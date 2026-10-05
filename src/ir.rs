@@ -2551,7 +2551,7 @@ impl IrTypeParameter {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IrTypeAlias {
     pub name: String,
     pub formals: Vec<String>,

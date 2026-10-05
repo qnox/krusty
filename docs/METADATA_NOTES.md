@@ -186,7 +186,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `writeTo` emits every message's fields in ascending field-number order, repeated fields together
   and extensions last, so `Type.flags` (f1, e.g. `SUSPEND_TYPE`) comes first and a function's
   `return_type` (f3) precedes its `type_parameter` (f4). Interning order in `d2` is independent of
-  it. A `Type` naming a type parameter the declaration being written owns (a member function's or
+  it, yet follows the same order for these two: a function or property, top-level or member,
+  interns its return type before its type parameters' names and bounds (`fun <U> f(u: U) =
+  Result()` writes `Result`, then `U`). A `Type` naming a type parameter the declaration being written owns (a member function's or
   property's own, bounds included) uses `type_parameter_name` (f9); an enclosing class's uses
   `type_parameter` (f7). A class header is the class's own declaration, so its type parameters'
   bounds and its supertypes name the class's parameters too (`class C<T : Comparable<T>>`,

@@ -18,7 +18,6 @@ use crate::libraries::{
     GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
 use crate::names::{property_getter_name, property_setter_name, COMPANION_OBJECT_NAME};
-use crate::spelling::Spelled;
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 // The compilation-scoped supertype cache is a resolver fact. The driver and the frontend
 // facade enter it through this name so they stay on the resolve contract.
@@ -57,6 +56,7 @@ pub(crate) use actualization_names::actualization_type_bindings;
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
 pub(crate) use checked_annotation_publication::publish_checked_classifier_annotations;
 pub(crate) use checked_constant_publication::publish_checked_compile_time_constants;
+pub(crate) use type_use_annotation_publication::publish_checked_type_use_annotations;
 mod call_constraints;
 mod call_diagnostics;
 mod call_result_constraint;
@@ -157,6 +157,7 @@ mod safe_index;
 mod sam_constructors;
 mod sam_conversion_recording;
 mod source_fragment;
+mod type_use_annotation_publication;
 use source_fragment::SourceFragmentMode;
 mod scope;
 mod selected_argument_commitment;
@@ -166,13 +167,13 @@ use selected_argument_commitment::{
 };
 mod signature_collection;
 mod signature_parameter_identity;
+mod type_spellings;
 #[cfg(test)]
 pub(crate) use signature_collection::collect_signatures_with_cp_headers;
 use signature_collection::{
     base_class_type_ref, commit_top_level_conflict_groups, compact_classifier_identity,
     compact_source_imports, enum_entry_member_signature, has_projected_generic_return_hazard,
-    resolve_source_alias_expansion, spelling_scope, supertype_components, supertype_graph,
-    TopLevelFunctionConflictKey,
+    spelling_scope, supertype_components, supertype_graph, TopLevelFunctionConflictKey,
 };
 pub use signature_collection::{collect_signatures, collect_signatures_with_cp};
 pub(crate) use signature_collection::{
@@ -182,6 +183,7 @@ use signature_parameter_identity::{
     aligned_parameter_identities, copy_parameter_identities, declared_parameter_identities,
     signature_from_resolved_function,
 };
+pub(crate) use type_spellings::{spelling_of_ref, spelling_of_ref_with};
 mod singleton_receivers;
 mod source_constructors;
 mod source_package;
@@ -3242,22 +3244,13 @@ pub struct SymbolTable {
     /// consumer can place a use site's arguments. Every valid source alias has one; an unresolved
     /// declaration is a frontend error and compilation stops before emission.
     pub source_alias_expansions: HashMap<TypeName, (Vec<String>, Ty)>,
-    /// Source SPELLINGS of declared types, keyed by the top-level declaration that spelled them —
-    /// see [`crate::spelling`]. `@Metadata` records a `typealias` named in a declared type as
+    /// Source SPELLINGS of declared types, keyed by stable Pass-1 identity — see
+    /// [`crate::spelling`]. `@Metadata` records a `typealias` named in a declared type as
     /// `Type.abbreviated_type`, and `Ty` is fully expanded by the time the builders see it, so the
-    /// spelling travels beside it rather than inside it.
-    ///
-    /// Only declarations that actually name an alias get an entry, so this map is empty for most
-    /// modules. A class's entry covers its header (supertypes, primary-constructor parameters,
-    /// type-parameter bounds); its members are keyed separately in [`Self::member_spellings`].
-    pub declared_spellings: HashMap<(u32, DeclId), crate::spelling::DeclaredSpellings>,
-    /// The same declaration spelling facts keyed by stable Pass-1 identity. This is the only form
-    /// allowed past the parser seam; the legacy parser-keyed map remains for non-streamed analysis.
+    /// spelling travels beside it rather than inside it. The compact header inventory is the only
+    /// producer; a declaration-only support source contributes no declared spellings.
     pub stable_declared_spellings:
         HashMap<crate::fir::DeclarationId, crate::spelling::DeclaredSpellings>,
-    /// The same, for class members, keyed by the exact AST coordinate lowering already uses.
-    pub member_spellings:
-        HashMap<crate::libraries::SourceMember, crate::spelling::DeclaredSpellings>,
     /// How each source `typealias` spelled its own RIGHT-HAND SIDE, keyed by the alias's identity.
     ///
     /// Two things need it. `TypeAlias.underlying_type` (f4) names an alias DIRECTLY when the
@@ -3410,9 +3403,7 @@ impl Default for SymbolTable {
             source_class_aliases: HashMap::new(),
             source_alias_fqns: HashMap::new(),
             source_alias_expansions: HashMap::new(),
-            declared_spellings: HashMap::new(),
             stable_declared_spellings: HashMap::new(),
-            member_spellings: HashMap::new(),
             alias_expansion_spellings: HashMap::new(),
             anonymous_object_types: HashMap::new(),
             anonymous_object_captures: HashMap::new(),
@@ -9372,278 +9363,6 @@ fn associated_companion_receiver_ty_from_spelling(
 
 fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink) -> Ty {
     ty_of_ref_with(r, classes, tparams, diags)
-}
-
-/// The SOURCE SPELLING of a declared type, walked in parallel with [`ty_of_ref_with`] over the same
-/// `TypeRef` — the sidecar `@Metadata` needs to write `Type.abbreviated_type` (see
-/// [`crate::spelling::Spelled`]).
-///
-/// This is a SEPARATE walk rather than an extra return value from `ty_of_ref_with` deliberately:
-/// that function is on the hot path of every signature collection and every checker query, and the
-/// spelling is wanted only where a declaration is published to metadata. Diagnostics are suppressed
-/// here for the same reason — `ty_of_ref_with` has already reported anything wrong with this
-/// `TypeRef`, and reporting twice would double every type error in a declared position.
-pub(crate) fn spelling_of_ref(
-    r: &TypeRef,
-    classes: &ClassNames,
-    tparams: &TParams,
-    expansions: &HashMap<TypeName, (Spelled, Vec<String>, Ty)>,
-    spellings: &HashMap<Span, TypeRef>,
-) -> Spelled {
-    let mut sink = DiagSink::new();
-    spelling_of_ref_with(
-        r,
-        classes,
-        tparams,
-        expansions,
-        spellings,
-        &mut |argument| type_argument_of_ref(argument, classes, tparams, &mut sink),
-    )
-}
-
-/// [`spelling_of_ref`] with declaration-scoped semantic argument resolution supplied by the
-/// caller. Compact Pass-1 headers use this form so alias arguments are bound by the same lexical
-/// resolver as the declaration signature instead of being looked up again in a file-global map.
-pub(crate) fn spelling_of_ref_with(
-    r: &TypeRef,
-    classes: &ClassNames,
-    tparams: &TParams,
-    expansions: &HashMap<TypeName, (Spelled, Vec<String>, Ty)>,
-    spellings: &HashMap<Span, TypeRef>,
-    resolve_argument: &mut dyn FnMut(&TypeRef) -> Ty,
-) -> Spelled {
-    // Two ways a reference can name an alias, and they are mutually exclusive:
-    //
-    //  * a SAME-FILE alias was already rewritten to its target by the parse seam, which parked the
-    //    original spelling in `File::alias_spellings` — `r.name` now names the target;
-    //  * an alias declared in a sibling file or on the classpath is never rewritten, so `r.name`
-    //    still spells it and only name resolution can say so.
-    //
-    // An import path names a declaration rather than using the type, and gets no abbreviation.
-    let spelled = spellings.get(&r.span).unwrap_or(r);
-    // A type parameter shadows any same-named alias, and is never itself one.
-    if tparams.contains(&spelled.name) {
-        return Spelled {
-            definitely_non_null: spelled.definitely_non_null(),
-            ..Spelled::default()
-        };
-    }
-    // Arrow syntax (`(A) -> B`) spells a function type structurally, so the NODE itself names no
-    // alias — but its components can (`(Cargo) -> Cargo`). The metadata arguments of a function
-    // type are synthesized as `params… + ret`, so the component spellings are laid out in that
-    // order for the encoder to consume positionally. A SUSPEND function type's tail is the CPS
-    // `Continuation`/`Any?` pair instead of the return, so its return spelling has no slot.
-    //
-    // This is tested on the SPELLED node, not the resolved one: `typealias Handler<T> = (T) ->
-    // String` leaves an arrow type behind after the parse seam expands it, and the alias the
-    // source actually wrote is exactly what must survive that.
-    if !spelled.fun_params.is_empty() || spelled.name == "<fun>" {
-        let mut args: Vec<Spelled> = spelled
-            .fun_params
-            .iter()
-            .map(|parameter| {
-                spelling_of_ref_with(
-                    parameter,
-                    classes,
-                    tparams,
-                    expansions,
-                    spellings,
-                    resolve_argument,
-                )
-            })
-            .collect();
-        if !spelled.fun_suspend() {
-            args.push(
-                spelled
-                    .arg
-                    .as_deref()
-                    .map(|ret| {
-                        spelling_of_ref_with(
-                            ret,
-                            classes,
-                            tparams,
-                            expansions,
-                            spellings,
-                            resolve_argument,
-                        )
-                    })
-                    .unwrap_or_default(),
-            );
-        }
-        return Spelled {
-            definitely_non_null: spelled.definitely_non_null(),
-            alias: None,
-            alias_args: Vec::new(),
-            args,
-        };
-    }
-    let alias = (!r.is_import())
-        .then(|| classes.alias_identity(&spelled.name))
-        .flatten();
-    // Argument spellings come from the SPELLED node: at an aliased reference these are the
-    // as-written arguments, whose arity may differ from the expansion's.
-    let argument_spellings: Vec<Spelled> = spelled
-        .targs
-        .iter()
-        .map(|argument| {
-            spelling_of_ref_with(
-                argument,
-                classes,
-                tparams,
-                expansions,
-                spellings,
-                resolve_argument,
-            )
-        })
-        .collect();
-    let Some(alias) = alias else {
-        return Spelled {
-            definitely_non_null: spelled.definitely_non_null(),
-            alias: None,
-            alias_args: Vec::new(),
-            // Without an alias at this node the expanded type's arguments ARE the spelled ones,
-            // position for position.
-            args: argument_spellings,
-        };
-    };
-    // At an aliased node the two argument lists diverge: the abbreviated `Type` takes the
-    // AS-SPELLED arguments (`Boxed<Int>` -> one), while the expanded type takes the alias's
-    // right-hand side applied to them (`PBox<Int, Int>` -> two). Recover each spelled argument's
-    // `Ty` through the ordinary resolution path, discarding diagnostics as described above.
-    let alias_args: Vec<(Ty, Spelled)> = spelled
-        .targs
-        .iter()
-        .zip(argument_spellings)
-        .map(|(argument, spelling)| (resolve_argument(argument), spelling))
-        .collect();
-    let expansion_args = expansion_arg_spellings(
-        expansions
-            .get(&alias)
-            .map(|(rhs, formals, expansion)| (rhs, formals.as_slice(), *expansion))
-            .or_else(|| {
-                classes.alias_expansion(&spelled.name).map(|classpath| {
-                    (
-                        &classpath.expansion_spelling,
-                        classpath.formals.as_slice(),
-                        classpath.expansion,
-                    )
-                })
-            }),
-        &alias_args,
-    );
-    Spelled {
-        definitely_non_null: spelled.definitely_non_null(),
-        alias: Some(alias),
-        alias_args,
-        // The expansion's argument spellings come from TWO places. A right-hand side that spells an
-        // alias in a fixed position supplies it directly (`typealias CargoBox = PBox<Cargo, Cargo>`
-        // abbreviates both expanded arguments as `Cargo`). A position holding one of the alias's
-        // own PARAMETERS instead takes the spelling THIS use site wrote there (`typealias Boxed<T>
-        // = PBox<T, T>` spells no alias itself, yet `Boxed<Cargo>` abbreviates both).
-        //
-        // A SOURCE alias's template comes from the module's own map; a CLASSPATH alias's comes from
-        // its recorded expansion, whose right-hand-side spellings the metadata decoder recovers
-        // from the dependency's `Type.abbreviated_type`.
-        args: expansion_args,
-    }
-}
-
-/// Place a use site's argument spellings into an alias expansion's PARAMETER positions, keeping the
-/// right-hand side's own spelling everywhere else. See the call site for why both sources exist.
-fn expansion_arg_spellings(
-    template: Option<(&Spelled, &[String], Ty)>,
-    use_site: &[(Ty, Spelled)],
-) -> Vec<Spelled> {
-    let Some((rhs, formals, expansion)) = template else {
-        return Vec::new();
-    };
-    let bindings = formals
-        .iter()
-        .cloned()
-        .zip(use_site.iter().map(|(ty, _)| *ty))
-        .collect::<crate::symbol_resolver::GSigBinds>();
-    let applied = crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings);
-    expansion
-        .type_args()
-        .iter()
-        .zip(applied.type_args())
-        .enumerate()
-        .map(|(index, (&template, &applied))| {
-            substitute_expansion_spelling(
-                rhs.arg(index),
-                template,
-                applied,
-                formals,
-                use_site,
-                &bindings,
-            )
-        })
-        .collect()
-}
-
-/// Apply alias use-site arguments to the spelling tree of its expanded right-hand side. Semantic
-/// expansion already substitutes recursively; the spelling sidecar must do the same or a nested
-/// abbreviation (`Outer<T> = Box<Inner<T>>`) retains the alias declaration's `T` and later tries to
-/// emit it in an unrelated declaration's metadata table.
-fn substitute_expansion_spelling(
-    spelling: &Spelled,
-    template: Ty,
-    applied: Ty,
-    formals: &[String],
-    use_site: &[(Ty, Spelled)],
-    bindings: &crate::symbol_resolver::GSigBinds,
-) -> Spelled {
-    let template_inner = template.projection_inner().unwrap_or(template);
-    if let Ty::TyParam(name, _) = template_inner {
-        if let Some(index) = formals.iter().position(|formal| formal == name) {
-            return use_site
-                .get(index)
-                .map(|(_, spelling)| spelling.clone())
-                .unwrap_or_default();
-        }
-    }
-
-    let alias_args = spelling
-        .alias_args
-        .iter()
-        .map(|(argument, argument_spelling)| {
-            let applied_argument =
-                crate::symbol_resolver::ty_subst_keep_unbound(*argument, bindings);
-            (
-                applied_argument,
-                substitute_expansion_spelling(
-                    argument_spelling,
-                    *argument,
-                    applied_argument,
-                    formals,
-                    use_site,
-                    bindings,
-                ),
-            )
-        })
-        .collect();
-    let args = template
-        .type_args()
-        .iter()
-        .zip(applied.type_args())
-        .enumerate()
-        .map(|(index, (&template, &applied))| {
-            substitute_expansion_spelling(
-                spelling.arg(index),
-                template,
-                applied,
-                formals,
-                use_site,
-                bindings,
-            )
-        })
-        .collect();
-    Spelled {
-        definitely_non_null: spelling.definitely_non_null,
-        alias: spelling.alias,
-        alias_args,
-        args,
-    }
 }
 
 fn type_argument_of_ref(
@@ -36150,6 +35869,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_declaration_type_parameters: HashMap::new(),
         class_literal_targets: HashMap::new(),
         applied_annotations: HashMap::new(),
+        bound_annotation_identities: HashMap::new(),
         ret_ty: Ty::Unit,
         type_parameter_owners: HashMap::new(),
         expected: None,
@@ -37309,6 +37029,17 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         CaptureDiscovery::Published | CaptureDiscovery::Scratch => {}
     }
     c.fragment = fragment;
+    if fragment.publishes_annotation_metadata() {
+        let symbols = syms
+            .pass_one_symbols()
+            .expect("annotation metadata publication requires Pass-1 occurrence bindings");
+        c.bound_annotation_identities
+            .extend(symbols.resolved_annotations.iter().filter_map(
+                |(&(source, lo, hi), &identity)| {
+                    (source == file_index).then_some(((lo, hi), identity))
+                },
+            ));
+    }
     c.signature_defaults_only = fragment.is_signature_defaults();
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
@@ -37360,7 +37091,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // discarded; neither may become a second owner of the application.
     if !capture_discovery
         && !fragment.is_signature_defaults()
-        && !fragment.is_classifier_annotations()
+        && !fragment.publishes_annotation_metadata()
     {
         let applications = file.file_annotations.clone();
         for (annotation, arguments) in applications {
@@ -37372,7 +37103,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // declaration facts. Only the legacy whole-file checker decodes them here; reparsing one Pass-2
     // body must neither rediscover a caller-visible signature fact nor patch the module table.
     if !fragment.is_signature_defaults()
-        && !fragment.is_classifier_annotations()
+        && !fragment.publishes_annotation_metadata()
         && resolved_index.is_none()
     {
         c.collect_source_contracts(scope, selected_body_declarations);
@@ -37381,12 +37112,15 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // Typealiases have no `Decl` node, so their declaration type-parameter annotations enter the
     // same checker path explicitly at file scope. Capture discovery is a scratch expression pass;
     // the authoritative check below owns annotation validation and folded values.
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
         for &declaration_start in &file.type_alias_declaration_starts {
             c.check_declaration_type_parameter_annotations(scope, declaration_start);
         }
     }
 
+    if fragment.is_type_use_annotations() {
+        c.check_owned_type_use_annotations(scope, None);
+    }
     // Each top-level declaration is checked in its OWN scope, so a prior declaration's bindings
     // cannot leak into the next one.
     c.anonymous_lexical_scope = anonymous_lexical_scope;
@@ -37453,6 +37187,10 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             continue;
         }
         c.set_anonymous_lexical_class_context(d);
+        if fragment.is_type_use_annotations() && !matches!(file.decl(d), Decl::Class(_)) {
+            c.check_owned_type_use_annotations(scope, Some(d));
+            continue;
+        }
         match file.decl(d) {
             Decl::Fun(f) => c.check_top_level_fun(scope, f, d),
             Decl::Class(cl) => {
@@ -37463,7 +37201,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             }
         }
     }
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
         if let (Some(index), Some(selected_bodies)) = (resolved_index, selected_stable_bodies) {
             let direct_classes = selected_inline_owned_anonymous_classes(
                 file,
@@ -37550,7 +37288,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         }
     }
     if let Some(body) = file.script_body.filter(|_| {
-        !fragment.is_classifier_annotations()
+        !fragment.publishes_annotation_metadata()
             && !c.signature_defaults_only
             && (!capture_discovery
                 || c.capture_scope
@@ -37564,7 +37302,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         });
         c.in_script_body = false;
     }
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
         c.check_import_paths();
         for reference in &file.detached_type_refs {
             if c.resolved_type_tys
@@ -37684,7 +37422,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         source_contracts,
         ..
     } = c;
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
         if let Some(syms) = syms.pass_one_symbols_mut() {
             publish_checked_primary_constructor_types(
                 file,
@@ -38027,7 +37765,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_property_reference_type,
         context_args,
     };
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
         plugin_expression_planning::plan_plugin_expressions(
             file,
             &mut info,
@@ -38740,6 +38478,10 @@ struct Checker<'a> {
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
     class_literal_targets: HashMap<ExprId, TypeName>,
     applied_annotations: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
+    /// Exact Pass-1 binding for each annotation occurrence owned by a bounded metadata fragment.
+    /// The fragment consumes this handoff directly instead of reopening the temporary module
+    /// provider or resolving the source spelling a second time.
+    bound_annotation_identities: HashMap<(u32, u32), TypeName>,
     ret_ty: Ty,
     /// kotlinc's owner wording (`fun <T : B> f`) of each declaration-owned type parameter checked
     /// so far, keyed by semantic identity, solely for diagnostics.
@@ -48286,13 +48028,7 @@ impl<'a> Checker<'a> {
                         },
                     )
                     .map_or((0, std::cmp::Reverse(0), true), |score| score.rank);
-                Some((
-                    candidate.low_priority,
-                    rank,
-                    candidate_index,
-                    selected,
-                    contextual.params,
-                ))
+                Some((candidate.low_priority, rank, candidate_index, selected))
             })
             .collect::<Vec<_>>();
         if scored.iter().any(|candidate| !candidate.0) {
@@ -48306,7 +48042,7 @@ impl<'a> Checker<'a> {
         };
         let constraint_shapes = scored
             .iter()
-            .map(|(_, _, candidate_index, selected, _)| {
+            .map(|(_, _, candidate_index, selected)| {
                 selected
                     .argument_slots
                     .iter()
@@ -48350,12 +48086,16 @@ impl<'a> Checker<'a> {
             return SourceConstructorSelection::NoMatch { mismatch };
         };
         scored.retain(|candidate| candidate.1 == best);
-        let selected = if let [(_, _, candidate_index, selected, _)] = scored.as_slice() {
+        let selected = if let [(_, _, candidate_index, selected)] = scored.as_slice() {
             (*candidate_index, selected)
         } else {
+            // Kotlin compares the parameters the supplied arguments map to, in argument order
+            // (FIR's flat signature of the argument mapping), exactly as at a function call. A
+            // parameter left to its default takes no part, a named argument compares against the
+            // parameter it names, and each vararg element against the element type.
             let parameter_shapes = scored
                 .iter()
-                .map(|(_, _, _, _, params)| params.clone())
+                .map(|(_, _, _, selected)| selected.argument_types.clone())
                 .collect::<Vec<_>>();
             let argument_kinds = arguments
                 .args
@@ -48381,7 +48121,7 @@ impl<'a> Checker<'a> {
                     // inapplicable constructor applicable.
                     let constraint_shapes = scored
                         .iter()
-                        .map(|(_, _, candidate_index, selected, _)| {
+                        .map(|(_, _, candidate_index, selected)| {
                             selected
                                 .argument_slots
                                 .iter()
@@ -51518,21 +51258,25 @@ impl<'a> Checker<'a> {
     /// resolver's `LibraryConst` payloads, so nested-class and dependency constants participate
     /// without reopening a source spelling or classifier lookup.
     fn fold_annotation_string(&self, expression: ExprId) -> Option<crate::kt_string::KtString> {
-        let constant = checked_constant_expression(
-            CheckedConstantExpression {
-                file: self.file,
-                expression_types: &self.expr_types,
-                resolved_constants: &self.resolved_constants,
-                resolved_calls: &self.resolved_calls,
-                resolved_operator_calls: &self.resolved_operator_calls,
-            },
-            expression,
-            Ty::String,
-        )?;
-        match constant.value {
+        match self.checked_constant(expression, Ty::String)?.value {
             crate::libraries::LibConst::Str(value) => Some(value),
             _ => None,
         }
+    }
+
+    fn checked_constant(
+        &self,
+        expression: ExprId,
+        declared: Ty,
+    ) -> Option<crate::libraries::LibraryConst> {
+        let context = CheckedConstantExpression {
+            file: self.file,
+            expression_types: &self.expr_types,
+            resolved_constants: &self.resolved_constants,
+            resolved_calls: &self.resolved_calls,
+            resolved_operator_calls: &self.resolved_operator_calls,
+        };
+        checked_constant_expression(context, expression, declared)
     }
 
     /// A resolved compile-time constant read (`const val`), whatever expression shape reached it.
@@ -51551,8 +51295,13 @@ impl<'a> Checker<'a> {
         use crate::libraries::LibConst;
         use crate::types::AnnotationValue;
 
-        let constant = self.resolved_constants.get(&e)?;
         let declared = expected.map(Ty::non_null);
+        // A constant reference was resolved by checking; any other constant expression (`-1`,
+        // `LIMIT * 2`) folds through the same checked constant language as a `const val`.
+        let constant = match self.resolved_constants.get(&e) {
+            Some(constant) => constant.clone(),
+            None => self.checked_constant(e, declared?)?,
+        };
         Some(match &constant.value {
             LibConst::Int(value) => match declared {
                 Some(Ty::Boolean) => AnnotationValue::Boolean(*value != 0),
@@ -53202,48 +52951,52 @@ impl<'a> Checker<'a> {
                     .insert(declaration, classifier);
             }
         }
-        self.check_classifier_own_annotations(scope, cl, current_owner);
-        for entry in &cl.enum_entries {
-            self.check_annotation_applications_in_declaration_scope(
-                scope,
-                &entry.annotations,
-                &entry.annotation_args,
-            );
+        // Type-use annotation publication folds only the occurrences inside type references; the
+        // declaration applications below belong to the passes that retain their arguments.
+        if !self.fragment.is_type_use_annotations() {
+            self.check_classifier_own_annotations(scope, cl, current_owner);
+            for entry in &cl.enum_entries {
+                self.check_annotation_applications_in_declaration_scope(
+                    scope,
+                    &entry.annotations,
+                    &entry.annotation_args,
+                );
+            }
+            for constructor in &cl.secondary_ctors {
+                self.check_annotation_applications_in_declaration_scope(
+                    scope,
+                    &constructor.annotations,
+                    &constructor.annotation_args,
+                );
+            }
+            // Property and primary-constructor annotations are ordinary checked applications. Their
+            // selected targets and folded arguments are the same payload handed to lowering.
+            for property in cl.body_props.iter() {
+                self.check_annotation_applications_in_declaration_scope(
+                    scope,
+                    &property.annotations,
+                    &property.annotation_args,
+                );
+                self.check_accessor_annotations(scope, property);
+            }
+            for parameter in &cl.props {
+                self.check_annotation_applications_in_declaration_scope(
+                    scope,
+                    &parameter.annotations,
+                    &parameter.annotation_args,
+                );
+            }
+            // The primary constructor's own annotations (`class C @Mark constructor(…)`).
+            if let Some(annotations) = &cl.primary_ctor_annotations {
+                self.check_annotation_applications_in_declaration_scope(
+                    scope,
+                    annotations,
+                    &cl.primary_ctor_annotation_args,
+                );
+            }
+            // Compiler plugins' own class rules read the applications checked just above.
+            self.check_plugin_class_rules(scope, cl);
         }
-        for constructor in &cl.secondary_ctors {
-            self.check_annotation_applications_in_declaration_scope(
-                scope,
-                &constructor.annotations,
-                &constructor.annotation_args,
-            );
-        }
-        // Property and primary-constructor annotations are ordinary checked applications. Their
-        // selected targets and folded arguments are the same payload handed to lowering.
-        for property in cl.body_props.iter() {
-            self.check_annotation_applications_in_declaration_scope(
-                scope,
-                &property.annotations,
-                &property.annotation_args,
-            );
-            self.check_accessor_annotations(scope, property);
-        }
-        for parameter in &cl.props {
-            self.check_annotation_applications_in_declaration_scope(
-                scope,
-                &parameter.annotations,
-                &parameter.annotation_args,
-            );
-        }
-        // The primary constructor's own annotations (`class C @Mark constructor(…)`).
-        if let Some(annotations) = &cl.primary_ctor_annotations {
-            self.check_annotation_applications_in_declaration_scope(
-                scope,
-                annotations,
-                &cl.primary_ctor_annotation_args,
-            );
-        }
-        // Compiler plugins' own class rules read the applications checked just above.
-        self.check_plugin_class_rules(scope, cl);
         // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
         // conflicting declaration). `cl.props` holds every primary-ctor parameter (property
         // and plain) in order.
@@ -53825,6 +53578,15 @@ impl<'a> Checker<'a> {
                 }
             }
             self.check_declaration_type_parameter_annotations(scope, cl.span.lo);
+            if self.fragment.is_type_use_annotations() {
+                self.check_owned_type_use_annotations(scope, Some(d));
+                if current_owner.is_some() {
+                    self.lexical_class_context.remove(0);
+                }
+                self.active_statement_suppressions
+                    .truncate(class_suppression_depth);
+                return;
+            }
             // A local class's lexical captures are concrete fields, not unresolved outer locals once
             // its body is entered. Shadow the enclosing binding with the exact generated storage slot;
             // the checker then records that slot on every read and lowering never searches fields.
@@ -71531,7 +71293,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         annotation: &AnnotationRef,
     ) -> Option<TypeName> {
-        if self.fragment.is_classifier_annotations() {
+        if self.fragment.publishes_annotation_metadata() {
             return self
                 .module
                 .legacy_symbols()?

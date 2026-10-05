@@ -999,7 +999,10 @@ pub fn build_class(
             append_param_annotations(st, &mut parameter, annotations, annotations_in_metadata);
             parameter
         });
+        // kotlinc interns the type before the type parameters, as at the top level.
         prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
+        let ty = return_type(st, &property_type_parameters);
+        prop.field_message(3, &ty); // Property.return_type = 3
         for (index, parameter) in p.type_params.iter().enumerate() {
             let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
@@ -1022,8 +1025,6 @@ pub fn build_class(
             .unwrap_or_else(|error| panic!("invalid emitted property type parameter: {error}"));
             prop.repeated_message(4, &parameter);
         }
-        let ty = return_type(st, &property_type_parameters);
-        prop.field_message(3, &ty); // Property.return_type = 3
         if let Some(recv) = p.receiver {
             // Property.receiver_type = 5 — a member EXTENSION property's declared receiver;
             // its presence is what makes the record an extension.
@@ -1229,6 +1230,20 @@ pub fn build_class(
             m.type_params.iter().map(String::as_str),
             m.semantic_type_params.iter().map(String::as_str),
         ));
+        // kotlinc interns the return type before the type parameters, as at the top level.
+        let ret = crate::metadata::type_encoder::encode_declared_type(
+            st,
+            m.ret,
+            &m.spellings.ret,
+            &function_type_parameters,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "invalid emitted metadata return type for '{class_internal}.{}': {error}",
+                m.name
+            )
+        });
+        func.field_message(3, &ret);
         for (index, name) in m.type_params.iter().enumerate() {
             let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
@@ -1251,19 +1266,6 @@ pub fn build_class(
             .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"));
             func.repeated_message(4, &parameter);
         }
-        let ret = crate::metadata::type_encoder::encode_declared_type(
-            st,
-            m.ret,
-            &m.spellings.ret,
-            &function_type_parameters,
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "invalid emitted metadata return type for '{class_internal}.{}': {error}",
-                m.name
-            )
-        });
-        func.field_message(3, &ret);
         if let Some(recv) = m.receiver {
             // Function.receiver_type = 5 — a MEMBER EXTENSION's receiver, restored from the
             // physical `params[0]` realization so consumers see the LOGICAL shape.
@@ -1320,7 +1322,7 @@ pub fn build_class(
             } else {
                 m.spellings.param(i).clone()
             };
-            let mut ty = crate::metadata::type_encoder::encode_declared_type(
+            let ty = crate::metadata::type_encoder::encode_declared_type(
                 st,
                 *pty,
                 &declared_spelling,
@@ -1334,13 +1336,6 @@ pub fn build_class(
                         )
                     },
                 );
-            if m.no_infer_params.get(i).copied().unwrap_or(false) {
-                let annotation = crate::metadata::type_encoder::encode_annotation(
-                    st,
-                    crate::types::type_name("kotlin/internal/NoInfer"),
-                );
-                ty.field_message(100, &annotation);
-            }
             vp.field_message(3, &ty);
             if m.vararg_index == Some(i) {
                 // ValueParameter.vararg_element_type = 4 — the ELEMENT next to the array type.
