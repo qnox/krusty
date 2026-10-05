@@ -114,13 +114,15 @@ impl BodyLowering<'_> {
             .checked_add(usize::from(suspend))
             .and_then(|arity| u8::try_from(arity).ok())
             .ok_or(FirLoweringFailure::MissingExpression(fir_callable))?;
-        Ok(self.ir.add_expr(IrExpr::Lambda {
+        let lambda = self.ir.add_expr(IrExpr::Lambda {
             impl_fn: wrapper,
             arity,
             captures: vec![callable_value, receiver_value],
             sam: None,
             inline_body: None,
-        }))
+        });
+        self.ir.note_synthesized_lambda(lambda);
+        Ok(lambda)
     }
 
     pub(super) fn checked_function_invoke_reference(
@@ -235,15 +237,18 @@ impl BodyLowering<'_> {
                     declaration_result: target_result.get(),
                     declaration_suspend: target_suspend,
                     adaptation: None,
+                    reflection_owner: None,
                 })))
         } else {
-            Ok(self.ir.add_expr(IrExpr::Lambda {
+            let lambda = self.ir.add_expr(IrExpr::Lambda {
                 impl_fn: wrapper,
                 arity,
                 captures: vec![captured],
                 sam: None,
                 inline_body: None,
-            }))
+            });
+            self.ir.note_synthesized_lambda(lambda);
+            Ok(lambda)
         }
     }
 }

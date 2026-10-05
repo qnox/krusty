@@ -41,14 +41,10 @@ pub struct SamSignature {
     pub(crate) context_count: usize,
     pub(crate) has_receiver: bool,
     pub(crate) suspend: bool,
-    /// The method's primitive result replaces a non-primitive result of a declaration it
-    /// overrides, at any depth (`override fun f(): Int` of `fun f(): Any`).
-    pub(crate) overrides_non_primitive_result: bool,
-    /// Non-primitive results of the declarations this primitive method overrides, before the call
-    /// specializes them. A type parameter that the call binds to `Int` is still one of these: its
-    /// erasure is `Any`, so the override returns the wrapper. A target uses these contracts when
-    /// realizing its physical bridge descriptors.
-    pub(crate) overridden_non_primitive_results: Vec<Ty>,
+    /// The distinct own results of the declarations the method overrides, at any depth, before the
+    /// call specializes them: a type parameter the call binds to `Int` stays that type parameter.
+    /// A target realizes its result and bridge descriptors from these.
+    pub(crate) overridden_results: Vec<Ty>,
     /// The interface is a Kotlin declaration, not a Java one.
     pub(crate) kotlin_interface: bool,
     /// Provider-normalized semantic identities parallel to `declared_params`.
@@ -149,11 +145,13 @@ pub(crate) fn semantic_sam_signature(
     let mut abstract_method = None;
     for (_, declarations) in declarations {
         let nearest = declarations.iter().map(|(depth, ..)| *depth).min()?;
-        let overridden_results = declarations
-            .iter()
-            .filter(|(depth, ..)| *depth > nearest)
-            .map(|(_, member, ..)| declared_result(member))
-            .collect::<Vec<_>>();
+        let mut overridden_results = Vec::new();
+        for (_, member, ..) in declarations.iter().filter(|(depth, ..)| *depth > nearest) {
+            let result = declared_result(member);
+            if !overridden_results.contains(&result) {
+                overridden_results.push(result);
+            }
+        }
         let nearest = declarations
             .into_iter()
             .filter(|(depth, ..)| *depth == nearest)
@@ -162,43 +160,14 @@ pub(crate) fn semantic_sam_signature(
             continue;
         }
         let (_, member, params, ret, declaration) = nearest.into_iter().next()?;
-        let mut overridden_non_primitive_results = if is_primitive(declared_result(&member)) {
-            overridden_results
-                .into_iter()
-                .filter(|&result| !is_primitive(result))
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let mut unique_results = Vec::new();
-        for result in overridden_non_primitive_results.drain(..) {
-            if !unique_results.contains(&result) {
-                unique_results.push(result);
-            }
-        }
-        let overrides_non_primitive_result = !unique_results.is_empty();
         if abstract_method
-            .replace((
-                member,
-                params,
-                ret,
-                declaration,
-                overrides_non_primitive_result,
-                unique_results,
-            ))
+            .replace((member, params, ret, declaration, overridden_results))
             .is_some()
         {
             return None;
         }
     }
-    let (
-        sam,
-        params,
-        ret,
-        declaration,
-        overrides_non_primitive_result,
-        overridden_non_primitive_results,
-    ) = abstract_method?;
+    let (sam, params, ret, declaration, overridden_results) = abstract_method?;
     let parameter_identities = sam_parameter_identities(&sam)?;
     Some(SamSignature {
         internal,
@@ -211,8 +180,7 @@ pub(crate) fn semantic_sam_signature(
         context_count: sam.context_count,
         has_receiver: sam.is_member_extension(),
         suspend: sam.suspend(),
-        overrides_non_primitive_result,
-        overridden_non_primitive_results,
+        overridden_results,
         kotlin_interface,
         parameter_identities,
     })
@@ -242,11 +210,6 @@ fn declared_result(member: &LibraryMember) -> Ty {
         .generic_sig
         .as_ref()
         .map_or(member.ret, |signature| signature.ret)
-}
-
-/// Kotlin's primitive types: the results a JVM override boxes when it replaces another result.
-fn is_primitive(ty: Ty) -> bool {
-    ty.is_numeric_or_char() || ty == Ty::Boolean
 }
 
 /// The declaration identity a provider published for a classifier member.

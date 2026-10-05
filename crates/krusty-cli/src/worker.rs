@@ -213,11 +213,10 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 "--friends" => unit
                     .friend_paths
                     .extend(values.into_iter().map(PathBuf::from)),
-                // krusty does not enforce opt-in requirements, so supplying an opt-in changes no
-                // emitted bytes today. Report that fact instead of pretending the CLI consumed it.
+                // Accepted opt-in markers select diagnostics; the batch CLI checks them.
                 "--opt_in" => unit
-                    .inert
-                    .extend(values.into_iter().map(|value| format!("--opt_in {value}"))),
+                    .kotlinc_args
+                    .extend(values.into_iter().map(|value| format!("-opt-in={value}"))),
                 // Preserve warning policy as the standard kotlinc spelling. The batch parser owns
                 // the diagnostic-name registry and duplicate checks, so the worker does not grow
                 // a second, drifting copy.

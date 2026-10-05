@@ -308,7 +308,7 @@ pub(super) fn sam_bootstrap_descriptors(
     let sam_result = if target.suspend {
         sam_parameters.push(Ty::obj("kotlin/coroutines/Continuation"));
         Ty::obj("java/lang/Object")
-    } else if target.overrides_non_primitive_result {
+    } else if crate::jvm::override_results::boxes_sam_result(target) {
         crate::jvm::method_descriptors::jvm_declared_ty(&Ty::nullable(sam_result))
     } else {
         crate::jvm::method_descriptors::jvm_declared_ty(&sam_result)

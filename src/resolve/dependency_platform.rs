@@ -197,7 +197,7 @@ fn merge_functions(
             existing.call_sig = candidate.call_sig.clone();
             existing.default_values = candidate.default_values.clone();
             existing.context_count = candidate.context_count;
-            existing.annotations = candidate.annotations.clone();
+            existing.callable.annotations = candidate.callable.annotations.clone();
             existing.callable.inline = candidate.flags.inline;
             existing.callable.suspend = candidate.flags.suspend;
             existing.callable.is_abstract = candidate.flags.is_abstract;
@@ -648,7 +648,7 @@ mod tests {
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target: None,
             type_parameters: crate::types::TypeParameters::default(),
             own_type_parameter_count: 0,

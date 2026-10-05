@@ -310,10 +310,8 @@ pub(crate) struct TypeParameters {
 /// declaration's by table id (`Type.type_parameter`, f7), never both.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TypeParameterRef {
+    /// Owned by an enclosing declaration, an inner class's outer class included: its joint id.
     Id(u64),
-    /// Captured by an inner class from an enclosing class: the joint index, plus the name (f9),
-    /// since the isolated reader has no enclosing-chain context to resolve a bare joint index.
-    Captured(u64),
     /// Owned by the declaration being written, by its source name.
     Named(String),
     /// Captured by a local or anonymous class from an enclosing declaration: numbered on first
@@ -612,11 +610,6 @@ fn encode_type_with_parameter(
             }
             match reference {
                 TypeParameterRef::Id(id) => message.field_varint(7, *id),
-                TypeParameterRef::Captured(id) => {
-                    message.field_varint(7, *id);
-                    let source_name = crate::types::type_parameter_source_name(name);
-                    message.field_varint(9, strings.local(source_name) as u64);
-                }
                 TypeParameterRef::CapturedOnUse => {
                     message.field_varint(7, type_parameters.captured.intern(name));
                 }
@@ -624,6 +617,8 @@ fn encode_type_with_parameter(
                     message.field_varint(9, strings.local(source_name) as u64);
                 }
             }
+            let annotations = type_annotations(strings, spelled);
+            add_type_annotations(&mut message, annotations);
         }
         Ty::Obj(classifier, arguments) => {
             // kotlinc interns the enclosing classifier before recursively interning its arguments,
@@ -641,17 +636,23 @@ fn encode_type_with_parameter(
                 message.field_varint(3, 1);
             }
             message.field_varint(6, classifier as u64);
+            let annotations = type_annotations(strings, spelled);
             if expansion == Expansion::Expanded {
                 encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
             }
+            add_type_annotations(&mut message, annotations);
         }
         Ty::Unit => {
             encode_classifier(&mut message, strings, "kotlin/Unit", nullable);
+            let annotations = type_annotations(strings, spelled);
             encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
+            add_type_annotations(&mut message, annotations);
         }
         Ty::Nothing => {
             encode_classifier(&mut message, strings, "kotlin/Nothing", nullable);
+            let annotations = type_annotations(strings, spelled);
             encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
+            add_type_annotations(&mut message, annotations);
         }
         Ty::Fun(signature) => {
             let arity = signature.params.len() + usize::from(signature.suspend);
@@ -687,6 +688,7 @@ fn encode_type_with_parameter(
                 message.field_varint(3, 1);
             }
             message.field_varint(6, classifier as u64);
+            let annotations = type_annotations(strings, spelled);
             if expansion == Expansion::Expanded {
                 encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
             }
@@ -696,6 +698,7 @@ fn encode_type_with_parameter(
             if signature.context_count > 0 {
                 add_context_function_annotation(&mut message, strings, signature.context_count);
             }
+            add_type_annotations(&mut message, annotations);
             if signature.suspend {
                 message.field_varint(1, 1); // Type.flags: SUSPEND_TYPE
             }
@@ -843,6 +846,11 @@ pub(crate) fn encode_alias_reference(
         message.field_varint(3, 1);
     }
     message.field_varint(12, alias_id as u64); // Type.type_alias_name = 12
+                                               // The reference records only what this occurrence wrote, never what the alias's own right-hand
+                                               // side applies to its expansion.
+    for annotation in &spelled.annotations {
+        message.field_message(100, &encode_type_annotation(strings, annotation.checked()));
+    }
     Ok(Some(message))
 }
 
@@ -883,6 +891,59 @@ fn encode_abbreviation(
 pub(crate) fn encode_annotation(strings: &mut StringTable<'_>, classifier: TypeName) -> Pb {
     let mut annotation = Pb::new();
     annotation.field_varint(1, strings.class_id(classifier) as u64);
+    annotation
+}
+
+/// Append the source annotations `@Metadata` records on this (expanded) type occurrence as
+/// `Type.annotation` (extension field 100): those an alias named here applies to its expansion,
+/// then the occurrence's own, each in source order, then the `@ParameterName` of a named
+/// function-type parameter. See [`Spelled::expansion_annotations`].
+///
+/// kotlinc interns these annotations BEFORE the node's abbreviation even though `abbreviated_type`
+/// (f13) is written ahead of them, so callers build the messages first with [`type_annotations`].
+fn add_type_annotations(message: &mut Pb, annotations: Vec<Pb>) {
+    for annotation in &annotations {
+        message.field_message(100, annotation);
+    }
+}
+
+/// The `Type.annotation` messages of one occurrence, interning their strings now.
+fn type_annotations(strings: &mut StringTable<'_>, spelled: &Spelled) -> Vec<Pb> {
+    let inherited = spelled.expansion_annotations.iter();
+    let mut annotations = inherited
+        .chain(&spelled.annotations)
+        .map(|annotation| encode_type_annotation(strings, annotation.checked()))
+        .collect::<Vec<_>>();
+    if let Some(name) = spelled.parameter_name.as_deref() {
+        annotations.push(parameter_name_annotation(strings, name));
+    }
+    annotations
+}
+
+/// A type-use annotation application as a metadata `Annotation` message, with its argument values.
+fn encode_type_annotation(
+    strings: &mut StringTable<'_>,
+    annotation: &crate::types::ResolvedAnnotation,
+) -> Pb {
+    crate::metadata::builder::annotation_pb(
+        strings,
+        &crate::ir::AppliedAnnotation::from(annotation),
+    )
+}
+
+/// `@ParameterName(name = "…")` on a named function-type parameter's type.
+fn parameter_name_annotation(strings: &mut StringTable<'_>, name: &str) -> Pb {
+    let annotation_id = strings.class_id(crate::types::type_name("kotlin/ParameterName"));
+    let argument_name = strings.local("name");
+    let mut value = Pb::new();
+    value.field_varint(1, 8); // Annotation.Argument.Value.Type.STRING
+    value.field_varint(5, strings.local(name) as u64); // string_value
+    let mut argument = Pb::new();
+    argument.field_varint(1, argument_name as u64);
+    argument.field_message(2, &value);
+    let mut annotation = Pb::new();
+    annotation.field_varint(1, annotation_id as u64);
+    annotation.field_message(2, &argument);
     annotation
 }
 

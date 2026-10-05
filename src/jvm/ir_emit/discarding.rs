@@ -40,7 +40,7 @@ impl Emitter<'_> {
         // A discarded `when` is a statement: its branches discard their own values, so no branch
         // leaves a value another branch does not. A block ending in one runs as a statement block,
         // which discards that `when` the same way. A discarded `Unit` is nothing at all.
-        if !self.machine_suspensions.contains(&expression) {
+        if !self.machine_suspensions.contains_key(&expression) {
             match node {
                 // A copied inline body's terminal `Unit` carries its mapped closing line on a
                 // `nop`, even though the value itself is not materialized.

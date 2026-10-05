@@ -297,10 +297,15 @@ pub(super) fn build_class_metadata_with_facts(
     }
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let local_classifiers = super::super::local_classifiers::names(ir);
-    // A reader maps a declared type to its JVM descriptor by class id, and a local classifier's id
-    // maps to no JVM name, so a signature naming one (outermost) records its descriptor.
-    let names_local =
-        |t: Ty| matches!(t.non_null(), Ty::Obj(name, _) if local_classifiers.contains(&name));
+    // A backing field records its descriptor exactly when a reader cannot rebuild it from the
+    // property type (kotlinc's `requiresSignature`).
+    let requires_field_signature = |property: Ty, physical: &str| {
+        super::super::metadata_method_signatures::requires_field_signature(
+            property,
+            physical,
+            &local_classifiers,
+        )
+    };
     // Metadata describes Kotlin PROPERTY declarations, never physical fields. Synthetic storage such
     // as `x$delegate`, `this$0`, and interface-delegation fields has no source declaration and must not
     // leak into the metadata name/type namespace. A property's optional backing field supplies only
@@ -323,34 +328,40 @@ pub(super) fn build_class_metadata_with_facts(
                 .backing_field
                 .and_then(|index| c.fields.get(index as usize).map(|field| (index, field)));
             let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
+            // A getter's descriptor is its physical one: a scalar getter result over a reference-returning overridden
+            // property returns the wrapper (see `jvm::override_results`).
+            let physical_getter = |fid: u32| {
+                let function = &ir.functions[fid as usize];
+                (
+                    function.name.clone(),
+                    ir_method_desc(&function.params, &override_results.physical_result(ir, fid)),
+                )
+            };
             let ordinary_getter = property
                 .getter
-                .and_then(|fid| ir.functions.get(fid as usize))
-                .map(|function| {
-                    (
-                        function.name.clone(),
-                        ir_method_desc(&function.params, &function.ret),
-                    )
-                })
+                .filter(|&fid| (fid as usize) < ir.functions.len())
+                .map(physical_getter)
                 .or_else(|| {
                     c.methods
                         .iter()
-                        .map(|fid| &ir.functions[*fid as usize])
-                        .find(|function| function.name == default_getter)
-                        .map(|function| {
-                            (
-                                function.name.clone(),
-                                ir_method_desc(&function.params, &function.ret),
-                            )
-                        })
+                        .copied()
+                        .find(|&fid| ir.functions[fid as usize].name == default_getter)
+                        .map(physical_getter)
                 })
                 .or_else(|| {
                     backing.and_then(|(_, field)| {
                         // `@JvmField` suppresses the accessor pair entirely, so there is no
                         // synthesized getter to derive from the backing field — kotlinc records the
                         // field alone.
+                        let boxed = override_results
+                            .boxes_member_property(c.fq_name, property_index as u32);
+                        let result = if boxed {
+                            Ty::nullable(property.ty)
+                        } else {
+                            field.ty
+                        };
                         (!visibility.is_private() && !is_jvm_field(c, &property.name))
-                            .then(|| (default_getter, format!("(){}", desc(field.ty))))
+                            .then(|| (default_getter, format!("(){}", desc(result))))
                     })
                 });
             let getter = if c.is_annotation {
@@ -468,10 +479,14 @@ pub(super) fn build_class_metadata_with_facts(
                         property.setter,
                     ),
                     field_desc: backing
-                        .map(|(_, field)| field)
-                        .or(delegate)
-                        .filter(|field| property.ty != field.ty || names_local(field.ty))
-                        .map(|field| desc(field.ty)),
+                        .map(|(_, field)| field.ty)
+                        .or(delegate.map(|field| field.ty))
+                        .or_else(|| {
+                            static_fields::hoisted_static_for(ir, c, property_index)
+                                .map(|storage| storage.ty)
+                        })
+                        .map(desc)
+                        .filter(|physical| requires_field_signature(property.ty, physical)),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
                     field_name: backing
@@ -583,8 +598,8 @@ pub(super) fn build_class_metadata_with_facts(
             setter: ext.setter.and_then(accessor_sig),
             setter_parameter_name: super::super::parameter_names::explicit_setter(ir, ext.setter),
             field_desc: ext_delegate
-                .filter(|field| field.ty != ext.ty)
-                .map(|field| desc(field.ty)),
+                .map(|field| desc(field.ty))
+                .filter(|physical| requires_field_signature(ext.ty, physical)),
             field_name: ext_delegate.map(|field| instance_field_jvm_name(ir, c, field)),
             annotations: property_metadata_annotations(c, &ext.name),
             field_annotations: Default::default(),
@@ -1250,6 +1265,8 @@ pub(super) fn build_class_metadata_with_facts(
         Vec::new()
     };
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
+    let enclosing_type_parameters =
+        super::super::local_classifiers::enclosing_type_parameters(ir, c);
     let class_type_parameters = ir
         .class_signature(&c.fq_name())
         .map(|signature| signature.type_params.as_slice())
@@ -1270,7 +1287,6 @@ pub(super) fn build_class_metadata_with_facts(
             (!property.visibility.is_public_api()).then_some(property.ty),
         )
     });
-    // Metadata lists the declared superclass before interfaces.
     let superclass = c.superclass;
     let any = crate::types::wk::any();
     let mut supertypes = ir
@@ -1304,7 +1320,18 @@ pub(super) fn build_class_metadata_with_facts(
         .get(&c.fq_name_id())
         .cloned()
         .unwrap_or_default();
-    let supertype_spellings = class_spellings.supertype_spellings(has_declared_superclass);
+    let mut supertype_spellings = class_spellings.supertype_spellings(has_declared_superclass);
+    // Both lists lead with the superclass; `@Metadata` lists it where the source wrote it.
+    let superclass_position = ir.class_superclass_positions.get(&c.fq_name_id());
+    if let Some(position) = superclass_position.filter(|_| has_declared_superclass) {
+        let position = *position as usize;
+        // An interface without a spelling has no entry yet; it must not shift the superclass's.
+        if supertype_spellings.len() <= position {
+            supertype_spellings.resize(position + 1, crate::spelling::Spelled::default());
+        }
+        supertypes[..=position].rotate_left(1);
+        supertype_spellings[..=position].rotate_left(1);
+    }
     let secondary_ctor_shapes =
         super::super::constructor_metadata::secondary_constructor_shapes(ir, c);
     let secondary_ctor_metas: Vec<crate::metadata::class_builder::CtorMeta> = secondary_ctor_shapes
@@ -1339,7 +1366,10 @@ pub(super) fn build_class_metadata_with_facts(
             supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
-            captured_type_params: super::super::local_classifiers::captured_type_parameters(c),
+            captured_type_params: super::super::local_classifiers::captured_type_parameters(
+                c,
+                &enclosing_type_parameters,
+            ),
             ctor_param_tparams: &ctor_param_tparams,
             ctor_param_annotations: &named_ctor_param_annotations,
             flags: class_metadata_flags(ir, c),
@@ -1365,7 +1395,7 @@ pub(super) fn build_class_metadata_with_facts(
             // An anonymous object's constructor (an enum entry body's too) is not callable.
             emit_primary_ctor: !c.is_interface
                 && !c.is_anonymous_object
-                && c.enum_entry_of.is_none()
+                && !c.is_enum_entry
                 && (c.has_primary_ctor || c.secondary_ctors.is_empty()),
             // `jvmClassFlags` describes the interface SHAPE this compilation produced, so it tracks
             // `-jvm-default` exactly: a consumer reads it to know whether method bodies live on the

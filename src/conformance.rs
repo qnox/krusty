@@ -316,6 +316,7 @@ pub fn needs_unmodeled_compiler_flag(src: &str) -> bool {
             .any(|marker| src.contains(marker))
         || needs_unmodeled_jvm_default_mode(src)
         || needs_unmodeled_sam_conversion_mode(src)
+        || needs_unmodeled_lambda_mode(src)
 }
 
 /// `// JVM_DEFAULT_MODE:` — the `-jvm-default` strategy a test pins, as the compiler models it.
@@ -346,6 +347,38 @@ pub fn sam_conversion_mode(src: &str) -> crate::jvm::ir_emit::LambdaMode {
         })
         .next_back()
         .unwrap_or_default()
+}
+
+/// `// LAMBDAS:` — the `-Xlambdas` strategy a test pins. Absent, the test runs under kotlinc's
+/// own default (`indy`). The corpus writes the value in uppercase.
+pub fn lambda_mode(src: &str) -> crate::jvm::ir_emit::LambdaMode {
+    src.lines()
+        .filter_map(|line| line.trim().strip_prefix("// LAMBDAS:"))
+        .filter_map(|mode| match mode.split_whitespace().next() {
+            Some(value) if value.eq_ignore_ascii_case("class") => {
+                Some(crate::jvm::ir_emit::LambdaMode::Class)
+            }
+            Some(value) if value.eq_ignore_ascii_case("indy") => {
+                Some(crate::jvm::ir_emit::LambdaMode::Indy)
+            }
+            _ => None,
+        })
+        .next_back()
+        .unwrap_or_default()
+}
+
+/// `// LAMBDAS:` values krusty does not model. `class` and `indy` are emitted; a missing or
+/// unknown value is unsupported.
+pub fn needs_unmodeled_lambda_mode(src: &str) -> bool {
+    src.lines()
+        .filter_map(|line| line.trim().strip_prefix("// LAMBDAS:"))
+        .any(|mode| {
+            !matches!(
+                mode.split_whitespace().next(),
+                Some(value)
+                    if value.eq_ignore_ascii_case("class") || value.eq_ignore_ascii_case("indy")
+            )
+        })
 }
 
 /// `// SAM_CONVERSIONS:` values krusty does not model. `class` and `indy` are emitted; a missing
@@ -1130,6 +1163,23 @@ mod tests {
         ));
         assert!(needs_unmodeled_compiler_flag(
             "// SAM_CONVERSIONS: sideways\nfun box() = \"OK\""
+        ));
+    }
+
+    #[test]
+    fn lambda_class_mode_is_modelled() {
+        let src = "// LAMBDAS: CLASS\nfun box() = \"OK\"";
+        assert!(!needs_unmodeled_compiler_flag(src));
+        assert_eq!(lambda_mode(src), crate::jvm::ir_emit::LambdaMode::Class);
+        assert_eq!(
+            lambda_mode("fun box() = \"OK\""),
+            crate::jvm::ir_emit::LambdaMode::Indy
+        );
+        assert!(needs_unmodeled_compiler_flag(
+            "// LAMBDAS:\nfun box() = \"OK\""
+        ));
+        assert!(needs_unmodeled_compiler_flag(
+            "// LAMBDAS: sideways\nfun box() = \"OK\""
         ));
     }
 
