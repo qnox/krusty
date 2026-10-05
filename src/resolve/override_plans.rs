@@ -178,7 +178,7 @@ pub(super) fn property_declaration(
     })
 }
 
-fn function_target(
+pub(super) fn function_target(
     index: &ResolvedModuleIndex,
     function: &FunctionInfo,
 ) -> Option<ResolvedFunctionOverrideTarget> {
@@ -260,7 +260,7 @@ fn declared_properties(
         .collect()
 }
 
-fn declared_functions(
+pub(super) fn declared_functions(
     source: &dyn crate::symbol_source::SymbolSource,
     receiver: Ty,
     name: &str,
