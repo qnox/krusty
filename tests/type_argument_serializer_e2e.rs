@@ -152,6 +152,13 @@ object ItemSerializer : KSerializer<Item> {\n\
 \x20       PrimitiveSerialDescriptor(\"codecs.Item\", PrimitiveKind.STRING)\n\
 \x20   override fun serialize(encoder: Encoder, value: Item) = encoder.encodeString(value.raw)\n\
 \x20   override fun deserialize(decoder: Decoder): Item = Item(decoder.decodeString())\n\
+}\n\
+\n\
+class ItemClassSerializer : KSerializer<Item> {\n\
+\x20   override val descriptor: SerialDescriptor =\n\
+\x20       PrimitiveSerialDescriptor(\"codecs.ItemClass\", PrimitiveKind.STRING)\n\
+\x20   override fun serialize(encoder: Encoder, value: Item) = encoder.encodeString(\"c:\" + value.raw)\n\
+\x20   override fun deserialize(decoder: Decoder): Item = Item(decoder.decodeString().removePrefix(\"c:\"))\n\
 }\n";
 
 /// The private-corpus shape: a dependency's serializer `object` on a type argument wrapped across
@@ -210,6 +217,80 @@ fun box(): String {\n\
     assert_eq!(
         both_compilers_box_against_dependency(DEPENDENCY, main, "property_dependency_object"),
         "OK {\"single\":\"s\"}"
+    );
+}
+
+/// A dependency serializer CLASS is constructed through the primary constructor selected from
+/// Kotlin metadata for both a type-use and a property annotation; lowering never guesses ()V.
+#[test]
+fn a_dependency_class_serializer_uses_its_selected_primary_constructor() {
+    let main = "import codecs.Item\n\
+import codecs.ItemClassSerializer\n\
+import kotlinx.serialization.Serializable\n\
+import kotlinx.serialization.json.Json\n\
+\n\
+@Serializable\n\
+data class Holder(\n\
+\x20   val items: List<@Serializable(with = ItemClassSerializer::class) Item>,\n\
+\x20   @Serializable(with = ItemClassSerializer::class)\n\
+\x20   val direct: Item,\n\
+)\n\
+\n\
+fun box(): String {\n\
+\x20   val json = Json.encodeToString(Holder.serializer(), Holder(listOf(Item(\"a\")), Item(\"d\")))\n\
+\x20   val back = Json.decodeFromString(Holder.serializer(), json)\n\
+\x20   val ok = back.items.single().raw == \"a\" && back.direct.raw == \"d\"\n\
+\x20   return if (ok) \"OK \" + json else \"FAIL: \" + json\n\
+}\n";
+    assert_eq!(
+        both_compilers_box_against_dependency(DEPENDENCY, main, "dependency_class_serializer"),
+        "OK {\"items\":[\"c:a\"],\"direct\":\"c:d\"}"
+    );
+}
+
+const GENERIC_DEPENDENCY: &str = "package genericcodecs\n\
+\n\
+import kotlinx.serialization.KSerializer\n\
+import kotlinx.serialization.descriptors.SerialDescriptor\n\
+import kotlinx.serialization.encoding.Decoder\n\
+import kotlinx.serialization.encoding.Encoder\n\
+\n\
+class Box<T>(val value: T)\n\
+\n\
+class BoxSerializer<T>(private val element: KSerializer<T>) : KSerializer<Box<T>> {\n\
+\x20   override val descriptor: SerialDescriptor = element.descriptor\n\
+\x20   override fun serialize(encoder: Encoder, value: Box<T>) =\n\
+\x20       encoder.encodeSerializableValue(element, value.value)\n\
+\x20   override fun deserialize(decoder: Decoder): Box<T> =\n\
+\x20       Box(decoder.decodeSerializableValue(element))\n\
+}\n";
+
+/// Constructor operands come from the annotated type's checked arguments. This exercises an
+/// external primary constructor whose descriptor is not ()V.
+#[test]
+fn a_dependency_generic_serializer_receives_the_type_argument_serializer() {
+    let main = "import genericcodecs.Box\n\
+import genericcodecs.BoxSerializer\n\
+import kotlinx.serialization.Serializable\n\
+import kotlinx.serialization.json.Json\n\
+\n\
+@Serializable\n\
+data class Holder(\n\
+\x20   val boxes: List<@Serializable(with = BoxSerializer::class) Box<String>>,\n\
+)\n\
+\n\
+fun box(): String {\n\
+\x20   val json = Json.encodeToString(Holder.serializer(), Holder(listOf(Box(\"v\"))))\n\
+\x20   val back = Json.decodeFromString(Holder.serializer(), json)\n\
+\x20   return if (back.boxes.single().value == \"v\") \"OK \" + json else \"FAIL: \" + json\n\
+}\n";
+    assert_eq!(
+        both_compilers_box_against_dependency(
+            GENERIC_DEPENDENCY,
+            main,
+            "dependency_generic_class_serializer",
+        ),
+        "OK {\"boxes\":[\"v\"]}"
     );
 }
 

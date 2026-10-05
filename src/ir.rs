@@ -103,7 +103,10 @@ pub use constructors::{
     IrCapturedReceiver, IrConstructorCapture, IrCtorParameterProvenance,
     IrJvmValueClassSecondaryCtor,
 };
-pub use constructors::{IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction};
+pub use constructors::{
+    IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction,
+    IrCustomSerializerConstructorTarget,
+};
 pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
@@ -1649,6 +1652,10 @@ pub struct IrFile {
     /// `@Serializable(with = …)` names a serializer class, keyed by that classifier.
     pub custom_serializer_constructions:
         std::collections::HashMap<TypeName, IrCustomSerializerConstruction>,
+    /// Frontend-selected primary constructors for serializer classes named on checked type
+    /// occurrences, keyed by serializer identity and the annotated type's semantic argument count.
+    pub type_use_serializer_constructions:
+        std::collections::HashMap<(TypeName, u32), IrCustomSerializerConstruction>,
     /// Exact semantic property-override edges copied from stable FIR. A target backend may erase
     /// these types and materialize representation bridges, but it must not search declarations.
     pub property_overrides: std::collections::HashMap<TypeName, Vec<IrPropertyOverride>>,

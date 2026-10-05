@@ -6,10 +6,10 @@ use crate::types::{Ty, TypeName, Visibility};
 use super::header::{
     next_id, CallableId, DeclarationFlags, DeclarationId, DeclarationIds, DeclarationKind,
     DeclarationNameId, DeclarationStub, DeferredCallableSelectionId, DeferredMemberSelectionId,
-    DeferredValueSelectionId, DiagnosticId, HeaderDeclaration, HeaderDeclarationKind,
-    HeaderScopeArena, HeaderSyntaxArena, HeaderTypeId, LookupNames, OriginId, PropertyId,
-    SigExprId, SigNameId, SignatureScopeId, SourceFileId, SourceMap, StableDeclarationAnchor,
-    TypeParameterId,
+    DeferredValueSelectionId, DiagnosticId, ExternalCallableId, HeaderDeclaration,
+    HeaderDeclarationKind, HeaderScopeArena, HeaderSyntaxArena, HeaderTypeId, LookupNames,
+    OriginId, PropertyId, SigExprId, SigNameId, SignatureScopeId, SourceFileId, SourceMap,
+    StableDeclarationAnchor, TypeParameterId,
 };
 use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
@@ -26,6 +26,24 @@ mod classifier_headers;
 mod declaration_metadata;
 mod result_expectation;
 mod source_packages;
+
+/// Exact constructor declaration selected for a serializer class named by a checked type-use
+/// annotation. Module and dependency declarations share the same semantic payload; only their
+/// stable identity carrier differs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedCustomSerializerConstructorTarget {
+    Module(DeclarationId),
+    External(ExternalCallableId),
+}
+
+/// Frontend-selected construction of a serializer class for an annotated type occurrence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedTypeUseSerializerConstruction {
+    pub serializer: TypeName,
+    pub parameters: Box<[ResolvedTy]>,
+    pub operands: Box<[u32]>,
+    pub target: ResolvedCustomSerializerConstructorTarget,
+}
 
 /// A half-open slice in the signature graph's shared operand arena.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1526,6 +1544,11 @@ pub struct ResolvedModuleIndex {
     /// the generated accessor's operand ordinal passed to each constructor parameter.
     serialization_custom_serializer_constructors:
         HashMap<DeclarationId, (DeclarationId, Box<[u32]>)>,
+    /// Constructor plans selected for serializer classes named on declared type occurrences, keyed
+    /// by serializer identity and the annotated type's semantic argument count. This is independent
+    /// of source property spelling and can be reused by every equal checked occurrence.
+    serialization_type_use_serializer_constructors:
+        HashMap<(TypeName, u32), ResolvedTypeUseSerializerConstruction>,
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
@@ -2663,6 +2686,9 @@ impl ResolvedModuleIndex {
             && self.generated_classifiers.is_empty()
             && self.serialization_companion_accessors.is_empty()
             && self.serialization_custom_serializer_constructors.is_empty()
+            && self
+                .serialization_type_use_serializer_constructors
+                .is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
@@ -3155,6 +3181,17 @@ impl ResolvedModuleIndex {
                 .serialization_custom_serializer_constructors
                 .values()
                 .map(|(_, operands)| std::mem::size_of_val(operands.as_ref()))
+                .sum::<usize>()
+            + self.serialization_type_use_serializer_constructors.len()
+                * (std::mem::size_of::<(TypeName, u32)>()
+                    + std::mem::size_of::<ResolvedTypeUseSerializerConstruction>())
+            + self
+                .serialization_type_use_serializer_constructors
+                .values()
+                .map(|construction| {
+                    std::mem::size_of_val(construction.parameters.as_ref())
+                        + std::mem::size_of_val(construction.operands.as_ref())
+                })
                 .sum::<usize>()
             + (self.invisible_reference_suppressions.len()
                 + self.invisible_member_suppressions.len()

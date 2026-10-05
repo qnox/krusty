@@ -207,7 +207,16 @@ impl SerializeBody<'_> {
                 }));
             } else if let Some(internal) = declared_serializer_of(ctx, ir, class_id, pname) {
                 // An explicit per-property serializer takes precedence over the property's type.
-                let inst = build_field_serializer_instance(ir, ctx, internal);
+                let scope = if delegate {
+                    super::type_parameter_serializers::TypeParameterSerializers::NONE
+                } else {
+                    type_parameter_serializers
+                };
+                let annotated = super::type_argument_serializers::declared_type_spelling(
+                    ctx, ir, class_id, pname,
+                );
+                let inst =
+                    build_field_serializer_instance(ir, ctx, internal, *ty, scope, &annotated);
                 let method = if is_nullable(ty) {
                     "encodeNullableSerializableElement"
                 } else {

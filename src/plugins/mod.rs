@@ -168,6 +168,7 @@ pub struct FrontendNamedClassContext<'a> {
 }
 
 /// A source class named by a class-valued annotation argument.
+#[derive(Clone)]
 pub struct FrontendNamedClass {
     pub classifier: TypeName,
     /// The class as a diagnostic names it without type arguments: `X<*, *>`.

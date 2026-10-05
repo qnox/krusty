@@ -9112,14 +9112,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   into (`Swapped<@A Item, String>` with `typealias Swapped<V, K> = Map<K, V>` annotates the map's
   value), and an annotation the alias's right-hand side writes on its root
   (`typealias Coded = @Serializable(with = S::class) Item`) is the serializer of every `Coded`
-  occurrence, as kotlinc honours both. A serializer class named on a type argument is built with
-  its no-argument constructor; a classpath serializer class there, or a declared one without that
-  constructor, stays an explicit unsupported element. Known gap: kotlinc caches a CLASS
+  occurrence, as kotlinc honours both. A serializer class named on a property or type occurrence is
+  built only through the primary constructor selected and validated while checked declarations and
+  dependency metadata are available. FIR records its stable module/dependency identity, declared
+  parameter types, and the annotated type-argument serializer passed to each parameter; common IR
+  and the JVM backend consume that record without guessing `()V` or recovering a constructor from
+  a name. This supports dependency serializer classes and generic serializers such as
+  `BoxSerializer<T>(KSerializer<T>)`; an unavailable or inaccessible constructor remains an
+  explicit unsupported element instead of becoming a guessed allocation. Known gap: kotlinc caches a CLASS
   serializer named for a whole property (property-level or on the declared type itself) in
   `$childSerializers`, where krusty constructs it at each use; the behaviour is identical.
   Tests: `tests/type_argument_serializer_e2e.rs` (object, class, nullable, nested, declared-type
-  and typealias shapes and a dependency's object under both compilers; the cache factories and the
-  generated `$serializer` against kotlinc's bytes, with and without typealiases).
+  and typealias shapes, dependency objects/classes, and a generic dependency serializer under both
+  compilers; the cache factories and the generated `$serializer` against kotlinc's bytes, with and
+  without typealiases).
 - **A computed property default is an optional element's default too.** A defaulted property is
   written only when the encoder asks for defaults or the value differs from the default:
   `shouldEncodeElementDefault(desc, i) || self.x != <default>`. Only a CONSTANT default was compared,

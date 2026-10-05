@@ -500,9 +500,22 @@ impl ChildSerializersBody<'_> {
                 } else if let Some(internal) =
                     declared_serializer_of(ctx, ir, declaring_class, &fields[i].0)
                 {
-                    // Explicit per-property serializer: `new X()` (or `X.INSTANCE`),
-                    // wrapped `.nullable` for a nullable property.
-                    let base = super::build_field_serializer_instance(ir, ctx, internal);
+                    // Explicit per-property serializer: the selected constructor (or
+                    // `X.INSTANCE`), wrapped `.nullable` for a nullable property.
+                    let annotated = super::type_argument_serializers::declared_type_spelling(
+                        ctx,
+                        ir,
+                        declaring_class,
+                        &fields[i].0,
+                    );
+                    let base = super::build_field_serializer_instance(
+                        ir,
+                        ctx,
+                        internal,
+                        serializer_field_types[i],
+                        type_parameter_serializers,
+                        &annotated,
+                    );
                     if super::is_nullable(&serializer_field_types[i]) {
                         super::wrap_nullable_serializer(ir, base)
                     } else {

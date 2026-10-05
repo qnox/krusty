@@ -904,18 +904,28 @@ impl SerializationPlugin {
             // A primary constructor this file declares is realized from its own class; another
             // file's is reached through its declared parameters, as an ordinary module call is.
             let declared_here = ir.class_id_by_name(construction.serializer).is_some();
+            let (target, external_target) = match construction.target {
+                crate::ir::IrCustomSerializerConstructorTarget::Module(target) => {
+                    (Some(target), None)
+                }
+                crate::ir::IrCustomSerializerConstructorTarget::External(target) => {
+                    (None, Some(target.declaration))
+                }
+            };
             let new = ir.add_expr(IrExpr::New {
                 internal: construction.serializer,
                 args,
                 ctor_params: (!declared_here).then(|| construction.parameters.to_vec()),
                 ctor_desc: None,
-                external_target: None,
+                external_target,
                 defaults: Box::new([]),
                 default_prefix_count: 0,
             });
             ir.construction_declared_params
                 .insert(new, construction.parameters.clone());
-            ir.construction_targets.insert(new, construction.target);
+            if let Some(target) = target {
+                ir.construction_targets.insert(new, target);
+            }
             ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::Cast,
                 arg: new,
@@ -2336,7 +2346,9 @@ mod tests {
                 serializer: type_name(serializer),
                 parameters: vec![kserializer("V"), kserializer("K")].into(),
                 operands: vec![1, 0].into(),
-                target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                target: crate::ir::IrCustomSerializerConstructorTarget::Module(
+                    crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                ),
             },
         );
         (ir, id)

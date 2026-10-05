@@ -123,7 +123,20 @@ impl ElementDecode<'_> {
         {
             // An explicit per-property serializer takes precedence over the property's type, as it
             // does in `serialize` and `childSerializers`: what `X` wrote only `X` can read back.
-            let inst = build_field_serializer_instance(ir, ctx, internal);
+            let annotated = super::type_argument_serializers::declared_type_spelling(
+                ctx,
+                ir,
+                self.serialized_class,
+                &self.fields[k].0,
+            );
+            let inst = build_field_serializer_instance(
+                ir,
+                ctx,
+                internal,
+                ty,
+                self.type_parameter_serializers,
+                &annotated,
+            );
             self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
         } else if is_nullable(&ty) || decode_element_method(&ty).is_none() {
             // The nested `$serializer.INSTANCE` (non-generic) / `Foo.serializer(A_ser)` (generic) /

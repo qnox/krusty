@@ -1587,6 +1587,7 @@ impl JvmLibraries {
                         &member.params,
                     );
                     member.visibility = declaration.params.visibility;
+                    member.set_is_primary_constructor(declaration.primary);
                     member.call_sig = CallSig::metadata_member(
                         member.params.len(),
                         declaration.params.names.clone(),
