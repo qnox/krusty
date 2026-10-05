@@ -343,6 +343,10 @@ struct BodyLowering<'a> {
     /// The call each `{ val t = operand…; call(t…) }` block this body built evaluates once its
     /// stored operands are bound, recorded when the block is created.
     operand_bound_calls: HashMap<ExprId, ExprId>,
+    /// The lambda literal about to be lowered for a functional interface whose method returns
+    /// `Unit`: its implementation returns nothing, as the interface method does, rather than the
+    /// `Unit` value a function type's `invoke` returns.
+    unit_method_lambda: Option<FirExprId>,
 }
 
 /// The block a body's executable root evaluates, through the implicit conversions checking put on
@@ -562,6 +566,7 @@ impl<'a> BodyLowering<'a> {
             root_block: root_scope_block(body),
             lowered_root_block: None,
             operand_bound_calls: HashMap::new(),
+            unit_method_lambda: None,
         }
     }
 

@@ -104,6 +104,10 @@ pub struct ResolvedPropertyOverride {
     /// current-module declaration, whose status is derived from its own edges, and for a Java
     /// declaration, which records none; see [`crate::libraries::LibraryMember::return_value_status`].
     pub overridden_return_value_status: Option<crate::types::ReturnValueStatus>,
+    /// The overridden declaration's visibility as its provider records it. An override written
+    /// without a visibility modifier keeps it: the effective visibility is the most permissive of
+    /// the declarations it overrides, transitively.
+    pub overridden_visibility: crate::types::Visibility,
     /// Whether a Kotlin superclass declaration among the implementation's other overridden
     /// properties itself overrides `overridden`. A target realization of `overridden` (such as a
     /// JVM renamed-builtin bridge) may therefore already be owned by that superclass.
@@ -174,6 +178,8 @@ pub struct ResolvedFunctionOverride {
     /// records it. An override inherits both modifiers, so its own metadata repeats them.
     pub overridden_operator: bool,
     pub overridden_infix: bool,
+    /// See [`ResolvedPropertyOverride::overridden_visibility`].
+    pub overridden_visibility: crate::types::Visibility,
     pub suspend: bool,
     /// Whether a Kotlin superclass declaration among the implementation's other overridden
     /// functions itself overrides `overridden`; see
