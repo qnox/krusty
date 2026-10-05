@@ -2,8 +2,9 @@
 //!
 //! Kotlin's private visibility is lexical: a declaration that is private inside a companion object
 //! is visible everywhere in the companion's containing class, so a private class nested in a private
-//! companion can be constructed and read from the outer class's own methods. A private companion also
-//! keeps that visibility on the outer class's `Companion` field.
+//! companion can be constructed and read from the outer class's own methods. A private or protected
+//! companion also keeps that visibility on the outer class's `Companion` field, and another class
+//! that may not read that field goes through a synthetic accessor.
 //!
 //! DIFFERENTIAL: the same source goes through the provisioned kotlinc and through krusty, and each
 //! class file is compared byte for byte.
@@ -51,11 +52,16 @@ class PrivateHolder {
         private fun twice(value: Int) = value * 2
     }
 }
+open class ProtectedHolder {
+    protected companion object
+}
 "#;
 
 #[test]
 fn the_companion_field_keeps_the_companion_visibility() {
-    byte_identical("companion_visibilities", COMPANION_VISIBILITIES, "PrivateHolder");
+    for class in ["PrivateHolder", "ProtectedHolder"] {
+        byte_identical("companion_visibilities", COMPANION_VISIBILITIES, class);
+    }
 }
 
 /// Every other JVM class that reads a private companion (a nested or inner class, an object
@@ -88,6 +94,63 @@ fn other_classes_read_a_private_companion_through_its_accessor() {
             "private_companion_from_other_classes",
             PRIVATE_COMPANION_FROM_OTHER_CLASSES,
             class,
+        );
+    }
+}
+
+/// A protected companion declared in another package. A subclass reads its field directly; a
+/// nested class, an object expression and an unrelated class's companion initializer cannot, and
+/// read it through `access$getCompanion$p$s<hash>` on the class that grants the access: the
+/// enclosing subclass, else the enclosing class's companion that subclasses the holder.
+const PROTECTED_BASE: &str = r#"
+package a
+
+open class A {
+    protected companion object {
+        fun getO() = "O"
+    }
+}
+"#;
+
+const PROTECTED_USES: &str = r#"
+package b
+
+import a.A
+
+class Outer : A() {
+    private companion object {
+        fun getK() = "K"
+    }
+    val direct = getO()
+    class Nested {
+        val test = getO() + getK()
+        fun foo() = object {
+            override fun toString() = getO() + getK()
+        }
+    }
+}
+
+class Unrelated {
+    companion object : A() {
+        val ok = getO()
+    }
+}
+"#;
+
+#[test]
+fn other_classes_read_an_inherited_protected_companion_through_the_granting_class() {
+    let classes = common::classes_against_kotlinc_module(&[
+        ("a/A.kt", PROTECTED_BASE),
+        ("b/Uses.kt", PROTECTED_USES),
+    ]);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>()
+    );
+    for (class, reference) in &classes.reference {
+        assert!(
+            classes.krusty[class] == *reference,
+            "{class}: krusty's bytes differ from kotlinc's"
         );
     }
 }

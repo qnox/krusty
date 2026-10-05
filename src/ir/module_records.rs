@@ -94,4 +94,7 @@ pub enum IrClassifierKind {
 pub struct IrModuleClassifier {
     pub singleton: bool,
     pub companion_owner: Option<TypeName>,
+    /// The classifier's declared Kotlin visibility. A companion's decides who may read the field
+    /// its owner publishes it through.
+    pub visibility: crate::types::Visibility,
 }

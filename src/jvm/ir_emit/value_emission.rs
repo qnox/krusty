@@ -27,19 +27,41 @@ impl super::Emitter<'_> {
         node: &IrExpr,
         code: &mut CodeBuilder,
     ) {
-        // Another class reads a private `Companion` field through its owner's accessor.
-        if let Some((owner, companion)) =
-            super::companion_field::private_companion_read(self.ir, node).filter(|(owner, _)| {
-                self.static_owner
-                    != Some(crate::jvm::private_static_access::StaticOwner::Class(
-                        *owner,
-                    ))
-            })
-        {
-            let (name, descriptor) = super::companion_field::companion_instance_accessor(companion);
-            let method = self.cw.methodref(&owner.render(), &name, &descriptor);
-            code.invokestatic(method, 0, 1);
-            return;
+        // A `Companion` field this class may not read is read through the accessor the plan
+        // placed for it.
+        if let (Some(context), Some(read)) = (
+            self.static_owner,
+            super::companion_field::companion_field_read(self.ir, node),
+        ) {
+            match super::companion_field::companion_field_accessor(self.ir, context, read) {
+                Err(error) => {
+                    *self.run.emit_error.borrow_mut() = Some(error);
+                    return;
+                }
+                Ok(Some((owner, accessor))) => {
+                    let planned = self.run.static_accessor_plan.borrow().declares(
+                        crate::jvm::private_static_access::StaticOwner::Class(owner),
+                        accessor,
+                    );
+                    if !planned {
+                        *self.run.emit_error.borrow_mut() = Some(format!(
+                            "{} declares no accessor for companion {}",
+                            owner.render(),
+                            read.companion.render()
+                        ));
+                        return;
+                    }
+                    let (name, descriptor) = super::companion_field::companion_instance_accessor(
+                        owner,
+                        read.holder,
+                        read.companion,
+                    );
+                    let method = self.cw.methodref(&owner.render(), &name, &descriptor);
+                    code.invokestatic(method, 0, 1);
+                    return;
+                }
+                Ok(None) => {}
+            }
         }
         match node {
             IrExpr::BottomValue { producer, .. } => {

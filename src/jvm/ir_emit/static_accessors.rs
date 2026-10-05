@@ -55,9 +55,12 @@ pub(super) enum StaticAccessor {
     /// `access$set<X>$p(<owner>, value)` that writes the backing field, including when the
     /// property declares a setter.
     FieldSetter { class: u32, property: u32 },
-    /// `access$get<Companion>$p()`, reading the private `Companion` field that holds singleton
-    /// `companion`.
-    CompanionInstance(TypeName),
+    /// `access$get<Companion>$p()` (or `…$p$s<hash>()` on a class other than `holder`), reading
+    /// `holder`'s `Companion` field that holds singleton `companion`.
+    CompanionInstance {
+        companion: TypeName,
+        holder: TypeName,
+    },
 }
 
 /// Every static owner's accessors, in first-use order.
@@ -70,6 +73,11 @@ pub(super) struct StaticAccessorPlan {
 impl StaticAccessorPlan {
     fn accessors_of(&self, owner: StaticOwner) -> &[StaticAccessor] {
         self.by_owner.get(&owner).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `owner` declares `accessor`, so a use site may call it.
+    pub(super) fn declares(&self, owner: StaticOwner, accessor: StaticAccessor) -> bool {
+        self.accessors_of(owner).contains(&accessor)
     }
 }
 
@@ -562,6 +570,21 @@ impl Walk<'_> {
                 uses.push(self.protected_use(line, bridge.clone()));
                 continue;
             }
+            if let Some(read) =
+                super::companion_field::companion_field_read(ir, ir.expr(expression))
+            {
+                // A read with no access path is reported where the emitter meets it.
+                if let Ok(Some((owner, accessor))) =
+                    super::companion_field::companion_field_accessor(ir, context, read)
+                {
+                    uses.push(Use {
+                        line,
+                        owner: StaticOwner::Class(owner),
+                        accessor,
+                    });
+                }
+                continue;
+            }
             let Some((owner, accessor)) = self.target(expression) else {
                 continue;
             };
@@ -575,8 +598,9 @@ impl Walk<'_> {
                 | StaticAccessor::MemberGetter { .. }
                 | StaticAccessor::MemberSetter { .. }
                 | StaticAccessor::FieldGetter { .. }
-                | StaticAccessor::FieldSetter { .. }
-                | StaticAccessor::CompanionInstance(_) => context != owner,
+                | StaticAccessor::FieldSetter { .. } => context != owner,
+                // Placed by `companion_field_accessor`, which already decided it is needed.
+                StaticAccessor::CompanionInstance { .. } => true,
                 StaticAccessor::Protected(_) => true,
             };
             if needed {
@@ -621,18 +645,6 @@ impl Walk<'_> {
             }
             IrExpr::PropertyRead { .. } => self.private_member_property(expression, true),
             IrExpr::PropertyWrite { .. } => self.private_member_property(expression, false),
-            read @ (IrExpr::SingletonValue { .. }
-            | IrExpr::StaticInstance { .. }
-            | IrExpr::ExternalStaticInstance { .. }) => {
-                super::companion_field::private_companion_read(self.ir, read).map(
-                    |(owner, companion)| {
-                        (
-                            StaticOwner::Class(owner),
-                            StaticAccessor::CompanionInstance(companion),
-                        )
-                    },
-                )
-            }
             _ => None,
         }
     }
@@ -741,8 +753,8 @@ pub(super) fn emit(
             StaticAccessor::FieldSetter { class, property } => {
                 accessor.field_setter(class, property, cw)
             }
-            StaticAccessor::CompanionInstance(companion) => {
-                accessor.companion_instance(companion, cw)
+            StaticAccessor::CompanionInstance { companion, holder } => {
+                accessor.companion_instance(companion, holder, cw)
             }
             StaticAccessor::Protected(index) => {
                 let bridge = &plan.protected[index as usize];
@@ -1126,14 +1138,18 @@ impl Accessor<'_> {
         cw.add_method(self.flags, &name, &descriptor, &code);
     }
 
-    /// `access$get<Companion>$p`: read the owner's private `Companion` field.
-    fn companion_instance(&self, companion: TypeName, cw: &mut ClassWriter) {
-        let (name, descriptor) = super::companion_field::companion_instance_accessor(companion);
+    /// `access$get<Companion>$p`: read `holder`'s `Companion` field.
+    fn companion_instance(&self, companion: TypeName, holder: TypeName, cw: &mut ClassWriter) {
+        let StaticOwner::Class(owner) = self.owner else {
+            unreachable!("a companion field accessor is declared by a class");
+        };
+        let (name, descriptor) =
+            super::companion_field::companion_instance_accessor(owner, holder, companion);
         reserve_signature(cw, &name, &descriptor);
         let mut code = CodeBuilder::new(0);
         code.mark_line(self.declaration_line);
         let field = cw.fieldref(
-            &self.owner.internal_name(self.facade),
+            &holder.render(),
             companion.nested_segment_ref(),
             &format!("L{};", companion.render()),
         );
