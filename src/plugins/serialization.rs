@@ -1004,23 +1004,7 @@ impl SerializationPlugin {
         let name = ir.add_expr(IrExpr::Const(IrConst::String(
             annotations::class_serial_name(ir, class_id),
         )));
-        let values = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: type_name(class_fq),
-                name: "values".to_string(),
-                descriptor: format!("()[L{class_fq};"),
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: vec![],
-        });
-        // The JVM would accept `[Le/Status;` where `[Ljava/lang/Enum;` is expected (arrays are
-        // covariant), but kotlinc still narrows with an explicit `checkcast` — so emit one.
-        let enums = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: values,
-            type_operand: Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Enum")]),
-        });
+        let enums = enum_serializer::enum_values_array(ir, type_name(class_fq));
         let enum_ser = enum_serializer::factory_call(ir, class_id, name, enums);
         let class_name = ir.classes[class_id as usize].fq_name_id();
         cached_serializer::add_cached_serializer_delegate(ir, class_id, class_name, enum_ser);
