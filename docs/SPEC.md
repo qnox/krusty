@@ -12172,6 +12172,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   resulting exit on the setter body (`IrFile::record_accessor_body_exit`), and the accessor that
   appends the `return` marks it (`UnitBodyExit`). Test: `tests/setter_return_line_e2e.rs`.
 
+- **A function reference's carrier reaches its use site uncast.** kotlinc's
+  `FunctionReferenceLowering` replaces a reference with its carrier (a `FunctionReferenceImpl`
+  subclass instance or its `INSTANCE`) behind an implicit cast, which the JVM codegen writes as no
+  instruction. The use site coerces the carrier's class type to what it needs: a `checkcast
+  Function1` for a function-typed parameter or return, a `checkcast KFunction` for a local of the
+  reference's own `KFunction1` type, and nothing for an `Any` parameter. Common IR therefore
+  replaces the reference with the carrier itself, typed as its class, exactly as a class-strategy
+  lambda's carrier is, instead of casting it to its function type. Test:
+  `tests/reference_carrier_cast_e2e.rs`.
+
 - **A primary constructor's `super(…)` delegation carries its operands' lines and returns to the
   declaration's start.** fir2ir builds a primary constructor's delegating call at the class
   declaration's start, annotations included (`IrClass::primary_delegation_line`), and a secondary

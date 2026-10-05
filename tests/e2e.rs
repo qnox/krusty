@@ -1413,6 +1413,8 @@ mod open_end_range_membership_e2e;
 mod optional_expectation_annotation_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
+#[path = "reference_carrier_cast_e2e.rs"]
+mod reference_carrier_cast_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
 mod result_generic_override_argument_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
