@@ -60,9 +60,11 @@ fn reordered_named_arguments_store_only_what_kotlinc_stores() {
         let pair = common::ModuleClassPair::compile(&sources, class);
         assert!(pair.krusty == pair.kotlinc, "{class} differs from kotlinc");
     }
-    let (kotlinc, krusty) =
-        common::ModuleClassPair::compile(&sources, "NamedKt").method_code("NamedKt", "reordered");
-    assert_eq!(krusty, kotlinc);
+    let facade = common::ModuleClassPair::compile(&sources, "NamedKt");
+    for function in ["reordered", "references"] {
+        let (kotlinc, krusty) = facade.method_code("NamedKt", function);
+        assert_eq!(krusty, kotlinc, "{function}");
+    }
 }
 
 #[test]

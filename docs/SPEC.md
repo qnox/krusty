@@ -4556,6 +4556,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call and in a constructor delegation alike. Operands stored because one of them suspends or because the callee is an
   inline function from a dependency are unchanged. Tests: `tests/named_argument_operands_e2e.rs`.
 
+- **A callable reference is cast only where its consumer reads it.** The reference's carrier class
+  reaches its use uncast, and the consumer narrows it as it would any other value: `Function1` for a
+  function-typed parameter or local, `KFunction` for a reference-typed local, temporary or result,
+  and nothing for `Any`. A stored bound reference in a reordered call keeps its `KFunctionN` type.
+  A `KFunctionN<P…, R>` in a generic `Signature` is written `KFunction<R>`, the one type argument of
+  its JVM class. Tests: `tests/reference_consumer_casts_e2e.rs`, `tests/named_argument_operands_e2e.rs`.
+
 - **A lambda returns what kotlinc infers for it.** A lambda whose every result is `Unit` (a statement
   tail such as an assignment, a declaration or an `else`-less `if`, or a `Unit` call) has the result
   type `Unit` even where the expected function type returns `Any` or `Any?`, so its implementation

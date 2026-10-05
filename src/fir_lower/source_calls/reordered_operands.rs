@@ -37,8 +37,9 @@ impl BodyLowering<'_> {
     }
 
     /// Store a reordered call's operand in a temporary of the type it evaluates to, as kotlinc's
-    /// temporary holds it: a scalar the parameter takes as a reference is boxed where it is passed,
-    /// not before it is stored.
+    /// temporary holds it, and coerce it to the parameter where it is passed: a scalar the parameter
+    /// takes as a reference is boxed there, not before it is stored, and a bound reference is held at
+    /// its own reflective type (`KFunction0`, `KProperty0`).
     pub(in super::super) fn spill_reordered_operand(
         &mut self,
         value: ExprId,
@@ -52,7 +53,8 @@ impl BodyLowering<'_> {
         } = self.ir.expr(value)
         {
             if let Some(&operand_ty) = self.ir.logical_types.get(&arg) {
-                if !operand_ty.is_reference() && type_operand.is_reference() {
+                let boxed = !operand_ty.is_reference() && type_operand.is_reference();
+                if boxed || self.is_reference_value(arg) {
                     let read = self.spill_call_operand(arg, operand_ty, statements);
                     return self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::ImplicitCoercion,
@@ -62,6 +64,19 @@ impl BodyLowering<'_> {
                 }
             }
         }
+        if self.is_reference_value(value) {
+            if let Some(&reference_ty) = self.ir.logical_types.get(&value) {
+                return self.spill_call_operand(value, reference_ty, statements);
+            }
+        }
         self.spill_call_operand(value, parameter_ty, statements)
+    }
+
+    fn is_reference_value(&self, value: ExprId) -> bool {
+        matches!(
+            self.ir.expr(value),
+            IrExpr::CallableReference(_)
+                | IrExpr::Checked(IrCheckedOperation::PropertyReference { .. })
+        )
     }
 }
