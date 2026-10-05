@@ -85,10 +85,12 @@ pub(super) fn accept_active_debug_metadata(
                 ir.classes[class as usize].decl_line = classifier.decl_line;
                 ir.classes[class as usize].decl_start_line = classifier.decl_start_line;
                 ir.classes[class as usize].decl_end_line = classifier.decl_end_line;
-                if classifier.ctor_close_line != 0 {
+                ir.classes[class as usize].primary_ctor_lines.decl_line =
+                    classifier.primary_ctor_lines.decl_line;
+                if classifier.primary_ctor_lines.close_line != 0 {
                     ir.ctor_close_lines.insert(
                         ir.classes[class as usize].fq_name_id(),
-                        classifier.ctor_close_line,
+                        classifier.primary_ctor_lines.close_line,
                     );
                 }
                 attach_generated_companion_debug_metadata(

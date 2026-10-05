@@ -3065,7 +3065,7 @@ fn emit_class(
             // The trailing `return` goes back on the class-declaration line, closing the ctor's table.
             if !ctor_lines.is_empty() {
                 // A closing `init` line still pending owns a `nop` before the return's line.
-                let line = primary_constructor_line(ir, c);
+                let line = primary_constructor_line(c);
                 ctor.mark_line(line);
                 ctor_lines.push((ctor.bytes.len() as u16, line));
             }

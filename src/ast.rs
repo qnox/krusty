@@ -22,7 +22,7 @@ mod operators;
 mod type_refs;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
-pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
+pub use constructors::{CtorDelegation, CtorDelegationCall, PrimaryCtorLines, SecondaryCtor};
 pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use operators::{BinOp, UnOp};
@@ -1167,10 +1167,9 @@ pub struct ClassDecl {
     /// closing `}`; for a bodyless declaration it is the line containing the final header token.
     /// Filled by the same parser post-pass as [`Self::decl_line`].
     pub decl_end_line: u32,
-    /// AT PARSE: the byte offset of the primary constructor's closing `)`; the same parser
-    /// post-pass that fills `decl_line` REWRITES it to the 1-based source line. 0 = no primary
-    /// parameter list. kotlinc maps the ctor `$default` overload's `return` to this line.
-    pub ctor_close_line: u32,
+    /// The lines the primary constructor's own declaration owns, rewritten from token offsets by
+    /// the post-pass that fills `decl_line`. All 0 when the header wrote no constructor.
+    pub primary_ctor_lines: PrimaryCtorLines,
     /// The file-level declarations this classifier's `companion { … }` blocks introduced, in
     /// source order. They are hoisted beside the classifier, which remains their lexical owner.
     pub companion_block_members: Vec<CompanionBlockMember>,

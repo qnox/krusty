@@ -12476,9 +12476,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   marks its own line; the call is back on the delegation line at its first synthesized operand —
   an omitted default's placeholder, which lowering builds at the call's line like kotlinc's
   `DefaultParameterInjector` — or at the `invokespecial`. The trailing `return` maps to the
-  constructor's own start (`setExtraLineNumberForVoidReturningFunction`): the class header when
-  the class declares a parameter list, the declaration's start, annotations included, when the
-  constructor is implicit. Test: `tests/super_delegation_line_e2e.rs`.
+  constructor's own start (`setExtraLineNumberForVoidReturningFunction`): the line of its
+  `constructor` keyword, or of its parameter list's `(` when it wrote none — annotations and
+  modifiers in front of the keyword do not move it (`class P private⏎constructor(val x: Int)`
+  returns on the `constructor` line, not the header) — and the declaration's start, annotations
+  included, when the constructor is implicit. The parser records that start on
+  `ClassDecl::primary_ctor_lines`; common IR carries it as `IrPrimaryCtorLines::decl_line`. Tests:
+  `tests/super_delegation_line_e2e.rs`, `tests/value_class_constructor_lines_e2e.rs`.
+
+- **A value class's private `<init>` is one line: the source constructor's own start.** kotlinc's
+  `JvmInlineClassLowering.buildPrimaryValueClassConstructor` replaces the primary constructor with
+  a private one whose body (`Object()`, the store of the underlying field, `return`) is built with
+  `irBlockBody(constructor)` at the original constructor's offsets. So its `LineNumberTable` is the
+  single row `line <constructor keyword or "(" line>: 0` — not the `@JvmInline` line an ordinary
+  class's `super()` takes, nor the property line its stores take (`@JvmInline⏎value class
+  IC(val x: Int)` → `line 2: 0`; `value class W(⏎    val x: Int⏎)` → the `(` line;
+  `value class⏎W(val x: Int)` → the `W(` line, not the `value class` keyword's — the grammar's
+  `class NL* simpleIdentifier` lets the name follow on a later line). The init
+  block's lines stay in `constructor-impl`, and `box-impl`, `unbox-impl`, `equals-impl0` and the
+  structural members have no table. The JVM value-class pass, which is that lowering's
+  counterpart, re-anchors the class's `IrPrimaryCtorLines::delegation_line` and the underlying
+  field's `constructor_store_line` on `IrPrimaryCtorLines::decl_line`; the emitter only consumes
+  the recorded lines. Test: `tests/value_class_constructor_lines_e2e.rs`, comparing every member's
+  table of value classes annotated on their own line, on the header line, unannotated (`inline
+  class`), with one or two `init` blocks, with a wrapped parameter list, with a line break
+  between `value class` and the name or between a modifier and `value class`, and with an annotated `constructor` keyword, and of
+  ordinary annotated classes.
 
 - **A local inner class's enclosing-instance store carries the class's line.** kotlinc's
   `LocalDeclarationsLowering` stores a local class's captured values ahead of the delegation with

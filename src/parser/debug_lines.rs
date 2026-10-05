@@ -160,9 +160,14 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 } else {
                     line_at(c.span.hi.saturating_sub(1))
                 };
-                // The parser stored the primary ctor's `)` OFFSET here — rewrite it to the line.
-                if c.ctor_close_line != 0 {
-                    c.ctor_close_line = line_at(c.ctor_close_line);
+                // The parser stored the primary ctor's start and `)` OFFSETS — rewrite them to lines.
+                for offset in [
+                    &mut c.primary_ctor_lines.decl_line,
+                    &mut c.primary_ctor_lines.close_line,
+                ] {
+                    if *offset != 0 {
+                        *offset = line_at(*offset);
+                    }
                 }
                 // A class's methods live INSIDE the class decl, not in `decl_arena` — walk them too,
                 // or every member method keeps line 0 and gets no `LineNumberTable`.

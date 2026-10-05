@@ -1,4 +1,4 @@
-//! A class's secondary constructors, as written.
+//! A class's constructors, as written.
 //!
 //! A secondary constructor is the one declaration that is neither a function nor a property: it
 //! carries its own parameters, its own delegation, and its own source lines, and every later phase
@@ -30,7 +30,7 @@ pub struct SecondaryCtor {
     pub decl_line: u32,
     /// 1-based source line of the `this`/`super` keyword this constructor delegates through. The
     /// parser stores that token's OFFSET and the post-pass rewrites it to its line, the way
-    /// `ClassDecl::ctor_close_line` is rewritten; 0 = no written delegation.
+    /// `ClassDecl::primary_ctor_lines` are rewritten; 0 = no written delegation.
     pub delegation_line: u32,
     /// 1-based source line this constructor's declaration ENDS on — its delegation's closing `)`
     /// or its block's `}`. Filled by the same post-pass.
@@ -41,6 +41,20 @@ pub struct SecondaryCtor {
     /// The visibility the declaration was written with. A secondary constructor is the one member
     /// whose modifiers used to be dropped, which published every `private constructor` publicly.
     pub visibility: Visibility,
+}
+
+/// The source lines a class's PRIMARY constructor declaration owns. The parser stores each token's
+/// OFFSET and the post-pass that fills `ClassDecl::decl_line` rewrites it to its 1-based line, like
+/// [`SecondaryCtor::delegation_line`]; 0 = not written.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PrimaryCtorLines {
+    /// Where the constructor itself starts: its `constructor` keyword, or its parameter list's `(`
+    /// when it wrote none. Annotations and modifiers in front of the keyword do not move it — the
+    /// same start [`SecondaryCtor::decl_line`] records. kotlinc maps the constructor's trailing
+    /// `return` here, and a JVM value class's whole private `<init>`.
+    pub decl_line: u32,
+    /// The parameter list's closing `)`. kotlinc maps the `$default` overload's `return` here.
+    pub close_line: u32,
 }
 
 /// How a secondary constructor delegates: to another constructor of the same class (`this(...)`),

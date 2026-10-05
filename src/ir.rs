@@ -101,7 +101,7 @@ pub use constructors::{
     IrJvmValueClassSecondaryCtor,
 };
 pub use constructors::{IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction};
-pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
+pub use constructors::{IrPrimaryCtorLines, IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use fields::IrField;
@@ -1024,6 +1024,8 @@ pub struct IrClass {
     /// is its closing `}`. Backends use this stable source fact for synthesized fall-through code;
     /// they must not recover it from source text.
     pub decl_end_line: u32,
+    /// The source lines of the primary constructor's own declaration and body anchors.
+    pub primary_ctor_lines: IrPrimaryCtorLines,
     /// Declared non-`Any` generic upper bounds (`<T: String>` → `("T", String)`), carried verbatim from
     /// the source. Platform-neutral metadata; the JVM value-class pass uses it to erase a value class's
     /// underlying type parameter to its bound (`value class S<T: String>` → `String`).
@@ -1233,6 +1235,7 @@ impl IrClass {
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,
+            primary_ctor_lines: IrPrimaryCtorLines::default(),
             type_param_bounds: Vec::new(),
             type_params: Vec::new(),
             captured_type_params: Vec::new(),
@@ -1352,6 +1355,7 @@ impl IrClass {
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,
+            primary_ctor_lines: IrPrimaryCtorLines::default(),
             type_param_bounds: Vec::new(),
             type_params: Vec::new(),
             captured_type_params: Vec::new(),

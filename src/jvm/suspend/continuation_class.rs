@@ -260,6 +260,7 @@ pub(super) fn build_continuation_class(
         decl_line: 0,
         decl_start_line: 0,
         decl_end_line: 0,
+        primary_ctor_lines: crate::ir::IrPrimaryCtorLines::default(),
         type_param_bounds: vec![],
         type_params: Vec::new(),
         captured_type_params: Vec::new(),

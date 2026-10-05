@@ -178,7 +178,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         secondary_ctors: Vec::new(),
         type_aliases: Vec::new(),
         span,
-        ctor_close_line: 0,
+        primary_ctor_lines: PrimaryCtorLines::default(),
         companion_block_members: Vec::new(),
         decl_line: 0,
         decl_start_line: 0,
@@ -2360,7 +2360,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
-            ctor_close_line: 0,
+            primary_ctor_lines: PrimaryCtorLines::default(),
             companion_block_members: Vec::new(),
             decl_line: 0,
             decl_start_line: 0,
@@ -2752,7 +2752,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: has_primary_ctor.then_some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
-            ctor_close_line: 0,
+            primary_ctor_lines: PrimaryCtorLines::default(),
             companion_block_members: companions.block_members,
             decl_line: 0,
             decl_start_line: 0,
@@ -3263,7 +3263,9 @@ impl<'a> Parser<'a> {
         let annotation_args = self.take_pending_annotation_args();
         let context_params = std::mem::take(&mut self.pending_context_params);
         let start = self.tok().span;
-        self.bump(); // 'class'
+        // `class`, then the name — the grammar lets it follow on a later line (`value class⏎N(…)`).
+        self.bump();
+        self.skip_newlines();
         let name = self.ident_or_error("class name");
         let name_span = self.declaration_name_span;
         let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
@@ -3280,29 +3282,16 @@ impl<'a> Parser<'a> {
         };
         let lexical_type_param_lens =
             self.push_lexical_type_params(&type_params, &type_param_bounds);
-        let mut primary_constructor_annotations = Vec::new();
-        let mut primary_constructor_annotation_args = Vec::new();
-        // An explicit constructor prefix may continue across physical newlines.
-        let mut primary_ctor_visibility = Visibility::Public;
-        if self.primary_constructor_header_follows() {
-            self.skip_newlines();
-            if self.at(TokenKind::At) || self.at_modifier() {
-                let ctor_mods = self.skip_decl_prefix();
-                // The declared constructor visibility survives into `@Metadata` (and, for
-                // `protected`, the JVM `<init>` access flags).
-                primary_ctor_visibility = visibility_of(&ctor_mods);
-                primary_constructor_annotations = self.take_pending_annotations();
-                primary_constructor_annotation_args = self.take_pending_annotation_args();
-            }
-        }
-        let header_ctor_kw = self.at(TokenKind::Ident) && self.keyword_text("constructor");
-        if header_ctor_kw {
-            self.bump();
-        }
+        let primary_prefix = self.parse_primary_constructor_prefix();
         let mut props = Vec::new();
         let mut ctor_close_lo = 0u32;
         let has_primary_ctor_parens = self.eat(TokenKind::LParen);
-        let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
+        let header_has_primary = primary_prefix.keyword || has_primary_ctor_parens;
+        let primary_start = if header_has_primary {
+            primary_prefix.start
+        } else {
+            0
+        };
         if has_primary_ctor_parens {
             self.skip_newlines();
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
@@ -3462,7 +3451,7 @@ impl<'a> Parser<'a> {
         self.pop_lexical_type_params(lexical_type_param_lens);
         ClassDecl {
             name_span,
-            primary_ctor_visibility,
+            primary_ctor_visibility: primary_prefix.visibility,
             name,
             visibility: Visibility::Public,
             annotations,
@@ -3499,12 +3488,15 @@ impl<'a> Parser<'a> {
             // `expect` class that wrote none: kotlinc gives it no default constructor.
             primary_ctor_annotations: (header_has_primary
                 || (secondary_ctors.is_empty() && !self.in_expect_classifier))
-                .then_some(primary_constructor_annotations),
-            primary_ctor_annotation_args: primary_constructor_annotation_args,
+                .then_some(primary_prefix.annotations),
+            primary_ctor_annotation_args: primary_prefix.annotation_args,
             secondary_ctors,
             type_aliases,
             span: Span::new(start.lo, end.hi),
-            ctor_close_line: ctor_close_lo,
+            primary_ctor_lines: PrimaryCtorLines {
+                decl_line: primary_start,
+                close_line: ctor_close_lo,
+            },
             companion_block_members: companions.block_members,
             decl_line: 0,
             decl_start_line: 0,
@@ -3850,7 +3842,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
-            ctor_close_line: 0,
+            primary_ctor_lines: PrimaryCtorLines::default(),
             companion_block_members: companions.block_members,
             decl_line: 0,
             decl_start_line: 0,
@@ -3962,7 +3954,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(span.lo, end.hi),
-            ctor_close_line: 0,
+            primary_ctor_lines: PrimaryCtorLines::default(),
             companion_block_members: Vec::new(),
             decl_line: 0,
             decl_start_line: 0,
@@ -4096,7 +4088,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
-            ctor_close_line: 0,
+            primary_ctor_lines: PrimaryCtorLines::default(),
             companion_block_members: Vec::new(),
             decl_line: 0,
             decl_start_line: 0,
