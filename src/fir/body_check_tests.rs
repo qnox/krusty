@@ -1925,6 +1925,8 @@ suspend fun target(value: Int): Int = value
 suspend fun inspect(): Boolean {
     val reference = ::target
     val lambda = suspend { value: Int -> value }
+    @Suppress("UNCHECKED_CAST")
+    lambda as Function2<Int, Continuation<Int>, Any?>
     return reference is KSuspendFunction1<Int, Any?> &&
         reference is SuspendFunction1<Int, Any?> &&
         lambda !is KSuspendFunction1<Int, Any?> &&

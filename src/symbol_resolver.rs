@@ -42,6 +42,7 @@ pub(crate) use selected_call_instantiation::selected_default_callable;
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
 mod source_view;
+mod statically_known_subtype;
 pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
@@ -85,6 +86,7 @@ pub(crate) use overload_selection::{CandidateSelectionWithTies, ReceiverFunction
 pub(crate) use receiver_mro::{function_shape_matches, ReceiverMro};
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
 use scope_level_callables::{function_set_from_symbols, level_functions, level_properties};
+pub(crate) use statically_known_subtype::{nominal_type, statically_known_subtype};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CallableImport {
