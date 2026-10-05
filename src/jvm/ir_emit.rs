@@ -4073,18 +4073,6 @@ fn emit_enum_class(
     // `ClassFormatError: Duplicate method name "<init>"`. Its bytes are still built above so the
     // constant pool interns in kotlinc's order.
     seed_enum_constructor_locals(ir, c, &self_desc, &mut cw);
-    // The constructor's LocalVariableTable strings follow its body, and the property accessors
-    // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
-    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        cw.reserve_method_name(&property_getter_name(&f.name));
-        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
-        // The nullability comes from the declared type; `t` is its erased JVM form.
-        match field_nullability_kind(ir, &fq, &f.name, f.ty) {
-            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
-            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
-            _ => {}
-        }
-    }
     let emits_primary_ctor = c.has_primary_ctor || c.secondary_ctors.is_empty();
     if emits_primary_ctor {
         cw.add_method_sig(
@@ -4136,6 +4124,19 @@ fn emit_enum_class(
             &mut cw,
             env,
         );
+    }
+
+    // The constructors' LocalVariableTable strings follow their bodies, and the property accessors
+    // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
+    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
+        cw.reserve_method_name(&property_getter_name(&f.name));
+        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
+        // The nullability comes from the declared type; `t` is its erased JVM form.
+        match field_nullability_kind(ir, &fq, &f.name, f.ty) {
+            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
+            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
+            _ => {}
+        }
     }
 
     emit_declared_property_accessors(

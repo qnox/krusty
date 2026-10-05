@@ -148,6 +148,17 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         .map(|(entry, _, _)| entry)
         .unwrap_or_else(|| class_decl.map_or(0, |candidate| candidate.decl_line));
     let mut lines: Vec<(u16, u32)> = vec![(0, class_line)];
+    let physical_params = physical_prefix
+        .iter()
+        .chain(real_params)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut stub_params = physical_params.clone();
+    stub_params.extend(std::iter::repeat_n(Ty::Int, mask_count));
+    stub_params.push(marker);
+    let desc = method_descriptor(&stub_params, Ty::Unit);
+    // kotlinc visits the overload's descriptor before its body's constants.
+    e.cw.reserve_descriptor(&desc);
     let mut code = CodeBuilder::new(e.frame.size());
     for (i, def) in defaults.iter().enumerate().take(n) {
         if let Some(def_expr) = def {
@@ -188,11 +199,6 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     for &(pslot, pty) in &param_slots {
         load(pty, pslot, &mut code);
     }
-    let physical_params = physical_prefix
-        .iter()
-        .chain(real_params)
-        .copied()
-        .collect::<Vec<_>>();
     // A constructor hidden for its value-class parameters is reached through its marker accessor,
     // as every construction outside the accessor is.
     let mut target_params = physical_params.clone();
@@ -223,13 +229,6 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     code.ensure_locals(e.frame.max());
     code.link();
 
-    let mut stub_params = physical_params;
-    stub_params.extend(std::iter::repeat_n(
-        Ty::Int,
-        default_mask_count(real_params.len()),
-    ));
-    stub_params.push(marker);
-    let desc = method_descriptor(&stub_params, Ty::Unit);
     // Once constructor selection recorded that this declaration is reached through a public
     // marker accessor, its default-argument realization is public as well. This is the same exact
     // declaration fact used for the delegation above; do not rediscover it from the owner or the

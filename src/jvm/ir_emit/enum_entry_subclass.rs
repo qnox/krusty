@@ -121,11 +121,21 @@ pub(super) fn emit_enum_entry_subclass(
     ctor.link();
     // As on the enum's own constructor, the generic `Signature` leaves out the `(String, int)`
     // prefix, so it is `()V`.
-    cw.add_method_sig(0x0000, "<init>", &ctor_desc, &ctor, Some(ENTRY_CONSTRUCTOR_SIGNATURE));
+    cw.add_method_sig(
+        0x0000,
+        "<init>",
+        &ctor_desc,
+        &ctor,
+        Some(ENTRY_CONSTRUCTOR_SIGNATURE),
+    );
     // The constructor maps to its entry's line and lists the receiver and the enum prefix.
     let locals = [
         ("this".to_string(), format!("L{fq_name};"), 0),
-        ("$enum$name".to_string(), "Ljava/lang/String;".to_string(), 1),
+        (
+            "$enum$name".to_string(),
+            "Ljava/lang/String;".to_string(),
+            1,
+        ),
         ("$enum$ordinal".to_string(), "I".to_string(), 2),
     ];
     let line = ir

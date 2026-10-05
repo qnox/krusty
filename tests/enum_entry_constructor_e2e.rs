@@ -2,7 +2,10 @@
 //! An enum's constructors are private. A constant's subclass takes only the name and ordinal: its
 //! constructor evaluates the constant's arguments and calls the enum's constructor through the
 //! `$default` overload when an argument is omitted, and otherwise through a public synthetic
-//! `(…, DefaultConstructorMarker)` accessor the enum declares for it.
+//! `(…, DefaultConstructorMarker)` accessor the enum declares for it. The constructor a constant
+//! selects, a secondary one among them, is the one its subclass calls; the constant's arguments,
+//! named, omitted or with side effects, run in the subclass in source order, and the lambdas among
+//! them are the subclass's methods, numbered there.
 
 use super::common;
 
@@ -39,6 +42,78 @@ const CLASSES: [&str; 6] = [
     "Slot$FIRST",
 ];
 
+const SELECTED: &str = "var counter = 0
+fun next(): Int { counter += 1; return counter }
+fun tag(): String { counter += 10; return \"n\" }
+enum class Plain { A { override fun g() = 1 }, B { override fun g() = 2 }; abstract fun g(): Int }
+enum class Labeled(val label: String) {
+    A { override fun f() = 1 },
+    B(\"y\");
+    constructor() : this(\"x\")
+    open fun f(): Int = 0
+}
+enum class Shelf(val width: Int, val label: String = \"w\") {
+    WIDE(next()) { override fun f() = 1 },
+    NAMED(label = tag(), width = next()) { override fun f() = 2 },
+    SPLIT(\"ab\", next()) { override fun f() = 3 },
+    TAGGED(\"abc\", 1, \"q\") { override fun f() = 4 },
+    PLAIN(9);
+    constructor(text: String, extra: Int, tag: String = \"t\") : this(text.length + extra, tag)
+    open fun f() = 0
+}
+enum class Act(val action: () -> Int) {
+    ONE({ counter + 1 }) { override fun g() = 1 },
+    TWO({ 2 });
+    open fun g() = 0
+}
+fun box(): String {
+    if (Plain.A.g() + Plain.B.g() != 3) return \"plain\"
+    if (Labeled.A.label != \"x\" || Labeled.A.f() != 1 || Labeled.B.f() != 0) return \"labeled\"
+    var shelves = \"\"
+    for (shelf in Shelf.values()) shelves += \"${shelf.width}${shelf.label}${shelf.f()},\"
+    if (shelves != \"1w1,12n2,15t3,4q4,9w0,\") return shelves
+    if (Act.ONE.action() != 14 || Act.ONE.g() != 1 || Act.TWO.action() != 2) return \"act\"
+    return \"OK\"
+}
+";
+
+#[test]
+fn a_constant_reaches_the_constructor_it_selects_like_kotlinc() {
+    let sources = [("Selected.kt", SELECTED)];
+    for class in [
+        "Plain",
+        "Plain$A",
+        "Labeled",
+        "Labeled$A",
+        "Shelf",
+        "Shelf$WIDE",
+        "Shelf$NAMED",
+        "Shelf$SPLIT",
+        "Shelf$TAGGED",
+        "SelectedKt",
+    ] {
+        let pair = common::ModuleClassPair::compile(&sources, class);
+        assert!(pair.krusty == pair.kotlinc, "{class} differs from kotlinc");
+    }
+    // A constant's lambda argument is its subclass's method, so the enum numbers only its own.
+    for class in ["Act", "Act$ONE"] {
+        let pair = common::ModuleClassPair::compile(&sources, class);
+        assert_eq!(
+            erased_methods(&pair.krusty),
+            erased_methods(&pair.kotlinc),
+            "{class}: methods"
+        );
+    }
+}
+
+#[test]
+fn a_constant_evaluates_its_arguments_once_in_source_order() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SELECTED, "Selected"),
+        "OK"
+    );
+}
+
 #[test]
 fn enum_entry_constructors_run() {
     common::expect_box_ok_with_stdlib(ENUMS, "EnumEntryConstructors");
@@ -65,12 +140,17 @@ fn enum_entry_constructors_match_kotlinc() {
             .iter()
             .find(|(emitted, _)| emitted == class)
             .unwrap_or_else(|| panic!("krusty did not emit {class}"));
-        assert_eq!(methods(emitted), methods(&reference), "{class}: methods");
+        assert_eq!(
+            erased_methods(emitted),
+            erased_methods(&reference),
+            "{class}: methods"
+        );
     }
 }
 
-/// Every method's access flags, name, descriptor and generic `Signature`, in classfile order.
-fn methods(bytes: &[u8]) -> Vec<(u16, String, String, Option<String>)> {
+/// Every method's access flags, name and descriptor, in classfile order. A generic `Signature` of
+/// the enum's own constructor is not this file's subject.
+fn erased_methods(bytes: &[u8]) -> Vec<(u16, String, String)> {
     let class = krusty::jvm::classreader::parse_class(bytes).expect("parse class");
     class
         .methods
@@ -80,7 +160,6 @@ fn methods(bytes: &[u8]) -> Vec<(u16, String, String, Option<String>)> {
                 method.access,
                 method.name.clone(),
                 method.descriptor.clone(),
-                method.signature.clone(),
             )
         })
         .collect()
