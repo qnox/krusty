@@ -878,11 +878,9 @@ pub(super) fn realize(
             continue;
         }
         // A member dispatch realizes the dependency declaration the frontend selected.
-        let selected = property_virtual_target.unwrap_or_else(|| {
-            crate::ir::IrVirtualTarget::Function(
-                crate::fir::ResolvedFunctionOverrideTarget::External(target),
-            )
-        });
+        let selected = property_virtual_target.unwrap_or(crate::ir::IrVirtualTarget::Function(
+            crate::fir::ResolvedFunctionOverrideTarget::External(target),
+        ));
         match kind {
             ExternalCallableKind::TopLevel => {
                 *callee = Callee::Static {

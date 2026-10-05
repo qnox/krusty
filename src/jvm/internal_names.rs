@@ -792,17 +792,15 @@ fn rewrite_callee(callee: &mut Callee, rename: &CallRename<'_>) {
         }
         Callee::CrossFile {
             name,
-            module_target,
+            module_target: Some(target),
             ..
         } => {
             // A sibling default call is realized as a cross-file edge before this pass, and it
             // already carries the selected declaration. Rename that declaration only.
-            if let Some(target) = *module_target {
-                if let Some(renamed) = rename.by_callable.get(&target) {
-                    *name = keep_default_stub(name, renamed.clone());
-                } else if rename.module_functions.contains(&target) {
-                    *name = append_module_suffix(name, rename.suffix);
-                }
+            if let Some(renamed) = rename.by_callable.get(target) {
+                *name = keep_default_stub(name, renamed.clone());
+            } else if rename.module_functions.contains(target) {
+                *name = append_module_suffix(name, rename.suffix);
             }
         }
         Callee::Module { target, name, .. } | Callee::ModuleWithDefaults { target, name, .. } => {

@@ -92,6 +92,19 @@ pub(super) fn runtime_member_role(
     }
 }
 
+pub(super) fn console_intrinsic(
+    intrinsic: Option<crate::backend::BackendCompilerIntrinsic>,
+) -> Option<super::super::super::intrinsics::ConsoleIntrinsic> {
+    use super::super::super::intrinsics::ConsoleIntrinsic;
+    use crate::backend::BackendCompilerIntrinsic;
+
+    match intrinsic {
+        Some(BackendCompilerIntrinsic::Print) => Some(ConsoleIntrinsic::Print),
+        Some(BackendCompilerIntrinsic::Println) => Some(ConsoleIntrinsic::Println),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,18 +125,5 @@ mod tests {
             ),
             Some(crate::native::intrinsics::RuntimeMemberRole::Equals)
         );
-    }
-}
-
-pub(super) fn console_intrinsic(
-    intrinsic: Option<crate::backend::BackendCompilerIntrinsic>,
-) -> Option<super::super::super::intrinsics::ConsoleIntrinsic> {
-    use super::super::super::intrinsics::ConsoleIntrinsic;
-    use crate::backend::BackendCompilerIntrinsic;
-
-    match intrinsic {
-        Some(BackendCompilerIntrinsic::Print) => Some(ConsoleIntrinsic::Print),
-        Some(BackendCompilerIntrinsic::Println) => Some(ConsoleIntrinsic::Println),
-        _ => None,
     }
 }

@@ -627,7 +627,7 @@ pub(super) fn cross_owner_member_calls(
                     }
                 }
             }
-            if !protected.contains_key(&expression) {
+            if let std::collections::hash_map::Entry::Vacant(slot) = protected.entry(expression) {
                 if let Some(dependency) =
                     ir.jvm_protected_dependency_calls.get(&expression).cloned()
                 {
@@ -656,17 +656,14 @@ pub(super) fn cross_owner_member_calls(
                                 .iter()
                                 .map(jvm_declared_ty)
                                 .collect::<Vec<_>>();
-                            protected.insert(
-                                expression,
-                                ProtectedMemberAccessBridge {
-                                    owner: bridge_owner,
-                                    name: dependency.name,
-                                    target_parameters: parameters.clone(),
-                                    bridge_parameters: parameters,
-                                    result: jvm_declared_ty(&dependency.result),
-                                    parameter_names: dependency.parameter_names.into_vec(),
-                                },
-                            );
+                            slot.insert(ProtectedMemberAccessBridge {
+                                owner: bridge_owner,
+                                name: dependency.name,
+                                target_parameters: parameters.clone(),
+                                bridge_parameters: parameters,
+                                result: jvm_declared_ty(&dependency.result),
+                                parameter_names: dependency.parameter_names.into_vec(),
+                            });
                         }
                     }
                 }

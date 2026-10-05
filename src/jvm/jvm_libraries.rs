@@ -5613,6 +5613,11 @@ fn classpath_annotation_targets(
     crate::types::AnnotationTargets::java(&ci.java_targets)
 }
 
+/// `kotlin.contracts`, the package that declares the contract DSL.
+fn is_contracts_package(package: TypeName) -> bool {
+    package.matches("kotlin/contracts")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -7204,9 +7209,4 @@ mod tests {
             None
         );
     }
-}
-
-/// `kotlin.contracts`, the package that declares the contract DSL.
-fn is_contracts_package(package: TypeName) -> bool {
-    package.matches("kotlin/contracts")
 }

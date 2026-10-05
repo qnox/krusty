@@ -41,6 +41,8 @@
 1	src/fir/header.rs	called `expect` on `property.init` after checking its variant with `is_some`
 1	src/fir/header.rs	this function has too many arguments (10/7)
 1	src/fir/inline_body.rs	large size difference between variants: the entire enum is at least 360 bytes
+1	src/fir/interface_delegation.rs	large size difference between variants: the entire enum is at least 448 bytes
+1	src/fir/interface_delegation.rs	large size difference between variants: the entire enum is at least 512 bytes
 1	src/fir/module_symbols.rs	this function has too many arguments (8/7)
 1	src/fir/signature_extract.rs	this function has too many arguments (8/7)
 1	src/fir/signature.rs	this function has too many arguments (8/7)
@@ -53,7 +55,7 @@
 1	src/frontend/tests/streaming.rs	using `clone` on type `ResolvedCallableHeader` which implements the `Copy` trait: help: try removing the `clone` call: `callable`
 1	src/ir/value_class_constructors.rs	redundant closure: help: replace the closure with the function itself: `&remap_ty`
 1	src/jvm/backend.rs	this function has too many arguments (8/7)
-1	src/jvm/backend.rs	this function has too many arguments (9/7)
+1	src/jvm/builtin_member_operations.rs	large size difference between variants: the entire enum is at least 256 bytes
 1	src/jvm/bytecode_passes/temporaries/null_check_folds.rs	this `if` can be collapsed into the outer `match`
 1	src/jvm/classfile/control_flow.rs	this function has too many arguments (8/7)
 1	src/jvm/classfile/stack_maps.rs	very complex type used. Consider factoring parts into `type` definitions
@@ -87,7 +89,7 @@
 1	src/plugins/mod.rs	this `map_or` can be simplified
 1	src/resolve.rs	called `expect` on `current_owner` after checking its variant with `is_some`
 1	src/resolve.rs	iterating on a map's keys
-1	src/resolve.rs	large size difference between variants: the entire enum is at least 456 bytes
+1	src/resolve.rs	large size difference between variants: the entire enum is at least 496 bytes
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `matches_qual`
 1	src/resolve.rs	returning the result of a `let` binding from a block
 1	src/resolve.rs	this function has too many arguments (12/7)
@@ -96,6 +98,7 @@
 1	src/resolve.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if views.len() > 1 { views } else { Default::default() }`
 1	src/resolve.rs	usage of `bool::then` in `filter_map`
 1	src/resolve.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `other`
+1	src/resolve/call_diagnostics.rs	this function has too many arguments (8/7)
 1	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `is_assignable`
 1	src/resolve/callable_reference_selection.rs	this `match` expression can be replaced with `?`
 1	src/resolve/conditional_branch.rs	this function has too many arguments (8/7)
@@ -127,20 +130,25 @@
 1	src/types/interning.rs	unnecessary use of `to_string`: help: use: `"T"`
 1	tests/common/mod.rs	function `capture_common_ir` is never used
 1	tests/common/mod.rs	function `compile_in_process_diagnostics` is never used
+1	tests/common/native_backend.rs	constant `NATIVE_RUNTIME_HEADER` is never used
+1	tests/common/native_backend.rs	constant `NATIVE_SYS_HEADER` is never used
+1	tests/common/native_backend.rs	function `native_sys_header` is never used
+1	tests/common/native_backend.rs	function `write_native_runtime_headers` is never used
 1	tests/kotlin_box_ir_jvm_conformance.rs	consider using `sort_by_key`
 1	tests/kotlin_box_ir_jvm_conformance.rs	this function has too many arguments (8/7)
 1	tests/local_class_nullability_e2e.rs	called `Iterator::last` on a `DoubleEndedIterator`; this will needlessly iterate the entire iterator
 1	tests/safe_call_origin_narrowing_e2e.rs	this function has too many arguments (8/7)
 10	src/fir/body_check/driver_tests.rs	the function `crate::resolve::publish_checked_local_signatures` doesn't need a mutable reference
 13	src/parser.rs	this `map_or` can be simplified
-14	src/resolve.rs	this function has too many arguments (8/7)
+15	src/resolve.rs	this function has too many arguments (8/7)
 2	src/fir_lower/checked.rs	this function has too many arguments (8/7)
 2	src/fir_lower/source_calls.rs	this function has too many arguments (8/7)
 2	src/fir_lower/tests.rs	the method `accept_inline_bodies` doesn't need a mutable reference
 2	src/fir/body_check.rs	unnecessary closure used to substitute value for `Option::None`
-2	src/fir/header.rs	this function has too many arguments (9/7)
+2	src/fir/body_check/references.rs	this function has too many arguments (8/7)
 2	src/fir/module_symbols.rs	this method chain can be written more clearly with `if .. else ..`
 2	src/frontend/inline_preparation.rs	the function `crate::fir::check_and_dispatch_body_in_session` doesn't need a mutable reference
+2	src/jvm/backend.rs	this function has too many arguments (9/7)
 2	src/jvm/ir_emit/comparison_branches/mod.rs	this function has too many arguments (8/7)
 2	src/jvm/jvm_libraries.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 2	src/resolve.rs	the `Err`-variant returned from this function is very large
@@ -156,6 +164,7 @@
 2	src/symbol_resolver.rs	this function has too many arguments (8/7)
 3	src/fir/body_check/calls.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `selected`
 3	src/fir/header.rs	this function has too many arguments (8/7)
+3	src/fir/header.rs	this function has too many arguments (9/7)
 3	src/fir/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 3	src/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 3	src/resolve.rs	unnecessary closure used to substitute value for `Option::None`

@@ -325,19 +325,20 @@ fn box_lambda_modes<'a>(
     sources: impl IntoIterator<Item = &'a str>,
 ) -> krusty::jvm::ir_emit::LambdaModes {
     let sources = sources.into_iter().collect::<Vec<_>>();
-    let mut modes = krusty::jvm::ir_emit::LambdaModes::default();
-    modes.lambdas = sources
-        .iter()
-        .copied()
-        .map(krusty::conformance::lambda_mode)
-        .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
-        .unwrap_or_default();
-    modes.sam_conversions = sources
-        .iter()
-        .copied()
-        .map(krusty::conformance::sam_conversion_mode)
-        .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
-        .unwrap_or_default();
+    let modes = krusty::jvm::ir_emit::LambdaModes {
+        lambdas: sources
+            .iter()
+            .copied()
+            .map(krusty::conformance::lambda_mode)
+            .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
+            .unwrap_or_default(),
+        sam_conversions: sources
+            .iter()
+            .copied()
+            .map(krusty::conformance::sam_conversion_mode)
+            .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
+            .unwrap_or_default(),
+    };
     modes
 }
 

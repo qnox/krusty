@@ -1083,15 +1083,14 @@ impl super::Emitter<'_> {
                         let result_narrow = ordinary_virtual
                             .then(|| self.ir.jvm_overridden_call_realizations.get(&e))
                             .flatten()
-                            .map(|realization| {
+                            .and_then(|realization| {
                                 let narrow = (realization.descriptor != descriptor
                                     && ret.is_reference())
                                 .then(|| crate::jvm::names::instanceof_internal_name(ret));
                                 name = realization.physical_name.clone();
                                 descriptor = realization.descriptor.clone();
                                 narrow
-                            })
-                            .flatten();
+                            });
                         let call_parameters = bridge.as_ref().map_or(ptys.as_slice(), |bridge| {
                             bridge.bridge_parameters.as_slice()
                         });
