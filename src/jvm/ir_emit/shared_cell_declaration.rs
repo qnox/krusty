@@ -1,6 +1,7 @@
 //! A captured mutable local's `Ref$XxxRef` holder. A declaration takes kotlinc's
 //! `SharedVariablesLowering` shape: the local stores a fresh holder, and a separate statement then
-//! sets its `element` to the initial value, which a declaration without an initializer omits. The
+//! sets its `element` to the initial value. A declaration without an initializer, or whose
+//! initializer is the element's default (`null`, `false`, a zero), omits that statement. The
 //! holder's debug range opens at its store, before the element is set.
 //!
 //! kotlinc boxes only a local that a closure it does not inline captures; a lambda it inlines
@@ -76,7 +77,7 @@ impl Emitter<'_> {
         store(holder, slot, code);
         self.mark_suspend_lambda_parameter_read(declaration, code);
         self.open_declared_local(declaration, slot, holder, code);
-        if let Some(value) = value {
+        if let Some(value) = value.filter(|&value| !holds_default_value(self.ir, elem, value)) {
             // The element store is the declaration's statement: its value marks its own line,
             // and the `putfield` returns to the declaration's.
             load(holder, slot, code);
@@ -193,6 +194,32 @@ impl Emitter<'_> {
             self.open_locals.len()
         };
         self.open_locals.insert(position, local);
+    }
+}
+
+/// Whether `value` is the constant a fresh holder's `element` already holds: `null`, `false` or a
+/// zero of the element's own kind. kotlinc sets no element for such an initializer; `-0.0` is not
+/// one, since its bits differ from the field's default.
+fn holds_default_value(ir: &crate::ir::IrFile, elem: Ty, value: ExprId) -> bool {
+    use crate::ir::IrConst;
+    let IrExpr::Const(constant) = ir.expr(value) else {
+        return false;
+    };
+    match constant {
+        IrConst::Null => !elem.is_jvm_scalar(),
+        IrConst::Boolean(value) => elem.is_jvm_scalar() && !*value,
+        IrConst::Byte(value) => elem.is_jvm_scalar() && *value == 0,
+        IrConst::Short(value) => elem.is_jvm_scalar() && *value == 0,
+        IrConst::Int(value) => elem.is_jvm_scalar() && *value == 0,
+        IrConst::Long(value) => elem.is_jvm_scalar() && *value == 0,
+        IrConst::Char(value) => elem.is_jvm_scalar() && *value == 0,
+        IrConst::UByte(value) => elem.is_jvm_scalar() && *value == 0,
+        IrConst::UShort(value) => elem.is_jvm_scalar() && *value == 0,
+        IrConst::UInt(value) => elem.is_jvm_scalar() && *value == 0,
+        IrConst::ULong(value) => elem.is_jvm_scalar() && *value == 0,
+        IrConst::Float(value) => elem.is_jvm_scalar() && value.to_bits() == 0,
+        IrConst::Double(value) => elem.is_jvm_scalar() && value.to_bits() == 0,
+        IrConst::String(_) => false,
     }
 }
 

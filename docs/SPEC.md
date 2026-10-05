@@ -816,6 +816,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A property assignment realized as a field store marks its line at the `putfield`**
   (kotlinc's `visitSetField`). The entry appears when the value ran on another line or under an
   inlined body. Test: `tests/field_store_lines_e2e.rs`.
+- **A captured `var` initialized to its holder's default sets no element.** A fresh `Ref$XxxRef`
+  already holds `null`, `false` or zero, so kotlinc stores no `element` for such an initializer;
+  `-0.0`, any other value, and a later assignment of the default are stored. Test:
+  `tests/shared_cell_default_initializer_e2e.rs`.
 - **`@Metadata` writer — the suspend round-trip.** krusty now emits a `@kotlin.Metadata` annotation on
   a file facade that has top-level `suspend fun`s, so its OWN compiled output is consumable as a
   classpath dependency (a suspend fn's physical method is `Object foo(…, Continuation)` — only

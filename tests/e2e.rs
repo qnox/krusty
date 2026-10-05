@@ -2624,3 +2624,6 @@ mod covariant_bridge_cast_e2e;
 
 #[path = "field_store_lines_e2e.rs"]
 mod field_store_lines_e2e;
+
+#[path = "shared_cell_default_initializer_e2e.rs"]
+mod shared_cell_default_initializer_e2e;
