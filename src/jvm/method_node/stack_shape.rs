@@ -7,6 +7,7 @@
 //! analysis `FastStackAnalyzer` with `FixStackInterpreter` answers there.
 
 use super::nodes::{Constant, Insn, LabelId, MethodNode, Node};
+use crate::jvm::bytecode::{InlineCallBracket, InlineCallBrackets};
 use crate::jvm::bytecode_passes::coroutines::markers::{
     is_after_inline_marker, is_before_inline_marker,
 };
@@ -327,16 +328,15 @@ fn manipulate(op: u8, stack: &mut Vec<Category>, at: usize) -> Result<(), ShapeE
 /// saved values back under the bracketed code's result.
 pub fn stack_shapes(node: &MethodNode) -> Result<Vec<Option<Vec<Category>>>, ShapeError> {
     let count = node.nodes.len();
-    // `FixStackContext`: each closing marker's opening one, by nesting.
-    let mut opening = vec![None; count];
-    let mut open = Vec::new();
-    for (index, entry) in node.nodes.iter().enumerate() {
+    let brackets = InlineCallBrackets::pair(node.nodes.iter().map(|entry| {
         if is_before_inline_marker(entry) {
-            open.push(index);
+            Some(InlineCallBracket::Open)
         } else if is_after_inline_marker(entry) {
-            opening[index] = open.pop();
+            Some(InlineCallBracket::Close)
+        } else {
+            None
         }
-    }
+    }));
     let mut position = vec![None; node.label_count as usize];
     for (index, entry) in node.nodes.iter().enumerate() {
         if let Node::Label(label) = entry {
@@ -411,18 +411,9 @@ pub fn stack_shapes(node: &MethodNode) -> Result<Vec<Option<Vec<Category>>>, Sha
                 })
             }
         }
-        let entry = &node.nodes[index];
-        if is_before_inline_marker(entry) {
-            stack.clear();
-        } else if is_after_inline_marker(entry) {
-            let saved = opening[index]
-                .and_then(|opening| shapes[opening].clone())
-                .ok_or(ShapeError::UnpairedInlineMarker(index))?;
-            // The bracketed code's result, normally one value or none; a body that left more is
-            // FixStack's to reject, so its values are kept.
-            let inner = std::mem::replace(&mut stack, saved);
-            stack.extend(inner);
-        }
+        brackets
+            .follow(index, &mut stack, |opening| shapes[opening].clone())
+            .map_err(|_| ShapeError::UnpairedInlineMarker(index))?;
         match insn {
             Insn::Jump { target, .. } => enter(&mut shapes, &mut work, at(*target)?, &stack)?,
             Insn::TableSwitch {

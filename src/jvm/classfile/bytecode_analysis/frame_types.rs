@@ -319,6 +319,7 @@ impl FrameTypes {
             None => FrameState::from_verif(entry, &[], pool),
         });
         let order = graph.reverse_post_order();
+        let brackets = crate::jvm::bytecode::InlineCallBrackets::of_insns(insns);
         // Propagate `state` along an edge into `to`. A recorded frame is what the verifier holds
         // there whatever arrives, so it is taken once and never widened; anywhere else the edges
         // meet.
@@ -361,7 +362,7 @@ impl FrameTypes {
                 let Some(state) = before[index].as_ref() else {
                     continue;
                 };
-                let Some(after) = step(insns, index, state, pool, None) else {
+                let Some(mut after) = step(insns, index, state, pool, None) else {
                     crate::trace_compiler!(
                         "bytecode",
                         "frame analysis: cannot step {:?} at {index} from {state:?}",
@@ -369,6 +370,20 @@ impl FrameTypes {
                     );
                     return None;
                 };
+                // The recorded frames inside a bracket are those of the body FixStack rewrites, so
+                // the bracket is followed the way they were computed.
+                if brackets
+                    .follow(index, &mut after.stack, |opening| {
+                        before[opening].as_ref().map(|state| state.stack.clone())
+                    })
+                    .is_err()
+                {
+                    crate::trace_compiler!(
+                        "bytecode",
+                        "frame analysis: no bracket opens the closing marker at {index}"
+                    );
+                    return None;
+                }
                 // A handler is entered with locals as they stood BEFORE this instruction, which a
                 // self-edge below may join into; keep them only when a handler covers it.
                 let entry_locals =
@@ -1016,6 +1031,62 @@ mod tests {
         assert!(
             FrameTypes::analyze(&insns, &graph, &[object("Main")], &frames[..1], &pool).is_some()
         );
+    }
+
+    /// The frames inside a `beforeInlineCall`/`afterInlineCall` bracket are computed over the body
+    /// FixStack rewrites: the opening marker saves the stack and clears it. Meeting such a recorded
+    /// frame, the analysis has to put the saved values back under the bracketed result at the
+    /// closing marker, or the code after it underflows (the coroutine machine then declined a
+    /// suspension before an inlined `map`).
+    #[test]
+    fn an_inline_call_bracket_saves_the_stack_and_puts_it_back_under_the_result() {
+        use crate::jvm::bytecode::{CodegenMarker, CODEGEN_MARKER_OP};
+        let marker = |side: CodegenMarker| with(CODEGEN_MARKER_OP, &[side as u8]);
+        let pool = FakePool::default();
+        // aload_0 ; beforeInlineCall ; iconst_1 ; afterInlineCall ; pop ; pop ; return
+        let insns = [
+            plain(0x2a),
+            marker(CodegenMarker::BeforeInlineCall),
+            plain(0x04),
+            marker(CodegenMarker::AfterInlineCall),
+            plain(0x57),
+            plain(0x57),
+            plain(0xb1),
+        ];
+        // The frame the computation records inside the bracket: the stack is cleared there.
+        let frames = [(2, vec![object("Main")], Vec::new())];
+        let types = analyze(&insns, &[object("Main")], &frames, &pool);
+        assert!(types.before(2).expect("reachable").stack.is_empty());
+        assert_eq!(
+            types.before(3).expect("reachable").stack,
+            [VerificationType::Integer]
+        );
+        assert_eq!(
+            types.before(4).expect("reachable").stack,
+            [reference("Main"), VerificationType::Integer]
+        );
+        // Unrecorded, the bracket is followed all the same.
+        let types = analyze(&insns, &[object("Main")], &[], &pool);
+        assert!(types.before(2).expect("reachable").stack.is_empty());
+        assert_eq!(
+            types.before(4).expect("reachable").stack,
+            [reference("Main"), VerificationType::Integer]
+        );
+    }
+
+    #[test]
+    fn a_closing_inline_call_marker_nothing_opens_is_declined() {
+        use crate::jvm::bytecode::{CodegenMarker, CODEGEN_MARKER_OP};
+        let pool = FakePool::default();
+        // iconst_1 ; afterInlineCall ; pop ; return
+        let insns = [
+            plain(0x04),
+            with(CODEGEN_MARKER_OP, &[CodegenMarker::AfterInlineCall as u8]),
+            plain(0x57),
+            plain(0xb1),
+        ];
+        let graph = ControlGraph::build(&insns, &[]).expect("graph");
+        assert!(FrameTypes::analyze(&insns, &graph, &[object("Main")], &[], &pool).is_none());
     }
 
     #[test]
