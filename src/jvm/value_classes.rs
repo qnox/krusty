@@ -1838,26 +1838,19 @@ pub(crate) fn lower_value_classes(
             for (&argument, parameter) in args.iter().zip(
                 constructor_arguments::supplied_parameters(params, defaults, *default_prefix_count),
             ) {
-                let Target::UnboxedX(value_class) = target(parameter, &under) else {
-                    continue;
-                };
-                if !repr_ctx.is_boxed_vc(argument, value_class) {
+                // This pass owns the edges into an unboxed value-class parameter; the boundary
+                // operation itself is the one every parameter takes.
+                if !matches!(target(parameter, &under), Target::UnboxedX(_)) {
                     continue;
                 }
-                // Unbox where each path produces the box, as every other parameter boundary does
-                // (`record_value_boundary`): a block over a call handing over its box (a resumed
-                // generic suspend result) is unboxed at that call, and only once.
-                let mut tails = Vec::new();
-                crate::ir::value_tails(&ir.exprs, argument, &mut tails);
-                for tail in tails {
-                    if repr_ctx.is_boxed_vc(tail, value_class)
-                        && !value_member_constructor_ops
-                            .iter()
-                            .any(|(existing, _)| *existing == tail)
-                    {
-                        value_member_constructor_ops.push((tail, BoxOp::Unbox(value_class)));
-                    }
-                }
+                record_value_boundary(
+                    &mut value_member_constructor_ops,
+                    &ir.exprs,
+                    &repr_ctx,
+                    argument,
+                    *parameter,
+                    &under,
+                );
             }
         }
         // First decide the rewrite WITHOUT holding a mutable borrow (so `prop_access` can `add_expr`).
