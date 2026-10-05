@@ -1917,7 +1917,7 @@ fn publish_inherited_function_defaults(
 }
 
 pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mut SymbolTable) {
-    let (plans, preorders, inherited_defaults, superclass_interfaces) = {
+    let (plans, preorders, inherited_defaults) = {
         let module = ModuleSymbols::new(table);
         let source =
             CompositeSource::new(vec![&module as &dyn SymbolSource, table.libraries.as_ref()]);
@@ -1966,18 +1966,7 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mu
                 classifier_inherited_defaults(index, &source, *classifier, properties, functions)
             })
             .collect::<Vec<_>>();
-        let superclass_interfaces = plans
-            .iter()
-            .filter_map(|(classifier, _, _)| {
-                index.classifier_header(*classifier).map(|_| {
-                    (
-                        *classifier,
-                        inherited_superclass_interfaces(index, &source, *classifier),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        (plans, preorders, inherited_defaults, superclass_interfaces)
+        (plans, preorders, inherited_defaults)
     };
     let function_edges = plans
         .iter()
@@ -1986,9 +1975,6 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mu
     publish_inherited_function_defaults(index, &preorders, &function_edges);
     for (classifier, defaults) in inherited_defaults {
         index.publish_inherited_defaults(classifier, defaults);
-    }
-    for (classifier, interfaces) in superclass_interfaces {
-        index.publish_superclass_interfaces(classifier, interfaces);
     }
     let inherited = publish_inherited_statuses(index, &plans);
     publish_inherited_visibilities_to_symbols(table, &inherited);
