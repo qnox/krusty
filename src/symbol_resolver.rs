@@ -55,6 +55,7 @@ pub(crate) use hierarchy_projection::{
 };
 use hierarchy_projection::{
     classifier_type_parameter_bounds, direct_supertypes_from_classifier, receiver_hierarchy,
+    supertype_with_classifier,
 };
 pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
