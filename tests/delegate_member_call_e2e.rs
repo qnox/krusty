@@ -11,12 +11,18 @@
 //! delegate with no class type (a function type) keeps the interface declaration's call. A
 //! delegate class whose member overrides the forwarded declaration through several supertypes
 //! dispatches virtually to it, and a member a superclass already implements gets no forwarder.
+//!
+//! The delegate member is the one overriding the forwarded declaration, type-parameter bounds
+//! included: beside `fun <T : CharSequence> pick(t: T)` a delegate may declare an unrelated
+//! `fun <T : Any> pick(t: T)`, and in either declaration order the forwarder calls the former and
+//! checks its flexible result.
 
 use super::common;
 
 const SOURCE: &str = r#"
 import java.util.ArrayList
 import java.util.HashSet
+import java.util.Objects
 
 class Names : List<String> by ArrayList<String>()
 
@@ -110,6 +116,24 @@ open class FixedSlot : Shadow {
 
 class Hidden : LateSlot(), Shadow by FixedSlot()
 
+interface Picks {
+    fun <T : CharSequence> pick(t: T): String
+}
+
+class Narrow : Picks {
+    override fun <T : CharSequence> pick(t: T) = Objects.toString(t)
+    fun <T : Any> pick(t: T): String = "wide"
+}
+
+class Wide : Picks {
+    fun <T : Any> pick(t: T): String = "wide"
+    override fun <T : CharSequence> pick(t: T) = Objects.toString(t)
+}
+
+class NarrowPicks : Picks by Narrow()
+
+class WidePicks : Picks by Wide()
+
 fun box(): String {
     val items = ArrayList<String>()
     items.add("O")
@@ -142,6 +166,10 @@ fun box(): String {
     val hidden = Hidden()
     hidden.x = "OK"
     if (hidden.x != "OK") return "Hidden"
+    val narrow: Picks = NarrowPicks()
+    if (narrow.pick("OK") != "OK") return "NarrowPicks"
+    val wide: Picks = WidePicks()
+    if (wide.pick("OK") != "OK") return "WidePicks"
     return Forwarded().text()
 }
 "#;
@@ -170,6 +198,8 @@ fn delegate_member_calls_match_kotlinc() {
         ("Chained", &["apply"]),
         ("Call", &["invoke"]),
         ("Overridden", &["first", "getSecond"]),
+        ("NarrowPicks", &["pick"]),
+        ("WidePicks", &["pick"]),
     ];
     for (class, methods) in cases {
         let pair = common::ModuleClassPair::compile(&[("DelegateMemberCall.kt", SOURCE)], class);

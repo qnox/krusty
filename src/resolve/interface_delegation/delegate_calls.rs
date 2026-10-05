@@ -8,22 +8,27 @@
 //! enhanced to not-null whenever that declared result rejects `null`.
 //!
 //! The Pass-1 forwarding plan is selected from the interface before any body is checked; this
-//! module selects the delegate-side calls once the checker knows the delegate value's type. It uses
-//! the same override slots, so each forwarder's delegate call overrides the declaration it
-//! forwards.
+//! module selects the delegate-side calls once the checker knows the delegate value's type. It
+//! starts from the stable declaration identity the plan recorded and selects the delegate member
+//! that overrides it under the shared override input-shape relation
+//! ([`crate::symbol_resolver::function_input_shapes_match`]), so a same-named member of another
+//! slot (`fun <T : Any> f(t: T)` beside `fun <T : CharSequence> f(t: T)`) is never a candidate.
 
 use crate::fir::{
-    ResolvedDelegateCall, ResolvedDelegateMemberCalls, ResolvedDelegatedFunction,
-    ResolvedDelegatedMember, ResolvedDelegatedProperty, ResolvedInterfaceDelegation,
+    ResolvedDelegateCall, ResolvedDelegateMemberCalls, ResolvedDelegatedCallTarget,
+    ResolvedDelegatedFunction, ResolvedDelegatedMember, ResolvedDelegatedModuleTarget,
+    ResolvedDelegatedProperty, ResolvedFunctionOverrideTarget, ResolvedInterfaceDelegation,
     ResolvedModuleIndex,
 };
-use crate::libraries::{FnKind, ResultEnhancement};
+use crate::libraries::{FnKind, FunctionInfo, ResultEnhancement};
+use crate::resolve::override_plans;
+use crate::resolve::platform_value_narrowing::expected_type_rejects_null;
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 use super::{
     applied_owner_type, applied_property_signature, effective_function, effective_property,
-    function_call, interface_owners, is_delegated_function, property_call, PropertyCallShape,
+    function_call, property_call, PropertyCallShape,
 };
 
 /// Select, for every forwarder of `delegation`, the call it makes on a delegate of type
@@ -92,47 +97,50 @@ fn unchanged_property(property: &ResolvedDelegatedProperty) -> ResolvedDelegateM
     }
 }
 
-/// Whether `implementation`, found on the delegate, overrides the forwarded `declaration`: the same
-/// input shape, a Java parameter's flexibility included.
-fn overrides(
+/// The forwarded declaration as the delegate's own supertype applies it, selected by the stable
+/// identity the forwarding plan recorded.
+///
+/// kotlinc's `findDelegateToSymbol` relates declarations, not the interface's type arguments: a
+/// delegate may implement the interface with other arguments (`InOutBase<D, D>` delegating
+/// `InOutBase<D, A>`), so the declaration is read through the delegated interface as the delegate's
+/// own hierarchy applies it, substituted exactly as the delegate's members are. Member lookup only
+/// enumerates that view; the declaration is the one carrying the plan's identity.
+fn forwarded_declaration(
     source: &dyn SymbolSource,
-    implementation: &crate::libraries::FunctionInfo,
-    declaration: &crate::libraries::FunctionInfo,
-) -> bool {
-    let formals = |function: &crate::libraries::FunctionInfo| {
-        function
-            .generic_sig
-            .as_ref()
-            .map(|signature| signature.formals.clone())
-            .unwrap_or_default()
+    index: &ResolvedModuleIndex,
+    interface: Ty,
+    delegate: Ty,
+    forwarded: &ResolvedDelegatedFunction,
+) -> Option<FunctionInfo> {
+    // The plan's first obligation is the declaration its call targets.
+    let declaration = forwarded.overridden.first()?;
+    let called = match &forwarded.call.target {
+        ResolvedDelegatedCallTarget::Module {
+            target: ResolvedDelegatedModuleTarget::Function(callable),
+            ..
+        } => ResolvedFunctionOverrideTarget::Module(*callable),
+        ResolvedDelegatedCallTarget::External(identity) => {
+            ResolvedFunctionOverrideTarget::External(*identity)
+        }
+        ResolvedDelegatedCallTarget::Module { .. } => return None,
     };
-    implementation.context_count == declaration.context_count
-        && implementation.flags.suspend == declaration.flags.suspend
-        && crate::symbol_resolver::override_parameter_types_match(
-            source,
-            &declaration.semantic_params(),
-            &formals(declaration),
-            &implementation.semantic_params(),
-            &formals(implementation),
-        )
-}
-
-/// Whether two hierarchy views of a member name one declaration.
-fn same_declaration(
-    function: &crate::libraries::FunctionInfo,
-    declaration: &crate::libraries::FunctionInfo,
-) -> bool {
-    function.callable.owner == declaration.callable.owner
-        && function.stable_declaration == declaration.stable_declaration
-        && function.callable.external_identity == declaration.callable.external_identity
-}
-
-/// kotlinc's `acceptsNullValues` for a forwarder's declared result: a nullable type or a type
-/// parameter whose bound admits `null` accepts it.
-fn rejects_null(result: Ty) -> bool {
-    !result.admits_null()
-        && !result.upper_bound_admits_null()
-        && (result.is_reference() || result.is_jvm_scalar())
+    if declaration.target != called {
+        return None;
+    }
+    let applied_interface =
+        applied_owner_type(source, delegate, interface.kotlin_class_internal()?)?;
+    let declared =
+        crate::symbol_resolver::members_in_hierarchy(source, applied_interface, &forwarded.name);
+    let function = declared.functions().iter().find(|function| {
+        override_plans::function_target(index, function) == Some(declaration.target)
+    })?;
+    // The plan recorded the declaration's own type parameters; a view that disagrees has lost
+    // them, and comparing it as non-generic would admit another declaration's override.
+    let formals = function
+        .generic_sig
+        .as_ref()
+        .map_or(0, |signature| signature.formals.len());
+    (formals == forwarded.type_parameters.len()).then(|| function.clone())
 }
 
 fn delegate_function_call(
@@ -146,30 +154,11 @@ fn delegate_function_call(
     if forwarded.call.extension_receiver_parameter.is_some() {
         return Some(unchanged(&forwarded.call));
     }
-    let interface_owners = interface_owners(source, interface)?;
-    let declared = crate::symbol_resolver::members_in_hierarchy(source, interface, &forwarded.name);
-    let forwarded_declaration = declared
-        .functions()
-        .iter()
-        .filter(|function| is_delegated_function(function, &interface_owners))
-        .find(|function| {
-            function_call(source, index, interface, function).as_ref() == Some(&forwarded.call)
-        })?;
-    // kotlinc's `findDelegateToSymbol` relates declarations, not the interface's type arguments: a
-    // delegate may implement the interface with other arguments (`InOutBase<D, D>` delegating
-    // `InOutBase<D, A>`). The forwarded declaration is therefore compared as the delegate's own
-    // supertype applies it, substituted exactly as the delegate's members are.
-    let applied_interface =
-        applied_owner_type(source, delegate, interface.kotlin_class_internal()?)?;
-    let applied_declarations =
-        crate::symbol_resolver::members_in_hierarchy(source, applied_interface, &forwarded.name);
-    let forwarded_declaration = applied_declarations
-        .functions()
-        .iter()
-        .find(|function| same_declaration(function, forwarded_declaration))?;
+    let declaration = forwarded_declaration(source, index, interface, delegate, forwarded)?;
     let available = crate::symbol_resolver::members_in_hierarchy(source, delegate, &forwarded.name);
     let candidates = available.functions().iter().filter(|function| {
-        function.kind == FnKind::Member && overrides(source, function, forwarded_declaration)
+        function.kind == FnKind::Member
+            && crate::symbol_resolver::function_input_shapes_match(source, &declaration, function)
     });
     let selected = effective_function(source, index, delegate, candidates)?;
     let call = function_call(source, index, delegate, selected)?;
@@ -178,7 +167,7 @@ fn delegate_function_call(
             selected.ret.apply(selected.callable.ret),
             Ty::PlatformNullable(_)
         );
-    let result_check = (unchecked && rejects_null(forwarded.call.result.get()))
+    let result_check = (unchecked && expected_type_rejects_null(forwarded.call.result.get()))
         .then(|| format!("{}(...)", forwarded.name).into_boxed_str());
     Some(ResolvedDelegateCall { call, result_check })
 }
@@ -212,7 +201,7 @@ fn delegate_property_calls(
         property_type,
     };
     let result_check = (matches!(property_type, Ty::PlatformNullable(_))
-        && rejects_null(forwarded.ty.get()))
+        && expected_type_rejects_null(forwarded.ty.get()))
     .then(|| {
         getter
             .producer
