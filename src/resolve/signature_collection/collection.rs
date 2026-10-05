@@ -163,9 +163,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         );
             common || !optional
         });
-    // Normalize source annotation retention once identities are bound. The explicit retention
-    // argument is interpreted only under the resolved `kotlin.annotation.Retention` declaration;
-    // later phases receive the enum fact and never inspect its source spelling.
+    // Register every source annotation class with the default retention. A declared `@Retention`
+    // replaces it once the classifier-annotation pass has checked the application and selected its
+    // enum entry; the header never reads the argument's spelling.
     if let Some(headers) = compact_headers {
         collect_compact_annotation_policies(headers, &mut table);
     } else {
@@ -177,33 +177,14 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 if class.kind != crate::ast::ClassKind::Annotation {
                     continue;
                 }
-                let retention = class
-                    .annotations
-                    .iter()
-                    .zip(&class.annotation_args)
-                    .find_map(|(annotation, arguments)| {
-                        table
-                            .resolved_annotation(file_index as u32, annotation)
-                            .filter(|name| name.matches("kotlin/annotation/Retention"))?;
-                        let &argument = arguments.first()?;
-                        let Expr::Member { name, .. } = file.expr(argument) else {
-                            return None;
-                        };
-                        match name.as_str() {
-                            "RUNTIME" => Some(crate::types::AnnotationRetention::Runtime),
-                            "BINARY" => Some(crate::types::AnnotationRetention::Binary),
-                            "SOURCE" => Some(crate::types::AnnotationRetention::Source),
-                            _ => None,
-                        }
-                    })
-                    .unwrap_or(crate::types::AnnotationRetention::Default);
                 let Some(annotation_identity) = file_class_names[file_index].get_class(&class.name)
                 else {
                     continue;
                 };
-                table
-                    .annotation_retentions
-                    .insert(annotation_identity, retention);
+                table.annotation_retentions.insert(
+                    annotation_identity,
+                    crate::types::AnnotationRetention::Default,
+                );
             }
         }
     }

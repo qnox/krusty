@@ -2039,6 +2039,26 @@ impl ResolvedModuleIndex {
         );
     }
 
+    /// A source annotation class's declared `@Retention`, published once the classifier-annotation
+    /// pass has checked the application and found it selects a `kotlin.annotation.AnnotationRetention`
+    /// entry. It replaces the default the header registered the class with.
+    pub(crate) fn publish_annotation_retention(
+        &mut self,
+        classifier: TypeName,
+        retention: crate::types::AnnotationRetention,
+    ) {
+        let registered = self
+            .annotation_retentions
+            .get_mut(&classifier)
+            .expect("a declared retention requires the classifier's registered annotation policy");
+        assert!(
+            *registered == crate::types::AnnotationRetention::Default
+                && retention != crate::types::AnnotationRetention::Default,
+            "an annotation classifier may publish one declared retention"
+        );
+        *registered = retention;
+    }
+
     /// A source annotation class's `@Target` policy, published once the classifier-annotation pass
     /// has checked the application: `valid` decides applicability, an invalid application only
     /// supplies kotlinc's recovery for diagnostics (see [`crate::types::DeclaredTargetPolicies`]).

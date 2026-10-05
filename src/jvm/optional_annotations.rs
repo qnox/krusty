@@ -222,7 +222,8 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
 }
 
 /// The class's `@kotlin.annotation.Retention`, as a classpath retention name. Kotlin's default is
-/// `RUNTIME`; `BINARY` is the class-file `CLASS` policy.
+/// `RUNTIME`; `BINARY` is the class-file `CLASS` policy. Only an entry of
+/// `kotlin.annotation.AnnotationRetention` itself is a retention.
 fn declared_retention(declaration: &semantic::KotlinClass) -> &'static str {
     let retention = type_name("kotlin/annotation/Retention");
     let entry = declaration
@@ -230,9 +231,15 @@ fn declared_retention(declaration: &semantic::KotlinClass) -> &'static str {
         .iter()
         .find(|annotation| annotation.identity == retention)
         .and_then(|annotation| annotation.argument("value"));
-    match entry {
-        Some(semantic::AnnotationArgument::Enum { entry, .. }) if entry == "SOURCE" => "SOURCE",
-        Some(semantic::AnnotationArgument::Enum { entry, .. }) if entry == "BINARY" => "CLASS",
+    let declared = match entry {
+        Some(semantic::AnnotationArgument::Enum { class, entry }) => {
+            crate::types::AnnotationRetention::of_entry(*class, entry)
+        }
+        _ => None,
+    };
+    match declared {
+        Some(crate::types::AnnotationRetention::Source) => "SOURCE",
+        Some(crate::types::AnnotationRetention::Binary) => "CLASS",
         _ => "RUNTIME",
     }
 }
