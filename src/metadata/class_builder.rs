@@ -591,8 +591,8 @@ pub enum ClassMemberOrder {
 /// The type parameters a class captures from enclosing declarations, and how kotlinc numbers them.
 #[derive(Clone, Copy, Debug)]
 pub enum CapturedTypeParameters<'a> {
-    /// An inner class's: the enclosing classes' parameters hold the ids before its own, outermost
-    /// first.
+    /// A nested class's: every enclosing class's parameters, outermost first, hold the ids before
+    /// its own. An inner class addresses the ones it captures by those ids.
     Reserved(&'a [String]),
     /// A local or anonymous class's: its own parameters come first, and each captured one takes
     /// the next id on first use (see `TypeParameters`).
@@ -737,7 +737,7 @@ impl Default for ClassTail<'_> {
             primary_ctor_jvm_signature: true,
             type_params: &[],
             type_param_bounds: &[],
-            captured_type_params: CapturedTypeParameters::Reserved(&[]),
+            captured_type_params: CapturedTypeParameters::default(),
             sealed_subclasses: &[],
             supertypes: &[],
             annotations: &crate::metadata::NO_ANNOTATIONS,
@@ -825,7 +825,7 @@ pub fn build_class(
         numbered_on_use.iter().cloned(),
     );
     for (index, semantic) in reserved.iter().enumerate() {
-        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Captured(index as u64));
+        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Id(index as u64));
     }
     for (index, (source, parameter)) in tail
         .type_params
@@ -1018,7 +1018,10 @@ pub fn build_class(
             parameter.field_message(3, &return_type(st, &setter_type_parameters)); // ValueParameter.type = 3
             parameter
         });
+        // kotlinc interns the type before the type parameters, as at the top level.
         prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
+        let ty = return_type(st, &property_type_parameters);
+        prop.field_message(3, &ty); // Property.return_type = 3
         for (index, parameter) in p.type_params.iter().enumerate() {
             let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
@@ -1041,8 +1044,6 @@ pub fn build_class(
             .unwrap_or_else(|error| panic!("invalid emitted property type parameter: {error}"));
             prop.repeated_message(4, &parameter);
         }
-        let ty = return_type(st, &property_type_parameters);
-        prop.field_message(3, &ty); // Property.return_type = 3
         if let Some(recv) = p.receiver {
             // Property.receiver_type = 5 — a member EXTENSION property's declared receiver;
             // its presence is what makes the record an extension.
@@ -1164,15 +1165,18 @@ pub fn build_class(
                 .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
             _ => None,
         });
-        let mut field = Pb::new();
-        if let Some(n) = &p.field_name {
-            field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
-        }
-        if let Some(d) = &boxed_field_desc {
-            field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
-        }
-        // An abstract property has no backing field at all — kotlinc omits the entry rather than
-        // writing an empty one (which is what a concrete property's derived field looks like).
+        // An abstract property has no backing field at all: kotlinc omits the entry rather than
+        // writing an empty one, and interns none of its strings.
+        let field = p.has_backing_field.then(|| {
+            let mut field = Pb::new();
+            if let Some(n) = &p.field_name {
+                field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
+            }
+            if let Some(d) = &boxed_field_desc {
+                field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
+            }
+            field
+        });
         // Property.annotation = 14 / the backing field's = 34, both interning after the signature's
         // strings (kotlinc's serializer writes the JVM extension first). A disabled source feature
         // keeps the `HAS_ANNOTATIONS` flag above but writes no records.
@@ -1200,8 +1204,8 @@ pub fn build_class(
         for annotation in &field_annotations {
             prop.repeated_message(34, annotation); // Property.backingFieldAnnotation = 34
         }
-        if p.has_backing_field {
-            jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
+        if let Some(field) = &field {
+            jvm.field_message(1, field); // field (empty → derived; boxed primitive → explicit desc)
         }
         if let Some(synthetic_method) = &synthetic_method {
             jvm.field_message(2, synthetic_method); // JvmPropertySignature.syntheticMethod = 2
@@ -1237,6 +1241,20 @@ pub fn build_class(
             m.type_params.iter().map(String::as_str),
             m.semantic_type_params.iter().map(String::as_str),
         ));
+        // kotlinc interns the return type before the type parameters, as at the top level.
+        let ret = crate::metadata::type_encoder::encode_declared_type(
+            st,
+            m.ret,
+            &m.spellings.ret,
+            &function_type_parameters,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "invalid emitted metadata return type for '{class_internal}.{}': {error}",
+                m.name
+            )
+        });
+        func.field_message(3, &ret);
         for (index, name) in m.type_params.iter().enumerate() {
             let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
@@ -1259,19 +1277,6 @@ pub fn build_class(
             .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"));
             func.repeated_message(4, &parameter);
         }
-        let ret = crate::metadata::type_encoder::encode_declared_type(
-            st,
-            m.ret,
-            &m.spellings.ret,
-            &function_type_parameters,
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "invalid emitted metadata return type for '{class_internal}.{}': {error}",
-                m.name
-            )
-        });
-        func.field_message(3, &ret);
         if let Some(recv) = m.receiver {
             // Function.receiver_type = 5 — a MEMBER EXTENSION's receiver, restored from the
             // physical `params[0]` realization so consumers see the LOGICAL shape.
@@ -1328,7 +1333,7 @@ pub fn build_class(
             } else {
                 m.spellings.param(i).clone()
             };
-            let mut ty = crate::metadata::type_encoder::encode_declared_type(
+            let ty = crate::metadata::type_encoder::encode_declared_type(
                 st,
                 *pty,
                 &declared_spelling,
@@ -1342,13 +1347,6 @@ pub fn build_class(
                         )
                     },
                 );
-            if m.no_infer_params.get(i).copied().unwrap_or(false) {
-                let annotation = crate::metadata::type_encoder::encode_annotation(
-                    st,
-                    crate::types::type_name("kotlin/internal/NoInfer"),
-                );
-                ty.field_message(100, &annotation);
-            }
             vp.field_message(3, &ty);
             if m.vararg_index == Some(i) {
                 // ValueParameter.vararg_element_type = 4 — the ELEMENT next to the array type.
@@ -1519,7 +1517,7 @@ pub fn build_class(
     let inline_underlying: Option<(u32, Option<Pb>)> = tail.inline_underlying.map(|(name, ty)| {
         (
             st.local(name),
-            ty.map(|ty| type_pb(&mut st, ty, &class_type_parameters)),
+            ty.map(|ty| type_pb(&mut st, ty, &class_header_type_parameters)),
         )
     });
 

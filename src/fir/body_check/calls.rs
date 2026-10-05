@@ -62,7 +62,6 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::StartCoroutine
         | crate::libraries::CompilerIntrinsic::CoroutineContext
         | crate::libraries::CompilerIntrinsic::CoroutineSuspended
-        | crate::libraries::CompilerIntrinsic::SuspendCoroutine
         | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
         | crate::libraries::CompilerIntrinsic::EnumValues
         | crate::libraries::CompilerIntrinsic::EnumValueOf
@@ -1753,9 +1752,6 @@ impl BodyFirChecker<'_> {
                     crate::types::AssertionMode::Runtime
                 };
                 Some(FirIntrinsic::Assert { mode })
-            }
-            Some(crate::libraries::CompilerIntrinsic::SuspendCoroutine) => {
-                Some(FirIntrinsic::SuspendCoroutine)
             }
             Some(crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn) => {
                 Some(FirIntrinsic::SuspendCoroutineUninterceptedOrReturn {

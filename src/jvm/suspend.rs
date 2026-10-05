@@ -55,8 +55,6 @@ use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
 use live_scopes::{
     live_temp_scopes, merge_live_temps, reconcile_positional_spill_locals, ScopeWalk,
 };
-mod safe_coroutine_points;
-use safe_coroutine_points::realize_safe_coroutine_points;
 mod residual_trace;
 use residual_trace::{trace_residual_parents, trace_residual_suspension};
 mod spill_layout;
@@ -163,7 +161,6 @@ pub(crate) fn lower_suspend(
     specialized_lambda_classes: &mut SpecializedLambdaClasses,
     null_out_dead_spills: bool,
 ) -> bool {
-    realize_safe_coroutine_points(ir);
     let mut outputs = MachineOutputs {
         continuation_metadata,
         default_call_operands,

@@ -17,16 +17,17 @@ use crate::types::Ty;
 
 fn finish_bridge(
     cw: &mut ClassWriter,
-    name: &str,
     desc: &str,
     code: &mut CodeBuilder,
     locals: u16,
     bridge: &crate::ir::Bridge,
     packs_arguments: bool,
-    signature: Option<&str>,
+    entry: Option<&EntryHeader>,
 ) {
-    if bridge.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
-        finish_code_sig::<0x0001>(cw, name, desc, code, locals, signature);
+    let name = bridge.name.as_str();
+    if let Some(entry) = entry {
+        finish_code_sig::<0x0001>(cw, name, desc, code, locals, entry.signature.as_deref());
+        cw.set_method_parameters(name, desc, &entry.reflected);
     } else if packs_arguments {
         finish_code::<{ 0x0001 | 0x0010 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
     } else if bridge.special {
@@ -253,11 +254,13 @@ fn emit_bridge(
     let pw: u16 = ep.iter().map(|t| slot_words(*t)).sum();
     let mut code = CodeBuilder::new(1 + pw);
     if let Some(header) = entry {
-        cw.reserve_method_pool(
+        cw.reserve_method_pool_with_annotations(
             &b.name,
             &erased_desc,
             header.signature.as_deref(),
             &header.annotation_types(),
+            &crate::ir::DeclarationAnnotations::default(),
+            &header.reflected,
         );
     }
     if b.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
@@ -395,13 +398,12 @@ fn emit_bridge(
         throw_assertion_error(cw, &mut code);
         finish_bridge(
             cw,
-            &b.name,
             &erased_desc,
             &mut code,
             1 + pw,
             b,
             packs_arguments,
-            entry.and_then(|header| header.signature.as_deref()),
+            entry,
         );
         attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
         return;
@@ -418,13 +420,12 @@ fn emit_bridge(
         throw_assertion_error(cw, &mut code);
         finish_bridge(
             cw,
-            &b.name,
             &erased_desc,
             &mut code,
             1 + pw,
             b,
             packs_arguments,
-            entry.and_then(|header| header.signature.as_deref()),
+            entry,
         );
         attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
         return;
@@ -496,43 +497,31 @@ fn emit_bridge(
             }
             unbox_prim_from(cw, &mut code, cr, er);
         } else if er.is_reference()
-            && cr.is_reference()
-            && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Void"
-            && crate::jvm::names::instanceof_internal_name(er) != "java/lang/Object"
-        {
-            // `Nothing?` has only the value `null`, but its concrete JVM descriptor is
-            // `java/lang/Void`. A bridge returning a narrower reference (for example a nullable
-            // value class box) must refine the verifier type before `areturn`. `Void` is already
-            // a subtype of the erased `Object` return, so that bridge returns it directly.
-            let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(er));
-            code.checkcast(ci);
-        } else if er.is_reference()
             && !er.is_array()
-            && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Object"
+            && cr.is_reference()
+            && !crate::jvm::names::same_type_descriptor(cr, er)
             && crate::jvm::names::instanceof_internal_name(er) != "java/lang/Object"
         {
-            // Covariant generic DIAMOND: the inherited concrete getter returns the erased
-            // `Object` (`val x: T` in a generic base), but an interface in the hierarchy requires
-            // a NARROWER reference type (`override val x: String`). This bridge's declared return
-            // (`er`) is that narrower type, so the `Object` on the stack must be `checkcast` to it
-            // before `areturn` — otherwise the verifier rejects it ("Bad return type"). The usual
-            // direction (concrete is a SUBtype of erased) needs no cast; this is the inverse.
-            // Restricted to a plain object type (`Ty::Obj`): an array `er` would need a descriptor-
-            // form class ref, and that narrowing direction doesn't arise here.
+            // kotlinc's bridge materializes the delegated result at its own return type, and
+            // `StackValue.coerce` casts between two different reference types unless the target is
+            // `Object`: it does not consult the class hierarchy. So a `String` override bridged to
+            // a `CharSequence` declaration is cast, as is the erased `Object` of a generic getter
+            // bridged to a narrower declaration and `Nothing?`'s `Void` bridged to a box. A bridge
+            // returning `Object` or an array (`Array<String>` over `Array<out Any>`) takes the
+            // result as it is.
             let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(er));
             code.checkcast(ci);
-        } // reference→reference (concrete is a subtype of erased): no cast needed
+        }
     }
     emit_return(er, &mut code);
     finish_bridge(
         cw,
-        &b.name,
         &erased_desc,
         &mut code,
         1 + pw,
         b,
         packs_arguments,
-        entry.and_then(|header| header.signature.as_deref()),
+        entry,
     );
     attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
 }
@@ -616,12 +605,14 @@ fn attach_bridge_debug_tables(
     }
 }
 
-/// What an interface entry declares beyond its descriptor: its member's generic `Signature` and
-/// nullability annotations, less the carrier the member receives first.
+/// What an interface entry declares beyond its descriptor: its member's generic `Signature`,
+/// nullability annotations and, under `-java-parameters`, `MethodParameters`, less the carrier the
+/// member receives first.
 struct EntryHeader {
     signature: Option<String>,
     result: Option<&'static str>,
     parameters: Vec<Option<&'static str>>,
+    reflected: Vec<crate::jvm::method_parameters::MethodParameter>,
 }
 
 impl EntryHeader {
@@ -629,14 +620,15 @@ impl EntryHeader {
         ir: &IrFile,
         formatter: &JvmSignatureFormatter<'_>,
         member: u32,
+        entry: &crate::ir::Bridge,
         descriptor: &str,
+        java_parameters: bool,
     ) -> Self {
         let function = &ir.functions[member as usize];
         let signature = ir.signatures.get(&member).and_then(|generic| {
-            let mut generic = super::value_class_signatures::physical_generic_signature(
-                ir, member, function, generic,
-            )
-            .into_owned();
+            let mut generic =
+                super::value_class_signatures::physical_generic_signature(ir, member, generic)
+                    .into_owned();
             assert_eq!(
                 generic.params.len(),
                 function.params.len(),
@@ -654,10 +646,21 @@ impl EntryHeader {
                 .filter(|signature| signature != descriptor)
         });
         let nullability = super::declared_nullability::declared_nullability(ir, member);
+        let reflected = if java_parameters {
+            crate::jvm::method_parameters::value_class_interface_entry(
+                ir,
+                member,
+                &jvm_function_params(ir, member),
+                entry.erased_params.len(),
+            )
+        } else {
+            Vec::new()
+        };
         Self {
             signature,
             result: nullability.result,
             parameters: nullability.parameters.get(1..).unwrap_or_default().to_vec(),
+            reflected,
         }
     }
 
@@ -687,7 +690,7 @@ pub(super) fn emit_value_class_interface_entries(
             continue;
         }
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
-        let header = EntryHeader::of(ir, formatter, member, &descriptor);
+        let header = EntryHeader::of(ir, formatter, member, b, &descriptor, env.java_parameters);
         let class = ClassBridges::new(ir, c, env);
         emit_bridge(&class, cw, bridge_index, b, Some(&header));
         cw.set_method_nullability(&b.name, &descriptor, header.result, &header.parameters);

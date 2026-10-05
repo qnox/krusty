@@ -1858,6 +1858,9 @@ pub struct File {
     /// reference retains its complete source spelling and own span until name resolution commits it
     /// to a canonical classifier identity.
     pub type_annotations: std::collections::HashMap<u32, Vec<AnnotationRef>>,
+    /// Argument expressions of the type-use annotations in [`Self::type_annotations`] written with
+    /// a non-empty argument list, keyed by the annotation reference's span.
+    pub type_annotation_arguments: std::collections::HashMap<(u32, u32), Vec<ExprId>>,
     /// Declaration type parameters carrying annotations, keyed by the exact start of their owning
     /// declaration's signature and then kept in source order. This is distinct from
     /// [`Self::type_annotations`]: `class C<@Ann T>` annotates the declaration of `T`, not a type use.

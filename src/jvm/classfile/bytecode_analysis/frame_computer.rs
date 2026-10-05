@@ -24,7 +24,7 @@
 
 use super::control_graph::Handler;
 use super::frame_types::{method_types, step_in_place, FrameState, PoolView, VerificationType};
-use crate::jvm::bytecode::{CodegenMarker, CODEGEN_MARKER_OP};
+use crate::jvm::bytecode::InlineCallBrackets;
 use crate::jvm::inline::{BranchTarget, Insn};
 
 const OBJECT: &str = "java/lang/Object";
@@ -165,25 +165,9 @@ impl FrameComputation<'_> {
         };
         let mut max_stack = 0;
         // `beforeInlineCall`/`afterInlineCall` brackets, followed as FixStack rewrites them when
-        // the class is written: the opening marker saves the stack and clears it, the closing one
-        // puts it back under the bracketed code's result. The frames are those of the rewritten
-        // body, which is what the class file carries.
-        let marker = |index: usize| match &self.insns[index] {
-            Insn::Plain { op, operands } if *op == CODEGEN_MARKER_OP => operands
-                .first()
-                .copied()
-                .and_then(CodegenMarker::from_operand),
-            _ => None,
-        };
-        let mut opening = vec![None; n];
-        let mut open = Vec::new();
-        for (index, slot) in opening.iter_mut().enumerate() {
-            match marker(index) {
-                Some(CodegenMarker::BeforeInlineCall) => open.push(index),
-                Some(CodegenMarker::AfterInlineCall) => *slot = open.pop(),
-                _ => {}
-            }
-        }
+        // the class is written. The frames are those of the rewritten body, which is what the
+        // class file carries.
+        let brackets = InlineCallBrackets::of_insns(self.insns);
         let mut saved: Vec<Option<Vec<VerificationType>>> = vec![None; n];
         while let Some(std::cmp::Reverse(b)) = pending.pop() {
             queued[b] = false;
@@ -202,20 +186,11 @@ impl FrameComputation<'_> {
                     Some(self.this_class),
                 )
                 .ok_or(Decline::Unsteppable(index))?;
-                match marker(index) {
-                    Some(CodegenMarker::BeforeInlineCall) => {
-                        saved[index] = Some(std::mem::take(&mut state.stack));
-                    }
-                    Some(CodegenMarker::AfterInlineCall) => {
-                        let under = opening[index]
-                            .and_then(|opening| saved[opening].clone())
-                            .ok_or(Decline::Unsteppable(index))?;
-                        // The bracketed code's result, normally one value or none; a body
-                        // that left more is FixStack's to reject, so its values are kept.
-                        let inner = std::mem::replace(&mut state.stack, under);
-                        state.stack.extend(inner);
-                    }
-                    _ => {}
+                if let Some(opened) = brackets
+                    .follow(index, &mut state.stack, |opening| saved[opening].clone())
+                    .map_err(|_| Decline::Unsteppable(index))?
+                {
+                    saved[index] = Some(opened);
                 }
                 max_stack = max_stack.max(words(&state.stack));
             }

@@ -5,7 +5,7 @@ use super::{
     constructor_default_masks, instance_field_jvm_name, jvm_tys, load, method_descriptor,
     slot_words, type_descriptor, ClassWriter, CodeBuilder, EmitEnv, Emitter,
 };
-use crate::ir::{IrClass, IrConstructorTarget, IrFile, IrSecondaryCtor};
+use crate::ir::{IrClass, IrConstructorTarget, IrCtorParameterProvenance, IrFile, IrSecondaryCtor};
 use crate::jvm::method_parameters::OwnerConstructorPrefix;
 use crate::jvm::private_static_access::StaticOwner;
 use crate::types::Ty;
@@ -289,6 +289,14 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     if parameter >= sc.prefix_params.len() as u32 {
                         continue;
                     }
+                    // An inner class's enclosing-instance store carries the constructor's own line;
+                    // a local class's captured values are stored without one.
+                    let encloses = c.ctor_args.get(parameter as usize).is_some_and(|argument| {
+                        argument.provenance == IrCtorParameterProvenance::EnclosingInstance
+                    });
+                    if encloses && !generated && sc.lines.decl_line != 0 {
+                        sctor.mark_line(sc.lines.decl_line);
+                    }
                     let parameter = parameter as usize + owner_prefix_tys.len();
                     let ty = sc_param_tys[parameter];
                     let slot = 1 + sc_param_tys[..parameter]
@@ -312,13 +320,9 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             }
             // A declared constructor's table opens after whatever prologue precedes its delegation,
             // at the delegation's line, or at the `constructor` keyword when it is implicit.
-            let delegation_line = if sc.lines.delegation_line != 0 {
-                sc.lines.delegation_line
-            } else {
-                sc.lines.decl_line
-            };
-            if !generated && delegation_line != 0 {
-                sctor.mark_line(delegation_line);
+            let delegation_line = sc.lines.delegation_call_line().filter(|_| !generated);
+            if let Some(line) = delegation_line {
+                sctor.mark_line(line);
             }
             for &statement in &sc.delegate_prelude {
                 e.emit(statement, &mut sctor);
@@ -382,8 +386,8 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             let delegate_init =
                 e.cw.methodref(&target_class, "<init>", &delegate_descriptor);
             // The call itself is back on the delegation's line after an argument on another.
-            if !generated && delegation_line != 0 {
-                sctor.mark_line(delegation_line);
+            if let Some(line) = delegation_line {
+                sctor.mark_line(line);
             }
             sctor.invokespecial(delegate_init, aw, 0);
             e.this_uninitialized = false;

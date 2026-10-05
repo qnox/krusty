@@ -351,15 +351,8 @@ impl Checker<'_> {
         facts.optional_expectation = self.is_optional_expectation_classifier(internal);
         let module_retention = self.module.annotation_retention(internal);
         let classifier = self.resolver().classifier(internal)?;
-        let retention = module_retention.or_else(|| {
-            Some(match classifier.retention.as_deref() {
-                Some("SOURCE") => crate::types::AnnotationRetention::Source,
-                Some("BINARY" | "CLASS") => crate::types::AnnotationRetention::Binary,
-                Some("RUNTIME") => crate::types::AnnotationRetention::Runtime,
-                None => crate::types::AnnotationRetention::Default,
-                Some(_) => return None,
-            })
-        })?;
+        let retention =
+            super::annotation_applications::annotation_retention(module_retention, &classifier)?;
         let targets = if module_retention.is_some() {
             self.module.annotation_targets(internal)
         } else {

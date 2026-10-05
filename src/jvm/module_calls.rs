@@ -458,6 +458,7 @@ pub(super) fn realize_default_calls(
 pub(super) fn realize_super_calls(
     ir: &mut IrFile,
     callables: &crate::backend::CheckedBackendCallables,
+    property_realizations: &mut PropertyRealizations,
 ) -> Result<(), ModuleRealizationTarget> {
     for raw in 0..ir.exprs.len() {
         // `super` dispatch: the checker fixed the supertype declaration, so only the PHYSICAL
@@ -530,7 +531,9 @@ pub(super) fn realize_super_calls(
             // class declares: `super<Base>@Outer.value` died at its first read with a
             // `NoSuchMethodError`. `kind` remains the semantic fact for targets that need it;
             // nothing about the JVM spelling is derived from it.
-            let _ = kind;
+            if let crate::ir::IrSuperCallKind::PropertyGetter(property) = kind {
+                property_realizations.record_super_getter(raw as ExprId, property);
+            }
             let descriptor = if descriptor.is_empty() {
                 crate::jvm::names::method_descriptor(&params, ret)
             } else {
@@ -684,7 +687,7 @@ pub(super) fn realize(
     property_realizations: &mut PropertyRealizations,
 ) -> Result<(), ModuleRealizationTarget> {
     realize_declared_function_names(ir)?;
-    realize_super_calls(ir, callables)?;
+    realize_super_calls(ir, callables, property_realizations)?;
     prepare_inherited_default_calls(ir)?;
     for raw in 0..ir.exprs.len() {
         // A property accessor call keeps its declaration's parameter vector (contexts, receiver,

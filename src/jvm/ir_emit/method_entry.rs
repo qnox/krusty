@@ -37,8 +37,12 @@ pub(super) fn emit(
     // `Intrinsics.checkNotNullParameter(param, "name")` at method entry.
     let declared = &ir.functions[function as usize];
     let parameter_identities = ir.function_parameter_identities(function);
-    let assertion_names =
-        crate::jvm::parameter_names::function_assertions(ir, function, parameter_types);
+    let assertion_names = crate::jvm::parameter_names::placed(
+        ir,
+        function,
+        holder_receiver,
+        crate::jvm::parameter_names::function_assertions(ir, function, parameter_types),
+    );
     for (index, check) in declared.param_checks.iter().enumerate() {
         if check.is_none() || covered == Some(index) {
             continue;

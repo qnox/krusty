@@ -36,13 +36,13 @@ impl Checker<'_> {
             );
             return None;
         }
-        let internal = if self.fragment.is_classifier_annotations() {
+        let internal = if self.fragment.publishes_annotation_metadata() {
             // Pass 1 already bound this exact occurrence. Metadata publication consumes that
             // identity directly: resolving its spelling again after actualization could resurrect
             // a target-excluded optional-expect annotation or select a different scope rung.
-            self.module
-                .legacy_symbols()
-                .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))?
+            self.bound_annotation_identities
+                .get(&(annotation.span.lo, annotation.span.hi))
+                .copied()?
         } else {
             // Resolve the application in its owning lexical scope. Pass 1's declaration-header
             // inventory and Pass 2's body checking use the same scope rules.
@@ -122,4 +122,22 @@ impl Checker<'_> {
             debug_assert_eq!(removed, container);
         }
     }
+}
+
+/// The retention of an annotation classifier: the module's own normalized fact for a source
+/// declaration, otherwise the provider's declared policy. `None` for a policy this compiler does not
+/// know, which makes the application unsupported rather than silently retained.
+pub(super) fn annotation_retention(
+    module_retention: Option<crate::types::AnnotationRetention>,
+    classifier: &crate::libraries::LibraryType,
+) -> Option<crate::types::AnnotationRetention> {
+    module_retention.or_else(|| {
+        Some(match classifier.retention.as_deref() {
+            Some("SOURCE") => crate::types::AnnotationRetention::Source,
+            Some("BINARY" | "CLASS") => crate::types::AnnotationRetention::Binary,
+            Some("RUNTIME") => crate::types::AnnotationRetention::Runtime,
+            None => crate::types::AnnotationRetention::Default,
+            Some(_) => return None,
+        })
+    })
 }

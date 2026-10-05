@@ -54,12 +54,15 @@ fn capture_free_lambda_owns_a_body_local_callable_and_checked_body() {
     let (body, _) = checked_function_body("fun make(): () -> Int = { 42 }\n", "make");
     let FirExprKind::Lambda {
         callable,
+        type_parameters,
         body: lambda_body,
+        ..
     } = &body.expr(root_expression(&body)).expect("lambda").kind
     else {
         panic!("lambda must become a body-local checked callable")
     };
     assert_eq!(lambda_body.local_callable(), Some(*callable));
+    assert!(type_parameters.is_empty());
     assert!(lambda_body.parameters().is_empty());
     assert!(matches!(
         lambda_body
@@ -67,6 +70,31 @@ fn capture_free_lambda_owns_a_body_local_callable_and_checked_body() {
             .map(|statement| &statement.kind),
         Some(FirStatementKind::Expression(_))
     ));
+}
+
+#[test]
+fn lambda_publishes_exact_enclosing_type_parameter_identities_and_bound_closure() {
+    let (body, index) = checked_function_body(
+        "class Holder<T> {\n\
+             fun <V : T> make(value: V): (V) -> V = { value }\n\
+         }\n",
+        "make",
+    );
+    let FirExprKind::Lambda {
+        type_parameters, ..
+    } = &body.expr(root_expression(&body)).expect("lambda").kind
+    else {
+        panic!("generic function result must remain a checked lambda")
+    };
+    let names = type_parameters
+        .iter()
+        .map(|parameter| {
+            index
+                .type_parameter_name(*parameter)
+                .expect("published type parameter name")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["V", "T"]);
 }
 
 #[test]
@@ -650,10 +678,10 @@ fn sam_argument_retains_the_selected_interface_method_shape() {
     assert!(!sam.nullable);
 }
 
-/// The selected method's slot carries the declarations it overrides: a primitive result over a
-/// non-primitive one is published on the conversion, and a primitive result over nothing is not.
+/// The selected method's slot carries the own results of the declarations it overrides, as
+/// declared: the frontend publishes them on the conversion and classifies none of them.
 #[test]
-fn sam_argument_records_a_primitive_result_over_a_non_primitive_one() {
+fn sam_argument_records_the_overridden_results() {
     let overrides = |source: &str| {
         let (body, _) = checked_function_body(source, "make");
         let FirExprKind::Call(call) = &body.expr(root_expression(&body)).expect("call").kind else {
@@ -672,13 +700,10 @@ fn sam_argument_records_a_primitive_result_over_a_non_primitive_one() {
         };
         let sam = body.sam_conversion(sam).expect("body-local SAM target");
         assert_eq!(sam.result.get(), Ty::Int);
-        (
-            sam.overrides_non_primitive_result,
-            sam.overridden_non_primitive_results
-                .iter()
-                .map(|result| result.get())
-                .collect::<Vec<_>>(),
-        )
+        sam.overridden_results
+            .iter()
+            .map(|result| result.get())
+            .collect::<Vec<_>>()
     };
     assert_eq!(
         overrides(
@@ -687,7 +712,7 @@ fn sam_argument_records_a_primitive_result_over_a_non_primitive_one() {
          fun consume(child: Child): Int = 0\n\
          fun make(): Int = consume { 1 }\n",
         ),
-        (true, vec![Ty::obj("kotlin/Any")])
+        vec![Ty::obj("kotlin/Any")]
     );
     assert_eq!(
         overrides(
@@ -695,17 +720,13 @@ fn sam_argument_records_a_primitive_result_over_a_non_primitive_one() {
          fun consume(child: Child): Int = 0\n\
          fun make(): Int = consume { 1 }\n",
         ),
-        (false, Vec::new())
+        Vec::<Ty>::new()
     );
-    let (generic, results) = overrides(
+    let results = overrides(
         "interface Echo<T> { fun echo(x: T): T }\n\
          fun interface Count : Echo<Int> { override fun echo(x: Int): Int }\n\
          fun consume(count: Count): Int = 0\n\
          fun make(): Int = consume { it }\n",
-    );
-    assert!(
-        generic,
-        "a type parameter specialized to Int is still a non-primitive override"
     );
     assert!(
         results.len() == 1 && results[0].is_ty_param(),
@@ -1419,4 +1440,89 @@ fn a_function_value_passed_to_a_fun_interface_still_converts() {
         )
     };
     assert_eq!(conversion.classifier, crate::types::type_name("Foo"));
+}
+
+#[test]
+fn a_source_lambda_publishes_type_parameters_in_first_use_order() {
+    let (body, index) = checked_function_body("fun <T, U : T> id(u: U): () -> U = { u }\n", "id");
+    let FirExprKind::Lambda {
+        type_parameters, ..
+    } = &body.expr(root_expression(&body)).expect("lambda").kind
+    else {
+        panic!("the function body must be a checked lambda")
+    };
+    let owner = crate::fir::DeclarationId::from_raw(body.owner().raw());
+    assert_eq!(
+        type_parameters.as_ref(),
+        [
+            index
+                .type_parameter(owner, 1)
+                .expect("U is the second declared parameter"),
+            index
+                .type_parameter(owner, 0)
+                .expect("T is named by U's bound"),
+        ]
+    );
+}
+
+#[test]
+fn a_member_lambda_publishes_the_class_parameter_and_its_own() {
+    let (body, index) = checked_function_body(
+        "class Holder<T> {\n\
+             fun <V : T> pick(v: V): (T) -> V = { t: T -> v }\n\
+         }\n",
+        "pick",
+    );
+    let FirExprKind::Lambda {
+        type_parameters, ..
+    } = &body.expr(root_expression(&body)).expect("lambda").kind
+    else {
+        panic!("the member body must be a checked lambda")
+    };
+    let function = crate::fir::DeclarationId::from_raw(body.owner().raw());
+    let class_parameter = index
+        .declaration_anchor(function)
+        .and_then(|anchor| anchor.owner)
+        .and_then(|class| index.type_parameter(class, 0))
+        .expect("Holder declares T");
+    let own = index.type_parameter(function, 0).expect("pick declares V");
+    assert_eq!(type_parameters.as_ref(), [class_parameter, own]);
+    assert_ne!(class_parameter, own);
+}
+
+#[test]
+fn a_nested_type_parameter_shadows_the_class_parameter() {
+    let (body, index) = checked_function_body(
+        "class Box<T> {\n\
+             fun <T> inner(): (T) -> T = { t: T -> t }\n\
+         }\n",
+        "inner",
+    );
+    let FirExprKind::Lambda {
+        type_parameters, ..
+    } = &body.expr(root_expression(&body)).expect("lambda").kind
+    else {
+        panic!("the member body must be a checked lambda")
+    };
+    let function = crate::fir::DeclarationId::from_raw(body.owner().raw());
+    let own = index.type_parameter(function, 0).expect("inner declares T");
+    let class_parameter = index
+        .declaration_anchor(function)
+        .and_then(|anchor| anchor.owner)
+        .and_then(|class| index.type_parameter(class, 0))
+        .expect("Box declares T");
+    assert_eq!(type_parameters.as_ref(), [own]);
+    assert_ne!(own, class_parameter);
+}
+
+#[test]
+fn a_non_generic_lambda_publishes_no_type_parameters() {
+    let (body, _) = checked_function_body("fun make(): () -> Int = { 42 }\n", "make");
+    let FirExprKind::Lambda {
+        type_parameters, ..
+    } = &body.expr(root_expression(&body)).expect("lambda").kind
+    else {
+        panic!("the function body must be a checked lambda")
+    };
+    assert!(type_parameters.is_empty());
 }
