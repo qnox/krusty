@@ -264,6 +264,10 @@ pub(super) fn synth_value_members(
         };
         if let Some(name) = custom_impl {
             let declared = (function.params.clone(), function.ret);
+            // Metadata describes the override as source declared it; only its JVM realization
+            // becomes the static `-impl` over the carrier.
+            ir.vc_declared_sigs
+                .insert(fid, (function.name.clone(), declared.0.clone(), declared.1));
             function.name = name.to_string();
             function.params.insert(0, u_ir);
             function.is_static = true;
@@ -506,6 +510,8 @@ pub(super) fn synth_value_members(
             let acc = ir.add_expr(IrExpr::StringConcat(vec![prefix, rendered, close]));
             let sbody = ret_block(ir, acc);
             let impl_fid = add_static(ir, "toString-impl", vec![u_ir], str_ir, sbody);
+            ir.jvm_value_class_generated_any
+                .insert(impl_fid, crate::ir::IrValueClassAnyMember::ToString);
             let member = Receiver {
                 rest: &[],
                 ret: str_ir,
@@ -540,6 +546,8 @@ pub(super) fn synth_value_members(
             let h = property_hash(ir, u_ir);
             let sbody = ret_block(ir, h);
             let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
+            ir.jvm_value_class_generated_any
+                .insert(impl_fid, crate::ir::IrValueClassAnyMember::HashCode);
             let member = Receiver {
                 rest: &[],
                 ret: int_ir,
@@ -631,6 +639,8 @@ pub(super) fn synth_value_members(
             stmts.push(ir.add_expr(IrExpr::Return(Some(t))));
             let sbody = ir.add_expr(IrExpr::Block { stmts, value: None });
             let impl_fid = add_static(ir, "equals-impl", vec![u_ir, any_ir], bool_ir, sbody);
+            ir.jvm_value_class_generated_any
+                .insert(impl_fid, crate::ir::IrValueClassAnyMember::Equals);
             let other = [Ty::nullable(any_ir)];
             let member = Receiver {
                 rest: &other,
