@@ -3344,6 +3344,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   clears the operand stack) takes the `emit_operands` temp route; the `Vararg`/`SpreadBuilder` fill
   loops have no such option, and lowering declines a `try` element for them (`is_branchy`).
   `tests/comparison_under_operands_e2e.rs`.
+- **A `lateinit` backing field carries no nullability annotation.** It holds null until assigned,
+  so kotlinc's `AnnotationCodegen.generateNullabilityAnnotation` skips a field whose property is
+  `lateinit`, whatever its declared type; its accessors keep `@NotNull`. This covers class, object,
+  enum and facade fields (`field_visibility::publishes_field_nullability`; test
+  `lateinit_field_nullability_e2e`).
 - **A `lateinit` FIELD read is itself branchy.** The uninitialized guard kotlinc inserts at every
   such read (`dup; ifnonnull L; ldc name; invokestatic throwUninitializedPropertyAccessException; L:`)
   branches and rejoins. So a `lateinit` read is a

@@ -1235,6 +1235,8 @@ mod lambda_vs_block_fun_type_e2e;
 mod language_level_features_e2e;
 #[path = "lateinit_companion_read_e2e.rs"]
 mod lateinit_companion_read_e2e;
+#[path = "lateinit_field_nullability_e2e.rs"]
+mod lateinit_field_nullability_e2e;
 #[path = "lateinit_field_visibility_e2e.rs"]
 mod lateinit_field_visibility_e2e;
 #[path = "lateinit_local_e2e.rs"]
