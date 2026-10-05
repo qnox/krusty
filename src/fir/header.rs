@@ -914,6 +914,10 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::OPERATOR, function.is_operator())
                 .with(DeclarationFlags::INFIX, function.is_infix())
                 .with(
+                    DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                    function.has_visibility_modifier(),
+                )
+                .with(
                     DeclarationFlags::COMPANION,
                     function.is_companion_extension(),
                 )
@@ -1039,6 +1043,10 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::OVERRIDE, property.is_override)
                 .with(DeclarationFlags::ABSTRACT, property.is_abstract)
                 .with(DeclarationFlags::MUTABLE, property.is_var)
+                .with(
+                    DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                    property.has_visibility_modifier,
+                )
                 .with(DeclarationFlags::LATEINIT, property.is_lateinit)
                 .with(DeclarationFlags::DELEGATED, property.delegate.is_some())
                 .with(
@@ -1237,7 +1245,11 @@ fn extract_file_stub_inventory(
                     .with(DeclarationFlags::PROPERTY_PARAMETER, true)
                     .with(DeclarationFlags::MUTABLE, property.is_var)
                     .with(DeclarationFlags::OPEN, property.is_open)
-                    .with(DeclarationFlags::OVERRIDE, property.is_override),
+                    .with(DeclarationFlags::OVERRIDE, property.is_override)
+                    .with(
+                        DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                        property.has_visibility_modifier,
+                    ),
             });
         }
         // Data-class component/copy callables participate in ordinary overload selection during
@@ -2973,6 +2985,15 @@ impl StreamedHeaderModule {
         source: SourceFileId,
     ) -> impl Iterator<Item = (u32, &[crate::diag::Span])> + '_ {
         self.type_use_annotations.occurrences(source)
+    }
+
+    /// Each named function-type parameter of `source`: its type's start offset and its name, which
+    /// `@Metadata` records as a `@ParameterName` annotation on that type.
+    pub(crate) fn function_type_parameter_names(
+        &self,
+        source: SourceFileId,
+    ) -> impl Iterator<Item = (u32, &str)> + '_ {
+        self.type_use_annotations.parameter_names(source)
     }
 
     pub(crate) fn detached_type_roots(

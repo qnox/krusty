@@ -33,6 +33,12 @@ impl Emitter<'_> {
         params: &[Ty],
         code: &mut CodeBuilder,
     ) {
+        if let IrExpr::GetValue(value) = self.ir.expr(func) {
+            if let Some(alias) = self.inline_lambda_alias(*value) {
+                self.emit_aliased_invocation(&alias, args, params, code);
+                return;
+            }
+        }
         let n = args.len();
         let high_arity = is_high_arity_function(n as u8);
         let argument_array_type = Ty::array(Ty::nullable(Ty::obj("kotlin/Any")));

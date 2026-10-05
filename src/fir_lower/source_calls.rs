@@ -176,25 +176,6 @@ impl BodyLowering<'_> {
         suspends
     }
 
-    fn checked_operands_suspend(
-        &self,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-    ) -> bool {
-        dispatch_receiver
-            .into_iter()
-            .chain(extension_receiver)
-            .any(|operand| self.operand_suspends(operand))
-            || arguments.iter().any(|argument| match argument {
-                IrCheckedArgument::Expression { value, .. } => self.operand_suspends(*value),
-                IrCheckedArgument::Vararg { elements, .. } => elements
-                    .iter()
-                    .any(|(value, _)| self.operand_suspends(*value)),
-                IrCheckedArgument::Default { .. } => false,
-            })
-    }
-
     /// Inline the already-checked block passed to one of Kotlin's coroutine primitives.
     ///
     /// FIR has selected the intrinsic declaration and its sole lambda argument. Common lowering
@@ -949,7 +930,6 @@ impl BodyLowering<'_> {
         // direct.
         let direct = matches!(mode, SelectedOperandMode::DirectWhenOrdered)
             && !preserve_inline_lambdas
-            && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
             && argument_boundaries::follow_parameter_order(arguments, extension_receiver_parameter);
         let mut statements = Vec::new();
         let receiver = if member_extension {
@@ -1474,9 +1454,7 @@ impl BodyLowering<'_> {
         // extension receiver, then the value arguments. A context argument is an implicit value
         // (a context parameter or an implicit receiver), so passing the receiver after it still
         // evaluates every operand once, in source order.
-        let direct =
-            !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
-                && argument_boundaries::follow_parameter_order(arguments, None);
+        let direct = argument_boundaries::follow_parameter_order(arguments, None);
         let bindings = substitutions
             .iter()
             .filter_map(|substitution| match substitution.parameter {

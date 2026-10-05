@@ -172,6 +172,9 @@ pub struct Options {
     /// `-Xexplicit-api=strict|warning|disable`: kotlinc's explicit API mode, applied to the
     /// language settings once they are built.
     pub explicit_api: Option<String>,
+    /// `-opt-in=<fq name>[,<fq name>…]` (also `-opt-in <value>`, repeatable): requirement markers
+    /// accepted module-wide, applied to the language settings once they are built.
+    pub opt_in: Vec<String>,
     /// `-Xsuppress-version-warnings`: omit the deprecated and experimental language/API warnings.
     /// Redundant feature arguments stay reported.
     pub suppress_version_warnings: bool,
@@ -207,6 +210,7 @@ impl Default for Options {
             no_call_assertions: false,
             plugins: PluginConfig::default(),
             explicit_api: None,
+            opt_in: Vec::new(),
             suppress_version_warnings: false,
         }
     }
@@ -228,13 +232,7 @@ pub fn jvm_target_to_major(v: &str) -> Option<u16> {
 }
 
 /// kotlinc flags that take a following value but which krusty ignores (accept + drop the value).
-const IGNORED_WITH_VALUE: &[&str] = &[
-    "-kotlin-home",
-    "-opt-in",
-    "-script-templates",
-    "-expression",
-    "-e",
-];
+const IGNORED_WITH_VALUE: &[&str] = &["-kotlin-home", "-script-templates", "-expression", "-e"];
 /// kotlinc valueless flags that krusty ignores (accept + drop).
 const IGNORED_FLAGS: &[&str] = &[
     "-include-runtime",
@@ -544,6 +542,20 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                     ));
                 }
             }
+            // `-opt-in` is an array argument: each occurrence holds comma-separated marker names.
+            flag if flag == "-opt-in" || flag.starts_with("-opt-in=") => {
+                let value = match flag.strip_prefix("-opt-in=") {
+                    Some(value) => Some(value.to_string()),
+                    None => it.next().map(|value| value.to_string()),
+                };
+                opts.opt_in.extend(
+                    value
+                        .iter()
+                        .flat_map(|value| value.split(','))
+                        .filter(|marker| !marker.is_empty())
+                        .map(str::to_string),
+                );
+            }
             flag if flag.starts_with("-Xkotlin-reference-version=") => {
                 let value = flag
                     .strip_prefix("-Xkotlin-reference-version=")
@@ -626,6 +638,9 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                 opts.language_settings
                     .features
                     .apply_explicit_api_mode(mode);
+            }
+            for marker in &opts.opt_in {
+                opts.language_settings.features.opt_in(marker);
             }
         }
         Err(error) => opts.errors.push(error),
@@ -1557,6 +1572,34 @@ mod tests {
             [
                 "unknown value for parameter -Xexplicit-api: 'bogus'. Value should be one of \
               {disable, strict, warning}"
+            ]
+        );
+    }
+
+    /// `-opt-in` accepts markers in both spellings, repeated and comma-separated.
+    #[test]
+    fn opt_in_accepts_every_spelling() {
+        let parsed = parse_args(&[
+            "-opt-in=a.B,c.D",
+            "-opt-in",
+            "e.F",
+            "-opt-in=kotlin.contracts.ExperimentalContracts",
+            "f.kt",
+        ]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(
+            parsed
+                .language_settings
+                .features
+                .opted_in()
+                .collect::<Vec<_>>(),
+            [
+                "a.B",
+                "c.D",
+                "e.F",
+                "kotlin.contracts.ExperimentalContracts"
             ]
         );
     }

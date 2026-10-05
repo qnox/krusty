@@ -6,6 +6,7 @@ annotation class ImplicitIntegerCoercion\n";
 #[test]
 fn annotated_constants_coerce_to_annotated_unsigned_parameters() {
     const USE_SITE: &str = "// LANGUAGE: +ImplicitSignedToUnsignedIntegerConversion\n\
+@file:OptIn(ExperimentalUnsignedTypes::class)\n\
 package sample\n\
 import kotlin.internal.ImplicitIntegerCoercion\n\
 @ImplicitIntegerCoercion const val BYTE_VALUE = 255\n\
