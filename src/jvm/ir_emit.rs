@@ -3237,8 +3237,11 @@ fn emit_class(
     // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
     // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
     // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared
-    // visibility (a PROTECTED primary gets a protected convenience ctor).
-    if c.has_primary_ctor {
+    // visibility (a PROTECTED primary gets a protected convenience ctor). A declared constructor
+    // without value parameters already is that `<init>()`, so kotlinc's JvmDefaultConstructorLowering
+    // adds none beside it.
+    let declares_no_arg_ctor = c.secondary_ctors.iter().any(|sc| sc.params.is_empty());
+    if c.has_primary_ctor && !declares_no_arg_ctor {
         let param_tys = class_ctor_jvm_tys(c);
         let value_param_ctor = ir.has_value_param_ctor(&fq_name);
         let ctor_access = if is_continuation || c.is_anonymous_object {
