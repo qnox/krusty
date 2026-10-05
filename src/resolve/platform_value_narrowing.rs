@@ -5,12 +5,25 @@
 //! declared expected type does not accept `null`. The recorded positions become
 //! `Intrinsics.checkNotNullExpressionValue` on the JVM.
 
-use super::{Checker, PlatformNarrowing, ResolvedCall, TypeInfo};
+use super::{Checker, ResolvedCall, TypeInfo};
 use crate::ast::{Expr, ExprId};
 use crate::libraries::ResultEnhancement;
 use crate::symbol_resolver::ResolvedMember;
 use crate::types::Ty;
 use std::collections::HashMap;
+
+/// Where a PLATFORM value is committed to a declared non-null type, as far as the guard's SHAPE is
+/// concerned. Measured against kotlinc 2.4.10: a declared type propagates into a conditional, so each
+/// branch is checked where it produces its value; a value argument does not, so the merged value is
+/// checked instead — which is why the two are distinguished rather than treated as one position set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlatformNarrowing {
+    /// A property/local with an explicit type, a return, an assignment.
+    Declaration,
+    /// A value argument (including the parameter of a non-null-typed lambda) or an extension
+    /// call's explicit receiver.
+    Argument,
+}
 
 impl Checker<'_> {
     /// Record that `e`'s PLATFORM type is committed to a declared non-null `expected` here.
@@ -40,6 +53,24 @@ impl Checker<'_> {
         }
         if expected_type_rejects_null(expected) {
             self.platform_narrowings.insert(e, position);
+        }
+    }
+
+    /// An extension call's explicit `receiver` is the argument of the extension's receiver
+    /// parameter, and kotlinc's implicit not-null cast guards it like one: a Java value is checked
+    /// where the DECLARED receiver (`Iterable<T>`, not a `T` whose bound admits `null`) rejects
+    /// `null`, against the receiver as the call `applied` it. A safe call has tested the receiver.
+    pub(super) fn narrow_extension_receiver(
+        &mut self,
+        call: ExprId,
+        receiver: ExprId,
+        declared: Option<Ty>,
+        applied: Ty,
+    ) {
+        if !matches!(self.file.expr(call), Expr::SafeCall { .. })
+            && !declared.unwrap_or(applied).upper_bound_admits_null()
+        {
+            self.narrow_platform_value(applied, receiver, PlatformNarrowing::Argument);
         }
     }
 

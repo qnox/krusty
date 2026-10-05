@@ -4,6 +4,10 @@
 //! nothing checked, so kotlinc's implicit not-null cast (`insertSpecialCast`) guards it wherever the
 //! expected type rejects `null`: a declared result, an extension receiver, and an interface
 //! delegation forwarder, naming the property's getter. A dispatch receiver stays unchecked.
+//!
+//! An extension call's explicit receiver is checked like any Java value
+//! (`System.getProperty(name).measure()` checks `getProperty(...)`), unless the declared receiver
+//! is a type parameter whose bound admits `null` (`T.same()`) or the call is a safe call.
 
 use super::common;
 
@@ -22,6 +26,16 @@ fun Iterable<*>.countOf(): Int {
     for (element in this) count++
     return count
 }
+
+fun String.measure(): Int = length
+
+fun <T> T.same(): T = this
+
+fun versionLength(): Int = System.getProperty("java.version").measure()
+
+fun keysSame(map: HashMap<String, String>): Set<String> = map.keys.same()
+
+fun safeLength(name: String): Int = System.getProperty(name)?.measure() ?: 0
 
 fun keysOf(map: HashMap<String, String>): Set<String> = map.keys
 
@@ -44,7 +58,9 @@ fun box(): String {
     table.put("O", "K")
     if (table.keys.size != 1 || table.entries.size != 1) return "MutableTable"
     if (entryCount(map) != 1) return "entryCount"
-    return map.get("O") ?: "missing"
+    if (versionLength() == 0 || keysSame(map).size != 1) return "receivers"
+    if (safeLength("krusty.absent") != 0) return "safeLength"
+    return "O" + (map.get("O") ?: "missing")
 }
 "#;
 
@@ -53,7 +69,15 @@ fn renamed_builtin_property_reads_are_checked_like_kotlinc() {
     let cases: &[(&str, &[&str])] = &[
         (
             "RenamedBuiltinPropertyKt",
-            &["keysOf", "entriesOf", "registryKeys", "entryCount", "box"],
+            &[
+                "keysOf",
+                "entriesOf",
+                "registryKeys",
+                "entryCount",
+                "versionLength",
+                "keysSame",
+                "safeLength",
+            ],
         ),
         ("Table", &["getKeys", "getEntries", "getValues"]),
         ("MutableTable", &["getKeys", "getEntries", "getValues"]),

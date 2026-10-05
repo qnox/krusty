@@ -132,6 +132,7 @@ use operator_calls::{range_operator, ResolvedInRangeComparison};
 mod overload_diagnostics;
 mod override_plans;
 mod platform_value_narrowing;
+pub use platform_value_narrowing::PlatformNarrowing;
 mod plugin_class_checks;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
@@ -9783,19 +9784,6 @@ fn ty_of_ref_with(
     base
 }
 
-/// Result of typechecking a file: the type assigned to every expression node.
-/// Where a PLATFORM value is committed to a declared non-null type, as far as the guard's SHAPE is
-/// concerned. Measured against kotlinc 2.4.10: a declared type propagates into a conditional, so each
-/// branch is checked where it produces its value; a value argument does not, so the merged value is
-/// checked instead — which is why the two are distinguished rather than treated as one position set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlatformNarrowing {
-    /// A property/local with an explicit type, a return, an assignment.
-    Declaration,
-    /// A value argument (including the parameter of a non-null-typed lambda).
-    Argument,
-}
-
 /// A functional-interface conversion selected for one expression, plus the suspension of the
 /// value being converted. The signature is the target method; `source_suspend` is the value's own
 /// callable view and is false when a non-suspend value is adapted to a suspend method.
@@ -9805,6 +9793,7 @@ pub(crate) struct ResolvedSamConversion {
     pub source_suspend: bool,
 }
 
+/// Result of typechecking a file: the type assigned to every expression node.
 pub struct TypeInfo {
     pub expr_types: Vec<Ty>,
     /// Exact function signature of each callable-reference expression, captured before an expected
@@ -67491,6 +67480,8 @@ impl<'a> Checker<'a> {
         let selected_receiver = selected.receiver.unwrap_or(rt);
         let receiver_expression = crate::ast::explicit_call_receiver(self.file, e);
         if let Some(receiver_expression) = receiver_expression {
+            let declared = selected.generic_sig.as_ref().and_then(|sig| sig.receiver);
+            self.narrow_extension_receiver(e, receiver_expression, declared, selected_receiver);
             if selected_receiver != rt
                 && self
                     .unit_coerced_lambda_type(receiver_expression, selected_receiver, rt)

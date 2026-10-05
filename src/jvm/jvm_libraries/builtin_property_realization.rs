@@ -8,9 +8,13 @@
 use super::*;
 
 impl JvmLibraries {
-    /// The builtin property `name` as `recv`'s class declares it through a realizing method among
-    /// `functions` (the members named `name`), or, for a property realized under another JVM name,
-    /// among the members of that name.
+    /// The builtin property `name` as `recv`'s class declares it through a realizing member.
+    ///
+    /// A builtin declaration is published under its source name and carries its JVM name
+    /// (`Map.keys` realized by `keySet`), so it is among `functions`, the members named `name`. A
+    /// Java method overriding it is published under its own JVM name (`HashMap.keySet()`), so for a
+    /// property realized under another JVM name the members of that name are candidates too. Either
+    /// way the realization is the zero-argument member with the mapping's JVM name and descriptor.
     pub(super) fn builtin_property_realization(
         &self,
         recv: Ty,
@@ -20,25 +24,22 @@ impl JvmLibraries {
         function_renames: &[MappedBuiltinMember],
     ) -> Option<PropertyInfo> {
         let owner = recv.kotlin_class_internal()?;
-        let renamed_realizations;
-        let realizations = match mapped_property {
-            Some(mapping) if mapping.physical_name != name => {
-                renamed_realizations = self.member_functions_with_renames(
-                    recv,
-                    &mapping.physical_name,
-                    function_renames,
-                );
-                &renamed_realizations
-            }
-            _ => functions,
-        };
-        let function = realizations.overloads.iter().find(|function| {
-            function.callable.params.is_empty()
-                && mapped_property.is_none_or(|mapping| {
-                    function.callable.physical_name() == mapping.physical_name
-                        && function.callable.descriptor == mapping.descriptor
-                })
-        })?;
+        let renamed = mapped_property
+            .filter(|mapping| mapping.physical_name != name)
+            .map(|mapping| {
+                self.member_functions_with_renames(recv, &mapping.physical_name, function_renames)
+            });
+        let function = functions
+            .overloads
+            .iter()
+            .chain(renamed.iter().flat_map(|renamed| &renamed.overloads))
+            .find(|function| {
+                function.callable.params.is_empty()
+                    && mapped_property.is_none_or(|mapping| {
+                        function.callable.physical_name() == mapping.physical_name
+                            && function.callable.descriptor == mapping.descriptor
+                    })
+            })?;
         let mut getter = function.callable.clone();
         // `FunctionInfo` keeps Kotlin declaration modality separately from its physical callable
         // handle. A builtin property synthesized from the corresponding zero-arg member must restore

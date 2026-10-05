@@ -325,7 +325,8 @@ impl BodyFirChecker<'_> {
                 {
                     return Ok(FirExprKind::Constant(FirConstant::String(constant)));
                 }
-                let receiver = self.explicit_receiver(receiver)?;
+                let receiver =
+                    self.explicit_extension_receiver(expression, receiver, extension.receiver)?;
                 self.selected_extension_call(expression, arguments, *extension, Some(receiver))
             }
             Some(ResolvedCall::MemberExtension {
