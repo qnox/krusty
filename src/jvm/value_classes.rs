@@ -52,7 +52,7 @@ use call_results::CallTypes;
 pub(crate) use class_annotations::class_file_annotations;
 pub(crate) use declaration_inventory::record_referenced as record_referenced_value_classes;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
-pub(crate) use module_members::{forwarded_member_types, module_member_jvm_name};
+pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};
 use representation::erase;
 pub(crate) use representation::{
@@ -2827,22 +2827,9 @@ pub(crate) fn lower_value_classes(
                     );
                 }
             }
-            // A value-class property accessor is a static `-impl` over the unboxed carrier, regardless
-            // of whether this compilation or a dependency declared it. The sole stored property was
-            // already rewritten to identity; every remaining semantic property read keeps the carrier
-            // representation expected by its selected accessor.
-            if let IrExpr::PropertyRead {
-                receiver: Some(receiver),
-                owner,
-                ..
-            } = &ir.exprs[id as usize]
-            {
-                if under.contains_key(owner) {
-                    if let Repr::Boxed(x) = repr_ctx.repr(*receiver) {
-                        ops.push((*receiver, BoxOp::Unbox(x)));
-                    }
-                }
-            }
+            value_boundaries::record_property_receiver_boundary(
+                &mut ops, &ir.exprs, &repr_ctx, id, &under,
+            );
             // A member call (`toString`/`equals`/`hashCode`/user method) on an UNBOXED value class
             // dispatches on the boxed object — box the receiver. (Getter calls were already rewritten to
             // identity property access in step 4, so only real instance-method calls remain here.)

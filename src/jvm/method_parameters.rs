@@ -423,6 +423,57 @@ pub(super) fn resolved_holder_forward(
         .collect()
 }
 
+/// A compatibility forwarder an implementing class writes for an inherited interface member is an
+/// instance method declaring the member's own parameters: an extension receiver stays a receiver
+/// and carries no flag, as on any instance method.
+pub(super) fn resolved_class_forwarder(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    names: &[Option<String>],
+    physical_parameters: &[Ty],
+) -> Vec<MethodParameter> {
+    assert_eq!(
+        names.len(),
+        physical_parameters.len(),
+        "inherited-forwarder parameter identities must match its declaration"
+    );
+    assert_eq!(
+        identities.len(),
+        names.len(),
+        "one spelling per inherited-forwarder parameter identity"
+    );
+    names.iter().map(|name| (name.clone(), 0)).collect()
+}
+
+/// The static a value class keeps for an inherited forwarder takes the carrier first, as a
+/// synthetic parameter, and moves the member's extension receiver into a mandated one, like every
+/// value-class `-impl`.
+pub(super) fn value_class_inherited_static(
+    carrier: &str,
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    names: &[Option<String>],
+    physical_parameters: &[Ty],
+) -> Vec<MethodParameter> {
+    assert_eq!(
+        names.len(),
+        physical_parameters.len(),
+        "a value-class inherited static's parameter identities must match its declaration"
+    );
+    assert_eq!(
+        identities.len(),
+        names.len(),
+        "one spelling per value-class inherited static parameter identity"
+    );
+    std::iter::once(parameter(carrier, SYNTHETIC))
+        .chain(identities.iter().zip(names).map(|(identity, name)| {
+            let flags = match identity {
+                crate::fir::ResolvedParameterIdentity::ExtensionReceiver => MANDATED,
+                _ => 0,
+            };
+            (name.clone(), flags)
+        }))
+        .collect()
+}
+
 pub(super) fn continuation_constructor(class: &IrClass) -> Vec<MethodParameter> {
     let identities = crate::jvm::parameter_names::constructor_identities(&class.ctor_args);
     assert_eq!(
