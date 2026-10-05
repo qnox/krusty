@@ -791,7 +791,7 @@ mod tests {
                 ),
                 (
                     "compiler-plugin",
-                    "Kotlin compiler plugins are not supported by krusty: org.jetbrains.kotlin.allopen",
+                    "unsupported compiler plugin",
                 ),
                 (
                     "compiler-version",
@@ -856,16 +856,22 @@ mod tests {
                     Err(error) => error,
                 };
                 let rendered = error.to_string();
-                let expected_line = format!("> {expected}");
-                assert_eq!(
-                    rendered
-                        .lines()
-                        .filter(|line| line.trim() == expected_line)
-                        .count(),
-                    1,
-                    "{case}: {rendered}",
-                );
-                assert!(!log.exists(), "{case} must fail before execing krusty");
+                if case == "compiler-plugin" {
+                    assert!(rendered.contains(expected), "{case}: {rendered}");
+                    assert!(rendered.contains("allopen"), "{case}: {rendered}");
+                    assert!(log.exists(), "{case} must be rejected by krusty's registry");
+                } else {
+                    let expected_line = format!("> {expected}");
+                    assert_eq!(
+                        rendered
+                            .lines()
+                            .filter(|line| line.trim() == expected_line)
+                            .count(),
+                        1,
+                        "{case}: {rendered}",
+                    );
+                    assert!(!log.exists(), "{case} must fail before execing krusty");
+                }
             }
 
             // Gradle transports named warning policy without duplicating the compiler's registry.
@@ -1156,18 +1162,11 @@ mod tests {
             Ok(()) => panic!("a compiler plugin applied before krusty was ignored"),
             Err(error) => error.to_string(),
         };
-        assert_eq!(
-            error
-                .lines()
-                .filter(|line| line.trim()
-                    == "> Kotlin compiler plugins are not supported by krusty: org.jetbrains.kotlin.allopen")
-                .count(),
-            1,
-            "{error}"
-        );
+        assert!(error.contains("unsupported compiler plugin"), "{error}");
+        assert!(error.contains("allopen"), "{error}");
         assert!(
-            !log.exists(),
-            "the rejected task must fail before execing krusty"
+            log.exists(),
+            "the compiler registry must inspect the forwarded plugin classpath"
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -1289,6 +1288,239 @@ fun main() {
     )
     println("decoded=$decoded")
     println("descriptor=" + Point.serializer().descriptor.serialName)
+}
+"#,
+        );
+    }
+
+    /// The KSP Gradle plugin is a compiler-plugin support plugin, but KSP2 runs its processors in
+    /// its own `kspKotlin` task: the compile task gets KSP's `symbol-processing-api` jar on its
+    /// plugin classpath, which declares no compiler-plugin registrar, and no options. krusty then
+    /// compiles the Kotlin and Java sources the processor generated, exactly as kotlinc would, and
+    /// the application runs. A compiler plugin krusty cannot run still fails the task beside KSP.
+    /// KSP's Gradle plugin does not load on Gradle 7.6, so CI runs this on the Gradle 8+ lanes.
+    #[test]
+    #[ignore = "downloads Gradle, the Kotlin Gradle plugin and KSP"]
+    fn ksp2_generated_sources_compile_through_krusty() {
+        let fixture = IntegrationFixture::new("krusty-ksp2", write_ksp2_build);
+        let (root, log) = (&fixture.root, &fixture.log);
+
+        let output = fixture
+            .build()
+            .tasks([":app:run"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let printed = output
+            .lines()
+            .filter(|line| line.starts_with("greeting="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            printed,
+            ["greeting=hello Alice", "greeting=hello Bob"],
+            "{output}"
+        );
+
+        // The processor project stays with kotlinc; the application is the one krusty compile.
+        let run = single_invocation(log);
+        let mut sources = source_names(&run);
+        sources.sort_unstable();
+        assert_eq!(
+            sources,
+            ["Greetings.kt", "JavaGreeting.java", "Main.kt"],
+            "{run:?}"
+        );
+        assert!(
+            plugin_classpath_names(&run)
+                .contains(&format!("symbol-processing-api-{KSP_VERSION}.jar").as_str()),
+            "{run:?}"
+        );
+        assert!(run.iter().all(|arg| arg != "-P"), "{run:?}");
+        for class in [
+            "app/build/classes/kotlin/main/app/MainKt.class",
+            "app/build/classes/kotlin/main/generated/Greetings.class",
+            "app/build/classes/java/main/generated/JavaGreeting.class",
+        ] {
+            assert!(root.join(class).is_file(), "missing {class}");
+        }
+
+        let _ = std::fs::remove_file(log);
+        let result = fixture
+            .build()
+            .property("krusty.negative", "allopen")
+            .tasks([":app:compileKotlin"])
+            .run();
+        let error = match result {
+            Ok(()) => panic!("all-open applied beside KSP was ignored"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("unsupported compiler plugin"), "{error}");
+        assert!(error.contains("allopen"), "{error}");
+        assert!(
+            log.exists(),
+            "the compiler registry must inspect the forwarded plugin classpath"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    const KSP_VERSION: &str = "2.3.10";
+
+    fn write_ksp2_build(root: &Path, plugin_version: &str, kgp_version: &str) {
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            let body = body
+                .replace("PLUGIN_VERSION", plugin_version)
+                .replace("KGP_VERSION", kgp_version)
+                .replace("KSP_VERSION", KSP_VERSION);
+            std::fs::write(path, body).expect("write");
+        };
+        write(
+            "settings.gradle.kts",
+            r#"
+pluginManagement {
+    repositories {
+        providers.gradleProperty("krusty.plugin.repository").orNull?.let {
+            maven { url = uri(it) }
+        }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "ksp2"
+include(":processor")
+include(":app")
+"#,
+        );
+        write(
+            "build.gradle.kts",
+            r#"
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+
+plugins {
+    kotlin("jvm") version "KGP_VERSION" apply false
+    id("com.google.devtools.ksp") version "KSP_VERSION" apply false
+}
+
+subprojects {
+    repositories {
+        mavenCentral()
+    }
+    tasks.withType<KotlinJvmCompile>().configureEach {
+        compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
+    }
+    tasks.withType<JavaCompile>().configureEach {
+        options.release.set(17)
+    }
+}
+"#,
+        );
+        write(
+            "processor/build.gradle.kts",
+            r#"
+plugins {
+    kotlin("jvm")
+}
+
+dependencies {
+    implementation("com.google.devtools.ksp:symbol-processing-api:KSP_VERSION")
+}
+"#,
+        );
+        write(
+            "processor/src/main/resources/META-INF/services/com.google.devtools.ksp.processing.SymbolProcessorProvider",
+            "processor.GreetProcessorProvider\n",
+        );
+        write(
+            "processor/src/main/kotlin/processor/GreetProcessor.kt",
+            r#"package processor
+
+import com.google.devtools.ksp.processing.CodeGenerator
+import com.google.devtools.ksp.processing.Dependencies
+import com.google.devtools.ksp.processing.Resolver
+import com.google.devtools.ksp.processing.SymbolProcessor
+import com.google.devtools.ksp.processing.SymbolProcessorEnvironment
+import com.google.devtools.ksp.processing.SymbolProcessorProvider
+import com.google.devtools.ksp.symbol.KSAnnotated
+import com.google.devtools.ksp.symbol.KSClassDeclaration
+
+class GreetProcessorProvider : SymbolProcessorProvider {
+    override fun create(environment: SymbolProcessorEnvironment): SymbolProcessor =
+        GreetProcessor(environment.codeGenerator)
+}
+
+/** Generates a Kotlin object listing every `@app.Greet` class, and a Java helper it greets with. */
+class GreetProcessor(private val codeGenerator: CodeGenerator) : SymbolProcessor {
+    private var done = false
+
+    override fun process(resolver: Resolver): List<KSAnnotated> {
+        if (done) return emptyList()
+        done = true
+        val classes = resolver.getSymbolsWithAnnotation("app.Greet")
+            .filterIsInstance<KSClassDeclaration>()
+            .toList()
+        val names = classes.map { it.simpleName.asString() }.sorted()
+        val dependencies = Dependencies(true, *classes.mapNotNull { it.containingFile }.toTypedArray())
+        codeGenerator.createNewFile(dependencies, "generated", "Greetings").bufferedWriter().use {
+            it.write("package generated\n\nobject Greetings {\n")
+            it.write("    val names: List<String> = listOf(" + names.joinToString { name -> "\"$name\"" } + ")\n")
+            it.write("}\n")
+        }
+        codeGenerator.createNewFile(dependencies, "generated", "JavaGreeting", "java").bufferedWriter().use {
+            it.write("package generated;\n\npublic final class JavaGreeting {\n")
+            it.write("    public static String hello(String name) {\n        return \"hello \" + name;\n    }\n")
+            it.write("}\n")
+        }
+        return emptyList()
+    }
+}
+"#,
+        );
+        write(
+            "app/build.gradle.kts",
+            r#"
+plugins {
+    kotlin("jvm")
+    id("com.google.devtools.ksp")
+    id("krusty") version "PLUGIN_VERSION"
+    kotlin("plugin.allopen") version "KGP_VERSION" apply false
+    application
+}
+
+if (providers.gradleProperty("krusty.negative").orNull == "allopen") {
+    pluginManager.apply("org.jetbrains.kotlin.plugin.allopen")
+}
+
+dependencies {
+    ksp(project(":processor"))
+}
+
+application {
+    mainClass.set("app.MainKt")
+}
+"#,
+        );
+        write(
+            "app/src/main/kotlin/app/Main.kt",
+            r#"package app
+
+import generated.Greetings
+import generated.JavaGreeting
+
+annotation class Greet
+
+@Greet
+class Alice
+
+@Greet
+class Bob
+
+fun main() {
+    for (name in Greetings.names) {
+        println("greeting=" + JavaGreeting.hello(name))
+    }
 }
 "#,
         );

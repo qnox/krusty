@@ -270,6 +270,7 @@ fn run_backend_passes_after_plugins(
         &mut facts.property_reference_realizations,
     );
     crate::jvm::parameter_assertions::finalize_after_value_class_lowering(ir);
+    crate::jvm::default_parameter_representation::record_defaulted_primitive_bounds(ir);
     // A concatenation appends a `toString()` call's receiver itself, as kotlinc does once its
     // value-class lowering has turned a value class's `toString()` into a static call.
     crate::jvm::concatenated_to_string::flatten_to_string_operands(ir);
@@ -301,6 +302,10 @@ fn run_backend_passes_after_plugins(
         .map_err(|_| SkipReason::DefaultCalls)?;
     }
     crate::jvm::shared_captures::lower_class_capture_slots(ir);
+    // An inline expansion rewrites a type-parameter cell to the call-site element. A lambda that
+    // still uses the shared erased implementation takes the erased holder, and suspension spilling
+    // reads that holder from the cell, so the two have to agree before either pass.
+    crate::jvm::shared_captures::restore_erased_escaping_capture_holders(ir);
     let null_out_dead_spills =
         crate::jvm::runtime_capabilities::null_out_spilled_variable(classpath);
     if !crate::jvm::suspend::lower_suspend(
@@ -721,7 +726,7 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
                     // The semantic handoff says whether a callable body exists; this JVM boundary
                     // owns only its representation as a facade static. Common IR lowering consumes
                     // the same answer, so registration cannot promise a body that lowering omits.
-                    let emitted = syms.source_fn_has_callable_body(file, i as u32, f);
+                    let emitted = syms.source_fn_has_callable_body(file, f);
                     if emitted {
                         fns.push((
                             i as u32,
@@ -1159,7 +1164,7 @@ impl Backend for JvmBackend {
         if let Err(target) = crate::jvm::module_calls::realize(
             &mut file.ir,
             file.stems,
-            &self.cp,
+            &file.classifiers,
             &file.callables,
             &mut property_realizations,
         ) {
@@ -1349,6 +1354,10 @@ pub fn facade_package_metadata_from_ir(
         })
         .collect::<Vec<_>>();
 
+    // A declared accessor's realized name, which `@JvmName` may have changed.
+    let accessor_jvm_name = |function: Option<u32>| {
+        function.map(|function| ir.functions[function as usize].name.clone())
+    };
     let properties = ir
         .package_properties
         .iter()
@@ -1356,27 +1365,30 @@ pub fn facade_package_metadata_from_ir(
             // Which accessors the facade really declares, declared or compiler-default: a private
             // property with default accessors has none, and kotlinc's `JvmPropertySignature` then
             // names neither.
-            let (has_getter, has_setter, setter_function) =
-                match ir.local_property_layouts.get(&declaration.property) {
-                    Some(crate::ir::IrLocalPropertyLayout::TopLevelStorage {
-                        storage,
-                        getter,
-                        setter,
-                        ..
-                    }) => (
-                        getter.is_some() || ir.has_jvm_default_static_getter(*storage),
-                        setter.is_some() || ir.has_jvm_default_static_setter(*storage),
-                        *setter,
-                    ),
-                    Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor { setter, .. }) => {
-                        (true, setter.is_some(), *setter)
-                    }
-                    Some(
-                        crate::ir::IrLocalPropertyLayout::Member { .. }
-                        | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
-                    )
-                    | None => (true, declaration.mutable, None),
-                };
+            let (has_getter, has_setter, getter_function, setter_function) = match ir
+                .local_property_layouts
+                .get(&declaration.property)
+            {
+                Some(crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+                    storage,
+                    getter,
+                    setter,
+                    ..
+                }) => (
+                    getter.is_some() || ir.has_jvm_default_static_getter(*storage),
+                    setter.is_some() || ir.has_jvm_default_static_setter(*storage),
+                    *getter,
+                    *setter,
+                ),
+                Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+                    getter, setter, ..
+                }) => (true, setter.is_some(), Some(*getter), *setter),
+                Some(
+                    crate::ir::IrLocalPropertyLayout::Member { .. }
+                    | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
+                )
+                | None => (true, declaration.mutable, None, None),
+            };
             let companion = declaration.is_companion_extension();
             let field = property_field(ir, declaration);
             let accessor_parameters = declaration
@@ -1396,7 +1408,9 @@ pub fn facade_package_metadata_from_ir(
                 erased_value_class_descriptor(ir, declaration).unwrap_or(ty_descriptor);
             let getter = has_getter.then(|| {
                 (
-                    crate::jvm::names::property_getter_name(&declaration.name),
+                    accessor_jvm_name(getter_function).unwrap_or_else(|| {
+                        crate::jvm::names::property_getter_name(&declaration.name)
+                    }),
                     format!("({descriptor_parameters}){value_descriptor}"),
                 )
             });
@@ -1404,7 +1418,9 @@ pub fn facade_package_metadata_from_ir(
                 let mut parameters = descriptor_parameters;
                 parameters.push_str(&value_descriptor);
                 (
-                    crate::jvm::names::property_setter_name(&declaration.name),
+                    accessor_jvm_name(setter_function).unwrap_or_else(|| {
+                        crate::jvm::names::property_setter_name(&declaration.name)
+                    }),
                     format!("({parameters})V"),
                 )
             });
@@ -1451,6 +1467,11 @@ pub fn facade_package_metadata_from_ir(
                 modifiers: declaration.modifiers,
                 setter_visibility: declaration.setter_visibility,
                 companion,
+                accessor_annotations: ir
+                    .accessor_annotations
+                    .get(&declaration.property)
+                    .map(crate::metadata::AccessorMetadataAnnotations::of)
+                    .unwrap_or_default(),
                 field_name: field.as_ref().and_then(|(name, _)| name.clone()),
                 field_desc: field.map(|(_, descriptor)| descriptor).filter(|physical| {
                     super::metadata_method_signatures::requires_field_signature(

@@ -131,6 +131,7 @@ impl BodyFirChecker<'_> {
         let storage = LocalBinding {
             value: self.allocate_local(),
             ty: storage_ty,
+            mutable: false,
             lateinit: false,
         };
         let storage_name = format!("{name}$delegate");
