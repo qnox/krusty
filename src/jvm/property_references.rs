@@ -191,7 +191,7 @@ pub(super) fn realize(
                 property,
                 getter_name,
                 setter_name,
-                receiver,
+                reflection_owner,
                 ..
             } => module_property(
                 ir.referenced_module_properties
@@ -204,10 +204,8 @@ pub(super) fn realize(
                 (getter_name.as_ref(), setter_name.as_deref()),
                 ModulePropertySite {
                     caller: reference_owner,
-                    dispatch: referenced_member_dispatch(
-                        ir,
-                        receiver.map(crate::fir::ResolvedTy::get),
-                    ),
+                    dispatch: referenced_member_dispatch(ir, *reflection_owner)
+                        .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?,
                 },
             )?,
             FirPropertyReferenceTarget::Classifier {
@@ -740,28 +738,19 @@ struct ReferencedMemberDispatch {
 
 fn referenced_member_dispatch(
     ir: &IrFile,
-    receiver: Option<Ty>,
-) -> Option<ReferencedMemberDispatch> {
-    let class = receiver?.kotlin_class_internal()?;
-    let is_interface = ir
-        .classes
-        .iter()
-        .find(|candidate| candidate.fq_name_id() == class)
-        .map(|candidate| candidate.is_interface || candidate.is_annotation)
-        .or_else(|| {
-            ir.referenced_module_classifiers
-                .get(&class)
-                .map(|classifier| {
-                    matches!(
-                        classifier.kind,
-                        IrClassifierKind::Interface | IrClassifierKind::Annotation
-                    )
-                })
-        })?;
-    Some(ReferencedMemberDispatch {
+    reflection_owner: Option<TypeName>,
+) -> Result<Option<ReferencedMemberDispatch>, ()> {
+    let Some(class) = reflection_owner else {
+        return Ok(None);
+    };
+    let is_interface = matches!(
+        ir.source_classifier_kind(class).ok_or(())?,
+        IrClassifierKind::Interface | IrClassifierKind::Annotation
+    );
+    Ok(Some(ReferencedMemberDispatch {
         class,
         is_interface,
-    })
+    }))
 }
 
 fn module_property(
@@ -852,13 +841,17 @@ fn module_property(
         })
         .or(enclosing)
         .unwrap_or(static_owner);
-    let call_owner = referenced
-        .as_ref()
+    // A protected bridge targets the declaration owner and is later rewritten to the bridge
+    // owner. Keep that physical identity separate from the classifier used for reflection.
+    let call_dispatch = protected_bridge
+        .is_none()
+        .then_some(referenced.as_ref())
+        .flatten();
+    let call_owner = call_dispatch
         .map(|dispatch| dispatch.class)
         .or(enclosing)
         .unwrap_or(static_owner);
-    let owner_is_interface = referenced
-        .as_ref()
+    let owner_is_interface = call_dispatch
         .map(|dispatch| dispatch.is_interface)
         .unwrap_or_else(|| super::module_calls::owner_is_jvm_interface(property));
     // A companion-block receiver names the reflected classifier but is not passed to the accessor.
@@ -1035,5 +1028,17 @@ fn synthesize(
             ty: class,
             field: "INSTANCE",
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_written_owner_without_a_published_kind_is_not_a_declaration_owner_fallback() {
+        let ir = IrFile::default();
+        assert!(referenced_member_dispatch(&ir, None).unwrap().is_none());
+        assert!(referenced_member_dispatch(&ir, Some(type_name("sample/Missing"))).is_err());
     }
 }

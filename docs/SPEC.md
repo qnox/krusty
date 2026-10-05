@@ -3221,10 +3221,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **An inherited property reference is owned by the classifier it was written on.** `A::parent`
   and `a::parent`, where `parent` is declared on a supertype of `A`, reflect `A` and call `A`'s
   accessor. kotlin-reflect substitutes the property type from that owner (`A?`, not the
-  declaration's `T?`). `H<A>::parent` still reflects `H`. A class that implements the declaring
+  declaration's `T?`). `H<A>::parent` still reflects `H`. The checker records that exact written
+  owner on the selected property-reference target; common IR retains it, and JVM realization does
+  not reconstruct it from a receiver type or provider map. A class that implements the declaring
   interface calls the accessor with `invokevirtual` on that class. A classifier declared in
-  another file of the same module is published with its source kind so the reference still names
-  it. Tests:
+  another file of the same module is published with its source kind; one normalized common-IR kind
+  query covers either source location, and a missing published kind fails realization instead of
+  falling back to the declaring owner. Tests:
+  `common_ir_records_the_written_owner_of_each_inherited_property_reference`,
   `an_inherited_property_reference_substitutes_through_the_referenced_classifier` and
   `an_inherited_property_reference_in_another_file_uses_the_referenced_classifier` in
   `tests/inherited_property_reference_e2e.rs`. Corpus:

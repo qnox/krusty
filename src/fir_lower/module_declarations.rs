@@ -355,16 +355,15 @@ pub(super) fn publish_referenced(
                     properties.insert(*property);
                 }
                 FirPropertyReferenceTarget::SpecializedModule {
-                    property, receiver, ..
+                    property,
+                    reflection_owner,
+                    ..
                 } => {
                     properties.insert(*property);
                     // The classifier the reference was written on may be a subtype of the
                     // declaring class, and it may live in another file. Realization names the
                     // member on that classifier.
-                    if let Some(class) = receiver
-                        .as_ref()
-                        .and_then(|ty| ty.get().kotlin_class_internal())
-                    {
+                    if let Some(class) = *reflection_owner {
                         if index.classifier_declaration(class).is_some() {
                             classifiers.insert(class);
                         }
