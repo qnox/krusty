@@ -197,6 +197,23 @@ fn a_member_type_annotation_folds_in_its_classifier_scope() {
     assert_identical("CrateUse", &src, "app/Crate");
 }
 
+/// Declaration annotations with arguments sit beside the type-use ones: publishing the type-use
+/// values must leave the declaration applications to the passes that check them.
+#[test]
+fn a_member_type_annotation_beside_declaration_annotation_arguments_is_recorded() {
+    let src = format!(
+        "{PRELUDE}\n\
+         @Target(AnnotationTarget.PROPERTY) annotation class Note(val text: String)\n\
+         class Box<out V>(private val raw: Any?) {{\n\
+             @Note(\"raw\")\n\
+             val value: Any? get() = raw\n\
+             fun valueOr(fallback: @UnsafeVariance V): V = fallback\n\
+             fun kept(item: @Kept Item): Item = item\n\
+         }}\n"
+    );
+    assert_identical("BoxUse", &src, "app/Box");
+}
+
 /// A typealias's right-hand side with argument-bearing annotations, and its use.
 #[test]
 fn an_annotated_typealias_with_arguments_is_recorded() {

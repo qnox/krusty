@@ -52899,47 +52899,51 @@ impl<'a> Checker<'a> {
                     .insert(declaration, classifier);
             }
         }
-        self.check_classifier_own_annotations(scope, cl, current_owner);
-        for entry in &cl.enum_entries {
-            self.check_annotation_applications_in_declaration_scope(
-                scope,
-                &entry.annotations,
-                &entry.annotation_args,
-            );
+        // Type-use annotation publication folds only the occurrences inside type references; the
+        // declaration applications below belong to the passes that retain their arguments.
+        if !self.fragment.is_type_use_annotations() {
+            self.check_classifier_own_annotations(scope, cl, current_owner);
+            for entry in &cl.enum_entries {
+                self.check_annotation_applications_in_declaration_scope(
+                    scope,
+                    &entry.annotations,
+                    &entry.annotation_args,
+                );
+            }
+            for constructor in &cl.secondary_ctors {
+                self.check_annotation_applications_in_declaration_scope(
+                    scope,
+                    &constructor.annotations,
+                    &constructor.annotation_args,
+                );
+            }
+            // Property and primary-constructor annotations are ordinary checked applications. Their
+            // selected targets and folded arguments are the same payload handed to lowering.
+            for property in cl.body_props.iter() {
+                self.check_annotation_applications_in_declaration_scope(
+                    scope,
+                    &property.annotations,
+                    &property.annotation_args,
+                );
+            }
+            for parameter in &cl.props {
+                self.check_annotation_applications_in_declaration_scope(
+                    scope,
+                    &parameter.annotations,
+                    &parameter.annotation_args,
+                );
+            }
+            // The primary constructor's own annotations (`class C @Mark constructor(…)`).
+            if let Some(annotations) = &cl.primary_ctor_annotations {
+                self.check_annotation_applications_in_declaration_scope(
+                    scope,
+                    annotations,
+                    &cl.primary_ctor_annotation_args,
+                );
+            }
+            // Compiler plugins' own class rules read the applications checked just above.
+            self.check_plugin_class_rules(scope, cl);
         }
-        for constructor in &cl.secondary_ctors {
-            self.check_annotation_applications_in_declaration_scope(
-                scope,
-                &constructor.annotations,
-                &constructor.annotation_args,
-            );
-        }
-        // Property and primary-constructor annotations are ordinary checked applications. Their
-        // selected targets and folded arguments are the same payload handed to lowering.
-        for property in cl.body_props.iter() {
-            self.check_annotation_applications_in_declaration_scope(
-                scope,
-                &property.annotations,
-                &property.annotation_args,
-            );
-        }
-        for parameter in &cl.props {
-            self.check_annotation_applications_in_declaration_scope(
-                scope,
-                &parameter.annotations,
-                &parameter.annotation_args,
-            );
-        }
-        // The primary constructor's own annotations (`class C @Mark constructor(…)`).
-        if let Some(annotations) = &cl.primary_ctor_annotations {
-            self.check_annotation_applications_in_declaration_scope(
-                scope,
-                annotations,
-                &cl.primary_ctor_annotation_args,
-            );
-        }
-        // Compiler plugins' own class rules read the applications checked just above.
-        self.check_plugin_class_rules(scope, cl);
         // Duplicate primary-constructor parameter names are illegal (kotlinc reports a
         // conflicting declaration). `cl.props` holds every primary-ctor parameter (property
         // and plain) in order.
