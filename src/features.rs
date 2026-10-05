@@ -2,7 +2,7 @@
 //! infrastructure's `// LANGUAGE:` directive. Stable features for krusty's Kotlin language level are
 //! enabled by default; directives and command-line flags apply ordered overrides.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::language_version::LanguageVersion;
 
@@ -11,6 +11,9 @@ use crate::language_version::LanguageVersion;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LangFeatures {
     enabled: HashSet<String>,
+    /// Opt-in requirement markers accepted for the whole module (`-opt-in=<fq name>`), spelled as
+    /// kotlinc's `AnalysisFlags.optIn` holds them: dotted fully qualified names.
+    opted_in: BTreeSet<String>,
 }
 
 impl Default for LangFeatures {
@@ -37,7 +40,10 @@ impl LangFeatures {
                 }
             }
         }
-        Self { enabled }
+        Self {
+            enabled,
+            opted_in: BTreeSet::new(),
+        }
     }
 }
 
@@ -95,6 +101,18 @@ impl LangFeatures {
     /// Enable every feature enabled in `other`.
     pub fn extend(&mut self, other: &Self) {
         self.enabled.extend(other.enabled.iter().cloned());
+        self.opted_in.extend(other.opted_in.iter().cloned());
+    }
+
+    /// Accept the opt-in requirement of the marker with this dotted fully qualified name module-wide,
+    /// as kotlinc's `-opt-in=<fq name>` does.
+    pub fn opt_in(&mut self, marker: &str) {
+        self.opted_in.insert(marker.to_string());
+    }
+
+    /// The dotted fully qualified names of the markers accepted module-wide.
+    pub fn opted_in(&self) -> impl Iterator<Item = &str> {
+        self.opted_in.iter().map(String::as_str)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &str> {
@@ -134,6 +152,12 @@ impl LangFeatures {
             // carried the same way.
             if let Some(rest) = l.strip_prefix("// EXPLICIT_API_MODE:") {
                 self.apply_explicit_api_mode(&rest.trim().to_ascii_lowercase());
+            }
+            // `// OPT_IN: a.B, c.D` — the test infrastructure's spelling of `-opt-in` per marker.
+            if let Some(rest) = l.strip_prefix("// OPT_IN:") {
+                for marker in rest.split([' ', ',', '\t']).filter(|s| !s.is_empty()) {
+                    self.opt_in(marker);
+                }
             }
         }
     }

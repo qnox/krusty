@@ -913,6 +913,8 @@ mod function_reference_invoke_e2e;
 mod function_scope_locals_e2e;
 #[path = "function_subclass_invoke_e2e.rs"]
 mod function_subclass_invoke_e2e;
+#[path = "function_supertype_inference_e2e.rs"]
+mod function_supertype_inference_e2e;
 #[path = "function_type_is_e2e.rs"]
 mod function_type_is_e2e;
 #[path = "function_type_supertype_e2e.rs"]
@@ -1485,6 +1487,8 @@ mod suspend_argument_operands_e2e;
 mod suspend_coroutine_inline_e2e;
 #[path = "suspend_function_boxing_e2e.rs"]
 mod suspend_function_boxing_e2e;
+#[path = "suspend_lambda_shared_capture_e2e.rs"]
+mod suspend_lambda_shared_capture_e2e;
 #[path = "suspend_result_nullability_e2e.rs"]
 mod suspend_result_nullability_e2e;
 #[path = "suspend_under_try_e2e.rs"]
@@ -1924,6 +1928,8 @@ mod operator_expected_result_seeding_e2e;
 mod operator_inc_dec_e2e;
 #[path = "operator_index_e2e.rs"]
 mod operator_index_e2e;
+#[path = "opt_in_usage_e2e.rs"]
+mod opt_in_usage_e2e;
 #[path = "optimization_gate_e2e.rs"]
 mod optimization_gate_e2e;
 #[path = "overload_declaration_specificity_e2e.rs"]
