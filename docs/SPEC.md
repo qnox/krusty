@@ -8985,6 +8985,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `Any`, which also changed the generic `Signature` attribute (`<Y:TX;>`).
   Tests: `tests/type_of_e2e.rs` (cross-checked against the reference compiler with kotlin-reflect)
   and `jvm::type_of::tests`; the corpus's `reflection/typeOf`, `ktype` and `typeErasure` cases.
+  A member-extension call publishes its solved method type arguments the same way an ordinary
+  extension call does. Inline expansion of `inline fun <reified T> Receiver.foo` inside the
+  declaring class therefore substitutes `T`; without those arguments the expanded `typeOf<T>()`
+  stayed `reifiedOperationMarker` and threw. Tests:
+  `tests/member_extension_reified_e2e.rs` and
+  `typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt`.
   A generic top-level extension property's accessors are generic methods and carry a `Signature`
   (`<P:Ljava/lang/Object;>(TP;)Lkotlin/reflect/KType;`), as kotlinc emits.
   An anonymous object created inside an inline function is copied at each call that fixes a reified
