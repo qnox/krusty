@@ -871,15 +871,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`ResolvedModuleIndex::publish_inherited_visibility`) and the projected module signatures
   (`publish_inherited_visibilities_to_symbols` inside a module-mutation bracket), so access
   checks, access-bridge synthesis, JVM access flags, and `@Metadata` all see the same visibility.
-  A body-local classifier's override plan is published only when the body declaring it is checked,
-  after the file's members were predeclared, so `finalize_inherited_statuses` re-reads each source
-  function's corrected header once every body has been (accessors stay with
-  `record_accessor_visibilities`). One gap remains there: the ENCLOSING body's own access checks
-  run before that publication, so a read of the local class's inherited-`protected` member from
-  the declaring function is still accepted where kotlinc reports `cannot access 'fun f(): Int': it
-  is protected in file.` — moving the plan publication ahead of the enclosing body's checks is an
-  architectural follow-up
-  (`diagnostics_language_parity_e2e::local_override_visibility_access_matches_kotlinc`, ignored).
+  A body-local classifier's override plan is published only after the bounded body traversal has
+  discovered and checked its local signature. A group that discovers such classifiers therefore
+  publishes those signatures and repeats the ordinary body checker; that second traversal is the
+  authoritative one, so accesses later in the enclosing body see the inherited visibility too.
+  Common-IR predeclaration then consumes the corrected header directly; lowering does not repair
+  visibility after the fact.
   The same pass also fixed a declared `protected abstract` member's JVM flags: abstract-method
   emission hardcoded `ACC_PUBLIC | ACC_ABSTRACT` and now derives the word from the recorded
   visibility (`method_access::abstract_method_access`). Tests:
@@ -893,7 +890,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `jvm_signature` extension, a pre-existing mangling gap krusty has for declared `internal`
   members alike),
   `diagnostics_language_parity_e2e::inherited_override_visibility_access_matches_kotlinc`, and
-  `diagnostics_language_parity_e2e::internal_override_visibility_access_matches_kotlinc_across_modules`.
+  `diagnostics_language_parity_e2e::internal_override_visibility_access_matches_kotlinc_across_modules`,
+  and `diagnostics_language_parity_e2e::local_override_visibility_access_matches_kotlinc`.
 - **Companion member properties — accessors + records.** A companion property's backing field is a
   static on the OUTER class; kotlinc realizes the property as `public final` INSTANCE accessors on
   `C$Companion` (via `access$…$cp` bridges over its private fields) and records it on the
