@@ -77,6 +77,7 @@ pub(super) fn add_cached_serializer_delegate(
         sam: None,
         inline_body: None,
     });
+    ir.note_synthesized_lambda(block);
     let mode = ir.add_expr(IrExpr::EnumEntry {
         classifier: type_name("kotlin/LazyThreadSafetyMode"),
         name: "PUBLICATION".into(),

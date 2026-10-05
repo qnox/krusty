@@ -318,14 +318,23 @@ fn compile_source(
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 
-/// `-Xsam-conversions` for a box file. `// SAM_CONVERSIONS: CLASS` selects the shared Java wrapper;
-/// anything else keeps kotlinc's default `indy`. Lambda literals stay on `-Xlambdas=indy`.
+/// `-Xlambdas` and `-Xsam-conversions` for a box file. `// LAMBDAS: CLASS` and
+/// `// SAM_CONVERSIONS: CLASS` select the class strategy; anything else keeps kotlinc's default
+/// `indy`.
 fn box_lambda_modes<'a>(
     sources: impl IntoIterator<Item = &'a str>,
 ) -> krusty::jvm::ir_emit::LambdaModes {
+    let sources = sources.into_iter().collect::<Vec<_>>();
     let mut modes = krusty::jvm::ir_emit::LambdaModes::default();
+    modes.lambdas = sources
+        .iter()
+        .copied()
+        .map(krusty::conformance::lambda_mode)
+        .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
+        .unwrap_or_default();
     modes.sam_conversions = sources
-        .into_iter()
+        .iter()
+        .copied()
         .map(krusty::conformance::sam_conversion_mode)
         .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
         .unwrap_or_default();
