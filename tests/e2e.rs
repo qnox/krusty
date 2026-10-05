@@ -32,6 +32,8 @@ mod common {
 mod abstract_instantiation_check_e2e;
 #[path = "abstract_member_check_e2e.rs"]
 mod abstract_member_check_e2e;
+#[path = "abstract_member_shape_e2e.rs"]
+mod abstract_member_shape_e2e;
 #[path = "abstract_modifier_consistency_e2e.rs"]
 mod abstract_modifier_consistency_e2e;
 #[path = "adapted_callable_reference_equality_e2e.rs"]
@@ -118,6 +120,8 @@ mod box_runtime_reflect_e2e;
 mod boxed_array_construction_e2e;
 #[path = "boxed_override_results_e2e.rs"]
 mod boxed_override_results_e2e;
+#[path = "boxed_property_getters_e2e.rs"]
+mod boxed_property_getters_e2e;
 #[path = "bracket_lambda_param_e2e.rs"]
 mod bracket_lambda_param_e2e;
 #[path = "branch_soft_keyword_name_e2e.rs"]

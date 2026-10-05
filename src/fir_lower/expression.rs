@@ -1726,9 +1726,8 @@ impl BodyLowering<'_> {
                         has_receiver: conversion.has_receiver,
                         suspend: conversion.suspend,
                         source_suspend: conversion.source_suspend,
-                        overrides_non_primitive_result: conversion.overrides_non_primitive_result,
-                        overridden_non_primitive_results: conversion
-                            .overridden_non_primitive_results
+                        overridden_results: conversion
+                            .overridden_results
                             .iter()
                             .map(|ty| ty.get())
                             .collect(),
