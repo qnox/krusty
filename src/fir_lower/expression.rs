@@ -1034,67 +1034,50 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::SafeCall { receiver, selector } => {
-                self.safe_call_expression(receiver, *selector, expression.ty.get(), None)?
+                self.safe_call_expression(receiver, *selector, expression.ty.get())?
             }
             FirExprKind::Elvis { lhs, rhs } => {
-                let target = expression.ty.get();
-                let fused_safe_call = self.body.expr(*lhs).and_then(|lhs| match &lhs.kind {
-                    FirExprKind::SafeCall { receiver, selector }
-                        if self.body.expr(*selector).is_some_and(|selector| {
-                            selector.ty.get() == target && !selector.ty.get().is_nullable()
-                        }) =>
-                    {
-                        Some((*receiver, *selector))
-                    }
-                    _ => None,
+                let lhs_value = self.expression(*lhs)?;
+                let temporary = self.allocate_temporary();
+                let variable = self.ir.add_expr(IrExpr::Variable {
+                    index: temporary,
+                    ty: self
+                        .body
+                        .expr(*lhs)
+                        .ok_or(FirLoweringFailure::MissingExpression(*lhs))?
+                        .ty
+                        .get(),
+                    init: Some(lhs_value),
+                    named: false,
                 });
-                if let Some((receiver, selector)) = fused_safe_call {
-                    let rhs = self.expression(*rhs)?;
-                    let rhs = self.coerce_result(rhs, target);
-                    self.safe_call_expression(&receiver, selector, target, Some(rhs))?
-                } else {
-                    let lhs_value = self.expression(*lhs)?;
-                    let temporary = self.allocate_temporary();
-                    let variable = self.ir.add_expr(IrExpr::Variable {
-                        index: temporary,
-                        ty: self
-                            .body
-                            .expr(*lhs)
-                            .ok_or(FirLoweringFailure::MissingExpression(*lhs))?
-                            .ty
-                            .get(),
-                        init: Some(lhs_value),
-                        named: false,
-                    });
-                    let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
-                    let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                    let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Eq,
-                        lhs: condition_lhs,
-                        rhs: null,
-                    });
-                    let rhs = self.expression(*rhs)?;
-                    let rhs = self.coerce_result(rhs, expression.ty.get());
-                    let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
-                    let lhs = self.coerce_result(lhs, expression.ty.get());
-                    let result = self.ir.add_expr(IrExpr::When {
-                        branches: vec![(Some(condition), rhs), (None, lhs)],
-                    });
-                    // An elvis over a safe call is one more guard of that call's chain: its left
-                    // value's null check joins the chain's, and every `null` reaches the right side.
-                    let over_safe_call = matches!(
-                        self.ir.expr(lhs_value),
-                        IrExpr::Block { value: Some(guard), .. } if self.ir.null_guards.contains(guard)
-                    );
-                    if over_safe_call {
-                        self.ir.null_guards.insert(result);
-                        self.ir.elvis_safe_call_guards.insert(result);
-                    }
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![variable],
-                        value: Some(result),
-                    })
+                let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
+                let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Eq,
+                    lhs: condition_lhs,
+                    rhs: null,
+                });
+                let rhs = self.expression(*rhs)?;
+                let rhs = self.coerce_result(rhs, expression.ty.get());
+                let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
+                let lhs = self.coerce_result(lhs, expression.ty.get());
+                let result = self.ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(condition), rhs), (None, lhs)],
+                });
+                // An elvis over a safe call is one more guard of that call's chain: its left
+                // value's null check joins the chain's, and every `null` reaches the right side.
+                let over_safe_call = matches!(
+                    self.ir.expr(lhs_value),
+                    IrExpr::Block { value: Some(guard), .. } if self.ir.null_guards.contains(guard)
+                );
+                if over_safe_call {
+                    self.ir.null_guards.insert(result);
+                    self.ir.elvis_safe_call_guards.insert(result);
                 }
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![variable],
+                    value: Some(result),
+                })
             }
             FirExprKind::Throw(value) => {
                 let operand = self.expression(*value)?;
@@ -1861,7 +1844,6 @@ impl BodyLowering<'_> {
         receiver: &FirReceiver,
         selector: FirExprId,
         result_type: Ty,
-        null_result: Option<ExprId>,
     ) -> Result<ExprId, FirLoweringFailure> {
         let receiver_value =
             self.expression_with_conversion(receiver.value, receiver.conversion)?;
@@ -1897,13 +1879,11 @@ impl BodyLowering<'_> {
         });
         let selector = self.expression(selector)?;
         let selector = self.coerce_result(selector, result_type);
-        let null_result = null_result.unwrap_or_else(|| {
-            if result_type == Ty::Unit {
-                self.ir.add_expr(IrExpr::UnitInstance)
-            } else {
-                self.ir.add_expr(IrExpr::Const(IrConst::Null))
-            }
-        });
+        let null_result = if result_type == Ty::Unit {
+            self.ir.add_expr(IrExpr::UnitInstance)
+        } else {
+            self.ir.add_expr(IrExpr::Const(IrConst::Null))
+        };
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
