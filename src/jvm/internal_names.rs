@@ -72,9 +72,109 @@ pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade
     if old_names.is_empty() && synthesized.is_empty() && !rewrites_sibling_calls {
         return;
     }
+    // A value-class bridge calls the member by the spelling it had before this suffix
+    // (`build-<hash>`). The member is now `build-<hash>$<module>`, so the bridge's target has
+    // to move with it. A property reference is the same kind of stored spelling (`getX`).
+    retarget_renamed_bridges(ir, &old_names);
+    rewrite_property_references(ir, &old_names, &synthesized, &suffix);
     suffix_override_bridges(ir, &old_names, &synthesized, &suffix);
     apply_synthesized_accessors(ir, &synthesized, &suffix);
     rewrite_call_names(ir, &old_names, &synthesized, &suffix);
+}
+
+/// Point a bridge at the suffixed member it delegates to.
+///
+/// `target_name` is the physical spelling captured before `$<module>`. When that spelling is the
+/// renamed function, the bridge must call the suffixed name. A public override is not in
+/// `old_names`, so its bridge keeps calling the unsuffixed method.
+fn retarget_renamed_bridges(ir: &mut IrFile, old_names: &HashMap<FunId, String>) {
+    let new_names = old_names
+        .keys()
+        .map(|&function| (function, ir.functions[function as usize].name.clone()))
+        .collect::<HashMap<_, _>>();
+    for class in &mut ir.classes {
+        for bridge in &mut class.bridges {
+            let Some(function) = bridge.target_function else {
+                continue;
+            };
+            let Some(old) = old_names.get(&function) else {
+                continue;
+            };
+            let current = bridge
+                .target_name
+                .as_deref()
+                .unwrap_or(bridge.name.as_str());
+            if current == old {
+                bridge.target_name = new_names.get(&function).cloned();
+            }
+        }
+    }
+}
+
+/// A property reference stores the accessor spelling it will call. The declaration's JVM name
+/// gained `$<module>`; the reference has to call that name.
+fn rewrite_property_references(
+    ir: &mut IrFile,
+    old_names: &HashMap<FunId, String>,
+    synthesized: &[SynthesizedAccessor],
+    suffix: &str,
+) {
+    let mut getters = HashMap::<(TypeName, String), String>::new();
+    let mut setters = HashMap::<(TypeName, String), String>::new();
+    for class in &ir.classes {
+        for property in &class.properties {
+            if let Some(function) = property
+                .getter
+                .filter(|function| old_names.contains_key(function))
+            {
+                let old = old_names[&function].clone();
+                getters.insert(
+                    (class.fq_name, old),
+                    ir.functions[function as usize].name.clone(),
+                );
+            }
+            if let Some(function) = property
+                .setter
+                .filter(|function| old_names.contains_key(function))
+            {
+                let old = old_names[&function].clone();
+                setters.insert(
+                    (class.fq_name, old),
+                    ir.functions[function as usize].name.clone(),
+                );
+            }
+        }
+    }
+    for accessor in synthesized {
+        if let Some(getter) = &accessor.getter {
+            getters.insert(
+                (accessor.owner, getter.clone()),
+                format!("{getter}{suffix}"),
+            );
+        }
+        if let Some(setter) = &accessor.setter {
+            setters.insert(
+                (accessor.owner, setter.clone()),
+                format!("{setter}{suffix}"),
+            );
+        }
+    }
+    for class in &mut ir.classes {
+        let Some(reference) = class.prop_ref.as_mut() else {
+            continue;
+        };
+        let Some(owner) = reference.call_owner_internal.or(reference.owner_internal) else {
+            continue;
+        };
+        if let Some(name) = getters.get(&(owner, reference.getter_name.clone())) {
+            reference.getter_name.clone_from(name);
+        }
+        if let Some(setter) = reference.setter_name.clone() {
+            if let Some(name) = setters.get(&(owner, setter)) {
+                reference.setter_name = Some(name.clone());
+            }
+        }
+    }
 }
 
 /// An internal member of a real class. Facade functions stay on their Kotlin names, as do

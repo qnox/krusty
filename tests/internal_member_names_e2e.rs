@@ -342,6 +342,47 @@ fn sibling_default_call_uses_the_selected_declaration() {
     assert_eq!(result.as_deref(), Some("OK"));
 }
 
+const INTERNAL_VALUE_OVERRIDE: &str = "\
+package demo
+
+@JvmInline
+value class Id(val raw: Int)
+
+abstract class Holder<T> {
+    internal abstract fun build(): T
+}
+
+class IdHolder : Holder<Id>() {
+    override fun build(): Id = Id(7)
+}
+
+@JvmInline
+value class Z(internal val x: Int)
+
+fun box(): String {
+    val held: Holder<Id> = IdHolder()
+    val built = held.build().raw
+    val read = Z::x.get(Z(42))
+    return if (built == 7 && read == 42) \"OK\" else \"built=$built read=$read\"
+}
+";
+
+/// An internal override whose result is a value class keeps the module suffix on the mangled
+/// member (`build-<hash>$main`). The erased bridge calls that member. A property reference to an
+/// internal value-class constructor property calls `getX$main`.
+#[test]
+fn internal_value_class_override_and_property_reference_use_the_suffixed_name() {
+    assert_source_matches(
+        INTERNAL_VALUE_OVERRIDE,
+        "InternalValue",
+        "InternalValue.kt",
+        "main",
+        &["demo/Holder", "demo/IdHolder"],
+    );
+    let result = run_box(INTERNAL_VALUE_OVERRIDE, "InternalValue");
+    assert_eq!(result.as_deref(), Some("OK"));
+}
+
 #[test]
 fn the_default_module_suffix_is_main() {
     assert_matches(

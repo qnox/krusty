@@ -518,6 +518,7 @@ fn superclass_method_bridges(
             target_ret: None,
             barrier_plan: None,
             special,
+            module_name_bridge: internal_name_bridge,
             target_name,
             property_implementation: None,
         });
@@ -738,6 +739,7 @@ fn push_member_extension_accessor_bridges(
         target_ret: None,
         barrier_plan: None,
         special: false,
+        module_name_bridge: false,
         target_name: None,
         property_implementation: None,
     };
@@ -837,6 +839,7 @@ fn push_property_bridge(
             target_ret: None,
             barrier_plan: None,
             special,
+            module_name_bridge: internal_getter_bridge,
             target_name,
             property_implementation: property_implementation(edge, BridgeAccessorRole::Getter),
         });
@@ -883,6 +886,7 @@ fn push_property_bridge(
             target_ret: None,
             barrier_plan: None,
             special: false,
+            module_name_bridge: internal_setter_bridge,
             target_name: setter_target_name,
             property_implementation: property_implementation(edge, BridgeAccessorRole::Setter),
         });

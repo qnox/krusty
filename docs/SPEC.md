@@ -2045,9 +2045,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   callable naming, so a lambda inside the member does not carry it. Top-level functions and
   properties, constructors, and private or protected members stay unmangled; fields stay private
   and unmangled. A same-module override that stays `internal` keeps the mangled name and does not
-  gain a second method. A public override keeps the Kotlin name and also emits
+  gain a second method.   A public override keeps the Kotlin name and also emits
   `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` under the mangled name; that bridge `invokevirtual`s the
-  public method, so a call through the internal declaration reaches the override. A public
+  public method, so a call through the internal declaration reaches the override. An override that
+  stays `internal` is renamed with the member. A signature bridge for that override calls the
+  suffixed method (`build-<hash>$<module>`), not the spelling from before the suffix. A property
+  reference calls the suffixed accessor (`getX$<module>`). A public
   overload of the same Kotlin name is a different method: the call and any bridge select the
   internal signature by its declaration and JVM descriptor, and the public overload keeps its
   name. A default stub is its own signature (`name$default` plus the mask and marker), so a
