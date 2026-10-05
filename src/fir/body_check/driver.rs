@@ -2,6 +2,7 @@
 
 use super::constructors::{
     check_and_dispatch_constructor_body, check_and_dispatch_signature_constructor_defaults,
+    ConstructorBodySource,
 };
 use super::*;
 use crate::ast::{
@@ -437,15 +438,17 @@ fn check_and_dispatch_body_in_session_with_source(
             active,
         ),
         BodyKind::Constructor => check_and_dispatch_constructor_body(
-            file,
-            info,
-            source,
+            ConstructorBodySource {
+                file,
+                info,
+                source,
+                index,
+                active,
+            },
             work,
-            index,
             origins,
             ordinary_sink,
             session,
-            active,
         ),
     };
     if let Err(error) = &result {
