@@ -26,8 +26,25 @@ impl PostponedCallConstraints {
         ty_mentions_param(ty, &self.formals)
     }
 
+    /// Join a new lower bound into `formal`'s current one. Sibling subtypes join to their nearest
+    /// common supertype through the class hierarchy (kotlinc's common-supertype calculation for a
+    /// type variable's lower constraints), not to `Any`: `put("a", Dot()); put("b", Line())` in a
+    /// builder fixes `V` to their sealed parent.
+    fn join_lower(&mut self, source: &dyn SymbolSource, formal: &str, actual: Ty) {
+        let merged = match self.lower.get(formal).copied() {
+            Some(current) => crate::symbol_resolver::merge_inferred_ty_from_symbols(
+                Some(source),
+                crate::symbol_resolver::inference_actual(current),
+                crate::symbol_resolver::inference_actual(actual),
+            ),
+            None => crate::symbol_resolver::inference_actual(actual),
+        };
+        self.lower.insert(formal.to_string(), merged);
+    }
+
     pub(super) fn constrain_assignable(
         &mut self,
+        source: &dyn SymbolSource,
         expected: Ty,
         actual: Ty,
         inferred: &crate::symbol_resolver::AssignabilityConstraints,
@@ -37,13 +54,12 @@ impl PostponedCallConstraints {
             "lambda_apply",
             "postponed constrain expected={expected:?} actual={actual:?}"
         );
-        for (formal, actual) in inferred.lower.iter().filter(|(formal, _)| {
-            self.formals.iter().any(|allowed| allowed == *formal)
+        for (formal, actual) in inferred.lower.iter() {
+            if self.formals.iter().any(|allowed| allowed == formal)
                 && !shadowed_formals.contains(formal.as_str())
-        }) {
-            let merged =
-                crate::symbol_resolver::merge_inferred_ty(self.lower.get(formal).copied(), *actual);
-            self.lower.insert(formal.clone(), merged);
+            {
+                self.join_lower(source, formal, *actual);
+            }
         }
 
         for (formal, upper) in inferred.upper.iter().filter(|(formal, _)| {
@@ -57,29 +73,25 @@ impl PostponedCallConstraints {
         }
     }
 
-    pub(super) fn constrain_equal(&mut self, formal: &str, actual: Ty) {
+    pub(super) fn constrain_equal(&mut self, source: &dyn SymbolSource, formal: &str, actual: Ty) {
         if !self.formals.iter().any(|allowed| allowed == formal) {
             return;
         }
-        let merged =
-            crate::symbol_resolver::merge_inferred_ty(self.lower.get(formal).copied(), actual);
-        self.lower.insert(formal.to_string(), merged);
+        self.join_lower(source, formal, actual);
         self.upper
             .entry(formal.to_string())
             .or_default()
             .push(actual);
     }
 
-    pub(super) fn merge(&mut self, other: Self) {
+    pub(super) fn merge(&mut self, source: &dyn SymbolSource, other: Self) {
         for formal in other.formals {
             if !self.formals.contains(&formal) {
                 self.formals.push(formal);
             }
         }
         for (formal, actual) in other.lower {
-            let merged =
-                crate::symbol_resolver::merge_inferred_ty(self.lower.get(&formal).copied(), actual);
-            self.lower.insert(formal, merged);
+            self.join_lower(source, &formal, actual);
         }
         for (formal, upper) in other.upper {
             self.upper.entry(formal).or_default().extend(upper);

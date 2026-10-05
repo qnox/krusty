@@ -2647,6 +2647,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   does not change the constraint; the box covers it. Tests:
   `tests/delegate_initializer_constraint_e2e.rs`; box:
   `inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt`.
+- **A builder type variable's lower bounds join to their nearest common supertype.**
+  `Shape.Group(buildMap { put("a", Dot(1)); put("b", Line("x")); if (flag) put("c", extra) })`,
+  with `class Group(val entries: Map<String, Shape>)` and `Dot`, `Line`, `Group` subclasses of the
+  sealed `Shape`, compiles under kotlinc: PCLA collects `Dot <: V`, `Line <: V`, `Group <: V` from the
+  `put` calls and fixes `V` to their common supertype `Shape`, which satisfies the expected
+  `Map<String, Shape>`. krusty's postponed-call frame (`PostponedCallConstraints`,
+  `src/resolve/postponed_constraints.rs`) joined two different lower bounds with the
+  hierarchy-blind `merge_inferred_ty`, which erases any pair of distinct classes to `Any`, and then
+  reported `argument type mismatch: actual type is 'Map<String, Any>', but 'Map<String, Shape>'
+  was expected.` Every lower-bound join in that frame — an argument constraint, an expected-result
+  binding, and a finished lambda's constraints merged into the call — now goes through the
+  symbol-aware `merge_inferred_ty_from_symbols`, which returns the nearest shared supertype from
+  the class hierarchy and still falls back to `Any` when the bounds share none. An unqualified
+  constructor call (`Wrapper(buildMap { … })`) already took `V` from the parameter type; the
+  qualified nested-class constructor `Shape.Group(…)` solved the builder from its lower bounds
+  alone, which is where the erased join surfaced. The same holds for a repository-owned
+  `fun <E> collect(block: Collector<E>.() -> Unit): List<E>`. Known gap: the
+  implicit-return-type engine (`streaming_signature_bridge`) still substitutes the first lower
+  bound into later calls in the lambda, so `fun f() = collect { add(Dot(1)); add(Line("x")) }`
+  without a declared result type still reports `unresolved reference 'add'`. Byte gap: for the
+  qualified call kotlinc emits `checkcast Shape` after each discarded `put` result (the solved
+  `V?`), krusty does not; the test compares diagnostics and the run, not the facade's code. Test:
+  `tests/builder_sibling_lower_bounds_e2e.rs`.
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
   (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
   `<T> assertDoesNotThrow(ThrowingSupplier<T>)` (JUnit, imported as a static) both take a `{ … }`
