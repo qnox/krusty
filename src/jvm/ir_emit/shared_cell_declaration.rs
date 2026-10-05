@@ -109,7 +109,7 @@ impl Emitter<'_> {
             // and the `putfield` returns to the declaration's.
             load(holder, slot, code);
             self.mark_expression_start(value, code);
-            self.emit_value(value, code);
+            self.emit_element_value(elem, value, code);
             debug_lines::mark_statement(self.ir, declaration, code);
             self.put_element(&elem, code);
         }
@@ -140,9 +140,22 @@ impl Emitter<'_> {
         } else {
             self.emit_new_holder(class, code);
             code.dup();
-            self.emit_value(init, code);
+            self.emit_element_value(elem, init, code);
         }
         self.put_element(&elem, code);
+    }
+
+    /// Emit a value stored into a holder's `element`. An `ObjectRef` stores `Object`, so a
+    /// suspension point's erased result is stored as it is, without the narrowing kotlinc writes
+    /// only for a consumer that needs it.
+    pub(super) fn emit_element_value(&mut self, elem: Ty, value: ExprId, code: &mut CodeBuilder) {
+        let object = Ty::obj("java/lang/Object");
+        if ir_ty_to_jvm(&elem).is_reference()
+            && self.emit_erased_suspension_result(value, object, code)
+        {
+            return;
+        }
+        self.emit_value(value, code);
     }
 
     fn emit_new_holder(&mut self, class: &str, code: &mut CodeBuilder) {
