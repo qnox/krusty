@@ -54,6 +54,7 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::PrimitiveCompare
         | crate::libraries::CompilerIntrinsic::BooleanNot
         | crate::libraries::CompilerIntrinsic::PrimitiveHashCode
+        | crate::libraries::CompilerIntrinsic::PrimitiveEquals
         | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
         | crate::libraries::CompilerIntrinsic::Assert
         | crate::libraries::CompilerIntrinsic::AssertFailsWith
@@ -750,7 +751,7 @@ impl BodyFirChecker<'_> {
             expression,
             arguments,
             &parameters,
-            extension.context_args.iter().map(Some),
+            extension.context_args.iter().map(Option::as_ref),
             extension.vararg_index,
         )?;
         Ok(FirExprKind::Call(FirCall {
@@ -1006,7 +1007,7 @@ impl BodyFirChecker<'_> {
                     target,
                     substitutions,
                     true,
-                    selected.context_args.iter().cloned().map(Some).collect(),
+                    selected.context_args.clone(),
                     selected.vararg_index,
                     parameters,
                 ))
@@ -1205,7 +1206,7 @@ impl BodyFirChecker<'_> {
                     context_parameters,
                     value_parameters: parameters,
                     vararg_index: selected.vararg_index,
-                    context_arguments: selected.context_args.iter().cloned().map(Some).collect(),
+                    context_arguments: selected.context_args.clone(),
                 })
             }
             Some(ResolvedCall::MemberExtension {

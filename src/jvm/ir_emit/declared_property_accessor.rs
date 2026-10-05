@@ -92,11 +92,14 @@ pub(super) fn emit(
                 "Lorg/jetbrains/annotations/NotNull;"
             }
         });
-        cw.reserve_method_pool(
+        let annotations = &property.accessor_annotations.getter;
+        cw.reserve_method_pool_with_annotations(
             &getter,
             &getter_desc,
             sig.as_deref(),
             &getter_ann.into_iter().collect::<Vec<_>>(),
+            annotations,
+            &[],
         );
         let mut g = CodeBuilder::new(1);
         let physical_name = instance_field_jvm_name(ir, c, field);
@@ -107,12 +110,16 @@ pub(super) fn emit(
             g.aload(0);
             g.getfield(fref, slot_words(field_jt) as i32);
         }
-        // A `lateinit var` read throws while the field is still null — kotlinc inserts this at every
-        // access, and the accessor is an access like any other.
+        // kotlinc's `LateinitLowering` getter: return the value, or throw and then
+        // `aconst_null; areturn` so the null path has a reference for the verifier.
         if field.is_lateinit() {
             g.dup();
-            let lbl = g.new_label();
-            g.ifnonnull(lbl);
+            let missing = g.new_label();
+            g.ifnull(missing);
+            emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, getter_jt);
+            emit_return(getter_jt, &mut g);
+            g.bind(missing);
+            g.pop();
             g.push_string(&field.name, cw);
             let m = cw.methodref(
                 "kotlin/jvm/internal/Intrinsics",
@@ -120,16 +127,17 @@ pub(super) fn emit(
                 "(Ljava/lang/String;)V",
             );
             g.invokestatic(m, 1, 0);
-            // The join needs a stackmap frame: `this` in local 0, the (non-null on the taken path)
-            // field value on the stack.
-            g.bind(lbl);
+            g.aconst_null();
+            emit_return(getter_jt, &mut g);
+        } else {
+            emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, getter_jt);
+            emit_return(getter_jt, &mut g);
         }
-        emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, getter_jt);
-        emit_return(getter_jt, &mut g);
         g.ensure_locals(1);
         g.link();
         let access = default_accessor_access(property.visibility, overridable);
         cw.add_method_sig(access, &getter, &getter_desc, &g, sig.as_deref());
+        super::function_annotations::emit_declared(cw, annotations, &getter, &getter_desc);
         // The class-wide pass annotates accessors by their backing field's type, which a boxed
         // getter result does not have.
         if boxed_getter {
@@ -153,11 +161,14 @@ pub(super) fn emit(
                         "Lorg/jetbrains/annotations/NotNull;"
                     }
                 });
-            cw.reserve_method_pool(
+            let annotations = &property.accessor_annotations.setter;
+            cw.reserve_method_pool_with_annotations(
                 &setter,
                 &setter_desc,
                 sig.as_deref(),
                 &setter_ann.into_iter().collect::<Vec<_>>(),
+                annotations,
+                &[],
             );
             // `<set-?>` is the setter value parameter's JVM debug name even when no non-null guard
             // uses it as a String constant. Its UTF8 belongs to this method's header/debug window,
@@ -200,6 +211,7 @@ pub(super) fn emit(
             st.link();
             let access = default_accessor_access(property.setter_visibility, overridable);
             cw.add_method_sig(access, &setter, &setter_desc, &st, sig.as_deref());
+            super::function_annotations::emit_declared(cw, annotations, &setter, &setter_desc);
             seed_accessor_locals(c, fq_name, cw);
         }
     }

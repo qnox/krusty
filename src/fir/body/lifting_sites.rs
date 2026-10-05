@@ -39,3 +39,36 @@ impl FirLiftingSite {
         }
     }
 }
+
+impl super::FirBody {
+    pub fn set_lifting_site(&mut self, site: FirLiftingSite) {
+        assert!(
+            self.lifting_site.replace(site).is_none(),
+            "a FIR body has one lifting site"
+        );
+    }
+
+    pub fn lifting_site(&self) -> Option<&FirLiftingSite> {
+        self.lifting_site.as_ref()
+    }
+
+    pub fn add_bodiless_lifting_site(&mut self, site: FirLiftingSite) {
+        self.bodiless_lifting_sites.push(site);
+    }
+
+    /// Every lifting site this body and the callables nested in it declare, its own included.
+    pub fn collect_lifting_sites<'a>(&'a self, out: &mut Vec<&'a FirLiftingSite>) {
+        out.extend(self.lifting_site.iter());
+        out.extend(self.bodiless_lifting_sites.iter());
+        for statement in &self.statements {
+            if let super::FirStatementKind::LocalFunction { body, .. } = &statement.kind {
+                body.collect_lifting_sites(out);
+            }
+        }
+        for expression in &self.expressions {
+            if let super::FirExprKind::Lambda { body, .. } = &expression.kind {
+                body.collect_lifting_sites(out);
+            }
+        }
+    }
+}

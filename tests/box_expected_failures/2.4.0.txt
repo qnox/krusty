@@ -4,7 +4,6 @@
 # The goal is to empty this list of expected failures.
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
-coroutines/tailCallOptimizations/crossinline.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
 reflection/typeOf/intersectionType.kt

@@ -338,11 +338,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { kotlin: 2.4.0,  gradle: 7.6.3 }
-          - { kotlin: 2.4.0,  gradle: 9.5.0 }
-          - { kotlin: 2.4.10, gradle: 8.14.3 }
-          - { kotlin: 2.4.20, gradle: 7.6.3 }
-          - { kotlin: 2.4.20, gradle: 9.7.0 }
+          # KSP's Gradle plugin does not load on Gradle 7.6 (its build-script metadata is newer than
+          # Gradle 7.6's embedded Kotlin compiler reads), so the KSP2 test runs on the other lanes.
+          - { kotlin: 2.4.0,  gradle: 7.6.3,  ksp: false }
+          - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true }
+          - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true }
+          - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false }
+          - { kotlin: 2.4.20, gradle: 9.7.0,  ksp: true }
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -387,10 +389,13 @@ jobs:
           KRUSTY_GRADLE_USER_HOME: ${{ runner.temp }}/krusty-gradle-user-home
         run: |
           chmod +x krusty
+          tests="kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty"
+          tests="$tests serialization_plugin_compiles_through_krusty"
+          if [ "${{ matrix.ksp }}" = true ]; then
+            tests="$tests ksp2_generated_sources_compile_through_krusty"
+          fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
-            cargo test --profile gate -p krusty-build -- --ignored \
-              kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty \
-              serialization_plugin_compiles_through_krusty
+            cargo test --profile gate -p krusty-build -- --ignored $tests
 
   # Build the release binaries per OS/arch (master only). Independent of conformance so it can run in
   # parallel; publishing is what waits on the gate.

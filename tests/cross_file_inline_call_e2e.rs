@@ -166,18 +166,18 @@ fn same_file_inline_still_splices() {
     common::expect_box_ok_with_stdlib(SRC, "same_file_inline_splice_kept");
 }
 
-/// The `contracts/kt47168.kt` shape: an inline fn whose body carries an ALIASED contract intrinsic
+/// The `contracts/kt47168.kt` shape: an inline fn whose body carries the contract intrinsic
 /// (erased, not a closure) and a tail value-return is safe standalone — it lowers + emits as a
-/// facade static, so the cross-file call links. Resolving the alias to semantic callable identity
-/// keeps inline eligibility consistent with checker erasure; the effects themselves are unneeded
-/// for codegen here.
+/// facade static, so the cross-file call links; the effects themselves are unneeded for codegen
+/// here. kotlinc reads a contract only from a call spelled `contract`, so an import alias of the
+/// intrinsic is rejected as a misplaced contract instead (`contract_declarations_e2e`).
 #[test]
 fn contract_and_tail_return_inline_fun_called_cross_file() {
     const LIB: &str = "// OPT_IN: kotlin.contracts.ExperimentalContracts\n\
                        import kotlin.contracts.InvocationKind\n\
-                       import kotlin.contracts.contract as declareContract\n\
+                       import kotlin.contracts.contract\n\
                        inline fun foo(x: () -> String, y: () -> String): String {\n\
-                       \x20   declareContract {\n\
+                       \x20   contract {\n\
                        \x20       callsInPlace(x, InvocationKind.EXACTLY_ONCE)\n\
                        \x20       callsInPlace(y, InvocationKind.EXACTLY_ONCE)\n\
                        \x20   }\n\

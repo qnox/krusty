@@ -1225,15 +1225,22 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_if(&mut self) -> ExprId {
-        let start = self.tok().span;
-        self.bump(); // 'if'
+    /// The parenthesized condition of an `if`, `while` or `do`-`while`. Inside the parentheses a
+    /// newline is insignificant, so the condition may start and end on a line of its own:
+    /// `while (\n    true\n)`.
+    pub(super) fn parse_parenthesized_condition(&mut self) -> ExprId {
         self.expect(TokenKind::LParen, "'('");
-        // The condition may start (and end) on a fresh line: `if(\n  a && b\n)`. Skip newlines around it.
         self.skip_newlines();
         let cond = self.parse_expr();
         self.skip_newlines();
         self.expect(TokenKind::RParen, "')'");
+        cond
+    }
+
+    fn parse_if(&mut self) -> ExprId {
+        let start = self.tok().span;
+        self.bump(); // 'if'
+        let cond = self.parse_parenthesized_condition();
         self.skip_newlines();
         let then_branch = self.parse_branch(true);
         // optional else (may be on the next line)

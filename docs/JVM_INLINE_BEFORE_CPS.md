@@ -504,6 +504,7 @@ Working today, each with a fixture in `tests/suspend_in_spliced_inline_e2e.rs`:
 | A body spliced into a `try` region (`runCatching { susp() }`) | `a_suspension_inside_a_spliced_try_region_runs` |
 | A value-`try` in the spliced body around the suspension (`try { susp() } catch …`) | `a_value_try_whose_arm_is_the_suspension_runs`, `…_computes_with_the_suspension_runs`, `…_binds_the_suspension_first_runs` |
 | That `try`'s `catch` running, on the direct path and on a failed resumption | `a_value_try_catches_a_throw_on_the_direct_path`, `a_value_try_catches_a_failed_resumption` |
+| That `try` under the lambda's result coercion (`mapNotNull { try { Out(susp()) } catch … }`) | `tests/spliced_coerced_value_try_e2e.rs` |
 | An accumulator the loop REWRITES across the suspension (`fold`, `reduce`) | `an_accumulator_rewritten_across_a_spliced_suspension_runs`, `stdlib_fold_and_reduce_with_a_suspending_operation_run` |
 | A spliced lambda's own parameter snapshot, typed in the lambda's numbering | `a_snapshot_of_a_spliced_lambda_parameter_is_typed_by_the_lambda` |
 | A `null`-typed local or operand across the suspension | `a_null_{local,operand}_…_is_rematerialized` |
@@ -515,7 +516,13 @@ Working today, each with a fixture in `tests/suspend_in_spliced_inline_e2e.rs`:
 (`desugar_spliced_value_try` in `src/jvm/suspend/hoisting.rs`), before the body is hoisted. A
 suspending arm's value is the call's raw `Object`; stored straight into the `try`'s result slot it
 would be described as a scalar the frame never had. The desugar binds each arm to a typed local
-first. The body's own tail value is typed by the `try` itself (or the coercion around it), never by
+first. A lambda whose declared result is wider than its body (`mapNotNull`'s `(T) -> R?` given an
+`Out` body) arrives with that result coercion around its WHOLE body block, `coerce(Block { try { … }
+})`; when the block's value is a suspending `try`, the coercion is moved onto that value first, so the
+`try` is recognized and the coercion applied to each arm
+(`tests/spliced_coerced_value_try_e2e.rs`). Left outside, the `try` stayed a value, the body was
+declined, and the function was emitted with no continuation to pass (`call arity mismatch`).
+The body's own tail value is typed by the `try` itself (or the coercion around it), never by
 the enclosing function's return type — that type is right only for a non-local `return` inside the
 body, which is the one statement it is used for. A value-`try` nested deeper in an expression
 (`1 + try { … }`) is not reached and still declines (`suspends_in_a_value_try`, checked AFTER
