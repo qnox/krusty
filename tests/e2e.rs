@@ -1041,12 +1041,42 @@ mod inline_deep_coverage_e2e;
 mod inline_end_branch_e2e;
 #[path = "inline_lambda_as_value_e2e.rs"]
 mod inline_lambda_as_value_e2e;
+#[path = "inline_lambda_caller_loop_jump_e2e.rs"]
+mod inline_lambda_caller_loop_jump_e2e;
+#[path = "inline_lambda_captured_literal_e2e.rs"]
+mod inline_lambda_captured_literal_e2e;
+#[path = "inline_lambda_companion_initializer_e2e.rs"]
+mod inline_lambda_companion_initializer_e2e;
 #[path = "inline_lambda_expansion_e2e.rs"]
 mod inline_lambda_expansion_e2e;
+#[path = "inline_lambda_initializer_values_e2e.rs"]
+mod inline_lambda_initializer_values_e2e;
+#[path = "inline_lambda_local_delegate_e2e.rs"]
+mod inline_lambda_local_delegate_e2e;
+#[path = "inline_lambda_local_table_order_e2e.rs"]
+mod inline_lambda_local_table_order_e2e;
+#[path = "inline_lambda_nested_frame_return_e2e.rs"]
+mod inline_lambda_nested_frame_return_e2e;
+#[path = "inline_lambda_nested_return_e2e.rs"]
+mod inline_lambda_nested_return_e2e;
+#[path = "inline_lambda_placed_capture_suspension_e2e.rs"]
+mod inline_lambda_placed_capture_suspension_e2e;
 #[path = "inline_lambda_result_boxing_e2e.rs"]
 mod inline_lambda_result_boxing_e2e;
+#[path = "inline_lambda_resumed_value_class_e2e.rs"]
+mod inline_lambda_resumed_value_class_e2e;
 #[path = "inline_lambda_return_scope_e2e.rs"]
 mod inline_lambda_return_scope_e2e;
+#[path = "inline_lambda_sibling_value_class_e2e.rs"]
+mod inline_lambda_sibling_value_class_e2e;
+#[path = "inline_lambda_suspend_lambda_e2e.rs"]
+mod inline_lambda_suspend_lambda_e2e;
+#[path = "inline_lambda_suspend_member_e2e.rs"]
+mod inline_lambda_suspend_member_e2e;
+#[path = "inline_lambda_unintercepted_probe_e2e.rs"]
+mod inline_lambda_unintercepted_probe_e2e;
+#[path = "inline_lambda_value_argument_e2e.rs"]
+mod inline_lambda_value_argument_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
 #[path = "inline_object_regeneration_e2e.rs"]
@@ -1447,6 +1477,8 @@ mod setter_return_line_e2e;
 mod splice_nullable_value_class_lambda_e2e;
 #[path = "super_delegation_line_e2e.rs"]
 mod super_delegation_line_e2e;
+#[path = "suspend_argument_operands_e2e.rs"]
+mod suspend_argument_operands_e2e;
 #[path = "suspend_coroutine_inline_e2e.rs"]
 mod suspend_coroutine_inline_e2e;
 #[path = "suspend_function_boxing_e2e.rs"]
@@ -1821,6 +1853,8 @@ mod redundant_null_check_e2e;
 mod redundant_null_jumps_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]
 mod renamed_builtin_bridge_owner_e2e;
+#[path = "renamed_builtin_property_null_check_e2e.rs"]
+mod renamed_builtin_property_null_check_e2e;
 #[path = "source_when_nop_e2e.rs"]
 mod source_when_nop_e2e;
 #[path = "spill_order_e2e.rs"]

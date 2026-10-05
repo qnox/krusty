@@ -132,6 +132,7 @@ use operator_calls::{range_operator, ResolvedInRangeComparison};
 mod overload_diagnostics;
 mod override_plans;
 mod platform_value_narrowing;
+pub use platform_value_narrowing::PlatformNarrowing;
 mod plugin_class_checks;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
@@ -9502,19 +9503,6 @@ fn ty_of_ref_with(
     base
 }
 
-/// Result of typechecking a file: the type assigned to every expression node.
-/// Where a PLATFORM value is committed to a declared non-null type, as far as the guard's SHAPE is
-/// concerned. Measured against kotlinc 2.4.10: a declared type propagates into a conditional, so each
-/// branch is checked where it produces its value; a value argument does not, so the merged value is
-/// checked instead — which is why the two are distinguished rather than treated as one position set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlatformNarrowing {
-    /// A property/local with an explicit type, a return, an assignment.
-    Declaration,
-    /// A value argument (including the parameter of a non-null-typed lambda).
-    Argument,
-}
-
 /// A functional-interface conversion selected for one expression, plus the suspension of the
 /// value being converted. The signature is the target method; `source_suspend` is the value's own
 /// callable view and is false when a non-suspend value is adapted to a suspend method.
@@ -9524,6 +9512,7 @@ pub(crate) struct ResolvedSamConversion {
     pub source_suspend: bool,
 }
 
+/// Result of typechecking a file: the type assigned to every expression node.
 pub struct TypeInfo {
     pub expr_types: Vec<Ty>,
     /// Exact function signature of each callable-reference expression, captured before an expected
@@ -13418,6 +13407,7 @@ impl<'a> Checker<'a> {
                     self.resolved_call_type_args
                         .insert(call, candidate.type_arguments.clone());
                 }
+                self.narrow_member_extension_receiver(call, &candidate);
                 self.resolved_calls.insert(
                     call,
                     candidate.resolved_call(dispatch_receiver, extension_receiver, interface),
@@ -54107,6 +54097,21 @@ impl<'a> Checker<'a> {
                             })
                         });
                     }
+                    // A body group may be checked again after publishing a local classifier's
+                    // inherited visibility. Its frozen override plan is then authoritative: do
+                    // not try to rediscover the same edge from the transient local scope, whose
+                    // providers were consumed by the first traversal. Bind this parser method to
+                    // its stable declaration and consume the exact recorded implementation edge.
+                    if !overrides_super {
+                        overrides_super = self
+                            .resolved_index
+                            .zip(self.active_declarations)
+                            .is_some_and(|(index, active)| {
+                                override_plans::published_function_override_matches(
+                                    index, active, self.file, internal, m,
+                                )
+                            });
+                    }
                     if !is_any_member(m) && !overrides_super {
                         self.diags.error(
                             m.override_span
@@ -63842,11 +63847,13 @@ impl<'a> Checker<'a> {
                 if let Some(fname) = op.arith_operator_name() {
                     match self.member_extension_operator_call(
                         scope,
-                        e,
+                        CallArgs {
+                            call: e,
+                            args: &[rhs],
+                            arg_tys: &[rt],
+                        },
                         lt,
                         fname,
-                        &[rhs],
-                        &[rt],
                         operator_span,
                     ) {
                         Ok(Some((ret, target))) => {
@@ -63978,11 +63985,13 @@ impl<'a> Checker<'a> {
             {
                 match self.member_extension_operator_call(
                     scope,
-                    e,
+                    CallArgs {
+                        call: e,
+                        args: &[rhs],
+                        arg_tys: &[rt],
+                    },
                     lt,
                     "compareTo",
-                    &[rhs],
-                    &[rt],
                     operator_span,
                 ) {
                     Ok(Some((Ty::Int, target))) => {
@@ -66773,58 +66782,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Select an operator declared as a member extension of an implicit dispatch receiver. This is
-    /// the same candidate engine used by explicit member-extension calls; the only syntax-specific
-    /// work here is recording the selected call under the operator convention key.
-    fn member_extension_operator_call(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        extension_receiver: Ty,
-        name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
-        span: Span,
-    ) -> Result<Option<(Ty, ResolvedCall)>, ()> {
-        let request = MemberExtensionFunctionCall {
-            extension_receiver,
-            result_constraint: CallResultConstraint::direct(None),
-            name,
-            args,
-            arg_tys,
-            arg_names: None,
-            explicit_type_args: &[],
-            trailing_lambda: false,
-        };
-        let candidate = match self.member_extension_function(
-            scope,
-            request,
-            MemberExtensionSelection::Operators,
-        ) {
-            Ok(Some(candidate)) => candidate,
-            Ok(None) => return Ok(None),
-            Err(()) => {
-                self.diags.error(
-                    span,
-                    format!("overload resolution ambiguity for operator '{name}'"),
-                );
-                return Err(());
-            }
-        };
-        if candidate.visibility != Visibility::Public {
-            self.reject_if_inaccessible(candidate.visibility, name, candidate.owner, span);
-        }
-        let interface = self
-            .resolver()
-            .classifier(candidate.owner)
-            .is_some_and(|shape| shape.is_interface());
-        let dispatch_receiver = self.implicit_receiver_selection(candidate.dispatch_receiver);
-        let result = candidate.ret;
-        let call = candidate.resolved_call(dispatch_receiver, extension_receiver, interface);
-        self.mark_extension_receiver_used(expression, candidate.dispatch_receiver);
-        Ok(Some((result, call)))
-    }
-
     /// The type of a builtin operator-method call on a primitive receiver (`5.plus(2)`,
     /// `a.compareTo(b)`, `a shl b`) — or `None` when the name/args aren't a builtin operation.
     /// A builtin member BEATS any same-named user extension (Kotlin: members always win); an
@@ -67253,6 +67210,8 @@ impl<'a> Checker<'a> {
         let selected_receiver = selected.receiver.unwrap_or(rt);
         let receiver_expression = crate::ast::explicit_call_receiver(self.file, e);
         if let Some(receiver_expression) = receiver_expression {
+            let declared = selected.generic_sig.as_ref().and_then(|sig| sig.receiver);
+            self.narrow_extension_receiver(e, receiver_expression, declared, selected_receiver);
             if selected_receiver != rt
                 && self
                     .unit_coerced_lambda_type(receiver_expression, selected_receiver, rt)
@@ -67944,16 +67903,17 @@ impl<'a> Checker<'a> {
         {
             if matches!(
                 selected.member.visibility,
-                Visibility::PackagePrivate | Visibility::Protected
+                Visibility::Internal | Visibility::PackagePrivate | Visibility::Protected
             ) {
-                let visibility = if selected.member.visibility == Visibility::Protected {
-                    "protected"
-                } else {
-                    "package-private"
+                let visibility = match selected.member.visibility {
+                    Visibility::Internal => "internal",
+                    Visibility::PackagePrivate => "package-private",
+                    Visibility::Protected => "protected",
+                    Visibility::Private | Visibility::Public => unreachable!(),
                 };
                 self.diags.error(
                     self.call_callee_name_span(call),
-                    Self::callable_access_message(
+                    self.callable_access_message(
                         false,
                         &selected.member.name,
                         &selected.member.params,
@@ -67966,7 +67926,7 @@ impl<'a> Checker<'a> {
             } else {
                 let visibility = match selected.member.visibility {
                     Visibility::Private => "private",
-                    Visibility::Internal => "internal",
+                    Visibility::Internal => unreachable!(),
                     Visibility::Public => "public",
                     Visibility::Protected | Visibility::PackagePrivate => unreachable!(),
                 };
@@ -68593,7 +68553,17 @@ impl<'a> Checker<'a> {
         }
         let member_extension = match site {
             Some(IncDecSite::Expression(expression)) => self
-                .member_extension_operator_call(scope, expression, recv, name, &[], &[], span)?
+                .member_extension_operator_call(
+                    scope,
+                    CallArgs {
+                        call: expression,
+                        args: &[],
+                        arg_tys: &[],
+                    },
+                    recv,
+                    name,
+                    span,
+                )?
                 .map(|(_, target)| target),
             Some(IncDecSite::Statement(statement)) => {
                 self.member_extension_zero_arg_operator(scope, statement, recv, name, span)?
@@ -71388,6 +71358,7 @@ impl<'a> Checker<'a> {
     }
 
     fn callable_access_message(
+        &self,
         is_static: bool,
         name: &str,
         params: &[Ty],
@@ -71398,10 +71369,22 @@ impl<'a> Checker<'a> {
     ) -> String {
         let static_prefix = if is_static { "static " } else { "" };
         let params = Self::access_parameter_display(params, param_names);
+        let container = self
+            .resolved_index
+            .and_then(|index| {
+                index
+                    .classifier_declaration(owner)
+                    .map(|declaration| (index, declaration))
+            })
+            .and_then(|(index, declaration)| index.declaration_header(declaration))
+            .filter(|header| header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS))
+            .map_or_else(
+                || format!("'{}'", Self::access_owner_display(owner)),
+                |_| "file".to_string(),
+            );
         format!(
-            "cannot access '{static_prefix}fun {name}({params}): {}': it is {visibility} in '{}'.",
+            "cannot access '{static_prefix}fun {name}({params}): {}': it is {visibility} in {container}.",
             ret.source_name(),
-            Self::access_owner_display(owner),
         )
     }
 
@@ -71450,7 +71433,7 @@ impl<'a> Checker<'a> {
         }
         self.diags.error(
             self.call_callee_name_span(call),
-            Self::callable_access_message(
+            self.callable_access_message(
                 true,
                 name,
                 &selected.semantic_params(),

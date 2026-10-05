@@ -4,6 +4,7 @@
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
 mod builtin_classifier_shapes;
+mod builtin_property_realization;
 mod builtins_customizer;
 mod catalog_presence;
 mod classifier_facts;
@@ -3762,57 +3763,13 @@ impl JvmLibraries {
                 || mapped_builtin_property(cn, name)
                 || mapped_property.is_some())
         {
-            if let Some(function) = functions.overloads.iter().find(|function| {
-                function.callable.params.is_empty()
-                    && mapped_property.as_ref().is_none_or(|mapping| {
-                        function.callable.physical_name() == mapping.physical_name
-                            && function.callable.descriptor == mapping.descriptor
-                    })
-            }) {
-                let mut getter = function.callable.clone();
-                // `FunctionInfo` keeps Kotlin declaration modality separately from its physical
-                // callable handle. A builtin property synthesized from the corresponding zero-arg
-                // member must restore that semantic fact: mapped `java.util.Collection.size()` is
-                // a usable JVM method handle, while Kotlin `Collection.size` remains abstract and
-                // therefore cannot compete with a concrete interface default in `super.size`.
-                getter.is_abstract = function.flags.is_abstract;
-                let ty = function
-                    .generic_sig
-                    .as_ref()
-                    .map(|signature| signature.ret)
-                    .unwrap_or_else(|| function.ret.apply(getter.ret));
-                getter.ret = ty;
-                overloads.push(PropertyInfo {
-                    return_value_status: function.flags.return_value_status,
-                    name: name.to_string(),
-                    kind: PropKind::Member,
-                    receiver: Some(recv),
-                    associated_classifier: None,
-                    associated_access_owner: None,
-                    formals: Vec::new(),
-                    ty,
-                    context_count: 0,
-                    context_param_names: Vec::new(),
-                    context_parameter_identities: Vec::new(),
-                    getter,
-                    setter: None,
-                    setter_visibility: function.visibility,
-                    setter_parameter_name: None,
-                    is_const: false,
-                    implicit_integer_coercion: false,
-                    compile_time_constant: None,
-                    visibility: function.visibility,
-                    owner: cn,
-                    receiver_rank: 0,
-                    source_key: None,
-                    stable_declaration: None,
-                    getter_declaration: None,
-                    setter_declaration: None,
-                    source_member: None,
-                    producer: PropertyProducer::KotlinAccessor,
-                    read_stability: crate::libraries::PropertyReadStability::Unstable,
-                });
-            }
+            overloads.extend(self.builtin_property_realization(
+                recv,
+                name,
+                &functions,
+                mapped_property,
+                function_renames,
+            ));
         }
         const ACC_STATIC: u16 = 0x0008;
         const ACC_PUBLIC: u16 = 0x0001;
