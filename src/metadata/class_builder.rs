@@ -1405,28 +1405,39 @@ pub fn build_class(
     // Members add their requirements in serialization order; the class's own follow them.
     let mut requirements = VersionRequirementTable::default();
 
-    let mut prop_msgs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
-    let mut func_msgs: Vec<Option<Pb>> = (0..methods.len()).map(|_| None).collect();
-    let mut alias_msgs: Vec<Option<Pb>> = (0..tail.type_aliases.len()).map(|_| None).collect();
+    // kotlinc adds each record to its list as it builds it, so a list serializes in build order,
+    // not in the caller's index order: a member extension property declared before a plain one
+    // stays first. Each slot keeps its build sequence number beside the record.
+    let mut built = 0..;
+    let mut prop_msgs: Vec<Option<(usize, Pb)>> = (0..props.len()).map(|_| None).collect();
+    let mut func_msgs: Vec<Option<(usize, Pb)>> = (0..methods.len()).map(|_| None).collect();
+    let mut alias_msgs: Vec<Option<(usize, Pb)>> =
+        (0..tail.type_aliases.len()).map(|_| None).collect();
     let mut enum_msgs: Vec<Option<Pb>> = (0..enum_entries.len()).map(|_| None).collect();
     for member in tail.member_order {
         match *member {
             ClassMemberOrder::Property(index)
                 if index < props.len() && prop_msgs[index].is_none() =>
             {
-                prop_msgs[index] = Some(build_prop(&mut st, &props[index]));
+                prop_msgs[index] = Some((
+                    built.next().expect("unbounded"),
+                    build_prop(&mut st, &props[index]),
+                ));
             }
             ClassMemberOrder::Function(index)
                 if index < methods.len() && func_msgs[index].is_none() =>
             {
-                func_msgs[index] = Some(build_func(&mut st, &mut requirements, &methods[index]));
+                func_msgs[index] = Some((
+                    built.next().expect("unbounded"),
+                    build_func(&mut st, &mut requirements, &methods[index]),
+                ));
             }
             ClassMemberOrder::TypeAlias(index)
                 if index < tail.type_aliases.len() && alias_msgs[index].is_none() =>
             {
-                alias_msgs[index] = Some(crate::metadata::builder::type_alias_pb(
-                    &mut st,
-                    &tail.type_aliases[index],
+                alias_msgs[index] = Some((
+                    built.next().expect("unbounded"),
+                    crate::metadata::builder::type_alias_pb(&mut st, &tail.type_aliases[index]),
                 ));
             }
             ClassMemberOrder::EnumEntry(index)
@@ -1445,31 +1456,28 @@ pub fn build_class(
     // Preserve their established property-then-function order after all explicitly ordered members.
     for (index, prop) in props.iter().enumerate() {
         if prop_msgs[index].is_none() {
-            prop_msgs[index] = Some(build_prop(&mut st, prop));
+            prop_msgs[index] = Some((built.next().expect("unbounded"), build_prop(&mut st, prop)));
         }
     }
     for (index, function) in methods.iter().enumerate() {
         if func_msgs[index].is_none() {
-            func_msgs[index] = Some(build_func(&mut st, &mut requirements, function));
+            func_msgs[index] = Some((
+                built.next().expect("unbounded"),
+                build_func(&mut st, &mut requirements, function),
+            ));
         }
     }
     for (index, alias) in tail.type_aliases.iter().enumerate() {
         if alias_msgs[index].is_none() {
-            alias_msgs[index] = Some(crate::metadata::builder::type_alias_pb(&mut st, alias));
+            alias_msgs[index] = Some((
+                built.next().expect("unbounded"),
+                crate::metadata::builder::type_alias_pb(&mut st, alias),
+            ));
         }
     }
-    let prop_msgs: Vec<Pb> = prop_msgs
-        .into_iter()
-        .map(|message| message.expect("every property metadata record is built"))
-        .collect();
-    let func_msgs: Vec<Pb> = func_msgs
-        .into_iter()
-        .map(|message| message.expect("every function metadata record is built"))
-        .collect();
-    let alias_msgs: Vec<Pb> = alias_msgs
-        .into_iter()
-        .map(|message| message.expect("every type-alias metadata record is built"))
-        .collect();
+    let prop_msgs = in_build_order(prop_msgs, "property");
+    let func_msgs = in_build_order(func_msgs, "function");
+    let alias_msgs = in_build_order(alias_msgs, "type-alias");
 
     // Entries the caller did not schedule among the members intern after them, in entry order.
     let enum_msgs: Vec<Pb> = enum_msgs
@@ -1611,6 +1619,17 @@ pub fn build_class(
 /// Build the `(d1, d2)` payload for an ANONYMOUS class (`object : P2 {}` inside a function):
 /// kotlinc's record is `Class { flags = LOCAL visibility (10), fq_name = <raw internal, marked
 /// localName in the string table>, supertype* }` — no members, no constructor record.
+
+/// A member list in the order its records were built, which is the order kotlinc serializes it.
+fn in_build_order(slots: Vec<Option<(usize, Pb)>>, kind: &str) -> Vec<Pb> {
+    let mut built: Vec<(usize, Pb)> = slots
+        .into_iter()
+        .map(|slot| slot.unwrap_or_else(|| panic!("every {kind} metadata record is built")))
+        .collect();
+    built.sort_by_key(|(sequence, _)| *sequence);
+    built.into_iter().map(|(_, record)| record).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

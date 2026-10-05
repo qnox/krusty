@@ -497,6 +497,22 @@ UNPROJECTED as `ValueParameter.vararg_element_type` (f4). `metadata::vararg_reco
 the projection at the encode seam only, so nothing upstream of metadata sees a type source never
 wrote. A primitive specialized array has no type argument and is recorded unchanged.
 
+## Accessors, setter parameters and member list order
+
+Measured against kotlinc 2.4.20:
+
+- `JvmPropertySignature.getter`/`setter` name the property's own accessor methods. A private
+  property with default accessors has no accessor method, so it records the field alone, even when
+  the class declares `getValue(reference, property)` or an exact `fun getCount(): Int` /
+  `fun setCount(next: Int)`. Those stay `Function` records.
+- `Property.setter_value_parameter`'s type addresses the property's own type parameters by id
+  (`Type.type_parameter`), while the return type and receiver name them
+  (`Type.type_parameter_name`). The setter is a declaration of its own. This holds for package and
+  class properties alike.
+- `Class.property`, `Class.function` and `Class.type_alias` serialize in the order the records were
+  built, which is the d2 interning order. With `var <M> Slot<M>.member` declared before
+  `val later`, both lists put `member` first.
+
 ## Class supertypes: only what source declared
 
 `Class.supertype` (f6) lists the DECLARED supertypes in source order, wherever the superclass is

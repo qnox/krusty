@@ -10,7 +10,8 @@ use crate::metadata::local_properties::{
 };
 use crate::metadata::type_encoder::{
     encode_declared_type, encode_metadata_type_parameter, encode_type, encode_type_parameter,
-    semantic_named_type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
+    semantic_named_type_parameters, MetadataTypeParameter, StringTable, TypeParameterRef,
+    TypeParameters,
 };
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::Ty;
@@ -747,12 +748,7 @@ pub(crate) fn type_alias_pb(st: &mut StringTable<'_>, alias: &TypeAliasMeta) -> 
     let tps: TypeParameters = alias
         .formals
         .iter()
-        .map(|formal| {
-            (
-                formal.clone(),
-                crate::metadata::type_encoder::TypeParameterRef::Named(formal.clone()),
-            )
-        })
+        .map(|formal| (formal.clone(), TypeParameterRef::Named(formal.clone())))
         .collect();
     for (index, formal) in alias.formals.iter().enumerate() {
         p.repeated_message(3, &encode_type_parameter(st, index, formal, false));
@@ -838,6 +834,19 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
         m.semantic_type_params.iter().map(String::as_str),
     );
     let words = AccessorWords::of(m);
+    // The setter is a declaration of its own: the property's type parameters are not its own, so
+    // its value parameter addresses them by table id, like a class property's setter.
+    let (mut setter_tps, _) = tps.member(0);
+    for (index, (name, semantic)) in m
+        .type_params
+        .iter()
+        .zip(&m.semantic_type_params)
+        .enumerate()
+    {
+        let id = TypeParameterRef::Id(index as u64);
+        setter_tps.insert(name.clone(), id.clone());
+        setter_tps.insert(semantic.clone(), id);
+    }
     // kotlinc records the setter's value parameter exactly when the setter is not the default one,
     // and serializes it before the property's own name, so its strings come first in `d2`. An
     // unnamed parameter is `value` on a source-declared setter (`private set`) and `<set-?>` on a
@@ -853,7 +862,7 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
             });
         let mut parameter = Pb::new();
         parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
-        let ty = type_pb_declared(st, m.ty, &m.spellings.ret, &tps);
+        let ty = type_pb_declared(st, m.ty, &m.spellings.ret, &setter_tps);
         parameter.field_message(3, &ty); // ValueParameter.type = 3
         parameter
     });
