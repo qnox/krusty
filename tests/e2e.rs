@@ -32,6 +32,8 @@ mod common {
 mod abstract_instantiation_check_e2e;
 #[path = "abstract_member_check_e2e.rs"]
 mod abstract_member_check_e2e;
+#[path = "abstract_member_shape_e2e.rs"]
+mod abstract_member_shape_e2e;
 #[path = "abstract_modifier_consistency_e2e.rs"]
 mod abstract_modifier_consistency_e2e;
 #[path = "adapted_callable_reference_equality_e2e.rs"]

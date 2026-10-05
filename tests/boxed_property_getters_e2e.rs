@@ -27,8 +27,6 @@ fun box(): String {
 }
 ";
 
-/// Every class but the interfaces, as kotlinc writes it. An interface still records a field
-/// descriptor kotlinc leaves out of its abstract property's metadata, which is not this change's.
 #[test]
 fn a_boxed_property_getter_matches_kotlinc_across_files() {
     let sources = [
@@ -36,6 +34,8 @@ fn a_boxed_property_getter_matches_kotlinc_across_files() {
         ("Overrides.kt", OVERRIDES),
     ];
     for class in [
+        "Gauge",
+        "Holder",
         "Meter",
         "Fixed",
         "Forward",

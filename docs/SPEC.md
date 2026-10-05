@@ -10852,6 +10852,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `warning` warnings with the same text; a test selects the mode with `// EXPLICIT_API_MODE:`.
   Verified against kotlinc 2.4.20. (`tests/explicit_api_mode_e2e.rs`.)
 
+- **An abstract member's metadata and nullability match a concrete one's, without the field.** An
+  abstract property has no backing field, so kotlinc writes no field entry in its
+  `JvmPropertySignature` and interns none of the field's strings: `interface Holder { val count:
+  Int? }` records `getCount()Ljava/lang/Integer;` and no separate `Ljava/lang/Integer;`, and a
+  bare type-parameter property records no `Ljava/lang/Object;`. An abstract method or accessor
+  carries kotlinc's `@NotNull`/`@Nullable` on its result and parameters in an abstract class and an
+  enum exactly as in an interface. Tests: `tests/abstract_member_shape_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
