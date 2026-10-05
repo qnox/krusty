@@ -2436,7 +2436,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `JvmPropertySignature` names only the accessors the property owns. A private property with
   default accessors has none, so `operator fun getValue(...)` beside `private val value` is a
   `Function` record and not the property's getter, and a declared `fun getCount(): Int` beside a
-  private `count` stays a `Function` record. A setter's value parameter is its own declaration and
+  private `count` stays a `Function` record. A value class's declared `override fun toString()` is a
+  declared `Function` too, while the `equals`/`hashCode`/`toString` its synthesis generated are
+  recorded by the exact `-impl` identities that synthesis created, never by method name. A setter's value parameter is its own declaration and
   addresses the property's type parameters by table id. A class serializes each member list in the
   order it builds the records, so a member extension property declared first stays first. Tests:
   `tests/metadata_accessor_signature_e2e.rs`, `tests/metadata_property_flags_e2e.rs`.

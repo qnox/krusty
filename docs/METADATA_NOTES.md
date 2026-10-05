@@ -240,7 +240,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   order, the primary-constructor properties first and enum entries at their declaration position
   (so after those properties and before the body's other members), then the members the compiler
   generates: `componentN`, `copy`, `equals`, `hashCode`, `toString` for a data class and `equals`,
-  `hashCode`, `toString` for a value class. The visit order is the order strings enter `d2` and the
+  `hashCode`, `toString` for a value class. A value class's override that source declares is one of
+  its declarations instead: `override fun toString()` is a declared `Function` (realized as
+  `toString-impl`) and the generated list keeps only the members source left out. The visit order is the order strings enter `d2` and the
   order within each protobuf list (`function`, `property`, `enum_entry`); the lists themselves stay
   in field-number order. Test: `tests/metadata_member_order_e2e.rs`.
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter

@@ -47,3 +47,26 @@ fn a_private_property_does_not_adopt_a_member_with_its_accessor_signature() {
         }\n";
     assert_identical("AccessorSignatureExact", src, "app/Counter");
 }
+
+#[test]
+fn a_value_class_records_its_declared_any_overrides_but_not_the_synthesized_family() {
+    let src = "package app\n\
+        \n\
+        @JvmInline\n\
+        value class Meters(val amount: Int) {\n\
+        \x20   override fun toString(): String = \"m\"\n\
+        \x20   fun twice(): Int = amount + amount\n\
+        }\n";
+    assert_identical("AccessorSignatureValueToString", src, "app/Meters");
+}
+
+#[test]
+fn a_value_class_with_only_synthesized_any_members_records_none_of_them() {
+    let src = "package app\n\
+        \n\
+        @JvmInline\n\
+        value class Label(val text: String) {\n\
+        \x20   fun shout(): String = text\n\
+        }\n";
+    assert_identical("AccessorSignatureValuePlain", src, "app/Label");
+}
