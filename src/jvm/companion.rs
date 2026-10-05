@@ -733,21 +733,15 @@ fn reload_companion_instance(
 ) {
     let companion_name = ir.classes[companion as usize].fq_name;
     let field = companion_name.nested_segment_ref().to_string();
-    let mut pending = vec![body];
-    let mut seen = HashSet::new();
-    while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
-            continue;
-        }
+    // A lambda's `inline_body` numbers its own values: its value 0 is not the companion.
+    for expression in crate::ir::value_namespace_expressions(ir, body) {
         if matches!(ir.expr(expression), IrExpr::GetValue(0)) {
             ir.exprs[expression as usize] = IrExpr::ExternalStaticInstance {
                 owner: outer,
                 ty: companion_name,
                 field: field.clone(),
             };
-            continue;
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
 }
 
