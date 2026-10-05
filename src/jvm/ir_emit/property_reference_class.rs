@@ -301,14 +301,22 @@ impl PropertyCallTarget<'_> {
             return;
         }
         if let Some(facade) = self.facade {
-            adapt_property_reference_value(
-                cw,
-                code,
-                self.unboxed_receiver_value_class,
-                self.params[0],
-            );
-            code.aload(value_local);
-            self.emit_property_value(cw, code, self.params[1]);
+            // A hoisted companion bridge is static and takes only the value. The bound
+            // reference still captured the companion instance; the write does not pass it.
+            if self.params.len() == 1 {
+                code.pop();
+                code.aload(value_local);
+                self.emit_property_value(cw, code, self.params[0]);
+            } else {
+                adapt_property_reference_value(
+                    cw,
+                    code,
+                    self.unboxed_receiver_value_class,
+                    self.params[0],
+                );
+                code.aload(value_local);
+                self.emit_property_value(cw, code, self.params[1]);
+            }
             let arg_words = self
                 .params
                 .iter()
