@@ -8,12 +8,19 @@
 impl super::ConstPool {
     /// Start recording the indices interns return.
     pub(super) fn start_noting(&mut self) {
+        assert!(
+            self.noted.is_none(),
+            "constant-pool noting spans must not overlap"
+        );
         self.noted = Some(Vec::new());
     }
 
     /// The indices interns returned since [`Self::start_noting`], each once, in order.
     pub(super) fn take_noted(&mut self) -> Vec<u16> {
-        let mut noted = self.noted.take().unwrap_or_default();
+        let mut noted = self
+            .noted
+            .take()
+            .expect("constant-pool noting must be started before it is taken");
         let mut seen = std::collections::HashSet::new();
         noted.retain(|&index| seen.insert(index));
         noted

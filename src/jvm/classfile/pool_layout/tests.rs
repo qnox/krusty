@@ -220,6 +220,44 @@ fn a_rewritten_method_s_entries_are_placed_in_asm_order() {
 }
 
 #[test]
+fn transformation_class_entries_lead_the_rewritten_body() {
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    let before = writer.cp.slot_count();
+    add_static(&mut writer, "f", "()Ljava/lang/String;", |code, writer| {
+        code.push_string("body", writer);
+        code.areturn();
+    });
+    let after = writer.cp.slot_count();
+
+    // The coroutine transformer discovers this field after the original body was emitted, but
+    // kotlinc visits it immediately before writing the transformed body. Record both the new field
+    // name and the already-present descriptor to exercise both sides of that ordering rule.
+    writer.cp.start_noting();
+    writer.add_field(0, "L$0", "Ljava/lang/String;");
+    let leading = writer.cp.take_noted();
+
+    let class = writer.finish();
+    let relaid = [RelaidMethod {
+        index: 0,
+        added: before + 1..after + 1,
+        leading,
+        interned: after + 1..after + 1,
+    }];
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
+        .expect("the class reads")
+        .expect("the transformer's field moves ahead of the body");
+    let entries = pool(&laid_out);
+    let position = |entry: &str| {
+        entries
+            .iter()
+            .position(|candidate| candidate == entry)
+            .expect("named pool entry")
+    };
+    assert!(position("L$0") < position("body"));
+    assert!(position("Ljava/lang/String;") < position("body"));
+}
+
+#[test]
 fn an_ldc_whose_entry_would_move_past_one_byte_keeps_the_pool() {
     let mut writer = ClassWriter::new("T", "java/lang/Object");
     add_static(&mut writer, "f", "()Ljava/lang/Object;", |code, writer| {

@@ -196,13 +196,7 @@ impl ClassWriter {
 
     /// Declare a field at `position`, ahead of the fields declared so far (a suspend lambda's
     /// spill fields, which the coroutine transformer adds after the class's own).
-    fn add_leading_field(
-        &mut self,
-        position: usize,
-        access: u16,
-        name: &str,
-        desc: &str,
-    ) {
+    fn add_leading_field(&mut self, position: usize, access: u16, name: &str, desc: &str) {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
         self.fields.insert(

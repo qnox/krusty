@@ -180,7 +180,10 @@ impl<'a> Layout<'a> {
         // interns it earlier, for a holder it visits before that code.
         let mut leading = vec![false; count];
         for method in relaid {
-            let code_start = code_starts.get(&method.index).copied().unwrap_or(usize::MAX);
+            let code_start = code_starts
+                .get(&method.index)
+                .copied()
+                .unwrap_or(usize::MAX);
             for &index in &method.leading {
                 let at = usize::from(index);
                 if at < count && first_named[at] >= code_start {

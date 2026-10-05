@@ -1479,12 +1479,12 @@ mod splice_nullable_value_class_lambda_e2e;
 mod super_delegation_line_e2e;
 #[path = "suspend_argument_operands_e2e.rs"]
 mod suspend_argument_operands_e2e;
-#[path = "suspend_lambda_shared_capture_e2e.rs"]
-mod suspend_lambda_shared_capture_e2e;
 #[path = "suspend_coroutine_inline_e2e.rs"]
 mod suspend_coroutine_inline_e2e;
 #[path = "suspend_function_boxing_e2e.rs"]
 mod suspend_function_boxing_e2e;
+#[path = "suspend_lambda_shared_capture_e2e.rs"]
+mod suspend_lambda_shared_capture_e2e;
 #[path = "suspend_result_nullability_e2e.rs"]
 mod suspend_result_nullability_e2e;
 #[path = "suspend_under_try_e2e.rs"]
