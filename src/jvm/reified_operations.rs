@@ -301,11 +301,18 @@ fn realize_expression_dag(
                     IrTypeOp::Cast | IrTypeOp::CastNonNull => (true, false),
                     IrTypeOp::SafeCast | IrTypeOp::ImplicitCoercion => return None,
                 };
+                // kotlinc's `ReificationArgument.asString`: a marked-nullable operand names `T?`,
+                // which the call site specializes to a test that also accepts `null`.
+                let name = if type_operand.is_nullable() {
+                    format!("{}?", parameter.source_name)
+                } else {
+                    parameter.source_name.clone()
+                };
                 Some(IrExpr::ReifiedTypeOp {
                     cast,
                     negated,
                     arg,
-                    name: parameter.source_name.clone(),
+                    name,
                     erased: parameter.erased,
                 })
             }),

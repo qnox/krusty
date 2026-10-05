@@ -1,7 +1,7 @@
 //! Lower checked type operations whose semantics require control flow.
 
 use crate::fir::FirExprId;
-use crate::ir::{ExprId, IrConst, IrExpr, IrTypeOp};
+use crate::ir::{ExprId, IrBinOp, IrConst, IrExpr, IrTypeOp};
 use crate::types::{stored_value_ty, Ty};
 
 use super::{BodyLowering, FirLoweringFailure};
@@ -9,6 +9,46 @@ use super::{BodyLowering, FirLoweringFailure};
 /// The language-defined answer for an instance check which does not depend on the operand.
 fn settled_instance_answer(target: Ty) -> Option<bool> {
     (target.non_null().canonical_semantic() == Ty::Nothing).then_some(false)
+}
+
+/// kotlin IR's `IrType.isNullable()`: a nullable or flexible occurrence, or a type parameter whose
+/// bound admits `null`. A definitely-non-null `T & Any` does not.
+fn admits_null_at_runtime(ty: Ty) -> bool {
+    ty.admits_null() || (ty.is_ty_param() && ty.upper_bound_admits_null())
+}
+
+/// kotlinc's `erasedUpperBound`: the classifier a type stands for once erased, through type
+/// parameter bounds and nullability. A function type stands for its `FunctionN` classifier.
+fn erased_upper_bound(ty: Ty) -> Option<Ty> {
+    let mut current = ty.non_null();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        match current {
+            Ty::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
+            Ty::DefinitelyNotNull(inner) => current = inner.non_null(),
+            Ty::Obj(name, _) => return Some(Ty::obj_name(name).canonical_semantic()),
+            Ty::Fun(signature) => {
+                return Some(Ty::obj_name(
+                    crate::libraries::function_classifiers::function_classifier_identity(
+                        signature.params.len(),
+                        signature.suspend,
+                    ),
+                ))
+            }
+            Ty::TyParam(..)
+            | Ty::Nullable(_)
+            | Ty::PlatformNullable(_)
+            | Ty::Null
+            | Ty::Nothing
+            | Ty::Error
+            | Ty::Pending
+            | Ty::InProjection(_)
+            | Ty::OutProjection(_)
+            | Ty::StarProjection(_)
+            | Ty::Intersection(_) => return None,
+            builtin => return Some(builtin),
+        }
+    }
 }
 
 impl BodyLowering<'_> {
@@ -28,9 +68,9 @@ impl BodyLowering<'_> {
     /// answer the rule for some programs and not others — so `canonical_semantic` decides it once
     /// rather than this becoming another site that lists both.
     ///
-    /// `x is Nothing?` reaches this through the null-or-instance expansion in `expression`, so it
-    /// becomes `x == null || false` — which is what `Nothing?`, the type of `null` and of nothing
-    /// else, means. Safe casts consume the same settled answer before constructing their generic
+    /// `x is Nothing?` reaches this through the null-or-instance expansion in [`Self::type_test`],
+    /// so it becomes `x == null || false` — which is what `Nothing?`, the type of `null` and of
+    /// nothing else, means. Safe casts consume the same settled answer before constructing their generic
     /// guard and directly yield `null`, which is the same fact seen from the other side.
     pub(super) fn instance_check(
         &mut self,
@@ -59,6 +99,108 @@ impl BodyLowering<'_> {
             arg: operand,
             type_operand: target,
         })
+    }
+
+    /// `operand is target` (or `!is`) as kotlinc's `TypeOperatorLowering.lowerInstanceOf` shapes
+    /// it, from the operand's checked type and the target:
+    ///
+    /// - a reified type-parameter target is tested as written, nullability included, so its
+    ///   inline-site marker names `T?`;
+    /// - a nullable operand tested against a nullable target is bound once (`irLetS`) and becomes
+    ///   `tmp == null || tmp is T`;
+    /// - a nullable operand tested against a non-null target with the same erased upper bound
+    ///   (`x is T` for `x: T?`, `s is String` for `s: String?`) is the null check `x != null`;
+    /// - anything else tests the non-null target, so `x is String?` for a non-null `x` is
+    ///   `x is String`.
+    ///
+    /// `!is` is the negation of the same test: `!(tmp == null || tmp is T)`, `x == null`, or
+    /// `x !is T`.
+    pub(super) fn type_test(
+        &mut self,
+        negated: bool,
+        operand: ExprId,
+        operand_type: Ty,
+        target: Ty,
+    ) -> ExprId {
+        if self.is_reified_type_parameter(target) {
+            return self.instance_check(negated, operand, target);
+        }
+        if admits_null_at_runtime(operand_type) && target.admits_null() {
+            let test = self.null_or_instance(operand, target.non_null());
+            return if negated {
+                self.ir.add_negation(test)
+            } else {
+                test
+            };
+        }
+        if admits_null_at_runtime(operand_type)
+            && erased_upper_bound(operand_type)
+                .is_some_and(|bound| Some(bound) == erased_upper_bound(target))
+        {
+            let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+            return self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: if negated {
+                    IrBinOp::RefEq
+                } else {
+                    IrBinOp::RefNe
+                },
+                lhs: operand,
+                rhs: null,
+            });
+        }
+        self.instance_check(negated, operand, target.non_null())
+    }
+
+    /// `irLetS(operand) { tmp -> tmp == null || tmp is target }`: a stable read is tested in place,
+    /// any other operand is evaluated once into an `Any?` temporary.
+    fn null_or_instance(&mut self, operand: ExprId, target: Ty) -> ExprId {
+        let (declaration, slot) = match self.stable_value_read(operand) {
+            Some(slot) => (None, slot),
+            None => {
+                let temporary = self.allocate_temporary();
+                let declaration = self.ir.add_expr(IrExpr::Variable {
+                    index: temporary,
+                    ty: Ty::nullable(Ty::obj("kotlin/Any")),
+                    init: Some(operand),
+                    named: false,
+                });
+                (Some(declaration), temporary)
+            }
+        };
+        let nullable_read = self.ir.add_expr(IrExpr::GetValue(slot));
+        let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let null_test = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::RefEq,
+            lhs: nullable_read,
+            rhs: null,
+        });
+        let instance_read = self.ir.add_expr(IrExpr::GetValue(slot));
+        let instance_test = self.instance_check(false, instance_read, target);
+        // `JvmBackendContext.oror` is a plain `when`, not a source `||`: its true branch is a
+        // constant and its else branch the instance test's value.
+        let true_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let test = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(null_test), true_value), (None, instance_test)],
+        });
+        match declaration {
+            Some(declaration) => self.ir.add_expr(IrExpr::Block {
+                stmts: vec![declaration],
+                value: Some(test),
+            }),
+            None => test,
+        }
+    }
+
+    /// Whether `target` (or `target?`) is a reified type parameter, whose test an inline call site
+    /// specializes and therefore keeps as written.
+    fn is_reified_type_parameter(&self, target: Ty) -> bool {
+        let Ty::TyParam(identity, _) = target.non_null() else {
+            return false;
+        };
+        self.index
+            .type_parameter_by_semantic_name(identity)
+            .and_then(|parameter| self.index.type_parameter_header(parameter))
+            .is_some_and(|header| header.flags.is_reified())
     }
 
     /// Lower `value as? T` to one evaluation followed by an `is T` guard, a checked cast on the

@@ -511,64 +511,10 @@ impl BodyLowering<'_> {
                     FirTypeOperation::SafeCast => {
                         self.safe_cast_expression(operand_id, target.get())?
                     }
-                    FirTypeOperation::Is | FirTypeOperation::NotIs
-                        if target.get().is_nullable() =>
-                    {
-                        // JVM `instanceof` is false for null, while Kotlin's `x is T?` is true.
-                        // Evaluate the checked operand once, retain it as a language-level reference,
-                        // and expand the nullable test without resolving or reinterpreting its type.
-                        let operand_ty = self
-                            .body
-                            .expr(operand_id)
-                            .ok_or(FirLoweringFailure::MissingExpression(operand_id))?
-                            .ty
-                            .get();
-                        let reference = if operand_ty.is_reference() {
-                            operand
-                        } else {
-                            self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: operand,
-                                type_operand: crate::types::Ty::nullable(crate::types::Ty::obj(
-                                    "kotlin/Any",
-                                )),
-                            })
-                        };
-                        let temporary = self.allocate_temporary();
-                        let variable = self.ir.add_expr(IrExpr::Variable {
-                            index: temporary,
-                            ty: crate::types::Ty::nullable(crate::types::Ty::obj("kotlin/Any")),
-                            init: Some(reference),
-                            named: false,
-                        });
-                        let nullable_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-                        let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                        let negated = *operation == FirTypeOperation::NotIs;
-                        let null_test = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: if negated {
-                                IrBinOp::RefNe
-                            } else {
-                                IrBinOp::RefEq
-                            },
-                            lhs: nullable_read,
-                            rhs: null,
-                        });
-                        let instance_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-                        let instance_test =
-                            self.instance_check(negated, instance_read, target.get().non_null());
-                        let combined = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: if negated { IrBinOp::And } else { IrBinOp::Or },
-                            lhs: null_test,
-                            rhs: instance_test,
-                        });
-                        self.ir.add_expr(IrExpr::Block {
-                            stmts: vec![variable],
-                            value: Some(combined),
-                        })
-                    }
-                    FirTypeOperation::Is | FirTypeOperation::NotIs => self.instance_check(
+                    FirTypeOperation::Is | FirTypeOperation::NotIs => self.type_test(
                         *operation == FirTypeOperation::NotIs,
                         operand,
+                        operand_ty,
                         target.get(),
                     ),
                     FirTypeOperation::Cast => {

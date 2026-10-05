@@ -1767,6 +1767,8 @@ mod nullable_primitive_parameter_name_e2e;
 mod nullable_receiver_operator_ext_e2e;
 #[path = "nullable_ref_arg_to_erased_param_e2e.rs"]
 mod nullable_ref_arg_to_erased_param_e2e;
+#[path = "nullable_type_test_e2e.rs"]
+mod nullable_type_test_e2e;
 #[path = "nullable_unit_e2e.rs"]
 mod nullable_unit_e2e;
 #[path = "nullable_value_class_nullability_e2e.rs"]

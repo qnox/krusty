@@ -542,13 +542,17 @@ fn nullable_type_test_expands_from_its_checked_target() {
             ..
         }
     )));
-    assert!(ir.exprs.iter().any(|expression| matches!(
-        expression,
-        IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Or,
-            ..
-        }
-    )));
+    // kotlinc's `oror`: a plain `when` answering `true` for `null`, else the instance test.
+    assert!(ir.exprs.iter().any(|expression| match expression {
+        IrExpr::When { branches } => matches!(
+            branches.as_slice(),
+            [(Some(null_test), when_null), (None, instance_test)]
+                if matches!(ir.expr(*null_test), IrExpr::PrimitiveBinOp { op: IrBinOp::RefEq, .. })
+                    && matches!(ir.expr(*when_null), IrExpr::Const(IrConst::Boolean(true)))
+                    && matches!(ir.expr(*instance_test), IrExpr::TypeOp { op: IrTypeOp::InstanceOf, .. })
+        ),
+        _ => false,
+    }));
     assert!(!ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::TypeOp {

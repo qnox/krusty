@@ -10192,6 +10192,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `classfile::method_rewrite::tests` (a rewritten method and one written as emitted), and
   `tests/empty_locals_e2e.rs` (whole class files against kotlinc, and the sample at run time).
 
+- **The shape of `is`/`!is` follows the operand's type (kotlinc's `TypeOperatorLowering.lowerInstanceOf`).**
+  A reified type-parameter target is tested as written. Its marker names `T?` when the target is
+  nullable (`ReificationArgument.asString`), so the call site's specialization also accepts `null`.
+  The same applies to `as T?`. A nullable operand tested against a nullable target is bound once
+  (`irLetS`: a stable read in place, anything else in an `Any?` temporary) and becomes the plain
+  `when` `tmp == null || tmp is T` (`JvmBackendContext.oror`), not a source `||`. Its codegen
+  materializes `iconst_1` and the `instanceof` result, and the temporary-elimination port keeps the
+  value on the stack (`dup; ifnonnull L; pop; iconst_1; goto E; L: instanceof`). A nullable operand
+  tested against a non-null target with the same erased upper bound is the null check `x != null`.
+  This covers `x is T` for `x: T?` and `s is Item` for `s: Item?`. Every other test checks the
+  non-null target, so `b is Item?` for a non-null `b` is `instanceof Item`. `!is` negates the
+  same test. Nullability is IR's `isNullable`: a marked or flexible type, or a type parameter
+  whose bound admits `null`. Test: `tests/nullable_type_test_e2e.rs`.
+
 - **Mutable collections and function types in `is`/`as`/`as?` (kotlinc's `TypeIntrinsics`).** A
   mutable Kotlin collection shares its JVM interface with its read-only face, and a function type
   erases to a `FunctionN` that a lambda of another arity may also implement, so neither can be tested
