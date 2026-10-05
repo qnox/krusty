@@ -974,7 +974,9 @@ impl BodyLowering<'_> {
             for argument in &mut arguments {
                 match argument {
                     IrCheckedArgument::Expression { parameter, value } => {
-                        if super::constructors::is_forwarded_super_argument(self.ir, *value) {
+                        if super::constructors::is_forwarded_super_argument(self.ir, *value)
+                            || self.passes_reordered_operand_in_place(*value)
+                        {
                             continue;
                         }
                         let ty = *parameter_types.get(*parameter as usize).ok_or(
@@ -982,7 +984,7 @@ impl BodyLowering<'_> {
                                 parameter: *parameter,
                             },
                         )?;
-                        *value = self.spill_call_operand(*value, ty, &mut prelude);
+                        *value = self.spill_reordered_operand(*value, ty, &mut prelude);
                     }
                     IrCheckedArgument::Vararg {
                         array_type,
