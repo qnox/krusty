@@ -471,7 +471,12 @@ pub(super) fn build_class_metadata_with_facts(
                         .map(|(_, field)| field)
                         .or(delegate)
                         .filter(|field| property.ty != field.ty || names_local(field.ty))
-                        .map(|field| desc(field.ty)),
+                        .map(|field| desc(field.ty))
+                        .or_else(|| {
+                            static_fields::hoisted_static_for(ir, c, property_index)
+                                .filter(|storage| storage.erased_declared_ty.is_some())
+                                .map(|storage| desc(storage.ty))
+                        }),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
                     field_name: backing

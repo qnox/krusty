@@ -19342,7 +19342,7 @@ impl<'a> Checker<'a> {
                 // Resolve that shape once: both contextual argument typing and the selected `invoke`
                 // operation must consume the same semantic value.
                 let explicit_invoke_ty = (name == CALLABLE_INVOKE_OPERATOR)
-                    .then(|| self.expression_function_type(scope, receiver, rt))
+                    .then(|| self.invoke_function_view(scope, receiver, rt))
                     .flatten();
                 let receiver_function_argument_params = explicit_invoke_ty
                     .and_then(|ty| match ty {
@@ -26707,7 +26707,7 @@ val result = object { fun value(): String = captured }
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target,
             type_parameters: crate::types::TypeParameters::default(),
             own_type_parameter_count: 0,
@@ -29560,7 +29560,7 @@ fun box(): String {
                     companion_object: None,
                     qualified_name: None,
                     value_underlying: None,
-                    value_underlying_property: None,
+                    value_declaration: None,
                     alias_target: None,
                     own_type_parameter_count: type_parameters.type_params.len(),
                     type_parameters,
@@ -29721,7 +29721,7 @@ fun box(): String {
                     companion_object: None,
                     qualified_name: None,
                     value_underlying: None,
-                    value_underlying_property: None,
+                    value_declaration: None,
                     alias_target: None,
                     type_parameters: crate::types::TypeParameters::default(),
                     own_type_parameter_count: 0,
@@ -36216,6 +36216,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         implicit_receiver_selections: HashMap::new(),
         implicit_receiver_identities: HashMap::new(),
         read_flow_roots: HashMap::new(),
+        read_callable_reference_types: HashMap::new(),
         anonymous_super_read_provenance: HashMap::new(),
         stable_property_reads: std::collections::HashSet::new(),
         implicit_receiver_identity_uses: receiver_uses::ReceiverUses::default(),
@@ -38922,6 +38923,8 @@ struct Checker<'a> {
     implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
     /// The flow root each checked lexical-value or `this` read resolved to.
     read_flow_roots: HashMap<ExprId, scope::PathRoot>,
+    /// The exact function shape of a callable reference a checked name read is bound to.
+    read_callable_reference_types: HashMap<ExprId, Ty>,
     /// Exact selected value/receiver identity for a bare read that an anonymous object's constructor
     /// may keep. This is recorded when the scope tower binds the expression; capture publication
     /// consumes the decision without rescanning a later scope or comparing source spellings.
@@ -63457,6 +63460,11 @@ impl<'a> Checker<'a> {
                     }
                 }
                 crate::trace_compiler!("resolve", "name read {n} origin={:?}", l.origin);
+                if let Some(function) = l.callable_reference_type {
+                    // A value bound to a callable reference keeps the reference's exact function
+                    // shape beside its nominal reflection type; invoking the read consumes it.
+                    self.read_callable_reference_types.insert(e, function);
+                }
                 if let ReceiverFnValueOrigin::ClassStorage(field)
                 | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } = l.origin
                 {

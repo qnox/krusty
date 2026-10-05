@@ -885,6 +885,8 @@ mod function_expected_e2e;
 mod function_reference_invoke_e2e;
 #[path = "function_scope_locals_e2e.rs"]
 mod function_scope_locals_e2e;
+#[path = "function_subclass_invoke_e2e.rs"]
+mod function_subclass_invoke_e2e;
 #[path = "function_type_is_e2e.rs"]
 mod function_type_is_e2e;
 #[path = "function_type_supertype_e2e.rs"]
@@ -1475,6 +1477,8 @@ mod value_class_private_member_access_e2e;
 mod value_class_secondary_constructor_default_e2e;
 #[path = "value_class_secondary_constructor_return_e2e.rs"]
 mod value_class_secondary_constructor_return_e2e;
+#[path = "value_class_signature_e2e.rs"]
+mod value_class_signature_e2e;
 #[path = "value_class_super_call_e2e.rs"]
 mod value_class_super_call_e2e;
 #[path = "value_class_suspend_member_reentry_e2e.rs"]
@@ -1765,6 +1769,8 @@ mod omitted_default_generic_overload_e2e;
 mod one_armed_when_fallthrough_e2e;
 #[path = "private_constructor_accessors_e2e.rs"]
 mod private_constructor_accessors_e2e;
+#[path = "private_inline_property_ref_e2e.rs"]
+mod private_inline_property_ref_e2e;
 #[path = "redundant_checkcast_e2e.rs"]
 mod redundant_checkcast_e2e;
 #[path = "redundant_checkcasts_before_aastore_e2e.rs"]

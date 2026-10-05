@@ -2571,7 +2571,7 @@ fn emit_scheduled_member(
         // An abstract member is still a source declaration. Its annotations are the same payload a
         // concrete member writes from `emit_method`; omitting them drops `@Deprecated` on an
         // interface or abstract-class member.
-        function_annotations::add_abstract(ir, cw, fid, signature_formatter, env.override_results);
+        function_annotations::add_abstract(ir, cw, fid, signature_formatter, env);
     }
     // A method with default-valued parameters gets a `<name>$default(…, mask, marker)` synthetic stub
     // (the JVM realization of default arguments). A STATIC method (a value class's `constructor-impl`)
@@ -3711,83 +3711,14 @@ fn emit_interface_class(
                     w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
                     w
                 });
-                let member_desc = declared_method_desc(ir, env.override_results, fid);
-                let signature = default_impls::holder_method_signature(
-                    &signature_formatter,
+                interface_compatibility::emit_own_member_forward(
                     ir,
-                    c.fq_name,
-                    declared_method_signature(&signature_formatter, ir, env.override_results, fid)
-                        .as_deref(),
-                    &member_desc,
-                );
-                // Annotation selection reads the SEMANTIC member types when recorded — `f.ret` is
-                // already erased, and an erased `T` return must not read as `@NotNull Object`.
-                let (semantic_params, semantic_ret) = match ir.member_semantic_sigs.get(&fid) {
-                    Some((params, ret)) => (params.clone(), *ret),
-                    None => (jd_declared_param_tys(ir, fid), f.ret),
-                };
-                let physical_params = jvm_function_params(ir, fid);
-                let assertion_names =
-                    crate::jvm::parameter_names::function_assertions(ir, fid, &physical_params)
-                        .expect("a compatibility declaration carries exact assertion identities");
-                let guards = if opts.param_assertions {
-                    f.param_checks
-                        .iter()
-                        .enumerate()
-                        .map(|(index, check)| {
-                            check.as_ref().map(|_| {
-                                let _identity = ir
-                                    .function_parameter_identities(fid)
-                                    .and_then(|identities| identities.get(index))
-                                    .expect("a checked compatibility parameter has an identity");
-                                assertion_names[index]
-                                    .clone()
-                                    .expect("a checked compatibility parameter has a JVM label")
-                            })
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let parameter_names =
-                    crate::jvm::parameter_names::function_locals(ir, fid, &physical_params)
-                        .expect("a compatibility declaration carries exact parameter identities");
-                let method_parameter_names =
-                    crate::jvm::parameter_names::function_method_parameters(
-                        ir,
-                        fid,
-                        &physical_params,
-                    )
-                    .expect("a compatibility declaration carries exact reflection identities");
-                interface_compatibility::emit_holder_forward(
+                    c,
+                    fid,
                     di,
-                    c.fq_name,
-                    interface_compatibility::HolderForward {
-                        member_name: &f.name,
-                        param_tys: &physical_params,
-                        semantic_params: &semantic_params,
-                        local_variable_names: &parameter_names,
-                        method_parameter_names: &method_parameter_names,
-                        guards: &guards,
-                        ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
-                        semantic_ret,
-                        signature: signature.as_deref(),
-                        // A property accessor has no `fn_decl_lines` entry — its line lives on the
-                        // property declaration it realizes.
-                        decl_line: ir.fn_decl_lines.get(&fid).copied().unwrap_or_else(|| {
-                            c.properties
-                                .iter()
-                                .find(|property| {
-                                    let (getter, setter) = accessor_jvm_names(c, &property.name);
-                                    getter == f.name || setter == f.name
-                                })
-                                .map(|property| property.decl_line)
-                                .unwrap_or(0)
-                        }),
-                        java_parameters: opts.java_parameters,
-                        varargs: method_access::varargs_access(ir, fid),
-                        target: JdHolderTarget::AccessBridge,
-                    },
+                    &signature_formatter,
+                    opts,
+                    env,
                 );
             }
         } else {
@@ -3802,13 +3733,8 @@ fn emit_interface_class(
                 });
                 emit_holder_method(ir, fid, c.fq_name, &fq_name, facade, di, env);
             }
-            let desc = function_annotations::add_abstract(
-                ir,
-                &mut cw,
-                fid,
-                &signature_formatter,
-                env.override_results,
-            );
+            let desc =
+                function_annotations::add_abstract(ir, &mut cw, fid, &signature_formatter, env);
             // An abstract method still carries kotlinc's nullability annotations.
             let (result, params) = super::abstract_method_nullability::annotations(ir, fid, f);
             if result.is_some() || params.iter().any(Option::is_some) {
@@ -3895,9 +3821,13 @@ fn emit_interface_class(
     for &fid in &jd_bridge_fids {
         let f = &ir.functions[fid as usize];
         let physical_params = jvm_function_params(ir, fid);
-        let parameter_names =
-            crate::jvm::parameter_names::function_locals(ir, fid, &physical_params)
-                .expect("an access bridge carries exact declaration parameter identities");
+        let parameter_names = crate::jvm::parameter_names::placed(
+            ir,
+            fid,
+            Some(c.fq_name),
+            crate::jvm::parameter_names::function_locals(ir, fid, &physical_params),
+        )
+        .expect("an access bridge carries exact declaration parameter identities");
         emit_jd_access_bridge(
             &mut cw,
             c.fq_name,
@@ -4383,13 +4313,7 @@ fn emit_enum_class(
             } else {
                 // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
                 // entry subclasses override it.
-                function_annotations::add_abstract(
-                    ir,
-                    &mut *cw,
-                    fid,
-                    &signature_formatter,
-                    env.override_results,
-                );
+                function_annotations::add_abstract(ir, &mut *cw, fid, &signature_formatter, env);
             }
         }
     };
@@ -5182,15 +5106,14 @@ fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
         .collect()
 }
 
-/// The bridged member's shape: its declared name, physical parameter list with the parameter
-/// identities the bridge's debug info mirrors, its physical return, and its own `ACC_VARARGS`
-/// when the last physical parameter is the declared `vararg`.
-struct JdAccessBridgeMember<'a> {
-    name: &'a str,
-    param_tys: &'a [Ty],
-    parameter_names: &'a [Option<String>],
-    ret: Ty,
-    varargs: u16,
+/// The member shape carried through an `access$<name>$jd` bridge. The vararg bit is a recorded
+/// declaration fact, not inferred from an array descriptor.
+pub(super) struct JdAccessBridgeMember<'a> {
+    pub(super) name: &'a str,
+    pub(super) param_tys: &'a [Ty],
+    pub(super) parameter_names: &'a [Option<String>],
+    pub(super) ret: Ty,
+    pub(super) varargs: u16,
 }
 
 /// The `access$<name>$jd` bridge kotlinc puts on an `enable`-mode interface for each of its
@@ -5238,10 +5161,10 @@ fn emit_jd_access_bridge(
     let target = cw.interface_methodref(&fq, member_name, &member_desc);
     code.invokespecial(target, argument_words as i32, slot_words(ret) as i32);
     emit_return(ret, &mut code);
-    // PUBLIC | STATIC | SYNTHETIC, plus the member's own ACC_VARARGS when its last physical
-    // parameter is the declared `vararg` — kotlinc keeps the bridge element-form callable.
     code.ensure_locals(argument_words);
     code.link();
+    // PUBLIC | STATIC | SYNTHETIC, plus the selected member's own ACC_VARARGS when its last
+    // physical parameter is the declared vararg.
     cw.add_method_sig(0x1009 | varargs, &name, &bridge_desc, &code, None);
     let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
     let mut slot = 1u16;
@@ -5763,16 +5686,14 @@ fn emit_method_inner_with_holder(
         }
         if instance {
             let this_desc = format!("L{owner};");
-            let receiver_name = if holder_receiver.is_some() {
-                "$this"
-            } else {
-                "this"
-            };
+            let receiver_name = holder_receiver.map_or("this", |_| "$this");
             code.add_local_entry(0, None, 0, receiver_name, &this_desc);
         }
         let mut slot = u16::from(instance);
-        let local_names = parameter_identities
-            .and_then(|_| crate::jvm::parameter_names::function_locals(ir, fid, &param_tys));
+        let local_names = parameter_identities.and_then(|_| {
+            let names = crate::jvm::parameter_names::function_locals(ir, fid, &param_tys);
+            crate::jvm::parameter_names::placed(ir, fid, holder_receiver, names)
+        });
         for (i, t) in param_tys.iter().enumerate() {
             let pname = local_names
                 .as_ref()
@@ -5911,29 +5832,6 @@ fn property_jvm_signatures(
 /// `Signature` for a member whose SEMANTIC types mention enclosing-class type parameters: each
 /// position is a bare `T<name>;` reference or a plain non-generic descriptor. `None` when any
 /// position needs deeper generic formatting (those flow through the ordinary formatters).
-fn member_semantic_signature(params: &[Ty], ret: Ty) -> Option<String> {
-    fn part(t: Ty) -> Option<String> {
-        match t {
-            Ty::TyParam(name, _) => Some(format!(
-                "T{};",
-                crate::types::type_parameter_source_name(name)
-            )),
-            Ty::Nullable(inner) if matches!(*inner, Ty::TyParam(..)) => part(*inner),
-            t if !crate::types::ty_mentions_any_param(t) && t.type_args().is_empty() => {
-                Some(crate::jvm::names::type_descriptor(ir_ty_to_jvm(&t)))
-            }
-            _ => None,
-        }
-    }
-    let mut out = String::from("(");
-    for &p in params {
-        out.push_str(&part(p)?);
-    }
-    out.push(')');
-    out.push_str(&part(ret)?);
-    Some(out)
-}
-
 fn method_signature(
     formatter: &JvmSignatureFormatter<'_>,
     ir: &IrFile,
@@ -5965,8 +5863,11 @@ fn method_signature_shape(
         let ret = generic.ret.as_ref().unwrap_or(declared_ret);
         return suspend_generic_method_sig(formatter, generic, ret);
     }
+    if let Some(generic) = ir.jvm_value_class_member_signatures.get(&fid) {
+        return formatter.method_signature(generic, f, None);
+    }
     if let Some(generic) = ir.signatures.get(&fid) {
-        let generic = value_class_signatures::physical_generic_signature(ir, fid, f, generic);
+        let generic = value_class_signatures::physical_generic_signature(ir, fid, generic);
         let vararg_index = ir.fn_varargs.get(&fid).map(|vararg| vararg.index);
         return formatter.method_signature(&generic, f, vararg_index);
     }
@@ -5976,12 +5877,10 @@ fn method_signature_shape(
     ) {
         return suspend_method_sig(formatter, params, ret);
     }
-    if let Some((params, ret)) = value_class_signatures::physical_member_signature(ir, fid, f) {
-        // A member using ENCLOSING-CLASS type parameters signs with bare references (`(TT;)TT;`)
-        // and declares nothing — the parameters belong to the class header's own signature.
-        if let Some(sig) = member_semantic_signature(&params, ret) {
-            return Some(sig);
-        }
+    if let Some((params, ret)) = value_class_signatures::physical_member_signature(ir, fid) {
+        // A member using ENCLOSING-CLASS type parameters declares none: they belong to the class
+        // header's own signature (`(TT;)TT;`).
+        return formatter.method_positions(&params, &ret);
     }
     if let Some((params, declared_ret)) = ir.suspend_declared_sigs.get(&fid) {
         // A value-class RETURN survives in the continuation's type argument as the value class
@@ -5994,6 +5893,9 @@ fn method_signature_shape(
             .map(|(_, _, value_class_ret)| value_class_ret)
             .unwrap_or(declared_ret);
         return suspend_method_sig(formatter, params, ret);
+    }
+    if let Some((params, ret)) = value_class_signatures::declared_value_class_signature(ir, fid) {
+        return formatter.method_positions(&params, &ret);
     }
     method_parameterized_sig(formatter, &signature_function_params(ir, fid), &f.ret)
 }

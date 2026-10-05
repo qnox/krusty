@@ -114,18 +114,24 @@ pub(crate) fn supertype_classifier(supertype: Ty) -> Ty {
     let Ty::Fun(signature) = supertype else {
         return supertype;
     };
-    let classifier = FunctionClassifier {
-        kind: if signature.suspend {
+    let classifier = function_classifier_identity(signature.params.len(), signature.suspend);
+    let mut arguments = signature.params.clone();
+    arguments.push(signature.ret);
+    Ty::obj_args_name(classifier, &arguments)
+}
+
+/// The function classifier a function type of `arity` parameters (an extension receiver and context
+/// parameters included) is an instance of: `kotlin/FunctionN` or `kotlin/coroutines/SuspendFunctionN`.
+pub(crate) fn function_classifier_identity(arity: usize, suspend: bool) -> TypeName {
+    FunctionClassifier {
+        kind: if suspend {
             FunctionClassKind::SuspendFunction
         } else {
             FunctionClassKind::Function
         },
-        arity: signature.params.len(),
+        arity,
     }
-    .identity();
-    let mut arguments = signature.params.clone();
-    arguments.push(signature.ret);
-    Ty::obj_args_name(classifier, &arguments)
+    .identity()
 }
 
 pub(crate) fn is_reflective_function_classifier(internal: TypeName) -> bool {
@@ -239,6 +245,9 @@ fn ensure_invoke(
         declaration.call_sig = synthesized_invoke_call_sig(parameters.len());
         declaration.flags.operator = true;
         declaration.flags.is_abstract = true;
+        // The seed's own `invoke` has the physical shape (a suspend function's runtime interface
+        // takes the continuation as one more parameter); the classifier declares only this one.
+        shape.members.retain(|member| member.name != "invoke");
         shape.insert_declared_callables(
             "invoke".to_string(),
             Callables::Functions(FunctionSet {

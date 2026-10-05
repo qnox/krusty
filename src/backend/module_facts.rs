@@ -61,7 +61,7 @@ pub struct BackendClassifierFact {
     pub own_type_parameter_count: usize,
     pub type_param_variances: Box<[TypeVariance]>,
     pub value_underlying: Option<Ty>,
-    pub value_underlying_property: Option<Box<str>>,
+    pub value_declaration: Option<crate::types::DeclaredValueClass>,
     /// The role its provider published for the declaration in type checks and casts.
     pub role: Option<crate::types::ClassifierRole>,
 }
@@ -168,10 +168,7 @@ impl BackendClassifierFact {
             own_type_parameter_count: shape.own_type_parameter_count,
             type_param_variances: shape.type_param_variances().to_vec().into_boxed_slice(),
             value_underlying: shape.value_underlying,
-            value_underlying_property: shape
-                .value_underlying_property
-                .as_deref()
-                .map(Box::<str>::from),
+            value_declaration: shape.value_declaration.clone(),
             role: shape.classifier_role(),
         }
     }
@@ -448,7 +445,7 @@ impl BackendModuleFacts {
                 ))? as usize;
             let mut surface = Vec::new();
             let mut value_underlying = None;
-            let mut value_underlying_property = None;
+            let mut value_declaration = None;
             for child_raw in 0..index.declaration_count() {
                 let child = crate::fir::DeclarationId::from_raw(
                     u32::try_from(child_raw).expect("too many stable declarations for a packed id"),
@@ -550,7 +547,15 @@ impl BackendModuleFacts {
                                 .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER)
                         {
                             value_underlying = Some(signature.result.get());
-                            value_underlying_property = Some(Box::<str>::from(name));
+                            value_declaration = Some(crate::types::DeclaredValueClass {
+                                property: name.into(),
+                                underlying: signature.result.get(),
+                                type_parameters: index
+                                    .own_type_parameter_types(declaration)
+                                    .ok_or(BackendFactError::IncompleteClassifier(
+                                        classifier.classifier,
+                                    ))?,
+                            });
                         }
                         let mut parameters = signature
                             .parameters
@@ -663,7 +668,7 @@ impl BackendModuleFacts {
                 own_type_parameter_count,
                 type_param_variances,
                 value_underlying,
-                value_underlying_property,
+                value_declaration,
                 // A source declaration is neither a mapped collection builtin nor a `FunctionN`.
                 role: None,
             };
@@ -980,7 +985,16 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
 
     fn classifier_value_property(&self, classifier: TypeName) -> Option<String> {
         BackendClassifierSource::classifier(self, classifier)
-            .and_then(|fact| fact.value_underlying_property.as_deref().map(str::to_owned))
+            .and_then(|fact| Some(fact.value_declaration.as_ref()?.property.to_string()))
+    }
+
+    fn classifier_value_declaration(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::DeclaredValueClass> {
+        BackendClassifierSource::classifier(self, classifier)?
+            .value_declaration
+            .clone()
     }
 
     fn classifier_role(&self, classifier: TypeName) -> Option<crate::types::ClassifierRole> {

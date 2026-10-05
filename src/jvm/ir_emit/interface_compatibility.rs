@@ -53,7 +53,7 @@ pub(super) fn emit_inherited_default_surface(
                            param_tys: &[Ty],
                            semantic_params: &[Ty],
                            local_variable_names: &[Option<String>],
-                           method_parameter_names: &[Option<String>],
+                           reflected: &[crate::jvm::method_parameters::MethodParameter],
                            assertion_names: &[Option<String>],
                            physical_ret: Ty,
                            semantic_ret: Ty,
@@ -91,7 +91,7 @@ pub(super) fn emit_inherited_default_surface(
                     cw,
                     c.fq_name,
                     c.decl_line,
-                    super::JdAccessBridgeMember {
+                    JdAccessBridgeMember {
                         name,
                         param_tys,
                         parameter_names: local_variable_names,
@@ -140,24 +140,23 @@ pub(super) fn emit_inherited_default_surface(
             };
             emit_holder_forward(
                 di,
-                c.fq_name,
                 HolderForward {
+                    interface: c.fq_name,
                     member_name: name,
                     param_tys,
                     semantic_params,
                     local_variable_names,
-                    method_parameter_names,
+                    reflected,
                     guards: &guards,
                     ret: physical_ret,
                     semantic_ret,
-                    // The promoted generic signature of an inherited member is not reconstructed here
-                    // (the declaring classifier's formals are not this interface's); a generic
+                    // The promoted generic signature of an inherited member is not reconstructed
+                    // here (the declaring classifier's formals are not this interface's); a generic
                     // inherited surface keeps descriptor-only shape. Recorded in docs/SPEC.md.
                     signature: None,
-                    // kotlinc gives an inherited member's holder forwarder no line: it has no source
-                    // in this interface.
+                    // kotlinc gives an inherited member's holder forwarder no line: it has no
+                    // source in this interface.
                     decl_line: 0,
-                    java_parameters: opts.java_parameters,
                     varargs,
                     target,
                 },
@@ -191,6 +190,14 @@ pub(super) fn emit_inherited_default_surface(
                 semantic_params.len(),
                 "a republished member needs exact metadata parameter identities"
             );
+            let mut identities = member.parameter_identities.to_vec();
+            for names in [
+                &mut local_variable_names,
+                &mut method_parameter_names,
+                &mut assertion_names,
+            ] {
+                crate::jvm::parameter_names::resolved_on_holder(&identities, names);
+            }
             // A `suspend` member republishes in its CPS shape — trailing `Continuation`
             // (`$completion`, `@NotNull`) and a `@Nullable Object` return — like the
             // implementing-class forwarders.
@@ -202,7 +209,17 @@ pub(super) fn emit_inherited_default_surface(
                 assertion_names.push(Some("$completion".to_string()));
                 semantic_params.push(Ty::obj("kotlin/coroutines/Continuation"));
                 semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
+                identities.push(crate::fir::ResolvedParameterIdentity::SuspendCompletion);
             }
+            let reflected = if opts.java_parameters {
+                crate::jvm::method_parameters::resolved_holder_forward(
+                    &identities,
+                    &method_parameter_names,
+                    &param_tys,
+                )
+            } else {
+                Vec::new()
+            };
             // A suspend member's trailing continuation, not its vararg array, is the last physical
             // parameter, so only a non-suspend vararg member keeps ACC_VARARGS on this surface.
             let varargs = if member.vararg && !member.suspend() {
@@ -215,7 +232,7 @@ pub(super) fn emit_inherited_default_surface(
                 &param_tys,
                 &semantic_params,
                 &local_variable_names,
-                &method_parameter_names,
+                &reflected,
                 &assertion_names,
                 physical_ret,
                 semantic_ret,
@@ -231,44 +248,137 @@ pub(super) fn emit_inherited_default_surface(
     }
 }
 
-/// One receiver-first `$DefaultImpls` forward's member shape: the declared member's physical and
-/// semantic parameter lists, its parameter identities under each publication (`LocalVariableTable`,
-/// `MethodParameters`, nullability-guard labels), and where the forward sends its call.
-pub(super) struct HolderForward<'a> {
-    pub member_name: &'a str,
-    pub param_tys: &'a [Ty],
-    pub semantic_params: &'a [Ty],
-    pub local_variable_names: &'a [Option<String>],
-    pub method_parameter_names: &'a [Option<String>],
-    pub guards: &'a [Option<String>],
-    pub ret: Ty,
-    pub semantic_ret: Ty,
-    pub signature: Option<&'a str>,
-    pub decl_line: u32,
-    pub java_parameters: bool,
-    /// The member's own `ACC_VARARGS` when its last physical parameter is the declared `vararg`.
-    pub varargs: u16,
-    pub target: JdHolderTarget<'a>,
+/// Emit the `$DefaultImpls` forward kotlinc keeps under `enable` for the interface's own bodied
+/// member `fid`: a receiver-first static calling the interface's `access$<name>$jd` bridge. Like
+/// every static that takes the interface instance first, it names an extension receiver
+/// `$receiver`.
+pub(super) fn emit_own_member_forward(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    fid: u32,
+    di: &mut ClassWriter,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    opts: &EmitOptions,
+    env: &EmitEnv,
+) {
+    let f = &ir.functions[fid as usize];
+    let member_desc = declared_method_desc(ir, env.override_results, fid);
+    let signature = default_impls::holder_method_signature(
+        signature_formatter,
+        ir,
+        c.fq_name,
+        declared_method_signature(signature_formatter, ir, env.override_results, fid).as_deref(),
+        &member_desc,
+    );
+    // Annotation selection reads the SEMANTIC member types when recorded — `f.ret` is
+    // already erased, and an erased `T` return must not read as `@NotNull Object`.
+    let (semantic_params, semantic_ret) = match ir.member_semantic_sigs.get(&fid) {
+        Some((params, ret)) => (params.clone(), *ret),
+        None => (jd_declared_param_tys(ir, fid), f.ret),
+    };
+    let physical_params = jvm_function_params(ir, fid);
+    let placed = |names| crate::jvm::parameter_names::placed(ir, fid, Some(c.fq_name), names);
+    let assertion_names = placed(crate::jvm::parameter_names::function_assertions(
+        ir,
+        fid,
+        &physical_params,
+    ))
+    .expect("a compatibility declaration carries exact assertion identities");
+    let guards = if opts.param_assertions {
+        f.param_checks
+            .iter()
+            .enumerate()
+            .map(|(index, check)| {
+                check.as_ref().map(|_| {
+                    let _identity = ir
+                        .function_parameter_identities(fid)
+                        .and_then(|identities| identities.get(index))
+                        .expect("a checked compatibility parameter has an identity");
+                    assertion_names[index]
+                        .clone()
+                        .expect("a checked compatibility parameter has a JVM label")
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let parameter_names = placed(crate::jvm::parameter_names::function_locals(
+        ir,
+        fid,
+        &physical_params,
+    ))
+    .expect("a compatibility declaration carries exact parameter identities");
+    let reflected = if opts.java_parameters {
+        crate::jvm::method_parameters::function(ir, fid, &physical_params, Some(c.fq_name))
+    } else {
+        Vec::new()
+    };
+    emit_holder_forward(
+        di,
+        HolderForward {
+            interface: c.fq_name,
+            member_name: &f.name,
+            param_tys: &physical_params,
+            semantic_params: &semantic_params,
+            local_variable_names: &parameter_names,
+            reflected: &reflected,
+            guards: &guards,
+            ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+            semantic_ret,
+            signature: signature.as_deref(),
+            // A property accessor has no `fn_decl_lines` entry — its line lives on the
+            // property declaration it realizes.
+            decl_line: ir.fn_decl_lines.get(&fid).copied().unwrap_or_else(|| {
+                c.properties
+                    .iter()
+                    .find(|property| {
+                        let (getter, setter) = accessor_jvm_names(c, &property.name);
+                        getter == f.name || setter == f.name
+                    })
+                    .map(|property| property.decl_line)
+                    .unwrap_or(0)
+            }),
+            varargs: method_access::varargs_access(ir, fid),
+            target: JdHolderTarget::AccessBridge,
+        },
+    );
+}
+
+/// One receiver-first `$DefaultImpls` forward: the member it stands for, as the interface spells
+/// it, and where it sends the call.
+struct HolderForward<'a> {
+    interface: crate::types::TypeName,
+    member_name: &'a str,
+    param_tys: &'a [Ty],
+    semantic_params: &'a [Ty],
+    local_variable_names: &'a [Option<String>],
+    /// The forward's `MethodParameters`, its `$this` included; empty without `-java-parameters`.
+    reflected: &'a [crate::jvm::method_parameters::MethodParameter],
+    guards: &'a [Option<String>],
+    ret: Ty,
+    semantic_ret: Ty,
+    signature: Option<&'a str>,
+    decl_line: u32,
+    /// The member's own `ACC_VARARGS` when its last physical parameter is the declared vararg.
+    varargs: u16,
+    target: JdHolderTarget<'a>,
 }
 
 /// Emit one receiver-first `$DefaultImpls` forward to an interface bridge or dependency holder.
-pub(super) fn emit_holder_forward(
-    cw: &mut ClassWriter,
-    interface: crate::types::TypeName,
-    forward: HolderForward<'_>,
-) {
+fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
     let HolderForward {
+        interface,
         member_name,
         param_tys,
         semantic_params,
         local_variable_names,
-        method_parameter_names,
+        reflected,
         guards,
         ret,
         semantic_ret,
         signature,
         decl_line,
-        java_parameters,
         varargs,
         target,
     } = forward;
@@ -277,7 +387,10 @@ pub(super) fn emit_holder_forward(
         param_tys.len(),
         "a compatibility holder needs exact declaration parameter identities"
     );
-    assert_eq!(method_parameter_names.len(), param_tys.len());
+    assert!(
+        reflected.is_empty() || reflected.len() == param_tys.len() + 1,
+        "a compatibility holder reflects its receiver and every declaration parameter"
+    );
     let fq = interface.render();
     let mut with_receiver = vec![Ty::obj_name(interface)];
     with_receiver.extend_from_slice(param_tys);
@@ -287,12 +400,7 @@ pub(super) fn emit_holder_forward(
     if let Some(signature) = signature {
         cw.seed_utf8(signature);
     }
-    let method_parameters = if java_parameters {
-        super::super::method_parameters::holder_forward(method_parameter_names, param_tys)
-    } else {
-        Vec::new()
-    };
-    for (parameter, _) in &method_parameters {
+    for (parameter, _) in reflected {
         if let Some(parameter) = parameter {
             cw.seed_utf8(parameter);
         }
@@ -356,7 +464,7 @@ pub(super) fn emit_holder_forward(
     code.ensure_locals(argument_words);
     code.link();
     cw.add_method_sig(0x0009 | varargs, member_name, &desc, &code, signature);
-    cw.set_method_parameters(member_name, &desc, &method_parameters);
+    cw.set_method_parameters(member_name, &desc, reflected);
 
     let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
     let mut slot = 1u16;
