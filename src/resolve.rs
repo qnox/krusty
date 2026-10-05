@@ -13405,6 +13405,17 @@ fn instantiate_member_extension_with(
         generic.map_or(function.signature.ret, |signature| signature.ret),
         &bindings,
     );
+    // Ordinary extension and member calls publish these solutions on the call. A member
+    // extension publishes them too, so an inlined `typeOf<T>()` receives the call-site argument.
+    let type_arguments = generic
+        .map(|signature| {
+            signature
+                .formals
+                .iter()
+                .map(|formal| solved_member_extension_type_argument(&bindings, formal))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     Some(InstantiatedMemberExtension {
         extension_receiver: apply_inference_bindings(declared_receiver, &bindings),
         logical_params,
@@ -13415,7 +13426,20 @@ fn instantiate_member_extension_with(
         physical_vararg_index: full_call_sig.vararg_index,
         score,
         argument_parameters,
+        type_arguments,
     })
+}
+
+/// A formal's call-site solution, or `None` when it is still the formal itself.
+fn solved_member_extension_type_argument(
+    bindings: &crate::symbol_resolver::GSigBinds,
+    formal: &str,
+) -> Option<Ty> {
+    let solution = bindings.get(formal).copied()?;
+    (solution != Ty::Error
+        && !solution.mentions_pending()
+        && !matches!(solution.non_null(), Ty::TyParam(identity, _) if identity == formal))
+    .then_some(solution)
 }
 
 impl<'a> Checker<'a> {
@@ -13665,6 +13689,12 @@ impl<'a> Checker<'a> {
                     .is_some_and(|shape| shape.is_interface());
                 let dispatch_receiver =
                     self.implicit_receiver_selection(candidate.dispatch_receiver);
+                if !candidate.type_arguments.is_empty()
+                    && candidate.type_arguments.iter().all(Option::is_some)
+                {
+                    self.resolved_call_type_args
+                        .insert(call, candidate.type_arguments.clone());
+                }
                 self.resolved_calls.insert(
                     call,
                     candidate.resolved_call(dispatch_receiver, extension_receiver, interface),
@@ -38390,6 +38420,8 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     overridden_results: Box<[Ty]>,
     owner: TypeName,
     physical_name: String,
+    /// Solved method type arguments in formal order. `None` is an unsolved formal.
+    type_arguments: Vec<Option<Ty>>,
 }
 
 #[derive(Clone)]
@@ -38416,6 +38448,9 @@ struct InstantiatedMemberExtension {
     physical_vararg_index: Option<usize>,
     score: (usize, std::cmp::Reverse<usize>, bool),
     argument_parameters: Vec<(usize, usize)>,
+    /// Solved method type arguments in formal order. Published on the call when every formal
+    /// has one, matching an ordinary extension call.
+    type_arguments: Vec<Option<Ty>>,
 }
 
 struct MemberExtensionCall<'a> {
