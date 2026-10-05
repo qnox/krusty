@@ -4703,6 +4703,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   signature first. The classes are byte-identical to kotlinc 2.4.20's. Tests:
   `tests/constructor_argument_specificity_e2e.rs`.
 
+- **A call reordered by named arguments stores only what kotlinc stores.** Each argument is stored
+  in a temporary in source order, except one kotlinc passes in place because evaluating it has no
+  effect to reorder: a constant (folded ones such as `1 + 2` and `"a" + "b"` included), a read of a
+  `val`, a parameter or a receiver, a function literal that is not SAM-converted, an unbound
+  callable reference and an unbound class literal. A `var` read, an object, a string template, a
+  property read, a SAM-converted lambda and a bound reference (its receiver evaluates where it is
+  written) are stored. A scalar stored for a reference parameter is boxed where it is passed, in a
+  call and in a constructor delegation alike. Suspension does not add a whole-call spill: the JVM
+  state machine preserves already-pushed operands, so an already ordered call stays direct and a
+  genuinely reordered call applies this selective rule. Operands retained for an inline function
+  from a dependency keep their established path. Tests: `tests/named_argument_operands_e2e.rs`.
+
+- **A callable reference is cast only where its consumer reads it.** The reference's carrier class
+  reaches its use uncast, and the consumer narrows it as it would any other value: `Function1` for a
+  function-typed parameter or local, `KFunction` for a reference-typed local, temporary or result,
+  and nothing for `Any`. A stored bound reference in a reordered call keeps its `KFunctionN` type.
+  A `KFunctionN<P…, R>` in a generic `Signature` is written `KFunction<R>`, the one type argument of
+  its JVM class. Tests: `tests/reference_consumer_casts_e2e.rs`, `tests/named_argument_operands_e2e.rs`.
+
 - **A captured `var` initialized to its holder's default leaves the holder unset.** A `Ref$XxxRef`
   holder starts at its field's JVM default, so a constant initializer equal to it (zero, positive
   zero for `Float`/`Double`, `false`, `'\u0000'`, or `null` in an `ObjectRef`) is not stored, as

@@ -702,6 +702,17 @@ impl<'a> BodyLowering<'a> {
     }
 
     fn implicit_receiver_slot(&self, current: bool, depth: u32) -> Option<u32> {
+        let mut receivers = self.receiver_slots();
+        if current {
+            receivers.next()
+        } else {
+            receivers.nth(depth as usize)
+        }
+    }
+
+    /// The slots of this body's own implicit receivers, innermost first: the extension receiver,
+    /// the context receivers, then the dispatch receiver.
+    fn receiver_slots(&self) -> impl Iterator<Item = u32> + '_ {
         let context_start = self.capture_count
             + u32::from(self.has_dispatch_receiver)
             + self.class_constructor_capture_count
@@ -710,20 +721,15 @@ impl<'a> BodyLowering<'a> {
             .has_extension_receiver
             .then_some(context_start + self.context_parameter_count);
         let dispatch = self.has_dispatch_receiver.then_some(self.capture_count);
-        let receivers = extension
+        extension
             .into_iter()
             .chain(
                 (0..self.context_parameter_count)
                     .filter(|ordinal| !self.context_value_ordinals.contains(ordinal))
                     .rev()
-                    .map(|ordinal| context_start + ordinal),
+                    .map(move |ordinal| context_start + ordinal),
             )
-            .chain(dispatch);
-        if current {
-            receivers.into_iter().next()
-        } else {
-            receivers.into_iter().nth(depth as usize)
-        }
+            .chain(dispatch)
     }
 
     fn implicit_receiver_capture_slot(
