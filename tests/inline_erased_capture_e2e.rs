@@ -41,3 +41,60 @@ fn inlined_type_parameter_cell_matches_the_erased_lambda() {
         "erased-capture",
     );
 }
+
+#[test]
+fn value_class_captured_by_a_non_inline_lambda_keeps_the_primitive_holder() {
+    both_compilers_box(
+        r#"
+        @JvmInline
+        value class Z(val int: Int)
+
+        fun box(): String {
+            var xz = Z(0)
+            val fn = { xz = Z(42) }
+            fn()
+            if (xz.int != 42) return "FAIL " + xz.int
+            return "OK"
+        }
+        "#,
+        "vc-capture",
+    );
+}
+
+#[test]
+fn generic_value_class_captured_by_a_non_inline_lambda_keeps_the_primitive_holder() {
+    both_compilers_box(
+        r#"
+        @JvmInline
+        value class Z<T : Int>(val int: T)
+
+        fun box(): String {
+            var xz = Z(0)
+            val fn = { xz = Z(42) }
+            fn()
+            if (xz.int != 42) return "FAIL " + xz.int
+            return "OK"
+        }
+        "#,
+        "vc-capture-generic",
+    );
+}
+
+#[test]
+fn value_class_byte_captured_by_a_non_inline_lambda_keeps_the_byte_holder() {
+    both_compilers_box(
+        r#"
+        @JvmInline
+        value class ByteWrapper(val v: Byte)
+
+        fun box(): String {
+            var byte = ByteWrapper(1)
+            val fn = { byte = ByteWrapper(101) }
+            fn()
+            if (byte.v != 101.toByte()) return "FAIL " + byte.v
+            return "OK"
+        }
+        "#,
+        "vc-capture-byte",
+    );
+}

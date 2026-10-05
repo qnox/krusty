@@ -11419,11 +11419,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   including the shared cell of a `var` whose type is a type parameter. A call with `T = Int` would
   otherwise build `Ref$IntRef`. A lambda that escapes that expansion and was not cloned — an ordinary
   parameter stays on the shared implementation — still takes the erased holder (`Ref$ObjectRef`).
-  The cell keeps that holder. The call site boxes a primitive element into it and unboxes on the way
-  out. A by-value capture of that same parameter is boxed to the shared implementation's erased
-  parameter when the closure is built. A cell whose capture already uses the same holder, including
-  a primitive `var` an inlined lambda splices, stays on that holder. Test:
-  `tests/inline_erased_capture_e2e.rs`.
+  The cell keeps that holder. The holder is the implementation parameter's type after later
+  representation passes, not the Kotlin type recorded when the capture was built. The call site
+  boxes a primitive element into it and unboxes on the way out. A by-value capture of that same
+  parameter is boxed to the shared implementation's erased parameter when the closure is built.
+  A cell whose implementation parameter already uses the same holder stays there. That includes a
+  primitive `var` an inlined lambda splices and a value-class `var` whose non-inline lambda was
+  specialized to `Ref$IntRef` or `Ref$ByteRef`. Two implementations that require different holders
+  do not collapse the cell onto one of them. Test: `tests/inline_erased_capture_e2e.rs`.
 
 - **Inner-class outer access**: an inner method reads an enclosing-instance member through `this$0`
   (field 0) via the outer's synthesized getter (`this.this$0.getX()`) — the outer backing field is
