@@ -1439,6 +1439,12 @@ pub(super) fn add_accessor_function(
     if let Some(line) = line {
         ir.expr_source_lines.insert(returned, line);
     }
+    if let Some(exit) = (!returns_value)
+        .then(|| ir.accessor_body_exit(value))
+        .flatten()
+    {
+        ir.mark_unit_body_exit(returned, exit);
+    }
     let body = if returns_value {
         ir.add_expr(IrExpr::Block {
             stmts: vec![returned],
@@ -1973,6 +1979,8 @@ pub(super) fn accept_property_body(
         .first()
         .and_then(|root| body.statement(*root))
         .map(|statement| statement.origin);
+    let is_setter = anchor.kind == DeclarationKind::Accessor && anchor.sibling == 1;
+    let setter_exit = is_setter.then(|| setter_exit_line(&body)).flatten();
     let lowered = lower_body_with_context(body, index, ir, local_callables)
         .map_err(FirFileLoweringFailure::Body)?;
     if !lowered.defaults.is_empty() {
@@ -1981,6 +1989,17 @@ pub(super) fn accept_property_body(
         ));
     }
     let value = body_value(lowered.roots.into_vec(), origin, ir)?;
+    let setter_exit = setter_exit.and_then(|exit| match exit {
+        super::UnitReturnLine::ClosingBrace(line) => {
+            Some(crate::ir::UnitBodyExit::ClosingBrace(line))
+        }
+        super::UnitReturnLine::ExpressionEnd => {
+            super::unit_expression_end(ir, value).map(crate::ir::UnitBodyExit::ExpressionEnd)
+        }
+    });
+    if let Some(exit) = setter_exit {
+        ir.record_accessor_body_exit(value, exit);
+    }
     let has_constant_initializer = anchor.kind == DeclarationKind::Property
         && anchor.owner.is_none()
         && index
@@ -2046,6 +2065,15 @@ pub(super) fn accept_property_body(
     Ok(())
 }
 
+/// Where a setter body's appended `return` takes its line: the end of an expression body, or the
+/// closing `}` a block body falls off.
+fn setter_exit_line(body: &FirBody) -> Option<super::UnitReturnLine> {
+    if body.has_implicit_return() {
+        return Some(super::UnitReturnLine::ExpressionEnd);
+    }
+    (body.close_line() != 0).then(|| super::UnitReturnLine::ClosingBrace(body.close_line()))
+}
+
 /// Attach a retained accessor body to the inline-only function predeclared in a caller's file.
 /// The foreign property itself is not imported into that file: it is only the lexical owner of
 /// this checked template, while the selected accessor identity is the splice boundary.
@@ -2098,6 +2126,12 @@ pub(super) fn accept_inline_accessor_template(
     let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
     if let Some(line) = line {
         ir.expr_source_lines.insert(returned, line);
+    }
+    if let Some(exit) = (!returns_value)
+        .then(|| ir.accessor_body_exit(value))
+        .flatten()
+    {
+        ir.mark_unit_body_exit(returned, exit);
     }
     let body = if returns_value {
         ir.add_expr(IrExpr::Block {

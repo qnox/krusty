@@ -1617,7 +1617,7 @@ impl<'a> CommonIrBodySink<'a> {
                 result,
                 lowered.implicit_return,
                 false,
-                0,
+                Some(super::UnitReturnLine::ExpressionEnd),
                 origin,
             )
             .map_err(FirFileLoweringFailure::Body)?

@@ -243,7 +243,7 @@ mod tests {
             own_type_parameter_count: 0,
             type_param_variances: Box::new([]),
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             role: None,
         })
     }

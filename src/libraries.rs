@@ -2375,9 +2375,10 @@ pub struct LibraryType {
     /// (`UInt` → `Int`, `Result` → `Any`); `None` for an ordinary class. The JVM backend erases the value
     /// class to this everywhere (like a user value class), reproducing kotlinc's unboxed representation.
     pub value_underlying: Option<Ty>,
-    /// Source name of a value class's sole underlying property. Kept beside its underlying type because
-    /// together they are the complete semantic value-class shape used by the JVM representation pass.
-    pub value_underlying_property: Option<String>,
+    /// A value class's sole underlying property and its declared type over the class's own type
+    /// parameters. Kept beside its underlying type because together they are the complete semantic
+    /// value-class shape used by the JVM representation pass.
+    pub value_declaration: Option<crate::types::DeclaredValueClass>,
     /// When this name is a `typealias`, the target internal it expands to (`kotlin/collections/ArrayList`
     /// → `java/util/ArrayList`); `None` for a real type. Name resolution records the target, so an alias
     /// resolves to the underlying type with no separate alias query.
@@ -2514,7 +2515,7 @@ impl LibraryType {
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target: None,
             type_parameters: crate::types::TypeParameters::default(),
             own_type_parameter_count: 0,
@@ -2805,7 +2806,7 @@ mod tests {
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target: None,
             type_parameters: crate::types::TypeParameters::default(),
             own_type_parameter_count: 0,
