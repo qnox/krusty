@@ -519,6 +519,10 @@ fn copy_override_edges(
         }
         ir.function_overrides.insert(target_name, copied);
     }
+    // The copy inherits the same interface defaults as the class it copies.
+    if let Some(defaults) = ir.inherited_defaults.get(&source_name).cloned() {
+        ir.inherited_defaults.insert(target_name, defaults);
+    }
     Ok(())
 }
 

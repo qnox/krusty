@@ -25,7 +25,7 @@ use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 use companion_field::{add_companion_field, emit_companion_init};
 use field_visibility::{declared_field_access, default_accessor_access, is_jvm_field};
-use inherited_default_forwarders::{backend_member_jvm_name, emit_default_impls_forwarders};
+use inherited_default_forwarders::emit_default_impls_forwarders;
 
 mod access_bridges;
 mod annotation_impl;
@@ -99,7 +99,6 @@ mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod inherited_default_forwarders;
 mod interface_compatibility;
-mod interface_hierarchy;
 mod intrinsic_probes;
 mod lambda_class;
 pub(super) mod lambda_class_names;
@@ -3751,7 +3750,6 @@ fn emit_interface_class(
             &mut cw,
             &mut default_impls,
             opts,
-            env,
         );
     }
     let emitted_default_impls = default_impls.is_some();

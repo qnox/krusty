@@ -1771,7 +1771,40 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a more specific interface override still forwards to that override
   (`class More : Specific, Inherits()` where `Specific` overrides `Base`). The forwarder is an
   `invokespecial` that must NAME a direct superinterface (the first declared one through which the
-  winning declaration is inherited; measured on the diamond). A sub-interface REPUBLISHES the surface for every inherited default it
+  winning declaration is inherited; measured on the diamond). Which members a class or interface
+  inherits this way is a Kotlin override decision, so the override-plan phase owns it: while the
+  providers are live it walks the classifier's interface closure (every interface before its
+  ancestors, siblings in written order), keeps the nearest declaration of each override slot (an
+  abstract redeclaration suppresses a farther body), drops the classifier's own declarations, the
+  slots a class member already implements and every interface the superclass reaches, and
+  publishes one `ResolvedInheritedDefault` per remaining non-private body — its declaring
+  interface, the direct superinterface it is inherited through, its parameters, identities and
+  result, and where its body lives (this module, a dependency's default method or holder, a Java
+  default). Common IR carries the records (`IrFile::inherited_defaults`); the JVM backend only maps
+  each to its forwarder, holder republication or value-class static, and never walks the hierarchy
+  (`src/fir/index_tests.rs::the_nearest_declaration_of_a_slot_wins_and_names_its_direct_superinterface`).
+  The record also carries the member as the classifier's applied supertype substitutes it
+  (`f(value: String): String` for `I<String>`), computed by the frontend from the common
+  classifier model. When that shape differs from the declaration's erasure, the class writes the
+  TYPED forwarder `String f(String)` (`ACC_BRIDGE`, generic `Signature` when it differs from the
+  descriptor) and, for a value class, the typed static `String f-impl(int, String)`; both call the
+  erased declaration and `checkcast` its result. The ordinary bridge pass adds the erased
+  `Object f(Object)` (`ACC_BRIDGE | ACC_SYNTHETIC`) delegating to the typed forwarder. A primitive
+  substitute (`I<Int>`) takes `int` parameters, boxed for the call, and keeps the boxed `Integer`
+  return. A `super` call that selects the declaration through a class holding the typed
+  forwarder names the TYPED entry (`invokespecial Shout.echo(String)String`), as kotlinc does: the
+  erased entry is a bridge that dispatches virtually back to the override and would recurse. The
+  record carries the selected function's identity for that lookup; a superclass's records are
+  rekeyed with every other class-keyed fact when a local classifier gets its JVM name. A provider's
+  property view of a function (`ClosedRange.isEmpty`, whose getter IS the function) is not a second
+  slot. Recorded gaps: a forwarder over the member's OWN type parameter (`fun <T> echo`) omits
+  kotlinc's `<T:...>` `Signature` (the record does not carry the member's type-parameter
+  declarations), and a value-class substitute (`I<Z>`) keeps the erased shape where kotlinc writes
+  a mangled typed forwarder
+  (`tests/jvm_default_mode_e2e.rs::a_specializing_supertype_types_the_inherited_default_like_kotlinc`,
+  `a_kotlinc_consumer_links_against_a_specialized_inherited_default`,
+  `specialized_inherited_defaults_run_in_every_shape`).
+  A sub-interface REPUBLISHES the surface for every inherited default it
   does not redeclare, even when it declares nothing itself; a member inherited from a
   `disable`-compiled dependency gets a holder forward straight to that dependency's holder (behind
   a `checkcast`, without `@Deprecated` or an `access$…$jd` bridge), exactly as measured. Kotlin-ness
@@ -1783,9 +1816,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   described ONLY by its `Property` metadata record — recording the accessor as a `Function` too
   made every kotlinc consumer report "inherited platform declarations clash" on each implementer;
   the accessor match is DESCRIPTOR-aware, so `fun getX(): Int` beside `val x: String` keeps its
-  `Function` record. Forwarder suppression against a class's own property accessors is keyed the
-  same way, on the accessors the class actually EMITS: a `val` never stands in for an inherited
-  `setX(I)V` (dropping that forwarder left the class abstract), and a same-name accessor with a
+  `Function` record. Forwarder suppression against a class's own property follows the override
+  slot, never an accessor spelling: a property never stands in for an inherited `setX(I)V`
+  function (dropping that forwarder left the class abstract), and a same-name accessor with a
   different return coexists with its forwarder, as kotlinc emits both.
   A `suspend` member's forwarders and republished surface use its CPS shape — a trailing
   `Continuation` parameter (`$completion`, `@NotNull`) and a `@Nullable Object` return — never the
@@ -2445,9 +2478,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   jvm-default `access$…$jd` bridge, and the `$DefaultImpls` forwarder — both the declared one and the
   surface a sub-interface republishes for an inherited default it does not redeclare. All of them now
   take the bit from the recorded vararg fact: `ir.fn_varargs` for a declared member (a suspend
-  member's trailing continuation keeps the bit off), `BackendMemberFact.vararg` for the republished
-  surface, computed at the provider boundary from the declaration's call shape — never inferred from
-  an array-typed last parameter. Tests: `tests/method_access_flags_e2e.rs`
+  member's trailing continuation keeps the bit off), `ResolvedInheritedDefault.vararg` for the
+  republished surface, which override planning records from the selected declaration's checked
+  parameter flags or its provider's call shape — never inferred from an array-typed last parameter. Tests: `tests/method_access_flags_e2e.rs`
   (`abstract_vararg_method_flags_match_kotlinc`, `abstract_vararg_members_run`).
 - Range expressions as **values**: `a..b` and `a..<b` are the only true range *operators* (parsed at a
   precedence tighter than infix functions, looser than additive). `a..b` over `Int`/`Long`/`Char`

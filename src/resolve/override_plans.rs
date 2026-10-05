@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod inherited_defaults;
 mod inherited_status;
 
 use super::SymbolTable;
@@ -445,8 +446,8 @@ fn declaration_formal_bounds(
 ///
 /// This is path provenance, not another member lookup: the full applied hierarchy is already a
 /// stable FIR fact, but flattening it loses whether an interface arrived through the superclass or
-/// through a directly declared interface. Compatibility emitters need that distinction without
-/// reopening providers after checking.
+/// through a directly declared interface. Inherited-default selection needs that distinction: the
+/// superclass already realizes every member of an interface it reaches.
 fn inherited_superclass_interfaces(
     index: &ResolvedModuleIndex,
     source: &dyn SymbolSource,
@@ -469,6 +470,34 @@ fn inherited_superclass_interfaces(
             .then_some(candidate)
         })
         .collect()
+}
+
+/// The interface defaults one classifier inherits without overriding, selected from its frozen
+/// override plan while the hierarchy providers are live.
+fn classifier_inherited_defaults(
+    index: &ResolvedModuleIndex,
+    source: &dyn SymbolSource,
+    classifier: DeclarationId,
+    properties: &[ResolvedPropertyOverride],
+    functions: &[ResolvedFunctionOverride],
+) -> (DeclarationId, Vec<crate::fir::ResolvedInheritedDefault>) {
+    let hierarchy = with_function_supertypes(
+        source,
+        index.classifier_hierarchy(classifier).unwrap_or_default(),
+    );
+    let superclass_interfaces = inherited_superclass_interfaces(index, source, classifier);
+    let defaults = inherited_defaults::inherited_defaults(
+        index,
+        source,
+        &inherited_defaults::ClassifierPlan {
+            classifier,
+            hierarchy: &hierarchy,
+            superclass_interfaces: &superclass_interfaces,
+            functions,
+            properties,
+        },
+    );
+    (classifier, defaults)
 }
 
 fn publish_inherited_interface_function_plans(
@@ -1410,7 +1439,7 @@ pub(crate) fn publish_checked_local_override_plans(
     source_file: u32,
     classifiers: &[crate::fir::DeclarationId],
 ) {
-    let (plans, preorders, superclass_interfaces) = {
+    let (plans, preorders, inherited_defaults) = {
         let module = crate::fir::StreamedModuleSymbols::for_file(index, source_file);
         let source = CompositeSource::new(vec![
             &module as &dyn SymbolSource,
@@ -1523,26 +1552,22 @@ pub(crate) fn publish_checked_local_override_plans(
             .flat_map(|(_, _, functions)| functions.iter().cloned())
             .collect::<Vec<_>>();
         let preorders = default_supertype_orders(&source, &function_edges);
-        let superclass_interfaces = plans
+        let inherited_defaults = plans
             .iter()
-            .map(|(classifier, _, _)| {
-                (
-                    *classifier,
-                    inherited_superclass_interfaces(index, &source, *classifier),
-                )
+            .filter(|(classifier, _, _)| index.inherited_defaults(*classifier).is_none())
+            .map(|(classifier, properties, functions)| {
+                classifier_inherited_defaults(index, &source, *classifier, properties, functions)
             })
             .collect::<Vec<_>>();
-        (plans, preorders, superclass_interfaces)
+        (plans, preorders, inherited_defaults)
     };
     let function_edges = plans
         .iter()
         .flat_map(|(_, _, functions)| functions.iter().cloned())
         .collect::<Vec<_>>();
     publish_inherited_function_defaults(index, &preorders, &function_edges);
-    for (classifier, interfaces) in superclass_interfaces {
-        if index.superclass_interfaces(classifier).is_none() {
-            index.publish_superclass_interfaces(classifier, interfaces);
-        }
+    for (classifier, defaults) in inherited_defaults {
+        index.publish_inherited_defaults(classifier, defaults);
     }
     // A local classifier's plan is published once, by the first body that checks it (a default
     // argument's object is checked for each function that carries the default); its statuses go
@@ -1801,7 +1826,7 @@ fn publish_inherited_function_defaults(
 }
 
 pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &SymbolTable) {
-    let (plans, preorders, superclass_interfaces) = {
+    let (plans, preorders, inherited_defaults) = {
         let module = ModuleSymbols::new(table);
         let source =
             CompositeSource::new(vec![&module as &dyn SymbolSource, table.libraries.as_ref()]);
@@ -1843,26 +1868,22 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &Sy
             .flat_map(|(_, _, functions)| functions.iter().cloned())
             .collect::<Vec<_>>();
         let preorders = default_supertype_orders(&source, &function_edges);
-        let superclass_interfaces = plans
+        let inherited_defaults = plans
             .iter()
-            .filter_map(|(classifier, _, _)| {
-                index.classifier_header(*classifier).map(|_| {
-                    (
-                        *classifier,
-                        inherited_superclass_interfaces(index, &source, *classifier),
-                    )
-                })
+            .filter(|(classifier, _, _)| index.classifier_header(*classifier).is_some())
+            .map(|(classifier, properties, functions)| {
+                classifier_inherited_defaults(index, &source, *classifier, properties, functions)
             })
             .collect::<Vec<_>>();
-        (plans, preorders, superclass_interfaces)
+        (plans, preorders, inherited_defaults)
     };
     let function_edges = plans
         .iter()
         .flat_map(|(_, _, functions)| functions.iter().cloned())
         .collect::<Vec<_>>();
     publish_inherited_function_defaults(index, &preorders, &function_edges);
-    for (classifier, interfaces) in superclass_interfaces {
-        index.publish_superclass_interfaces(classifier, interfaces);
+    for (classifier, defaults) in inherited_defaults {
+        index.publish_inherited_defaults(classifier, defaults);
     }
     publish_inherited_statuses(index, &plans);
     for (classifier, properties, functions) in plans {

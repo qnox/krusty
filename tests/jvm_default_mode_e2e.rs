@@ -1253,8 +1253,9 @@ fn a_value_class_realizes_an_inherited_default_with_an_impl_static() {
 }
 
 /// A generic member and a `suspend` member get the same static-and-forwarder pair, measured on
-/// kotlinc's descriptors, flags and member order. (Their generic `Signature` attributes are a
-/// recorded gap of every inherited-member forwarder, so the comparison is the public shape.)
+/// kotlinc's descriptors, flags and member order. (A forwarder over the member's own type
+/// parameter omits kotlinc's `<T:...>` `Signature`, a recorded gap, so the comparison is the public
+/// shape.)
 #[test]
 fn a_value_class_inherited_generic_or_suspend_default_has_an_impl_static() {
     const SOURCE: &str = "package vcs\n\
@@ -1369,5 +1370,148 @@ fn a_kotlinc_consumer_links_against_a_value_class_inherited_default_static() {
             .expect("JVM unavailable for the mixed-compiler value-class test");
         assert_eq!(result, "OK", "-jvm-default={flag}");
         let _ = std::fs::remove_dir_all(work);
+    }
+}
+
+/// A value class and a plain class that inherit a default through a specializing supertype.
+const SPECIALIZED_INHERITED_SOURCE: &str = r#"package vcg
+
+interface I<T> {
+    fun f(value: T): T = value
+}
+
+@JvmInline value class V(val raw: Int) : I<String>
+
+class C : I<String>
+"#;
+
+/// `I<String>` substitutes the inherited `f(value: T): T`, so kotlinc writes the typed static
+/// `String f-impl(int, String)` and the typed forwarder `String f(String)` (`ACC_BRIDGE`), each
+/// casting the erased `I.f(Object):Object` result, plus the erased synthetic bridge
+/// `Object f(Object)` that delegates to the typed forwarder. A plain class writes the same forwarder
+/// and bridge without the static. Both classes are compared whole, generic `Signature`s included.
+#[test]
+fn a_specializing_supertype_types_the_inherited_default_like_kotlinc() {
+    for (mode, flag) in [
+        (JvmDefaultMode::Enable, "enable"),
+        (JvmDefaultMode::Disable, "disable"),
+    ] {
+        let ours = compile_source(mode, SPECIALIZED_INHERITED_SOURCE, "Specialized");
+        let reference = compile_reference_source(flag, SPECIALIZED_INHERITED_SOURCE, "Specialized");
+        let classes = common::ClassSets {
+            reference: reference.into_iter().collect(),
+            krusty: ours.into_iter().collect(),
+        };
+        for class in ["vcg/V", "vcg/C"] {
+            let (reference, krusty) = classes.class_listing(class);
+            assert_eq!(
+                krusty, reference,
+                "{class} diverges from kotlinc under -jvm-default={flag}"
+            );
+        }
+    }
+}
+
+/// A kotlinc consumer calls the specialized inherited default by its typed ABI
+/// (`V.f-impl(int, String): String`, `C.f(String): String`) and through the interface's erased
+/// slot, so a krusty library that published only the erased shape fails with `NoSuchMethodError`.
+#[test]
+fn a_kotlinc_consumer_links_against_a_specialized_inherited_default() {
+    for (mode, flag) in [
+        (JvmDefaultMode::Enable, "enable"),
+        (JvmDefaultMode::Disable, "disable"),
+    ] {
+        let work = common::scratch_dir().expect("allocate mixed-compiler specialization fixture");
+        let library = work.join("library");
+        let application = work.join("application");
+        compile_module_to(
+            mode,
+            SPECIALIZED_INHERITED_SOURCE,
+            "Specialized",
+            &library,
+            None,
+        );
+        let app_source = work.join("Application.kt");
+        std::fs::write(
+            &app_source,
+            r#"package app
+                import vcg.*
+                fun box(): String {
+                    val v = V(1)
+                    val c = C()
+                    val viaV: I<String> = v
+                    val viaC: I<String> = c
+                    return if (v.f("a") == "a" && c.f("b") == "b" && viaV.f("c") == "c" &&
+                        viaC.f("d") == "d") "OK" else "fail"
+                }
+            "#,
+        )
+        .expect("write kotlinc consumer source");
+        std::fs::create_dir_all(&application).expect("create kotlinc consumer output");
+        let args = vec![
+            "-d".to_string(),
+            application.to_string_lossy().into_owned(),
+            "-nowarn".to_string(),
+            format!("-jvm-default={flag}"),
+            "-classpath".to_string(),
+            library.to_string_lossy().into_owned(),
+            app_source.to_string_lossy().into_owned(),
+        ];
+        let (code, stderr) =
+            common::kotlinc_compile(&args).expect("reference compiler unavailable");
+        assert_eq!(code, 0, "kotlinc consumer failed under {flag}: {stderr}");
+        let mut classes = Vec::new();
+        collect_classes(&library, &library, &mut classes);
+        collect_classes(&application, &application, &mut classes);
+        let box_class = common::find_box_class(&classes).expect("mixed-compiler box class");
+        let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+            .expect("JVM unavailable for the mixed-compiler specialization test");
+        assert_eq!(result, "OK", "-jvm-default={flag}");
+        let _ = std::fs::remove_dir_all(work);
+    }
+}
+
+/// The shapes a specializing supertype must still run through: a local class and an anonymous
+/// object (renamed to their JVM names after override planning), a value-class substitute (which
+/// keeps the erased shape), a `super` call through a superclass that holds the typed forwarder (it
+/// names the typed entry; the erased one is a bridge back to it), and a provider's function that
+/// the provider also exposes as a property view (`ClosedRange.isEmpty`, one forwarder).
+#[test]
+fn specialized_inherited_defaults_run_in_every_shape() {
+    const SOURCE: &str = r#"package vcr
+
+interface Echo<T> { fun echo(value: T): T = value }
+
+@JvmInline value class Z(val raw: Int) : Echo<Z>
+
+class Plain : Echo<Z>
+
+open class Shout : Echo<String>
+class Whisper : Shout() {
+    override fun echo(value: String): String = super.echo(value).lowercase()
+}
+
+class Span(override val start: Int, override val endInclusive: Int) : ClosedRange<Int>
+
+fun box(): String {
+    class Local : Echo<String>
+    val anonymous = object : Echo<String> {}
+    if (Local().echo("l") != "l" || anonymous.echo("a") != "a") return "fail local"
+    if (Z(1).echo(Z(2)).raw != 2 || Plain().echo(Z(3)).raw != 3) return "fail value class"
+    if (Whisper().echo("OK") != "ok") return "fail super"
+    if (Span(2, 1).isEmpty() != true || 1 !in Span(0, 2)) return "fail range"
+    return "OK"
+}
+"#;
+    for mode in [
+        JvmDefaultMode::Enable,
+        JvmDefaultMode::Disable,
+        JvmDefaultMode::NoCompatibility,
+    ] {
+        let classes = compile_source(mode, SOURCE, "Shapes");
+        let box_class = common::find_box_class(&classes).expect("specialization box class");
+        let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+            .expect("JVM unavailable for the specialization shapes test");
+        assert_eq!(result, "OK", "{mode:?}");
     }
 }

@@ -38,6 +38,7 @@ pub(crate) fn realize_calls(
         classpath,
         &callables,
         &mut property_realizations,
+        crate::jvm::ir_emit::JvmDefaultMode::default(),
     )
     .expect("every module call is realized");
     let mut default_call_operands = super::default_call_operands::DefaultCallOperands::default();
