@@ -48221,13 +48221,7 @@ impl<'a> Checker<'a> {
                         },
                     )
                     .map_or((0, std::cmp::Reverse(0), true), |score| score.rank);
-                Some((
-                    candidate.low_priority,
-                    rank,
-                    candidate_index,
-                    selected,
-                    contextual.params,
-                ))
+                Some((candidate.low_priority, rank, candidate_index, selected))
             })
             .collect::<Vec<_>>();
         if scored.iter().any(|candidate| !candidate.0) {
@@ -48241,7 +48235,7 @@ impl<'a> Checker<'a> {
         };
         let constraint_shapes = scored
             .iter()
-            .map(|(_, _, candidate_index, selected, _)| {
+            .map(|(_, _, candidate_index, selected)| {
                 selected
                     .argument_slots
                     .iter()
@@ -48285,12 +48279,16 @@ impl<'a> Checker<'a> {
             return SourceConstructorSelection::NoMatch { mismatch };
         };
         scored.retain(|candidate| candidate.1 == best);
-        let selected = if let [(_, _, candidate_index, selected, _)] = scored.as_slice() {
+        let selected = if let [(_, _, candidate_index, selected)] = scored.as_slice() {
             (*candidate_index, selected)
         } else {
+            // Kotlin compares the parameters the supplied arguments map to, in argument order
+            // (FIR's flat signature of the argument mapping), exactly as at a function call. A
+            // parameter left to its default takes no part, a named argument compares against the
+            // parameter it names, and each vararg element against the element type.
             let parameter_shapes = scored
                 .iter()
-                .map(|(_, _, _, _, params)| params.clone())
+                .map(|(_, _, _, selected)| selected.argument_types.clone())
                 .collect::<Vec<_>>();
             let argument_kinds = arguments
                 .args
@@ -48316,7 +48314,7 @@ impl<'a> Checker<'a> {
                     // inapplicable constructor applicable.
                     let constraint_shapes = scored
                         .iter()
-                        .map(|(_, _, candidate_index, selected, _)| {
+                        .map(|(_, _, candidate_index, selected)| {
                             selected
                                 .argument_slots
                                 .iter()

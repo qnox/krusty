@@ -4328,6 +4328,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   this(x, x)` would set `a` instead of using its default → wrong fields). An omitted parameter with a
   non-literal default skips at lowering. Tests: `tests/named_ctor_args_e2e.rs`.
 
+- **Constructor specificity compares the parameters the supplied arguments map to.** Among applicable
+  constructors, kotlinc 2.4.20 picks the most specific one from each candidate's argument mapping,
+  exactly as for a function call: a parameter left to its default takes no part, a named argument
+  compares against the parameter it names, and each vararg element against the element type. With
+  `class C(x: Int = 1, y: Int = 2) { constructor(x: Long = 4L, y: Long = 5L) }`, `C(x = 100)`,
+  `C(y = 100)`, `C(100)` and the delegation `this(8)` all select the `Int` primary, and
+  `V(1, 2)` selects `vararg xs: Int` over `vararg xs: Long`. Calls, qualified nested calls,
+  `this(...)`/`super(...)` delegations and dependency constructors share this one selection
+  (`select_source_constructor`). Separately, the JVM `<init>()` convenience overload of an
+  all-defaults primary is emitted only when the class declares no constructor without value
+  parameters (kotlinc's `JvmDefaultConstructorLowering`); a declared `constructor()` owns that
+  descriptor. Tests: `tests/constructor_argument_specificity_e2e.rs`.
+
 - **Method type parameter that shadows its class's (`class Box<T> { fun <T> m(x: T): T }`).** The
   classpath member-return substitution (`JvmLibraries::member_return`) binds a generic class's formal
   type parameters to the receiver's type arguments (`Box<String>` → `{T: String}`) and substitutes a
