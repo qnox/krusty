@@ -31,6 +31,12 @@ open class Base {
     internal open var openV: Int = 9
         get() = field
         set(value) { field = value }
+    internal fun `looks$main`(): Int = 10
+    internal fun `looks$lib1`(): Int = 11
+    fun `public$main`(): Int = 12
+    fun `public$lib1`(): Int = 13
+    internal val `p$main`: Int get() = 14
+    internal val `p$lib1`: Int get() = 15
 }
 
 class Child : Base() {
@@ -88,7 +94,10 @@ fun box(): String {
     val onChild = child.f(1) + child.f(\"xy\") + child.g(3) + child.g(\"z\")
     val asBase: Over = child
     val through = asBase.f(4) + asBase.f(\"abcd\") + asBase.g(5) + asBase.g(\"abcde\")
-    return if (direct == 7 && onChild == 9 && through == 20) \"OK\" else \"direct=$direct child=$onChild through=$through\"
+    val names = Base().run {
+        `looks$main`() + `looks$lib1`() + `public$main`() + `public$lib1`() + `p$main` + `p$lib1`
+    }
+    return if (direct == 7 && onChild == 9 && through == 20 && names == 75) \"OK\" else \"direct=$direct child=$onChild through=$through names=$names\"
 }
 ";
 

@@ -42,9 +42,6 @@ pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade
     let mut old_names = HashMap::<FunId, String>::new();
     for fid in targets {
         let function = &mut ir.functions[fid as usize];
-        if function.name.ends_with(&suffix) {
-            continue;
-        }
         let old = function.name.clone();
         function.name = format!("{old}{suffix}");
         old_names.insert(fid, old);
@@ -62,7 +59,7 @@ pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade
     }
     // A plain `internal var v` has no accessor function. The emitter synthesizes `getV`/`setV`
     // from the property, so the suffix has to land on that JVM name too.
-    let synthesized = synthesized_internal_accessors(ir, facade_name, &suffix);
+    let synthesized = synthesized_internal_accessors(ir, facade_name);
     // A sibling file may declare none of these members and still call them. Its calls spell the
     // Kotlin name until this rewrite, so an empty rename set is not a reason to leave them.
     let rewrites_sibling_calls = ir
@@ -136,11 +133,7 @@ struct SynthesizedAccessor {
 }
 
 /// JVM names of internal accessors the emitter synthesizes because the property has no function.
-fn synthesized_internal_accessors(
-    ir: &IrFile,
-    facade: TypeName,
-    suffix: &str,
-) -> Vec<SynthesizedAccessor> {
+fn synthesized_internal_accessors(ir: &IrFile, facade: TypeName) -> Vec<SynthesizedAccessor> {
     let mut accessors = Vec::new();
     for (&property, checked) in &ir.checked_properties {
         let Some(class_id) = checked.class else {
@@ -163,8 +156,7 @@ fn synthesized_internal_accessors(
             continue;
         }
         let fresh = |current: &Option<String>, convention: String| {
-            let base = current.clone().unwrap_or(convention);
-            (!base.ends_with(suffix)).then_some(base)
+            Some(current.clone().unwrap_or(convention))
         };
         let getter = member.getter.is_none().then(|| {
             fresh(
@@ -561,13 +553,7 @@ pub(super) fn module_setter_is_mangled(property: &crate::ir::IrModuleProperty) -
 /// Append `$<module>` to a name the value-class pass may already have mangled, keeping a
 /// default stub's trailing `$default`.
 fn append_module_suffix(name: &str, suffix: &str) -> String {
-    if name.ends_with(suffix) {
-        return name.to_string();
-    }
     if let Some(base) = name.strip_suffix("$default") {
-        if base.ends_with(suffix) {
-            return name.to_string();
-        }
         return format!("{base}{suffix}$default");
     }
     format!("{name}{suffix}")
