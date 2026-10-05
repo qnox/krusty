@@ -129,6 +129,7 @@ mod member_overload_clash;
 mod named_class_constructors;
 mod operator_calls;
 use operator_calls::{range_operator, ResolvedInRangeComparison};
+mod enhanced_values;
 mod overload_diagnostics;
 mod override_plans;
 mod platform_value_narrowing;
@@ -10301,6 +10302,8 @@ pub struct IteratorProtocolTarget {
     pub next: Box<ResolvedCall>,
     pub iter_ty: Ty,
     pub elem_ty: Ty,
+    /// Where the `iterator()` and `next()` results carry `EnhancedNullability` for this iterable.
+    pub enhancement: for_loop_iteration::ProtocolEnhancement,
 }
 
 /// Complete semantic plan for a syntactic range loop whose `a..b` is a user-defined operator
@@ -24103,6 +24106,9 @@ impl<'a> Checker<'a> {
         } else {
             self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance);
         }
+        if declared.is_none() {
+            self.record_enhanced_local(scope, &name, init);
+        }
         if let Some(origin) = safe_call_origin {
             self.attach_safe_call_origin(scope, &name, origin);
         }
@@ -25114,6 +25120,7 @@ impl<'a> Checker<'a> {
             let body_scope = scope.child(ScopeKind::Block);
             let scope = &body_scope;
             self.declare(scope, &name, elem, false);
+            self.record_enhanced_loop_variable(scope, &name, iterable);
             self.check_loop_body(scope, body, &label);
         }
     }
@@ -29302,47 +29309,17 @@ fun box(): String {
             .any(|name| internal.matches(name))
             .then(|| {
                 let companion = if internal.matches("test/Factory") {
-                    let member = |second, descriptor: &str| crate::libraries::LibraryMember {
-                        return_value_status: None,
-                        external_identity: None,
-                        associated_classifier: None,
-                        associated_access_owner: None,
-                        external_default_provider: None,
-                        external_property_identity: None,
-                        semantic_role: None,
-                        singleton_dispatch: None,
-                        name: "make".to_string(),
-                        owner: Some(crate::types::type_name("test/Factory")),
-                        physical_name: None,
-                        physical_params: vec![Ty::obj("Config"), second],
-                        physical_parameter_plan: None,
-                        params: vec![Ty::obj("Config"), second],
-                        ret: Ty::String,
-                        physical_ret: Ty::String,
-                        descriptor: descriptor.to_string(),
-                        realization: crate::libraries::MemberRealization::Dispatch,
-                        signature: None,
-                        generic_sig: None,
-                        projected_return_hazard: false,
-                        flags: crate::libraries::LmFlags::default(),
-                        inline: crate::libraries::InlineKind::None,
-                        reified: false,
-                        inline_body_plan: None,
-                        visibility: crate::types::Visibility::Public,
-                        call_sig: CallSig::default(),
-                        context_count: 0,
-                        annotations: Vec::new(),
-                        contract: None,
-                        equality_bound: None,
-                        default_values: Vec::new(),
-                        default_realization: None,
-                        nonvirtual_realization: None,
-                        declared_ret: None,
-                        overridden_results: Box::new([]),
-                        implicit_classifier_callable: None,
-                        plugin_expression: None,
-                        stable_declaration: None,
-                        source_member: None,
+                    let member = |second, descriptor: &str| {
+                        let mut member = crate::libraries::LibraryMember::new(
+                            "make".to_string(),
+                            vec![Ty::obj("Config"), second],
+                            Ty::String,
+                            descriptor.to_string(),
+                        );
+                        member.owner = Some(crate::types::type_name("test/Factory"));
+                        member.physical_parameter_plan = None;
+                        member.call_sig = CallSig::default();
+                        member
                     };
                     let mut companion = vec![
                         member(
@@ -35963,6 +35940,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_library_default_literals: HashMap::new(),
         resolved_whole_array_vararg_args: std::collections::HashSet::new(),
         platform_narrowings: HashMap::new(),
+        enhanced_locals: Default::default(),
         interface_delegate_calls: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
         delegate_getvalue_targets: HashMap::new(),
@@ -38711,6 +38689,7 @@ struct Checker<'a> {
     resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     /// See [`TypeInfo::platform_narrowings`].
     platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
+    enhanced_locals: enhanced_values::EnhancedLocals,
     /// See [`TypeInfo::interface_delegate_calls`].
     interface_delegate_calls: HashMap<ExprId, Box<[crate::fir::ResolvedDelegateMemberCalls]>>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
@@ -63202,6 +63181,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 crate::trace_compiler!("resolve", "name read {n} origin={:?}", l.origin);
+                self.record_enhanced_local_read(e, &l);
                 if let Some(function) = l.callable_reference_type {
                     // A value bound to a callable reference keeps the reference's exact function
                     // shape beside its nominal reflection type; invoking the read consumes it.

@@ -1019,6 +1019,7 @@ fn fn_info(
         // sees the declaration itself. The fact exists for callables read back from a class file.
         declared_ret: None,
         overridden_results: Box::new([]),
+        enhanced_result: crate::libraries::EnhancedResult::NONE,
     };
     FunctionInfo {
         receiver_rank: rank,
@@ -1136,6 +1137,7 @@ fn source_callable(
         overridden_call_realizations: Box::new([]),
         // See the note in the builder above: a source callable carries its declaration un-erased.
         declared_ret: None,
+        enhanced_result: crate::libraries::EnhancedResult::NONE,
         overridden_results: Box::new([]),
     }
 }

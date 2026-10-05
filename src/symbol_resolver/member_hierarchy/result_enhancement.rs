@@ -13,7 +13,7 @@
 //! flexible result ([`ResultEnhancement::Flexible`]).
 
 use super::{override_parameter_types_match, resolution_subtype};
-use crate::libraries::{FunctionInfo, FunctionSet, ResultEnhancement};
+use crate::libraries::{enhance_from_overridden, FunctionInfo, FunctionSet, ResultEnhancement};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
@@ -114,13 +114,19 @@ pub(super) fn enhance_overriding_flexible_results(
         ) {
             continue;
         }
-        let fixed_not_null = declarations.iter().any(|inherited| {
-            overrides(source, implementation, inherited)
-                && result_qualifier(inherited) == Some(NullabilityQualifier::NotNull)
-        });
-        if !fixed_not_null {
+        let Some(fixing) = declarations
+            .iter()
+            .filter(|inherited| {
+                overrides(source, implementation, inherited)
+                    && result_qualifier(inherited) == Some(NullabilityQualifier::NotNull)
+            })
+            .min_by_key(|inherited| inherited.receiver_rank)
+        else {
             continue;
-        }
+        };
+        // The marks follow the declared results' shapes, so read both before any substitution.
+        let (_, marks) =
+            enhance_from_overridden(declared_result(implementation), declared_result(fixing));
         crate::trace_compiler!(
             "resolve",
             "enhanced overriding result owner={:?} name={} result={enhanced:?}",
@@ -132,5 +138,19 @@ pub(super) fn enhance_overriding_flexible_results(
             signature.ret = enhanced;
         }
         implementation.call_sig.result_enhancement = enhancement;
+        implementation.callable.enhanced_result.marks = marks;
+    }
+}
+
+/// A declaration's result as it declares it, over its own and its owner's type parameters: a
+/// receiver's type arguments have not replaced a Java type-parameter use, whose flexibility the
+/// enhancement reads.
+fn declared_result(function: &FunctionInfo) -> Ty {
+    match &function.callable.enhanced_result.declared {
+        Some((_, declared)) => *declared,
+        None => function.generic_sig.as_ref().map_or_else(
+            || function.ret.apply(function.callable.ret),
+            |signature| signature.ret,
+        ),
     }
 }

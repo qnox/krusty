@@ -139,7 +139,7 @@ impl Checker<'_> {
     }
 
     fn has_enhanced_call_result(&self, e: ExprId) -> bool {
-        enhanced_call_result(&self.resolved_calls, e)
+        enhanced_call_result(&self.resolved_calls, e) || self.value_enhancement(e).head()
     }
 
     /// The selected member's value parameters as the member DECLARES them for this receiver: the

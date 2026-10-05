@@ -162,6 +162,7 @@ impl LibraryCallable {
             overridden_call_realizations: Box::new([]),
             declared_ret: None,
             overridden_results: Box::new([]),
+            enhanced_result: crate::libraries::EnhancedResult::NONE,
         }
     }
 
