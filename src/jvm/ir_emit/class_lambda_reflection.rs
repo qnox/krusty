@@ -18,20 +18,24 @@ pub(super) struct ClassLambdaReflection {
     pub(super) d2: Vec<String>,
 }
 
-/// The reflection record for the lambda expression `expr`, when its implementation is a source
-/// function whose parameters and type parameters are recorded. A synthesized adapter that has
-/// neither returns `Ok(None)` and keeps the class it already had.
+/// The reflection record for the lambda expression `expr`. A source lambda is identified by its
+/// recorded origin and must carry every checked fact needed by metadata. A synthesized adapter
+/// without source provenance may omit the record and keep the class it already had.
 pub(super) fn reflect(
     ir: &IrFile,
     expr: u32,
     impl_fn: u32,
     formatter: &JvmSignatureFormatter<'_>,
 ) -> Result<Option<ClassLambdaReflection>, String> {
+    let source = ir.lambda_origins.contains_key(&impl_fn);
     let Some(function_type) = ir.logical_types.get(&expr).copied() else {
-        return Ok(None);
+        return missing_source_fact(source, "a source class lambda has no recorded logical type");
     };
     let Ty::Fun(signature) = function_type.non_null() else {
-        return Ok(None);
+        return missing_source_fact(
+            source,
+            "a source class lambda's logical type is not a function type",
+        );
     };
     let own = signature
         .params
@@ -46,11 +50,22 @@ pub(super) fn reflect(
         (None, own)
     };
     let Some(names) = value_parameter_names(ir, impl_fn, values.len())? else {
-        return Ok(None);
+        return missing_source_fact(
+            source,
+            "a source class lambda has no recorded parameter identities",
+        );
     };
-    let recorded = ir.recorded_lambda_type_parameters(impl_fn).unwrap_or(&[]);
+    let Some(recorded) = ir.recorded_lambda_type_parameters(impl_fn) else {
+        return missing_source_fact(
+            source,
+            "a source class lambda has no recorded type-parameter identities",
+        );
+    };
     if !type_parameters_available(signature.ret, receiver, values, recorded) {
-        return Ok(None);
+        return missing_source_fact(
+            source,
+            "a source class lambda's function type names an unrecorded type parameter",
+        );
     }
     let rendered = formatter
         .ty_at(&function_type.non_null(), Wildcards::Suppressed)
@@ -79,6 +94,17 @@ pub(super) fn reflect(
         d1: crate::metadata::encoding::bytes_to_strings(&bytes),
         d2: strings,
     }))
+}
+
+fn missing_source_fact(
+    source: bool,
+    message: &'static str,
+) -> Result<Option<ClassLambdaReflection>, String> {
+    if source {
+        Err(message.to_string())
+    } else {
+        Ok(None)
+    }
 }
 
 /// Metadata names of the lambda's value parameters, in order. `None` when the implementation has

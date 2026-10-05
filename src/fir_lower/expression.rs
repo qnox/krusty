@@ -1428,7 +1428,11 @@ impl BodyLowering<'_> {
                     self.checked_local_call(target.clone(), *extension_receiver, arguments)?;
                 self.declaration_result(call, Some(declared), expression.ty.get())
             }
-            FirExprKind::Lambda { callable, body } => {
+            FirExprKind::Lambda {
+                callable,
+                type_parameters,
+                body,
+            } => {
                 let suspend = matches!(
                     expression.ty.get().non_null(),
                     crate::types::Ty::Fun(signature) if signature.suspend
@@ -1445,7 +1449,7 @@ impl BodyLowering<'_> {
                     // Class-strategy `toString()` reads these from the lambda class's metadata,
                     // including a non-suspend lambda. A suspend lambda's class reads the same record.
                     let type_parameters =
-                        super::generics::named_type_parameters(self.index, expression.ty.get());
+                        super::generics::resolved_type_parameters(self.index, type_parameters);
                     self.ir
                         .record_lambda_type_parameters(impl_fn, type_parameters);
                 }

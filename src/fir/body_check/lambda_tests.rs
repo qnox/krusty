@@ -54,12 +54,14 @@ fn capture_free_lambda_owns_a_body_local_callable_and_checked_body() {
     let (body, _) = checked_function_body("fun make(): () -> Int = { 42 }\n", "make");
     let FirExprKind::Lambda {
         callable,
+        type_parameters,
         body: lambda_body,
     } = &body.expr(root_expression(&body)).expect("lambda").kind
     else {
         panic!("lambda must become a body-local checked callable")
     };
     assert_eq!(lambda_body.local_callable(), Some(*callable));
+    assert!(type_parameters.is_empty());
     assert!(lambda_body.parameters().is_empty());
     assert!(matches!(
         lambda_body
@@ -67,6 +69,31 @@ fn capture_free_lambda_owns_a_body_local_callable_and_checked_body() {
             .map(|statement| &statement.kind),
         Some(FirStatementKind::Expression(_))
     ));
+}
+
+#[test]
+fn lambda_publishes_exact_enclosing_type_parameter_identities_and_bound_closure() {
+    let (body, index) = checked_function_body(
+        "class Holder<T> {\n\
+             fun <V : T> make(value: V): (V) -> V = { value }\n\
+         }\n",
+        "make",
+    );
+    let FirExprKind::Lambda {
+        type_parameters, ..
+    } = &body.expr(root_expression(&body)).expect("lambda").kind
+    else {
+        panic!("generic function result must remain a checked lambda")
+    };
+    let names = type_parameters
+        .iter()
+        .map(|parameter| {
+            index
+                .type_parameter_name(*parameter)
+                .expect("published type parameter name")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["V", "T"]);
 }
 
 #[test]

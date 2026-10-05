@@ -127,6 +127,17 @@ fn type_parameter(index: &ResolvedModuleIndex, parameter: TypeParameterId) -> Ir
     }
 }
 
+pub(super) fn resolved_type_parameters(
+    index: &ResolvedModuleIndex,
+    parameters: &[TypeParameterId],
+) -> Vec<IrTypeParameter> {
+    parameters
+        .iter()
+        .copied()
+        .map(|parameter| type_parameter(index, parameter))
+        .collect()
+}
+
 /// A classifier's own type parameters, without the ones it captures from an outer declaration.
 pub(super) fn classifier_own_type_parameters(
     index: &ResolvedModuleIndex,
