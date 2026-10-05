@@ -18,7 +18,6 @@ use crate::libraries::{
     GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
 use crate::names::{property_getter_name, property_setter_name, COMPANION_OBJECT_NAME};
-use crate::spelling::Spelled;
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 // The compilation-scoped supertype cache is a resolver fact. The driver and the frontend
 // facade enter it through this name so they stay on the resolve contract.
@@ -3239,22 +3238,13 @@ pub struct SymbolTable {
     /// consumer can place a use site's arguments. Every valid source alias has one; an unresolved
     /// declaration is a frontend error and compilation stops before emission.
     pub source_alias_expansions: HashMap<TypeName, (Vec<String>, Ty)>,
-    /// Source SPELLINGS of declared types, keyed by the top-level declaration that spelled them —
-    /// see [`crate::spelling`]. `@Metadata` records a `typealias` named in a declared type as
+    /// Source SPELLINGS of declared types, keyed by stable Pass-1 identity — see
+    /// [`crate::spelling`]. `@Metadata` records a `typealias` named in a declared type as
     /// `Type.abbreviated_type`, and `Ty` is fully expanded by the time the builders see it, so the
-    /// spelling travels beside it rather than inside it.
-    ///
-    /// Only declarations that actually name an alias get an entry, so this map is empty for most
-    /// modules. A class's entry covers its header (supertypes, primary-constructor parameters,
-    /// type-parameter bounds); its members are keyed separately in [`Self::member_spellings`].
-    pub declared_spellings: HashMap<(u32, DeclId), crate::spelling::DeclaredSpellings>,
-    /// The same declaration spelling facts keyed by stable Pass-1 identity. This is the only form
-    /// allowed past the parser seam; the legacy parser-keyed map remains for non-streamed analysis.
+    /// spelling travels beside it rather than inside it. The compact header inventory is the only
+    /// producer; a declaration-only support source contributes no declared spellings.
     pub stable_declared_spellings:
         HashMap<crate::fir::DeclarationId, crate::spelling::DeclaredSpellings>,
-    /// The same, for class members, keyed by the exact AST coordinate lowering already uses.
-    pub member_spellings:
-        HashMap<crate::libraries::SourceMember, crate::spelling::DeclaredSpellings>,
     /// How each source `typealias` spelled its own RIGHT-HAND SIDE, keyed by the alias's identity.
     ///
     /// Two things need it. `TypeAlias.underlying_type` (f4) names an alias DIRECTLY when the
@@ -3407,9 +3397,7 @@ impl Default for SymbolTable {
             source_class_aliases: HashMap::new(),
             source_alias_fqns: HashMap::new(),
             source_alias_expansions: HashMap::new(),
-            declared_spellings: HashMap::new(),
             stable_declared_spellings: HashMap::new(),
-            member_spellings: HashMap::new(),
             alias_expansion_spellings: HashMap::new(),
             anonymous_object_types: HashMap::new(),
             anonymous_object_captures: HashMap::new(),

@@ -4339,8 +4339,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 }
             }
         }
-        // The legacy retained-AST path records no type-use annotations (see
-        // `collect_declared_spellings`); compact headers carry them for every source.
+        // Compact headers carry the checked type-use annotations of every compiled source. Only
+        // the editor's declaration-only support sources arrive without headers: they are a
+        // dependency module's API, never emitted, so no `@Metadata` consumes their spellings.
         let annotations = compact_headers
             .map(|headers| {
                 let source = crate::fir::SourceFileId::from_raw(file_index as u32);
@@ -4512,8 +4513,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
 
     if let Some(headers) = compact_headers {
         collect_compact_declared_spellings(&mut table, headers, &file_class_names);
-    } else {
-        collect_declared_spellings(&mut table, files, &file_class_names);
     }
     collect_stable_visibility_suppressions(&mut table, compact_headers);
 
