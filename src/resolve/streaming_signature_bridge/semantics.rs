@@ -1,5 +1,6 @@
 //! Resolver-backed evaluation of compact signature expressions.
 
+use super::callable_references::AppliedSourceAlias;
 use super::*;
 use crate::resolve::implicit_rungs::ImplicitRung;
 
@@ -1301,6 +1302,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             "select_call spelling={spelling} expected={:?}",
             expected.map(crate::fir::ResolvedTy::get),
         );
+        self.selected_calls.forget_abbreviation(origin);
         let entry_candidates = self.enclosing_enum_entry_callables(scope, spelling);
         if !entry_candidates.is_empty() {
             let argument_types = arguments
@@ -1410,7 +1412,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // names the type `Container$Nested`, not a member `Nested` on a value `Container`. The
             // qualifier there is a namespace, so folding it into a receiver cannot resolve it — a
             // plain class is not a value. Try the whole spelling as a classifier first.
-            if let Some(internal) = self.qualified_classifier(scope, spelling) {
+            // The binding keeps the declaration the final segment named, so `dep.Cargo()` keeps
+            // the `dep.Cargo` alias exactly as an imported `Cargo()` does.
+            if let Some(selected) = self.bound_or_scoped_classifier(scope, spelling, None) {
+                let (internal, alias) = (selected.classifier, selected.alias);
                 if let [argument] = argument_types.as_slice() {
                     if let Some(result) = selected_sam_constructor_result(
                         self,
@@ -1419,7 +1424,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         *argument,
                         &resolved_type_arguments,
                     ) {
-                        return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
+                        return self.named_construction_result(
+                            scope,
+                            origin,
+                            AppliedSourceAlias::selected(alias.as_ref(), &resolved_type_arguments),
+                            result,
+                            Some(*argument),
+                            expected,
+                        );
                     }
                 }
                 if let Some((declaration, selected_argument_types)) = self
@@ -1441,13 +1453,21 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     })
                     .ok()
                 {
-                    return self.constructor_result(
+                    let result = self.constructor_result(
                         scope,
                         &declaration,
                         &selected_argument_types,
                         None,
                         &resolved_type_arguments,
                         expected.map(crate::fir::ResolvedTy::get),
+                    )?;
+                    return self.named_construction_result(
+                        scope,
+                        origin,
+                        AppliedSourceAlias::selected(alias.as_ref(), &resolved_type_arguments),
+                        result.get(),
+                        None,
+                        expected,
                     );
                 }
                 // Constructor applicability is one rung, not a terminal interpretation of the
@@ -1882,8 +1902,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 return Ok(result);
             }
         }
-        let source_alias =
-            self.applied_source_alias_expansion(scope, spelling, &resolved_type_arguments);
         let scoped_classifier = self.bound_or_scoped_classifier(scope, spelling, classifier);
         let selected = self.with_resolver(scope, |resolver| {
             let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
@@ -2085,7 +2103,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             constructor,
                         );
                     return Some((
-                        SelectedTopLevelCall::Constructor(Box::new(selected)),
+                        SelectedTopLevelCall::Constructor(Box::new(selected), None),
                         argument_types.clone(),
                     ));
                 }
@@ -2093,14 +2111,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // A lexically nested classifier is a nearer type-scope rung than file imports. Use
             // the same ordering as value/type lookup instead of letting an imported same-named
             // classifier shadow `class Outer { class Nested; fun f() = Nested() }`.
-            let internal = match scoped_classifier {
-                Some(internal) => internal,
-                None => match resolver.classifier_in_scope(spelling) {
-                    crate::symbol_resolver::CandidateSelection::Selected(internal) => internal,
-                    crate::symbol_resolver::CandidateSelection::Ambiguous
-                    | crate::symbol_resolver::CandidateSelection::None => return None,
-                },
-            };
+            let selected = Self::constructed_classifier(resolver, scoped_classifier, spelling)?;
+            let (internal, alias) = (selected.classifier, selected.alias.map(Box::new));
             crate::trace_compiler!(
                 "signature",
                 "constructor candidate spelling={spelling} classifier={internal} source={:?}",
@@ -2118,7 +2130,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     .is_some_and(|declaration| declaration.sam_eligible)
             {
                 return Some((
-                    SelectedTopLevelCall::SamConstructor(internal),
+                    SelectedTopLevelCall::SamConstructor(internal, alias),
                     argument_types.clone(),
                 ));
             }
@@ -2136,7 +2148,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 &resolved_type_arguments,
             ) {
                 return Some((
-                    SelectedTopLevelCall::Constructor(Box::new(declaration)),
+                    SelectedTopLevelCall::Constructor(Box::new(declaration), alias),
                     constructor_argument_types,
                 ));
             }
@@ -2187,13 +2199,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     })
                 });
                 if let Some(contract) = contract {
-                    self.selected_call_contracts.borrow_mut().insert(
-                        origin,
-                        super::SelectedCallContract {
-                            contract,
-                            parameter_by_argument,
-                        },
-                    );
+                    self.selected_calls
+                        .record_contract(origin, contract, parameter_by_argument);
                 }
                 if let Some(source) = source {
                     if let Some(signature) =
@@ -2269,7 +2276,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 let callee = crate::fir::ResolvedTy::new(callee).map_err(|_| Self::failure())?;
                 self.select_invoke(scope, origin, callee, arguments, demand)
             }
-            SelectedTopLevelCall::SamConstructor(internal) => {
+            SelectedTopLevelCall::SamConstructor(internal, alias) => {
                 let actual = selected_argument_types
                     .first()
                     .copied()
@@ -2282,21 +2289,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &resolved_type_arguments,
                 )
                 .ok_or_else(Self::failure)?;
-                if let Some((formals, expansion)) = source_alias.as_ref() {
-                    return self
-                        .apply_source_alias_constructor_result(
-                            scope,
-                            formals,
-                            *expansion,
-                            result,
-                            Some(actual),
-                            expected.map(crate::fir::ResolvedTy::get),
-                        )
-                        .ok_or_else(Self::failure);
-                }
-                crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure())
+                self.named_construction_result(
+                    scope,
+                    origin,
+                    AppliedSourceAlias::selected(alias.as_deref(), &resolved_type_arguments),
+                    result,
+                    Some(actual),
+                    expected,
+                )
             }
-            SelectedTopLevelCall::Constructor(member) => {
+            SelectedTopLevelCall::Constructor(member, alias) => {
                 let result = self.constructor_result(
                     scope,
                     &member,
@@ -2305,19 +2307,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &resolved_type_arguments,
                     expected.map(crate::fir::ResolvedTy::get),
                 )?;
-                if let Some((formals, expansion)) = source_alias.as_ref() {
-                    return self
-                        .apply_source_alias_constructor_result(
-                            scope,
-                            formals,
-                            *expansion,
-                            result.get(),
-                            None,
-                            expected.map(crate::fir::ResolvedTy::get),
-                        )
-                        .ok_or_else(Self::failure);
-                }
-                Ok(result)
+                self.named_construction_result(
+                    scope,
+                    origin,
+                    AppliedSourceAlias::selected(alias.as_deref(), &resolved_type_arguments),
+                    result.get(),
+                    None,
+                    expected,
+                )
             }
         }
     }
@@ -2391,23 +2388,20 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let lexical_classifier = self.bound_or_scoped_classifier(scope, spelling, classifier);
             let sam_interface = self
                 .with_resolver(scope, |resolver| {
-                    lexical_classifier.or_else(|| match resolver.classifier_in_scope(spelling) {
-                        crate::symbol_resolver::CandidateSelection::Selected(internal) => {
-                            Some(internal)
-                        }
-                        crate::symbol_resolver::CandidateSelection::Ambiguous
-                        | crate::symbol_resolver::CandidateSelection::None => None,
-                    })
+                    Self::constructed_classifier(resolver, lexical_classifier, spelling)
                 })
                 .ok()
-                .filter(|internal| {
-                    crate::symbol_resolver::semantic_sam_signature(&source, Ty::obj_name(*internal))
-                        .is_some()
+                .filter(|selected| {
+                    let target = Ty::obj_name(selected.classifier);
+                    crate::symbol_resolver::semantic_sam_signature(&source, target).is_some()
                 });
-            if let Some(internal) = sam_interface {
-                let target = self
-                    .applied_source_alias_expansion(scope, spelling, &resolved_type_arguments)
-                    .map_or_else(|| Ty::obj_name(internal), |(_, expansion)| expansion);
+            if let Some(selected) = sam_interface {
+                let target =
+                    AppliedSourceAlias::selected(selected.alias.as_ref(), &resolved_type_arguments)
+                        .map_or_else(
+                            || Ty::obj_name(selected.classifier),
+                            |alias| alias.expansion,
+                        );
                 let sam = crate::symbol_resolver::semantic_sam_signature(&source, target)
                     .expect("the SAM signature was just selected");
                 let shape = Ty::fun_with_shape(
@@ -4940,45 +4934,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         argument: u32,
         condition: bool,
     ) -> bool {
-        use crate::contracts::{Condition, Effect, ParamRef, ReturnsValue};
-        fn proves(conclusion: &Condition, argument: u32, condition: bool) -> bool {
-            match conclusion {
-                Condition::IsNull {
-                    param: ParamRef::Param(index),
-                    negated: true,
-                } => !condition && *index == argument as usize,
-                // `returns() implies actual`: the boolean argument itself holds, and the
-                // extractor only takes this shape for an argument spelled `value != null`.
-                Condition::BoolParam(ParamRef::Param(index)) => {
-                    condition && *index == argument as usize
-                }
-                Condition::And(left, right) => {
-                    proves(left, argument, condition) || proves(right, argument, condition)
-                }
-                _ => false,
-            }
-        }
-        let contracts = self.selected_call_contracts.borrow();
-        let Some(selected) = contracts.get(&origin) else {
-            return false;
-        };
-        let Some(argument) = selected
-            .parameter_by_argument
-            .get(argument as usize)
-            .copied()
-            .flatten()
-        else {
-            return false;
-        };
-        selected.contract.effects.iter().any(|effect| {
-            matches!(
-                effect,
-                Effect::ConditionalReturns {
-                    returns: ReturnsValue::Any,
-                    conclusion,
-                } if proves(conclusion, argument, condition)
-            )
-        })
+        self.selected_calls
+            .proves_argument_non_null(origin, argument, condition)
+    }
+
+    fn call_result_abbreviation(
+        &self,
+        origin: crate::fir::OriginId,
+    ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
+        self.selected_calls.abbreviation(origin)
     }
 
     fn substitute(

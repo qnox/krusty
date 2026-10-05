@@ -947,16 +947,9 @@ impl<'a> CommonIrBodySink<'a> {
                     .declaration_name(entry)
                     .ok_or(FirFileLoweringFailure::UnsupportedCallableOwner(entry))?
                     .to_owned();
-                let has_body = (0..index.declaration_count()).any(|child_raw| {
-                    let child = DeclarationId::from_raw(
-                        u32::try_from(child_raw)
-                            .expect("too many stable declarations for a packed id"),
-                    );
-                    index
-                        .declaration_anchor(child)
-                        .is_some_and(|child_anchor| child_anchor.owner == Some(entry))
-                });
-                let subclass = has_body.then(|| header.classifier.nested_child(&name));
+                let subclass = index
+                    .enum_entry_has_body(entry)
+                    .then(|| header.classifier.nested_child(&name));
                 let source_order = index
                     .source_order(entry)
                     .ok_or(FirFileLoweringFailure::MissingSourceOrder(entry))?;
@@ -979,7 +972,7 @@ impl<'a> CommonIrBodySink<'a> {
                     // constructor with a different parameter list. Finalization installs that
                     // already-selected list after the entry body arrives; predeclaration only marks
                     // this skeleton as an enum-entry subclass.
-                    entry_class.enum_entry_of = Some(Vec::new());
+                    entry_class.is_enum_entry = true;
                     let entry_class = self.ir.add_class(entry_class);
                     assert!(
                         self.ir
@@ -1711,11 +1704,12 @@ impl CheckedBodySink for IndexedCommonIrBodySink<'_, '_> {
     }
 }
 
-/// Record what each lowered callable inherits from the declarations it overrides: its
-/// return-value status and `operator` / `infix`. A local classifier's override plan, and with it
-/// what its members inherit, is published when the body declaring it is checked, after the members
-/// were predeclared, so these are read once every body has been.
+/// Record what each lowered callable inherits from the declarations it overrides: its return-value
+/// status, `operator` / `infix`, and final visibility. Access checking already consumed the same
+/// corrected declaration header. This refresh is a representation handoff for body-local methods,
+/// which can be predeclared before their local classifier publishes its override plan.
 fn finalize_inherited_statuses(index: &ResolvedModuleIndex, ir: &mut IrFile) {
+    let mut visibilities = Vec::new();
     for (&callable, &function) in &ir.checked_callable_functions {
         let inherited = index.callable_inherited_status(callable);
         if inherited.return_value != crate::types::ReturnValueStatus::Unspecified {
@@ -1728,5 +1722,15 @@ fn finalize_inherited_statuses(index: &ResolvedModuleIndex, ir: &mut IrFile) {
         if inherited.infix {
             ir.infix_fns.insert(function);
         }
+        if let Some(header) = index
+            .callable(callable)
+            .and_then(|callable| index.declaration_header(callable.declaration))
+            .filter(|header| header.kind == DeclarationKind::Function)
+        {
+            visibilities.push((function, header.visibility));
+        }
+    }
+    for (function, visibility) in visibilities {
+        ir.set_method_visibility(function, visibility);
     }
 }

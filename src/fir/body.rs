@@ -1342,6 +1342,9 @@ pub enum FirExprKind {
     },
     Lambda {
         callable: LocalCallableId,
+        /// Declaration-owned type parameters the checked function type names, closed over their
+        /// bounds in first-use order. An inference variable has no stable declaration and is absent.
+        type_parameters: Box<[TypeParameterId]>,
         body: Box<FirBody>,
     },
     Try {
@@ -1551,8 +1554,14 @@ impl FirExprKind {
             } => target_parameters.len() * std::mem::size_of::<ResolvedTy>(),
             FirExprKind::ComparisonCall { call, .. }
             | FirExprKind::ContainmentCall { call, .. } => call.storage_payload_bytes(),
-            FirExprKind::Lambda { body, .. } => {
-                std::mem::size_of::<FirBody>() + body.storage_payload_bytes()
+            FirExprKind::Lambda {
+                type_parameters,
+                body,
+                ..
+            } => {
+                type_parameters.len() * std::mem::size_of::<TypeParameterId>()
+                    + std::mem::size_of::<FirBody>()
+                    + body.storage_payload_bytes()
             }
             FirExprKind::Try { catches, .. } => catches.len() * std::mem::size_of::<FirCatch>(),
             FirExprKind::When { branches, .. } => {
@@ -2448,7 +2457,7 @@ impl FirBody {
             );
         }
         for expression in &self.expressions {
-            let FirExprKind::Lambda { callable, body } = &expression.kind else {
+            let FirExprKind::Lambda { callable, body, .. } = &expression.kind else {
                 continue;
             };
             let previous = scope.insert(

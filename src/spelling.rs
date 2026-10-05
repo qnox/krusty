@@ -16,13 +16,13 @@
 //! Field numbers here were read off kotlinc 2.4.10 output, not recalled — see
 //! `docs/METADATA_NOTES.md`.
 
-use crate::types::{Ty, TypeName};
+use crate::types::{ResolvedAnnotation, Ty, TypeName};
 
 /// The source spelling of one declared type, mirroring the expanded `Ty` tree node for node.
 ///
 /// The default (`alias: None`, both argument lists empty) means "no alias was spelled at or below
 /// this node", which is the overwhelmingly common case and allocates nothing.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Spelled {
     /// This occurrence was written as a definitely-non-null intersection (`T & Any`). The semantic
     /// [`Ty`] already carries that fact in its occurrence bound; this sidecar preserves the exact
@@ -47,22 +47,47 @@ pub struct Spelled {
     /// as `CargoBox` writes abbreviations on BOTH expanded arguments as well as on the node itself.
     /// A short or empty vec leaves the remaining arguments unabbreviated.
     pub args: Vec<Spelled>,
+    /// The annotations `@Metadata` records on THIS occurrence (`Type.annotation`, extension field
+    /// 100), in source order: every applied annotation whose retention is not `SOURCE`
+    /// (`fun f(x: @Mark Item)`, `Holder<@Bin(3) Item>`), each with its checked argument values
+    /// once [`Self::seal`] has run.
+    pub annotations: Vec<TypeUseAnnotation>,
+    /// At a node that named an alias: the annotations the alias's own right-hand side recorded on
+    /// its root, which the EXPANDED type inherits ahead of this occurrence's own [`Self::annotations`]
+    /// (`typealias Marked = @Kept Item` makes every `Marked` occurrence an annotated `Item`). The
+    /// abbreviation names only what this occurrence wrote.
+    pub expansion_annotations: Vec<TypeUseAnnotation>,
+    /// The name this occurrence's function-type parameter was written with (`(count: Int) -> Unit`
+    /// names the `Int` occurrence `count`). `@Metadata` records it after the occurrence's own
+    /// annotations as `@kotlin.ParameterName(name = "count")`.
+    pub parameter_name: Option<Box<str>>,
 }
+
+/// The spelling of a node that names no alias and records no annotation.
+const EMPTY: Spelled = Spelled {
+    definitely_non_null: false,
+    alias: None,
+    alias_args: Vec::new(),
+    args: Vec::new(),
+    annotations: Vec::new(),
+    expansion_annotations: Vec::new(),
+    parameter_name: None,
+};
 
 impl Spelled {
     /// The "nothing was spelled as an alias" spelling — usable as a `&'static` argument at the many
     /// encode sites whose types cannot carry an alias (synthesized members, builtin classifiers).
-    pub const NONE: &'static Spelled = &Spelled {
-        definitely_non_null: false,
-        alias: None,
-        alias_args: Vec::new(),
-        args: Vec::new(),
-    };
+    pub const NONE: &'static Spelled = &EMPTY;
 
     /// Whether this node and everything below it is free of alias spellings — the fast path that
     /// lets the encoder skip the parallel walk entirely.
     pub fn is_none(&self) -> bool {
-        !self.definitely_non_null && self.alias.is_none() && self.args.iter().all(Spelled::is_none)
+        !self.definitely_non_null
+            && self.alias.is_none()
+            && self.annotations.is_empty()
+            && self.expansion_annotations.is_empty()
+            && self.parameter_name.is_none()
+            && self.args.iter().all(Spelled::is_none)
     }
 
     /// This node's spelling for the type argument at `index`, or the empty spelling when the
@@ -82,6 +107,7 @@ impl Spelled {
             alias: None,
             alias_args: Vec::new(),
             args: vec![self.clone()],
+            ..Spelled::default()
         }
     }
 
@@ -98,6 +124,22 @@ impl Spelled {
         self.alias_args.len() * std::mem::size_of::<(Ty, Spelled)>()
             + self.args.len() * std::mem::size_of::<Spelled>()
             + self
+                .annotations
+                .iter()
+                .chain(&self.expansion_annotations)
+                .map(|annotation| {
+                    std::mem::size_of::<TypeUseAnnotation>()
+                        + match annotation {
+                            TypeUseAnnotation::Bound(_) => 0,
+                            TypeUseAnnotation::Checked(annotation) => {
+                                annotation.arguments.len()
+                                    * std::mem::size_of::<(String, crate::types::AnnotationValue)>()
+                            }
+                        }
+                })
+                .sum::<usize>()
+            + self.parameter_name.as_deref().map_or(0, str::len)
+            + self
                 .alias_args
                 .iter()
                 .map(|(_, spelling)| spelling.storage_payload_bytes())
@@ -110,13 +152,147 @@ impl Spelled {
     }
 }
 
+/// One type-use annotation application on a [`Spelled`] node.
+///
+/// Pass 1 binds a source application's classifier while declaration spellings are collected, but
+/// its argument values are constant expressions the checker can fold only once signatures are
+/// final. Such an application therefore enters the tree as [`Self::Bound`] and leaves it, at the
+/// stable-metadata boundary, as [`Self::Checked`] (see [`Spelled::seal`]); nothing past that
+/// boundary may meet a `Bound` one. An application decoded from a dependency is `Checked` from
+/// the start.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TypeUseAnnotation {
+    Bound(AnnotationOccurrence),
+    Checked(ResolvedAnnotation),
+}
+
+impl TypeUseAnnotation {
+    /// The checked application. Panics on a `Bound` one: the stable-metadata boundary seals every
+    /// spelling it publishes.
+    pub fn checked(&self) -> &ResolvedAnnotation {
+        match self {
+            Self::Checked(annotation) => annotation,
+            Self::Bound(occurrence) => panic!(
+                "type-use annotation at {occurrence:?} crossed the stable-metadata boundary unchecked"
+            ),
+        }
+    }
+}
+
+/// A source annotation application, by its file and the exact span of its classifier reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AnnotationOccurrence {
+    pub source: u32,
+    pub span: crate::diag::Span,
+}
+
+/// What the checker made of each source type-use application: `Some` with its folded value, or
+/// `None` for a `SOURCE`-retained one, which `@Metadata` does not record.
+pub(crate) type CheckedTypeUseAnnotations =
+    std::collections::HashMap<AnnotationOccurrence, Option<ResolvedAnnotation>>;
+
+impl Spelled {
+    /// Replace every bound source application in this tree with its checked value, dropping the
+    /// `SOURCE`-retained ones. An application the checker produced no value for is dropped and
+    /// pushed onto `unchecked` for the caller to report.
+    pub(crate) fn seal(
+        &mut self,
+        checked: &CheckedTypeUseAnnotations,
+        unchecked: &mut Vec<AnnotationOccurrence>,
+    ) {
+        for annotations in [&mut self.annotations, &mut self.expansion_annotations] {
+            *annotations = std::mem::take(annotations)
+                .into_iter()
+                .filter_map(|annotation| match annotation {
+                    TypeUseAnnotation::Bound(occurrence) => match checked.get(&occurrence) {
+                        Some(value) => value.clone().map(TypeUseAnnotation::Checked),
+                        None => {
+                            unchecked.push(occurrence);
+                            None
+                        }
+                    },
+                    checked => Some(checked),
+                })
+                .collect();
+        }
+        for (_, argument) in &mut self.alias_args {
+            argument.seal(checked, unchecked);
+        }
+        for argument in &mut self.args {
+            argument.seal(checked, unchecked);
+        }
+    }
+}
+
+impl DeclaredSpellings {
+    /// [`Spelled::seal`] over every spelling of the declaration.
+    pub(crate) fn seal(
+        &mut self,
+        checked: &CheckedTypeUseAnnotations,
+        unchecked: &mut Vec<AnnotationOccurrence>,
+    ) {
+        for spelling in [&mut self.ret, &mut self.receiver, &mut self.superclass]
+            .into_iter()
+            .chain(&mut self.params)
+            .chain(&mut self.supertypes)
+            .chain(self.type_param_bounds.iter_mut().flatten())
+        {
+            spelling.seal(checked, unchecked);
+        }
+    }
+}
+
+/// The annotations `@Metadata` records on each type occurrence of one source file, keyed by the
+/// occurrence's start offset (the key the parser files type-use annotations under), as Pass 1
+/// bound them; see [`Spelled::annotations`].
+#[derive(Debug, Default)]
+pub(crate) struct RecordedTypeAnnotations {
+    annotations: std::collections::HashMap<u32, Vec<TypeUseAnnotation>>,
+    parameter_names: std::collections::HashMap<u32, Box<str>>,
+}
+
+impl RecordedTypeAnnotations {
+    pub(crate) fn record(&mut self, occurrence: u32, annotations: Vec<TypeUseAnnotation>) {
+        if !annotations.is_empty() {
+            self.annotations.insert(occurrence, annotations);
+        }
+    }
+
+    /// The occurrence at `occurrence` is the type of a function-type parameter written `name: …`.
+    pub(crate) fn record_parameter_name(&mut self, occurrence: u32, name: &str) {
+        self.parameter_names.insert(occurrence, name.into());
+    }
+
+    /// The annotations recorded on the type occurrence starting at `occurrence`.
+    pub(crate) fn at(&self, occurrence: u32) -> &[TypeUseAnnotation] {
+        self.annotations
+            .get(&occurrence)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// The name of the function-type parameter whose type starts at `occurrence`, if it was named.
+    pub(crate) fn parameter_name_at(&self, occurrence: u32) -> Option<&str> {
+        self.parameter_names.get(&occurrence).map(|name| &**name)
+    }
+}
+
+/// What one source file says about its type occurrences beyond their resolved types: the alias
+/// spellings the parse seam parked when it expanded the file's own aliases away, and the
+/// annotations `@Metadata` records on each occurrence.
+#[derive(Clone, Copy)]
+pub(crate) struct SourceSpellings<'a> {
+    pub aliases: &'a std::collections::HashMap<crate::diag::Span, crate::ast::TypeRef>,
+    pub annotations: &'a RecordedTypeAnnotations,
+}
+
 /// Source spellings of ONE declaration's declared types, addressed the way the metadata builders
 /// address them.
 ///
 /// Every field defaults to "nothing spelled an alias", and a declaration whose whole record would
 /// be empty is not recorded at all — so the overwhelming majority of declarations, in the
 /// overwhelming majority of modules, cost nothing.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DeclaredSpellings {
     /// The declared return type (a property's type, for a property).
     pub ret: Spelled,
@@ -140,30 +316,16 @@ pub struct DeclaredSpellings {
 impl DeclaredSpellings {
     /// The empty record, for the many builder paths whose declaration spelled no alias.
     pub const NONE: &'static DeclaredSpellings = &DeclaredSpellings {
-        ret: Spelled {
-            definitely_non_null: false,
-            alias: None,
-            alias_args: Vec::new(),
-            args: Vec::new(),
-        },
+        ret: EMPTY,
         params: Vec::new(),
-        receiver: Spelled {
-            definitely_non_null: false,
-            alias: None,
-            alias_args: Vec::new(),
-            args: Vec::new(),
-        },
-        superclass: Spelled {
-            definitely_non_null: false,
-            alias: None,
-            alias_args: Vec::new(),
-            args: Vec::new(),
-        },
+        receiver: EMPTY,
+        superclass: EMPTY,
         type_param_bounds: Vec::new(),
         supertypes: Vec::new(),
     };
 
-    /// Whether this declaration spelled no `typealias` anywhere — the signal not to record it.
+    /// Whether this declaration spelled no `typealias` and recorded no type-use annotation anywhere
+    /// — the signal not to record it.
     pub fn is_none(&self) -> bool {
         self.ret.is_none()
             && self.receiver.is_none()

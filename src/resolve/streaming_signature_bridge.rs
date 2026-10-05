@@ -31,9 +31,11 @@ mod lookups;
 mod postponed_calls;
 mod qualified_calls;
 mod receiver_member_level;
+mod selected_call_facts;
 mod semantics;
 mod source_contracts;
 mod stable_function_index;
+mod top_level_call;
 mod type_parameter_publication;
 mod value_parameter_publication;
 mod value_selection;
@@ -57,24 +59,7 @@ pub(crate) use local_signatures::{
     publish_checked_local_signatures, publish_discovered_local_capture_declarations,
 };
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
-
-enum SelectedTopLevelCall {
-    Ambiguous,
-    Callable {
-        callable: Box<crate::libraries::LibraryCallable>,
-        source: Option<(u32, u32)>,
-        declaration: Option<crate::fir::DeclarationId>,
-        parameter_by_argument: Box<[Option<u32>]>,
-    },
-    Value(Box<crate::libraries::PropertyInfo>),
-    /// A classifier whose constructors do not apply: its associated `operator fun invoke`, then the
-    /// `invoke` convention on the value it denotes (an object singleton or companion), if any.
-    ClassifierInvoke(TypeName, Option<Ty>),
-    Constructor(Box<crate::symbol_resolver::SelectedConstructorDeclaration>),
-    /// A fun-interface name applied to one function value (`I { … }`). The interface declares no
-    /// constructor, so this is not a `Constructor` selection — the result is the interface itself.
-    SamConstructor(crate::types::TypeName),
-}
+use top_level_call::SelectedTopLevelCall;
 
 struct ProductionSignatureSemantics<'a> {
     headers: &'a crate::fir::StreamedHeaderModule,
@@ -92,22 +77,15 @@ struct ProductionSignatureSemantics<'a> {
         RefCell<HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>>,
     stable_functions: stable_function_index::StableFunctionIndex,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
-    /// The contract of the callable selected for each top-level call, by call origin, so a
-    /// [`crate::fir::SigExpr::ContractNarrowed`] read can ask what the statement proved.
-    selected_call_contracts: RefCell<HashMap<crate::fir::OriginId, SelectedCallContract>>,
+    /// What each selected top-level call recorded, by call origin: its contract and the typealias
+    /// it constructed through.
+    selected_calls: selected_call_facts::SelectedCallFacts,
     /// Same-module source contracts bound before solving starts, by stable declaration, so a
     /// call of a source function with `returns() implies (x != null)` proves as much in a
     /// Pass-1 block as a library one. Publication into the index still happens at finalization.
     source_contracts:
         RefCell<HashMap<crate::fir::DeclarationId, std::sync::Arc<crate::contracts::Contract>>>,
     file_import_scopes: file_import_scopes::FileImportScopes,
-}
-
-struct SelectedCallContract {
-    contract: std::sync::Arc<crate::contracts::Contract>,
-    /// Selected declaration parameter for each argument in source order. The contract refers to
-    /// declaration parameters, while the compact graph retains source argument order.
-    parameter_by_argument: Box<[Option<u32>]>,
 }
 
 #[derive(Clone)]
@@ -4068,7 +4046,7 @@ pub(crate) fn finalized_streamed_signature_index(
         completed_scoped_constraints: RefCell::new(HashMap::new()),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
-        selected_call_contracts: RefCell::new(HashMap::new()),
+        selected_calls: selected_call_facts::SelectedCallFacts::default(),
         source_contracts: RefCell::new(HashMap::new()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
     };
@@ -4729,7 +4707,7 @@ pub(crate) fn finalized_streamed_signature_index(
         completed_scoped_constraints: RefCell::new(HashMap::new()),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
-        selected_call_contracts: RefCell::new(HashMap::new()),
+        selected_calls: selected_call_facts::SelectedCallFacts::default(),
         source_contracts: RefCell::new(HashMap::new()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
     };

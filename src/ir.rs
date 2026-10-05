@@ -60,6 +60,7 @@ pub(crate) use local_delegates::{
 };
 mod local_property_references;
 mod module_records;
+mod negations;
 mod null_checks;
 mod operators;
 mod overrides;
@@ -506,6 +507,13 @@ pub enum IrExpr {
     /// `break` — exit the innermost enclosing loop, or the loop carrying `label` (`break@outer`).
     Break {
         label: Option<String>,
+    },
+    /// Store `value` as the result of the enclosing inline-return frame `frame`, from a lambda body
+    /// nested inside it. That body numbers its values separately, so it names the frame, never the
+    /// frame's result value. See [`IrFile::inline_return_frames`].
+    SetFrameResult {
+        frame: String,
+        value: ExprId,
     },
     /// `continue` — jump to the innermost enclosing loop's `update`/condition (or the labeled loop's).
     Continue {
@@ -1116,10 +1124,10 @@ pub struct IrClass {
     /// `valueOf(String)`. Each [`IrEnumEntry`] carries its name, lowered constructor args, and optional
     /// synthesized-subclass fq name.
     pub enum_entries: Vec<IrEnumEntry>,
-    /// `Some(user_field_types)` marks this class as a synthesized enum-entry subclass: it extends the
-    /// enum (`superclass`), has no own fields, and its constructor is `(String name, int ordinal,
-    /// <user_field_types>)V` delegating to the enum's `(String,int,<user>)V` constructor.
-    pub enum_entry_of: Option<Vec<Ty>>,
+    /// Marks this class as the subclass an enum constant with a body is an instance of. It extends
+    /// the enum (`superclass`), declares no constructor parameters of its own, and its primary
+    /// constructor's superclass call (`super_args`) carries the constant's arguments.
+    pub is_enum_entry: bool,
     /// `Some(..)` marks this class as a synthesized property-reference singleton: a `final class
     /// extends kotlin/jvm/internal/PropertyReference1Impl` (the `superclass`) with a `public static
     /// final INSTANCE`, a constructor `super(owner.class, name, signature, 0)`, and a `get(Object)
@@ -1254,7 +1262,7 @@ impl IrClass {
             super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
             is_enum: false,
             enum_entries: Vec::new(),
-            enum_entry_of: None,
+            is_enum_entry: false,
             prop_ref: None,
             func_ref: None,
             lambda: None,
@@ -1373,7 +1381,7 @@ impl IrClass {
             super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
             is_enum: flags.has(crate::fir::DeclarationFlags::ENUM),
             enum_entries: Vec::new(),
-            enum_entry_of: None,
+            is_enum_entry: false,
             prop_ref: None,
             func_ref: None,
             lambda: None,
@@ -1838,6 +1846,12 @@ pub struct IrFile {
     /// ordinary backend-neutral `IrExpr::Return`; inline expansion consumes/decrements this fact as
     /// lambda bodies cross lexical boundaries, so no source label or AST identity survives.
     pub checked_return_depths: std::collections::HashMap<ExprId, u32>,
+    /// The result declaration of each inline-return frame, by the frame's label. An inline
+    /// expansion's returns leave through `break` to that label after storing their value. A return
+    /// in the expansion's own body stores it by the declaration's value index; one in a lambda body
+    /// nested in it writes [`IrExpr::SetFrameResult`], which every renumbering of either body
+    /// leaves pointing at the same frame.
+    pub inline_return_frames: std::collections::HashMap<ExprId, String>,
     /// Sparse construction facts keyed by the ordinary [`IrExpr::New`] identity. Common lowering
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
     /// must realize annotation instances through a platform-specific implementation class.
@@ -1938,6 +1952,8 @@ pub struct IrFile {
     /// source update has (kotlinc's `index = index + 1` in `WithIndexLoopHeader`). A target emits
     /// them as the plain arithmetic and store they are, never as a fused increment.
     pub plain_updates: std::collections::HashSet<ExprId>,
+    /// Boolean negations (kotlinc's `not`), spelled as `operand == false`; see `negations`.
+    pub negations: std::collections::HashSet<ExprId>,
     /// Pre-test loops whose body block is a transparent scope, as the body of a `for` loop kotlinc's
     /// `ForLoopsLowering` rebuilt as a `while` is (an `IrComposite`): the declarations it opens with
     /// stay in scope until the loop ends.
@@ -2550,7 +2566,7 @@ impl IrTypeParameter {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IrTypeAlias {
     pub name: String,
     pub formals: Vec<String>,

@@ -4,6 +4,7 @@
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
 mod builtin_classifier_shapes;
+mod builtin_property_realization;
 mod builtins_customizer;
 mod catalog_presence;
 mod classifier_facts;
@@ -38,7 +39,9 @@ use inline_capability::{metadata_inline, property_accessor_inline};
 use java_nullability::{
     java_result_enhancement, java_type_argument_nullability, java_type_nullability,
 };
-use mapped_builtin_member_status::{mapped_builtin_member_status, MappedBuiltinMemberStatus};
+use mapped_builtin_member_status::{
+    mapped_builtin_member_status, retain_joined_mapped_members, MappedBuiltinMemberStatus,
+};
 
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
@@ -46,7 +49,6 @@ use super::classpath::{
 use super::classreader::{ConstVal, FieldSig, JavaNullability};
 use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
-use crate::jvm::names::same_mapped_virtual_name_of;
 use crate::jvm::names::{property_getter_name, type_descriptor};
 use crate::libraries::builtin_top_level_realization::attach_function_realization;
 use crate::libraries::{
@@ -498,6 +500,7 @@ impl JvmLibraries {
                 )
                 .flatten();
             let mut callable = LibraryCallable {
+                annotations: meta.annotations.clone(),
                 inline: inline_kind,
                 suspend,
                 default_call: is_default,
@@ -556,7 +559,6 @@ impl JvmLibraries {
                     inherited_by_delegation: false,
                     return_value_status: None,
                 },
-                annotations: meta.annotations.clone(),
                 ..FunctionInfo::plain(kind, None, callable)
             });
             cm.attach_tail(c.paired_common, namespace, name, &mut overloads);
@@ -627,7 +629,7 @@ impl JvmLibraries {
                 inherited_by_delegation: false,
                 return_value_status: None,
             };
-            function.annotations = builtin.annotations;
+            function.callable.annotations = builtin.annotations;
             attach_function_realization(pkg, name, &mut function);
             overloads.push(function);
         }
@@ -772,6 +774,7 @@ impl JvmLibraries {
             let ret = metadata_return_info(function.ret_class, function.ret_nullable())
                 .apply(physical_ret);
             let callable = LibraryCallable {
+                annotations: function.annotations.clone(),
                 suspend: function.is_suspend(),
                 inline: function_inline,
                 context_count: function.context_count(),
@@ -810,7 +813,6 @@ impl JvmLibraries {
                     inherited_by_delegation: false,
                     return_value_status: Some(function.return_value_status),
                 },
-                annotations: function.annotations.clone(),
                 ..FunctionInfo::plain(
                     if receiver.is_some() {
                         FnKind::Extension
@@ -2387,26 +2389,12 @@ impl JvmLibraries {
                     mapped_builtin_member_status(internal_name, ci.this_class, member).is_visible()
                 });
             } else {
-                // A mapped JVM method and its Kotlin builtin entry describe one declaration. Prefer the
-                // builtin's Kotlin-only facts while retaining the same physical target.
-                members.retain(|member| {
-                    !builtin_members.iter().any(|builtin| {
-                        let member_physical = member
-                            .physical_name
-                            .as_deref()
-                            .unwrap_or(member.name.as_str());
-                        let builtin_physical = builtin
-                            .physical_name
-                            .as_deref()
-                            .unwrap_or(builtin.name.as_str());
-                        same_mapped_virtual_name_of(
-                            internal_name,
-                            member_physical,
-                            builtin_physical,
-                            &member.descriptor,
-                        ) && member.descriptor == builtin.descriptor
-                    })
-                });
+                retain_joined_mapped_members(
+                    internal_name,
+                    ci.this_class,
+                    &mut members,
+                    &builtin_members,
+                );
             }
             // A static Java declaration blocks an inherited instance property but does not itself
             // become one. Private instance declarations are normalized as private PropertyInfo
@@ -3777,57 +3765,13 @@ impl JvmLibraries {
                 || mapped_builtin_property(cn, name)
                 || mapped_property.is_some())
         {
-            if let Some(function) = functions.overloads.iter().find(|function| {
-                function.callable.params.is_empty()
-                    && mapped_property.as_ref().is_none_or(|mapping| {
-                        function.callable.physical_name() == mapping.physical_name
-                            && function.callable.descriptor == mapping.descriptor
-                    })
-            }) {
-                let mut getter = function.callable.clone();
-                // `FunctionInfo` keeps Kotlin declaration modality separately from its physical
-                // callable handle. A builtin property synthesized from the corresponding zero-arg
-                // member must restore that semantic fact: mapped `java.util.Collection.size()` is
-                // a usable JVM method handle, while Kotlin `Collection.size` remains abstract and
-                // therefore cannot compete with a concrete interface default in `super.size`.
-                getter.is_abstract = function.flags.is_abstract;
-                let ty = function
-                    .generic_sig
-                    .as_ref()
-                    .map(|signature| signature.ret)
-                    .unwrap_or_else(|| function.ret.apply(getter.ret));
-                getter.ret = ty;
-                overloads.push(PropertyInfo {
-                    return_value_status: function.flags.return_value_status,
-                    name: name.to_string(),
-                    kind: PropKind::Member,
-                    receiver: Some(recv),
-                    associated_classifier: None,
-                    associated_access_owner: None,
-                    formals: Vec::new(),
-                    ty,
-                    context_count: 0,
-                    context_param_names: Vec::new(),
-                    context_parameter_identities: Vec::new(),
-                    getter,
-                    setter: None,
-                    setter_visibility: function.visibility,
-                    setter_parameter_name: None,
-                    is_const: false,
-                    implicit_integer_coercion: false,
-                    compile_time_constant: None,
-                    visibility: function.visibility,
-                    owner: cn,
-                    receiver_rank: 0,
-                    source_key: None,
-                    stable_declaration: None,
-                    getter_declaration: None,
-                    setter_declaration: None,
-                    source_member: None,
-                    producer: PropertyProducer::KotlinAccessor,
-                    read_stability: crate::libraries::PropertyReadStability::Unstable,
-                });
-            }
+            overloads.extend(self.builtin_property_realization(
+                recv,
+                name,
+                &functions,
+                mapped_property,
+                function_renames,
+            ));
         }
         const ACC_STATIC: u16 = 0x0008;
         const ACC_PUBLIC: u16 = 0x0001;
@@ -4252,24 +4196,27 @@ impl JvmLibraries {
                     )
                 };
                 // Match the bytecode method to recover its descriptor and inline implementation details.
-                let (jvm_name, descriptor, cand) = if let Some(d) = mf.jvm_desc {
-                    (mf.jvm_name.clone(), d.to_string(), by_name(&mf.jvm_name))
-                } else if let Some(c) = by_name(&mf.jvm_name) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
-                } else if let Some(c) = lambda_return_mangled.as_ref().and_then(|n| by_name(n)) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
-                } else if let Some(c) = elem_mangled.as_ref().and_then(|n| by_name(n)) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
+                // A metadata JVM signature names the method exactly: a value-class receiver
+                // (`Result<T>.getOrThrow`) erases to its carrier there, which the receiver-keyed
+                // overload lookup would miss, losing the method's privacy (`@InlineOnly`).
+                let cand = if let Some(d) = mf.jvm_desc {
+                    self.cp.facade_static(facade, &mf.jvm_name, d)
                 } else {
+                    by_name(&mf.jvm_name)
+                        .or_else(|| lambda_return_mangled.as_ref().and_then(|n| by_name(n)))
+                        .or_else(|| elem_mangled.as_ref().and_then(|n| by_name(n)))
+                };
+                let Some(cand) = cand else {
                     continue;
                 };
+                let (jvm_name, descriptor) = (cand.name.clone(), cand.descriptor.clone());
                 crate::trace_compiler!(
                     "resolve",
                     "extension emit handle {} metadata_params={:?} expected_descs={value_param_descs:?} selected={jvm_name}{descriptor}",
                     mf.kotlin_name,
                     mf.generic_sig.as_ref().map(|signature| &signature.params),
                 );
-                let bytecode_public = cand.as_ref().map_or(mf.is_public(), |c| c.public);
+                let bytecode_public = cand.public;
                 // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
                 // return to `Object`; present the LOGICAL signature (drop the continuation) so a
                 // normal call resolves — the same rule the top-level and member paths apply. The
@@ -4328,6 +4275,7 @@ impl JvmLibraries {
                     })
                     .flatten();
                 let mut callable = LibraryCallable {
+                    annotations: mf.annotations.clone(),
                     inline,
                     suspend: mf.is_suspend(),
                     source_receiver,
@@ -4348,7 +4296,7 @@ impl JvmLibraries {
                         .map(|signature| signature.parameters_with_receiver(mf.context_count())),
                     // Carry the bytecode generic `Signature` so a reified extension can bind explicit
                     // type arguments instead of invoking its throwing inline-only method.
-                    signature: cand.as_ref().and_then(|c| c.signature.clone()),
+                    signature: cand.signature.clone(),
                     // The name this extension is DECLARED under, beside the JVM method it is
                     // realized as: `@JvmName` renames the method, and a value-class signature
                     // appends kotlinc's hash (`UInt.downTo` is `downTo-J1ME1BU`). Neither is
@@ -4371,7 +4319,7 @@ impl JvmLibraries {
                         self.top_level_default_realization(&callable).map(Box::new);
                 }
                 callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
-                let paired = cand.as_ref().is_some_and(|c| c.paired_common);
+                let paired = cand.paired_common;
                 overloads.push(FunctionInfo {
                     ret: ReturnInfo::new(mf.ret_nullable(), ret_class),
                     visibility: mf.visibility,
@@ -4388,7 +4336,6 @@ impl JvmLibraries {
                         inherited_by_delegation: false,
                         return_value_status: Some(mf.return_value_status),
                     },
-                    annotations: mf.annotations.clone(),
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
@@ -4932,6 +4879,7 @@ impl JvmLibraries {
                         let collection_barrier =
                             collection_barrier_role(builtin_cn, scope_name, &params, ret);
                         let callable = LibraryCallable {
+                            annotations: m.annotations.clone(),
                             reflection_name: Some(m.name.clone()),
                             physical_name: m.physical_name.clone(),
                             inline: m.inline,
@@ -5016,7 +4964,6 @@ impl JvmLibraries {
                                 inherited_by_delegation: m.inherited_by_delegation(),
                                 return_value_status: m.return_value_status,
                             },
-                            annotations: m.annotations.clone(),
                             ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
                         });
                         if let Some(function) = overloads.last_mut() {

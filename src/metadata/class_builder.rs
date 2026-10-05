@@ -68,11 +68,10 @@ pub struct PropMeta {
     /// Exact source identity of an explicitly named custom setter parameter. An implicit setter
     /// has no source parameter declaration and therefore omits `Property.setter_value_parameter`.
     pub setter_parameter_name: Option<String>,
-    /// An explicit `JvmFieldSignature.desc` for a backing field whose descriptor the reader cannot
-    /// derive from the Kotlin type — a VALUE-CLASS-typed property, whose field holds the erased
-    /// underlying (`val k: K` → `Ljava/lang/String;`). `None` leaves the field derived, which is what
-    /// every ordinary property records. (The boxed-nullable-primitive and bare-type-parameter cases
-    /// below are derived from the property itself, since the shape alone determines them.)
+    /// The backing field's descriptor, when a reader cannot rebuild it by mapping the property
+    /// type's class id (kotlinc's `requiresSignature`): a type parameter (`T` →
+    /// `Ljava/lang/Object;`), a boxed nullable primitive, a value class's erased underlying, a
+    /// reference array, or a delegate of another type. `None` leaves the field derived.
     pub field_desc: Option<String>,
     /// An explicit `JvmFieldSignature.name` when the PHYSICAL backing field's JVM name differs from
     /// the property name — an instance property mangled to dodge a same-named companion static
@@ -1022,7 +1021,10 @@ pub fn build_class(
             parameter.field_message(3, &return_type(st, &setter_type_parameters)); // ValueParameter.type = 3
             parameter
         });
+        // kotlinc interns the type before the type parameters, as at the top level.
         prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
+        let ty = return_type(st, &property_type_parameters);
+        prop.field_message(3, &ty); // Property.return_type = 3
         for (index, parameter) in p.type_params.iter().enumerate() {
             let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
@@ -1045,8 +1047,6 @@ pub fn build_class(
             .unwrap_or_else(|error| panic!("invalid emitted property type parameter: {error}"));
             prop.repeated_message(4, &parameter);
         }
-        let ty = return_type(st, &property_type_parameters);
-        prop.field_message(3, &ty); // Property.return_type = 3
         if let Some(recv) = p.receiver {
             // Property.receiver_type = 5 — a member EXTENSION property's declared receiver;
             // its presence is what makes the record an extension.
@@ -1122,12 +1122,8 @@ pub fn build_class(
             prop.field_varint(11, pflags); // Property.flags = 11
         }
         let mut jvm = Pb::new();
-        // A nullable PRIMITIVE property (`Int?`, `Double?`, …) has a BOXED backing field
-        // (`Ljava/lang/Integer;`, `Ljava/lang/Double;`), which the reader can't derive from the
-        // nullable-primitive return type — so kotlinc records an explicit `JvmFieldSignature.desc`
-        // (the boxed descriptor = the getter's return type). Every other property leaves the field
-        // empty (the reader derives it). kotlinc interns the getter/setter strings BEFORE the field
-        // descriptor (even though the proto writes `field` (f1) first), so build them in that order.
+        // kotlinc interns the getter/setter strings BEFORE the field's (even though the proto
+        // writes `field` (f1) first), so build them in that order.
         // The marker interns BEFORE the getter, exactly as it serializes (f2 before f3).
         let synthetic_method = p
             .synthetic_method
@@ -1141,33 +1137,6 @@ pub fn build_class(
             .setter
             .as_ref()
             .map(|(sn, sd)| jvm_method_sig(st, Some(sn), sd));
-        let boxed_field_desc = p.field_desc.clone().or(match p.ty {
-            Ty::Nullable(inner)
-                if matches!(
-                    *inner,
-                    Ty::Int
-                        | Ty::Long
-                        | Ty::Double
-                        | Ty::Float
-                        | Ty::Byte
-                        | Ty::Short
-                        | Ty::Char
-                        | Ty::Boolean
-                ) =>
-            {
-                p.getter
-                    .as_ref()
-                    .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string))
-            }
-            // A bare type-parameter property erases to `Ljava/lang/Object;`, which the reader
-            // cannot derive from the type `T` — so kotlinc records the descriptor explicitly, the
-            // same way it does for a boxed nullable primitive.
-            _ if p.tparam.is_some() => p
-                .getter
-                .as_ref()
-                .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
-            _ => None,
-        });
         // An abstract property has no backing field at all: kotlinc omits the entry rather than
         // writing an empty one, and interns none of its strings.
         let field = p.has_backing_field.then(|| {
@@ -1175,7 +1144,7 @@ pub fn build_class(
             if let Some(n) = &p.field_name {
                 field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
             }
-            if let Some(d) = &boxed_field_desc {
+            if let Some(d) = &p.field_desc {
                 field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
             }
             field
@@ -1208,7 +1177,7 @@ pub fn build_class(
             prop.repeated_message(34, annotation); // Property.backingFieldAnnotation = 34
         }
         if let Some(field) = &field {
-            jvm.field_message(1, field); // field (empty → derived; boxed primitive → explicit desc)
+            jvm.field_message(1, field); // field (empty → derived)
         }
         if let Some(synthetic_method) = &synthetic_method {
             jvm.field_message(2, synthetic_method); // JvmPropertySignature.syntheticMethod = 2
@@ -1245,6 +1214,20 @@ pub fn build_class(
             m.type_params.iter().map(String::as_str),
             m.semantic_type_params.iter().map(String::as_str),
         ));
+        // kotlinc interns the return type before the type parameters, as at the top level.
+        let ret = crate::metadata::type_encoder::encode_declared_type(
+            st,
+            m.ret,
+            &m.spellings.ret,
+            &function_type_parameters,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "invalid emitted metadata return type for '{class_internal}.{}': {error}",
+                m.name
+            )
+        });
+        func.field_message(3, &ret);
         for (index, name) in m.type_params.iter().enumerate() {
             let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
@@ -1267,19 +1250,6 @@ pub fn build_class(
             .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"));
             func.repeated_message(4, &parameter);
         }
-        let ret = crate::metadata::type_encoder::encode_declared_type(
-            st,
-            m.ret,
-            &m.spellings.ret,
-            &function_type_parameters,
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "invalid emitted metadata return type for '{class_internal}.{}': {error}",
-                m.name
-            )
-        });
-        func.field_message(3, &ret);
         if let Some(recv) = m.receiver {
             // Function.receiver_type = 5 — a MEMBER EXTENSION's receiver, restored from the
             // physical `params[0]` realization so consumers see the LOGICAL shape.
@@ -1336,7 +1306,7 @@ pub fn build_class(
             } else {
                 m.spellings.param(i).clone()
             };
-            let mut ty = crate::metadata::type_encoder::encode_declared_type(
+            let ty = crate::metadata::type_encoder::encode_declared_type(
                 st,
                 *pty,
                 &declared_spelling,
@@ -1350,13 +1320,6 @@ pub fn build_class(
                         )
                     },
                 );
-            if m.no_infer_params.get(i).copied().unwrap_or(false) {
-                let annotation = crate::metadata::type_encoder::encode_annotation(
-                    st,
-                    crate::types::type_name("kotlin/internal/NoInfer"),
-                );
-                ty.field_message(100, &annotation);
-            }
             vp.field_message(3, &ty);
             if m.vararg_index == Some(i) {
                 // ValueParameter.vararg_element_type = 4 — the ELEMENT next to the array type.
