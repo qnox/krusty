@@ -2116,6 +2116,28 @@ impl ResolvedModuleIndex {
             .flatten()
     }
 
+    /// `declaration` and the classifiers that lexically contain it, nearest first.
+    ///
+    /// Non-classifier owners (a function containing a local class, for example) are traversed but
+    /// not returned. The result is declaration identity, not a classifier-name prefix: generated
+    /// local names do not encode lexical ownership.
+    pub fn classifier_and_outer_class_declarations(
+        &self,
+        declaration: DeclarationId,
+    ) -> Vec<DeclarationId> {
+        let mut classifiers = Vec::new();
+        let mut current = Some(declaration);
+        while let Some(owner) = current {
+            if self.classifier_identity(owner).is_some() {
+                classifiers.push(owner);
+            }
+            current = self
+                .declaration_header(owner)
+                .and_then(|header| header.owner);
+        }
+        classifiers
+    }
+
     pub fn classifier_hierarchy(
         &self,
         declaration: DeclarationId,

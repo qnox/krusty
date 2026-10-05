@@ -777,6 +777,8 @@ mod enum_value_of_intrinsic_e2e;
 mod enum_vararg_e2e;
 #[path = "erased_scalar_result_e2e.rs"]
 mod erased_scalar_result_e2e;
+#[path = "erased_type_check_e2e.rs"]
+mod erased_type_check_e2e;
 #[path = "error_branch_join_e2e.rs"]
 mod error_branch_join_e2e;
 #[path = "error_receiver_cascade_e2e.rs"]
