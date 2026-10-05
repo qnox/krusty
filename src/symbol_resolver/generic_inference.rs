@@ -1232,6 +1232,35 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     }
 }
 
+/// Collapse a complete set of lower constraints in one operation. Keeping the original bounds is
+/// significant: a common type synthesized from the first pair is not itself a source constraint
+/// and must not make the answer depend on the order in which arguments were visited.
+pub(crate) fn merge_inferred_lower_bounds_from_symbols(
+    source: &dyn SymbolSource,
+    bounds: &[Ty],
+) -> Ty {
+    let bounds = bounds
+        .iter()
+        .map(|bound| inference_actual(*bound))
+        .collect::<Vec<_>>();
+    let Some((&first, rest)) = bounds.split_first() else {
+        return Ty::Error;
+    };
+    let nominal = |ty: Ty| match ty.non_null() {
+        Ty::Obj(..) => true,
+        Ty::Intersection(parts) => parts
+            .iter()
+            .all(|part| matches!(part.non_null(), Ty::Obj(..))),
+        _ => false,
+    };
+    if bounds.iter().copied().all(nominal) {
+        return common_supertype::common_super_types(source, &bounds);
+    }
+    rest.iter().copied().fold(first, |known, actual| {
+        merge_inferred_ty_from_symbols(Some(source), known, actual)
+    })
+}
+
 pub(crate) fn unify_inferred_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
     unify_inferred_ty_impl(None, sig, actual, binds);
 }

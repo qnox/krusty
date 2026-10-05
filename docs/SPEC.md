@@ -2663,10 +2663,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor call (`Wrapper(buildMap { … })`) already took `V` from the parameter type; the
   qualified nested-class constructor `Shape.Group(…)` solved the builder from its lower bounds
   alone, which is where the erased join surfaced. The same holds for a repository-owned
-  `fun <E> collect(block: Collector<E>.() -> Unit): List<E>`. Known gap: the
-  implicit-return-type engine (`streaming_signature_bridge`) still substitutes the first lower
-  bound into later calls in the lambda, so `fun f() = collect { add(Dot(1)); add(Line("x")) }`
-  without a declared result type still reports `unresolved reference 'add'`. Byte gap: for the
+  `fun <E> collect(block: Collector<E>.() -> Unit): List<E>`, including an inferred enclosing
+  return type. The solver retains all lower inputs and computes their common type together, so
+  reversing three sibling arguments cannot change the inferred signature. Byte gap: for the
   qualified call kotlinc emits `checkcast Shape` after each discarded `put` result (the solved
   `V?`), krusty does not; the test compares diagnostics and the run, not the facade's code. Test:
   `tests/builder_sibling_lower_bounds_e2e.rs`.

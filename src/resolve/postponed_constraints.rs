@@ -7,6 +7,7 @@ use super::*;
 pub(super) struct PostponedCallConstraints {
     pub(super) formals: Vec<String>,
     pub(super) lower: crate::symbol_resolver::GSigBinds,
+    lower_inputs: HashMap<String, Vec<Ty>>,
     pub(super) upper: HashMap<String, Vec<Ty>>,
     /// Diagnostics whose validity depends on the call solution. A lambda parameter still expressed
     /// as the callee's type variable cannot answer member lookup yet; the finalized recheck either
@@ -31,14 +32,13 @@ impl PostponedCallConstraints {
     /// type variable's lower constraints), not to `Any`: `put("a", Dot()); put("b", Line())` in a
     /// builder fixes `V` to their sealed parent.
     fn join_lower(&mut self, source: &dyn SymbolSource, formal: &str, actual: Ty) {
-        let merged = match self.lower.get(formal).copied() {
-            Some(current) => crate::symbol_resolver::merge_inferred_ty_from_symbols(
-                Some(source),
-                crate::symbol_resolver::inference_actual(current),
-                crate::symbol_resolver::inference_actual(actual),
-            ),
-            None => crate::symbol_resolver::inference_actual(actual),
-        };
+        let inputs = self.lower_inputs.entry(formal.to_string()).or_default();
+        let actual = crate::symbol_resolver::inference_actual(actual);
+        if !inputs.contains(&actual) {
+            inputs.push(actual);
+        }
+        let merged =
+            crate::symbol_resolver::merge_inferred_lower_bounds_from_symbols(source, inputs);
         self.lower.insert(formal.to_string(), merged);
     }
 
@@ -90,8 +90,10 @@ impl PostponedCallConstraints {
                 self.formals.push(formal);
             }
         }
-        for (formal, actual) in other.lower {
-            self.join_lower(source, &formal, actual);
+        for (formal, inputs) in other.lower_inputs {
+            for actual in inputs {
+                self.join_lower(source, &formal, actual);
+            }
         }
         for (formal, upper) in other.upper {
             self.upper.entry(formal).or_default().extend(upper);

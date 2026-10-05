@@ -30,17 +30,35 @@ fun many(): Shape.Many = Shape.Many(collect { add(Shape.Dot(2)); add(Shape.Line(
 
 fun drawing(): Drawing = Drawing(collect { add(Shape.Dot(2)); add(Shape.Line("y")) })
 
+fun inferredDrawing() = collect {
+    add(Shape.Dot(3))
+    add(Shape.Line("z"))
+    add(Shape.Group(emptyMap()))
+}
+
+fun reversedDrawing() = collect {
+    add(Shape.Group(emptyMap()))
+    add(Shape.Line("z"))
+    add(Shape.Dot(3))
+}
+
 fun box(): String {
     if (grouped(true, Shape.Group(emptyMap())).entries.size != 3) return "grouped"
     if (optional("q").entries.size != 2) return "optional"
     if (many().shapes.size != 2) return "many"
     if (drawing().shapes.size != 2) return "drawing"
+    if (inferredDrawing().size != 3) return "inferred"
+    if (reversedDrawing().size != 3) return "reversed"
+    val inferred: List<Shape> = inferredDrawing()
+    val reversed: List<Shape> = reversedDrawing()
+    if (inferred.size + reversed.size != 6) return "signatures"
     return "OK"
 }
 "#;
 
 /// `buildMap`'s `V` and a repository-owned builder's `E` are fixed to `Shape` from sibling
-/// subclass arguments: unconditionally, under an `if`, and inside a `?.let` lambda. The qualified
+/// subclass arguments: unconditionally, under an `if`, inside a `?.let` lambda, and in both orders
+/// while the enclosing function's result is inferred. The qualified
 /// `Shape.Group(...)` / `Shape.Many(...)` constructor calls are the shapes that solved the builder
 /// from its own lower bounds alone; the unqualified `Drawing(...)` call guards the path that already
 /// took them from the parameter type.

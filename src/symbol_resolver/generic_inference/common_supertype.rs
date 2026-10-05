@@ -1,4 +1,4 @@
-//! Common supertype of two inferred lower bounds.
+//! Common supertype of inferred lower bounds.
 //!
 //! Kotlin does not erase `Inv<A>` and `Inv<B>` to a raw `Inv` or to `Any`. The classifier stays,
 //! and each type argument is joined by its variance: a covariant argument joins directly, and an
@@ -14,8 +14,16 @@ use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName, TypeVariance};
 
 pub(super) fn common_super_type(source: &dyn SymbolSource, left: Ty, right: Ty) -> Ty {
-    let nullable = left.is_nullable() || right.is_nullable();
-    let result = common_at(source, left.non_null(), right.non_null());
+    common_super_types(source, &[left, right])
+}
+
+pub(super) fn common_super_types(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty {
+    let nullable = bounds.iter().any(|bound| bound.is_nullable());
+    let bounds = bounds
+        .iter()
+        .map(|bound| bound.non_null())
+        .collect::<Vec<_>>();
+    let result = common_at(source, &bounds);
     if nullable {
         Ty::nullable(result.non_null())
     } else {
@@ -23,45 +31,56 @@ pub(super) fn common_super_type(source: &dyn SymbolSource, left: Ty, right: Ty) 
     }
 }
 
-fn common_at(source: &dyn SymbolSource, left: Ty, right: Ty) -> Ty {
-    if left == right {
-        return left;
+fn common_at(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty {
+    let Some((&first, rest)) = bounds.split_first() else {
+        return Ty::obj_name(crate::types::wk::any());
+    };
+    if rest.iter().all(|bound| *bound == first) {
+        return first;
     }
     let oracle = SourceOracle(source);
     let context = crate::assignable::TyCtx::new();
-    let left_to_right = crate::assignable::is_assignable(&context, &oracle, left, right);
-    let right_to_left = crate::assignable::is_assignable(&context, &oracle, right, left);
-    if left_to_right && !right_to_left {
-        return right;
-    }
-    if right_to_left && !left_to_right {
-        return left;
-    }
-    if let (Ty::Obj(left_name, left_args), Ty::Obj(right_name, right_args)) = (left, right) {
-        if left_name == right_name && left_args.len() == right_args.len() {
-            return combine_classifier(source, left_name, left_args, right_args);
+    let closures = bounds
+        .iter()
+        .map(|bound| closure(source, *bound))
+        .collect::<Vec<_>>();
+    let mut classifiers = Vec::new();
+    for candidate in &closures[0] {
+        let Ty::Obj(classifier, arguments) = candidate else {
+            continue;
+        };
+        if !classifiers.contains(&(*classifier, arguments.len()))
+            && closures.iter().skip(1).all(|types| {
+                types.iter().any(|ty| {
+                    matches!(ty, Ty::Obj(name, args)
+                        if name == classifier && args.len() == arguments.len())
+                })
+            })
+        {
+            classifiers.push((*classifier, arguments.len()));
         }
     }
+
     let mut candidates = Vec::new();
-    for left_type in closure(source, left) {
-        for right_type in closure(source, right) {
-            let (Ty::Obj(left_name, left_args), Ty::Obj(right_name, right_args)) =
-                (left_type, right_type)
-            else {
-                continue;
-            };
-            if left_name != right_name || left_args.len() != right_args.len() {
-                continue;
-            }
-            let combined = if left_type == right_type {
-                left_type
-            } else {
-                combine_classifier(source, left_name, left_args, right_args)
-            };
-            if !candidates.contains(&combined) {
-                candidates.push(combined);
-            }
-        }
+    for (classifier, arity) in classifiers {
+        let matching = closures
+            .iter()
+            .map(|types| {
+                types
+                    .iter()
+                    .copied()
+                    .filter(|ty| matches!(ty, Ty::Obj(name, args) if *name == classifier && args.len() == arity))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        collect_classifier_combinations(
+            source,
+            classifier,
+            &matching,
+            0,
+            &mut Vec::new(),
+            &mut candidates,
+        );
     }
     let mut most_specific = Vec::new();
     for index in 0..candidates.len() {
@@ -82,38 +101,74 @@ fn common_at(source: &dyn SymbolSource, left: Ty, right: Ty) -> Ty {
     }
 }
 
-fn combine_classifier(
+fn collect_classifier_combinations(
     source: &dyn SymbolSource,
     classifier: TypeName,
-    left_args: &[Ty],
-    right_args: &[Ty],
-) -> Ty {
+    matching: &[Vec<Ty>],
+    index: usize,
+    selected: &mut Vec<Ty>,
+    candidates: &mut Vec<Ty>,
+) {
+    if index == matching.len() {
+        let combined = combine_classifier(source, classifier, selected);
+        if !candidates.contains(&combined) {
+            candidates.push(combined);
+        }
+        return;
+    }
+    for ty in &matching[index] {
+        selected.push(*ty);
+        collect_classifier_combinations(
+            source,
+            classifier,
+            matching,
+            index + 1,
+            selected,
+            candidates,
+        );
+        selected.pop();
+    }
+}
+
+fn combine_classifier(source: &dyn SymbolSource, classifier: TypeName, types: &[Ty]) -> Ty {
+    let arguments = types
+        .iter()
+        .map(|ty| match ty {
+            Ty::Obj(_, arguments) => arguments.as_ref(),
+            _ => &[][..],
+        })
+        .collect::<Vec<_>>();
+    let arity = arguments.first().map_or(0, |arguments| arguments.len());
     let variances = source
         .classifier(classifier)
         .map(|shape| shape.type_param_variances().clone())
         .unwrap_or_default();
-    let mut arguments = Vec::with_capacity(left_args.len());
-    for (index, (&left, &right)) in left_args.iter().zip(right_args).enumerate() {
-        if left == right {
-            arguments.push(left);
+    let mut combined_arguments = Vec::with_capacity(arity);
+    for index in 0..arity {
+        let projected = arguments
+            .iter()
+            .map(|arguments| arguments[index])
+            .collect::<Vec<_>>();
+        if projected.iter().all(|argument| *argument == projected[0]) {
+            combined_arguments.push(projected[0]);
             continue;
         }
         let variance = variances
             .get(index)
             .copied()
             .unwrap_or(TypeVariance::Invariant);
-        let joined = common_at(
-            source,
-            left.projection_read_ty().non_null(),
-            right.projection_read_ty().non_null(),
-        );
-        arguments.push(match variance {
+        let readable = projected
+            .iter()
+            .map(|argument| argument.projection_read_ty().non_null())
+            .collect::<Vec<_>>();
+        let joined = common_at(source, &readable);
+        combined_arguments.push(match variance {
             TypeVariance::Out => joined,
             TypeVariance::Invariant => Ty::out_projection(joined),
             TypeVariance::In => Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
         });
     }
-    Ty::obj_args_name(classifier, &arguments)
+    Ty::obj_args_name(classifier, &combined_arguments)
 }
 
 /// The classifier a reified operation records. An intersection is not a runtime class. When every
@@ -244,7 +299,7 @@ fn closure(source: &dyn SymbolSource, root: Ty) -> Vec<Ty> {
 
 #[cfg(test)]
 mod tests {
-    use super::{common_super_type, reified_runtime_type};
+    use super::{common_super_type, common_super_types, reified_runtime_type};
     use crate::symbol_source::SymbolSource;
     use crate::types::{type_name, Ty};
 
@@ -266,6 +321,16 @@ mod tests {
         assert_eq!(left_first, right_first);
         assert_ne!(left_first, left);
         assert_ne!(left_first, right);
+    }
+
+    #[test]
+    fn an_n_ary_join_does_not_discard_the_original_lower_bounds() {
+        let left = Ty::obj("demo/Left");
+        let middle = Ty::obj("demo/Middle");
+        let right = Ty::obj("demo/Right");
+        let forward = common_super_types(&EmptySource, &[left, middle, right]);
+        let reverse = common_super_types(&EmptySource, &[right, middle, left]);
+        assert_eq!(forward, reverse);
     }
 
     #[test]

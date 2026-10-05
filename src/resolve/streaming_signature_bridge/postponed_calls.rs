@@ -60,6 +60,7 @@ fn same_callable(
 }
 
 fn merge_active_constraints(
+    source: &dyn crate::symbol_source::SymbolSource,
     bindings: &mut crate::symbol_resolver::GSigBinds,
     constraints: crate::symbol_resolver::AssignabilityConstraints,
     active: &std::collections::HashSet<&str>,
@@ -76,7 +77,11 @@ fn merge_active_constraints(
             bindings
                 .entry(formal)
                 .and_modify(|known| {
-                    *known = crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
+                    *known = crate::symbol_resolver::merge_inferred_ty_from_symbols(
+                        Some(source),
+                        *known,
+                        actual,
+                    )
                 })
                 .or_insert(actual);
         }
@@ -412,16 +417,6 @@ impl ProductionSignatureSemantics<'_> {
                 bindings: Vec::new(),
             };
         }
-        let known = constraint_frame
-            .and_then(|(owner, index)| {
-                self.scoped_constraints
-                    .borrow()
-                    .get(&owner)
-                    .and_then(|stack| stack.get(index))
-                    .cloned()
-            })
-            .unwrap_or_default();
-
         let (mut functions, properties) = callables.into_parts();
         let mut recorded = Vec::new();
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
@@ -429,10 +424,7 @@ impl ProductionSignatureSemantics<'_> {
             &module as &dyn crate::symbol_source::SymbolSource,
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
-        let arguments = arguments
-            .iter()
-            .map(|argument| argument.substitute_types(&known))
-            .collect::<Vec<_>>();
+        let arguments = arguments.to_vec();
         for candidate in &mut functions.overloads {
             let Some(mut signature) = candidate.generic_sig.clone() else {
                 // A non-generic extension's receiver still constrains the active variables that
@@ -445,12 +437,16 @@ impl ProductionSignatureSemantics<'_> {
                             declared_receiver,
                             receiver,
                         );
-                    merge_active_constraints(&mut bindings, constraints, &active);
+                    merge_active_constraints(&source, &mut bindings, constraints, &active);
                     recorded.push((candidate.clone(), bindings));
                 }
                 continue;
             };
-            let mut bindings = known.clone();
+            // Active builder variables carry lower constraints, not fixed equalities. Each nested
+            // call contributes against the declaration shape independently; substituting the first
+            // lower bound here would make a later sibling argument inapplicable before PCLA solves
+            // the complete constraint set.
+            let mut bindings = crate::symbol_resolver::GSigBinds::new();
             let declared_receiver = signature.receiver.or(candidate.receiver);
             if let Some(declared_receiver) = declared_receiver {
                 crate::symbol_resolver::unify_inferred_ty_with_source(
@@ -482,7 +478,7 @@ impl ProductionSignatureSemantics<'_> {
                         parameter,
                         argument.type_for(parameter),
                     );
-                merge_active_constraints(&mut bindings, constraints, &active);
+                merge_active_constraints(&source, &mut bindings, constraints, &active);
             }
             if let Some(declared_receiver) = declared_receiver {
                 let expected_receiver =
@@ -493,7 +489,7 @@ impl ProductionSignatureSemantics<'_> {
                         expected_receiver,
                         receiver,
                     );
-                merge_active_constraints(&mut bindings, constraints, &active);
+                merge_active_constraints(&source, &mut bindings, constraints, &active);
             }
             let committed = bindings
                 .iter()
@@ -631,7 +627,7 @@ impl ProductionSignatureSemantics<'_> {
             &source, declared, receiver,
         );
         let mut bindings = crate::symbol_resolver::GSigBinds::new();
-        merge_active_constraints(&mut bindings, constraints, &active);
+        merge_active_constraints(&source, &mut bindings, constraints, &active);
         self.commit_postponed_bindings(scope, bindings);
     }
 
@@ -678,6 +674,13 @@ impl ProductionSignatureSemantics<'_> {
         else {
             return;
         };
-        ProductionSignatureSemantics::merge_scoped_constraints(active, bindings);
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        ProductionSignatureSemantics::merge_scoped_constraints_from_symbols(
+            &source, active, bindings,
+        );
     }
 }
