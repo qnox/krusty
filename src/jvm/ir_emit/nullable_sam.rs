@@ -63,9 +63,7 @@ impl<'a> Emitter<'a> {
             return;
         }
         self.emit_initialized_lambda_class(code, internal, cap_tys, |emitter, code| {
-            for &capture in captures {
-                emitter.emit_value(capture, code);
-            }
+            emitter.emit_lambda_captures(captures, cap_tys, code);
         });
     }
 
@@ -77,6 +75,7 @@ impl<'a> Emitter<'a> {
         indy: u16,
         cap_words: i32,
         captures: &[u32],
+        cap_tys: &[Ty],
         nullable: bool,
     ) {
         if nullable {
@@ -97,10 +96,19 @@ impl<'a> Emitter<'a> {
             code.bind(done);
             return;
         }
-        for &capture in captures {
-            self.emit_value(capture, code);
-        }
+        self.emit_lambda_captures(captures, cap_tys, code);
         code.invokedynamic(indy, cap_words, 1);
+    }
+
+    /// Bind each capture at the implementation parameter's JVM type. An inlined type parameter is
+    /// concrete at this call site and erased on a shared implementation, so a primitive value is
+    /// boxed into that parameter.
+    fn emit_lambda_captures(&mut self, captures: &[u32], cap_tys: &[Ty], code: &mut CodeBuilder) {
+        for (&capture, &parameter) in captures.iter().zip(cap_tys) {
+            self.emit_value(capture, code);
+            let produced = self.value_ty(capture);
+            self.adapt_physical_operand_for(capture, produced, parameter, code);
+        }
     }
 
     /// `new Wrapper(function)` only when `function` is non-null. The wrapper constructor rejects

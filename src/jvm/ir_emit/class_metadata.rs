@@ -297,10 +297,15 @@ pub(super) fn build_class_metadata_with_facts(
     }
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let local_classifiers = super::super::local_classifiers::names(ir);
-    // A reader maps a declared type to its JVM descriptor by class id, and a local classifier's id
-    // maps to no JVM name, so a signature naming one (outermost) records its descriptor.
-    let names_local =
-        |t: Ty| matches!(t.non_null(), Ty::Obj(name, _) if local_classifiers.contains(&name));
+    // A backing field records its descriptor exactly when a reader cannot rebuild it from the
+    // property type (kotlinc's `requiresSignature`).
+    let requires_field_signature = |property: Ty, physical: &str| {
+        super::super::metadata_method_signatures::requires_field_signature(
+            property,
+            physical,
+            &local_classifiers,
+        )
+    };
     // Metadata describes Kotlin PROPERTY declarations, never physical fields. Synthetic storage such
     // as `x$delegate`, `this$0`, and interface-delegation fields has no source declaration and must not
     // leak into the metadata name/type namespace. A property's optional backing field supplies only
@@ -474,15 +479,14 @@ pub(super) fn build_class_metadata_with_facts(
                         property.setter,
                     ),
                     field_desc: backing
-                        .map(|(_, field)| field)
-                        .or(delegate)
-                        .filter(|field| property.ty != field.ty || names_local(field.ty))
-                        .map(|field| desc(field.ty))
+                        .map(|(_, field)| field.ty)
+                        .or(delegate.map(|field| field.ty))
                         .or_else(|| {
                             static_fields::hoisted_static_for(ir, c, property_index)
-                                .filter(|storage| storage.erased_declared_ty.is_some())
-                                .map(|storage| desc(storage.ty))
-                        }),
+                                .map(|storage| storage.ty)
+                        })
+                        .map(desc)
+                        .filter(|physical| requires_field_signature(property.ty, physical)),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
                     field_name: backing
@@ -495,6 +499,9 @@ pub(super) fn build_class_metadata_with_facts(
                     // which the value-class pass may have mangled with the getter's).
                     annotations: property_metadata_annotations(c, &property.name),
                     field_annotations: property_backing_field_annotations(c, &property.name),
+                    accessor_annotations: crate::metadata::AccessorMetadataAnnotations::of(
+                        &property.accessor_annotations,
+                    ),
                     synthetic_method: property_marker_signature(ir, c, &property.name),
                     // kotlinc marks an interface companion's `@JvmField` property record: the
                     // backing field was MOVED onto the interface itself.
@@ -540,6 +547,7 @@ pub(super) fn build_class_metadata_with_facts(
                 field_name: None,
                 annotations: property_metadata_annotations(c, &prop.name),
                 field_annotations: property_backing_field_annotations(c, &prop.name),
+                accessor_annotations: Default::default(),
                 synthetic_method: property_marker_signature(ir, c, &prop.name),
                 moved_from_interface_companion: false,
                 companion: false,
@@ -594,11 +602,12 @@ pub(super) fn build_class_metadata_with_facts(
             setter: ext.setter.and_then(accessor_sig),
             setter_parameter_name: super::super::parameter_names::explicit_setter(ir, ext.setter),
             field_desc: ext_delegate
-                .filter(|field| field.ty != ext.ty)
-                .map(|field| desc(field.ty)),
+                .map(|field| desc(field.ty))
+                .filter(|physical| requires_field_signature(ext.ty, physical)),
             field_name: ext_delegate.map(|field| instance_field_jvm_name(ir, c, field)),
             annotations: property_metadata_annotations(c, &ext.name),
             field_annotations: Default::default(),
+            accessor_annotations: Default::default(),
             synthetic_method: property_marker_signature(ir, c, &ext.name),
             moved_from_interface_companion: false,
             companion: false,
@@ -976,6 +985,7 @@ pub(super) fn build_class_metadata_with_facts(
                                 .unwrap_or(false)
                         })
                         .collect(),
+                    contract: ir.fn_contracts.get(&fid).map(|contract| contract.to_arc()),
                 })
             })
             .collect::<Vec<_>>()
@@ -1016,6 +1026,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if synthesizes_copy {
@@ -1055,6 +1066,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if ir
@@ -1082,6 +1094,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if ir
@@ -1109,6 +1122,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if ir
@@ -1136,6 +1150,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         // kotlinc visits the source declarations first, then the members the compiler generates.

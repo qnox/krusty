@@ -104,6 +104,39 @@ pub(crate) fn publish_checked_classifier_annotations(
             let Decl::Class(class) = file.decl(declaration) else {
                 continue;
             };
+            if class.kind != crate::ast::ClassKind::Annotation {
+                continue;
+            }
+            if let Some(retention) = checked_retention(file, file_index as u32, table, &info, class)
+            {
+                index.publish_annotation_retention(internal, retention);
+                table.annotation_retentions.insert(internal, retention);
+            }
+            let Some(policy) = checked_target_policy(file, file_index as u32, table, &info, class)
+            else {
+                continue;
+            };
+            let published = match policy {
+                CheckedTargetPolicy::Valid(targets) => {
+                    index.publish_annotation_targets(internal, targets, true);
+                    table.annotation_targets.publish_valid(internal, targets)
+                }
+                CheckedTargetPolicy::InvalidRecovery(targets) => {
+                    index.publish_annotation_targets(internal, targets, false);
+                    table
+                        .annotation_targets
+                        .publish_invalid_recovery(internal, targets)
+                }
+            };
+            assert!(
+                published,
+                "an annotation classifier may publish one target policy"
+            );
+        }
+        for &(internal, declaration) in &declarations {
+            let Decl::Class(class) = file.decl(declaration) else {
+                continue;
+            };
             let Some(owner) = table
                 .classes
                 .get(&internal)
@@ -142,6 +175,112 @@ pub(crate) fn publish_checked_classifier_annotations(
     }
 }
 
+/// What an annotation class's own checked `@Target` application declares.
+enum CheckedTargetPolicy {
+    /// The application checked: its arguments are `kotlin.annotation.AnnotationTarget` entries, and
+    /// the targets they denote are the class's semantic policy.
+    Valid(crate::types::AnnotationTargets),
+    /// The application did not check (an argument of another enum is an argument type mismatch).
+    /// kotlinc still lists the entries it selected, by declared name, in the secondary
+    /// WRONG_ANNOTATION_TARGET diagnostics; the class has no semantic policy.
+    InvalidRecovery(crate::types::AnnotationTargets),
+}
+
+/// The class's `@Target` policy from its checked application, in declared order; `None` when it
+/// declares no `@Target`. Each argument is the enum entry the checker selected through the ordinary
+/// scope and import rules, so an unqualified or aliased import names the entry it selects, never
+/// its spelling.
+fn checked_target_policy(
+    file: &File,
+    file_index: u32,
+    table: &SymbolTable,
+    info: &TypeInfo,
+    class: &ClassDecl,
+) -> Option<CheckedTargetPolicy> {
+    let target = type_name("kotlin/annotation/Target");
+    let annotation_target = type_name("kotlin/annotation/AnnotationTarget");
+    let is_target = |annotation: &AnnotationRef| {
+        table.resolved_annotation(file_index, annotation) == Some(target)
+    };
+    let index = class.annotations.iter().position(is_target)?;
+    let mut leaves = Vec::new();
+    for &argument in &class.annotation_args[index] {
+        selected_entries(file, info, argument, &mut leaves);
+    }
+    // Valid only when the application checked and every argument selected an entry declared by
+    // `kotlin.annotation.AnnotationTarget` itself.
+    let valid = info.applied_annotation(&class.annotations[index]).is_some()
+        && leaves
+            .iter()
+            .all(|leaf| leaf.is_some_and(|entry| entry.classifier == annotation_target));
+    let entries = leaves.into_iter().flatten();
+    Some(if valid {
+        CheckedTargetPolicy::Valid(crate::types::AnnotationTargets::kotlin(entries.filter_map(
+            |entry| crate::types::KotlinTarget::of_entry(entry.classifier, &entry.name),
+        )))
+    } else {
+        CheckedTargetPolicy::InvalidRecovery(crate::types::AnnotationTargets::kotlin(
+            entries.filter_map(|entry| {
+                crate::types::KotlinTarget::recovered_from_invalid_entry(&entry.name)
+            }),
+        ))
+    })
+}
+
+/// The retention an annotation class's checked `@Retention` application declares; `None` when it
+/// declares none or the application is invalid. The argument is the enum entry the checker selected
+/// through the ordinary scope and import rules, so an unqualified or aliased import names the entry
+/// it selects, never its spelling. Only an entry declared by `kotlin.annotation.AnnotationRetention`
+/// itself is a retention: an entry of another enum, even one spelled the same, is an argument type
+/// mismatch, and the class keeps the default.
+fn checked_retention(
+    file: &File,
+    file_index: u32,
+    table: &SymbolTable,
+    info: &TypeInfo,
+    class: &ClassDecl,
+) -> Option<crate::types::AnnotationRetention> {
+    let retention = type_name("kotlin/annotation/Retention");
+    let index = class.annotations.iter().position(|annotation| {
+        table.resolved_annotation(file_index, annotation) == Some(retention)
+    })?;
+    info.applied_annotation(&class.annotations[index])?;
+    let mut leaves = Vec::new();
+    for &argument in &class.annotation_args[index] {
+        selected_entries(file, info, argument, &mut leaves);
+    }
+    let [Some(entry)] = leaves.as_slice() else {
+        return None;
+    };
+    crate::types::AnnotationRetention::of_entry(entry.classifier, &entry.name)
+}
+
+/// Each argument leaf's selected enum entry, `None` for a leaf that selected none. `@Target` takes
+/// a `vararg` of entries; the named form spells the same list as an array literal or `arrayOf`, so
+/// both flatten here.
+fn selected_entries<'i>(
+    file: &File,
+    info: &'i TypeInfo,
+    argument: ExprId,
+    leaves: &mut Vec<Option<&'i ResolvedEnumEntry>>,
+) {
+    if let Some(entry) = info.resolved_enum_entry(argument) {
+        leaves.push(Some(entry));
+        return;
+    }
+    let elements = match file.expr(argument) {
+        Expr::AnnotationArrayLiteral(elements) => elements.as_slice(),
+        Expr::Call { args, .. } => args.as_slice(),
+        _ => {
+            leaves.push(None);
+            return;
+        }
+    };
+    for &element in elements {
+        selected_entries(file, info, element, leaves);
+    }
+}
+
 fn classifier_has_resolved_annotations(
     table: &SymbolTable,
     file_index: u32,
@@ -167,11 +306,8 @@ impl Checker<'_> {
         function: &FunDecl,
         include_value_parameters: bool,
     ) -> usize {
-        let suppression_depth = self.push_declaration_suppressions(
-            scope,
-            &function.annotations,
-            &function.annotation_args,
-        );
+        let suppression_depth =
+            self.push_declaration_policies(scope, &function.annotations, &function.annotation_args);
         self.check_declaration_type_parameter_annotations(scope, function.signature_span.lo);
         for (annotation, arguments) in function.annotations.iter().zip(&function.annotation_args) {
             self.check_annotation_application(scope, annotation, arguments);
@@ -226,8 +362,7 @@ impl Checker<'_> {
             function,
             include_value_parameters,
         );
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(suppression_depth);
     }
 
     pub(super) fn fold_annotation_values(
@@ -346,6 +481,41 @@ impl Checker<'_> {
             });
     }
 
+    /// The targets WRONG_ANNOTATION_TARGET names for `internal`: its declared targets, or for a
+    /// source class whose own `@Target` application is invalid, kotlinc's recovery from it.
+    pub(super) fn diagnostic_annotation_targets(
+        &self,
+        internal: TypeName,
+    ) -> Option<crate::types::AnnotationTargets> {
+        if self.module.annotation_retention(internal).is_some() {
+            if let Some(targets) = self.module.annotation_targets().diagnostic(internal) {
+                return Some(targets);
+            }
+        }
+        self.declared_annotation_targets(internal)
+    }
+
+    /// The targets `internal` declares, whether this module or a library declares the class.
+    pub(super) fn declared_annotation_targets(
+        &self,
+        internal: TypeName,
+    ) -> Option<crate::types::AnnotationTargets> {
+        if self.module.annotation_retention(internal).is_some() {
+            return Some(
+                self.module
+                    .annotation_targets()
+                    .semantic(internal)
+                    .unwrap_or(crate::types::AnnotationTargets::DEFAULT),
+            );
+        }
+        Some(
+            self.resolver()
+                .classifier(internal)?
+                .annotation_targets
+                .unwrap_or(crate::types::AnnotationTargets::DEFAULT),
+        )
+    }
+
     pub(super) fn fold_annotation_application(
         &mut self,
         internal: TypeName,
@@ -357,13 +527,7 @@ impl Checker<'_> {
         let classifier = self.resolver().classifier(internal)?;
         let retention =
             super::annotation_applications::annotation_retention(module_retention, &classifier)?;
-        let targets = if module_retention.is_some() {
-            self.module.annotation_targets(internal)
-        } else {
-            classifier
-                .annotation_targets
-                .unwrap_or(crate::types::AnnotationTargets::DEFAULT)
-        };
+        let targets = self.declared_annotation_targets(internal)?;
         Some(crate::types::AppliedAnnotation {
             internal,
             values,

@@ -11,11 +11,12 @@
 //! String table: a class id uses operation `DESC_TO_CLASS_ID` (Record.f3=2) over `Lpkg/Name;`;
 //! builtin types use `predefined_index` (Record.f2); everything else is a verbatim d2 entry.
 
+use crate::metadata::builder::ContractTypeTable;
 use crate::metadata::local_properties::{
     local_property_pb, LocalPropertyMeta, LOCAL_VARIABLE_FIELD,
 };
 use crate::metadata::type_encoder::{
-    encode_annotation, encode_indexed_type_parameter, encode_metadata_type_parameter, encode_type,
+    encode_indexed_type_parameter, encode_metadata_type_parameter, encode_type,
     semantic_named_type_parameters, MetadataTypeParameter, StringTable, TypeParameterRef,
     TypeParameters,
 };
@@ -67,11 +68,10 @@ pub struct PropMeta {
     /// Exact source identity of an explicitly named custom setter parameter. An implicit setter
     /// has no source parameter declaration and therefore omits `Property.setter_value_parameter`.
     pub setter_parameter_name: Option<String>,
-    /// An explicit `JvmFieldSignature.desc` for a backing field whose descriptor the reader cannot
-    /// derive from the Kotlin type — a VALUE-CLASS-typed property, whose field holds the erased
-    /// underlying (`val k: K` → `Ljava/lang/String;`). `None` leaves the field derived, which is what
-    /// every ordinary property records. (The boxed-nullable-primitive and bare-type-parameter cases
-    /// below are derived from the property itself, since the shape alone determines them.)
+    /// The backing field's descriptor, when a reader cannot rebuild it by mapping the property
+    /// type's class id (kotlinc's `requiresSignature`): a type parameter (`T` →
+    /// `Ljava/lang/Object;`), a boxed nullable primitive, a value class's erased underlying, a
+    /// reference array, or a delegate of another type. `None` leaves the field derived.
     pub field_desc: Option<String>,
     /// An explicit `JvmFieldSignature.name` when the PHYSICAL backing field's JVM name differs from
     /// the property name — an instance property mangled to dodge a same-named companion static
@@ -85,6 +85,9 @@ pub struct PropMeta {
     /// Annotations that landed on the BACKING FIELD (`@Target(FIELD)`) — recorded separately (f34),
     /// because the reader must not attribute a field annotation to the property.
     pub field_annotations: crate::metadata::MetadataAnnotations,
+    /// The accessors' own annotations (`@A get`, `@A set`, `set(@A v)`): each accessor word's
+    /// `HAS_ANNOTATIONS` bit and the `getter_annotation`/`setter_annotation` records (f15/f16).
+    pub accessor_annotations: crate::metadata::AccessorMetadataAnnotations,
     /// `(name, descriptor)` of the `get<Name>$annotations()` marker method carrying
     /// [`Self::annotations`] — `JvmPropertySignature.syntheticMethod` (f2). `None` when the property
     /// has no property-targeted annotation.
@@ -159,6 +162,8 @@ pub struct FnMeta {
     pub param_annotations: Vec<crate::metadata::MetadataAnnotations>,
     /// Kotlin type-use inference policy, parallel to `params`.
     pub no_infer_params: Vec<bool>,
+    /// The member's declared `contract { … }` (`Function.contract` = 32).
+    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
 impl FnMeta {
@@ -186,6 +191,7 @@ impl FnMeta {
             annotations: Default::default(),
             param_annotations: Vec::new(),
             no_infer_params: Vec::new(),
+            contract: None,
         }
     }
 }
@@ -245,12 +251,8 @@ pub(crate) fn append_param_annotations(
     let Some(annotations) = annotations.filter(|_| annotations_in_metadata) else {
         return;
     };
-    for annotation in annotations
-        .records()
-        .iter()
-        .filter(|a| records_annotation(a))
-    {
-        let encoded = encode_annotation(st, annotation.internal);
+    for annotation in annotations.records() {
+        let encoded = crate::metadata::builder::annotation_pb(st, annotation);
         vp.field_message(7, &encoded); // ValueParameter.annotation = 7
     }
 }
@@ -264,30 +266,6 @@ pub(crate) fn param_annotation_flags(
     } else {
         0
     }
-}
-
-/// Whether this applied annotation is recorded in `@Metadata` at all.
-///
-/// An annotation with ARGUMENTS is not: its `Annotation.argument` encoding is a separate value model
-/// (`Annotation.Argument.Value`) that this builder does not write yet, and a record naming the class
-/// with its arguments dropped would describe `@Named()` — a different annotation from the source's
-/// `@Named("hi", 7)`. Omitting it leaves the metadata incomplete but never wrong; the classfile
-/// `Runtime*ParameterAnnotations` attribute carries the full form either way. Same policy as
-/// The common-IR annotation handoff likewise drops a whole annotation rather than emit a partial
-/// value set.
-///
-/// The encoding to fill in, measured from kotlinc 2.4.10 for `fun f(@Named("hi", 7) a: Int)` with
-/// `annotation class Named(val v: String, val n: Int)`:
-///   `Annotation.argument` = f2, repeated, each `{ nameId = f1, value = f2 }`;
-///   `Argument.Value` = `{ type = f1 (enum BYTE 0, CHAR 1, SHORT 2, INT 3, LONG 4, FLOAT 5, DOUBLE 6,
-///   BOOLEAN 7, STRING 8, CLASS 9, ENUM 10, ANNOTATION 11, ARRAY 12), intValue = f2 (zigzag sint),
-///   floatValue = f3, doubleValue = f4, stringValue = f5, classId = f6, enumValueId = f7,
-///   annotation = f8, arrayElement = f9 }`. That parameter's `ValueParameter.annotation` is
-///   `3a 16 | 08 07 | 12 08 08 08 12 04 08 08 28 09 | 12 08 08 0a 12 04 08 03 10 0e`
-///   — id 7, then `v` = STRING id 9, then `n` = INT 7 (`10 0e`, zigzag). String ids and the argument
-///   NAMES intern in that same order, after the annotation's own class id.
-pub(crate) fn records_annotation(annotation: &crate::ir::AppliedAnnotation) -> bool {
-    annotation.values.is_empty()
 }
 
 /// A declaration visibility's `flags` bits, which a property and its accessors share.
@@ -1013,9 +991,15 @@ pub fn build_class(
                 } else {
                     DECLARED_SETTER_PARAMETER
                 });
+            let annotations = Some(&p.accessor_annotations.setter_parameter);
             let mut parameter = Pb::new();
+            let flags = param_annotation_flags(annotations);
+            if flags != 0 {
+                parameter.field_varint(1, flags); // ValueParameter.flags = 1
+            }
             parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
             parameter.field_message(3, &return_type(st, &setter_type_parameters)); // ValueParameter.type = 3
+            append_param_annotations(st, &mut parameter, annotations, annotations_in_metadata);
             parameter
         });
         // kotlinc interns the type before the type parameters, as at the top level.
@@ -1101,7 +1085,10 @@ pub fn build_class(
                 0
             }
         };
-        let getter_flags = shared | not_default(p.modifiers.declared_getter);
+        let accessors = &p.accessor_annotations;
+        let getter_flags = shared
+            | not_default(p.modifiers.declared_getter)
+            | u64::from(accessors.getter.declares_annotations());
         if getter_flags != default_accessor {
             prop.field_varint(7, getter_flags); // Property.getter_flags = 7
         }
@@ -1110,7 +1097,8 @@ pub fn build_class(
         if p.is_var {
             let setter_flags = (shared & !property_flags::VISIBILITY_MASK)
                 | visibility_flags(p.setter_visibility)
-                | not_default(setter_is_not_default(p));
+                | not_default(setter_is_not_default(p))
+                | u64::from(accessors.setter.declares_annotations());
             if setter_flags != default_accessor {
                 prop.field_varint(8, setter_flags); // Property.setter_flags = 8
             }
@@ -1119,12 +1107,8 @@ pub fn build_class(
             prop.field_varint(11, pflags); // Property.flags = 11
         }
         let mut jvm = Pb::new();
-        // A nullable PRIMITIVE property (`Int?`, `Double?`, …) has a BOXED backing field
-        // (`Ljava/lang/Integer;`, `Ljava/lang/Double;`), which the reader can't derive from the
-        // nullable-primitive return type — so kotlinc records an explicit `JvmFieldSignature.desc`
-        // (the boxed descriptor = the getter's return type). Every other property leaves the field
-        // empty (the reader derives it). kotlinc interns the getter/setter strings BEFORE the field
-        // descriptor (even though the proto writes `field` (f1) first), so build them in that order.
+        // kotlinc interns the getter/setter strings BEFORE the field's (even though the proto
+        // writes `field` (f1) first), so build them in that order.
         // The marker interns BEFORE the getter, exactly as it serializes (f2 before f3).
         let synthetic_method = p
             .synthetic_method
@@ -1138,33 +1122,6 @@ pub fn build_class(
             .setter
             .as_ref()
             .map(|(sn, sd)| jvm_method_sig(st, Some(sn), sd));
-        let boxed_field_desc = p.field_desc.clone().or(match p.ty {
-            Ty::Nullable(inner)
-                if matches!(
-                    *inner,
-                    Ty::Int
-                        | Ty::Long
-                        | Ty::Double
-                        | Ty::Float
-                        | Ty::Byte
-                        | Ty::Short
-                        | Ty::Char
-                        | Ty::Boolean
-                ) =>
-            {
-                p.getter
-                    .as_ref()
-                    .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string))
-            }
-            // A bare type-parameter property erases to `Ljava/lang/Object;`, which the reader
-            // cannot derive from the type `T` — so kotlinc records the descriptor explicitly, the
-            // same way it does for a boxed nullable primitive.
-            _ if p.tparam.is_some() => p
-                .getter
-                .as_ref()
-                .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
-            _ => None,
-        });
         // An abstract property has no backing field at all: kotlinc omits the entry rather than
         // writing an empty one, and interns none of its strings.
         let field = p.has_backing_field.then(|| {
@@ -1172,7 +1129,7 @@ pub fn build_class(
             if let Some(n) = &p.field_name {
                 field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
             }
-            if let Some(d) = &boxed_field_desc {
+            if let Some(d) = &p.field_desc {
                 field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
             }
             field
@@ -1180,32 +1137,36 @@ pub fn build_class(
         // Property.annotation = 14 / the backing field's = 34, both interning after the signature's
         // strings (kotlinc's serializer writes the JVM extension first). A disabled source feature
         // keeps the `HAS_ANNOTATIONS` flag above but writes no records.
-        let annotations: Vec<Pb> = if annotations_in_metadata {
-            p.annotations
-                .records()
-                .iter()
-                .map(|annotation| crate::metadata::builder::annotation_pb(st, annotation))
-                .collect()
-        } else {
-            Vec::new()
+        let records = |st: &mut StringTable<'_>,
+                       annotations: &crate::metadata::MetadataAnnotations| {
+            if annotations_in_metadata {
+                annotations
+                    .records()
+                    .iter()
+                    .map(|annotation| crate::metadata::builder::annotation_pb(st, annotation))
+                    .collect()
+            } else {
+                Vec::new()
+            }
         };
-        let field_annotations: Vec<Pb> = if annotations_in_metadata {
-            p.field_annotations
-                .records()
-                .iter()
-                .map(|annotation| crate::metadata::builder::annotation_pb(st, annotation))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let annotations: Vec<Pb> = records(st, &p.annotations);
+        let getter_annotations = records(st, &accessors.getter);
+        let setter_annotations = records(st, &accessors.setter);
+        let field_annotations = records(st, &p.field_annotations);
         for annotation in &annotations {
             prop.repeated_message(14, annotation); // Property.annotation = 14
+        }
+        for annotation in &getter_annotations {
+            prop.repeated_message(15, annotation); // Property.getter_annotation = 15
+        }
+        for annotation in &setter_annotations {
+            prop.repeated_message(16, annotation); // Property.setter_annotation = 16
         }
         for annotation in &field_annotations {
             prop.repeated_message(34, annotation); // Property.backingFieldAnnotation = 34
         }
         if let Some(field) = &field {
-            jvm.field_message(1, field); // field (empty → derived; boxed primitive → explicit desc)
+            jvm.field_message(1, field); // field (empty → derived)
         }
         if let Some(synthetic_method) = &synthetic_method {
             jvm.field_message(2, synthetic_method); // JvmPropertySignature.syntheticMethod = 2
@@ -1226,6 +1187,7 @@ pub fn build_class(
     // Member functions (name f2, return_type f3, value_parameter f6, flags f9; JVM sig derivable).
     let build_func = |st: &mut StringTable<'_>,
                       requirements: &mut VersionRequirementTable,
+                      contract_types: &mut ContractTypeTable,
                       m: &FnMeta| {
         let mut func = Pb::new();
         func.field_varint(2, st.local(&m.name) as u64);
@@ -1396,6 +1358,24 @@ pub fn build_class(
         // proto types alone don't pin the JVM descriptor (erasure, boxed nullable primitive). A
         // mangled member with a derivable descriptor (`f(): V?` — nullable value classes box) is
         // name-only; a renamed-and-erased one carries both.
+        // The declared contract (Function.contract = 32) interns where a package function's does:
+        // before the signature, or after the annotations of an annotated member.
+        let mut contract = |st: &mut StringTable<'_>| {
+            m.contract.as_deref().map(|contract| {
+                crate::metadata::builder::contract_pb(
+                    st,
+                    contract_types,
+                    contract,
+                    &function_type_parameters,
+                )
+            })
+        };
+        let early_contract = m
+            .annotations
+            .records()
+            .is_empty()
+            .then(|| contract(st))
+            .flatten();
         let sig = (m.jvm_sig.is_some() || m.jvm_sig_name.is_some()).then(|| {
             let mut p = Pb::new();
             if let Some(n) = m.jvm_sig_name.as_deref() {
@@ -1421,6 +1401,7 @@ pub fn build_class(
         for annotation in &annotations {
             func.repeated_message(12, annotation);
         }
+        let contract = early_contract.or_else(|| contract(st));
         // Function.version_requirement = 31: an index into this class's requirement table.
         if needs_inline_parameter_null_check(
             flags,
@@ -1429,6 +1410,9 @@ pub fn build_class(
         ) {
             func.field_varint(31, requirements.index(INLINE_PARAMETER_NULL_CHECK));
         }
+        if let Some(contract) = &contract {
+            func.field_message(32, contract); // Function.contract = 32
+        }
         if let Some(sig) = &sig {
             func.field_message(100, sig);
         }
@@ -1436,6 +1420,7 @@ pub fn build_class(
     };
     // Members add their requirements in serialization order; the class's own follow them.
     let mut requirements = VersionRequirementTable::default();
+    let mut contract_types = ContractTypeTable::default();
 
     let mut prop_msgs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
     let mut func_msgs: Vec<Option<Pb>> = (0..methods.len()).map(|_| None).collect();
@@ -1451,7 +1436,12 @@ pub fn build_class(
             ClassMemberOrder::Function(index)
                 if index < methods.len() && func_msgs[index].is_none() =>
             {
-                func_msgs[index] = Some(build_func(&mut st, &mut requirements, &methods[index]));
+                func_msgs[index] = Some(build_func(
+                    &mut st,
+                    &mut requirements,
+                    &mut contract_types,
+                    &methods[index],
+                ));
             }
             ClassMemberOrder::TypeAlias(index)
                 if index < tail.type_aliases.len() && alias_msgs[index].is_none() =>
@@ -1482,7 +1472,12 @@ pub fn build_class(
     }
     for (index, function) in methods.iter().enumerate() {
         if func_msgs[index].is_none() {
-            func_msgs[index] = Some(build_func(&mut st, &mut requirements, function));
+            func_msgs[index] = Some(build_func(
+                &mut st,
+                &mut requirements,
+                &mut contract_types,
+                function,
+            ));
         }
     }
     for (index, alias) in tail.type_aliases.iter().enumerate() {
@@ -1616,6 +1611,9 @@ pub fn build_class(
         // Class.versionRequirement (f31) indexes Class.versionRequirementTable (f32).
         class.field_varint(31, requirements.index(requirement));
     }
+    if let Some(table) = contract_types.encode() {
+        class.field_message(30, &table); // Class.type_table = 30
+    }
     if let Some(table) = requirements.encode() {
         class.field_message(32, &table); // Class.versionRequirementTable = 32
     }
@@ -1673,6 +1671,7 @@ mod tests {
                 field_name: None,
                 annotations: Default::default(),
                 field_annotations: Default::default(),
+                accessor_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -1749,6 +1748,7 @@ mod tests {
                 field_name: None,
                 annotations: Default::default(),
                 field_annotations: Default::default(),
+                accessor_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -1810,6 +1810,7 @@ mod tests {
                 field_name: None,
                 annotations: Default::default(),
                 field_annotations: Default::default(),
+                accessor_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -1846,6 +1847,7 @@ mod tests {
         let any_q = Ty::nullable(Ty::obj("kotlin/Any"));
         let methods = vec![
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1868,6 +1870,7 @@ mod tests {
                 no_infer_params: Vec::new(),
             },
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1890,6 +1893,7 @@ mod tests {
                 no_infer_params: Vec::new(),
             },
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1912,6 +1916,7 @@ mod tests {
                 no_infer_params: Vec::new(),
             },
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1934,6 +1939,7 @@ mod tests {
                 no_infer_params: Vec::new(),
             },
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1956,6 +1962,7 @@ mod tests {
                 no_infer_params: Vec::new(),
             },
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -2002,6 +2009,7 @@ mod tests {
                 field_name: None,
                 annotations: Default::default(),
                 field_annotations: Default::default(),
+                accessor_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2029,6 +2037,7 @@ mod tests {
                 field_name: None,
                 annotations: Default::default(),
                 field_annotations: Default::default(),
+                accessor_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2105,6 +2114,7 @@ mod tests {
                 field_name: None,
                 annotations: Default::default(),
                 field_annotations: Default::default(),
+                accessor_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2260,6 +2270,7 @@ mod tests {
                 field_name: None,
                 annotations: Default::default(),
                 field_annotations: Default::default(),
+                accessor_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2323,6 +2334,7 @@ mod tests {
                 field_name: None,
                 annotations: Default::default(),
                 field_annotations: Default::default(),
+                accessor_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2394,6 +2406,7 @@ mod tests {
                     field_name: None,
                     annotations: Default::default(),
                     field_annotations: Default::default(),
+                    accessor_annotations: Default::default(),
                     synthetic_method: None,
                     moved_from_interface_companion: false,
                     companion: false,
@@ -2425,6 +2438,7 @@ mod tests {
                     field_name: None,
                     annotations: Default::default(),
                     field_annotations: Default::default(),
+                    accessor_annotations: Default::default(),
                     synthetic_method: None,
                     moved_from_interface_companion: false,
                     companion: false,

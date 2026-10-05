@@ -165,6 +165,18 @@ fn anonymous_context_parameters_are_locals() -> bool {
     crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
 }
 
+/// kotlinc's spelling of the extension receiver of a value class's interface entry. The entry is a
+/// fresh member on the box under its own JVM name (`f-<hash>`, `getC`) that keeps its receiver as
+/// an extension receiver, so the receiver is labeled after that name with its non-identifier
+/// characters escaped (`$this$f_u2d<hash>`), never after the source declaration or its property.
+/// Its local-variable row and its `MethodParameters` name agree.
+pub(super) fn value_class_interface_entry_receiver(entry_name: &str) -> String {
+    format!(
+        "$this${}",
+        crate::jvm::debug_local_names::escaped(entry_name)
+    )
+}
+
 /// kotlinc's spelling of a source lambda's extension receiver: `$this$<label>` after the lambda's
 /// label, and `<this>` for a lambda without one.
 pub(super) fn lambda_receiver(origin: &crate::ir::IrLambdaOrigin) -> String {
@@ -199,6 +211,14 @@ fn function_local_variable(
                 .get(&function)
                 .expect("a lambda's extension receiver belongs to a source lambda");
             return Some(lambda_receiver(origin));
+        }
+        // kotlinc names the receiver after the function's IR name when it writes the method. A
+        // local function has its lifted name by then (`top$wrap`), mangled for a JVM local.
+        if let Some(lifted) = ir.lifted_names.get(&function) {
+            return Some(format!(
+                "$this${}",
+                super::debug_local_names::escaped(lifted)
+            ));
         }
         let source_name = ir
             .fn_source_names

@@ -30,6 +30,9 @@ pub enum SkipReason {
     CallArguments(String),
     /// A selected overridden call could not be joined to its checked dispatch classifier facts.
     MemberDispatch(crate::types::TypeName),
+    /// A lambda argument of an inline call carried no published parameter modifier and declared
+    /// type, so whether the call inlines it is unknown.
+    InlineParameters,
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -70,6 +73,9 @@ pub(crate) struct BackendPassFacts {
     /// Checked property operations realized before representation passes. Companion hoisting
     /// reads it to attach a private accessor to the operation that moves into `<clinit>`.
     property_realizations: crate::jvm::property_realizations::PropertyRealizations,
+    /// The `-jvm-default` mode, which decides the forwarders (and their bridges) a class writes for
+    /// the interface defaults it inherits.
+    jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -159,6 +165,7 @@ pub(crate) fn run_backend_passes(
     run_backend_passes_after_plugins(
         ir,
         facade,
+        plugins.module_name,
         classifiers,
         callables,
         classpath,
@@ -171,6 +178,7 @@ pub(crate) fn run_backend_passes(
 fn run_backend_passes_after_plugins(
     ir: &mut crate::ir::IrFile,
     facade: &str,
+    module_name: &str,
     classifiers: &CheckedBackendClassifiers<'_>,
     callables: &crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
@@ -182,8 +190,13 @@ fn run_backend_passes_after_plugins(
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
-    crate::jvm::module_calls::realize_super_calls(ir, callables, &mut facts.property_realizations)
-        .map_err(|_| SkipReason::SuperCalls)?;
+    crate::jvm::module_calls::realize_super_calls(
+        ir,
+        callables,
+        &mut facts.property_realizations,
+        facts.jvm_default,
+    )
+    .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
     // declaration that has no class-file form. Before the value-class pass, which renames a marker
@@ -236,6 +249,7 @@ fn run_backend_passes_after_plugins(
         callables,
         &facts.override_results,
         &mut facts.function_argument_arrays,
+        facts.jvm_default,
     )?;
     crate::jvm::collection_barriers::select(
         ir,
@@ -265,6 +279,10 @@ fn run_backend_passes_after_plugins(
         &mut facts.property_reference_realizations,
     );
     crate::jvm::parameter_assertions::finalize_after_value_class_lowering(ir);
+    crate::jvm::default_parameter_representation::record_defaulted_primitive_bounds(ir);
+    // A concatenation appends a `toString()` call's receiver itself, as kotlinc does once its
+    // value-class lowering has turned a value class's `toString()` into a static call.
+    crate::jvm::concatenated_to_string::flatten_to_string_operands(ir);
     // Every body of the file is lowered, so each lifting sequence is whole, and the value-class
     // pass has named the functions kotlinc names their lifted callables after: name those callables
     // before any pass renders a debug name from them.
@@ -293,6 +311,10 @@ fn run_backend_passes_after_plugins(
         .map_err(|_| SkipReason::DefaultCalls)?;
     }
     crate::jvm::shared_captures::lower_class_capture_slots(ir);
+    // An inline expansion rewrites a type-parameter cell to the call-site element. A lambda that
+    // still uses the shared erased implementation takes the erased holder, and suspension spilling
+    // reads that holder from the cell, so the two have to agree before either pass.
+    crate::jvm::shared_captures::restore_erased_escaping_capture_holders(ir);
     let null_out_dead_spills =
         crate::jvm::runtime_capabilities::null_out_spilled_variable(classpath);
     if !crate::jvm::suspend::lower_suspend(
@@ -314,10 +336,21 @@ fn run_backend_passes_after_plugins(
     // Source lambda names are inputs to lifting. Fix them before reparenting so the lifted-name
     // pass can retain the final caller-qualified path and ordinal.
     crate::jvm::debug_local_names::realize_source_lambda_implementation_names(ir);
-    crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
+    crate::jvm::ir_emit::mark_must_inline_lambdas(ir).map_err(|missing| {
+        crate::trace_compiler!(
+            "splice",
+            "inline call {} published no parameter facts for lambda operand {}",
+            missing.call,
+            missing.parameter
+        );
+        SkipReason::InlineParameters
+    })?;
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
     crate::jvm::lifted_names::realize(ir, &facts.override_results);
+    // After lifted names are fixed. The module suffix must not leak into `$lambda$N`: kotlinc
+    // names those from the value-class spelling and only then appends `$<module>` to the member.
+    crate::jvm::internal_names::mangle_internal_members(ir, module_name, facade);
     // A specialized suspend lambda is already a real class when suspend lowering completes, but
     // its JVM name depends on the caller's final placement and lifted spelling. Realize that name
     // only now and keep the coroutine-emission facts keyed by the same physical identity.
@@ -702,7 +735,7 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
                     // The semantic handoff says whether a callable body exists; this JVM boundary
                     // owns only its representation as a facade static. Common IR lowering consumes
                     // the same answer, so registration cannot promise a body that lowering omits.
-                    let emitted = syms.source_fn_has_callable_body(file, i as u32, f);
+                    let emitted = syms.source_fn_has_callable_body(file, f);
                     if emitted {
                         fns.push((
                             i as u32,
@@ -767,6 +800,7 @@ struct BackendReadyIr<'a> {
     facade_class: crate::types::TypeName,
     package: String,
     signature_symbols: &'a dyn BackendClassifierSource,
+    dependency_callables: crate::backend::CheckedBackendCallables,
     inner_class_resolver: crate::jvm::classfile::InnerClassResolver,
     pass_facts: BackendPassFacts,
     metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
@@ -850,6 +884,7 @@ impl JvmBackend {
                 facade_class,
                 package,
                 signature_symbols: &classifiers,
+                dependency_callables: callables,
                 inner_class_resolver,
                 pass_facts,
                 metadata,
@@ -874,6 +909,7 @@ impl JvmBackend {
             facade_class,
             package,
             signature_symbols,
+            dependency_callables,
             inner_class_resolver,
             pass_facts,
             metadata,
@@ -917,6 +953,7 @@ impl JvmBackend {
             crate::jvm::ir_emit::CheckedEmitFacts {
                 metadata: emit_metadata,
                 signature_symbols,
+                dependency_callables: &dependency_callables,
                 property_realizations: &pass_facts.property_realizations,
                 property_reference_realizations: &pass_facts.property_reference_realizations,
                 default_call_operands: &pass_facts.default_call_operands,
@@ -984,6 +1021,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             diags.error(crate::diag::Span::new(0, 0), detail);
             return;
         }
+        SkipReason::InlineParameters => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "internal error: an inline call's lambda argument has no published parameter modifier and declared type".to_string(),
+            );
+            return;
+        }
         SkipReason::MemberDispatch(classifier) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1003,6 +1047,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         SkipReason::DefaultCalls
         | SkipReason::SuperCalls
         | SkipReason::CallArguments(_)
+        | SkipReason::InlineParameters
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
         }
@@ -1132,9 +1177,10 @@ impl Backend for JvmBackend {
         if let Err(target) = crate::jvm::module_calls::realize(
             &mut file.ir,
             file.stems,
-            &self.cp,
+            &file.classifiers,
             &file.callables,
             &mut property_realizations,
+            self.jvm_default,
         ) {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1168,6 +1214,7 @@ impl Backend for JvmBackend {
                 default_call_operands,
                 local_delegate_access,
                 lambda_methods,
+                jvm_default: self.jvm_default,
                 ..BackendPassFacts::default()
             },
             state,
@@ -1322,6 +1369,10 @@ pub fn facade_package_metadata_from_ir(
         })
         .collect::<Vec<_>>();
 
+    // A declared accessor's realized name, which `@JvmName` may have changed.
+    let accessor_jvm_name = |function: Option<u32>| {
+        function.map(|function| ir.functions[function as usize].name.clone())
+    };
     let properties = ir
         .package_properties
         .iter()
@@ -1329,28 +1380,32 @@ pub fn facade_package_metadata_from_ir(
             // Which accessors the facade really declares, declared or compiler-default: a private
             // property with default accessors has none, and kotlinc's `JvmPropertySignature` then
             // names neither.
-            let (has_getter, has_setter, setter_function) =
-                match ir.local_property_layouts.get(&declaration.property) {
-                    Some(crate::ir::IrLocalPropertyLayout::TopLevelStorage {
-                        storage,
-                        getter,
-                        setter,
-                        ..
-                    }) => (
-                        getter.is_some() || ir.has_jvm_default_static_getter(*storage),
-                        setter.is_some() || ir.has_jvm_default_static_setter(*storage),
-                        *setter,
-                    ),
-                    Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor { setter, .. }) => {
-                        (true, setter.is_some(), *setter)
-                    }
-                    Some(
-                        crate::ir::IrLocalPropertyLayout::Member { .. }
-                        | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
-                    )
-                    | None => (true, declaration.mutable, None),
-                };
+            let (has_getter, has_setter, getter_function, setter_function) = match ir
+                .local_property_layouts
+                .get(&declaration.property)
+            {
+                Some(crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+                    storage,
+                    getter,
+                    setter,
+                    ..
+                }) => (
+                    getter.is_some() || ir.has_jvm_default_static_getter(*storage),
+                    setter.is_some() || ir.has_jvm_default_static_setter(*storage),
+                    *getter,
+                    *setter,
+                ),
+                Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+                    getter, setter, ..
+                }) => (true, setter.is_some(), Some(*getter), *setter),
+                Some(
+                    crate::ir::IrLocalPropertyLayout::Member { .. }
+                    | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
+                )
+                | None => (true, declaration.mutable, None, None),
+            };
             let companion = declaration.is_companion_extension();
+            let field = property_field(ir, declaration);
             let accessor_parameters = declaration
                 .context_parameters
                 .iter()
@@ -1368,7 +1423,9 @@ pub fn facade_package_metadata_from_ir(
                 erased_value_class_descriptor(ir, declaration).unwrap_or(ty_descriptor);
             let getter = has_getter.then(|| {
                 (
-                    crate::jvm::names::property_getter_name(&declaration.name),
+                    accessor_jvm_name(getter_function).unwrap_or_else(|| {
+                        crate::jvm::names::property_getter_name(&declaration.name)
+                    }),
                     format!("({descriptor_parameters}){value_descriptor}"),
                 )
             });
@@ -1376,7 +1433,9 @@ pub fn facade_package_metadata_from_ir(
                 let mut parameters = descriptor_parameters;
                 parameters.push_str(&value_descriptor);
                 (
-                    crate::jvm::names::property_setter_name(&declaration.name),
+                    accessor_jvm_name(setter_function).unwrap_or_else(|| {
+                        crate::jvm::names::property_setter_name(&declaration.name)
+                    }),
                     format!("({parameters})V"),
                 )
             });
@@ -1423,8 +1482,19 @@ pub fn facade_package_metadata_from_ir(
                 modifiers: declaration.modifiers,
                 setter_visibility: declaration.setter_visibility,
                 companion,
-                delegate_field: delegate_field(ir, declaration),
-                field_desc: erased_value_class_descriptor(ir, declaration),
+                accessor_annotations: ir
+                    .accessor_annotations
+                    .get(&declaration.property)
+                    .map(crate::metadata::AccessorMetadataAnnotations::of)
+                    .unwrap_or_default(),
+                field_name: field.as_ref().and_then(|(name, _)| name.clone()),
+                field_desc: field.map(|(_, descriptor)| descriptor).filter(|physical| {
+                    super::metadata_method_signatures::requires_field_signature(
+                        declaration.ty,
+                        physical,
+                        &Default::default(),
+                    )
+                }),
             }
         })
         .collect::<Vec<_>>();
@@ -1479,22 +1549,25 @@ fn erased_value_class_descriptor(
         .then(|| crate::jvm::names::type_descriptor(field.ty))
 }
 
-fn delegate_field(
+/// The facade field realizing a property, if any: a delegate's storage by its JVM name, or a
+/// backing field (named by the property), with its physical descriptor.
+fn property_field(
     ir: &crate::ir::IrFile,
     declaration: &crate::ir::IrPackageProperty,
-) -> Option<(String, String)> {
-    let Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
-        delegate: Some(storage),
-        ..
-    }) = ir.local_property_layouts.get(&declaration.property)
-    else {
-        return None;
+) -> Option<(Option<String>, String)> {
+    let (name, storage) = match ir.local_property_layouts.get(&declaration.property)? {
+        crate::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. } => (None, *storage),
+        crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+            delegate: Some(storage),
+            ..
+        } => (
+            Some(ir.static_field_jvm_name(*storage).to_string()),
+            *storage,
+        ),
+        _ => return None,
     };
-    let field = &ir.statics[*storage as usize];
-    Some((
-        ir.static_field_jvm_name(*storage).to_string(),
-        crate::jvm::names::type_descriptor(field.ty),
-    ))
+    let field = ir.statics.get(storage as usize)?;
+    Some((name, crate::jvm::names::type_descriptor(field.ty)))
 }
 
 /// The JVM descriptor of a package function realized from its declaration: context parameters,
@@ -1865,6 +1938,10 @@ mod tests {
             (
                 "derive_bridges(",
                 &["src/jvm/bridges.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "mangle_internal_members(",
+                &["src/jvm/internal_names.rs", "src/jvm/backend.rs"],
             ),
             ("collection_barriers::select(", &["src/jvm/backend.rs"]),
             (

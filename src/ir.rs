@@ -81,8 +81,8 @@ mod when_facts;
 pub use crate::enclosing_declarations::EnclosingDeclaration;
 pub use crate::types::EqualityMode;
 pub use annotations::{
-    AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations, FieldAnnotations,
-    PropertyAnnotations, RetainedAnnotation,
+    AccessorAnnotations, AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations,
+    FieldAnnotations, PropertyAnnotations, RetainedAnnotation,
 };
 pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
@@ -507,6 +507,13 @@ pub enum IrExpr {
     /// `break` — exit the innermost enclosing loop, or the loop carrying `label` (`break@outer`).
     Break {
         label: Option<String>,
+    },
+    /// Store `value` as the result of the enclosing inline-return frame `frame`, from a lambda body
+    /// nested inside it. That body numbers its values separately, so it names the frame, never the
+    /// frame's result value. See [`IrFile::inline_return_frames`].
+    SetFrameResult {
+        frame: String,
+        value: ExprId,
     },
     /// `continue` — jump to the innermost enclosing loop's `update`/condition (or the labeled loop's).
     Continue {
@@ -1631,10 +1638,10 @@ pub struct IrFile {
     /// Common lowering copies it from the stable FIR index; target passes may inspect target-specific
     /// representation rules but must not reconstruct semantic inheritance through frontend lookup.
     pub classifier_hierarchies: std::collections::HashMap<TypeName, Vec<IrAppliedClassifier>>,
-    /// Exact interface identities reached through each source classifier's direct superclass.
-    /// Common resolution records the path distinction before flattening the complete hierarchy;
-    /// target emitters consume it without reopening a classifier provider.
-    pub superclass_interfaces: std::collections::HashMap<TypeName, Vec<TypeName>>,
+    /// The interface defaults each source classifier inherits without overriding, as override
+    /// resolution selected them; a target backend realizes each record without selecting one.
+    pub inherited_defaults:
+        std::collections::HashMap<TypeName, Vec<crate::fir::ResolvedInheritedDefault>>,
     /// The frontend-selected custom serializer construction of each source classifier whose
     /// `@Serializable(with = …)` names a serializer class, keyed by that classifier.
     pub custom_serializer_constructions:
@@ -1839,6 +1846,12 @@ pub struct IrFile {
     /// ordinary backend-neutral `IrExpr::Return`; inline expansion consumes/decrements this fact as
     /// lambda bodies cross lexical boundaries, so no source label or AST identity survives.
     pub checked_return_depths: std::collections::HashMap<ExprId, u32>,
+    /// The result declaration of each inline-return frame, by the frame's label. An inline
+    /// expansion's returns leave through `break` to that label after storing their value. A return
+    /// in the expansion's own body stores it by the declaration's value index; one in a lambda body
+    /// nested in it writes [`IrExpr::SetFrameResult`], which every renumbering of either body
+    /// leaves pointing at the same frame.
+    pub inline_return_frames: std::collections::HashMap<ExprId, String>,
     /// Sparse construction facts keyed by the ordinary [`IrExpr::New`] identity. Common lowering
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
     /// must realize annotation instances through a platform-specific implementation class.
@@ -2079,6 +2092,10 @@ pub struct IrFile {
     /// `@Metadata` both read it, so it must not be folded into either representation. Retention stays
     /// SEMANTIC here — the JVM split into visible/invisible attributes belongs to the emitter.
     pub fn_param_annotations: std::collections::HashMap<u32, Vec<DeclarationAnnotations>>,
+    /// Annotations written on a source property's accessors, by property. A declared accessor's
+    /// also land in [`Self::function_annotations`]; a default one exists only in a backend.
+    pub accessor_annotations:
+        std::collections::HashMap<crate::fir::PropertyId, AccessorAnnotations>,
     /// Per declared function, whether each PHYSICAL source parameter carries Kotlin's semantic
     /// `@NoInfer` type-use marker. Extension receivers occupy their physical slot with `false`;
     /// metadata projection removes that slot again. This is inference policy, not a JVM fact.
@@ -2338,6 +2355,9 @@ pub struct IrFile {
     /// carried as provenance; the JVM backend is where it becomes a class name. A suspend function
     /// with no entry has no source declaration behind it.
     pub fn_continuation_ordinal: std::collections::HashMap<u32, u32>,
+    /// The declared `contract { … }` of a member function, a Kotlin declaration fact the class's
+    /// metadata records. A package function carries its own on [`IrPackageFunction`].
+    pub fn_contracts: std::collections::HashMap<u32, crate::contracts::ResolvedContract>,
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     class_signatures: std::collections::HashMap<TypeName, IrGenericSig>,
@@ -2405,6 +2425,10 @@ pub struct IrFile {
     /// Exact provider-selected language-member roles retained on their call expressions. This is
     /// declaration identity data, not a spelling-based backend lookup.
     pub semantic_call_roles: std::collections::HashMap<ExprId, crate::types::SemanticCallRole>,
+    /// Current-module functions that play a language role through the declaration they override
+    /// (an override of `Any.toString`), as the frontend's override resolution published them.
+    pub callable_semantic_roles:
+        std::collections::HashMap<crate::fir::CallableId, crate::types::SemanticCallRole>,
     /// Member call or property access `ExprId` → the classifier its dispatch receiver statically
     /// has, after smart casts: the class the member was selected through, whether this module or a
     /// dependency declares it. A type-parameter receiver records nothing. What a target names for

@@ -40,6 +40,11 @@ pub struct IrCheckedProperty {
     /// included, else 0. Accepted like [`Self::decl_line`] and kept apart from it: the constructor's
     /// store of the property maps here, its accessors to `decl_line`.
     pub decl_start_line: u32,
+    /// Lines of the getter and setter headers when each was written with a body (else 0), accepted
+    /// like [`Self::decl_line`]. Such an accessor is a declaration of its own and anchors on its
+    /// own line; any other accessor anchors on [`Self::decl_line`].
+    pub getter_decl_line: u32,
+    pub setter_decl_line: u32,
     /// Exact semantic position among the owning class's property initializers and `init` blocks.
     /// This is copied from the stable FIR declaration header, never reconstructed from source.
     pub initialization_order: Option<u32>,
@@ -193,6 +198,9 @@ pub struct IrProperty {
     /// accessor for it (`access$get<X>$p` on the JVM); without one the splice would be illegal, and
     /// silently degrading the `inline` call instead would change what the program does.
     pub needs_access_bridge: bool,
+    /// Annotations written on this property's accessors, whether source declared each accessor or
+    /// a backend realizes its default.
+    pub accessor_annotations: super::AccessorAnnotations,
 }
 
 /// A property declared by another file of the module, as the file's code selects it.

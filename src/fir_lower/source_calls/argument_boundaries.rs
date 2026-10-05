@@ -2,7 +2,7 @@ use crate::ir::{ExprId, IrCheckedArgument, IrDeclarationArgumentBoundary, IrExpr
 use crate::types::Ty;
 
 /// Whether source-order operands already follow declaration parameter order.
-pub(super) fn follow_parameter_order(
+pub(in super::super) fn follow_parameter_order(
     arguments: &[IrCheckedArgument],
     preceding_parameter: Option<u32>,
 ) -> bool {

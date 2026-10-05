@@ -42,6 +42,7 @@ pub(crate) use selected_call_instantiation::selected_default_callable;
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
 mod source_view;
+mod statically_known_subtype;
 pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
@@ -56,6 +57,7 @@ pub(crate) use hierarchy_projection::{
 };
 use hierarchy_projection::{
     classifier_type_parameter_bounds, direct_supertypes_from_classifier, receiver_hierarchy,
+    supertype_with_classifier,
 };
 pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
@@ -84,6 +86,7 @@ pub(crate) use overload_selection::{CandidateSelectionWithTies, ReceiverFunction
 pub(crate) use receiver_mro::{function_shape_matches, ReceiverMro};
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
 use scope_level_callables::{function_set_from_symbols, level_functions, level_properties};
+pub(crate) use statically_known_subtype::{nominal_type, statically_known_subtype};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CallableImport {
@@ -1391,6 +1394,7 @@ fn ranked_extension_candidates<'a>(
     // final overload selection evaluates applicability one scope-tower rung at a time.
     out.sort_by_key(|(rank, _, o)| {
         let hides_members = o
+            .callable
             .annotations
             .contains(&crate::types::type_name("kotlin/internal/HidesMembers"));
         (
@@ -2011,7 +2015,22 @@ impl<'a> SymbolResolver<'a> {
             .module
             .is_some_and(|module| module.classifier(internal).is_some())
         {
-            let declaring_owner = internal.nested_owner();
+            // A private member of a companion object is visible throughout the class that owns the
+            // companion (kotlinc's private visibility treats the companion's containing class as
+            // the declaring scope), so `Outer` may name `Outer$Companion$Hidden`.
+            let declaring_owner = internal.nested_owner().map(|declaring_owner| {
+                match declaring_owner.nested_owner() {
+                    Some(outer)
+                        if visibility == crate::types::Visibility::Private
+                            && self.src.classifier(outer).and_then(|outer| {
+                                outer.companion_object.as_ref().map(|(_, name)| *name)
+                            }) == Some(declaring_owner) =>
+                    {
+                        outer
+                    }
+                    _ => declaring_owner,
+                }
+            });
             if declaring_owner.is_some_and(|declaring_owner| {
                 self.lexical_classes
                     .iter()
@@ -3504,14 +3523,23 @@ impl<'a> SymbolResolver<'a> {
                 .is_some()
         };
         if parsed.iter().any(|candidate| {
-            !candidate.0.annotations.contains(&crate::types::type_name(
-                "kotlin/internal/LowPriorityInOverloadResolution",
-            )) && applicable(candidate)
-        }) {
-            parsed.retain(|candidate| {
-                !candidate.0.annotations.contains(&crate::types::type_name(
+            !candidate
+                .0
+                .callable
+                .annotations
+                .contains(&crate::types::type_name(
                     "kotlin/internal/LowPriorityInOverloadResolution",
                 ))
+                && applicable(candidate)
+        }) {
+            parsed.retain(|candidate| {
+                !candidate
+                    .0
+                    .callable
+                    .annotations
+                    .contains(&crate::types::type_name(
+                        "kotlin/internal/LowPriorityInOverloadResolution",
+                    ))
             });
         }
 
@@ -5375,6 +5403,7 @@ fn select_overload_tracking_with_functions(
             .map(|(rank, receiver, overload)| {
                 (
                     if overload
+                        .callable
                         .annotations
                         .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
                     {
@@ -5383,6 +5412,7 @@ fn select_overload_tracking_with_functions(
                         EXTENSION_PRIORITY
                     },
                     if overload
+                        .callable
                         .annotations
                         .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
                     {
@@ -6055,9 +6085,12 @@ fn best_by_args_with_ties<'a>(
     let ordinary = cands
         .iter()
         .filter(|(candidate, _)| {
-            !candidate.annotations.contains(&crate::types::type_name(
-                "kotlin/internal/LowPriorityInOverloadResolution",
-            ))
+            !candidate
+                .callable
+                .annotations
+                .contains(&crate::types::type_name(
+                    "kotlin/internal/LowPriorityInOverloadResolution",
+                ))
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -6066,9 +6099,12 @@ fn best_by_args_with_ties<'a>(
             let low = cands
                 .iter()
                 .filter(|(candidate, _)| {
-                    candidate.annotations.contains(&crate::types::type_name(
-                        "kotlin/internal/LowPriorityInOverloadResolution",
-                    ))
+                    candidate
+                        .callable
+                        .annotations
+                        .contains(&crate::types::type_name(
+                            "kotlin/internal/LowPriorityInOverloadResolution",
+                        ))
                 })
                 .cloned()
                 .collect::<Vec<_>>();

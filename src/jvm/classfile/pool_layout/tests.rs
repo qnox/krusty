@@ -196,6 +196,7 @@ fn a_rewritten_method_s_entries_are_placed_in_asm_order() {
     let relaid = [RelaidMethod {
         index: 1,
         added: before_g + 1..after_g + 1,
+        leading: Vec::new(),
         interned: after_g + 1..after_g + 1,
     }];
     let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
@@ -216,6 +217,44 @@ fn a_rewritten_method_s_entries_are_placed_in_asm_order() {
         spelled_slots(&laid_out, &read),
         spelled_slots(&class, &index_slots::read(&class).expect("the class reads"))
     );
+}
+
+#[test]
+fn transformation_class_entries_lead_the_rewritten_body() {
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    let before = writer.cp.slot_count();
+    add_static(&mut writer, "f", "()Ljava/lang/String;", |code, writer| {
+        code.push_string("body", writer);
+        code.areturn();
+    });
+    let after = writer.cp.slot_count();
+
+    // The coroutine transformer discovers this field after the original body was emitted, but
+    // kotlinc visits it immediately before writing the transformed body. Record both the new field
+    // name and the already-present descriptor to exercise both sides of that ordering rule.
+    writer.cp.start_noting();
+    writer.add_field(0, "L$0", "Ljava/lang/String;");
+    let leading = writer.cp.take_noted();
+
+    let class = writer.finish();
+    let relaid = [RelaidMethod {
+        index: 0,
+        added: before + 1..after + 1,
+        leading,
+        interned: after + 1..after + 1,
+    }];
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
+        .expect("the class reads")
+        .expect("the transformer's field moves ahead of the body");
+    let entries = pool(&laid_out);
+    let position = |entry: &str| {
+        entries
+            .iter()
+            .position(|candidate| candidate == entry)
+            .expect("named pool entry")
+    };
+    assert!(position("L$0") < position("body"));
+    assert!(position("Ljava/lang/String;") < position("body"));
 }
 
 #[test]
@@ -298,4 +337,47 @@ fn a_copied_class_keeps_an_entry_nothing_names() {
     let class = writer.finish();
     let padded = with_integers(&class, 2);
     assert_eq!(relayout(padded.clone(), &[], Unnamed::Kept), padded);
+}
+
+#[test]
+fn a_rewritten_call_site_follows_its_bootstrap_arguments_and_method() {
+    // ASM's `addBootstrapMethod` interns a call site's bootstrap arguments, then its bootstrap
+    // method handle, before the `InvokeDynamic` and its name and type. `BootstrapMethods` names
+    // them only by attribute index, yet a rewritten method's call site is still placed after them.
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    let desc = "()Ljava/lang/Object;";
+    let before_g = writer.cp.slot_count();
+    add_static(&mut writer, "g", desc, |code, writer| {
+        let argument = writer.method_type("()V");
+        let bootstrap = writer.method_handle_static(
+            "B",
+            "bootstrap",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+        );
+        let entry = writer.add_bootstrap(bootstrap, vec![argument]);
+        let site = writer.invoke_dynamic(entry, "run", "()Ljava/lang/Runnable;");
+        code.invokedynamic(site, 0, 1);
+        code.areturn();
+    });
+    let after_g = writer.cp.slot_count();
+    let class = writer.finish();
+    let relaid = [RelaidMethod {
+        index: 0,
+        added: before_g + 1..after_g + 1,
+        leading: Vec::new(),
+        interned: after_g + 1..after_g + 1,
+    }];
+    let laid_out = match relaid_class(&class, &relaid, Unnamed::Dropped).expect("the class reads") {
+        Some(laid_out) => laid_out,
+        None => class,
+    };
+    let entries = pool(&laid_out);
+    let position = |tag: &str| {
+        entries
+            .iter()
+            .position(|entry| entry == tag)
+            .unwrap_or_else(|| panic!("{tag} in {entries:?}"))
+    };
+    let (argument, handle, site) = (position("tag 16"), position("tag 15"), position("tag 18"));
+    assert!(argument < handle && handle < site, "{entries:?}");
 }

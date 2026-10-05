@@ -8,6 +8,8 @@ mod builtin_property_realization;
 mod builtins_customizer;
 mod catalog_presence;
 mod classifier_facts;
+#[cfg(test)]
+mod contract_dsl_tests;
 mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
@@ -498,6 +500,7 @@ impl JvmLibraries {
                 )
                 .flatten();
             let mut callable = LibraryCallable {
+                annotations: meta.annotations.clone(),
                 inline: inline_kind,
                 suspend,
                 default_call: is_default,
@@ -556,7 +559,6 @@ impl JvmLibraries {
                     inherited_by_delegation: false,
                     return_value_status: None,
                 },
-                annotations: meta.annotations.clone(),
                 ..FunctionInfo::plain(kind, None, callable)
             });
             cm.attach_tail(c.paired_common, namespace, name, &mut overloads);
@@ -627,7 +629,7 @@ impl JvmLibraries {
                 inherited_by_delegation: false,
                 return_value_status: None,
             };
-            function.annotations = builtin.annotations;
+            function.callable.annotations = builtin.annotations;
             attach_function_realization(pkg, name, &mut function);
             overloads.push(function);
         }
@@ -772,6 +774,7 @@ impl JvmLibraries {
             let ret = metadata_return_info(function.ret_class, function.ret_nullable())
                 .apply(physical_ret);
             let callable = LibraryCallable {
+                annotations: function.annotations.clone(),
                 suspend: function.is_suspend(),
                 inline: function_inline,
                 context_count: function.context_count(),
@@ -810,7 +813,6 @@ impl JvmLibraries {
                     inherited_by_delegation: false,
                     return_value_status: Some(function.return_value_status),
                 },
-                annotations: function.annotations.clone(),
                 ..FunctionInfo::plain(
                     if receiver.is_some() {
                         FnKind::Extension
@@ -4194,24 +4196,27 @@ impl JvmLibraries {
                     )
                 };
                 // Match the bytecode method to recover its descriptor and inline implementation details.
-                let (jvm_name, descriptor, cand) = if let Some(d) = mf.jvm_desc {
-                    (mf.jvm_name.clone(), d.to_string(), by_name(&mf.jvm_name))
-                } else if let Some(c) = by_name(&mf.jvm_name) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
-                } else if let Some(c) = lambda_return_mangled.as_ref().and_then(|n| by_name(n)) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
-                } else if let Some(c) = elem_mangled.as_ref().and_then(|n| by_name(n)) {
-                    (c.name.clone(), c.descriptor.clone(), Some(c))
+                // A metadata JVM signature names the method exactly: a value-class receiver
+                // (`Result<T>.getOrThrow`) erases to its carrier there, which the receiver-keyed
+                // overload lookup would miss, losing the method's privacy (`@InlineOnly`).
+                let cand = if let Some(d) = mf.jvm_desc {
+                    self.cp.facade_static(facade, &mf.jvm_name, d)
                 } else {
+                    by_name(&mf.jvm_name)
+                        .or_else(|| lambda_return_mangled.as_ref().and_then(|n| by_name(n)))
+                        .or_else(|| elem_mangled.as_ref().and_then(|n| by_name(n)))
+                };
+                let Some(cand) = cand else {
                     continue;
                 };
+                let (jvm_name, descriptor) = (cand.name.clone(), cand.descriptor.clone());
                 crate::trace_compiler!(
                     "resolve",
                     "extension emit handle {} metadata_params={:?} expected_descs={value_param_descs:?} selected={jvm_name}{descriptor}",
                     mf.kotlin_name,
                     mf.generic_sig.as_ref().map(|signature| &signature.params),
                 );
-                let bytecode_public = cand.as_ref().map_or(mf.is_public(), |c| c.public);
+                let bytecode_public = cand.public;
                 // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
                 // return to `Object`; present the LOGICAL signature (drop the continuation) so a
                 // normal call resolves — the same rule the top-level and member paths apply. The
@@ -4270,6 +4275,7 @@ impl JvmLibraries {
                     })
                     .flatten();
                 let mut callable = LibraryCallable {
+                    annotations: mf.annotations.clone(),
                     inline,
                     suspend: mf.is_suspend(),
                     source_receiver,
@@ -4290,7 +4296,7 @@ impl JvmLibraries {
                         .map(|signature| signature.parameters_with_receiver(mf.context_count())),
                     // Carry the bytecode generic `Signature` so a reified extension can bind explicit
                     // type arguments instead of invoking its throwing inline-only method.
-                    signature: cand.as_ref().and_then(|c| c.signature.clone()),
+                    signature: cand.signature.clone(),
                     // The name this extension is DECLARED under, beside the JVM method it is
                     // realized as: `@JvmName` renames the method, and a value-class signature
                     // appends kotlinc's hash (`UInt.downTo` is `downTo-J1ME1BU`). Neither is
@@ -4313,7 +4319,7 @@ impl JvmLibraries {
                         self.top_level_default_realization(&callable).map(Box::new);
                 }
                 callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
-                let paired = cand.as_ref().is_some_and(|c| c.paired_common);
+                let paired = cand.paired_common;
                 overloads.push(FunctionInfo {
                     ret: ReturnInfo::new(mf.ret_nullable(), ret_class),
                     visibility: mf.visibility,
@@ -4330,7 +4336,6 @@ impl JvmLibraries {
                         inherited_by_delegation: false,
                         return_value_status: Some(mf.return_value_status),
                     },
-                    annotations: mf.annotations.clone(),
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
@@ -4874,6 +4879,7 @@ impl JvmLibraries {
                         let collection_barrier =
                             collection_barrier_role(builtin_cn, scope_name, &params, ret);
                         let callable = LibraryCallable {
+                            annotations: m.annotations.clone(),
                             reflection_name: Some(m.name.clone()),
                             physical_name: m.physical_name.clone(),
                             inline: m.inline,
@@ -4958,7 +4964,6 @@ impl JvmLibraries {
                                 inherited_by_delegation: m.inherited_by_delegation(),
                                 return_value_status: m.return_value_status,
                             },
-                            annotations: m.annotations.clone(),
                             ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
                         });
                         if let Some(function) = overloads.last_mut() {
@@ -5128,14 +5133,73 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     fn is_erased_contract_callable(&self, callable: &crate::libraries::LibraryCallable) -> bool {
         // Contract erasure is a source-language decision, but the physical declaration owner is a
         // JVM-library fact. Keep that fact here: target-neutral resolve code sees only the selected
-        // callable and never embeds or reports the runtime facade class name. Requiring both the
-        // source name and declaring package prevents an unrelated library callable from acquiring
-        // intrinsic behavior merely because one component happens to match.
+        // callable and never embeds or reports the runtime facade class name. The selected
+        // declaration must be the intrinsic itself, `kotlin.contracts.contract(builder:
+        // ContractBuilder.() -> Unit): Unit`, by its declaring package, name, and complete
+        // signature; an unrelated library callable never acquires intrinsic behavior because one
+        // component happens to match.
+        let builder = Ty::obj("kotlin/contracts/ContractBuilder");
+        let takes_builder = match callable.params.as_slice() {
+            [Ty::Fun(function)] => {
+                function.has_receiver
+                    && function.context_count == 0
+                    && !function.suspend
+                    && function.params == [builder]
+                    && function.ret == Ty::Unit
+            }
+            _ => false,
+        };
         callable.name == "contract"
-            && callable
-                .owner
-                .parent()
-                .is_some_and(|package| package.matches("kotlin/contracts"))
+            && callable.ret == Ty::Unit
+            && callable.owner.parent().is_some_and(is_contracts_package)
+            && takes_builder
+    }
+
+    fn top_level_callable_package(&self, callable: &crate::libraries::LibraryCallable) -> TypeName {
+        // A classpath callable's owner is its file facade class; a compiler-declared one names
+        // its package directly.
+        if self.cp.find_name(callable.owner).is_some() {
+            callable.owner.namespace()
+        } else {
+            callable.owner
+        }
+    }
+
+    fn contract_dsl_member(
+        &self,
+        callable: &crate::contracts::SelectedDslCallable<'_>,
+    ) -> Option<crate::contracts::DslMember> {
+        use crate::contracts::DslMember;
+        if !callable.dispatch_member || callable.context_parameters != 0 {
+            return None;
+        }
+        let contracts = |name: &str| Ty::obj(&format!("kotlin/contracts/{name}"));
+        let member = if callable.owner.matches("kotlin/contracts/ContractBuilder") {
+            match (callable.name, callable.params) {
+                ("returns", []) => (DslMember::Returns, contracts("Returns")),
+                ("returns", [value]) if *value == Ty::nullable(Ty::obj("kotlin/Any")) => {
+                    (DslMember::ReturnsValue, contracts("Returns"))
+                }
+                ("returnsNotNull", []) => (DslMember::ReturnsNotNull, contracts("ReturnsNotNull")),
+                // `fun <R> callsInPlace(lambda: Function<R>, kind: InvocationKind)`: the lambda's
+                // `R` is the member's own type parameter, which selection may have specialized.
+                ("callsInPlace", [Ty::Obj(lambda, [_]), kind])
+                    if lambda.matches("kotlin/Function")
+                        && *kind == contracts("InvocationKind") =>
+                {
+                    (DslMember::CallsInPlace, contracts("CallsInPlace"))
+                }
+                _ => return None,
+            }
+        } else if callable.owner.matches("kotlin/contracts/SimpleEffect") {
+            match (callable.name, callable.params) {
+                ("implies", [Ty::Boolean]) => (DslMember::Implies, contracts("ConditionalEffect")),
+                _ => return None,
+            }
+        } else {
+            return None;
+        };
+        (callable.ret == member.1).then_some(member.0)
     }
 
     fn implicit_common_supertypes(&self, types: &[Ty]) -> Vec<crate::libraries::SemanticSupertype> {
@@ -5531,26 +5595,22 @@ fn classpath_annotation_targets(
     ci: &crate::jvm::classreader::ClassInfo,
 ) -> crate::types::AnnotationTargets {
     if !ci.kotlin_targets.is_empty() {
-        return crate::types::AnnotationTargets {
-            value_parameter: ci.kotlin_targets.iter().any(|t| t == "VALUE_PARAMETER"),
-            property: ci.kotlin_targets.iter().any(|t| t == "PROPERTY"),
-            field: ci.kotlin_targets.iter().any(|t| t == "FIELD"),
-        };
+        return crate::types::AnnotationTargets::kotlin(ci.kotlin_targets.iter().filter_map(
+            |entry| {
+                // The class reader kept only `kotlin.annotation.AnnotationTarget` elements.
+                crate::types::KotlinTarget::of_entry(
+                    crate::types::type_name("kotlin/annotation/AnnotationTarget"),
+                    entry,
+                )
+            },
+        ));
     }
     // A Kotlin annotation is identified by its own `@Metadata`; without a declared `@Target` it is
     // applicable everywhere.
     if ci.meta.class_kind.is_some() {
         return crate::types::AnnotationTargets::DEFAULT;
     }
-    // Java. An `@interface` with no `@Target` is applicable in every declaration context.
-    let java_target = |name: &str| {
-        ci.java_targets.is_empty() || ci.java_targets.iter().any(|entry| entry == name)
-    };
-    crate::types::AnnotationTargets {
-        value_parameter: java_target("PARAMETER"),
-        property: false,
-        field: java_target("FIELD"),
-    }
+    crate::types::AnnotationTargets::java(&ci.java_targets)
 }
 
 #[cfg(test)]
@@ -7144,4 +7204,9 @@ mod tests {
             None
         );
     }
+}
+
+/// `kotlin.contracts`, the package that declares the contract DSL.
+fn is_contracts_package(package: TypeName) -> bool {
+    package.matches("kotlin/contracts")
 }
