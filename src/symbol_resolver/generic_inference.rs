@@ -8,6 +8,7 @@ mod bound_relations;
 mod call_constraints;
 mod call_site_variables;
 mod common_supertype;
+pub(crate) use common_supertype::reified_runtime_type;
 mod conditional_result;
 mod postponed_result;
 

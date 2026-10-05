@@ -19280,6 +19280,7 @@ impl<'a> Checker<'a> {
                 if let Some(projected) = self
                     .flow_intersection_member_receiver(scope, receiver, &name)
                     .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
+                    .or_else(|| self.intersection_type_member_receiver(rt, &name))
                 {
                     rt = self.set(receiver, projected);
                 }
@@ -24963,6 +24964,7 @@ impl<'a> Checker<'a> {
         if let Some(projected) = self
             .flow_intersection_property_receiver(scope, receiver, &name, true)
             .or_else(|| self.type_parameter_member_receiver(scope, receiver_ty, &name))
+            .or_else(|| self.intersection_type_member_receiver(receiver_ty, &name))
         {
             receiver_ty = self.set(receiver, projected);
         } else if let Some(projected) =
@@ -51163,6 +51165,15 @@ impl<'a> Checker<'a> {
         self.intersection_member_receiver(&bounds, name)
     }
 
+    /// Project a denotable intersection onto the constituent that owns the selected member.
+    /// `X & Z` keeps both members visible, and each call records the constituent that declared it.
+    fn intersection_type_member_receiver(&self, receiver: Ty, name: &str) -> Option<Ty> {
+        let Ty::Intersection(bounds) = receiver.non_null() else {
+            return None;
+        };
+        self.intersection_member_receiver(bounds, name)
+    }
+
     fn intersection_member_receiver(&self, bounds: &[Ty], name: &str) -> Option<Ty> {
         if bounds.len() < 2 {
             return None;
@@ -59447,8 +59458,22 @@ impl<'a> Checker<'a> {
                     .unwrap_or(nominal)
             }
         } else {
-            nominal
+            self.intersection_constituent_for_expected(nominal, expected)
+                .unwrap_or(nominal)
         }
+    }
+
+    /// The constituent of a denotable intersection that is exactly the expected type. Delegation
+    /// and other value boundaries record that constituent rather than the whole intersection.
+    fn intersection_constituent_for_expected(&self, nominal: Ty, expected: Ty) -> Option<Ty> {
+        let Ty::Intersection(parts) = nominal.non_null() else {
+            return None;
+        };
+        let expected = expected.non_null();
+        parts
+            .iter()
+            .copied()
+            .find(|part| part.non_null() == expected)
     }
 
     /// Commit the contextual numeric conversion chosen for a value boundary. Candidate probing uses
@@ -59463,10 +59488,13 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let contextual = self.expression_type_for_expected(scope, expression, nominal, expected);
         let selected_intersection_projection = contextual != nominal
-            && self
+            && (self
                 .expr_access_path(expression)
                 .map(|path| self.lookup_intersection_narrowing(scope, &path))
-                .is_some_and(|constituents| constituents.contains(&contextual));
+                .is_some_and(|constituents| constituents.contains(&contextual))
+                || self
+                    .intersection_constituent_for_expected(nominal, contextual)
+                    .is_some());
         if selected_intersection_projection {
             // This is a committed value boundary, not candidate probing. Publish the exact
             // constituent selected from the proven non-denotable intersection so checked FIR can
@@ -64592,6 +64620,7 @@ impl<'a> Checker<'a> {
             if let Some(projected) = self
                 .flow_intersection_property_receiver(scope, receiver, &name, false)
                 .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
+                .or_else(|| self.intersection_type_member_receiver(rt, &name))
             {
                 rt = self.set(receiver, projected);
             } else if let Some(projected) =

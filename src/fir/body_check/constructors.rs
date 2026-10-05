@@ -897,15 +897,18 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::MissingStableCallTarget,
                     ));
                 };
+                let reified = header.flags.is_reified();
+                let value = ResolvedTy::new(value).map_err(|error| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnpublishableType(error),
+                    )
+                })?;
                 Ok(FirTypeSubstitution {
                     parameter: parameter.into(),
-                    reified: header.flags.is_reified(),
-                    value: ResolvedTy::new(value).map_err(|error| {
-                        self.failure(
-                            self.file.expr_span(expression),
-                            BodyCheckFailureKind::UnpublishableType(error),
-                        )
-                    })?,
+                    reified,
+                    value,
+                    reified_runtime: self.reified_substitution_runtime(reified, value),
                     additional_bounds: Box::new([]),
                 })
             })

@@ -16,33 +16,13 @@ fn agree(source: &str) {
     let jdk = common::jdk_modules();
     let krusty = compile_and_run_box_files(
         &[("main.kt", source)],
-        &[stdlib.clone(), reflect.clone()],
+        &[stdlib, reflect.clone()],
         Some(jdk.as_path()),
     )
     .expect("krusty box");
-    let kotlinc = kotlinc_box(source, &stdlib, &reflect);
+    let kotlinc = common::kotlinc_box_result_with_classpath(source, &[reflect]);
     assert_eq!(krusty, kotlinc);
     assert_eq!(krusty, "OK");
-}
-
-fn kotlinc_box(source: &str, stdlib: &PathBuf, reflect: &PathBuf) -> String {
-    let work = common::scratch_dir().expect("scratch");
-    let source_path = work.join("main.kt");
-    std::fs::write(&source_path, source).expect("write source");
-    let output = work.join("out");
-    std::fs::create_dir_all(&output).expect("output dir");
-    let (code, diagnostics) = common::kotlinc_compile(&[
-        source_path.display().to_string(),
-        "-d".to_string(),
-        output.display().to_string(),
-        "-XXLanguage:-ProhibitIntersectionReifiedTypeParameter".to_string(),
-    ])
-    .expect("kotlinc");
-    assert_eq!(code, 0, "kotlinc rejected the fixture: {diagnostics}");
-    let result = common::run_box(&[], "MainKt", &[output, stdlib.clone(), reflect.clone()])
-        .expect("kotlinc box");
-    let _ = std::fs::remove_dir_all(work);
-    result
 }
 
 #[test]

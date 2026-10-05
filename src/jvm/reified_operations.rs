@@ -141,7 +141,6 @@ pub(super) fn splice_arguments(
     expression: ExprId,
     facade: &str,
     render: &dyn Fn(Ty) -> String,
-    supertypes: &dyn Fn(TypeName) -> Vec<TypeName>,
 ) -> super::reified_arguments::ReifiedArguments {
     let classes = splice_type_map(ir, expression, render);
     let mut type_of = HashMap::new();
@@ -150,13 +149,7 @@ pub(super) fn splice_arguments(
         for (name, ty) in substitutions {
             for (argument, ty) in [(name.clone(), *ty), (format!("{name}?"), Ty::nullable(*ty))] {
                 let mut realization = Vec::new();
-                if super::type_of::generate_with_supertypes(
-                    ty,
-                    &parameters,
-                    &mut realization,
-                    supertypes,
-                )
-                .is_ok()
+                if super::type_of::generate(ty, &parameters, &mut realization).is_ok()
                 {
                     type_of.insert(argument, realization);
                 }

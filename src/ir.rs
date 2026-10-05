@@ -170,6 +170,9 @@ pub struct IrCheckedSubstitution {
     /// not runtime reification operations.
     pub reified: bool,
     pub value: Ty,
+    /// Runtime classifier selected for a reified operation. See
+    /// [`crate::fir::FirTypeSubstitution::reified_runtime`].
+    pub reified_runtime: Ty,
     pub additional_bounds: Vec<Ty>,
 }
 

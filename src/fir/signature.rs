@@ -2090,6 +2090,21 @@ impl ResolvedModuleIndex {
             .map(Box::as_ref)
     }
 
+    /// Direct supertypes already recorded for `classifier`. `None` means this index has no
+    /// hierarchy for that classifier; an empty list means the recorded hierarchy has no parent
+    /// other than the implicit `Any`.
+    pub fn recorded_direct_supertypes(&self, classifier: TypeName) -> Option<Vec<TypeName>> {
+        let declaration = self.classifier_declaration(classifier)?;
+        let hierarchy = self.classifier_hierarchy(declaration)?;
+        Some(
+            hierarchy
+                .iter()
+                .filter(|entry| entry.depth == 1)
+                .map(|entry| entry.classifier)
+                .collect(),
+        )
+    }
+
     pub(crate) fn publish_classifier_hierarchy(
         &mut self,
         declaration: DeclarationId,

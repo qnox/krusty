@@ -166,6 +166,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &HashMap<TypeNam
     };
     for substitution in substitutions {
         substitution.value = ty(substitution.value, names);
+        substitution.reified_runtime = ty(substitution.reified_runtime, names);
         tys(&mut substitution.additional_bounds, names);
     }
 }
@@ -222,6 +223,7 @@ fn callee(callee: &mut Callee, names: &HashMap<TypeName, TypeName>) {
             *ret = ty(*ret, names);
             for substitution in substitutions {
                 substitution.value = ty(substitution.value, names);
+                substitution.reified_runtime = ty(substitution.reified_runtime, names);
                 tys(&mut substitution.additional_bounds, names);
             }
         }

@@ -120,6 +120,106 @@ fn combine_classifier(
     Ty::obj_args_name(classifier, &arguments)
 }
 
+/// The classifier a reified operation records. An intersection is not a runtime class. When every
+/// component is a resolved classifier, the operation uses their single common supertype (`Any`
+/// when they share none, that shared classifier when they do). An unresolved component keeps the
+/// checked intersection: a missing hierarchy is not evidence that the components meet only at `Any`.
+pub(crate) fn reified_runtime_type(
+    ty: Ty,
+    direct_supertypes: &dyn Fn(TypeName) -> Option<Vec<TypeName>>,
+) -> Ty {
+    let nullable = ty.is_nullable();
+    let inner = ty.non_null().projection_read_ty().non_null();
+    let Ty::Intersection(parts) = inner else {
+        return ty;
+    };
+    let Some(approximated) = approximate_reified_intersection(parts, direct_supertypes) else {
+        return ty;
+    };
+    if nullable {
+        Ty::nullable(approximated)
+    } else {
+        approximated
+    }
+}
+
+fn approximate_reified_intersection(
+    parts: &[Ty],
+    direct_supertypes: &dyn Fn(TypeName) -> Option<Vec<TypeName>>,
+) -> Option<Ty> {
+    if parts.is_empty() {
+        return None;
+    }
+    let mut names = Vec::with_capacity(parts.len());
+    for part in parts {
+        names.push(part.non_null().obj_internal()?);
+    }
+    Some(Ty::obj_name(single_reified_supertype(
+        &names,
+        direct_supertypes,
+    )?))
+}
+
+fn single_reified_supertype(
+    components: &[TypeName],
+    direct_supertypes: &dyn Fn(TypeName) -> Option<Vec<TypeName>>,
+) -> Option<TypeName> {
+    let mut closures = Vec::with_capacity(components.len());
+    for name in components {
+        closures.push(supertype_closure(*name, direct_supertypes)?);
+    }
+    let mut common = closures.first().cloned().unwrap_or_default();
+    for closure in closures.iter().skip(1) {
+        common.retain(|name| closure.contains(name));
+    }
+    let any = crate::types::wk::any();
+    loop {
+        if common.is_empty() {
+            return Some(any);
+        }
+        let most = common
+            .iter()
+            .copied()
+            .filter(|name| {
+                !common.iter().any(|other| {
+                    other != name
+                        && supertype_closure(*other, direct_supertypes)
+                            .is_some_and(|closure| closure.contains(name))
+                })
+            })
+            .collect::<Vec<_>>();
+        if most.len() == 1 {
+            return Some(most[0]);
+        }
+        if most.is_empty() || most.len() == common.len() {
+            return Some(any);
+        }
+        for name in most {
+            common.remove(&name);
+        }
+    }
+}
+
+fn supertype_closure(
+    name: TypeName,
+    direct_supertypes: &dyn Fn(TypeName) -> Option<Vec<TypeName>>,
+) -> Option<HashSet<TypeName>> {
+    let mut seen = HashSet::new();
+    let mut pending = vec![name];
+    let any = crate::types::wk::any();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        if current == any {
+            continue;
+        }
+        pending.extend(direct_supertypes(current)?);
+        pending.push(any);
+    }
+    Some(seen)
+}
+
 fn closure(source: &dyn SymbolSource, root: Ty) -> Vec<Ty> {
     let mut queue = VecDeque::from([root.non_null()]);
     let mut seen = HashSet::new();
@@ -144,4 +244,39 @@ fn closure(source: &dyn SymbolSource, root: Ty) -> Vec<Ty> {
         }
     }
     types
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reified_runtime_type;
+    use crate::types::{type_name, Ty};
+
+    #[test]
+    fn an_intersection_reifies_as_its_single_common_supertype() {
+        let x = type_name("demo/X");
+        let y = type_name("demo/Y");
+        let z = type_name("demo/Z");
+        let intersection = Ty::intersection(&[Ty::obj_name(x), Ty::obj_name(y)]);
+        assert_eq!(
+            reified_runtime_type(intersection, &|_| None),
+            intersection,
+            "a missing classifier hierarchy must not become Any"
+        );
+        assert_eq!(
+            reified_runtime_type(intersection, &|_| Some(Vec::new())),
+            Ty::obj_name(crate::types::wk::any())
+        );
+        assert_eq!(
+            reified_runtime_type(intersection, &|name| {
+                if name == x || name == y {
+                    Some(vec![z])
+                } else if name == z {
+                    Some(Vec::new())
+                } else {
+                    None
+                }
+            }),
+            Ty::obj_name(z)
+        );
+    }
 }

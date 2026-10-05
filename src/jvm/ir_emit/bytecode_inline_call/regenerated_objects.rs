@@ -126,12 +126,6 @@ impl<'a> Emitter<'a> {
             call_expression,
             &self.facade,
             &|ty| self.rendered_inlined_cast_target(ty),
-            &|name| {
-                self.classifiers
-                    .classifier(name)
-                    .map(|fact| fact.supertypes.to_vec())
-                    .unwrap_or_default()
-            },
         );
         CallObjects {
             ir: self.ir,

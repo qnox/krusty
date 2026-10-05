@@ -1116,11 +1116,27 @@ fn delegate_substitutions(
             let header = index
                 .type_parameter_header(parameter)
                 .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
+            let reified = header.flags.is_reified();
+            let value = ResolvedTy::new(value)
+                .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?;
+            let runtime = if reified {
+                crate::symbol_resolver::reified_runtime_type(value.get(), &|name| {
+                    index.recorded_direct_supertypes(name)
+                })
+            } else {
+                value.get()
+            };
+            let reified_runtime = if runtime == value.get() {
+                value
+            } else {
+                ResolvedTy::new(runtime)
+                    .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?
+            };
             Ok(FirTypeSubstitution {
                 parameter: parameter.into(),
-                reified: header.flags.is_reified(),
-                value: ResolvedTy::new(value)
-                    .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?,
+                reified,
+                value,
+                reified_runtime,
                 additional_bounds: Box::new([]),
             })
         })

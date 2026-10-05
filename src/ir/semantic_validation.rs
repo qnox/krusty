@@ -153,6 +153,7 @@ fn validate_argument(argument: &IrCheckedArgument) -> Result<(), UndeterminedIrT
 
 fn validate_substitution(substitution: &IrCheckedSubstitution) -> Result<(), UndeterminedIrType> {
     reject("checked substitution", substitution.value)?;
+    reject("checked reified substitution", substitution.reified_runtime)?;
     reject_all(
         "checked substitution bound",
         substitution.additional_bounds.iter().copied(),

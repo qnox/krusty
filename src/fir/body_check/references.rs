@@ -1034,13 +1034,16 @@ impl BodyFirChecker<'_> {
                 let value = value.ok_or_else(|| {
                     self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
                 })?;
+                let reified = reified_type_parameter_ordinals.contains(&ordinal);
+                let value = resolved(value)?;
                 Ok(FirTypeSubstitution {
                     parameter: FirTypeParameterRef::External {
                         callable: declaration,
                         ordinal,
                     },
-                    reified: reified_type_parameter_ordinals.contains(&ordinal),
-                    value: resolved(value)?,
+                    reified,
+                    value,
+                    reified_runtime: self.reified_substitution_runtime(reified, value),
                     additional_bounds: Box::new([]),
                 })
             })
@@ -1319,13 +1322,16 @@ impl BodyFirChecker<'_> {
                 let value = value.ok_or_else(|| {
                     self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
                 })?;
+                let reified = reified_type_parameter_ordinals.contains(&ordinal);
+                let value = resolved(value)?;
                 Ok(FirTypeSubstitution {
                     parameter: FirTypeParameterRef::External {
                         callable: declaration,
                         ordinal,
                     },
-                    reified: reified_type_parameter_ordinals.contains(&ordinal),
-                    value: resolved(value)?,
+                    reified,
+                    value,
+                    reified_runtime: self.reified_substitution_runtime(reified, value),
                     additional_bounds: Box::new([]),
                 })
             })

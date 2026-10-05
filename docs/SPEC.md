@@ -8782,10 +8782,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **An invariant instantiation joins at a captured out-projection of the arguments' common supertype.**
   `sel(Inv(A), Inv(B))`, with `A : X, Y` and `B : X, Y`, has type `Inv<out (X & Y)>` rather than a
   raw `Inv` or `Any`. Reading `v` produces that captured upper bound, so the value has the members
-  of both `X` and `Y` and not a member declared on only one argument. A reified `typeOf` of the
-  intersection uses the single common supertype: `Any` when the components share none, that shared
-  classifier when they do (`X : Z` and `Y : Z` reify as `Z`), and the class itself when the captured
-  bound is one class. Corpus: `reflection/typeOf/intersectionType.kt` (`-ProhibitIntersectionReifiedTypeParameter`).
+  of both `X` and `Y` and not a member declared on only one argument. A call on that intersection
+  records the constituent that declares the member (`x()` sees `X`, `y()` sees `Y`). A reified
+  operation does not reify the intersection: the frontend records its single common supertype on
+  the substitution (`Any` when the components share none, that shared classifier when they do,
+  and the class itself when the captured bound is one class), and `typeOf` encodes that recorded
+  classifier. Corpus: `reflection/typeOf/intersectionType.kt`
+  (`-ProhibitIntersectionReifiedTypeParameter`).
   Test: `tests/intersection_reified_type_of_e2e.rs`.
 - **A Java member's flexible return keeps the caller's type arguments.** A Java generic class
   applied to the enclosing declaration's own type parameters (`Shelf<X, Y>` inside `fun <X, Y>`,

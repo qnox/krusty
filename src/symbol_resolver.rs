@@ -25,6 +25,7 @@ pub(crate) use classifier_scope::{
 };
 mod declaration_specificity;
 mod generic_inference;
+pub(crate) use generic_inference::reified_runtime_type;
 mod hierarchy_projection;
 mod lambda_call_shape;
 mod member_hierarchy;

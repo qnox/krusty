@@ -159,7 +159,7 @@ fn checked_substitution_bindings<'a>(
         .filter(|substitution| substitution.reified)
         .filter_map(|substitution| match substitution.parameter {
             FirTypeParameterRef::Module(parameter) => module_parameter_name(parameter)
-                .map(|name| (name.to_owned(), substitution.value.get())),
+                .map(|name| (name.to_owned(), substitution.reified_runtime.get())),
             FirTypeParameterRef::External { .. } => None,
         })
         .collect::<HashMap<_, _>>();
@@ -1468,6 +1468,7 @@ fn specialize_checked_substitution(
     bindings: &HashMap<String, Ty>,
 ) {
     specialize_ty(&mut substitution.value, bindings);
+    specialize_ty(&mut substitution.reified_runtime, bindings);
     specialize_tys(&mut substitution.additional_bounds, bindings);
 }
 
@@ -1859,12 +1860,14 @@ mod expansion_mode_tests {
                 parameter: FirTypeParameterRef::Module(ordinary),
                 reified: false,
                 value: ResolvedTy::new(Ty::String).unwrap(),
+                reified_runtime: ResolvedTy::new(Ty::String).unwrap(),
                 additional_bounds: Box::new([]),
             },
             FirTypeSubstitution {
                 parameter: FirTypeParameterRef::Module(reified),
                 reified: true,
                 value: ResolvedTy::new(Ty::Int).unwrap(),
+                reified_runtime: ResolvedTy::new(Ty::Int).unwrap(),
                 additional_bounds: Box::new([]),
             },
         ];

@@ -174,6 +174,10 @@ pub struct FirTypeSubstitution {
     /// Whether this exact declaration parameter carries Kotlin's `reified` capability.
     pub reified: bool,
     pub value: ResolvedTy,
+    /// Classifier a reified operation records. Equals [`Self::value`] except when that argument is
+    /// an intersection: the frontend selects the single common supertype, and a backend encodes
+    /// this identity without walking a classifier hierarchy.
+    pub reified_runtime: ResolvedTy,
     /// Additional constituents of an inferred flow-intersection type argument. `value` is the
     /// primary/JVM-erasure constituent; these bounds retain the rest of the checked Kotlin type for
     /// reified inline operations without introducing a lookup-visible synthetic classifier.

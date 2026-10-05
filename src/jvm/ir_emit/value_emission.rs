@@ -718,17 +718,7 @@ impl super::Emitter<'_> {
                         let parameters =
                             super::super::type_of::TypeParameters::new(self.ir, &self.facade);
                         let mut instructions = Vec::new();
-                        match super::super::type_of::generate_with_supertypes(
-                            *ty,
-                            &parameters,
-                            &mut instructions,
-                            &|name| {
-                                self.classifiers
-                                    .classifier(name)
-                                    .map(|fact| fact.supertypes.to_vec())
-                                    .unwrap_or_default()
-                            },
-                        ) {
+                        match super::super::type_of::generate(*ty, &parameters, &mut instructions) {
                             Ok(()) => super::super::type_of::encode(&instructions, code, self.cw),
                             Err(error) => self.run.set_emit_error(error.to_string()),
                         }
@@ -920,12 +910,6 @@ impl super::Emitter<'_> {
                         e,
                         &self.facade,
                         &|ty| self.rendered_inlined_cast_target(ty),
-                        &|name| {
-                            self.classifiers
-                                .classifier(name)
-                                .map(|fact| fact.supertypes.to_vec())
-                                .unwrap_or_default()
-                        },
                     );
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have
                     // callable bytecode, so a failed optional splice can fall back to a real call. An
