@@ -91,7 +91,6 @@ pub(super) fn synth_value_members(
     class_id: u32,
     under: &Under,
     callable_under: &Under,
-    has_init: bool,
     constructor_default: Option<ExprId>,
     realized: &mut SynthesizedValueMembers,
     rendered_value_class_text: &mut HashSet<ExprId>,
@@ -381,11 +380,7 @@ pub(super) fn synth_value_members(
     {
         let mut stmts = Vec::new();
         let mut result = 0;
-        if let Some(init_root) = ir.classes[class_id as usize]
-            .init_body
-            .take()
-            .filter(|_| has_init)
-        {
+        if let Some(init_root) = ir.classes[class_id as usize].init_body.take() {
             let mut reach = HashSet::new();
             collect_reachable_scoped(&ir.exprs, init_root, &mut reach);
             // `this` is the temporary; the parameter, which is the class's sole property, is read

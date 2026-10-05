@@ -364,7 +364,6 @@ pub(crate) fn lower_value_classes(
             cid,
             &under,
             &callable_under,
-            ir.classes[cid as usize].init_body.is_some(),
             constructor_default,
             &mut realized_members,
             &mut rendered_value_class_text,
