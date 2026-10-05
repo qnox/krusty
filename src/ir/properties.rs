@@ -193,6 +193,9 @@ pub struct IrProperty {
     /// accessor for it (`access$get<X>$p` on the JVM); without one the splice would be illegal, and
     /// silently degrading the `inline` call instead would change what the program does.
     pub needs_access_bridge: bool,
+    /// Annotations written on this property's accessors, whether source declared each accessor or
+    /// a backend realizes its default.
+    pub accessor_annotations: super::AccessorAnnotations,
 }
 
 /// A property declared by another file of the module, as the file's code selects it.

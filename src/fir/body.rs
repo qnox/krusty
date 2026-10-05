@@ -12,8 +12,11 @@ pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
+mod capture_order;
 mod lifting_sites;
+mod local_type_parameters;
 pub use lifting_sites::{FirLiftingSite, FirLiftingStep};
+pub use local_type_parameters::FirLocalTypeParameter;
 mod origins;
 pub use origins::{Origin, OriginStore, SyntheticOriginKind};
 mod branches;
@@ -411,6 +414,8 @@ pub struct FirCall {
 pub(crate) struct LocalBinding {
     pub(crate) value: LocalValueId,
     pub(crate) ty: ResolvedTy,
+    /// A `var` (or `lateinit var`): the binding can be reassigned after it is read.
+    pub(crate) mutable: bool,
     pub(crate) lateinit: bool,
 }
 
@@ -1793,6 +1798,7 @@ pub struct FirBody {
     pub(super) interface_delegate_calls: Vec<super::FirInterfaceDelegateCalls>,
     context_receiver_types: Vec<ResolvedTy>,
     context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
+    type_parameters: Box<[FirLocalTypeParameter]>,
     /// Declaration-owned inline semantics, in physical parameter order. The checker publishes
     /// this once; common lowering copies it without consulting declaration headers or types.
     inline_parameter_modifiers: Vec<crate::types::InlineParameterModifier>,
@@ -1800,6 +1806,7 @@ pub struct FirBody {
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
+    capture_declaration_ordinals: Box<[u32]>,
     implicit_receiver_captures: Vec<FirImplicitReceiverCapture>,
     sam_conversions: Vec<FirSamConversion>,
     platform_narrowings: Vec<FirPlatformNarrowing>,
@@ -1852,11 +1859,13 @@ impl FirBody {
             interface_delegate_calls: Vec::new(),
             context_receiver_types: Vec::new(),
             context_parameter_kinds: Vec::new(),
+            type_parameters: Box::default(),
             inline_parameter_modifiers: Vec::new(),
             inline_expansion_modes: Vec::new(),
             parameters: Vec::new(),
             default_values: Vec::new(),
             captures: Vec::new(),
+            capture_declaration_ordinals: Box::default(),
             implicit_receiver_captures: Vec::new(),
             sam_conversions: Vec::new(),
             platform_narrowings: Vec::new(),
@@ -2021,43 +2030,12 @@ impl FirBody {
         self.debug_name.as_deref()
     }
 
-    pub fn set_lifting_site(&mut self, site: FirLiftingSite) {
-        assert!(
-            self.lifting_site.replace(site).is_none(),
-            "a FIR body has one lifting site"
-        );
-    }
-
-    pub fn lifting_site(&self) -> Option<&FirLiftingSite> {
-        self.lifting_site.as_ref()
-    }
-
-    pub fn add_bodiless_lifting_site(&mut self, site: FirLiftingSite) {
-        self.bodiless_lifting_sites.push(site);
-    }
-
     pub(crate) fn add_local_delegate_plan(&mut self, plan: FirLocalDelegatePlan) {
         self.local_delegate_plans.push(plan);
     }
 
     pub(crate) fn local_delegate_plans(&self) -> &[FirLocalDelegatePlan] {
         &self.local_delegate_plans
-    }
-
-    /// Every lifting site this body and the callables nested in it declare, its own included.
-    pub fn collect_lifting_sites<'a>(&'a self, out: &mut Vec<&'a FirLiftingSite>) {
-        out.extend(self.lifting_site.iter());
-        out.extend(self.bodiless_lifting_sites.iter());
-        for statement in &self.statements {
-            if let FirStatementKind::LocalFunction { body, .. } = &statement.kind {
-                body.collect_lifting_sites(out);
-            }
-        }
-        for expression in &self.expressions {
-            if let FirExprKind::Lambda { body, .. } = &expression.kind {
-                body.collect_lifting_sites(out);
-            }
-        }
     }
 
     pub fn mark_source_lambda(&mut self, lambda: FirSourceLambda) {
@@ -2815,7 +2793,9 @@ impl FirBody {
             + self.debug_lines.payload_bytes()
             + self.default_values.len() * std::mem::size_of::<FirDefaultValue>()
             + self.context_receiver_types.len() * std::mem::size_of::<ResolvedTy>()
+            + self.type_parameter_payload_bytes()
             + self.captures.len() * std::mem::size_of::<FirCapture>()
+            + self.capture_declaration_ordinals.len() * std::mem::size_of::<u32>()
             + self.implicit_receiver_captures.len()
                 * std::mem::size_of::<FirImplicitReceiverCapture>()
             + self

@@ -15,6 +15,9 @@ impl Checker<'_> {
         match &function.body {
             FunBody::Expr(expression) => {
                 let checked = self.expr_declared(scope, *expression, self.ret_ty);
+                if self.selects_contract_intrinsic(*expression) {
+                    self.check_contract_expression_body(*expression);
+                }
                 let actual = self.recorded_expression_type_for_expected(
                     scope,
                     *expression,

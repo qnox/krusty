@@ -744,41 +744,6 @@ fn default_expression_growth_does_not_enter_header_syntax_or_signature_constrain
 }
 
 #[test]
-fn annotation_policy_inventory_flattens_named_target_arrays_without_body_ids() {
-    let text =
-        "@Target(allowedTargets = [AnnotationTarget.FIELD, AnnotationTarget.VALUE_PARAMETER])\n\
-                annotation class Mark\n";
-    let inputs = [SourceInput::kotlin(text)];
-    let mut diagnostics = DiagSink::new();
-    let module = stream_file_stub_inventory(
-        &inputs,
-        &LangFeatures::new(),
-        &mut diagnostics,
-        |_, _, _| {},
-    );
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let declaration = module
-        .stubs
-        .iter()
-        .find(|stub| {
-            stub.lookup_name
-                .and_then(|name| module.lookup_names.get(name))
-                == Some("Mark")
-        })
-        .expect("annotation class declaration")
-        .id;
-    let [application] = module.annotation_policy_applications(declaration) else {
-        panic!("one compact annotation policy application")
-    };
-    let arguments = module
-        .annotation_policy_arguments(application.arguments)
-        .iter()
-        .map(|argument| module.lookup_names.get(*argument).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(arguments, ["FIELD", "VALUE_PARAMETER"]);
-}
-
-#[test]
 fn streamed_extractor_builds_lazy_call_and_member_constraints_from_the_transient_ast() {
     let text = "fun a() = b().length\nfun b() = \"hello\"";
     let sources = [SourceInput::kotlin(text).with_file_stem("Lazy")];

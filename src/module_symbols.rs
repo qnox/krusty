@@ -82,11 +82,8 @@ impl<'a> ModuleSymbols<'a> {
         self.syms.annotation_retention(classifier)
     }
 
-    pub(crate) fn annotation_targets(
-        &self,
-        classifier: TypeName,
-    ) -> crate::types::AnnotationTargets {
-        self.syms.annotation_targets(classifier)
+    pub(crate) fn annotation_targets(&self) -> &'a crate::types::DeclaredTargetPolicies {
+        self.syms.annotation_targets()
     }
 
     /// Temporary Pass-1 graph access for inference-only checker operations. The streamed module

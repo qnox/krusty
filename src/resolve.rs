@@ -33,6 +33,7 @@ use scope::{ContextReceiver, ContextReceiverKind, ContextValue, FlowExclusion, N
 
 mod abstract_obligations;
 mod access_control;
+mod accessor_annotations;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
@@ -88,6 +89,8 @@ mod control_flow_join;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
+mod contract_declarations;
+mod contract_effects;
 mod dependency_platform;
 mod destructuring;
 mod diagnostic_selection;
@@ -3317,10 +3320,10 @@ pub struct SymbolTable {
     /// Retention normalized at the declaration/provider boundary by resolved annotation identity.
     /// Lowering and backends consume this fact without reopening a source declaration or classpath.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
-    /// Declared `@Target` set per annotation identity, normalized at the same declaration/provider
-    /// boundary as the retention. An identity absent from this map declares no `@Target` and is
-    /// therefore applicable everywhere ([`crate::types::AnnotationTargets::DEFAULT`]).
-    annotation_targets: HashMap<TypeName, crate::types::AnnotationTargets>,
+    /// Declared `@Target` policy per annotation identity: a library's from its provider, a source
+    /// class's from its checked `@Target` application. An identity with no valid policy is
+    /// applicable everywhere ([`crate::types::AnnotationTargets::DEFAULT`]).
+    annotation_targets: crate::types::DeclaredTargetPolicies,
     /// Top-level function name → the facade class it lives on (`helper` → `pkg/AKt`), for the WHOLE
     /// multi-file compilation. Populated only by the multi-file driver (which knows each file's
     /// stem/facade); empty for single-file/in-process callers. Lets `lower_file` emit a call to a
@@ -3428,7 +3431,7 @@ impl Default for SymbolTable {
             resolved_annotations: HashMap::new(),
             declaration_visibility_suppressions: HashMap::new(),
             annotation_retentions: HashMap::new(),
-            annotation_targets: HashMap::new(),
+            annotation_targets: crate::types::DeclaredTargetPolicies::default(),
             fn_facades: HashMap::new(),
             fn_facades_by_decl: HashMap::new(),
             unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
@@ -3649,13 +3652,10 @@ impl SymbolTable {
         self.annotation_retentions.get(&annotation).copied()
     }
 
-    /// The annotation's declared `@Target` set; an annotation that declares none is applicable
-    /// everywhere, which is what Kotlin's use-site defaulting assumes.
-    pub fn annotation_targets(&self, annotation: TypeName) -> crate::types::AnnotationTargets {
-        self.annotation_targets
-            .get(&annotation)
-            .copied()
-            .unwrap_or(crate::types::AnnotationTargets::DEFAULT)
+    /// The published `@Target` policies; an annotation with no valid one is applicable everywhere,
+    /// which is what Kotlin's use-site defaulting assumes.
+    pub fn annotation_targets(&self) -> &crate::types::DeclaredTargetPolicies {
+        &self.annotation_targets
     }
 
     /// Insert under the class's own internal name (the map's key scheme).
@@ -3850,125 +3850,6 @@ impl SymbolTable {
     }
 }
 
-/// Whether the import-scoped top-level family selected for `e` consists solely of the platform's
-/// erased contract intrinsic. The ordinary federated resolver owns aliases, package precedence,
-/// same-module shadowing, and ambiguity; this helper owns only the final semantic classification.
-/// Requiring every surviving overload to be intrinsic is conservative when two star imports expose
-/// competing callables: an ambiguous/user family must remain executable and therefore splice-only.
-fn resolved_call_is_erased_contract(
-    file: &File,
-    e: ExprId,
-    resolver: &crate::symbol_resolver::SymbolResolver<'_>,
-    platform: &dyn SemanticPlatform,
-) -> bool {
-    let Expr::Call { callee, .. } = file.expr(e) else {
-        return false;
-    };
-    let Expr::Name(name) = file.expr(*callee) else {
-        return false;
-    };
-    let overloads = resolver.top_level_candidates(name);
-    let mut top_level = crate::libraries::FunctionSet { overloads }.into_top_level();
-    let Some(first) = top_level.next() else {
-        return false;
-    };
-    platform.is_erased_contract_callable(&first.callable)
-        && top_level.all(|candidate| platform.is_erased_contract_callable(&candidate.callable))
-}
-
-/// Names introduced anywhere below a function body. Facade eligibility runs before lexical
-/// checking, so it cannot reuse [`Checker::lexical_value_declares`]; conservatively treating a
-/// same-named call as shadowed whenever the function contains such a binding prevents an erased
-/// intrinsic classification from crossing a local/lambda/function boundary. The conservatism is
-/// limited to the very small set of callee names that otherwise resolve to the contract intrinsic.
-fn function_bound_names(file: &File, function: &FunDecl) -> std::collections::HashSet<String> {
-    fn expression(file: &File, e: ExprId, names: &mut std::collections::HashSet<String>) {
-        match file.expr(e) {
-            Expr::Lambda { params, .. } => {
-                if params.is_empty() {
-                    names.insert("it".to_string());
-                } else {
-                    names.extend(params.iter().cloned());
-                }
-            }
-            Expr::Try { catches, .. } => {
-                names.extend(catches.iter().map(|catch| catch.name.clone()));
-            }
-            _ => {}
-        }
-        let mut expressions = Vec::new();
-        let mut statements = Vec::new();
-        file.any_child_expr(
-            e,
-            &mut |child| {
-                expressions.push(child);
-                false
-            },
-            &mut |statement| {
-                statements.push(statement);
-                false
-            },
-        );
-        for child in expressions {
-            expression(file, child, names);
-        }
-        for child in statements {
-            statement(file, child, names);
-        }
-    }
-
-    fn statement(file: &File, s: StmtId, names: &mut std::collections::HashSet<String>) {
-        match file.stmt(s) {
-            Stmt::Local { name, .. }
-            | Stmt::LocalLateinit { name, .. }
-            | Stmt::LocalDelegate { name, .. }
-            | Stmt::For { name, .. }
-            | Stmt::ForEach { name, .. } => {
-                names.insert(name.clone());
-            }
-            Stmt::Destructure { entries, .. } => {
-                names.extend(
-                    entries
-                        .iter()
-                        .filter(|entry| !entry.ignored)
-                        .map(|entry| entry.name.clone()),
-                );
-            }
-            Stmt::LocalFun(function) => {
-                names.insert(function.name.clone());
-                names.extend(
-                    function
-                        .params
-                        .iter()
-                        .map(|parameter| parameter.name.clone()),
-                );
-            }
-            Stmt::LocalClass(class) => {
-                names.insert(class.name.clone());
-            }
-            _ => {}
-        }
-        let mut expressions = Vec::new();
-        file.any_child_stmt(s, &mut |child| {
-            expressions.push(child);
-            false
-        });
-        for child in expressions {
-            expression(file, child, names);
-        }
-    }
-
-    let mut names = function
-        .params
-        .iter()
-        .map(|parameter| parameter.name.clone())
-        .collect::<std::collections::HashSet<_>>();
-    if let FunBody::Expr(body) | FunBody::Block(body) = function.body {
-        expression(file, body, &mut names);
-    }
-    names
-}
-
 /// Shapes that lower correctly ONLY when an `inline` body is spliced into a caller — the checker
 /// analyses the body with splice assumptions, so emitting it standalone (a facade static for
 /// cross-file calls) would miscompile: a lambda that is STORED or returned rather than passed to
@@ -4033,44 +3914,16 @@ fn reified_uses_are_class_literals(file: &File, f: &FunDecl) -> bool {
     }
 }
 
-fn inline_body_has_splice_only_shape(
-    file: &File,
-    f: &FunDecl,
-    is_erased_contract: &impl Fn(ExprId) -> bool,
-) -> bool {
+fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
     let reified = &f.reified_type_params;
     fn bad_expr(
         file: &File,
         e: ExprId,
         tparams: &[String],
         reified: &std::collections::HashSet<String>,
-        is_erased_contract: &impl Fn(ExprId) -> bool,
     ) -> bool {
         if file.anonymous_object_classes.contains_key(&e) {
             return true;
-        }
-        // An erased contract DSL lambda never becomes a closure. Walk its BODY (and every ordinary
-        // argument) for genuinely splice-only shapes, but bypass only calls whose selected callable
-        // family has the provider-owned intrinsic identity. Aliases and source shadows therefore use
-        // exactly the same resolution seam as checker erasure below.
-        if is_erased_contract(e) {
-            if let Expr::Call { args, .. } = file.expr(e) {
-                let mut bad = false;
-                for (i, &arg) in args.iter().enumerate() {
-                    let lambda_body = match file.expr(arg) {
-                        Expr::Lambda { body, .. } if i + 1 == args.len() => Some(*body),
-                        _ => None,
-                    };
-                    bad |= bad_expr(
-                        file,
-                        lambda_body.unwrap_or(arg),
-                        tparams,
-                        reified,
-                        is_erased_contract,
-                    );
-                }
-                return bad;
-            }
         }
         match file.expr(e) {
             // A REIFIED fn is emitted as a real method (kotlinc always does), and a standalone
@@ -4079,8 +3932,8 @@ fn inline_body_has_splice_only_shape(
             // body. Non-local returns inside its lambdas stay rejected by the arms below.
             Expr::Try { .. } if !reified.is_empty() => file.any_child_expr(
                 e,
-                &mut |child| bad_expr(file, child, tparams, reified, is_erased_contract),
-                &mut |stmt| bad_stmt(file, stmt, tparams, reified, is_erased_contract),
+                &mut |child| bad_expr(file, child, tparams, reified),
+                &mut |stmt| bad_stmt(file, stmt, tparams, reified),
             ),
             Expr::Lambda { .. }
             | Expr::Try { .. }
@@ -4099,19 +3952,19 @@ fn inline_body_has_splice_only_shape(
             // returned lambda stays rejected above), and a `return` inside it — a non-local
             // return through the inline frame — keeps the fn splice-only.
             Expr::Call { callee, args } => {
-                bad_expr(file, *callee, tparams, reified, is_erased_contract)
+                bad_expr(file, *callee, tparams, reified)
                     || args.iter().any(|&arg| match file.expr(arg) {
                         Expr::Lambda { body, .. } => {
                             lambda_body_has_return(file, *body)
-                                || bad_expr(file, *body, tparams, reified, is_erased_contract)
+                                || bad_expr(file, *body, tparams, reified)
                         }
-                        _ => bad_expr(file, arg, tparams, reified, is_erased_contract),
+                        _ => bad_expr(file, arg, tparams, reified),
                     })
             }
             _ => file.any_child_expr(
                 e,
-                &mut |child| bad_expr(file, child, tparams, reified, is_erased_contract),
-                &mut |stmt| bad_stmt(file, stmt, tparams, reified, is_erased_contract),
+                &mut |child| bad_expr(file, child, tparams, reified),
+                &mut |stmt| bad_stmt(file, stmt, tparams, reified),
             ),
         }
     }
@@ -4120,7 +3973,6 @@ fn inline_body_has_splice_only_shape(
         s: StmtId,
         tparams: &[String],
         reified: &std::collections::HashSet<String>,
-        is_erased_contract: &impl Fn(ExprId) -> bool,
     ) -> bool {
         if matches!(
             file.stmt(s),
@@ -4128,9 +3980,7 @@ fn inline_body_has_splice_only_shape(
         ) {
             return true;
         }
-        file.any_child_stmt(s, &mut |child| {
-            bad_expr(file, child, tparams, reified, is_erased_contract)
-        })
+        file.any_child_stmt(s, &mut |child| bad_expr(file, child, tparams, reified))
     }
     /// Any `return` inside a lambda argument's body (non-local through the inline frame — its
     /// framing only holds when spliced into a caller, not emitted standalone).
@@ -4145,7 +3995,7 @@ fn inline_body_has_splice_only_shape(
     }
     match &f.body {
         FunBody::Expr(body) | FunBody::Block(body) => {
-            bad_expr(file, *body, &f.type_params, reified, is_erased_contract)
+            bad_expr(file, *body, &f.type_params, reified)
         }
         FunBody::None => true,
     }
@@ -4157,7 +4007,7 @@ impl SymbolTable {
     /// shape (the checker analyses an `inline` body with splice assumptions). Signature
     /// representation is deliberately absent here: value-class mangling/erasure belongs to the
     /// emission pass, which rewrites the declaration and exact selected call together.
-    pub fn inline_fn_facade_emittable(&self, file: &File, file_index: u32, f: &FunDecl) -> bool {
+    pub fn inline_fn_facade_emittable(&self, file: &File, f: &FunDecl) -> bool {
         if !f.is_inline() {
             return false;
         }
@@ -4169,36 +4019,7 @@ impl SymbolTable {
         if !f.reified_type_params.is_empty() && !reified_uses_are_class_literals(file, f) {
             return false;
         }
-        let module = crate::module_symbols::ModuleSymbols::for_file(self, file_index);
-        let import_scope = function_import_scope(file, self);
-        let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
-            &*self.libraries,
-            &module,
-            &import_scope,
-        );
-        let bound_names = function_bound_names(file, f);
-        // Contract identity depends on the import scope and callee NAME, not on call arguments.
-        // Memoize per name so a large inline body pays the federated lookup once per distinct name.
-        let contract_names = std::cell::RefCell::new(HashMap::<String, bool>::new());
-        let is_erased_contract = |expression| {
-            let Expr::Call { callee, .. } = file.expr(expression) else {
-                return false;
-            };
-            let Expr::Name(name) = file.expr(*callee) else {
-                return false;
-            };
-            if bound_names.contains(name) {
-                return false;
-            }
-            if let Some(resolved) = contract_names.borrow().get(name).copied() {
-                return resolved;
-            }
-            let resolved =
-                resolved_call_is_erased_contract(file, expression, &resolver, &*self.libraries);
-            contract_names.borrow_mut().insert(name.clone(), resolved);
-            resolved
-        };
-        !inline_body_has_splice_only_shape(file, f, &is_erased_contract)
+        !inline_body_has_splice_only_shape(file, f)
     }
 
     /// Whether a source function has a standalone callable body in the checked program. Ordinary
@@ -4206,15 +4027,10 @@ impl SymbolTable {
     /// path or the conservative standalone-body analysis supports it. This semantic answer is
     /// shared by common IR lowering and target registration so neither layer reconstructs the
     /// declaration-kind predicate or introduces file/module/classpath exceptions.
-    pub fn source_fn_has_callable_body(
-        &self,
-        file: &File,
-        file_index: u32,
-        function: &FunDecl,
-    ) -> bool {
+    pub fn source_fn_has_callable_body(&self, file: &File, function: &FunDecl) -> bool {
         !function.is_inline()
             || function.has_callable_inline_extension_body()
-            || self.inline_fn_facade_emittable(file, file_index, function)
+            || self.inline_fn_facade_emittable(file, function)
     }
 
     pub fn source_constructor_matcher(&self) -> SourceConstructorMatcher<'_> {
@@ -9791,13 +9607,31 @@ pub struct ResolvedExtensionCall {
     pub receiver: Ty,
     /// Logical value parameters only; the extension receiver is carried separately.
     pub params: Vec<Ty>,
-    /// In-scope values selected for the declaration's leading context parameters.
-    pub context_args: Vec<ResolvedContextArgument>,
+    /// One entry per leading context parameter. `Some` is the in-scope value selection chose;
+    /// `None` is a context parameter explicitly named at the call site. Keeping the alignment is
+    /// what lets every later consumer address declaration parameters without reconstructing it.
+    pub context_args: Vec<Option<ResolvedContextArgument>>,
     pub source: Option<(u32, u32)>,
     pub stable_declaration: Option<crate::fir::DeclarationId>,
     pub vararg: bool,
     pub vararg_index: Option<usize>,
     pub param_default_values: Vec<Option<CtorDefaultValue>>,
+}
+
+/// The declaration and call-site facts that construct one source-origin extension target.
+/// Selection produces these as one contract; keeping them named prevents receiver, context,
+/// vararg and linkage fields from being coupled by positional helper arguments.
+struct ResolvedSourceExtensionCall {
+    callable: crate::libraries::LibraryCallable,
+    receiver: Ty,
+    params: Vec<Ty>,
+    context_args: Vec<Option<ResolvedContextArgument>>,
+    ret: Ty,
+    source: Option<(u32, u32)>,
+    stable_declaration: Option<crate::fir::DeclarationId>,
+    vararg: bool,
+    vararg_index: Option<usize>,
+    param_default_values: Vec<Option<CtorDefaultValue>>,
 }
 
 /// Exact enum entry selected by frontend lookup. Current-module entries carry their stable
@@ -9842,18 +9676,19 @@ impl ResolvedExtensionCall {
         }
     }
 
-    fn source(
-        mut callable: crate::libraries::LibraryCallable,
-        receiver: Ty,
-        params: Vec<Ty>,
-        context_args: Vec<ResolvedContextArgument>,
-        ret: Ty,
-        source: Option<(u32, u32)>,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        vararg: bool,
-        vararg_index: Option<usize>,
-        param_default_values: Vec<Option<CtorDefaultValue>>,
-    ) -> Self {
+    fn source(selected: ResolvedSourceExtensionCall) -> Self {
+        let ResolvedSourceExtensionCall {
+            mut callable,
+            receiver,
+            params,
+            context_args,
+            ret,
+            source,
+            stable_declaration,
+            vararg,
+            vararg_index,
+            param_default_values,
+        } = selected;
         callable.ret = ret;
         Self {
             callable,
@@ -9924,31 +9759,8 @@ impl ResolvedCall {
         Self::Extension(Box::new(ResolvedExtensionCall::library(callable)))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn source_extension(
-        callable: crate::libraries::LibraryCallable,
-        receiver: Ty,
-        params: Vec<Ty>,
-        context_args: Vec<ResolvedContextArgument>,
-        ret: Ty,
-        source: Option<(u32, u32)>,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        vararg: bool,
-        vararg_index: Option<usize>,
-        param_default_values: Vec<Option<CtorDefaultValue>>,
-    ) -> Self {
-        Self::Extension(Box::new(ResolvedExtensionCall::source(
-            callable,
-            receiver,
-            params,
-            context_args,
-            ret,
-            source,
-            stable_declaration,
-            vararg,
-            vararg_index,
-            param_default_values,
-        )))
+    fn source_extension(selected: ResolvedSourceExtensionCall) -> Self {
+        Self::Extension(Box::new(ResolvedExtensionCall::source(selected)))
     }
 
     pub fn ret(&self) -> Ty {
@@ -10624,10 +10436,10 @@ impl TypeInfo {
             _ => None,
         }
     }
-    /// The in-scope values the checker selected for the leading context parameters of the library
-    /// EXTENSION at call `e`. Paired with [`Self::resolved_extension`]: that path emits the physical
-    /// `(contexts…, receiver, values…)` argument list and cannot re-derive the context sources.
-    pub fn resolved_extension_context_args(&self, e: ExprId) -> &[ResolvedContextArgument] {
+    /// The aligned context arguments of the library extension at call `e`: `Some` for an in-scope
+    /// value selection chose, `None` for a context parameter explicitly named at the call site.
+    /// Paired with [`Self::resolved_extension`], so lowering never re-derives either source or slot.
+    pub fn resolved_extension_context_args(&self, e: ExprId) -> &[Option<ResolvedContextArgument>] {
         match self.resolved_calls.get(&e) {
             Some(ResolvedCall::Extension(c)) if matches!(c.callable.origin, Origin::Library) => {
                 &c.context_args
@@ -23854,15 +23666,16 @@ impl<'a> Checker<'a> {
             }
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
-                // executed and produces no bytecode (kotlinc drops it). Its lambda body uses the
-                // `ContractBuilder` DSL (`callsInPlace`/`returns`/`implies`) which isn't ordinary
-                // executable code — skip type-checking it and mark the statement for the lowerer to
-                // drop, instead of resolving the DSL members as if they were real calls.
-                if self.is_contract_call(scope, e) {
-                    self.expr_statement(scope, e);
+                // executed and produces no bytecode (kotlinc drops it). It is checked like any
+                // other call; the declaration its call selected decides that it is one.
+                let result = self.expr_statement(scope, e);
+                if self.selects_contract_intrinsic(e) {
+                    self.check_contract_statement(
+                        contract_declarations::BlockElement::Statement(s),
+                        e,
+                    );
                     self.stmt_lowers.insert(s, StmtLowering::Erased);
                 } else {
-                    let result = self.expr_statement(scope, e);
                     // A successful unsafe cast is also a data-flow fact for a stable access path.
                     // The cast expression itself retains its checked result/FIR operation, while
                     // subsequent reads use the proven target (`a as () -> Unit; KRunnable(a)`). A
@@ -25245,9 +25058,8 @@ impl<'a> Checker<'a> {
         // the same spelling, including the constructor parameter a stored property shadows.
         let outer_names = Self::capturable_local_names(scope, &own_params);
 
-        // Captured outer locals: lifted to extra leading parameters. Parameter defaults execute in
-        // the lifted callable's `$default` body, so they are declaration bodies for capture purposes
-        // just like the function body itself.
+        // Captured outer locals become extra leading parameters. Parameter defaults run in the
+        // lifted callable's `$default` body, so they capture like the function body itself.
         let mut captured_locals: Vec<(String, Ty, bool)> = Vec::new();
         if !outer_names.is_empty() {
             let body = match &f.body {
@@ -25285,10 +25097,9 @@ impl<'a> Checker<'a> {
             .receiver
             .as_ref()
             .map(|receiver| self.type_ref_ty(&physical_signature_scope, receiver));
-        // The lifted callable's physical signature uses erased types, but its lexical body and
-        // defaults must see the declaration-owned symbolic parameters. Mixing the two views turns
-        // `fun <T> reference(): List<T>.() -> T = List<T>::item` into an `Any` expectation while
-        // the selected property reference correctly carries the local `T` identity.
+        // The lifted callable's physical signature is erased, but its body and defaults see the
+        // declaration-owned symbolic parameters: otherwise `fun <T> reference(): List<T>.() -> T =
+        // List<T>::item` expects `Any` while the selected reference carries the local `T` identity.
         let semantic_params = if f.type_params.is_empty() {
             params.clone()
         } else {
@@ -25430,7 +25241,9 @@ impl<'a> Checker<'a> {
                     f.type_param_bounds
                         .iter()
                         .filter(|(owner, _)| owner == parameter)
-                        .map(|(_, bound)| self.type_ref_ty(&semantic_signature_scope, bound))
+                        .map(|(_, bound)| {
+                            self.check_type_parameter_bound(&semantic_signature_scope, bound)
+                        })
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>();
@@ -29913,68 +29726,6 @@ fun box(): String {
             selected_owner.is_some_and(|owner| owner.matches("Foo2")),
             "the overriding declaration must win the equal-depth diamond: {selected_owner:?}"
         );
-    }
-
-    #[test]
-    fn generic_source_contract_uses_callee_type_parameter_identity_at_call_site() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file_with_detected_features(
-            "import kotlin.contracts.contract\n\
-             import kotlin.contracts.ExperimentalContracts\n\
-             @OptIn(ExperimentalContracts::class)\n\
-             inline fun <T, reified R> Refinement<T, R>.validate(value: T): Boolean {\n\
-                 contract { returns() implies (value is R) }\n\
-                 return true\n\
-             }\n\
-             class Refinement<T, R>\n\
-             fun narrowed(refinement: Refinement<Any, String>, value: Any): String {\n\
-                 refinement.validate(value)\n\
-                 return value\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
-        if let Some(jdk) = crate::toolchain::jdk_modules() {
-            classpath.push(jdk);
-        }
-        let platform = initialized_jvm_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(classpath),
-        ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        check_file(&files[0], &mut symbols, &mut diagnostics);
-        assert_no_diags(&diagnostics);
-
-        let signature = symbols.ext_funs["validate"]
-            .values()
-            .flatten()
-            .next()
-            .expect("validate extension signature");
-        let result_formal = signature
-            .generic_sig
-            .as_ref()
-            .and_then(|generic| generic.formals.get(1))
-            .expect("reified result formal");
-        let contract = signature
-            .contract
-            .as_ref()
-            .expect("decoded source contract");
-        let [crate::contracts::Effect::ConditionalReturns { conclusion, .. }] =
-            contract.effects.as_slice()
-        else {
-            panic!(
-                "expected one conditional-return effect: {:?}",
-                contract.effects
-            )
-        };
-        let crate::contracts::Condition::IsType {
-            ty: crate::contracts::ConditionType::Metadata(ty),
-            ..
-        } = conclusion
-        else {
-            panic!("contract condition must be normalized to semantic type: {conclusion:?}")
-        };
-        assert_eq!(ty.ty_param_name(), Some(result_formal.as_str()));
     }
 
     #[test]
@@ -35978,7 +35729,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         anonymous_super_read_provenance: HashMap::new(),
         stable_property_reads: std::collections::HashSet::new(),
         implicit_receiver_identity_uses: receiver_uses::ReceiverUses::default(),
-        source_contracts: HashMap::new(),
         resolved_source_calls: HashMap::new(),
         extension_receiver_expr_uses: vec![Vec::new(); file.expr_arena.len()],
         extension_receiver_stmt_uses: vec![Vec::new(); file.stmt_arena.len()],
@@ -37146,16 +36896,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         c.report_unresolved_command_line_opt_ins();
     }
 
-    // The streaming path already published contracts as stable, semantically resolved Pass-1
-    // declaration facts. Only the legacy whole-file checker decodes them here; reparsing one Pass-2
-    // body must neither rediscover a caller-visible signature fact nor patch the module table.
-    if !fragment.is_signature_defaults()
-        && !fragment.publishes_annotation_metadata()
-        && resolved_index.is_none()
-    {
-        c.collect_source_contracts(scope, selected_body_declarations);
-    }
-
     // Typealiases have no `Decl` node, so their declaration type-parameter annotations enter the
     // same checker path explicitly at file scope. Capture discovery is a scratch expression pass;
     // the authoritative check below owns annotation validation and folded values.
@@ -37468,7 +37208,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_local_class_declarations,
         checked_local_classifier_identities,
         checked_local_classifier_type_arguments,
-        source_contracts,
         lambda_body_results,
         ..
     } = c;
@@ -37485,42 +37224,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             for (internal, params) in super_ctor_params {
                 if let Some(cs) = syms.class_by_type_name_mut(internal) {
                     cs.super_ctor_params = params;
-                }
-            }
-            // The decoded source contracts: patch them into the signature table so cross-file call
-            // sites and the `@Metadata` emitter read the same effects (the checker decoded them from
-            // the current file's top-level functions during checking).
-            for (decl, contract) in source_contracts {
-                // `decl` belongs to the ACTIVE bounded parser arena. In Pass 2 every top-level
-                // declaration is reparsed as its own unit, so its transient `DeclId` commonly starts
-                // at zero and cannot be compared with the Pass-1 whole-file `source_decl`. Translate
-                // it through the active declaration binding and publish by stable identity. The
-                // source-key fallback is retained for the legacy whole-file checker, which has no
-                // active declaration map.
-                let stable =
-                    active_declarations.and_then(|active| active.file_declaration(file, decl));
-                if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
-                    sigs.iter_mut().find(|s| {
-                        stable.is_some_and(|declaration| s.stable_declaration == Some(declaration))
-                            || (stable.is_none()
-                                && s.source_file == Some(file_index)
-                                && s.source_decl == Some(decl))
-                    })
-                }) {
-                    sig.contract = Some(contract.clone());
-                }
-                for families in syms.ext_funs.values_mut() {
-                    for overloads in families.values_mut() {
-                        if let Some(sig) = overloads.iter_mut().find(|s| {
-                            stable.is_some_and(|declaration| {
-                                s.stable_declaration == Some(declaration)
-                            }) || (stable.is_none()
-                                && s.source_file == Some(file_index)
-                                && s.source_decl == Some(decl))
-                        }) {
-                            sig.contract = Some(contract.clone());
-                        }
-                    }
                 }
             }
             for ((file, decl), ret) in inferred_fun_rets {
@@ -38371,10 +38074,10 @@ impl<'a> CheckerModuleSymbols<'a> {
         }
     }
 
-    fn annotation_targets(&self, classifier: TypeName) -> crate::types::AnnotationTargets {
+    fn annotation_targets(&self) -> &'a crate::types::DeclaredTargetPolicies {
         match self {
-            Self::Legacy(source) => source.annotation_targets(classifier),
-            Self::Streamed(source) => source.annotation_targets(classifier),
+            Self::Legacy(source) => source.annotation_targets(),
+            Self::Streamed(source) => source.annotation_targets(),
         }
     }
 
@@ -38737,10 +38440,6 @@ struct Checker<'a> {
     stable_property_reads: std::collections::HashSet<ExprId>,
     /// Semantic uses of exact lexical receiver bindings; see [`receiver_uses`].
     implicit_receiver_identity_uses: receiver_uses::ReceiverUses,
-    /// Decoded `contract { … }` effects of the current file's top-level functions, keyed by
-    /// `DeclId`. Filled before the decl walk (decode is AST-only) so call sites see contracts
-    /// irrespective of function declaration order.
-    source_contracts: HashMap<DeclId, std::sync::Arc<crate::contracts::Contract>>,
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
     extension_receiver_expr_uses: Vec<Vec<Span>>,
     extension_receiver_stmt_uses: Vec<Vec<Span>>,
@@ -39342,7 +39041,7 @@ impl<'a> Checker<'a> {
         selected: &crate::libraries::FunctionInfo,
         receiver: Ty,
         ret: Ty,
-        context_args: Vec<ResolvedContextArgument>,
+        context_args: Vec<Option<ResolvedContextArgument>>,
         param_default_values: Vec<Option<CtorDefaultValue>>,
     ) -> ResolvedCall {
         self.resolved_source_extension_call_with_params(
@@ -39361,29 +39060,29 @@ impl<'a> Checker<'a> {
         receiver: Ty,
         value_params: Vec<Ty>,
         ret: Ty,
-        context_args: Vec<ResolvedContextArgument>,
+        context_args: Vec<Option<ResolvedContextArgument>>,
         param_default_values: Vec<Option<CtorDefaultValue>>,
     ) -> ResolvedCall {
         let callable = selected.callable.clone();
-        ResolvedCall::source_extension(
+        ResolvedCall::source_extension(ResolvedSourceExtensionCall {
             callable,
             receiver,
-            value_params,
+            params: value_params,
             context_args,
             ret,
-            selected.source_key,
-            selected.stable_declaration,
-            selected.call_sig.vararg,
-            selected.call_sig.vararg_index.and_then(|index| {
+            source: selected.source_key,
+            stable_declaration: selected.stable_declaration,
+            vararg: selected.call_sig.vararg,
+            vararg_index: selected.call_sig.vararg_index.and_then(|index| {
                 index
                     .checked_sub(selected.context_count)
                     .filter(|index| *index < selected.callable.params.len())
             }),
-            param_default_values
+            param_default_values: param_default_values
                 .get(selected.context_count..)
                 .unwrap_or_default()
                 .to_vec(),
-        )
+        })
     }
 
     /// Take the checker state that belongs to the BODY currently being checked, leaving the checker
@@ -44250,359 +43949,6 @@ impl<'a> Checker<'a> {
                 .find(|receiver| receiver.ty == selected.ty && receiver.current == selected.current)
             {
                 self.mark_extension_receiver_used(call, receiver);
-            }
-        }
-    }
-
-    /// True when `e` resolves to the platform's erased contract-declaration intrinsic. This is the
-    /// same import-scoped, module-federated identity query used by inline-facade eligibility, so an
-    /// alias, source shadow, or unrelated same-named declaration cannot make checking and emission
-    /// disagree about whether the DSL lambda exists at runtime.
-    fn is_contract_call(&self, scope: &CheckerScope<'_>, e: ExprId) -> bool {
-        let Expr::Call { callee, .. } = self.file.expr(e) else {
-            return false;
-        };
-        let Expr::Name(name) = self.file.expr(*callee) else {
-            return false;
-        };
-        // Lexical values/local functions outrank every top-level import. They are intentionally kept
-        // outside SymbolResolver's package federation, so close that final precedence rung here
-        // before asking the shared top-level identity classifier.
-        if self.lexical_value_declares(scope, name) {
-            return false;
-        }
-        resolved_call_is_erased_contract(self.file, e, &self.resolver(), self.libraries)
-    }
-
-    /// Decode every top-level function's `contract { … }` block up front (see the call site in
-    /// `check_file_at_impl_mode`).
-    fn collect_source_contracts(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        selected_body_declarations: Option<&std::collections::HashSet<Span>>,
-    ) {
-        let file = self.file;
-        for &d in &file.decls {
-            let Decl::Fun(f) = file.decl(d) else { continue };
-            // An enclosing top-level declaration can be active solely to recreate the lexical
-            // scope of a nested inline body. Its ordinary body was deliberately removed from the
-            // compact Pass-1 syntax and does not own work in this check.
-            if selected_body_declarations.is_some_and(|selected| !selected.contains(&f.span)) {
-                continue;
-            }
-            if let Some(contract) = self.decode_fun_contract(scope, f) {
-                // Contract type conditions belong to the CALLEE declaration. Resolve them while
-                // that declaration's type parameters and imports are still in scope, then keep the
-                // resulting stable semantic identities on the signature/metadata handoff. Deferring
-                // a source spelling such as `R` until a call site incorrectly asks the caller's
-                // lexical scope to resolve the callee's formal.
-                let declaration_scope = scope.child(ScopeKind::Function { receiver: None });
-                let type_parameters = TParams::symbolic_from_decl_with(
-                    &f.type_params,
-                    &f.type_param_bounds,
-                    &|name| self.select_classifier(scope, name).found(),
-                )
-                .alpha_renamed_declaration(
-                    &f.type_params,
-                    self.compilation_id,
-                    self.file_index,
-                    f.signature_span.lo,
-                );
-                declaration_scope.declare_tparams(&f.type_params, &type_parameters, |name| {
-                    f.reified_type_params.contains(name)
-                });
-                let contract = contract.with_resolved_types(&mut |reference| {
-                    let ty = self.type_ref_ty_silent(&declaration_scope, reference);
-                    (ty != Ty::Error).then_some(ty)
-                });
-                self.source_contracts
-                    .insert(d, std::sync::Arc::new(contract));
-            }
-        }
-    }
-
-    /// The decoded contract of a source function, or `None` when its body has no (confirmed)
-    /// `kotlin.contracts.contract { … }` statement.
-    fn decode_fun_contract(
-        &self,
-        scope: &CheckerScope<'_>,
-        f: &FunDecl,
-    ) -> Option<crate::contracts::Contract> {
-        let crate::ast::FunBody::Block(block) = f.body else {
-            return None;
-        };
-        let Expr::Block { stmts, trailing } = self.file.expr(block) else {
-            return None;
-        };
-        let expression = stmts
-            .iter()
-            .filter_map(|statement| match self.file.stmt(*statement) {
-                Stmt::Expr(expression) => Some(*expression),
-                _ => None,
-            })
-            .chain(trailing.iter().copied())
-            .find(|expression| self.is_contract_call(scope, *expression))?;
-        let params: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
-        crate::contracts::decode_source(
-            self.file,
-            expression,
-            &params,
-            &f.name,
-            f.receiver.is_some(),
-        )
-    }
-
-    /// The contract of the function a call resolved to — decoded from same-file source through the
-    /// selected declaration identity, or read from metadata attached to the selected callable.
-    fn contract_for_call(
-        &self,
-        call: ExprId,
-    ) -> Option<std::sync::Arc<crate::contracts::Contract>> {
-        match self.resolved_calls.get(&call) {
-            Some(ResolvedCall::TopLevel(c)) => c.callable.contract.clone().or_else(|| {
-                c.source_decl
-                    .and_then(|d| self.source_contracts.get(&d).cloned())
-            }),
-            Some(ResolvedCall::Extension(c)) => c.callable.contract.clone().or_else(|| {
-                c.source
-                    .filter(|(file, _)| *file == self.file_index)
-                    .and_then(|(_, decl)| self.source_contracts.get(&DeclId(decl)).cloned())
-            }),
-            // Key by the selected declaration, NOT by name: `source_contracts` is a HashMap, so a
-            // name scan could bind a same-named sibling overload's contract (nondeterministically)
-            // to this call. `source` is (file, decl); only same-file decls are decoded here —
-            // cross-file extension contracts arrive already patched onto the signature (see the
-            // `source_contracts` drain in `check_file_at_impl_mode`).
-            _ => None,
-        }
-    }
-
-    /// The actual argument expression a contract [`crate::contracts::ParamRef`] refers to at
-    /// this call site: the receiver expression for `Receiver`, the i-th positional argument
-    /// for `Param(i)`.
-    fn contract_arg_expr(&self, call: ExprId, param: crate::contracts::ParamRef) -> Option<ExprId> {
-        let Expr::Call { callee, args } = self.file.expr(call) else {
-            return None;
-        };
-        match param {
-            crate::contracts::ParamRef::Param(i) => self
-                .resolved_call_arg_slots
-                .get(&call)
-                .and_then(|slots| slots.get(i))
-                .copied()
-                .flatten()
-                .or_else(|| args.get(i).copied()),
-            crate::contracts::ParamRef::Receiver => match self.file.expr(*callee) {
-                Expr::Member { receiver, .. } => Some(*receiver),
-                _ => None,
-            },
-        }
-    }
-
-    /// The stable ACCESS PATH a contract parameter refers to at this call site: the positional
-    /// argument expression for `Param(i)`, the receiver expression for `Receiver` — a plain name
-    /// or a property path (`requireNotNull(a.b)`, `a.p.isNullOrBlank()`) — or, for a leading
-    /// CONTEXT parameter (supplied implicitly), the context SOURCE the checker resolved
-    /// (`with("O") { validate1() }` → `this`).
-    fn contract_stable_arg_path(
-        &self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        param: crate::contracts::ParamRef,
-    ) -> Option<NarrowPath> {
-        if let Some(path) = self
-            .contract_arg_expr(call, param)
-            .and_then(|e| self.expr_access_path(e))
-        {
-            return Some(path);
-        }
-        // A leading context parameter: its "argument" is the implicit context source — recorded
-        // on the resolved module target for module calls, in the context-args map for classpath
-        // calls.
-        if let crate::contracts::ParamRef::Param(i) = param {
-            if let Some(sources) = self.context_args.get(&call) {
-                return sources
-                    .get(i)
-                    .and_then(|source| self.context_argument_path(scope, source));
-            }
-            if let Some(ResolvedCall::TopLevel(c)) = self.resolved_calls.get(&call) {
-                return c
-                    .context_args
-                    .get(i)
-                    .and_then(Option::as_ref)
-                    .and_then(|source| self.context_argument_path(scope, source));
-            }
-        }
-        None
-    }
-
-    /// Map a contract conclusion onto the call's actual arguments, producing `(path, Ty)`
-    /// narrowings for stable access paths. Only sound forms narrow: `x != null`, `x is T`
-    /// (positive), the boolean argument itself (recursed through the ordinary condition
-    /// machinery), and `&&` compounds. `x == null`, `!is`, `||`, and constants yield nothing.
-    /// A proof declined only because a capturing closure mutates the variable lands in `declined`
-    /// exactly as for the ordinary condition machinery.
-    fn conclusion_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        conclusion: &crate::contracts::Condition,
-        out: &mut Vec<(NarrowPath, Ty)>,
-        declined: &mut Vec<(String, Ty)>,
-    ) {
-        use crate::contracts::{Condition, ConditionType};
-        match conclusion {
-            Condition::IsNull {
-                param,
-                negated: true,
-            } => {
-                let Some(path) = self.contract_stable_arg_path(scope, call, *param) else {
-                    return;
-                };
-                // Shared with the flow smart-cast paths (`stable_path_ty`): `this`,
-                // `var`-rejection, and the nullable unwrap must not drift by condition shape.
-                self.null_proof_or_decline(scope, &path, out, declined, self.span(call));
-            }
-            Condition::IsType {
-                param,
-                ty: ConditionType::Source(tyref),
-                negated: false,
-            } => {
-                let Some(path) = self.contract_stable_arg_path(scope, call, *param) else {
-                    return;
-                };
-                let tt = self.type_ref_ty_silent(scope, tyref);
-                if tt == Ty::Error || !tt.is_reference() {
-                    return;
-                }
-                if !self.is_proof_stable_or_decline(scope, &path, tt, declined, self.span(call)) {
-                    return;
-                }
-                out.push((path, tt));
-            }
-            Condition::IsType {
-                param,
-                ty: ConditionType::Metadata(ty),
-                negated: false,
-            } => {
-                // A contract decoded from `@Metadata`: the is-type is already semantic but may
-                // mention the callee's type parameters (`value is R`) — substitute them with the
-                // call's bindings (`Refinement<Any, String>.validate` → `String`).
-                let Some(path) = self.contract_stable_arg_path(scope, call, *param) else {
-                    return;
-                };
-                let tt = self.subst_contract_metadata_ty(call, *ty);
-                if tt == Ty::Error || !tt.is_reference() || tt.is_ty_param() {
-                    return;
-                }
-                if !self.is_proof_stable_or_decline(scope, &path, tt, declined, self.span(call)) {
-                    return;
-                }
-                out.push((path, tt));
-            }
-            Condition::BoolParam(param) => {
-                if let Some(arg) = self.contract_arg_expr(call, *param) {
-                    self.collect_condition_narrowings(scope, arg, true, out, declined);
-                }
-            }
-            Condition::And(l, r) => {
-                self.conclusion_narrowings(scope, call, l, out, declined);
-                self.conclusion_narrowings(scope, call, r, out, declined);
-            }
-            _ => {}
-        }
-    }
-
-    /// Substitute the callee's type parameters in a metadata-decoded contract type with the
-    /// call's bindings: the checker's recorded type arguments first, then the receiver's type
-    /// arguments unified against the declared receiver's type-parameter arguments (from the
-    /// callable's metadata generic signature — `Refinement<Any, String>` against
-    /// `Refinement<T, R>` binds `R = String`). Unbound parameters erase through `ty_subst`
-    /// (to `Any`, a harmless no-narrow).
-    fn subst_contract_metadata_ty(&self, call: ExprId, ty: Ty) -> Ty {
-        if !ty.is_ty_param() && ty.type_args().iter().all(|a| !a.is_ty_param()) {
-            return ty;
-        }
-        let c = match self.resolved_calls.get(&call) {
-            Some(ResolvedCall::TopLevel(c)) => &c.callable,
-            Some(ResolvedCall::Extension(c)) => &c.callable,
-            _ => return ty,
-        };
-        let gsig = c.generic_sig.as_ref();
-        let formals: Vec<String> = gsig
-            .map(|g| g.formals.clone())
-            .or_else(|| {
-                c.signature
-                    .as_deref()
-                    .map(|s| self.libraries.signature_formal_names(s))
-            })
-            .unwrap_or_default();
-        if formals.is_empty() {
-            return ty;
-        }
-        let mut binds: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
-        if let Some(targs) = self.resolved_call_type_args.get(&call) {
-            for (name, t) in formals.iter().zip(targs.iter()) {
-                if let Some(t) = t {
-                    binds.insert(name.clone(), *t);
-                }
-            }
-        }
-        if binds.is_empty() {
-            let recv = self
-                .contract_arg_expr(call, crate::contracts::ParamRef::Receiver)
-                .map(|e| self.expr_types[e.0 as usize]);
-            if let Some(Ty::Obj(_, actual_args)) = recv.map(|t| t.non_null()) {
-                // Unify the DECLARED receiver's type-parameter arguments with the actual
-                // receiver's type arguments (`Refinement<T, R>` on `Refinement<Any, String>`).
-                if let Some(Ty::Obj(_, declared_args)) = gsig.and_then(|g| g.receiver) {
-                    for (d, a) in declared_args.iter().zip(actual_args.iter()) {
-                        if let Some(name) = d.ty_param_name() {
-                            binds.entry(name.to_string()).or_insert(*a);
-                        }
-                    }
-                } else if formals.len() == actual_args.len() {
-                    // No declared receiver shape: pair the formals positionally (exact count).
-                    for (name, t) in formals.iter().zip(actual_args.iter()) {
-                        binds.insert(name.clone(), *t);
-                    }
-                }
-            }
-        }
-        if binds.is_empty() {
-            ty
-        } else {
-            crate::symbol_resolver::ty_subst(ty, &binds)
-        }
-    }
-
-    /// Smart casts from the resolved callable's contract at a CONDITION position:
-    /// `if (r.isErr())` with `returns(true) implies (this@isErr is Err)` narrows per the
-    /// conclusion when the call's truth value matches the effect's return constant. The contract
-    /// is decoded from same-file source or from `@Metadata` (`!s.isNullOrBlank()` narrows `s`
-    /// through the deserialized kotlin.text contract — no per-function special cases).
-    fn contract_condition_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        truth: bool,
-        out: &mut Vec<(NarrowPath, Ty)>,
-        declined: &mut Vec<(String, Ty)>,
-    ) {
-        let Some(contract) = self.contract_for_call(cond) else {
-            return;
-        };
-        for effect in &contract.effects {
-            let crate::contracts::Effect::ConditionalReturns {
-                returns,
-                conclusion,
-            } = effect
-            else {
-                continue;
-            };
-            let applies = matches!(returns, crate::contracts::ReturnsValue::Bool(b) if *b == truth);
-            if applies {
-                self.conclusion_narrowings(scope, cond, conclusion, out, declined);
             }
         }
     }
@@ -50279,6 +49625,61 @@ impl<'a> Checker<'a> {
         false
     }
 
+    /// The type a successful `value is tested` proves for a value declared `stable_ty`: shared by
+    /// the `is` operator and a contract's `returns(…) implies (value is T)` conclusion, so the two
+    /// cannot disagree about scalars, nullable tests, or type arguments the test leaves implicit.
+    /// `infer_arguments` is whether the test wrote no type arguments of its own.
+    fn type_test_target(
+        &self,
+        stable_ty: Option<Ty>,
+        tt: Ty,
+        nullable: bool,
+        infer_arguments: bool,
+    ) -> Option<Ty> {
+        let runtime_tt =
+            crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), tt)
+                .unwrap_or(tt);
+        let runtime_tt = stable_ty
+            .filter(|_| infer_arguments)
+            .map(|declared| {
+                crate::symbol_resolver::apply_subtype_arguments_from_supertype(
+                    &self.fed_source(),
+                    runtime_tt,
+                    declared,
+                )
+            })
+            .unwrap_or(runtime_tt);
+        // `is T?` accepts null, so its narrowing remains nullable.
+        let narrowed = if nullable {
+            (runtime_tt != Ty::Error).then_some(Ty::nullable(runtime_tt.non_null()))
+        } else if runtime_tt.is_reference() {
+            Some(runtime_tt)
+        } else {
+            // A non-null scalar (`is Int`/`is Double`/`is Char`/`is UInt`) narrows to its canonical
+            // source identity. Runtime storage and unboxing are backend concerns; the frontend must
+            // not discard a valid unsigned proof merely because its carrier is a signed primitive.
+            let scalar = tt.canonical_semantic();
+            scalar.scalar_value_repr().is_some().then_some(scalar)
+        };
+        narrowed.map(|target| {
+            let context = crate::assignable::TyCtx::new();
+            stable_ty
+                .map(|declared| {
+                    // A successful non-null type test also removes nullability from the value's
+                    // declared type. When that non-null declaration is already more specific than
+                    // the tested supertype (`x: UInt?`, `x is Any`), retain it as the readable
+                    // intersection projection instead of widening the branch value to `Any`.
+                    if target.is_nullable() {
+                        declared
+                    } else {
+                        declared.non_null()
+                    }
+                })
+                .filter(|declared| crate::assignable::is_subtype(&context, self, *declared, target))
+                .unwrap_or(target)
+        })
+    }
+
     /// The NULL branch of a null check: the operand is proven null, so a stable nullable path
     /// narrows to `Nothing?` (kotlinc's exact receiver wording there). A root-only local made
     /// unstable only by closure writes still narrows when every such write stores null — the
@@ -50507,48 +49908,7 @@ impl<'a> Checker<'a> {
             .get(&(ty.span.lo, ty.span.hi))
             .copied()
             .unwrap_or_else(|| self.type_ref_ty_silent(scope, &ty));
-        let runtime_tt =
-            crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), tt)
-                .unwrap_or(tt);
-        let runtime_tt = stable_ty
-            .filter(|_| ty.targs.is_empty())
-            .map(|declared| {
-                crate::symbol_resolver::apply_subtype_arguments_from_supertype(
-                    &self.fed_source(),
-                    runtime_tt,
-                    declared,
-                )
-            })
-            .unwrap_or(runtime_tt);
-        // `is T?` accepts null, so its narrowing remains nullable.
-        let narrowed = if ty.nullable() {
-            (runtime_tt != Ty::Error).then_some(Ty::nullable(runtime_tt.non_null()))
-        } else if runtime_tt.is_reference() {
-            Some(runtime_tt)
-        } else {
-            // A non-null scalar (`is Int`/`is Double`/`is Char`/`is UInt`) narrows to its canonical
-            // source identity. Runtime storage and unboxing are backend concerns; the frontend must
-            // not discard a valid unsigned proof merely because its carrier is a signed primitive.
-            let scalar = tt.canonical_semantic();
-            scalar.scalar_value_repr().is_some().then_some(scalar)
-        };
-        let narrowed = narrowed.map(|target| {
-            let context = crate::assignable::TyCtx::new();
-            stable_ty
-                .map(|declared| {
-                    // A successful non-null type test also removes nullability from the value's
-                    // declared type. When that non-null declaration is already more specific than
-                    // the tested supertype (`x: UInt?`, `x is Any`), retain it as the readable
-                    // intersection projection instead of widening the branch value to `Any`.
-                    if target.is_nullable() {
-                        declared
-                    } else {
-                        declared.non_null()
-                    }
-                })
-                .filter(|declared| crate::assignable::is_subtype(&context, self, *declared, target))
-                .unwrap_or(target)
-        });
+        let narrowed = self.type_test_target(stable_ty, tt, ty.nullable(), ty.targs.is_empty());
         // Only stable values smart-cast soundly — a `var`/computed property could change.
         if stable_ty.is_none() {
             if let Some(narrowed) = narrowed {
@@ -52138,6 +51498,7 @@ impl<'a> Checker<'a> {
             .selected_body_declarations
             .as_ref()
             .is_none_or(|selected| selected.contains(&p.span));
+        self.check_accessor_annotations(scope, p);
         let suppression_depth =
             self.push_declaration_policies(scope, &p.annotations, &p.annotation_args);
         // An extension property's own generic type parameters (`val <T> Array<T>.length: Int`)
@@ -53048,6 +52409,7 @@ impl<'a> Checker<'a> {
                     &property.annotations,
                     &property.annotation_args,
                 );
+                self.check_accessor_annotations(scope, property);
             }
             for parameter in &cl.props {
                 self.check_annotation_applications_in_declaration_scope(
@@ -61571,22 +60933,22 @@ impl<'a> Checker<'a> {
                 } else {
                     let mut callable = selected.callable.clone();
                     callable.ret = ret;
-                    ResolvedCall::source_extension(
+                    ResolvedCall::source_extension(ResolvedSourceExtensionCall {
                         callable,
-                        at,
+                        receiver: at,
                         params,
-                        context_args,
+                        context_args: context_args.into_iter().map(Some).collect(),
                         ret,
-                        selected.source_key,
-                        selected.stable_declaration,
-                        vararg.is_some(),
-                        vararg,
-                        selected
+                        source: selected.source_key,
+                        stable_declaration: selected.stable_declaration,
+                        vararg: vararg.is_some(),
+                        vararg_index: vararg,
+                        param_default_values: selected
                             .default_values
                             .get(selected.context_count..)
                             .unwrap_or_default()
                             .to_vec(),
-                    )
+                    })
                 };
                 self.mark_source_call(e, selected.source_key);
                 self.resolved_calls.insert(e, target);
@@ -64691,14 +64053,6 @@ impl<'a> Checker<'a> {
                     break;
                 }
             }
-            let trailing_contract = (!signature_defaults_complete)
-                .then_some(trailing)
-                .flatten()
-                .filter(|expression| self.is_contract_call(scope, *expression));
-            if let Some(expression) = trailing_contract {
-                self.expr_lowers.insert(expression, ExprLowering::Erased);
-                self.set(expression, Ty::Unit);
-            }
             let t = match trailing {
                 _ if signature_defaults_complete => Ty::Unit,
                 // A trailing after a diverging statement is unreachable, which in Kotlin is a
@@ -64708,7 +64062,6 @@ impl<'a> Checker<'a> {
                 // of type `Nothing` is rejected outright, so the whole file was refused.
                 // Propagate an expected type into the block's trailing value (a typed context
                 // reaching a `{ … ; lambda }` result).
-                Some(_) if trailing_contract.is_some() => Ty::Unit,
                 Some(te) => {
                     let trailing_ty = if suppressed_continuation && !diverged {
                         self.unreachable_statement_depth += 1;
@@ -64760,6 +64113,17 @@ impl<'a> Checker<'a> {
                     }
                 }
             };
+            // A trailing `contract { … }` is checked like any other call; the declaration it selected
+            // makes it the erased contract statement.
+            if let Some(expression) = trailing.filter(|expression| {
+                !signature_defaults_complete && self.selects_contract_intrinsic(*expression)
+            }) {
+                self.expr_lowers.insert(expression, ExprLowering::Erased);
+                self.check_contract_statement(
+                    contract_declarations::BlockElement::Trailing(expression),
+                    expression,
+                );
+            }
             t
         };
         self.promote_block_flow(scope);
@@ -67283,12 +66647,9 @@ impl<'a> Checker<'a> {
             return Some(Ty::Error);
         }
         self.mark_selected_inline_lambdas(e, selected.flags.inline, &shape.call_sig);
-        let context_args = shape
-            .context_sources
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        self.mark_context_extension_receiver_used(scope, e, &context_args);
+        let context_args = shape.context_sources;
+        let implicit_context_args = context_args.iter().flatten().cloned().collect::<Vec<_>>();
+        self.mark_context_extension_receiver_used(scope, e, &implicit_context_args);
         let selected_receiver = selected.receiver.unwrap_or(rt);
         let receiver_expression = crate::ast::explicit_call_receiver(self.file, e);
         if let Some(receiver_expression) = receiver_expression {
@@ -68564,16 +67925,18 @@ impl<'a> Checker<'a> {
             return Err(());
         }
         Ok(Some(ResolvedCall::source_extension(
-            callable,
-            recv,
-            params,
-            context_args,
-            ret,
-            selected.source_key,
-            selected.stable_declaration,
-            false,
-            None,
-            Vec::new(),
+            ResolvedSourceExtensionCall {
+                callable,
+                receiver: recv,
+                params,
+                context_args: context_args.into_iter().map(Some).collect(),
+                ret,
+                source: selected.source_key,
+                stable_declaration: selected.stable_declaration,
+                vararg: false,
+                vararg_index: None,
+                param_default_values: Vec::new(),
+            },
         )))
     }
 
