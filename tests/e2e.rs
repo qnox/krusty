@@ -1049,6 +1049,8 @@ mod inner_class_declaration_order_e2e;
 mod inner_class_name_pool_order_e2e;
 #[path = "inner_class_outer_tparam_e2e.rs"]
 mod inner_class_outer_tparam_e2e;
+#[path = "inner_secondary_constructor_line_e2e.rs"]
+mod inner_secondary_constructor_line_e2e;
 #[path = "instant_builtin_serializer_e2e.rs"]
 mod instant_builtin_serializer_e2e;
 #[path = "integer_literal_branch_join_e2e.rs"]
@@ -1249,6 +1251,8 @@ mod local_fun_default_args_e2e;
 mod local_fun_overload_e2e;
 #[path = "local_fun_ref_e2e.rs"]
 mod local_fun_ref_e2e;
+#[path = "local_inner_enclosing_line_e2e.rs"]
+mod local_inner_enclosing_line_e2e;
 #[path = "local_override_boxed_result_e2e.rs"]
 mod local_override_boxed_result_e2e;
 #[path = "local_shadows_receiver_member_e2e.rs"]
@@ -1397,6 +1401,8 @@ mod primitive_hash_code_e2e;
 mod result_generic_override_argument_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
 mod same_module_inline_frame_markers_e2e;
+#[path = "setter_return_line_e2e.rs"]
+mod setter_return_line_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
 #[path = "suspend_function_boxing_e2e.rs"]
@@ -1407,6 +1413,8 @@ mod suspend_under_try_e2e;
 mod suspend_value_class_delegation_e2e;
 #[path = "suspend_value_class_results_e2e.rs"]
 mod suspend_value_class_results_e2e;
+#[path = "unit_expression_body_return_line_e2e.rs"]
+mod unit_expression_body_return_line_e2e;
 #[path = "unsigned_operations_e2e.rs"]
 mod unsigned_operations_e2e;
 #[path = "value_class_bound_reference_receiver_e2e.rs"]

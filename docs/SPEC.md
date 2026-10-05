@@ -11991,7 +11991,47 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`IrFile::fallthrough_return_line`), which the emitter writes BEFORE the returned `Unit` is
   loaded. kotlinc's `nop` after that mark always shares its line with the load or the `return`
   and is cleaned up, so it is not written. An expression-bodied local function ends in a return
-  of its own and gets no mark. Test: `tests/fallthrough_close_line_e2e.rs`.
+  of its own and gets no closing-line mark (see the next entry). Test:
+  `tests/fallthrough_close_line_e2e.rs`.
+
+- **A `Unit` expression body's `return` carries the expression's END line.** fir2ir's
+  `ExpressionBodyTransformer` builds the `IrReturn` of `fun f() = expression` at the expression's
+  end offset, and `ExpressionCodegen.visitReturn` marks that line after the value has been
+  evaluated, just before the `return` instruction. A non-`Unit` body already did; a `Unit` one
+  (`fun f(n: Int) = deliver {⏎ sink(n)⏎ }`, a call whose arguments span lines, an `if` whose
+  branches do) now does too, for declared, member and local functions. Lowering records the mark
+  through `UnitReturnLine::ExpressionEnd` on the appended `return`
+  (`IrFile::implicit_return_end_line`); a lambda keeps `UnitReturnLine::ClosingBrace`. A body on one line
+  already has that line in effect, so no entry is added. Test:
+  `tests/unit_expression_body_return_line_e2e.rs`.
+
+- **A setter's `return` carries a line, as a declared `Unit` function's does.** A block-bodied
+  setter falls off its closing `}`, which kotlinc marks on the `return`
+  (`setExtraLineNumberForVoidReturningFunction`); an expression-bodied setter `set(value) = …` is an
+  expression body, whose `return` carries the expression's end line. The checker records the
+  closing line of a block setter on its FIR body and marks an expression setter's body as an
+  implicit return, as it already did for an expression getter; property lowering records the
+  resulting exit on the setter body (`IrFile::record_accessor_body_exit`), and the accessor that
+  appends the `return` marks it (`UnitBodyExit`). Test: `tests/setter_return_line_e2e.rs`.
+
+- **A local inner class's enclosing-instance store carries the class's line.** kotlinc's
+  `LocalDeclarationsLowering` stores a local class's captured values ahead of the delegation with
+  no source offsets, so the constructor's first line is whatever follows them. An inner class's
+  `this$0` store is not a capture: it keeps the constructor's position even when the inner class is
+  itself local (`class Outer { inner class Inner }` inside a function, or an inner class of an
+  object literal), so its line entry sits on the `putfield this$0` rather than on the delegation.
+  The backend starts the constructor's first line after the last pre-super store that is not the
+  enclosing instance, selected by `IrCtorParameterProvenance` rather than by the field's name. Test:
+  `tests/local_inner_enclosing_line_e2e.rs`.
+
+- **A secondary constructor's enclosing-instance store carries the constructor's line.** A
+  secondary constructor of an inner class that delegates to `super` stores `this$0` first, and
+  kotlinc gives that store the constructor's declaration line; the delegation's own line follows
+  (`constructor(x: Int) :⏎ super(⏎ x⏎ )` maps the store to the `constructor` line, then the
+  `super` line). krusty opened the table at the delegation, after the store. A captured value of a
+  local class is still stored without a line, and a constructor delegating to `this(…)` stores
+  nothing. The store is selected by `IrCtorParameterProvenance::EnclosingInstance`. Test:
+  `tests/inner_secondary_constructor_line_e2e.rs`.
 
 - **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
   `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its
