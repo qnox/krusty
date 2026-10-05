@@ -47091,6 +47091,7 @@ impl<'a> Checker<'a> {
         secondary: usize,
         primary_params: &[Ty],
         secondary_params: &[Vec<Ty>],
+        supports_default_abi: bool,
     ) -> Vec<CtorDelegationCandidate> {
         let mut candidates = Vec::new();
         let context_count = class
@@ -47123,7 +47124,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg)
                     .map(|ordinal| ordinal + context_count),
-                supports_default_abi: !class.is_value,
+                supports_default_abi,
                 low_priority: class
                     .primary_ctor_annotations
                     .as_ref()
@@ -47183,7 +47184,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg)
                     .map(|ordinal| ordinal + secondary_context_count),
-                supports_default_abi: !class.is_value,
+                supports_default_abi,
                 low_priority: self.has_low_priority_annotation(scope, &constructor.annotations),
                 parameter_constraints: params
                     .iter()
@@ -54383,6 +54384,23 @@ impl<'a> Checker<'a> {
                             sc_index,
                             &primary_params,
                             &secondary_params,
+                            // An unboxed value class has no ordinary `$default` constructor. A boxed
+                            // full value class does, so `this(x)` may omit a parameter that has one.
+                            !cl.is_value
+                                || current_owner.is_some_and(|owner| {
+                                    c.resolved_index.is_some_and(|index| {
+                                        index
+                                            .classifier_declaration(owner)
+                                            .and_then(|declaration| {
+                                                index.declaration_header(declaration)
+                                            })
+                                            .is_some_and(|header| {
+                                                header
+                                                    .flags
+                                                    .has(crate::fir::DeclarationFlags::FULL_VALUE)
+                                            })
+                                    })
+                                }),
                         );
                         c.select_ctor_delegation(
                             delegation_scope,

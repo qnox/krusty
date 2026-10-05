@@ -23,8 +23,12 @@ pub(super) fn finalize_data_classes(
         let Some(header) = index.declaration_header(declaration) else {
             continue;
         };
+        // An abstract or sealed value class publishes `FULL_VALUE` but has no constructor
+        // properties and no generated trio. Only a final one, like a data class, synthesizes
+        // `equals`/`hashCode`/`toString`.
         let structural = header.flags.has(DeclarationFlags::DATA)
-            || header.flags.has(DeclarationFlags::FULL_VALUE);
+            || (header.flags.has(DeclarationFlags::FULL_VALUE)
+                && header.flags.has(DeclarationFlags::FINAL));
         if anchor.kind != DeclarationKind::Classifier || !structural {
             continue;
         }

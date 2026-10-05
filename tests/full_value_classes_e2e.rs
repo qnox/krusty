@@ -186,6 +186,43 @@ fun box(): String {
 }
 
 #[test]
+fn full_value_class_accepts_unit_and_nothing_carriers() {
+    const SRC: &str = "\
+// LANGUAGE: +FullValueClasses
+value class UnitWrapper(val unit: Unit)
+value class NothingWrapper(val nothing: Nothing)
+value class UnitWrapper1<T: Unit>(val unit: T)
+value class NothingWrapper1<T: Nothing>(val nothing: T)
+fun box(): String {
+    val unitWrapper = UnitWrapper(Unit)
+    if (unitWrapper != UnitWrapper(Unit)) return \"eq\"
+    if (unitWrapper.unit != Unit) return \"unit\"
+    val unitWrapper1 = UnitWrapper1(Unit)
+    if (unitWrapper1 != UnitWrapper1(Unit)) return \"eq1\"
+    if (unitWrapper1.unit != Unit) return \"unit1\"
+    return \"OK\"
+}
+";
+    common::expect_box_ok_with_stdlib(SRC, "full_value_class_accepts_unit_and_nothing_carriers");
+}
+
+#[test]
+fn full_value_secondary_constructor_may_omit_a_default() {
+    const SRC: &str = "\
+// LANGUAGE: +FullValueClasses
+value class Successful(val x: Int = 1, val y: Int = 2) {
+    constructor() : this(8)
+}
+fun box(): String {
+    val value = Successful()
+    if (value.x != 8 || value.y != 2) return value.toString()
+    return \"OK\"
+}
+";
+    common::expect_box_ok_with_stdlib(SRC, "full_value_secondary_constructor_may_omit_a_default");
+}
+
+#[test]
 fn aliased_jvm_inline_annotation_stays_unboxed() {
     const SRC: &str = "\
 import kotlin.jvm.JvmInline as Inline

@@ -197,7 +197,7 @@ pub(super) use declaration_types::class_ctor_jvm_tys;
 pub(super) use declaration_types::function_descriptor;
 use declaration_types::ir_method_desc;
 pub(crate) use declaration_types::jvm_tys;
-use declaration_types::{field_jvm_tys, jvm_declared_ty, signature_function_params};
+use declaration_types::{field_jvm_tys, jvm_declared_ty, jvm_value_ty, signature_function_params};
 use declaration_types::{
     ir_type_desc, jvm_function_params, jvm_is_erased_top, local_variable_desc,
 };
@@ -2806,7 +2806,7 @@ fn emit_class(
             .or(field.type_param.as_deref());
         let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter).field;
         let physical_name = instance_field_jvm_name(ir, c, field);
-        let field_desc = ir_type_desc(ty);
+        let field_desc = type_descriptor(jvm_value_ty(ty));
         // Coroutine continuation fields are compiler-generated storage rather than Kotlin
         // properties, so they are visited eagerly and receive no nullability annotation. Declared
         // properties, a data class's included, use the later field-table visit: their methods
@@ -6674,7 +6674,7 @@ impl<'a> Emitter<'a> {
             return Some(PropertyAccess::Accessor {
                 owner,
                 name: setter_name,
-                descriptor: method_descriptor(&[jvm_declared_ty(&field.ty)], Ty::Unit),
+                descriptor: method_descriptor(&[jvm_value_ty(&field.ty)], Ty::Unit),
                 is_static: false,
                 is_interface: is_jvm_interface(class),
                 static_receiver: None,
@@ -6683,7 +6683,7 @@ impl<'a> Emitter<'a> {
         Some(PropertyAccess::Field {
             owner,
             name: instance_field_jvm_name(self.ir, class, field),
-            descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
+            descriptor: type_descriptor(jvm_value_ty(&field.ty)),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
             is_static: static_storage(self.ir, class),
         })
