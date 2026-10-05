@@ -2001,6 +2001,11 @@ pub struct IrFile {
     /// bounds), keyed by the class's fully-qualified name.
     pub class_declared_spellings:
         std::collections::HashMap<crate::types::TypeName, crate::spelling::DeclaredSpellings>,
+    /// Where a class's declared superclass stands in its source supertype list, keyed by the class's
+    /// fully-qualified name. `@Metadata` lists supertypes in source order (`class C : I, Base(), J`
+    /// writes `I, Base, J`), while [`IrClass::superclass`] keeps the superclass apart. Absent when
+    /// the superclass is written first or none is declared.
+    pub class_superclass_positions: std::collections::HashMap<crate::types::TypeName, u32>,
     /// The same, for a class PROPERTY, keyed by `(class fully-qualified name, property name)` —
     /// a property has no `FunId` to hang off.
     pub prop_declared_spellings: std::collections::HashMap<

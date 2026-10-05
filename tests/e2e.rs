@@ -1381,6 +1381,8 @@ mod metadata_reader_e2e;
 mod metadata_return_types;
 #[path = "metadata_return_value_status_e2e.rs"]
 mod metadata_return_value_status_e2e;
+#[path = "metadata_supertype_order_e2e.rs"]
+mod metadata_supertype_order_e2e;
 #[path = "metadata_synthetic_classes_e2e.rs"]
 mod metadata_synthetic_classes_e2e;
 #[path = "metadata_type_reference_e2e.rs"]
