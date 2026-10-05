@@ -2401,6 +2401,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   supertype list always leads with it. The metadata emitter drops it. Tests:
   `a_generic_class_with_no_superclass_lists_only_its_interfaces` in
   `tests/typealias_abbreviated_type_e2e.rs`.
+- **A class's `@Metadata` supertypes keep source order.** kotlinc 2.4.20 writes
+  `class C : I, Base(), J` as `I, Base, J`; the superclass is not moved to the front. The JVM class
+  file and `Signature` still name the superclass separately. Tests:
+  `tests/metadata_supertype_order_e2e.rs`.
 - **Classpath Java varargs (`T...`)**: the class reader carries `ACC_VARARGS` into `CallSig::vararg`.
   The shared call-argument lowerer then packs trailing elements into the final array parameter for
   both static and instance calls. An ordinary array parameter remains fixed-arity.
