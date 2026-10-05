@@ -110,12 +110,16 @@ pub(super) fn emit(
             g.aload(0);
             g.getfield(fref, slot_words(field_jt) as i32);
         }
-        // A `lateinit var` read throws while the field is still null — kotlinc inserts this at every
-        // access, and the accessor is an access like any other.
+        // kotlinc's `LateinitLowering` getter: return the value, or throw and then
+        // `aconst_null; areturn` so the null path has a reference for the verifier.
         if field.is_lateinit() {
             g.dup();
-            let lbl = g.new_label();
-            g.ifnonnull(lbl);
+            let missing = g.new_label();
+            g.ifnull(missing);
+            emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, getter_jt);
+            emit_return(getter_jt, &mut g);
+            g.bind(missing);
+            g.pop();
             g.push_string(&field.name, cw);
             let m = cw.methodref(
                 "kotlin/jvm/internal/Intrinsics",
@@ -123,12 +127,12 @@ pub(super) fn emit(
                 "(Ljava/lang/String;)V",
             );
             g.invokestatic(m, 1, 0);
-            // The join needs a stackmap frame: `this` in local 0, the (non-null on the taken path)
-            // field value on the stack.
-            g.bind(lbl);
+            g.aconst_null();
+            emit_return(getter_jt, &mut g);
+        } else {
+            emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, getter_jt);
+            emit_return(getter_jt, &mut g);
         }
-        emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, getter_jt);
-        emit_return(getter_jt, &mut g);
         g.ensure_locals(1);
         g.link();
         let access = default_accessor_access(property.visibility, overridable);

@@ -1806,6 +1806,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   omitted-arg call to such an extension still inlines only checker-recorded constant defaults and
   otherwise bails (skip, never miscompile) — module calls are deliberately not routed through the
   stub (tests: `extension_default_stub_e2e`).
+  **Only the declaring function owns a stub**: an override inherits its parameters' defaults (Kotlin
+  forbids restating them), but kotlinc emits `name$default` solely on the function that WROTE them.
+  A call through any receiver dispatches via the declaring owner's stub, which `invokevirtual`s the
+  override. krusty once emitted a redundant stub on every overriding class, interface and enum entry
+  body (`IrFile::declared_param_defaults` gates emission; tests: `override_default_stub_e2e`).
 - `-jvm-default` (interface members with bodies): kotlinc offers three JVM realizations of the same
   Kotlin source, and the flag changes the CLASS SET, not just method bodies. Measured against
   kotlinc 2.4.10 on an interface with a default getter, a default method, a defaulted parameter and
@@ -3500,6 +3505,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   clears the operand stack) takes the `emit_operands` temp route; the `Vararg`/`SpreadBuilder` fill
   loops have no such option, and lowering declines a `try` element for them (`is_branchy`).
   `tests/comparison_under_operands_e2e.rs`.
+- **A `lateinit` backing field carries no nullability annotation.** It holds null until assigned,
+  so kotlinc's `AnnotationCodegen.generateNullabilityAnnotation` skips a field whose property is
+  `lateinit`, whatever its declared type; its accessors keep `@NotNull`. This covers class, object,
+  enum and facade fields (`field_visibility::publishes_field_nullability`; test
+  `lateinit_field_nullability_e2e`).
+- **A `lateinit` getter returns or throws.** kotlinc's `LateinitLowering` rewrites the getter to
+  `val v = field; if (v != null) return v else throwUninitializedPropertyAccessException(name)`, which
+  compiles to `dup; ifnull L; areturn; L: pop; ldc name; invokestatic …; aconst_null; areturn`. Member,
+  object and enum getters take that shape as facade getters already did; an inline read keeps the
+  `ifnonnull` guard below (test `lateinit_getter_shape_e2e`).
 - **A `lateinit` FIELD read is itself branchy.** The uninitialized guard kotlinc inserts at every
   such read (`dup; ifnonnull L; ldc name; invokestatic throwUninitializedPropertyAccessException; L:`)
   branches and rejoins. So a `lateinit` read is a
