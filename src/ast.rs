@@ -1897,6 +1897,10 @@ pub struct File {
     /// `+EagerLambdaAnalysis`: a lambda that does not discriminate applicable candidates by its
     /// shape is analyzed before the most specific candidate is chosen.
     pub eager_lambda_analysis: bool,
+    /// Before Kotlin language level 2.4, a lambda implementation keeps the body's inferred result
+    /// separately from the caller-facing function result. The checked FIR boundary records that
+    /// semantic choice so a backend never needs its own language-version switch.
+    pub lambda_implementation_uses_inferred_result: bool,
 }
 
 impl File {

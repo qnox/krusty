@@ -359,10 +359,6 @@ pub struct JvmBackend {
     /// Whether to emit the `Intrinsics.checkNotNullExpressionValue` guard on a narrowed platform
     /// value (`-Xno-call-assertions` clears this).
     call_assertions: bool,
-    /// Whether inferred `Nothing` lambda results require the pre-2.4 class realization that the
-    /// JVM metafactory could not adapt. The compiler driver derives this representation fact from
-    /// the finalized public language setting; the backend does not own language-version policy.
-    inferred_nothing_lambda_class_fallback: bool,
     /// `-language-version X.Y`: the `@kotlin.Metadata` `mv` and `.kotlin_module` header version to
     /// stamp; `None` keeps the default ([`crate::jvm::ir_emit::DEFAULT_METADATA_VERSION`]).
     metadata_version: Option<[i32; 3]>,
@@ -382,7 +378,6 @@ impl JvmBackend {
             lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
             param_assertions: true,
             call_assertions: true,
-            inferred_nothing_lambda_class_fallback: false,
             metadata_version: None,
             annotations_in_metadata: true,
         }
@@ -412,12 +407,6 @@ impl JvmBackend {
     /// where a platform value is narrowed to a declared non-null type.
     pub fn with_call_assertions(mut self, enabled: bool) -> JvmBackend {
         self.call_assertions = enabled;
-        self
-    }
-
-    /// Supply the finalized JVM representation fact selected by the public language settings.
-    pub fn with_inferred_nothing_lambda_class_fallback(mut self, enabled: bool) -> JvmBackend {
-        self.inferred_nothing_lambda_class_fallback = enabled;
         self
     }
 
@@ -1069,7 +1058,6 @@ impl Backend for JvmBackend {
             &delegate_closures,
             current_source,
             self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy,
-            self.inferred_nothing_lambda_class_fallback,
         ) {
             Ok(methods) => methods,
             Err(()) => {

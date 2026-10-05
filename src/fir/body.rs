@@ -1753,9 +1753,9 @@ pub struct FirBody {
     constructor_context_parameter_count: u32,
     receiver_type: Option<ResolvedTy>,
     result_type: Option<ResolvedTy>,
-    /// A lambda body's own inferred result, recorded before coercion to the selected function
-    /// type's return (`result_type` is that caller-facing boundary). A target specializing the
-    /// implementation method's signature reads the body's own type.
+    /// A lambda body's own inferred result when the selected language level keeps it as the
+    /// implementation signature (before 2.4). `result_type` is the caller-facing boundary. Its
+    /// absence at current language levels is a checked semantic decision, not missing inference.
     inferred_result_type: Option<ResolvedTy>,
     implicit_return: bool,
     default_fragment: bool,
@@ -1936,7 +1936,7 @@ impl FirBody {
     pub fn set_inferred_result_type(&mut self, result: ResolvedTy) {
         assert!(
             self.inferred_result_type.replace(result).is_none(),
-            "a FIR body may publish its inferred result type only once"
+            "a FIR body may publish its language-selected inferred result type only once"
         );
     }
 

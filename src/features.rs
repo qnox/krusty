@@ -10,6 +10,7 @@ use crate::language_version::LanguageVersion;
 /// `NameBasedDestructuring`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LangFeatures {
+    language_version: LanguageVersion,
     enabled: HashSet<String>,
 }
 
@@ -37,7 +38,10 @@ impl LangFeatures {
                 }
             }
         }
-        Self { enabled }
+        Self {
+            language_version,
+            enabled,
+        }
     }
 }
 
@@ -75,6 +79,15 @@ fn language_level_enables(language_version: LanguageVersion, since: (u16, u16)) 
 }
 
 impl LangFeatures {
+    /// The public source-language level from which this feature baseline was derived.
+    ///
+    /// Ordered feature overrides do not replace the language level: consumers that implement a
+    /// language-level semantic transition must read this fact instead of introducing a second
+    /// compiler-specific switch.
+    pub const fn language_version(&self) -> LanguageVersion {
+        self.language_version
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

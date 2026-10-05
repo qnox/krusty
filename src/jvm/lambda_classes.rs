@@ -245,7 +245,6 @@ pub(super) fn realize(
     delegates: &super::local_delegate_closures::Requirements,
     current_source: crate::ir::IrModuleSource,
     adapt_factory: bool,
-    legacy_nothing_conflict: bool,
 ) -> Result<LambdaMethods, ()> {
     let methods = LambdaMethods::collect(ir);
     let mut lambdas = ir
@@ -288,7 +287,7 @@ pub(super) fn realize(
                             .iter()
                             .chain([&signature.ret])
                             .any(|&ty| factory_conflict(ir, classifiers, ty))
-                        && !(legacy_nothing_conflict && nothing_conflict(ir, fid, signature)))))
+                        && !nothing_conflict(ir, fid, signature))))
         {
             continue;
         }
@@ -314,15 +313,7 @@ pub(super) fn realize(
             if nests_lifted_functions_with(ir, body, runtime_reified) {
                 return Err(());
             }
-            realize_class(
-                ir,
-                fid,
-                body,
-                &sites[0],
-                signature,
-                &captures,
-                legacy_nothing_conflict,
-            );
+            realize_class(ir, fid, body, &sites[0], signature, &captures);
             if let Some(result) = super::local_delegate_closures::invoke_result(ir, fid) {
                 let signed_result = ir.functions[fid as usize].ret;
                 ir.functions[fid as usize].ret = result;
@@ -351,15 +342,7 @@ pub(super) fn realize(
             continue;
         }
         match class_shape(ir, fid, every_emitted_root, runtime_reified, class_name) {
-            Ok((site, body, captures)) => realize_class(
-                ir,
-                fid,
-                body,
-                &site,
-                signature,
-                &captures,
-                legacy_nothing_conflict,
-            ),
+            Ok((site, body, captures)) => realize_class(ir, fid, body, &site, signature, &captures),
             Err(shape) => {
                 crate::trace_compiler!(
                     "value_classes",
@@ -482,12 +465,13 @@ fn nothing_conflict(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) ->
     fn is_nothing(ty: Ty) -> bool {
         matches!(ty.non_null(), Ty::Nothing | Ty::Null)
     }
-    signature.params.iter().copied().any(is_nothing)
-        || ir
-            .lambda_inferred_results
-            .get(&fid)
-            .copied()
-            .is_some_and(is_nothing)
+    let Some(inferred_result) = ir.lambda_inferred_results.get(&fid).copied() else {
+        // Current language levels select the caller-facing result as the implementation signature.
+        // The frontend records that decision by omitting the pre-2.4 inferred-result fact, so this
+        // backend does not need a parallel language-version option.
+        return false;
+    };
+    signature.params.iter().copied().any(is_nothing) || is_nothing(inferred_result)
 }
 
 /// Whether the class's `FunctionN` supertype is written raw, without the generic `Signature`.
@@ -497,12 +481,7 @@ fn nothing_conflict(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) ->
 /// `FunctionN`'s value parameters are `in` — a non-null `Nothing` there keeps the generic
 /// supertype, its argument written as a star (`Function1<*Lkotlin/Unit;>;`) — while its result is
 /// `out`, so any `Nothing`/`Nothing?` inferred result leaves the supertype raw.
-fn raw_supertype(
-    ir: &IrFile,
-    fid: FunId,
-    signature: &crate::types::FnSig,
-    legacy_nothing_result: bool,
-) -> bool {
+fn raw_supertype(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> bool {
     fn is_nothing(ty: Ty) -> bool {
         matches!(ty.non_null(), Ty::Nothing | Ty::Null)
     }
@@ -511,12 +490,11 @@ fn raw_supertype(
         .iter()
         .copied()
         .any(|ty| is_nothing(ty) && ty.admits_null())
-        || (legacy_nothing_result
-            && ir
-                .lambda_inferred_results
-                .get(&fid)
-                .copied()
-                .is_some_and(is_nothing))
+        || ir
+            .lambda_inferred_results
+            .get(&fid)
+            .copied()
+            .is_some_and(is_nothing)
 }
 
 /// Whether a value class's declared underlying type admits `null`: a nullable type, or a type
@@ -586,9 +564,8 @@ fn realize_class(
     site: &Site,
     signature: &crate::types::FnSig,
     captures: &[Capture],
-    legacy_nothing_result: bool,
 ) {
-    let class = declare_class(ir, fid, site, signature, captures, legacy_nothing_result);
+    let class = declare_class(ir, fid, site, signature, captures);
     // `invoke` takes `this` and the lambda's own parameters; each captured value is read from its
     // field.
     let expressions = crate::ir::value_namespace_expressions(ir, body);
@@ -618,12 +595,7 @@ fn realize_class(
     // boxed, since it overrides the generic `R`. A value class stays its carrier, which the
     // bridge boxes. kotlinc types it by the body's INFERRED result, which a `Nothing`/`Nothing?`
     // body pins to `Void` even when the selected function type's return is wider.
-    let result = match ir
-        .lambda_inferred_results
-        .get(&fid)
-        .copied()
-        .filter(|_| legacy_nothing_result)
-    {
+    let result = match ir.lambda_inferred_results.get(&fid).copied() {
         Some(inferred) if matches!(inferred.non_null(), Ty::Nothing | Ty::Null) => {
             if inferred.admits_null() {
                 Ty::nullable(Ty::Nothing)
@@ -697,7 +669,6 @@ fn declare_class(
     site: &Site,
     signature: &crate::types::FnSig,
     captures: &[Capture],
-    legacy_nothing_result: bool,
 ) -> ClassId {
     let mut class = crate::ir::IrClass::synthetic(site.class);
     class.superclass = crate::types::type_name("java/lang/Object");
@@ -743,7 +714,7 @@ fn declare_class(
         public_inline: false,
         invoke: fid,
         function_type: site.function_type,
-        raw_supertype: raw_supertype(ir, fid, signature, legacy_nothing_result),
+        raw_supertype: raw_supertype(ir, fid, signature),
         captures: captures
             .iter()
             .map(|capture| capture.capture.clone())

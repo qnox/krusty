@@ -102,8 +102,10 @@ impl BodyFirChecker<'_> {
         }
         let result_type = self.resolved_type(span, signature.ret)?;
         body.set_result_type(result_type);
-        if let Some(inferred) = self.info.lambda_body_results.get(&expression).copied() {
-            body.set_inferred_result_type(self.resolved_type(span, inferred)?);
+        if self.file.lambda_implementation_uses_inferred_result {
+            if let Some(inferred) = self.info.lambda_body_results.get(&expression).copied() {
+                body.set_inferred_result_type(self.resolved_type(span, inferred)?);
+            }
         }
         body.set_implicit_return();
         let context_receivers = signature.params[..context_count]

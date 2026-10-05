@@ -245,10 +245,6 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         .with_lambda_modes(opts.lambda_modes)
         .with_param_assertions(!opts.no_param_assertions)
         .with_call_assertions(!opts.no_call_assertions)
-        .with_inferred_nothing_lambda_class_fallback(
-            opts.language_settings.language_version
-                < krusty::language_version::LanguageVersion::V2_4,
-        )
         .with_annotations_in_metadata(opts.language_settings.features.has("AnnotationsInMetadata"))
         .with_metadata_version(Some(metadata_version));
     let outputs =
