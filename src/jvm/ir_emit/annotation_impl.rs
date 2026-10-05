@@ -205,8 +205,23 @@ pub(super) fn emit_annotation_impl_class(
         if let Some(defaults) = ir.class_ctor_defaults(&fq) {
             let param_tys: Vec<Ty> = members.iter().map(|(_, jt)| *jt).collect();
             // An annotation class's members carry no declaration annotations of their own.
-            constructor_defaults::emit_ctor_default_stub(
-                ir, &fq, c.fq_name, facade, &param_tys, defaults, false, &mut cw, env,
+            constructor_defaults::emit_ctor_default_stub_with_prefix(
+                ir,
+                constructor_defaults::ConstructorDefaultStub {
+                    owner: &fq,
+                    owner_identity: c.fq_name,
+                    facade,
+                    physical_prefix: &[],
+                    logical_prefix_count: 0,
+                    real_params: &param_tys,
+                    defaults,
+                    secondary_lines: None,
+                    target_uses_marker_accessor: false,
+                    deprecated: false,
+                    access: 0x1001,
+                },
+                &mut cw,
+                env,
             );
         }
     }
@@ -403,8 +418,11 @@ fn emit_annotation_hashcode(
     //   already IS its hash. kotlinc emits `Integer.hashCode(I)` there regardless.
     //
     // The accumulator lives in local 1: each member xors its weighted name hash with its value hash,
-    // adds that into the accumulator (from the second member on) and stores it back.
+    // adds that into the accumulator (from the second member on) and stores it back. kotlinc names
+    // that temporary `result` and gives it a debug row from its first store to the return, which is
+    // also what keeps its stores and loads in the method body.
     let accumulates = members.len() > 1;
+    let mut result_start = None;
     cw.reserve_method_pool("hashCode", "()I", None, &[]);
     let mut cb = CodeBuilder::new(if accumulates { 2 } else { 1 });
     for (index, ((name, _), jt)) in members.iter().zip(stored).enumerate() {
@@ -450,6 +468,7 @@ fn emit_annotation_hashcode(
         // annotation leaves its one value on the stack and returns it, which is kotlinc's shape.
         if accumulates {
             cb.istore(1);
+            result_start.get_or_insert(cb.bytes.len() as u16);
             cb.iload(1);
         }
     }
@@ -458,14 +477,23 @@ fn emit_annotation_hashcode(
         cb.push_int(0, cw);
     }
     cb.ireturn();
+    let result_local: Vec<(u16, u16, u16, String, String)> = result_start
+        .map(|start| {
+            let length = cb.bytes.len() as u16 - start;
+            (start, length, 1, "result".to_string(), "I".to_string())
+        })
+        .into_iter()
+        .collect();
     let max_locals = if accumulates { 2 } else { 1 };
     finish_code::<0x0011>(cw, "hashCode", "()I", &mut cb, max_locals);
+    cw.reserve_ranged_local_names(&result_local);
     cw.set_method_debug(
         "hashCode",
         "()I",
         None,
         &[("this".to_string(), format!("L{fq};"), 0)],
     );
+    cw.prepend_ranged_locals("hashCode", "()I", &result_local);
 }
 
 /// `toString()` for an annotation impl: `@<fqName>(m1=v1, m2=v2, …)` built with a `StringBuilder` (arrays

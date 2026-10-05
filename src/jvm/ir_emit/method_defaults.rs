@@ -71,6 +71,12 @@ pub(super) fn emit_default_stub(
         .expect("an extension receiver is a leading physical parameter");
     let ret = jvm_declared_ty(&function.ret);
     let owner_ty = Ty::obj(owner);
+    // The `$DefaultImpls` copy of a PRIVATE member's stub (`static_owner.is_none()` distinguishes
+    // it from the interface-side stub): `disable` publishes no interface-side declaration for a
+    // private member, so kotlinc's holder stub invokes the holder's own receiver-first static and
+    // is itself `public static synthetic` (measured on 2.4.20), not the private member's access.
+    let holder_private_dispatch =
+        is_interface && static_owner.is_none() && ir.method_visibility(fid).is_private();
     let stub_name = format!("{method_name}$default");
     let stub_desc = method_descriptor(&default_stub_params(ir, fid, owner_ty), ret);
     cw.reserve_method_name(&stub_name);
@@ -136,28 +142,45 @@ pub(super) fn emit_default_stub(
             &mut code,
         );
     }
-    let argument_words = real_params.iter().map(|ty| slot_words(*ty) as i32).sum();
+    let argument_words: i32 = real_params.iter().map(|ty| slot_words(*ty) as i32).sum();
     let descriptor = method_descriptor(&real_params, ret);
-    let method = if is_interface {
-        emitter
+    if holder_private_dispatch {
+        let holder = format!("{owner}$DefaultImpls");
+        let mut holder_params = vec![owner_ty];
+        holder_params.extend_from_slice(&real_params);
+        let holder_descriptor = method_descriptor(&holder_params, ret);
+        let method = emitter
             .cw
-            .interface_methodref(owner, &method_name, &descriptor)
+            .methodref(&holder, &method_name, &holder_descriptor);
+        // The receiver was loaded first, so the static target's arguments are already in order.
+        code.invokestatic(method, argument_words + 1, slot_words(ret) as i32);
     } else {
-        emitter.cw.methodref(owner, &method_name, &descriptor)
-    };
-    if is_interface {
-        code.invokeinterface(method, argument_words, slot_words(ret) as i32);
-    } else if ir.method_visibility(fid).is_private() {
-        code.invokespecial(method, argument_words, slot_words(ret) as i32);
-    } else {
-        code.invokevirtual(method, argument_words, slot_words(ret) as i32);
+        let method = if is_interface {
+            emitter
+                .cw
+                .interface_methodref(owner, &method_name, &descriptor)
+        } else {
+            emitter.cw.methodref(owner, &method_name, &descriptor)
+        };
+        if is_interface {
+            code.invokeinterface(method, argument_words, slot_words(ret) as i32);
+        } else if ir.method_visibility(fid).is_private() {
+            code.invokespecial(method, argument_words, slot_words(ret) as i32);
+        } else {
+            code.invokevirtual(method, argument_words, slot_words(ret) as i32);
+        }
     }
     emit_return(ret, &mut code);
     code.ensure_locals(emitter.frame.max());
     code.link();
-    emitter
-        .cw
-        .add_method(default_stub_access(ir, fid), &stub_name, &stub_desc, &code);
+    // kotlinc's holder stub for a private member is `public static synthetic` (the private member
+    // itself has no interface-side declaration, so nothing restricts the stub's reach).
+    let access = if holder_private_dispatch {
+        0x1009
+    } else {
+        default_stub_access(ir, fid)
+    };
+    emitter.cw.add_method(access, &stub_name, &stub_desc, &code);
     if let Some(&line) = ir
         .fn_sig_lines
         .get(&fid)

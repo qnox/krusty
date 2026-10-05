@@ -999,6 +999,54 @@ fn a_private_interface_member_stays_private_under_disable() {
         !implementer.iter().any(|(name, _, _)| name == "h"),
         "a private interface member never reaches the class ABI: {implementer:?}"
     );
+    // kotlinc 2.4.20 (measured): `disable` writes the private member ONLY as the holder's private
+    // static — the interface itself declares no `h` at all (a private ABSTRACT method is not even
+    // a legal class-file shape).
+    let bytes = ours
+        .iter()
+        .find_map(|(name, bytes)| (name == "I").then_some(bytes))
+        .expect("missing I.class");
+    let interface = krusty::jvm::classreader::parse_class(bytes).expect("parse I.class");
+    assert_eq!(
+        interface
+            .methods
+            .iter()
+            .map(|method| (method.name.as_str(), method.access))
+            .collect::<Vec<_>>(),
+        [("f", 0x0401)],
+        "the interface declares only the public abstract member"
+    );
+}
+
+/// A private interface member WITH default parameters under `disable`: the member and its
+/// `$default` stub live only on the holder, the stub is `public static synthetic`, and it
+/// dispatches to the holder's own private static with `invokestatic` — an `invokeinterface` would
+/// target a method the interface does not declare. Holder flags measured against kotlinc 2.4.20.
+#[test]
+fn a_private_interface_member_with_defaults_runs_under_disable() {
+    let source = "interface I { private fun h(x: Int = 7): String = \"h$x\"; fun f(): String = h() + \"!\" }\n                  class C : I\n                  fun box(): String = if (C().f() == \"h7!\") \"OK\" else \"fail\"\n";
+    let classes = compile_source(JvmDefaultMode::Disable, source, "T");
+    let box_class =
+        common::find_box_class(&classes).unwrap_or_else(|| panic!("no box class emitted"));
+    let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+        .unwrap_or_else(|| panic!("JVM unavailable for the disable behavior test"));
+    assert_eq!(result, "OK");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "I$DefaultImpls").then_some(bytes))
+        .expect("missing I$DefaultImpls.class");
+    let holder = krusty::jvm::classreader::parse_class(bytes).expect("parse I$DefaultImpls.class");
+    let mut shape = holder
+        .methods
+        .iter()
+        .map(|method| (method.name.as_str(), method.access))
+        .collect::<Vec<_>>();
+    shape.sort();
+    assert_eq!(
+        shape,
+        [("f", 0x0009), ("h", 0x000a), ("h$default", 0x1009)],
+        "holder member flags match kotlinc 2.4.20"
+    );
 }
 
 /// A dependency's declaration and physical realization are one provider record. The consumer's own
