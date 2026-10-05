@@ -9522,6 +9522,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/value_class_signature_e2e.rs` (every method of five value classes and their callers
   against kotlinc, in one file and with the value classes in a kotlinc-built dependency). Corpus:
   `inlineClasses/*Generic*` (`constructor-impl`), `inlineClasses/kt26103_*`.
+- **A value class implements an interface property through the same instance entries.**
+  kotlinc's `JvmInlineClassLowering` replaces a computed property's accessors exactly as it
+  replaces member functions: each is a static over the carrier named from the declared accessor
+  signature (`getB-impl`, `setB-impl`, or the value-class hash when that signature mentions a value
+  class: `getT-<hash>`, `setT2-<hash>`), and each accessor that overrides an interface accessor gets
+  an entry on the box under the name the signature answers to (`getB`, `getT-<hash>`), declared
+  right after its static. The entry takes the accessor's parameters less the carrier: the getter
+  none, a member-extension getter its receiver (`getC(String)`), a setter its value. A `var`
+  implementing a `val` adds a setter that overrides nothing, so it has no entry. An entry maps its
+  first line to the accessor's own header line when the accessor is written with a body on a line
+  of its own (`get() = …`, `set(value) { … }`), else to the property's line. A member-extension
+  entry's receiver is labeled after the entry's JVM name in its local-variable row and, under
+  `-java-parameters`, unflagged in `MethodParameters` (`$this$getC`, `$this$getE_u2d<hash>`), not
+  after the property as its static is (`$this$c`, mandated); a function entry likewise reflects
+  `$this$f_u2d<hash>`. The accessor statics are user declarations: their bodies take the
+  value-class boundary rewrites and return the carrier of a value-class result (`getT-<hash>`
+  returns `I`, not the box). The JVM backend derives property entries from the class's property
+  override edges with the function entries, in one pass. Not yet matched: kotlinc boxes the
+  result of a primitive accessor overriding a generic one (`getG()Ljava/lang/Integer;` for
+  `val g: T`), for a value class's static and entry as for any class. Tests:
+  `tests/value_class_property_entry_e2e.rs` (the box against kotlinc member for member, its exact
+  entries, and calls through the interface at run time),
+  `tests/java_parameters_attribute_e2e.rs` (`java_parameters_names_a_value_class_property_entries`).
 - **A `Nothing` override of a value-class member is reached through mangled bridges.** The
   supertype's accessor or function returning a value class is named with the value-class hash
   (`getP-<hash>`, `f-<hash>`), whether it spells the value class boxed (`X?`) or as its carrier
@@ -9922,8 +9945,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   republished forward of an inherited member does too. The JVM backend formats the entry from the
   static's recorded identities (an arity mismatch is an internal error), and the `$receiver`
   spelling from the extension-receiver role where the function is written on a holder or records a
-  holder receiver. Not yet matched: kotlinc orders an overriding accessor's entry beside its
-  static. Tests: `tests/java_parameters_attribute_e2e.rs`, `tests/interface_default_method_e2e.rs`.
+  holder receiver. Tests: `tests/java_parameters_attribute_e2e.rs`,
+  `tests/interface_default_method_e2e.rs`.
 - **An inherited interface default on a value class is a `-impl` static plus its forwarder.** A
   class that inherits an interface default it does not override gets a compatibility forwarder
   (`ACC_PUBLIC | ACC_BRIDGE`): under `enable` an `invokespecial` of the default through the first

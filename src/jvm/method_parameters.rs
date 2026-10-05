@@ -153,12 +153,14 @@ fn function_parameter_flags(role: IrParameterRole, moved_receivers: bool) -> u16
 
 /// The interface entry a value class keeps on its box for a member lowered to a static `-impl`
 /// declares that member's parameters less the carrier, named as the member names them. Its
-/// extension receiver is the receiver of an instance method again, so it has no flag (`$this$abs`
-/// beside the static's mandated one). `member_parameters` are the static's physical parameters.
+/// extension receiver is the receiver of an instance method again, so it has no flag and is
+/// labeled after the entry's own name `entry_name` (`$this$getC` beside the static's mandated
+/// `$this$c`). `member_parameters` are the static's physical parameters.
 pub(super) fn value_class_interface_entry(
     ir: &IrFile,
     member: u32,
     member_parameters: &[Ty],
+    entry_name: &str,
     entry_parameters: usize,
 ) -> Vec<MethodParameter> {
     let identities = ir
@@ -190,7 +192,15 @@ pub(super) fn value_class_interface_entry(
         .iter()
         .zip(names)
         .skip(1)
-        .map(|(identity, name)| (name, function_parameter_flags(identity.role, false)))
+        .map(|(identity, name)| {
+            let name = match identity.role {
+                IrParameterRole::ExtensionReceiver => Some(
+                    crate::jvm::parameter_names::value_class_interface_entry_receiver(entry_name),
+                ),
+                _ => name,
+            };
+            (name, function_parameter_flags(identity.role, false))
+        })
         .collect()
 }
 

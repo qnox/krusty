@@ -318,9 +318,6 @@ pub(crate) fn lower_value_classes(
 
     // Exact identities of members whose JVM realization synthesis already finalized.
     let mut realized_members = synth_members::SynthesizedValueMembers::default();
-    // Exact synthesized expressions that have already rendered a nested value-class carrier to a
-    // String while retaining the nested class as their logical concat-boundary type.
-    let mut rendered_value_class_text = HashSet::new();
     // Synthesize each value class's `-impl`/`equals`/`hashCode`/`toString` members up front (a JVM
     // concern — common lowering only emits the plain single-field class). Done before the analysis below so
     // they participate in `vc_methods`/erasure like any other method.
@@ -367,7 +364,6 @@ pub(crate) fn lower_value_classes(
             ir.classes[cid as usize].init_body.is_some(),
             constructor_default,
             &mut realized_members,
-            &mut rendered_value_class_text,
         ) {
             crate::trace_compiler!(
                 "value_classes",
@@ -746,8 +742,7 @@ pub(crate) fn lower_value_classes(
                 | "hashCode"
                 | "toString"
                 | "<init>"
-        ) || is_divergent_override_getter
-            || realized_members.instance_entries.contains(&(fid as u32));
+        ) || is_divergent_override_getter;
         let vc_member = !synthesized && vc_methods.contains(&(fid as u32));
         let source_name = f.name.clone();
         // Mangle a USER function whose (pre-erasure) signature mentions a value class — kotlinc's
@@ -778,7 +773,7 @@ pub(crate) fn lower_value_classes(
             // metadata.
             let lower_value_member = vc_member && !f.is_static;
             let is_suspend = suspend_fids.contains(&(fid as u32));
-            let mangled = if realized_members.accessors.contains(&(fid as u32)) {
+            let mangled = if realized_members.accessors.contains_key(&(fid as u32)) {
                 // Already named from its declared accessor signature, before it gained the carrier.
                 source_name.clone()
             } else if lower_value_member {
@@ -925,6 +920,7 @@ pub(crate) fn lower_value_classes(
     for function in lowered_value_members.iter().copied() {
         super::method_parameters::prepend_value_class_receiver(ir, function, "arg0");
     }
+    let static_members = realized_members.static_members(&lowered_value_members);
     // `(class, method-index)` → the value class a member's RETURN keeps BOXED. A user value-class member
     // runs on / returns the boxed object (the erasure loop above left its VC return un-erased), so its
     // `MethodCall` result is a boxed `X` — a following unboxed-slot use (`val b: X = x.inc()`) must unbox.
@@ -1254,35 +1250,31 @@ pub(crate) fn lower_value_classes(
     synth_members::record_renamed_functions(ir, &realized_members, &renamed_functions);
     let interface_entries = interface_entries::materialize(
         ir,
-        &lowered_value_members,
+        &static_members,
         override_results,
-        |ir: &IrFile, member: u32| {
-            let (name, params, ret) = ir
-                .vc_declared_sigs
-                .get(&member)
-                .expect("a lowered value-class member records its declaration");
-            vc_member_entry_name(
-                name,
-                params,
-                ret,
-                &callable_under,
-                suspend_fids.contains(&member),
-            )
+        |ir: &IrFile, member: u32| match realized_members.accessors.get(&member) {
+            Some(accessor_entry) => accessor_entry.clone(),
+            None => {
+                let (name, params, ret) = ir
+                    .vc_declared_sigs
+                    .get(&member)
+                    .expect("a lowered value-class member records its declaration");
+                let suspend = suspend_fids.contains(&member);
+                vc_member_entry_name(name, params, ret, &callable_under, suspend)
+            }
         },
     );
 
     // Exact user value-class members have now been rewritten to static carrier functions. Snapshot
     // those physical signatures before borrowing the class bridge lists; a bridge keeps the stable
     // function identity, so no emitted-name/arity lookup is needed to find its target ABI.
-    let lowered_member_targets = lowered_value_members
+    let lowered_member_targets = static_members
         .iter()
         .map(|&function| {
             let target = &ir.functions[function as usize];
             let result = override_results.physical_result(ir, function);
-            (
-                function,
-                (target.name.clone(), target.params.clone(), result),
-            )
+            let realized = (target.name.clone(), target.params.clone(), result);
+            (function, realized)
         })
         .collect::<HashMap<_, _>>();
     // A covariant-override bridge delegates to the concrete method by name (mangle the target if it was
@@ -1645,8 +1637,7 @@ pub(crate) fn lower_value_classes(
                 | "hashCode"
                 | "toString"
                 | "<init>"
-        ) || vc_sole_getter_fids.contains(&(fid as u32))
-            || realized_members.instance_entries.contains(&(fid as u32));
+        ) || vc_sole_getter_fids.contains(&(fid as u32));
         let user_vc_member = is_vc && !synthesized_member;
         if is_vc && !user_vc_member && f.name != "<init>" && f.name != "constructor-impl" {
             continue;
@@ -2524,7 +2515,7 @@ pub(crate) fn lower_value_classes(
         );
         // A `constructor-impl` runs source constructor bodies over the carrier.
         if vc_methods.contains(&id)
-            && !lowered_value_members.contains(&id)
+            && !static_members.contains(&id)
             && !ir.jvm_value_class_constructor_impls.contains_key(&id)
         {
             continue;
@@ -3042,7 +3033,7 @@ pub(crate) fn lower_value_classes(
                 &ir.exprs,
                 id,
                 &repr_ctx,
-                &rendered_value_class_text,
+                &realized_members.rendered_value_class_text,
                 &mut ops,
             );
             if let IrExpr::Call { callee, args, .. } = &ir.exprs[id as usize] {
@@ -3391,7 +3382,7 @@ pub(crate) fn lower_value_classes(
         carrier_unboxes: &carrier_unboxes,
         value_class_reference_supertypes: &vc_reference_supertypes,
         value_members: &vc_methods,
-        lowered_value_members: &lowered_value_members,
+        static_members: &static_members,
     };
     reference_returns::record_reference_returns(&mut ops, ir, &returns);
     for (id, is_ne) in vacuous {
@@ -3564,7 +3555,7 @@ pub(crate) fn lower_value_classes(
         if lambda_implementation_ids.contains(&(fid as u32)) {
             continue;
         }
-        if vc_methods.contains(&(fid as u32)) && !lowered_value_members.contains(&(fid as u32)) {
+        if vc_methods.contains(&(fid as u32)) && !static_members.contains(&(fid as u32)) {
             // A synthesized wrapper member such as `box-impl` keeps the boxed value-class result.
             // User declarations are absent from this branch: they were converted to static carrier
             // functions above and take the ordinary return-boundary path below.
