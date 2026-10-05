@@ -70,7 +70,9 @@ plugins {
 
 Kotlin/JVM must be applied before krusty. `kotlin("plugin.serialization")` works in any order:
 krusty receives the Kotlin Gradle plugin's compiler-plugin classpath and options exactly as kotlinc
-would. Any other Kotlin compiler plugin (all-open, no-arg, Compose, ...) fails the build. KSP2
+would. The compiler identifies plugin jars and directories from their registrar service entries;
+any unsupported Kotlin compiler plugin (all-open, no-arg, Compose, ...) fails the build regardless
+of the artifact filename. KSP2
 (`com.google.devtools.ksp`) works: it runs processors in its own `kspKotlin` task and
 adds no compiler plugin to the compilation, and krusty compiles the Kotlin and Java sources the
 processors generate (KSP's Gradle plugin needs Gradle 8 or newer). The

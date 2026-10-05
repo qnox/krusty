@@ -70,8 +70,9 @@ plugins {
 
 Plugin order is part of the supported boundary: apply Kotlin/JVM first, then krusty. The
 kotlinx.serialization plugin (\`kotlin("plugin.serialization")\`) is supported in any order; krusty
-receives the Kotlin Gradle plugin's compiler-plugin classpath and options as kotlinc would. Any other
-Kotlin compiler plugin is rejected, wherever it is applied, because krusty cannot preserve its
+receives the Kotlin Gradle plugin's compiler-plugin classpath and options as kotlinc would. The
+compiler identifies plugin jars and directories from their registrar service entries; any unsupported
+Kotlin compiler plugin is rejected regardless of artifact filename because krusty cannot preserve its
 compiler semantics. KSP2 (\`com.google.devtools.ksp\`) is supported: it runs processors in its own
 task and adds no compiler plugin to the compilation; krusty compiles the sources they generate
 (KSP's Gradle plugin needs Gradle 8 or newer).

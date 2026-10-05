@@ -791,7 +791,7 @@ mod tests {
                 ),
                 (
                     "compiler-plugin",
-                    "Kotlin compiler plugins are not supported by krusty: org.jetbrains.kotlin.allopen",
+                    "unsupported compiler plugin",
                 ),
                 (
                     "compiler-version",
@@ -856,16 +856,22 @@ mod tests {
                     Err(error) => error,
                 };
                 let rendered = error.to_string();
-                let expected_line = format!("> {expected}");
-                assert_eq!(
-                    rendered
-                        .lines()
-                        .filter(|line| line.trim() == expected_line)
-                        .count(),
-                    1,
-                    "{case}: {rendered}",
-                );
-                assert!(!log.exists(), "{case} must fail before execing krusty");
+                if case == "compiler-plugin" {
+                    assert!(rendered.contains(expected), "{case}: {rendered}");
+                    assert!(rendered.contains("allopen"), "{case}: {rendered}");
+                    assert!(log.exists(), "{case} must be rejected by krusty's registry");
+                } else {
+                    let expected_line = format!("> {expected}");
+                    assert_eq!(
+                        rendered
+                            .lines()
+                            .filter(|line| line.trim() == expected_line)
+                            .count(),
+                        1,
+                        "{case}: {rendered}",
+                    );
+                    assert!(!log.exists(), "{case} must fail before execing krusty");
+                }
             }
 
             // Gradle transports named warning policy without duplicating the compiler's registry.
@@ -1156,18 +1162,11 @@ mod tests {
             Ok(()) => panic!("a compiler plugin applied before krusty was ignored"),
             Err(error) => error.to_string(),
         };
-        assert_eq!(
-            error
-                .lines()
-                .filter(|line| line.trim()
-                    == "> Kotlin compiler plugins are not supported by krusty: org.jetbrains.kotlin.allopen")
-                .count(),
-            1,
-            "{error}"
-        );
+        assert!(error.contains("unsupported compiler plugin"), "{error}");
+        assert!(error.contains("allopen"), "{error}");
         assert!(
-            !log.exists(),
-            "the rejected task must fail before execing krusty"
+            log.exists(),
+            "the compiler registry must inspect the forwarded plugin classpath"
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -1354,18 +1353,11 @@ fun main() {
             Ok(()) => panic!("all-open applied beside KSP was ignored"),
             Err(error) => error.to_string(),
         };
-        assert_eq!(
-            error
-                .lines()
-                .filter(|line| line.trim()
-                    == "> Kotlin compiler plugins are not supported by krusty: org.jetbrains.kotlin.allopen")
-                .count(),
-            1,
-            "{error}"
-        );
+        assert!(error.contains("unsupported compiler plugin"), "{error}");
+        assert!(error.contains("allopen"), "{error}");
         assert!(
-            !log.exists(),
-            "the rejected task must fail before execing krusty"
+            log.exists(),
+            "the compiler registry must inspect the forwarded plugin classpath"
         );
 
         let _ = std::fs::remove_dir_all(root);
