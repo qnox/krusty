@@ -1855,6 +1855,8 @@ mod redundant_null_jumps_e2e;
 mod renamed_builtin_bridge_owner_e2e;
 #[path = "renamed_builtin_property_null_check_e2e.rs"]
 mod renamed_builtin_property_null_check_e2e;
+#[path = "shared_cell_initial_values_e2e.rs"]
+mod shared_cell_initial_values_e2e;
 #[path = "source_when_nop_e2e.rs"]
 mod source_when_nop_e2e;
 #[path = "spill_order_e2e.rs"]

@@ -4532,6 +4532,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameters (kotlinc's `JvmDefaultConstructorLowering`); a declared `constructor()` owns that
   descriptor. Tests: `tests/constructor_argument_specificity_e2e.rs`.
 
+- **A captured `var` initialized to its holder's default leaves the holder unset.** A `Ref$XxxRef`
+  holder starts at its field's JVM default, so a constant initializer equal to it (zero, positive
+  zero for `Float`/`Double`, `false`, `'\u0000'`, or `null` in an `ObjectRef`) is not stored, as
+  kotlinc's `SharedVariablesManager` skips it. `-0.0`, an unsigned zero and a zero boxed into an
+  `ObjectRef` are stored. Tests: `tests/shared_cell_initial_values_e2e.rs`.
+
 - **Method type parameter that shadows its class's (`class Box<T> { fun <T> m(x: T): T }`).** The
   classpath member-return substitution (`JvmLibraries::member_return`) binds a generic class's formal
   type parameters to the receiver's type arguments (`Box<String>` → `{T: String}`) and substitutes a
