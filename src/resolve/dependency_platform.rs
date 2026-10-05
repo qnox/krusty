@@ -197,7 +197,7 @@ fn merge_functions(
             existing.call_sig = candidate.call_sig.clone();
             existing.default_values = candidate.default_values.clone();
             existing.context_count = candidate.context_count;
-            existing.annotations = candidate.annotations.clone();
+            existing.callable.annotations = candidate.callable.annotations.clone();
             existing.callable.inline = candidate.flags.inline;
             existing.callable.suspend = candidate.flags.suspend;
             existing.callable.is_abstract = candidate.flags.is_abstract;

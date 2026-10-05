@@ -56,6 +56,7 @@ pub(crate) use hierarchy_projection::{
 };
 use hierarchy_projection::{
     classifier_type_parameter_bounds, direct_supertypes_from_classifier, receiver_hierarchy,
+    supertype_with_classifier,
 };
 pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
@@ -1391,6 +1392,7 @@ fn ranked_extension_candidates<'a>(
     // final overload selection evaluates applicability one scope-tower rung at a time.
     out.sort_by_key(|(rank, _, o)| {
         let hides_members = o
+            .callable
             .annotations
             .contains(&crate::types::type_name("kotlin/internal/HidesMembers"));
         (
@@ -3504,14 +3506,23 @@ impl<'a> SymbolResolver<'a> {
                 .is_some()
         };
         if parsed.iter().any(|candidate| {
-            !candidate.0.annotations.contains(&crate::types::type_name(
-                "kotlin/internal/LowPriorityInOverloadResolution",
-            )) && applicable(candidate)
-        }) {
-            parsed.retain(|candidate| {
-                !candidate.0.annotations.contains(&crate::types::type_name(
+            !candidate
+                .0
+                .callable
+                .annotations
+                .contains(&crate::types::type_name(
                     "kotlin/internal/LowPriorityInOverloadResolution",
                 ))
+                && applicable(candidate)
+        }) {
+            parsed.retain(|candidate| {
+                !candidate
+                    .0
+                    .callable
+                    .annotations
+                    .contains(&crate::types::type_name(
+                        "kotlin/internal/LowPriorityInOverloadResolution",
+                    ))
             });
         }
 
@@ -5374,6 +5385,7 @@ fn select_overload_tracking_with_functions(
             .map(|(rank, receiver, overload)| {
                 (
                     if overload
+                        .callable
                         .annotations
                         .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
                     {
@@ -5382,6 +5394,7 @@ fn select_overload_tracking_with_functions(
                         EXTENSION_PRIORITY
                     },
                     if overload
+                        .callable
                         .annotations
                         .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
                     {
@@ -6054,9 +6067,12 @@ fn best_by_args_with_ties<'a>(
     let ordinary = cands
         .iter()
         .filter(|(candidate, _)| {
-            !candidate.annotations.contains(&crate::types::type_name(
-                "kotlin/internal/LowPriorityInOverloadResolution",
-            ))
+            !candidate
+                .callable
+                .annotations
+                .contains(&crate::types::type_name(
+                    "kotlin/internal/LowPriorityInOverloadResolution",
+                ))
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -6065,9 +6081,12 @@ fn best_by_args_with_ties<'a>(
             let low = cands
                 .iter()
                 .filter(|(candidate, _)| {
-                    candidate.annotations.contains(&crate::types::type_name(
-                        "kotlin/internal/LowPriorityInOverloadResolution",
-                    ))
+                    candidate
+                        .callable
+                        .annotations
+                        .contains(&crate::types::type_name(
+                            "kotlin/internal/LowPriorityInOverloadResolution",
+                        ))
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -7997,6 +8016,7 @@ mod tests {
             overridden_call_realizations: Box::new([]),
             declared_ret: None,
             overridden_results: Box::new([]),
+            annotations: Vec::new(),
         };
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),
