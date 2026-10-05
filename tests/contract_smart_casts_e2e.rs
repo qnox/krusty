@@ -138,3 +138,37 @@ fun aliasedEntry(block: () -> Unit) {
 fn star_imported_and_aliased_invocation_kinds_declare_their_entries() {
     byte_identical("ImportedKinds", IMPORTED_KINDS, "ImportedKindsKt");
 }
+
+/// A contract names its owner's parameters, so each conclusion narrows the argument the call's
+/// committed mapping gives that parameter, never the argument in the same source position: a value
+/// after a defaulted parameter, and named arguments in another order.
+const MAPPED_ARGUMENTS: &str = r#"
+@file:OptIn(kotlin.contracts.ExperimentalContracts::class)
+import kotlin.contracts.*
+
+fun afterDefault(prefix: String = "", value: Any?): Boolean {
+    contract { returns(true) implies (value is Int) }
+    return value is Int
+}
+
+fun defaulted(a: Any?): Int = if (afterDefault(value = a)) a + 1 else 0
+"#;
+
+const REORDERED_ARGUMENTS: &str = r#"
+@file:OptIn(kotlin.contracts.ExperimentalContracts::class)
+import kotlin.contracts.*
+
+fun second(first: Any?, second: Any?): Boolean {
+    contract { returns(true) implies (second is String) }
+    return second is String
+}
+
+fun reordered(a: Any?, b: Any?): Int = if (second(second = a, first = b)) a.length else 0
+fun box(): String = if (reordered("OK", 1) == 2) "OK" else "FAIL"
+"#;
+
+#[test]
+fn a_conclusion_narrows_the_argument_mapped_to_its_parameter() {
+    byte_identical("MappedArguments", MAPPED_ARGUMENTS, "MappedArgumentsKt");
+    common::assert_accepted_like_kotlinc(REORDERED_ARGUMENTS);
+}

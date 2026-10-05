@@ -3,6 +3,35 @@
 
 use super::*;
 
+/// What supplies one parameter of a selected call.
+enum ContractArgument<'c> {
+    Expression(ExprId),
+    Context(&'c ResolvedContextArgument),
+}
+
+/// The context parameters of selected call `call`, one entry per leading context parameter:
+/// the source selection chose from scope, or `None` for one written at the call site. A call
+/// call that is not an ordinary selected callable has no mapping.
+fn selected_context_arguments(
+    call: &ResolvedCall,
+) -> Option<Vec<Option<&ResolvedContextArgument>>> {
+    Some(match call {
+        ResolvedCall::Member(selected) => {
+            selected.context_args.iter().map(Option::as_ref).collect()
+        }
+        ResolvedCall::TopLevel(selected) => {
+            selected.context_args.iter().map(Option::as_ref).collect()
+        }
+        ResolvedCall::Extension(selected) => selected.context_args.iter().map(Some).collect(),
+        ResolvedCall::MemberExtension { context_args, .. } => {
+            context_args.iter().map(Option::as_ref).collect()
+        }
+        // A companion call commits no context arguments of its own.
+        ResolvedCall::Companion(member) if member.context_count == 0 => Vec::new(),
+        _ => return None,
+    })
+}
+
 impl Checker<'_> {
     /// Whether checked call `e` selected the platform's erased contract-declaration intrinsic. The
     /// call is checked like any other first; this reads the declaration overload selection
@@ -30,67 +59,76 @@ impl Checker<'_> {
         }
     }
 
-    /// The actual argument expression a contract [`crate::contracts::ParamRef`] refers to at
-    /// this call site: the receiver expression for `Receiver`, the i-th positional argument
-    /// for `Param(i)`.
+    /// The argument a contract [`crate::contracts::ParamRef`] refers to at selected call `call`,
+    /// from the mapping its selection committed. `Param(i)` indexes the declaration's logical
+    /// parameters, leading context parameters first. A context parameter is supplied by the
+    /// context source selection chose or, when written at the call site, by its argument; a value
+    /// parameter by the argument its committed slot holds. A parameter the mapping leaves without
+    /// an argument (a default, an empty vararg) has none.
+    fn contract_argument(
+        &self,
+        call: ExprId,
+        param: crate::contracts::ParamRef,
+    ) -> Option<ContractArgument<'_>> {
+        let crate::contracts::ParamRef::Param(index) = param else {
+            let Expr::Call { callee, .. } = self.file.expr(call) else {
+                return None;
+            };
+            return match self.file.expr(*callee) {
+                Expr::Member { receiver, .. } => Some(ContractArgument::Expression(*receiver)),
+                _ => None,
+            };
+        };
+        let contexts = selected_context_arguments(self.resolved_calls.get(&call)?)?;
+        let slots = self.resolved_call_arg_slots.get(&call);
+        // Explicit context arguments follow the value arguments in the committed slots.
+        let explicit_contexts = contexts.iter().filter(|source| source.is_none()).count();
+        let ordinary = slots.map(|slots| slots.len().checked_sub(explicit_contexts));
+        let slot = match contexts.get(index) {
+            Some(Some(source)) => return Some(ContractArgument::Context(source)),
+            Some(None) => {
+                let explicit = contexts[..index]
+                    .iter()
+                    .filter(|source| source.is_none())
+                    .count();
+                ordinary??.checked_add(explicit)?
+            }
+            None => index - contexts.len(),
+        };
+        slots?
+            .get(slot)
+            .copied()
+            .flatten()
+            .map(ContractArgument::Expression)
+    }
+
+    /// The argument expression a contract parameter refers to at this call site, when an
+    /// expression supplies it.
     pub(super) fn contract_arg_expr(
         &self,
         call: ExprId,
         param: crate::contracts::ParamRef,
     ) -> Option<ExprId> {
-        let Expr::Call { callee, args } = self.file.expr(call) else {
-            return None;
-        };
-        match param {
-            crate::contracts::ParamRef::Param(i) => self
-                .resolved_call_arg_slots
-                .get(&call)
-                .and_then(|slots| slots.get(i))
-                .copied()
-                .flatten()
-                .or_else(|| args.get(i).copied()),
-            crate::contracts::ParamRef::Receiver => match self.file.expr(*callee) {
-                Expr::Member { receiver, .. } => Some(*receiver),
-                _ => None,
-            },
+        match self.contract_argument(call, param)? {
+            ContractArgument::Expression(expression) => Some(expression),
+            ContractArgument::Context(_) => None,
         }
     }
 
-    /// The stable ACCESS PATH a contract parameter refers to at this call site: the positional
-    /// argument expression for `Param(i)`, the receiver expression for `Receiver` — a plain name
-    /// or a property path (`requireNotNull(a.b)`, `a.p.isNullOrBlank()`) — or, for a leading
-    /// CONTEXT parameter (supplied implicitly), the context SOURCE the checker resolved
-    /// (`with("O") { validate1() }` → `this`).
+    /// The stable ACCESS PATH a contract parameter refers to at this call site: its argument
+    /// expression when that is a plain name or a property path (`requireNotNull(a.b)`,
+    /// `a.p.isNullOrBlank()`), or the context source selection chose for a context parameter
+    /// supplied implicitly (`with("O") { validate1() }` → `this`).
     pub(super) fn contract_stable_arg_path(
         &self,
         scope: &CheckerScope<'_>,
         call: ExprId,
         param: crate::contracts::ParamRef,
     ) -> Option<NarrowPath> {
-        if let Some(path) = self
-            .contract_arg_expr(call, param)
-            .and_then(|e| self.expr_access_path(e))
-        {
-            return Some(path);
+        match self.contract_argument(call, param)? {
+            ContractArgument::Expression(expression) => self.expr_access_path(expression),
+            ContractArgument::Context(source) => self.context_argument_path(scope, source),
         }
-        // A leading context parameter: its "argument" is the implicit context source — recorded
-        // on the resolved module target for module calls, in the context-args map for classpath
-        // calls.
-        if let crate::contracts::ParamRef::Param(i) = param {
-            if let Some(sources) = self.context_args.get(&call) {
-                return sources
-                    .get(i)
-                    .and_then(|source| self.context_argument_path(scope, source));
-            }
-            if let Some(ResolvedCall::TopLevel(c)) = self.resolved_calls.get(&call) {
-                return c
-                    .context_args
-                    .get(i)
-                    .and_then(Option::as_ref)
-                    .and_then(|source| self.context_argument_path(scope, source));
-            }
-        }
-        None
     }
 
     /// Map a contract conclusion onto the call's actual arguments, producing `(path, Ty)`
@@ -119,36 +157,6 @@ impl Checker<'_> {
                 // Shared with the flow smart-cast paths (`stable_path_ty`): `this`,
                 // `var`-rejection, and the nullable unwrap must not drift by condition shape.
                 self.null_proof_or_decline(scope, &path, out, declined, self.span(call));
-            }
-            Condition::IsType {
-                param,
-                ty: ConditionType::Source(tyref),
-                negated: false,
-            } => {
-                let Some(path) = self.contract_stable_arg_path(scope, call, *param) else {
-                    return;
-                };
-                let tt = self
-                    .resolved_type_tys
-                    .get(&(tyref.span.lo, tyref.span.hi))
-                    .copied()
-                    .unwrap_or_else(|| self.type_ref_ty_silent(scope, tyref));
-                if tt == Ty::Error {
-                    return;
-                }
-                let site = self.span(call);
-                let Some(target) = self.type_test_target(
-                    self.stable_path_ty(scope, &path, site),
-                    tt,
-                    tyref.nullable(),
-                    tyref.targs.is_empty(),
-                ) else {
-                    return;
-                };
-                if !self.is_proof_stable_or_decline(scope, &path, target, declined, site) {
-                    return;
-                }
-                out.push((path, target));
             }
             Condition::IsType {
                 param,

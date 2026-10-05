@@ -11059,10 +11059,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Contracts.** A `returns(…) implies` conclusion narrows the caller's arguments like the
   matching `is` or null test, a primitive type included; a Boolean call in a condition applies
   `returns(true)`/`returns(false)`, and a call compared with `null` applies `returnsNotNull()`
-  (`!= null`) or `returns(null)` (`== null`). A final member function's contract narrows at its
-  call sites and is written to class metadata like a top-level one. An `is` conclusion's type goes
-  to the declaration's `type_table` (deduplicated) and the expression names it by
-  `is_instance_type_id`; a conjunction reuses its left operand's message and appends the right one
+  (`!= null`) or `returns(null)` (`== null`). A conclusion about a parameter narrows the
+  argument the call's committed mapping gives that parameter (named, reordered and after a
+  defaulted parameter alike) or, for a context parameter supplied from scope, the selected context
+  source; a parameter the mapping leaves without an argument narrows nothing. Its `is` type is the
+  one the declaration's own signature scope bound, never re-read at the call site. A final member
+  function's contract narrows at its call sites and is written to class metadata like a top-level
+  one. An `is` conclusion's type goes to the declaration's `type_table` (deduplicated) and the
+  expression names it by `is_instance_type_id`; a conjunction reuses its left operand's message and appends the right one
   as an `and_argument` (a disjunction as an `or_argument`), nesting the left operand only when it
   already carries the other connective. kotlinc's declaration errors are reported at the
   `contract` call: it must be the first statement of a function's block body (not of a lambda, an
