@@ -66,11 +66,6 @@ pub(crate) fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
                 .iter()
                 .for_each(|ty| collect_classifier_names(*ty, &mut out));
         }
-        if let Some(parameters) = &class.enum_entry_of {
-            parameters
-                .iter()
-                .for_each(|ty| collect_classifier_names(*ty, &mut out));
-        }
         if let Some(reference) = &class.func_ref {
             reference
                 .param_tys
