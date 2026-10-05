@@ -12918,10 +12918,30 @@ fn contextual_call_shape_with(
     })
 }
 
-/// Instantiate one member-extension shape against a call: bind method formals from the receiver and
-/// the argument types, then score applicability. Argument SYNTAX is reached only through the two
-/// caller-supplied probes, so a caller with no expressions (signature solving in Pass 1, where the
-/// only member-extension reads are zero-argument) passes probes that are never consulted.
+/// Constrain one declared member-extension slot by its call-site evidence. The slot is unified both
+/// as declared and as already applied, so a formal reached only through another formal's solution
+/// (`P` bound to `List<Q>`) still learns from the argument. An active postponed call owns its own
+/// variables (`E` of `produce { onSend.call("") }`), so this nested candidate leaves those entries
+/// untouched and lets the argument check report the constraint to that owning frame. Every other
+/// solution remains candidate-local inference, including a delegate factory's formals and a stable
+/// enclosing declaration's type parameters.
+fn unify_member_extension_slot(
+    declared: Ty,
+    actual: Ty,
+    deferred_type_variables: &[String],
+    bindings: &mut crate::symbol_resolver::GSigBinds,
+) {
+    let mut inferred = bindings.clone();
+    let applied = apply_inference_bindings(declared, &inferred);
+    crate::symbol_resolver::unify_ty(applied, actual, &mut inferred);
+    crate::symbol_resolver::unify_ty(declared, actual, &mut inferred);
+    for (formal, solution) in inferred {
+        if !deferred_type_variables.contains(&formal) {
+            bindings.insert(formal, solution);
+        }
+    }
+}
+
 fn apply_inference_bindings(mut ty: Ty, bindings: &crate::symbol_resolver::GSigBinds) -> Ty {
     let mut seen = std::collections::HashSet::new();
     while seen.insert(ty) {
@@ -12934,17 +12954,42 @@ fn apply_inference_bindings(mut ty: Ty, bindings: &crate::symbol_resolver::GSigB
     ty
 }
 
-#[allow(clippy::too_many_arguments)]
-fn instantiate_member_extension_with(
+/// The caller-owned views a member-extension selection consults: how implicit context arguments
+/// are found, and how source arguments are inspected and scored. Signature solving has no
+/// expressions, so it supplies probes that never dereference argument syntax.
+#[derive(Clone, Copy)]
+pub(crate) struct MemberExtensionProbes<'p> {
     explicit_context_arguments: bool,
-    select_context_arguments: &ContextArgumentSelector<'_>,
-    is_spread_arg: &dyn Fn(usize) -> bool,
-    unit_coerced_lambda: &dyn Fn(usize, Ty, Ty) -> Option<Ty>,
-    score_candidate: &dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallCandidateScore>,
+    /// Variables owned by an active postponed-call frame. A nested candidate may expose them in an
+    /// applied parameter but must not consume their constraints before the owning frame sees them.
+    deferred_type_variables: &'p [String],
+    select_context_arguments: &'p ContextArgumentSelector<'p>,
+    is_spread_arg: &'p dyn Fn(usize) -> bool,
+    unit_coerced_lambda: &'p dyn Fn(usize, Ty, Ty) -> Option<Ty>,
+    score_candidate: &'p CandidateScorer<'p>,
+}
+
+/// Scores one candidate's parameters against the call's argument slots; `None` is inapplicable.
+type CandidateScorer<'s> = dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallCandidateScore> + 's;
+
+/// Instantiate one member-extension shape against a call: bind method formals from the receiver and
+/// the argument types, then score applicability. Argument SYNTAX is reached only through the
+/// caller-supplied probes, so a caller with no expressions (signature solving in Pass 1, where the
+/// only member-extension reads are zero-argument) passes probes that are never consulted.
+fn instantiate_member_extension_with(
+    probes: MemberExtensionProbes<'_>,
     result_constraint: CallResultConstraint,
     shape: &MemberExtensionFunctionShape,
     call: MemberExtensionCall<'_>,
 ) -> Option<InstantiatedMemberExtension> {
+    let MemberExtensionProbes {
+        explicit_context_arguments,
+        deferred_type_variables,
+        select_context_arguments,
+        is_spread_arg,
+        unit_coerced_lambda,
+        score_candidate,
+    } = probes;
     let MemberExtensionCall {
         extension_receiver,
         name,
@@ -13006,9 +13051,7 @@ fn instantiate_member_extension_with(
     for (parameter, actual) in context_actual_types.iter().enumerate() {
         let Some(actual) = actual else { continue };
         let declared = declared_params[parameter];
-        let applied = apply_inference_bindings(declared, &bindings);
-        crate::symbol_resolver::unify_ty(applied, *actual, &mut bindings);
-        crate::symbol_resolver::unify_ty(declared, *actual, &mut bindings);
+        unify_member_extension_slot(declared, *actual, deferred_type_variables, &mut bindings);
     }
     // Use the common index mapper over the SOURCE-VISIBLE shape. Implicit context parameters are
     // absent; explicitly named ones are present at the end and map back through
@@ -13047,16 +13090,17 @@ fn instantiate_member_extension_with(
         } else {
             *actual
         };
-        let applied = apply_inference_bindings(declared, &bindings);
-        crate::symbol_resolver::unify_ty(applied, actual, &mut bindings);
-        crate::symbol_resolver::unify_ty(declared, actual, &mut bindings);
+        unify_member_extension_slot(declared, actual, deferred_type_variables, &mut bindings);
     }
     if let Some(expected) = result_constraint.expected() {
         let declared_ret = generic.map_or(function.signature.ret, |signature| signature.ret);
         let declared_ret = result_constraint.declaration_result(declared_ret);
-        let applied = apply_inference_bindings(declared_ret, &bindings);
-        crate::symbol_resolver::unify_ty(applied, expected, &mut bindings);
-        crate::symbol_resolver::unify_ty(declared_ret, expected, &mut bindings);
+        unify_member_extension_slot(
+            declared_ret,
+            expected,
+            deferred_type_variables,
+            &mut bindings,
+        );
     }
     for (index, parameter) in method_type_params {
         let fallback = generic
@@ -35551,16 +35595,11 @@ impl<'a> Checker<'a> {
 }
 
 /// Select one member-extension function using caller-owned source, receivers, and call probes.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn member_extension_function_with(
     source: &dyn SymbolSource,
     oracle: &dyn crate::assignable::TypeOracle,
     receivers: &[ImplicitReceiver],
-    explicit_context_arguments: bool,
-    select_context_arguments: &ContextArgumentSelector<'_>,
-    is_spread_arg: &dyn Fn(usize) -> bool,
-    unit_coerced_lambda: &dyn Fn(usize, Ty, Ty) -> Option<Ty>,
-    score_candidate: &dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallCandidateScore>,
+    probes: MemberExtensionProbes<'_>,
     call: MemberExtensionFunctionCall<'_>,
     selection: MemberExtensionSelection,
 ) -> MemberExtensionFunctionSelection {
@@ -35582,11 +35621,7 @@ pub(crate) fn member_extension_function_with(
             continue;
         }
         let Some(instantiated) = instantiate_member_extension_with(
-            explicit_context_arguments,
-            select_context_arguments,
-            is_spread_arg,
-            unit_coerced_lambda,
-            score_candidate,
+            probes,
             result_constraint,
             &shape,
             MemberExtensionCall {
@@ -71613,14 +71648,22 @@ impl<'a> Checker<'a> {
         result_constraint: CallResultConstraint,
     ) -> Option<InstantiatedMemberExtension> {
         let args = call.args;
+        let deferred_type_variables = self.active_postponed_type_variables();
         instantiate_member_extension_with(
-            self.file.explicit_context_arguments,
-            &|parameters| self.select_context_arguments_with_types(scope, parameters),
-            &|source| self.file.is_spread_arg(args[source]),
-            &|source, expected, actual| {
-                self.unit_coerced_lambda_type(args[source], expected, actual)
+            MemberExtensionProbes {
+                explicit_context_arguments: self.file.explicit_context_arguments,
+                deferred_type_variables: &deferred_type_variables,
+                select_context_arguments: &|parameters| {
+                    self.select_context_arguments_with_types(scope, parameters)
+                },
+                is_spread_arg: &|source| self.file.is_spread_arg(args[source]),
+                unit_coerced_lambda: &|source, expected, actual| {
+                    self.unit_coerced_lambda_type(args[source], expected, actual)
+                },
+                score_candidate: &|params, call_sig, slots| {
+                    self.call_candidate_score(scope, params, call_sig, slots)
+                },
             },
-            &|params, call_sig, slots| self.call_candidate_score(scope, params, call_sig, slots),
             result_constraint,
             shape,
             call,
@@ -71651,17 +71694,25 @@ impl<'a> Checker<'a> {
         let receivers =
             member_extension_selection::ordinary_dispatch_first(scope, receivers.to_vec());
         let args = call.args;
+        let deferred_type_variables = self.active_postponed_type_variables();
         member_extension_function_with(
             &self.fed_source(),
             self,
             &receivers,
-            self.file.explicit_context_arguments,
-            &|parameters| self.select_context_arguments_with_types(scope, parameters),
-            &|source| self.file.is_spread_arg(args[source]),
-            &|source, expected, actual| {
-                self.unit_coerced_lambda_type(args[source], expected, actual)
+            MemberExtensionProbes {
+                explicit_context_arguments: self.file.explicit_context_arguments,
+                deferred_type_variables: &deferred_type_variables,
+                select_context_arguments: &|parameters| {
+                    self.select_context_arguments_with_types(scope, parameters)
+                },
+                is_spread_arg: &|source| self.file.is_spread_arg(args[source]),
+                unit_coerced_lambda: &|source, expected, actual| {
+                    self.unit_coerced_lambda_type(args[source], expected, actual)
+                },
+                score_candidate: &|params, call_sig, slots| {
+                    self.call_candidate_score(scope, params, call_sig, slots)
+                },
             },
-            &|params, call_sig, slots| self.call_candidate_score(scope, params, call_sig, slots),
             call,
             selection,
         )

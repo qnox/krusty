@@ -47,6 +47,10 @@ pub(super) struct RewriteSource {
     /// The pool entries the coroutine transformer interned for the body it put in place of this
     /// one. That body is final, and no rewrite reads the emitter's labels for it.
     pub transformed: Option<std::ops::Range<u16>>,
+    /// The pool entries the transformer named for the class ahead of that body (a suspend
+    /// lambda's spill fields and `@DebugMetadata`), which kotlinc's writer interns before the
+    /// body's code.
+    pub transformed_leading: Vec<u16>,
 }
 
 impl RewriteSource {
@@ -59,6 +63,7 @@ impl RewriteSource {
             decided: None,
             pool_end: None,
             transformed: None,
+            transformed_leading: Vec::new(),
         })
     }
 }
@@ -194,6 +199,7 @@ impl ClassWriter {
                 relaid.push(RelaidMethod {
                     index,
                     added: added_after + 1..previous_end.max(added_after) + 1,
+                    leading: std::mem::take(&mut source.transformed_leading),
                     interned,
                 });
                 continue;
@@ -220,6 +226,7 @@ impl ClassWriter {
                     relaid.push(RelaidMethod {
                         index,
                         added: added_after + 1..previous_end.max(added_after) + 1,
+                        leading: Vec::new(),
                         interned: interned_after + 1..self.cp.slot_count() + 1,
                     });
                 }
@@ -229,6 +236,7 @@ impl ClassWriter {
             relaid.push(RelaidMethod {
                 index,
                 added: added_after + 1..previous_end.max(added_after) + 1,
+                leading: Vec::new(),
                 interned: interned_after + 1..self.cp.slot_count() + 1,
             });
             crate::trace_compiler!("bytecode", "rewrote {}{}", source.name, source.desc);
