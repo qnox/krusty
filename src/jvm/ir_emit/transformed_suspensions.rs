@@ -27,6 +27,9 @@ use crate::types::Ty;
 pub(super) struct TransformedSuspensions {
     results: HashMap<ExprId, Ty>,
     fake_continuations: HashSet<ExprId>,
+    /// The suspension point a local declaration's initializer is, while that initializer is
+    /// emitted: kotlinc's `visitVariable` marks the initializer's line before casting its value.
+    initializer: Option<ExprId>,
 }
 
 /// What a suspension point leaves on the stack after its invoke.
@@ -67,6 +70,34 @@ impl Emitter<'_> {
         code.aconst_null();
         let continuation = self.cw.class_ref("kotlin/coroutines/Continuation");
         code.checkcast(continuation);
+    }
+
+    /// Note that `initializer`, a local declaration's, is about to be emitted, returning the
+    /// initializer noted before it for [`Self::leave_declared_initializer`]. A coercion to a
+    /// reference type or a statement-less block around a suspension point is that point.
+    pub(super) fn enter_declared_initializer(&mut self, initializer: ExprId) -> Option<ExprId> {
+        let mut e = initializer;
+        loop {
+            e = match self.ir.expr(e) {
+                IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => *arg,
+                IrExpr::Block {
+                    stmts,
+                    value: Some(value),
+                } if stmts.is_empty() => *value,
+                _ => break,
+            };
+        }
+        let point = self.transformed_result(e).map(|_| e);
+        std::mem::replace(&mut self.transformed_suspensions.initializer, point)
+    }
+
+    /// Restore the initializer noted before [`Self::enter_declared_initializer`].
+    pub(super) fn leave_declared_initializer(&mut self, previous: Option<ExprId>) {
+        self.transformed_suspensions.initializer = previous;
     }
 
     /// Whether `e` is a `suspendCoroutineUninterceptedOrReturn` block the transformer takes, whose
@@ -181,12 +212,14 @@ impl Emitter<'_> {
             return;
         }
         let discarded = leave == SuspensionResult::Discarded;
-        // A used result is read as the declared type at the call's own line once an inlined body
-        // ran under its own lines: the block's, or an inline suspend call's, after which the caller's
-        // line was forgotten (kotlinc's `markLineNumberAfterInlineIfNeeded`).
-        let inlined = block || code.line_forgotten();
+        // A used result is read as the declared type at the call's own line after the block. A
+        // declaration's initializer is too once an inline suspend call's body left the caller's
+        // line forgotten: kotlinc's `visitVariable` marks it before the cast. Anywhere else the
+        // next line mark is the consumer's own.
+        let initializer = self.transformed_suspensions.initializer == Some(e);
+        let marked = block || (initializer && code.line_forgotten());
         match self.ir.expr_source_lines.get(&e) {
-            Some(&line) if inlined && !discarded && line != 0 => code.mark_line(line),
+            Some(&line) if marked && !discarded && line != 0 => code.mark_line(line),
             _ => {}
         }
         let target = jvm_declared_ty(&result);
@@ -230,6 +263,7 @@ impl Emitter<'_> {
                 .map(|suspension| (suspension.call, suspension.result))
                 .collect(),
             fake_continuations: machine.fake_continuations.iter().copied().collect(),
+            initializer: None,
         };
         self.suspend_lambda_parameter_reads = machine
             .lambda

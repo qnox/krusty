@@ -93,7 +93,16 @@ impl Emitter<'_> {
                 if emit_deferred_zero(self.ir, declaration, initializer, slot_ty, code, self.cw) {
                     slot_ty
                 } else {
-                    self.emit_consumed_operand(initializer, code)
+                    // A call-operand holder is no declaration of kotlinc's: its operand is read
+                    // where the call consumes it.
+                    if holds_operand {
+                        self.emit_consumed_operand(initializer, code)
+                    } else {
+                        let previous = self.enter_declared_initializer(initializer);
+                        let source = self.emit_consumed_operand(initializer, code);
+                        self.leave_declared_initializer(previous);
+                        source
+                    }
                 };
             let semantic = self
                 .ir

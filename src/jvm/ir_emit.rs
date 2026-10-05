@@ -7239,20 +7239,25 @@ impl<'a> Emitter<'a> {
             splice_desc,
             inline_only,
             allow_owner_bridge,
+            for_inline_copy,
         } = target;
         crate::trace_compiler!(
             "splice",
             "inline target {owner}.{name}{descriptor} splice_descriptor={splice_desc} args={}",
             args.len()
         );
-        // kotlinc splices a suspend inline function's `name$$forInline` copy, which keeps the
-        // suspension markers its transformed `name` body has already lowered into a state machine.
-        let Some(body) = self
-            .bodies
-            .body(owner, &format!("{name}$$forInline"), descriptor)
-            .or_else(|| self.bodies.body(owner, name, descriptor))
-        else {
-            crate::trace_compiler!("splice", "no body for {owner}.{name}{descriptor}");
+        // Only a callable suspend inline function's `$$forInline` copy is spliced: its `name` body
+        // is already the callee's own state machine. Without the copy the call declines (a
+        // must-inline one bails), never splicing that machine.
+        let for_inline;
+        let body_name = if for_inline_copy {
+            for_inline = format!("{name}$$forInline");
+            for_inline.as_str()
+        } else {
+            name
+        };
+        let Some(body) = self.bodies.body(owner, body_name, descriptor) else {
+            crate::trace_compiler!("splice", "no body for {owner}.{body_name}{descriptor}");
             return false;
         };
         // A body that references a PRIVATE member (its own facade's helper or backing field) runs
