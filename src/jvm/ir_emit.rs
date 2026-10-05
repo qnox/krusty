@@ -3740,10 +3740,13 @@ fn emit_interface_class(
             &mut cw,
             c.fq_name,
             c.decl_line,
-            &f.name,
-            &physical_params,
-            &parameter_names,
-            jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+            JdAccessBridgeMember {
+                name: &f.name,
+                param_tys: &physical_params,
+                parameter_names: &parameter_names,
+                ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+                varargs: method_access::varargs_access(ir, fid),
+            },
         );
     }
     if enable_compat {
@@ -5020,6 +5023,16 @@ fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
         .collect()
 }
 
+/// The member shape carried through an `access$<name>$jd` bridge. The vararg bit is a recorded
+/// declaration fact, not inferred from an array descriptor.
+pub(super) struct JdAccessBridgeMember<'a> {
+    pub(super) name: &'a str,
+    pub(super) param_tys: &'a [Ty],
+    pub(super) parameter_names: &'a [Option<String>],
+    pub(super) ret: Ty,
+    pub(super) varargs: u16,
+}
+
 /// The `access$<name>$jd` bridge kotlinc puts on an `enable`-mode interface for each of its
 /// non-private default methods: a `public static synthetic` whose body makes the NON-VIRTUAL call
 /// (`invokespecial` on the interface's own method) that the `$DefaultImpls` forward and legacy
@@ -5029,11 +5042,15 @@ fn emit_jd_access_bridge(
     cw: &mut ClassWriter,
     interface: crate::types::TypeName,
     decl_line: u32,
-    member_name: &str,
-    param_tys: &[Ty],
-    parameter_names: &[Option<String>],
-    ret: Ty,
+    member: JdAccessBridgeMember<'_>,
 ) {
+    let JdAccessBridgeMember {
+        name: member_name,
+        param_tys,
+        parameter_names,
+        ret,
+        varargs,
+    } = member;
     assert_eq!(
         parameter_names.len(),
         param_tys.len(),
@@ -5061,7 +5078,11 @@ fn emit_jd_access_bridge(
     let target = cw.interface_methodref(&fq, member_name, &member_desc);
     code.invokespecial(target, argument_words as i32, slot_words(ret) as i32);
     emit_return(ret, &mut code);
-    finish_code::<0x1009>(cw, &name, &bridge_desc, &mut code, argument_words); // PUBLIC | STATIC | SYNTHETIC
+    code.ensure_locals(argument_words);
+    code.link();
+    // PUBLIC | STATIC | SYNTHETIC, plus the selected member's own ACC_VARARGS when its last
+    // physical parameter is the declared vararg.
+    cw.add_method_sig(0x1009 | varargs, &name, &bridge_desc, &code, None);
     let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
     let mut slot = 1u16;
     for (index, parameter) in param_tys.iter().enumerate() {
