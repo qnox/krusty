@@ -35790,6 +35790,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_declaration_type_parameters: HashMap::new(),
         class_literal_targets: HashMap::new(),
         applied_annotations: HashMap::new(),
+        bound_annotation_identities: HashMap::new(),
         ret_ty: Ty::Unit,
         type_parameter_owners: HashMap::new(),
         expected: None,
@@ -36946,6 +36947,17 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         CaptureDiscovery::Published | CaptureDiscovery::Scratch => {}
     }
     c.fragment = fragment;
+    if fragment.publishes_annotation_metadata() {
+        let symbols = syms
+            .pass_one_symbols()
+            .expect("annotation metadata publication requires Pass-1 occurrence bindings");
+        c.bound_annotation_identities
+            .extend(symbols.resolved_annotations.iter().filter_map(
+                |(&(source, lo, hi), &identity)| {
+                    (source == file_index).then_some(((lo, hi), identity))
+                },
+            ));
+    }
     c.signature_defaults_only = fragment.is_signature_defaults();
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
@@ -38377,6 +38389,10 @@ struct Checker<'a> {
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
     class_literal_targets: HashMap<ExprId, TypeName>,
     applied_annotations: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
+    /// Exact Pass-1 binding for each annotation occurrence owned by a bounded metadata fragment.
+    /// The fragment consumes this handoff directly instead of reopening the temporary module
+    /// provider or resolving the source spelling a second time.
+    bound_annotation_identities: HashMap<(u32, u32), TypeName>,
     ret_ty: Ty,
     /// kotlinc's owner wording (`fun <T : B> f`) of each declaration-owned type parameter checked
     /// so far, keyed by semantic identity, solely for diagnostics.

@@ -39,9 +39,9 @@ impl Checker<'_> {
             // identity directly: resolving its spelling again after actualization could resurrect
             // a target-excluded optional-expect annotation or select a different scope rung.
             let Some(internal) = self
-                .module
-                .legacy_symbols()
-                .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
+                .bound_annotation_identities
+                .get(&(annotation.span.lo, annotation.span.hi))
+                .copied()
             else {
                 return;
             };

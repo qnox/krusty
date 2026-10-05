@@ -151,11 +151,9 @@ impl Checker<'_> {
             .into_iter()
             .flat_map(|(_, annotations)| annotations)
         {
-            if self
-                .module
-                .legacy_symbols()
-                .and_then(|symbols| symbols.resolved_annotation(self.file_index, &annotation))
-                .is_none()
+            if !self
+                .bound_annotation_identities
+                .contains_key(&(annotation.span.lo, annotation.span.hi))
             {
                 continue;
             }
