@@ -476,6 +476,14 @@ pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealizat
         return MemberRealization::Intrinsic(CompilerIntrinsic::PrimitiveHashCode);
     }
 
+    if facts.name == "equals"
+        && facts.params == [Ty::nullable(Ty::obj("kotlin/Any"))]
+        && facts.ret == Ty::Boolean
+        && receiver.is_some()
+    {
+        return MemberRealization::Intrinsic(CompilerIntrinsic::PrimitiveEquals);
+    }
+
     if facts.owner.matches("kotlin/Boolean")
         && facts.name == "not"
         && facts.is_operator
