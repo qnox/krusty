@@ -290,6 +290,7 @@ fn realize_adapter_reference(
             ..
         }
     );
+    let inherited_owner = reference.reflection_owner;
     let (owner_class, name, top_level, reflection_signature) = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(target) => {
             let declaration = ir
@@ -303,7 +304,12 @@ fn realize_adapter_reference(
                 (crate::ir::IrStaticPlacement::CompanionBlock { declaring_class }, _) => {
                     (Some(declaring_class), false)
                 }
-                (crate::ir::IrStaticPlacement::Package, Some(owner)) => (Some(owner), false),
+                (crate::ir::IrStaticPlacement::Package, Some(owner)) => {
+                    // `A::foo` names the member on A even when the declaration lives on a supertype.
+                    // kotlin-reflect substitutes the return type from that owner (`test.A?`), not
+                    // from the declaring class (`T?`). `H<A>::foo` still names H.
+                    (Some(inherited_owner.unwrap_or(owner)), false)
+                }
                 (crate::ir::IrStaticPlacement::Package, None) => (
                     Some(
                         super::module_calls::facade_for(declaration.source, facades.stems)
@@ -891,6 +897,7 @@ mod tests {
             declaration_result: signature.ret,
             declaration_suspend,
             adaptation: None,
+            reflection_owner: None,
         };
         own_invoke_realizable(&ir, &reference)
     }

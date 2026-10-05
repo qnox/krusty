@@ -235,6 +235,7 @@ impl BodyLowering<'_> {
                     declaration_result: target_result.get(),
                     declaration_suspend: target_suspend,
                     adaptation: None,
+                    reflection_owner: None,
                 })))
         } else {
             Ok(self.ir.add_expr(IrExpr::Lambda {

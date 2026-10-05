@@ -22,6 +22,12 @@ pub(super) struct CheckedCallableReference<'a> {
     pub(super) adaptation: Option<&'a crate::fir::FirReferenceAdaptation>,
     pub(super) reference_ty: crate::types::Ty,
     pub(super) reflective: bool,
+    pub(super) reflection_owner: Option<crate::types::TypeName>,
+}
+
+struct MaterializedCallableReference {
+    ty: crate::types::Ty,
+    reflection_owner: Option<crate::types::TypeName>,
 }
 
 impl BodyLowering<'_> {
@@ -150,6 +156,7 @@ impl BodyLowering<'_> {
             adaptation,
             reference_ty,
             reflective,
+            reflection_owner,
         } = reference;
         if let crate::fir::FirCallableReferenceTarget::Constructor {
             target,
@@ -226,7 +233,10 @@ impl BodyLowering<'_> {
                 extension_receiver,
                 substitutions,
                 adaptation,
-                reference_ty,
+                super::external_references::CheckedExternalReference {
+                    ty: reference_ty,
+                    reflection_owner,
+                },
             );
         };
         let callable = self
@@ -242,7 +252,10 @@ impl BodyLowering<'_> {
             extension_receiver,
             substitutions,
             adaptation,
-            reference_ty,
+            MaterializedCallableReference {
+                ty: reference_ty,
+                reflection_owner,
+            },
         )? {
             return Ok(reference);
         }
@@ -257,8 +270,12 @@ impl BodyLowering<'_> {
         extension_capture: Option<ExprId>,
         substitutions: &[FirTypeSubstitution],
         adaptation: Option<&crate::fir::FirReferenceAdaptation>,
-        reference_ty: crate::types::Ty,
+        reference: MaterializedCallableReference,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
+        let MaterializedCallableReference {
+            ty: reference_ty,
+            reflection_owner,
+        } = reference;
         let crate::types::Ty::Fun(reference) = reference_ty.non_null() else {
             return Ok(None);
         };
@@ -509,6 +526,7 @@ impl BodyLowering<'_> {
                 declaration_result: signature_result,
                 declaration_suspend,
                 adaptation: adaptation.cloned().map(Box::new),
+                reflection_owner,
             },
         ))))
     }

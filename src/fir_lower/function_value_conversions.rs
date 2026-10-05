@@ -92,6 +92,7 @@ impl BodyLowering<'_> {
                     declaration_result: target.ret,
                     declaration_suspend: target.suspend,
                     adaptation: None,
+                    reflection_owner: None,
                 })),
         )
     }

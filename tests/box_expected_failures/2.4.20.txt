@@ -28,7 +28,6 @@ functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
-reflection/functions/genericOverriddenFunction.kt
 reflection/properties/genericOverriddenProperty.kt
 reflection/typeOf/intersectionType.kt
 reflection/typeOf/localClass.kt

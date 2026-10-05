@@ -291,6 +291,9 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
             reference.function_type = ty(reference.function_type, names);
             tys(&mut reference.declaration_parameters, names);
             reference.declaration_result = ty(reference.declaration_result, names);
+            if let Some(owner) = &mut reference.reflection_owner {
+                name(owner, names);
+            }
         }
         IrExpr::ClassConst {
             internal: Some(classifier),
