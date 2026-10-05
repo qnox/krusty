@@ -6306,7 +6306,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   PRIMITIVE-typed default slot passes the primitive zero (`iconst_0`), not `null` — `zero_placeholder` maps
   a non-nullable boxed-primitive `Obj("kotlin/Int")` (a JVM `int`) to `0`.
   A non-null type parameter bounded by a JVM primitive (`T : Char`) stays that primitive on the real
-  method and is the JDK wrapper (`java.lang.Character`) on the `$default` stub. An omitted call-site
+  method and is the JDK wrapper (`java.lang.Character`) on the `$default` stub when the parameter
+  declares a default; one without a default, and a captured value, stay the primitive on the stub
+  too (`fun <C : Char> f(a: C, b: C = a)` gives `f$default(char, Character, int, Object)`). A call
+  from another file reads which parameters declare defaults from the callee's header. An omitted call-site
   slot is `iconst_0; Character.valueOf`, the stub stores the default expression with the same
   `valueOf`, and the forward call unboxes with `charValue` (and the corresponding `valueOf` /
   `xxxValue` pair for the other primitive bounds). A nullable `T?` is already the wrapper on both

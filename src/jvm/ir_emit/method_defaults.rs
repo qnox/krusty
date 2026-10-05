@@ -1,9 +1,7 @@
 //! JVM realization of default-valued function and method parameters.
 
 use super::*;
-use crate::jvm::default_parameter_representation::{
-    primitive_bounded_type_parameter, primitive_unbox_method, primitive_wrapper,
-};
+use crate::jvm::default_parameter_representation::{primitive_unbox_method, primitive_wrapper};
 
 /// kotlinc opens an inheritable member's `$default` synthetic with a guard on the trailing marker:
 /// a `super.m()` call carrying defaults cannot dispatch through the virtual forwarding stub.
@@ -214,22 +212,10 @@ pub(super) fn default_stub_boxed_parameters(ir: &IrFile, fid: u32) -> HashMap<us
         .unwrap_or_default()
 }
 
-/// A non-null type parameter whose upper bound is a JVM primitive (`T : Char`) is that primitive
-/// on the real method, and the boxed bound (`java.lang.Character`) on the `$default` stub.
-fn primitive_type_parameter_box(declared: Ty) -> Option<Ty> {
-    primitive_bounded_type_parameter(declared).map(|(_, wrapper)| wrapper)
-}
-
 pub(super) fn stub_parameter_type(ir: &IrFile, fid: u32, index: usize, physical: Ty) -> Ty {
     default_stub_boxed_parameters(ir, fid)
         .get(&index)
         .copied()
-        .or_else(|| {
-            ir.functions
-                .get(fid as usize)
-                .and_then(|function| function.params.get(index).copied())
-                .and_then(primitive_type_parameter_box)
-        })
         .unwrap_or(physical)
 }
 

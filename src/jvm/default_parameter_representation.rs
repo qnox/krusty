@@ -1,10 +1,61 @@
 //! JVM representation facts shared by default-stub realization and emission.
 //!
 //! A primitive-bounded Kotlin type parameter has two physical forms at this boundary: its real
-//! method uses the primitive bound, while its `$default` stub uses the corresponding JDK wrapper.
+//! method uses the primitive bound, and its `$default` stub uses the corresponding JDK wrapper when
+//! the parameter has a default. kotlinc's stub takes a parameter without one as the primitive:
+//! `fun <C : Char> f(a: C, b: C = a)` gives `f$default(char, Character, int, Object)`.
 
+use crate::ir::IrFile;
 use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::types::Ty;
+
+/// Record, with the parameters each `$default` stub takes boxed, every defaulted one that is a
+/// primitive-bounded type parameter, as its JDK wrapper.
+pub(super) fn record_defaulted_primitive_bounds(ir: &mut IrFile) {
+    let mut boxed = Vec::new();
+    for (&function, parameters) in &ir.fn_params {
+        let Some(defaults) = &parameters.defaults else {
+            continue;
+        };
+        let declaration = &ir.functions[function as usize];
+        // The defaults are recorded before a value class's member becomes static over its
+        // receiver.
+        let receiver =
+            usize::from(declaration.is_static && declaration.dispatch_receiver.is_some());
+        let defaulted = (0..declaration.params.len())
+            .filter(|&index| {
+                index
+                    .checked_sub(receiver)
+                    .and_then(|index| defaults.get(index))
+                    .is_some_and(Option::is_some)
+            })
+            .collect::<Vec<_>>();
+        for (index, wrapper) in defaulted_primitive_bounds(&declaration.params, &defaulted) {
+            boxed.push((function, index, wrapper));
+        }
+    }
+    for (function, index, wrapper) in boxed {
+        ir.default_stub_boxed_params
+            .entry(function)
+            .or_default()
+            .push((index, wrapper));
+    }
+}
+
+/// Each of the `defaulted` positions of `parameters` that is a primitive-bounded type parameter,
+/// with the JDK wrapper the `$default` stub takes it as.
+pub(super) fn defaulted_primitive_bounds(
+    parameters: &[Ty],
+    defaulted: &[usize],
+) -> Vec<(usize, Ty)> {
+    defaulted
+        .iter()
+        .filter_map(|&index| {
+            let (_, wrapper) = primitive_bounded_type_parameter(*parameters.get(index)?)?;
+            Some((index, wrapper))
+        })
+        .collect()
+}
 
 /// `(primitive, JDK wrapper)` when `declared` is a non-null type parameter bounded by a JVM
 /// primitive.
