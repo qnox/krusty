@@ -1646,11 +1646,19 @@ impl super::Emitter<'_> {
                             self.classifiers,
                             self.run,
                         );
-                        match class_lambda_reflection::reflect(self.ir, e, *impl_fn, &formatter) {
+                        let invoke = class_lambda_reflection::ClassLambdaInvoke {
+                            own: lam_tys,
+                            result: impl_ret,
+                        };
+                        match class_lambda_reflection::reflect(
+                            self.ir, e, *impl_fn, invoke, &formatter,
+                        ) {
                             Ok(reflection) => reflection,
                             Err(error) => {
+                                // The class is discarded; a placeholder keeps the frames
+                                // computable.
                                 self.run.set_emit_error(error);
-                                return;
+                                return code.aconst_null();
                             }
                         }
                     } else {
@@ -1871,7 +1879,7 @@ impl super::Emitter<'_> {
                     self.release_operand_spills(&temps);
                 } else {
                     self.emit_value(*holder, code);
-                    self.emit_value(*value, code);
+                    self.emit_element_value(*elem, *value, code);
                 }
                 let (cls, fdesc) = ref_class(elem);
                 let f = self.cw.fieldref(cls, "element", fdesc);
