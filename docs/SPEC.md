@@ -4390,6 +4390,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameters (kotlinc's `JvmDefaultConstructorLowering`); a declared `constructor()` owns that
   descriptor. Tests: `tests/constructor_argument_specificity_e2e.rs`.
 
+- **A call reordered by named arguments stores only what kotlinc stores.** Each argument is stored
+  in a temporary in source order, except one kotlinc passes in place because evaluating it has no
+  effect to reorder: a constant (folded ones such as `1 + 2` and `"a" + "b"` included), a read of a
+  `val`, a parameter or a receiver, a function literal that is not SAM-converted, an unbound
+  callable reference and an unbound class literal. A `var` read, an object, a string template, a
+  property read and a SAM-converted lambda are stored. A scalar stored for a reference parameter is
+  boxed where it is passed. Operands stored because one of them suspends or because the callee is an
+  inline function from a dependency are unchanged. Tests: `tests/named_argument_operands_e2e.rs`.
+
 - **Method type parameter that shadows its class's (`class Box<T> { fun <T> m(x: T): T }`).** The
   classpath member-return substitution (`JvmLibraries::member_return`) binds a generic class's formal
   type parameters to the receiver's type arguments (`Box<String>` → `{T: String}`) and substitutes a
