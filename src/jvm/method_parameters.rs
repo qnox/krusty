@@ -153,12 +153,14 @@ fn function_parameter_flags(role: IrParameterRole, moved_receivers: bool) -> u16
 
 /// The interface entry a value class keeps on its box for a member lowered to a static `-impl`
 /// declares that member's parameters less the carrier, named as the member names them. Its
-/// extension receiver is the receiver of an instance method again, so it has no flag (`$this$abs`
-/// beside the static's mandated one). `member_parameters` are the static's physical parameters.
+/// extension receiver is the receiver of an instance method again, so it has no flag and is
+/// labeled after the entry's own name `entry_name` (`$this$getC` beside the static's mandated
+/// `$this$c`). `member_parameters` are the static's physical parameters.
 pub(super) fn value_class_interface_entry(
     ir: &IrFile,
     member: u32,
     member_parameters: &[Ty],
+    entry_name: &str,
     entry_parameters: usize,
 ) -> Vec<MethodParameter> {
     let identities = ir
@@ -190,7 +192,15 @@ pub(super) fn value_class_interface_entry(
         .iter()
         .zip(names)
         .skip(1)
-        .map(|(identity, name)| (name, function_parameter_flags(identity.role, false)))
+        .map(|(identity, name)| {
+            let name = match identity.role {
+                IrParameterRole::ExtensionReceiver => Some(
+                    crate::jvm::parameter_names::value_class_interface_entry_receiver(entry_name),
+                ),
+                _ => name,
+            };
+            (name, function_parameter_flags(identity.role, false))
+        })
         .collect()
 }
 
@@ -413,6 +423,57 @@ pub(super) fn resolved_holder_forward(
         "one spelling per compatibility-holder parameter identity"
     );
     std::iter::once(parameter("$this", SYNTHETIC))
+        .chain(identities.iter().zip(names).map(|(identity, name)| {
+            let flags = match identity {
+                crate::fir::ResolvedParameterIdentity::ExtensionReceiver => MANDATED,
+                _ => 0,
+            };
+            (name.clone(), flags)
+        }))
+        .collect()
+}
+
+/// A compatibility forwarder an implementing class writes for an inherited interface member is an
+/// instance method declaring the member's own parameters: an extension receiver stays a receiver
+/// and carries no flag, as on any instance method.
+pub(super) fn resolved_class_forwarder(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    names: &[Option<String>],
+    physical_parameters: &[Ty],
+) -> Vec<MethodParameter> {
+    assert_eq!(
+        names.len(),
+        physical_parameters.len(),
+        "inherited-forwarder parameter identities must match its declaration"
+    );
+    assert_eq!(
+        identities.len(),
+        names.len(),
+        "one spelling per inherited-forwarder parameter identity"
+    );
+    names.iter().map(|name| (name.clone(), 0)).collect()
+}
+
+/// The static a value class keeps for an inherited forwarder takes the carrier first, as a
+/// synthetic parameter, and moves the member's extension receiver into a mandated one, like every
+/// value-class `-impl`.
+pub(super) fn value_class_inherited_static(
+    carrier: &str,
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    names: &[Option<String>],
+    physical_parameters: &[Ty],
+) -> Vec<MethodParameter> {
+    assert_eq!(
+        names.len(),
+        physical_parameters.len(),
+        "a value-class inherited static's parameter identities must match its declaration"
+    );
+    assert_eq!(
+        identities.len(),
+        names.len(),
+        "one spelling per value-class inherited static parameter identity"
+    );
+    std::iter::once(parameter(carrier, SYNTHETIC))
         .chain(identities.iter().zip(names).map(|(identity, name)| {
             let flags = match identity {
                 crate::fir::ResolvedParameterIdentity::ExtensionReceiver => MANDATED,

@@ -788,6 +788,16 @@ impl super::IrFile {
                 edge.implementation_type = ty(edge.implementation_type, names);
             }
         }
+        for defaults in self.inherited_defaults.values_mut() {
+            for default in defaults {
+                name(&mut default.declaring_interface, names);
+                name(&mut default.dispatch_interface, names);
+                tys(&mut default.parameters, names);
+                default.result = ty(default.result, names);
+                tys(&mut default.applied_parameters, names);
+                default.applied_result = ty(default.applied_result, names);
+            }
+        }
         for overrides in self.function_overrides.values_mut() {
             for edge in overrides {
                 name(&mut edge.implementation_owner, names);
@@ -1001,6 +1011,7 @@ impl super::IrFile {
         remap_keyed(&mut self.classifier_hierarchies, names);
         remap_keyed(&mut self.property_overrides, names);
         remap_keyed(&mut self.function_overrides, names);
+        remap_keyed(&mut self.inherited_defaults, names);
         remap_keyed(&mut self.generated_member_publications, names);
         remap_keyed(&mut self.class_type_aliases, names);
         remap_keyed(&mut self.jvm_value_class_secondary_ctors, names);

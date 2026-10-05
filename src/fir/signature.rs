@@ -1556,10 +1556,9 @@ pub struct ResolvedModuleIndex {
     /// are semantic declaration headers; target erasure and bridge materialization are absent.
     pub(super) property_overrides: HashMap<DeclarationId, Box<[super::ResolvedPropertyOverride]>>,
     pub(super) function_overrides: HashMap<DeclarationId, Box<[super::ResolvedFunctionOverride]>>,
-    /// Exact interface identities inherited through the direct superclass of each source
-    /// classifier. Pass 1 computes this while the semantic hierarchy provider is live; target
-    /// backends consume it instead of walking superclass declarations again.
-    pub(super) superclass_interfaces: HashMap<DeclarationId, Box<[TypeName]>>,
+    /// The interface defaults each source classifier inherits without overriding, selected while
+    /// the semantic hierarchy provider is live; target backends realize them without a walk.
+    pub(super) inherited_defaults: HashMap<DeclarationId, Box<[super::ResolvedInheritedDefault]>>,
     /// Non-default return-value statuses of module declarations, derived from the frozen edges.
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
     pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
@@ -3231,12 +3230,13 @@ impl ResolvedModuleIndex {
                             .sum::<usize>()
                 })
                 .sum::<usize>()
-            + self.superclass_interfaces.len()
-                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<Box<[TypeName]>>())
             + self
-                .superclass_interfaces
+                .inherited_defaults
                 .values()
-                .map(|interfaces| interfaces.len() * std::mem::size_of::<TypeName>())
+                .map(|defaults| {
+                    std::mem::size_of::<DeclarationId>()
+                        + defaults.len() * std::mem::size_of::<super::ResolvedInheritedDefault>()
+                })
                 .sum::<usize>()
             + self
                 .classifiers

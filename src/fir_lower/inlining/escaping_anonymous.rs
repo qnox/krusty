@@ -519,6 +519,10 @@ fn copy_override_edges(
         }
         ir.function_overrides.insert(target_name, copied);
     }
+    // The copy inherits the same interface defaults as the class it copies.
+    if let Some(defaults) = ir.inherited_defaults.get(&source_name).cloned() {
+        ir.inherited_defaults.insert(target_name, defaults);
+    }
     Ok(())
 }
 
@@ -1147,12 +1151,13 @@ fn node_uses_binding(expression: &IrExpr, bindings: &HashMap<String, Ty>) -> boo
         IrExpr::TypeOp { type_operand, .. } => uses(*type_operand),
         IrExpr::KClassLiteral { classifier, .. } => classifier.is_some_and(uses),
         IrExpr::Call {
-            callee: crate::ir::Callee::Intrinsic { operation, .. },
+            callee:
+                crate::ir::Callee::Intrinsic {
+                    operation: crate::ir::IrIntrinsic::TypeOf { ty },
+                    ..
+                },
             ..
-        } => match operation {
-            crate::ir::IrIntrinsic::TypeOf { ty } => uses(*ty),
-            _ => false,
-        },
+        } => uses(*ty),
         _ => false,
     }
 }

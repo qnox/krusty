@@ -5,6 +5,43 @@ use super::{erase, is_ref, target, BoxOp, Repr, ReprCtx, Target, Under};
 use crate::ir::{value_tails, Callee, ExprId, IrExpr};
 use crate::types::Ty;
 
+/// The receiver of a property access `id` crosses into its selected accessor. A value-class
+/// property accessor is a static `-impl` over the unboxed carrier, regardless of whether this
+/// compilation or a dependency declared it: the sole stored property was already rewritten to
+/// identity, and every remaining read keeps the carrier its accessor expects. Any other owner's
+/// accessor — an interface property a value class inherits, read or written through the value
+/// class — dispatches on the box.
+pub(super) fn record_property_receiver_boundary(
+    ops: &mut Vec<(ExprId, BoxOp)>,
+    exprs: &[IrExpr],
+    repr_ctx: &ReprCtx<'_>,
+    id: ExprId,
+    under: &Under,
+) {
+    let (receiver, owner, read) = match &exprs[id as usize] {
+        IrExpr::PropertyRead {
+            receiver: Some(receiver),
+            owner,
+            ..
+        } => (*receiver, owner, true),
+        IrExpr::PropertyWrite {
+            receiver: Some(receiver),
+            owner,
+            ..
+        } => (*receiver, owner, false),
+        _ => return,
+    };
+    match repr_ctx.repr(receiver) {
+        Repr::Boxed(value_class) if read && under.contains_key(owner) => {
+            ops.push((receiver, BoxOp::Unbox(value_class)));
+        }
+        Repr::Unboxed(value_class) if !under.contains_key(owner) => {
+            ops.push((receiver, repr_ctx.box_op(receiver, value_class)));
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn record_value_boundary(
     ops: &mut Vec<(ExprId, BoxOp)>,
     exprs: &[IrExpr],

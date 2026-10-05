@@ -2623,6 +2623,8 @@ mod value_class_param_generic_return_e2e;
 mod value_class_private_init_e2e;
 #[path = "value_class_property_argument_e2e.rs"]
 mod value_class_property_argument_e2e;
+#[path = "value_class_property_entry_e2e.rs"]
+mod value_class_property_entry_e2e;
 #[path = "value_class_property_reference_e2e.rs"]
 mod value_class_property_reference_e2e;
 #[path = "value_class_receiver_capture_debug_names_e2e.rs"]
