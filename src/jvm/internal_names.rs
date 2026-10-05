@@ -354,6 +354,34 @@ fn function_descriptor(ir: &IrFile, function: FunId) -> String {
     jvm_signature(&function.params, &function.ret)
 }
 
+/// Descriptor of a lowered value-class member's `$default` static call.
+///
+/// The call is synthesized with the carrier already in parameter zero, each recorded boxed
+/// default slot substituted, then one mask word per 32 logical parameters and a trailing
+/// marker. A public overload of the same Kotlin name has a different descriptor and must not
+/// share this entry.
+fn value_member_default_stub_descriptor(ir: &IrFile, function: FunId) -> Option<String> {
+    let declaration = ir.functions.get(function as usize)?;
+    if !declaration.is_static
+        || declaration.dispatch_receiver.is_none()
+        || !ir.has_param_defaults(function)
+    {
+        return None;
+    }
+    let mut parameters = declaration.params.clone();
+    if let Some(boxed) = ir.default_stub_boxed_params.get(&function) {
+        for &(index, ty) in boxed {
+            *parameters.get_mut(index)? = ty;
+        }
+    }
+    let extension = usize::from(ir.extension_receiver_fns.contains(&function));
+    let logical = parameters.len().checked_sub(1 + extension)?;
+    let mask_count = logical.div_ceil(32).max(1);
+    parameters.extend(std::iter::repeat_n(crate::types::Ty::Int, mask_count));
+    parameters.push(crate::types::Ty::obj("java/lang/Object"));
+    Some(jvm_signature(&parameters, &declaration.ret))
+}
+
 fn jvm_signature(params: &[crate::types::Ty], ret: &crate::types::Ty) -> String {
     crate::jvm::method_descriptors::ir_method_desc(params, ret)
 }
@@ -420,14 +448,24 @@ fn rewrite_call_names(
             let Some(old) = old_names.get(&function) else {
                 continue;
             };
+            let renamed = ir.functions[function as usize].name.clone();
             by_signature.insert(
                 (
                     class.fq_name,
                     old.clone(),
                     function_descriptor(ir, function),
                 ),
-                ir.functions[function as usize].name.clone(),
+                renamed.clone(),
             );
+            // A value-class member call is already the static `-impl`, and an omitted argument
+            // names `name$default` with the stub descriptor (masks and marker included). That
+            // descriptor is not the member's, so the stub is its own signature entry.
+            if let Some(stub) = value_member_default_stub_descriptor(ir, function) {
+                by_signature.insert(
+                    (class.fq_name, format!("{old}$default"), stub),
+                    format!("{renamed}$default"),
+                );
+            }
         }
     }
     for accessor in synthesized {
@@ -535,30 +573,18 @@ fn append_module_suffix(name: &str, suffix: &str) -> String {
     format!("{name}{suffix}")
 }
 
-/// A value-class default call is already a static `name$default`. The member rename is keyed by
-/// owner, pre-suffix name, and descriptor (`m-impl$default` → `m-impl$lib1$default`). A `$default`
-/// stub's descriptor is not the member's, so it follows the member only when that pre-suffix name
-/// has one signature. Two overloads share the name and must not both move.
+/// A synthesized call with no declaration identity is renamed only when owner, pre-suffix name,
+/// and descriptor all match. A `$default` stub is a separate entry: its descriptor is not the
+/// member's, and a public overload of the same Kotlin name must keep its own stub.
 fn signature_renamed(
     by_signature: &HashMap<(TypeName, String, String), String>,
     owner: TypeName,
     name: &str,
     descriptor: &str,
 ) -> Option<String> {
-    if let Some(renamed) = by_signature.get(&(owner, name.to_string(), descriptor.to_string())) {
-        return Some(renamed.clone());
-    }
-    let base = name.strip_suffix("$default")?;
-    let mut matches = by_signature
-        .iter()
-        .filter(|((candidate_owner, candidate_name, _), _)| {
-            *candidate_owner == owner && candidate_name == base
-        });
-    let (_, renamed) = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-    Some(format!("{renamed}$default"))
+    by_signature
+        .get(&(owner, name.to_string(), descriptor.to_string()))
+        .cloned()
 }
 
 fn keep_default_stub(current: &str, renamed: String) -> String {
@@ -676,6 +702,21 @@ fn rewrite_callee(callee: &mut Callee, rename: &CallRename<'_>) {
                 signature_renamed(rename.by_signature, *owner, name, descriptor)
             {
                 *name = keep_default_stub(name, renamed);
+            }
+        }
+        Callee::CrossFile {
+            name,
+            module_target,
+            ..
+        } => {
+            // A sibling default call is realized as a cross-file edge before this pass, and it
+            // already carries the selected declaration. Rename that declaration only.
+            if let Some(target) = *module_target {
+                if let Some(renamed) = rename.by_callable.get(&target) {
+                    *name = keep_default_stub(name, renamed.clone());
+                } else if rename.module_functions.contains(&target) {
+                    *name = append_module_suffix(name, rename.suffix);
+                }
             }
         }
         Callee::Module { target, name, .. } | Callee::ModuleWithDefaults { target, name, .. } => {

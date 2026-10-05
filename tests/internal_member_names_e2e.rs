@@ -134,28 +134,32 @@ fn user_fields(bytes: &[u8]) -> BTreeSet<String> {
         .collect()
 }
 
-fn krusty_classes(module_name: &str) -> Vec<(String, Vec<u8>)> {
+fn krusty_source_classes(source: &str, stem: &str, module_name: &str) -> Vec<(String, Vec<u8>)> {
     let classpath = [common::stdlib_jar()];
-    common::compile_in_process_metadata_cp_module(SOURCE, "Members", &classpath, module_name)
+    common::compile_in_process_metadata_cp_module(source, stem, &classpath, module_name)
         .unwrap_or_else(|| {
-            let diagnostics = common::front_end_diagnostics(SOURCE, &classpath, None);
-            panic!("krusty declined the source under {module_name}: {diagnostics:?}")
+            let diagnostics = common::front_end_diagnostics(source, &classpath, None);
+            panic!("krusty declined {stem} under {module_name}: {diagnostics:?}")
         })
 }
 
-fn kotlinc_classes(module_name: &str) -> Option<Vec<(String, Vec<u8>)>> {
+fn kotlinc_source_classes(
+    source: &str,
+    file_name: &str,
+    module_name: &str,
+) -> Option<Vec<(String, Vec<u8>)>> {
     common::java_home();
     let dir = common::scratch_dir()?;
     let out = dir.join("out");
     std::fs::create_dir_all(&out).ok()?;
-    let source = dir.join("Members.kt");
-    std::fs::write(&source, SOURCE).ok()?;
+    let source_path = dir.join(file_name);
+    std::fs::write(&source_path, source).ok()?;
     let args = vec![
         "-module-name".to_string(),
         module_name.to_string(),
         "-d".to_string(),
         out.to_string_lossy().into_owned(),
-        source.to_string_lossy().into_owned(),
+        source_path.to_string_lossy().into_owned(),
     ];
     let (code, stderr) = common::kotlinc_compile(&args)?;
     assert_eq!(code, 0, "kotlinc failed under {module_name}: {stderr}");
@@ -198,11 +202,26 @@ fn class_bytes<'a>(classes: &'a [(String, Vec<u8>)], internal: &str) -> &'a [u8]
 }
 
 fn assert_matches(module_name: &str, internals: &[&str]) {
-    let Some(reference) = kotlinc_classes(module_name) else {
+    assert_source_matches(SOURCE, "Members", "Members.kt", module_name, internals);
+}
+
+fn run_box(source: &str, stem: &str) -> Option<String> {
+    let jdk = common::jdk_modules();
+    common::compile_and_run_box(source, stem, &[common::stdlib_jar()], Some(jdk.as_path()))
+}
+
+fn assert_source_matches(
+    source: &str,
+    stem: &str,
+    file_name: &str,
+    module_name: &str,
+    internals: &[&str],
+) {
+    let Some(reference) = kotlinc_source_classes(source, file_name, module_name) else {
         eprintln!("skip ({module_name}: provisioned kotlinc unavailable)");
         return;
     };
-    let krusty = krusty_classes(module_name);
+    let krusty = krusty_source_classes(source, stem, module_name);
     let mut mismatches = Vec::new();
     for internal in internals {
         let reference_bytes = class_bytes(&reference, internal);
@@ -247,6 +266,70 @@ fn internal_instance_members_match_kotlinc_under_an_explicit_module() {
 #[test]
 fn internal_and_public_overloads_keep_distinct_jvm_names() {
     let result = common::compile_and_run_with_stdlib(SOURCE, "Members");
+    assert_eq!(result.as_deref(), Some("OK"));
+}
+
+const DEFAULT_OVERLOADS: &str = "\
+package demo
+
+@JvmInline
+value class W(val raw: Int) {
+    internal fun f(x: Int = 1, y: Int = 2): Int = raw + x + y
+    fun f(s: String = \"a\", t: String = \"b\"): Int = s.length + t.length
+}
+
+fun box(): String {
+    val w = W(10)
+    val internalDefault = w.f(x = 4)
+    val publicDefault = w.f(s = \"abcd\")
+    return if (internalDefault == 16 && publicDefault == 5) \"OK\" else \"i=$internalDefault p=$publicDefault\"
+}
+";
+
+/// An internal value-class member and a public overload share the Kotlin name and both have
+/// defaults. The omitted call must follow the internal stub's descriptor (`f-impl$<module>$default`)
+/// and leave the public stub on `f-impl$default`.
+#[test]
+fn internal_default_stub_keeps_its_descriptor_beside_a_public_overload() {
+    assert_source_matches(
+        DEFAULT_OVERLOADS,
+        "Defaults",
+        "Defaults.kt",
+        "main",
+        &["demo/W"],
+    );
+    let result = run_box(DEFAULT_OVERLOADS, "Defaults");
+    assert_eq!(result.as_deref(), Some("OK"));
+}
+
+const SIBLING_HOST: &str = "\
+package demo
+
+open class Host {
+    internal fun f(x: Int = 1, y: Int = 2): Int = x + y
+    fun f(s: String = \"a\", t: String = \"b\"): Int = s.length + t.length
+}
+";
+
+const SIBLING_USE: &str = "\
+package demo
+
+fun box(): String {
+    val host = Host()
+    val internalDefault = host.f(x = 4)
+    val publicDefault = host.f(s = \"abcd\")
+    return if (internalDefault == 6 && publicDefault == 5) \"OK\" else \"i=$internalDefault p=$publicDefault\"
+}
+";
+
+/// A default call in another file of the module names the selected declaration. The internal
+/// stub gains `$<module>` before `$default`; the public overload's stub does not.
+#[test]
+fn sibling_default_call_uses_the_selected_declaration() {
+    let result = common::compile_and_run_files_with_stdlib(&[
+        ("Host.kt", SIBLING_HOST),
+        ("Use.kt", SIBLING_USE),
+    ]);
     assert_eq!(result.as_deref(), Some("OK"));
 }
 
