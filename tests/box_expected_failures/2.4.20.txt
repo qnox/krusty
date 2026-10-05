@@ -2,11 +2,6 @@
 # compiler/testData/codegen/box. Every outcome transition fails conformance. Regenerate
 # tests/box_expected_failures/2.4.20.txt with KRUSTY_BLESS_BOX_FAILURES=1 on a full local run.
 # The goal is to empty this list of expected failures.
-fullValueClasses/construction.kt
-fullValueClasses/inapplicableTypes.kt
-fullValueClasses/initializationOrderWithAbstractProperty.kt
-fullValueClasses/nonFinal.kt
-fullValueClasses/nonFinalThisInInitSideEffects.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
 reflection/properties/genericOverriddenProperty.kt
