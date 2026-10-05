@@ -172,12 +172,14 @@ impl BodyLowering<'_> {
         self.ir.lambda_own_params_from.insert(function, 0);
         let arity = u8::try_from(reference.params.len())
             .map_err(|_| FirLoweringFailure::UnsupportedIntrinsicCall)?;
-        Ok(self.ir.add_expr(IrExpr::Lambda {
+        let lambda = self.ir.add_expr(IrExpr::Lambda {
             impl_fn: function,
             arity,
             captures: Vec::new(),
             sam: None,
             inline_body: None,
-        }))
+        });
+        self.ir.note_synthesized_lambda(lambda);
+        Ok(lambda)
     }
 }

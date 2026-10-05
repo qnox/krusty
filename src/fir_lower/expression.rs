@@ -1430,7 +1430,11 @@ impl BodyLowering<'_> {
                     self.checked_local_call(target.clone(), *extension_receiver, arguments)?;
                 self.declaration_result(call, Some(declared), expression.ty.get())
             }
-            FirExprKind::Lambda { callable, body } => {
+            FirExprKind::Lambda {
+                callable,
+                type_parameters,
+                body,
+            } => {
                 let suspend = matches!(
                     expression.ty.get().non_null(),
                     crate::types::Ty::Fun(signature) if signature.suspend
@@ -1444,15 +1448,16 @@ impl BodyLowering<'_> {
                     if let Some(origin) = self.ir.lambda_origins.get_mut(&impl_fn) {
                         origin.class_provenance = provenance;
                     }
-                }
-                if suspend {
-                    let &IrExpr::Lambda { impl_fn, .. } = &self.ir.exprs[lambda as usize] else {
-                        unreachable!("a checked lambda lowers to a lambda")
-                    };
-                    let type_parameters =
-                        super::generics::named_type_parameters(self.index, expression.ty.get());
-                    self.ir
-                        .record_lambda_type_parameters(impl_fn, type_parameters);
+                    // The checker published the declarations. Lowering does not look them up by name.
+                    // Class-strategy `toString()` reads them from the lambda class's metadata,
+                    // including a non-suspend lambda. A suspend lambda's class reads the same record.
+                    let recorded =
+                        super::generics::type_parameters_by_identity(self.index, type_parameters);
+                    self.ir.record_lambda_type_parameters(impl_fn, recorded);
+                    self.ir.record_lambda_class_provenance(
+                        impl_fn,
+                        crate::ir::type_reflection::LambdaClassProvenance::SourceFunction,
+                    );
                 }
                 lambda
             }

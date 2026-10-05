@@ -40,6 +40,7 @@ mod bytecode_inline_call;
 mod call_operands;
 mod captured_storage;
 mod checked_facts;
+mod class_lambda_reflection;
 mod class_literals;
 mod class_pool_seed;
 mod companion_blocks;
@@ -408,6 +409,9 @@ struct LambdaClassPlan {
     /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
     owner_is_interface: bool,
     identity: lambda_class_names::LambdaClassIdentity,
+    /// The generic signature and `@Metadata` kotlin-reflect reads for `toString()`. Absent for a
+    /// user SAM conversion and for a synthesized adapter that is not a source lambda.
+    reflection: Option<class_lambda_reflection::ClassLambdaReflection>,
 }
 
 impl EmitRun {
@@ -1897,7 +1901,14 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
     } else {
         "java/lang/Object"
     };
-    let mut cw = new_writer(&plan.internal, super_name, opts);
+    let signature = plan
+        .reflection
+        .as_ref()
+        .map(|reflection| reflection.signature.as_str());
+    let mut cw = new_writer_generic(&plan.internal, signature, super_name, opts);
+    if let Some(signature) = signature {
+        cw.set_signature(signature);
+    }
     cw.set_access(0x0030); // ACC_FINAL | ACC_SUPER
     cw.add_interface(&plan.iface);
     if plan.function_adapter {
@@ -2121,6 +2132,15 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         clinit.putstatic(field, 1);
         clinit.ret_void();
         cw.add_method(0x0008, "<clinit>", "()V", &clinit); // ACC_STATIC
+    }
+    if let Some(reflection) = &plan.reflection {
+        cw.set_kotlin_metadata(
+            3,
+            &opts.metadata_version(),
+            synthetic_class_xi(SYNTHETIC_LOCAL),
+            &reflection.d1,
+            &reflection.d2,
+        );
     }
     (plan.internal.clone(), cw.finish())
 }

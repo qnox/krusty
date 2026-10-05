@@ -5,8 +5,6 @@
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 coroutines/tailCallOptimizations/crossinline.kt
-functions/functionNtoString.kt
-functions/functionNtoStringGeneric.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
 reflection/properties/genericOverriddenProperty.kt

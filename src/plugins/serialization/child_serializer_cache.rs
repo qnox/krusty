@@ -327,6 +327,7 @@ pub(super) fn add_child_serializer_cache(
                 sam: None,
                 inline_body: None,
             });
+            ir.note_synthesized_lambda(supplier);
             let mode = ir.add_expr(IrExpr::ExternalStaticField {
                 owner: type_name("kotlin/LazyThreadSafetyMode"),
                 name: "PUBLICATION".to_string(),
