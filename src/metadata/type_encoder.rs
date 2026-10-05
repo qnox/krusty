@@ -896,7 +896,8 @@ pub(crate) fn encode_annotation(strings: &mut StringTable<'_>, classifier: TypeN
 
 /// Append the source annotations `@Metadata` records on this (expanded) type occurrence as
 /// `Type.annotation` (extension field 100): those an alias named here applies to its expansion,
-/// then the occurrence's own, each in source order. See [`Spelled::expansion_annotations`].
+/// then the occurrence's own, each in source order, then the `@ParameterName` of a named
+/// function-type parameter. See [`Spelled::expansion_annotations`].
 ///
 /// kotlinc interns these annotations BEFORE the node's abbreviation even though `abbreviated_type`
 /// (f13) is written ahead of them, so callers build the messages first with [`type_annotations`].
@@ -909,10 +910,14 @@ fn add_type_annotations(message: &mut Pb, annotations: Vec<Pb>) {
 /// The `Type.annotation` messages of one occurrence, interning their strings now.
 fn type_annotations(strings: &mut StringTable<'_>, spelled: &Spelled) -> Vec<Pb> {
     let inherited = spelled.expansion_annotations.iter();
-    inherited
+    let mut annotations = inherited
         .chain(&spelled.annotations)
         .map(|annotation| encode_type_annotation(strings, annotation.checked()))
-        .collect()
+        .collect::<Vec<_>>();
+    if let Some(name) = spelled.parameter_name.as_deref() {
+        annotations.push(parameter_name_annotation(strings, name));
+    }
+    annotations
 }
 
 /// A type-use annotation application as a metadata `Annotation` message, with its argument values.
@@ -924,6 +929,22 @@ fn encode_type_annotation(
         strings,
         &crate::ir::AppliedAnnotation::from(annotation),
     )
+}
+
+/// `@ParameterName(name = "…")` on a named function-type parameter's type.
+fn parameter_name_annotation(strings: &mut StringTable<'_>, name: &str) -> Pb {
+    let annotation_id = strings.class_id(crate::types::type_name("kotlin/ParameterName"));
+    let argument_name = strings.local("name");
+    let mut value = Pb::new();
+    value.field_varint(1, 8); // Annotation.Argument.Value.Type.STRING
+    value.field_varint(5, strings.local(name) as u64); // string_value
+    let mut argument = Pb::new();
+    argument.field_varint(1, argument_name as u64);
+    argument.field_message(2, &value);
+    let mut annotation = Pb::new();
+    annotation.field_varint(1, annotation_id as u64);
+    annotation.field_message(2, &argument);
+    annotation
 }
 
 pub(crate) fn add_extension_function_annotation(message: &mut Pb, strings: &mut StringTable<'_>) {

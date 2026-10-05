@@ -1869,6 +1869,10 @@ pub struct File {
     /// Argument expressions of the type-use annotations in [`Self::type_annotations`] written with
     /// a non-empty argument list, keyed by the annotation reference's span.
     pub type_annotation_arguments: std::collections::HashMap<(u32, u32), Vec<ExprId>>,
+    /// Names written on function-type parameters (`(count: Int) -> Unit`), keyed by the parameter
+    /// type's start offset like [`Self::type_annotations`]. `@Metadata` records each as a
+    /// `@ParameterName` annotation on that parameter's type.
+    pub function_type_parameter_names: std::collections::HashMap<u32, String>,
     /// Declaration type parameters carrying annotations, keyed by the exact start of their owning
     /// declaration's signature and then kept in source order. This is distinct from
     /// [`Self::type_annotations`]: `class C<@Ann T>` annotates the declaration of `T`, not a type use.

@@ -57,6 +57,10 @@ pub struct Spelled {
     /// (`typealias Marked = @Kept Item` makes every `Marked` occurrence an annotated `Item`). The
     /// abbreviation names only what this occurrence wrote.
     pub expansion_annotations: Vec<TypeUseAnnotation>,
+    /// The name this occurrence's function-type parameter was written with (`(count: Int) -> Unit`
+    /// names the `Int` occurrence `count`). `@Metadata` records it after the occurrence's own
+    /// annotations as `@kotlin.ParameterName(name = "count")`.
+    pub parameter_name: Option<Box<str>>,
 }
 
 /// The spelling of a node that names no alias and records no annotation.
@@ -67,6 +71,7 @@ const EMPTY: Spelled = Spelled {
     args: Vec::new(),
     annotations: Vec::new(),
     expansion_annotations: Vec::new(),
+    parameter_name: None,
 };
 
 impl Spelled {
@@ -81,6 +86,7 @@ impl Spelled {
             && self.alias.is_none()
             && self.annotations.is_empty()
             && self.expansion_annotations.is_empty()
+            && self.parameter_name.is_none()
             && self.args.iter().all(Spelled::is_none)
     }
 
@@ -132,6 +138,7 @@ impl Spelled {
                         }
                 })
                 .sum::<usize>()
+            + self.parameter_name.as_deref().map_or(0, str::len)
             + self
                 .alias_args
                 .iter()
@@ -239,21 +246,34 @@ impl DeclaredSpellings {
 /// occurrence's start offset (the key the parser files type-use annotations under), as Pass 1
 /// bound them; see [`Spelled::annotations`].
 #[derive(Debug, Default)]
-pub(crate) struct RecordedTypeAnnotations(std::collections::HashMap<u32, Vec<TypeUseAnnotation>>);
+pub(crate) struct RecordedTypeAnnotations {
+    annotations: std::collections::HashMap<u32, Vec<TypeUseAnnotation>>,
+    parameter_names: std::collections::HashMap<u32, Box<str>>,
+}
 
 impl RecordedTypeAnnotations {
     pub(crate) fn record(&mut self, occurrence: u32, annotations: Vec<TypeUseAnnotation>) {
         if !annotations.is_empty() {
-            self.0.insert(occurrence, annotations);
+            self.annotations.insert(occurrence, annotations);
         }
+    }
+
+    /// The occurrence at `occurrence` is the type of a function-type parameter written `name: …`.
+    pub(crate) fn record_parameter_name(&mut self, occurrence: u32, name: &str) {
+        self.parameter_names.insert(occurrence, name.into());
     }
 
     /// The annotations recorded on the type occurrence starting at `occurrence`.
     pub(crate) fn at(&self, occurrence: u32) -> &[TypeUseAnnotation] {
-        self.0
+        self.annotations
             .get(&occurrence)
             .map(Vec::as_slice)
             .unwrap_or_default()
+    }
+
+    /// The name of the function-type parameter whose type starts at `occurrence`, if it was named.
+    pub(crate) fn parameter_name_at(&self, occurrence: u32) -> Option<&str> {
+        self.parameter_names.get(&occurrence).map(|name| &**name)
     }
 }
 

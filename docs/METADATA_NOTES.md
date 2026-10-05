@@ -392,6 +392,8 @@ Observed rules, each pinned by a fixture in `tests/typealias_abbreviated_type_e2
 | `import dep.Payload as P` | an import RENAME is not a typealias — NO abbreviation |
 | `(Cargo) -> Cargo` | an INLINE function type abbreviates its components; the arrow node itself spells nothing |
 | `vararg xs: Cargo` | spelled as the ELEMENT, recorded as `Array<Cargo>` — the abbreviation goes on the element and on `vararg_element_type`, never on the array |
+| `Handler` (`= (Cargo) -> Cargo`) | a USE of a function-type alias carries the right-hand side's component spellings on its expanded `Function1` arguments |
+| `(count: Int) -> Unit` | the parameter's `Type` records `Type.annotation` `@kotlin/ParameterName` with one argument (`name` = string-table id, value `{type=8 STRING, string_value(f5)="count"}`), after the type's own annotations; d2 interns the class, then `name`, then the value |
 | supertype, type-parameter bound, property type, extension receiver, ctor param, member fn | all carry it |
 
 **Interning order** (what keeps `d2` byte-identical): at every `Type` node — the main one and the

@@ -262,14 +262,14 @@ fn parse_argument_spelling(
                 let len = pb.varint()?;
                 let inner = pb.bytes(len as usize)?;
                 let node = parse_type_node(inner)?;
+                let (annotations, parameter_name) =
+                    occurrence_annotations(bind_type_annotations(&node.annotations, records, d2)?)?;
                 return Some(crate::spelling::Spelled {
                     definitely_non_null: node.definitely_non_null,
                     alias: parse_type_alias_name(inner, records, d2),
                     args: parse_type_argument_spellings(inner, records, d2)?,
-                    annotations: bind_type_annotations(&node.annotations, records, d2)?
-                        .into_iter()
-                        .map(crate::spelling::TypeUseAnnotation::Checked)
-                        .collect(),
+                    annotations,
+                    parameter_name,
                     ..crate::spelling::Spelled::default()
                 });
             }
@@ -277,6 +277,40 @@ fn parse_argument_spelling(
         }
     }
     Some(crate::spelling::Spelled::default())
+}
+
+/// Split the applications a `Type` records into those its occurrence wrote and the name of a
+/// function-type parameter. The writer derives `@ExtensionFunctionType`,
+/// `@ContextFunctionTypeParams` and a parameter's `@ParameterName` from the type's shape, so they
+/// are not occurrence annotations; `@ParameterName` contributes its `name` argument instead. `None`
+/// when a `@ParameterName` carries no string `name`, which kotlinc never writes.
+fn occurrence_annotations(
+    annotations: Vec<crate::types::ResolvedAnnotation>,
+) -> Option<(Vec<crate::spelling::TypeUseAnnotation>, Option<Box<str>>)> {
+    let shape = [
+        type_name("kotlin/ExtensionFunctionType"),
+        type_name("kotlin/ContextFunctionTypeParams"),
+    ];
+    let parameter_name_class = type_name("kotlin/ParameterName");
+    let mut parameter_name = None;
+    let mut written = Vec::new();
+    for annotation in annotations {
+        if annotation.annotation == parameter_name_class {
+            let name = annotation
+                .arguments
+                .iter()
+                .find_map(|(argument, value)| match value {
+                    crate::types::AnnotationValue::String(name) if argument == "name" => {
+                        name.as_str()
+                    }
+                    _ => None,
+                })?;
+            parameter_name = Some(name.into());
+        } else if !shape.contains(&annotation.annotation) {
+            written.push(crate::spelling::TypeUseAnnotation::Checked(annotation));
+        }
+    }
+    Some((written, parameter_name))
 }
 
 /// The alias a `Type` was spelled as: its `abbreviated_type` (f13) and that message's
