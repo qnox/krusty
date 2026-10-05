@@ -92,6 +92,27 @@ pub(super) fn build_class_metadata_with_facts(
     if c.is_value && !value_class_metadata_shape_admitted(ir, c) {
         return None;
     }
+    // A value class's compiler-synthesized members (the static `-impl` family + their instance
+    // delegators); allowed alongside the property accessor without disqualifying the shape.
+    let value_method_names: std::collections::HashSet<String> = if c.is_value {
+        [
+            "equals",
+            "hashCode",
+            "toString",
+            "equals-impl",
+            "equals-impl0",
+            "hashCode-impl",
+            "toString-impl",
+            "box-impl",
+            "unbox-impl",
+            "constructor-impl",
+        ]
+        .map(String::from)
+        .into_iter()
+        .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let synthesizes_copy = synthesizes_data_class_members(c);
     // `data` synthesizes over the PRIMARY-CONSTRUCTOR properties only — `c.fields` also holds the
     // backing fields of body properties (`data class P(val x: Int) { val y = 1 }` has two fields but
@@ -155,6 +176,7 @@ pub(super) fn build_class_metadata_with_facts(
                 return false;
             }
             !ir.is_data_class_member(c.fq_name_id(), fid)
+                && !value_method_names.contains(&ir.functions[fid as usize].name)
         })
         .collect();
     declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
