@@ -383,26 +383,6 @@ pub(in crate::resolve) fn collect_compact_annotation_policies(
         let (_, annotation) = compact_classifier_identity(headers, stub)
             .expect("a compact annotation classifier must retain its stable identity");
         table.annotation_retentions.insert(annotation, retention);
-
-        let declared_targets = headers
-            .annotation_policy_applications(stub.id)
-            .iter()
-            .find_map(|application| {
-                table
-                    .resolved_annotations
-                    .get(&(source, application.annotation.lo, application.annotation.hi))
-                    .filter(|name| name.matches("kotlin/annotation/Target"))?;
-                Some(crate::types::AnnotationTargets::kotlin(
-                    headers
-                        .annotation_policy_arguments(application.arguments)
-                        .iter()
-                        .filter_map(|argument| headers.lookup_names.get(*argument))
-                        .filter_map(crate::types::KotlinTarget::from_entry),
-                ))
-            });
-        if let Some(targets) = declared_targets {
-            table.annotation_targets.insert(annotation, targets);
-        }
     }
 }
 

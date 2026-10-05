@@ -204,40 +204,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 table
                     .annotation_retentions
                     .insert(annotation_identity, retention);
-                // `@Target(AnnotationTarget.X, …)` lists the declarations an application may sit on, in
-                // declared order. An annotation class that declares no `@Target` takes the default
-                // set and is left out of the map entirely.
-                let declared_targets = class
-                    .annotations
-                    .iter()
-                    .zip(&class.annotation_args)
-                    .find_map(|(annotation, arguments)| {
-                        table
-                            .resolved_annotation(file_index as u32, annotation)
-                            .filter(|name| name.matches("kotlin/annotation/Target"))?;
-                        let mut targets = Vec::new();
-                        for &argument in arguments {
-                            // `@Target` takes a `vararg` of enum entries. The NAMED form spells the
-                            // same list as an array literal or `arrayOf`, so both flatten here.
-                            let entries: Vec<ExprId> = match file.expr(argument) {
-                                Expr::AnnotationArrayLiteral(elements) => elements.clone(),
-                                Expr::Call { args, .. } => args.to_vec(),
-                                _ => vec![argument],
-                            };
-                            for entry in entries {
-                                let Expr::Member { name, .. } = file.expr(entry) else {
-                                    continue;
-                                };
-                                targets.extend(crate::types::KotlinTarget::from_entry(name));
-                            }
-                        }
-                        Some(crate::types::AnnotationTargets::kotlin(targets))
-                    });
-                if let Some(targets) = declared_targets {
-                    table
-                        .annotation_targets
-                        .insert(annotation_identity, targets);
-                }
             }
         }
     }

@@ -104,6 +104,20 @@ pub(crate) fn publish_checked_classifier_annotations(
             let Decl::Class(class) = file.decl(declaration) else {
                 continue;
             };
+            if class.kind != crate::ast::ClassKind::Annotation {
+                continue;
+            }
+            if let Some(targets) =
+                checked_declared_targets(file, file_index as u32, table, &info, class)
+            {
+                table.annotation_targets.insert(internal, targets);
+                index.publish_annotation_targets(internal, targets);
+            }
+        }
+        for &(internal, declaration) in &declarations {
+            let Decl::Class(class) = file.decl(declaration) else {
+                continue;
+            };
             let Some(owner) = table
                 .classes
                 .get(&internal)
@@ -139,6 +153,59 @@ pub(crate) fn publish_checked_classifier_annotations(
                 index.publish_declaration_applied_annotations(method_declaration, applications);
             }
         }
+    }
+}
+
+/// The targets an annotation class's checked `@Target` application lists, in declared order; `None`
+/// when it declares no `@Target`.
+///
+/// Like kotlinc's `getAllowedAnnotationTargets`, this reads each argument's SELECTED enum entry and
+/// takes the target that entry's declared name denotes. The entry is the one the checker bound
+/// through the ordinary scope and import rules, so an aliased or unqualified import names the entry
+/// it selects, never its spelling. kotlinc does not filter the entry's enum class: an argument of
+/// another enum is an argument type mismatch, and the entry it selected still counts.
+fn checked_declared_targets(
+    file: &File,
+    file_index: u32,
+    table: &SymbolTable,
+    info: &TypeInfo,
+    class: &ClassDecl,
+) -> Option<crate::types::AnnotationTargets> {
+    let (_, arguments) = class
+        .annotations
+        .iter()
+        .zip(&class.annotation_args)
+        .find(|(annotation, _)| {
+            table
+                .resolved_annotation(file_index, annotation)
+                .is_some_and(|name| name == type_name("kotlin/annotation/Target"))
+        })?;
+    let mut targets = Vec::new();
+    for &argument in arguments {
+        selected_target_entries(file, info, argument, &mut targets);
+    }
+    Some(crate::types::AnnotationTargets::kotlin(targets))
+}
+
+/// `@Target` takes a `vararg` of entries; the named form spells the same list as an array literal
+/// or `arrayOf`, so both flatten here.
+fn selected_target_entries(
+    file: &File,
+    info: &TypeInfo,
+    argument: ExprId,
+    targets: &mut Vec<crate::types::KotlinTarget>,
+) {
+    if let Some(entry) = info.resolved_enum_entry(argument) {
+        targets.extend(crate::types::KotlinTarget::from_entry(&entry.name));
+        return;
+    }
+    let elements = match file.expr(argument) {
+        Expr::AnnotationArrayLiteral(elements) => elements.as_slice(),
+        Expr::Call { args, .. } => args.as_slice(),
+        _ => return,
+    };
+    for &element in elements {
+        selected_target_entries(file, info, element, targets);
     }
 }
 

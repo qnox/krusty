@@ -6259,11 +6259,7 @@ pub(crate) fn finalized_streamed_signature_index(
     }
     for (&classifier, &retention) in &table.annotation_retentions {
         if index.classifier_declaration(classifier).is_some() {
-            index.publish_annotation_policy(
-                classifier,
-                retention,
-                table.annotation_targets.get(&classifier).copied(),
-            );
+            index.publish_annotation_policy(classifier, retention);
         }
     }
     failed.sort_by_key(|declaration| declaration.raw());

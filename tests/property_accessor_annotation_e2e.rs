@@ -257,3 +257,125 @@ fn a_java_annotation_on_a_wrong_accessor_target_is_rejected_like_kotlinc() {
         ]
     );
 }
+
+/// `@Target`'s arguments are the enum entries the checker selected through the ordinary import
+/// rules: an unqualified imported entry, and an aliased import whose alias spells another target.
+const IMPORTED_TARGETS: &str = "package accessors\n\
+    \n\
+    import kotlin.annotation.AnnotationTarget.PROPERTY_GETTER\n\
+    import kotlin.annotation.AnnotationTarget.PROPERTY_SETTER as CLASS\n\
+    \n\
+    @Target(PROPERTY_GETTER)\n\
+    @Retention(AnnotationRetention.RUNTIME)\n\
+    annotation class GetterOnly\n\
+    \n\
+    @Target(CLASS)\n\
+    annotation class SetterOnly\n";
+
+#[test]
+fn an_imported_target_entry_is_applied_like_kotlinc() {
+    assert_module_matches_kotlinc(&[
+        ("Targets.kt", IMPORTED_TARGETS),
+        (
+            "Uses.kt",
+            "package accessors\n\
+             \n\
+             class Holder {\n\
+             \x20   val x: Int @GetterOnly get() = 1\n\
+             \x20   var y: Int = 0\n\
+             \x20       @GetterOnly get() = field\n\
+             \x20       @SetterOnly set(value) {\n\
+             \x20           field = value\n\
+             \x20       }\n\
+             }\n",
+        ),
+    ]);
+}
+
+/// The selected entry decides the target, not the spelling: the alias `CLASS` selects
+/// `PROPERTY_SETTER`.
+#[test]
+fn an_imported_target_entry_is_checked_by_the_entry_it_selects_like_kotlinc() {
+    use krusty::kotlin_version::KotlinVersion;
+    const LEDGER: &[&str] = &[
+        "Uses.kt:5:9: this annotation is not applicable to target 'setter'. Applicable targets: \
+         getter",
+        "Uses.kt:6:16: this annotation is not applicable to target 'getter'. Applicable targets: \
+         setter",
+    ];
+    let expected: &[(KotlinVersion, &[&str])] = &[
+        (KotlinVersion::V2_4_0, LEDGER),
+        (KotlinVersion::V2_4_10, LEDGER),
+        (KotlinVersion::V2_4_20, LEDGER),
+    ];
+    let target = krusty::kotlin_version::target();
+    let (_, ledger) = expected
+        .iter()
+        .find(|(version, _)| *version == target)
+        .unwrap_or_else(|| panic!("no expected ledger for kotlinc {target}"));
+    let sources = [
+        ("Targets.kt", IMPORTED_TARGETS),
+        (
+            "Uses.kt",
+            "package accessors\n\
+             \n\
+             class Holder {\n\
+             \x20   var y: Int = 0\n\
+             \x20       @GetterOnly set\n\
+             \x20   val z: Int @SetterOnly get() = 1\n\
+             }\n",
+        ),
+    ];
+    assert_eq!(common::reference_error_ledger(&sources, &[]), *ledger);
+    common::assert_errors_match_kotlinc(&sources, &[]);
+}
+
+/// An entry of a repository-owned enum is an argument type mismatch. kotlinc's target policy still
+/// reads the entry the argument selected by its declared name, so `MyTarget.PROPERTY_GETTER` lists
+/// `getter`, and an entry no target is named after lists nothing.
+#[test]
+fn a_same_named_entry_of_another_enum_is_rejected_like_kotlinc() {
+    use krusty::kotlin_version::KotlinVersion;
+    const LEDGER: &[&str] = &[
+        "Mismatch.kt:5:9: argument type mismatch: actual type is 'MyTarget', but \
+         'AnnotationTarget' was expected.",
+        "Mismatch.kt:8:9: argument type mismatch: actual type is 'MyTarget', but \
+         'AnnotationTarget' was expected.",
+        "Mismatch.kt:14:9: this annotation is not applicable to target 'setter'. Applicable \
+         targets: getter",
+        "Mismatch.kt:16:9: this annotation is not applicable to target 'getter'. Applicable \
+         targets:",
+    ];
+    let expected: &[(KotlinVersion, &[&str])] = &[
+        (KotlinVersion::V2_4_0, LEDGER),
+        (KotlinVersion::V2_4_10, LEDGER),
+        (KotlinVersion::V2_4_20, LEDGER),
+    ];
+    let target = krusty::kotlin_version::target();
+    let (_, ledger) = expected
+        .iter()
+        .find(|(version, _)| *version == target)
+        .unwrap_or_else(|| panic!("no expected ledger for kotlinc {target}"));
+    let sources = [(
+        "Mismatch.kt",
+        "package accessors\n\
+         \n\
+         enum class MyTarget { PROPERTY_GETTER, NOT_A_TARGET }\n\
+         \n\
+         @Target(MyTarget.PROPERTY_GETTER)\n\
+         annotation class GetterOnly\n\
+         \n\
+         @Target(MyTarget.NOT_A_TARGET)\n\
+         annotation class Nowhere\n\
+         \n\
+         class Holder {\n\
+         \x20   var a: Int = 0\n\
+         \x20       @GetterOnly get\n\
+         \x20       @GetterOnly set\n\
+         \x20   val b: Int\n\
+         \x20       @Nowhere get() = 1\n\
+         }\n",
+    )];
+    assert_eq!(common::reference_error_ledger(&sources, &[]), *ledger);
+    common::assert_errors_match_kotlinc(&sources, &[]);
+}

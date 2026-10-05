@@ -2021,7 +2021,6 @@ impl ResolvedModuleIndex {
         &mut self,
         classifier: TypeName,
         retention: crate::types::AnnotationRetention,
-        targets: Option<crate::types::AnnotationTargets>,
     ) {
         assert!(
             self.classifier_declarations.contains_key(&classifier),
@@ -2033,14 +2032,25 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "an annotation classifier may publish one retention policy"
         );
-        if let Some(targets) = targets {
-            assert!(
-                self.annotation_targets
-                    .insert(classifier, targets)
-                    .is_none(),
-                "an annotation classifier may publish one target policy"
-            );
-        }
+    }
+
+    /// The targets a source annotation class's checked `@Target` application selected. Published
+    /// after the classifier-annotation pass has resolved the application's enum-entry arguments.
+    pub(crate) fn publish_annotation_targets(
+        &mut self,
+        classifier: TypeName,
+        targets: crate::types::AnnotationTargets,
+    ) {
+        assert!(
+            self.annotation_retentions.contains_key(&classifier),
+            "annotation targets require the classifier's published annotation policy"
+        );
+        assert!(
+            self.annotation_targets
+                .insert(classifier, targets)
+                .is_none(),
+            "an annotation classifier may publish one target policy"
+        );
     }
 
     pub(crate) fn annotation_retention(
