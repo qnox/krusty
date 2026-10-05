@@ -843,16 +843,7 @@ pub(super) fn realize(
             }
             IrExpr::SingletonValue { classifier } => {
                 let failure = ModuleRealizationTarget::Classifier(classifier);
-                // A companion is stored in the field its holder's classifier record declares,
-                // whichever compilation declared the holder and whatever the field's access.
-                let companion_field = classifier.nested_owner().and_then(|holder| {
-                    let declared = classifiers.classifier(holder)?;
-                    let (field, companion) = declared.companion.as_ref()?;
-                    (*companion == classifier).then(|| (holder, field.to_string()))
-                });
-                let (owner, field) = if let Some(stored) = companion_field {
-                    stored
-                } else if let Some(declaration) =
+                let (owner, field) = if let Some(declaration) =
                     ir.referenced_module_classifiers.get(&classifier).copied()
                 {
                     if !declaration.singleton {
@@ -863,8 +854,21 @@ pub(super) fn realize(
                     } else {
                         (classifier, "INSTANCE".to_string())
                     }
+                } else if let Some(storage) = classpath.singleton_storage(classifier) {
+                    // The provider's physical storage, which for a mapped builtin's companion is
+                    // a JVM runtime object rather than a field of the holder.
+                    storage
                 } else {
-                    classpath.singleton_storage(classifier).ok_or(failure)?
+                    // A non-public companion is stored in the field its holder's classifier
+                    // record declares, whichever compilation declared the holder.
+                    classifier
+                        .nested_owner()
+                        .and_then(|holder| {
+                            let declared = classifiers.classifier(holder)?;
+                            let (field, companion) = declared.companion.as_ref()?;
+                            (*companion == classifier).then(|| (holder, field.to_string()))
+                        })
+                        .ok_or(failure)?
                 };
                 Some(IrExpr::ExternalStaticInstance {
                     owner,
