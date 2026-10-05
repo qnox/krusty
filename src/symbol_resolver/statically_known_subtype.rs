@@ -29,13 +29,9 @@ pub(crate) fn nominal_type(ty: Ty) -> Ty {
         Ty::InProjection(inner) => Ty::in_projection(nominal_type(*inner)),
         Ty::OutProjection(inner) => Ty::out_projection(nominal_type(*inner)),
         Ty::StarProjection(inner) => Ty::star_projection(nominal_type(*inner)),
-        Ty::Intersection(parts) => Ty::intersection(
-            &parts
-                .iter()
-                .copied()
-                .map(nominal_type)
-                .collect::<Vec<_>>(),
-        ),
+        Ty::Intersection(parts) => {
+            Ty::intersection(&parts.iter().copied().map(nominal_type).collect::<Vec<_>>())
+        }
         other => other,
     }
 }
@@ -101,7 +97,9 @@ pub(crate) fn statically_known_subtype(
         for formal in &formals {
             if let Some(value) = result.get(*formal) {
                 let value = match *value {
-                    Ty::StarProjection(_) => Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
+                    Ty::StarProjection(_) => {
+                        Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))
+                    }
                     Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
                     other => other,
                 };

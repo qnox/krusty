@@ -82,9 +82,9 @@ use overload_selection::{
 };
 pub(crate) use overload_selection::{CandidateSelectionWithTies, ReceiverFunctionSelection};
 pub(crate) use receiver_mro::{function_shape_matches, ReceiverMro};
-pub(crate) use statically_known_subtype::{nominal_type, statically_known_subtype};
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
 use scope_level_callables::{function_set_from_symbols, level_functions, level_properties};
+pub(crate) use statically_known_subtype::{nominal_type, statically_known_subtype};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CallableImport {
