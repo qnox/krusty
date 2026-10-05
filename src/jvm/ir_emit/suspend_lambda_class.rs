@@ -328,7 +328,11 @@ fn lambda_metadata(
     lambda: &SuspendLambdaClass,
     formatter: &JvmSignatureFormatter<'_>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
-    let Ty::Fun(signature) = lambda.function_type.non_null() else {
+    let function_type = super::class_lambda_reflection::approximate_unpublished_type_parameters(
+        lambda.function_type,
+        &lambda.type_parameters,
+    );
+    let Ty::Fun(signature) = function_type.non_null() else {
         unreachable!("a suspend lambda has a function type")
     };
     let own = &signature.params[signature.context_count..];
