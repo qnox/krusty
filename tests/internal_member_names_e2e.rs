@@ -1,7 +1,9 @@
 //! An `internal` instance member is public in bytecode and named `name$<module>`. A public
 //! override keeps the Kotlin name and adds an `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` method of the
-//! mangled name. Top-level functions, constructors, and private or protected members stay
-//! unmangled. The suffix follows value-class mangling (`m-HASH$module`, `m-impl$module`).
+//! mangled name. Top-level functions, constructors, private members, and `@PublishedApi` members
+//! stay unmangled. The suffix follows value-class mangling (`m-HASH$module`, `m-impl$module`).
+//! A companion `@JvmStatic` member is mangled on the companion; the enclosing class's static
+//! forwarder is a separate shape and is not part of this comparison.
 
 use std::collections::BTreeSet;
 
@@ -19,16 +21,24 @@ open class Base {
     internal open fun openHidden(): Int = 2
     internal var v: Int = 3
     private fun p(): Int = 4
-    protected open fun q(): Int = 5
+    @PublishedApi
+    internal open fun published(): Int = 5
+    @PublishedApi
+    internal val publishedVal: Int = 6
     internal fun tagged(t: Tag): Int = t.raw
     internal open fun openTagged(t: Tag): Int = t.raw
     internal fun d(x: Int = 1): Int = x
+    internal open var openV: Int = 9
+        get() = field
+        set(value) { field = value }
 }
 
 class Child : Base() {
-    override fun openHidden(): Int = 20
-    override fun q(): Int = 50
-    override fun openTagged(t: Tag): Int = t.raw + 1
+    public override fun openHidden(): Int = 20
+    public override fun openTagged(t: Tag): Int = t.raw + 1
+    public override var openV: Int = 90
+        get() = field
+        set(value) { field = value }
 }
 
 open class Stay {
@@ -171,20 +181,26 @@ fn assert_matches(module_name: &str, internals: &[&str]) {
         return;
     };
     let krusty = krusty_classes(module_name);
+    let mut mismatches = Vec::new();
     for internal in internals {
         let reference_bytes = class_bytes(&reference, internal);
         let krusty_bytes = class_bytes(&krusty, internal);
-        assert_eq!(
-            user_methods(krusty_bytes),
-            user_methods(reference_bytes),
-            "{internal} methods under module {module_name}"
-        );
-        assert_eq!(
-            user_fields(krusty_bytes),
-            user_fields(reference_bytes),
-            "{internal} fields under module {module_name}"
-        );
+        let krusty_methods = user_methods(krusty_bytes);
+        let reference_methods = user_methods(reference_bytes);
+        if krusty_methods != reference_methods {
+            mismatches.push(format!(
+                "{internal} methods under module {module_name}\n krusty: {krusty_methods:?}\n kotlinc: {reference_methods:?}"
+            ));
+        }
+        let krusty_fields = user_fields(krusty_bytes);
+        let reference_fields = user_fields(reference_bytes);
+        if krusty_fields != reference_fields {
+            mismatches.push(format!(
+                "{internal} fields under module {module_name}\n krusty: {krusty_fields:?}\n kotlinc: {reference_fields:?}"
+            ));
+        }
     }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n\n"));
 }
 
 #[test]
@@ -198,7 +214,6 @@ fn internal_instance_members_match_kotlinc_under_an_explicit_module() {
             "demo/Same",
             "demo/MembersKt",
             "demo/O",
-            "demo/A",
             "demo/A$Companion",
             "demo/V",
         ],

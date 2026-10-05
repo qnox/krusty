@@ -137,6 +137,16 @@ fn external_method_name(
     .to_owned())
 }
 
+/// A same-module override can see the member. A dependency's `internal` member is overridable
+/// only from a friend module; otherwise the Kotlin name in this class is a different slot.
+fn sees_internal_member(
+    classpath: &crate::jvm::classpath::Classpath,
+    owner: crate::types::TypeName,
+    external: bool,
+) -> bool {
+    !external || classpath.grants_internal_access(owner)
+}
+
 fn function_is_internal(ir: &IrFile, function: crate::ir::FunId) -> bool {
     ir.method_visibility(function) == crate::types::Visibility::Internal
 }
@@ -165,10 +175,15 @@ fn function_target_is_internal(
     target: crate::fir::ResolvedFunctionOverrideTarget,
 ) -> bool {
     match target {
-        crate::fir::ResolvedFunctionOverrideTarget::Module(callable) => ir
-            .checked_callable_functions
-            .get(&callable)
-            .is_some_and(|function| function_is_internal(ir, *function)),
+        crate::fir::ResolvedFunctionOverrideTarget::Module(callable) => {
+            ir.checked_callable_functions
+                .get(&callable)
+                .is_some_and(|function| function_is_internal(ir, *function))
+                || ir
+                    .referenced_module_callables
+                    .get(&callable)
+                    .is_some_and(super::internal_names::module_callable_is_mangled)
+        }
         crate::fir::ResolvedFunctionOverrideTarget::External(callable) => callables
             .callable(callable)
             .is_some_and(|fact| fact.visibility == crate::types::Visibility::Internal),
@@ -193,6 +208,18 @@ fn property_accessor(
     }
 }
 
+fn property_member<'a>(
+    ir: &'a IrFile,
+    property: crate::fir::PropertyId,
+) -> Option<&'a crate::ir::IrProperty> {
+    let checked = ir.checked_properties.get(&property)?;
+    let class = ir.classes.get(checked.class? as usize)?;
+    class
+        .properties
+        .iter()
+        .find(|member| member.name == checked.name)
+}
+
 fn property_target_is_internal(
     ir: &IrFile,
     callables: &crate::backend::CheckedBackendCallables,
@@ -201,8 +228,27 @@ fn property_target_is_internal(
 ) -> bool {
     match target {
         crate::fir::ResolvedPropertyOverrideTarget::Module(property) => {
+            // A plain backing-field property has no accessor function. Its getter's visibility is
+            // the property's; a setter may narrow that on its own declaration.
+            if let Some(member) = property_member(ir, property) {
+                return if setter {
+                    member.setter_visibility == crate::types::Visibility::Internal
+                } else {
+                    member.visibility == crate::types::Visibility::Internal
+                };
+            }
             property_accessor(ir, property, setter)
                 .is_some_and(|function| function_is_internal(ir, function))
+                || ir
+                    .referenced_module_properties
+                    .get(&property)
+                    .is_some_and(|property| {
+                        if setter {
+                            super::internal_names::module_setter_is_mangled(property)
+                        } else {
+                            super::internal_names::module_getter_is_mangled(property)
+                        }
+                    })
         }
         crate::fir::ResolvedPropertyOverrideTarget::External(callable) => callables
             .callable(callable)
@@ -355,8 +401,22 @@ fn superclass_method_bridges(
         // A public override of an internal member keeps the Kotlin name. The internal declaration's
         // JVM name gains `$<module>` after this pass, so the bridge has to exist even while the two
         // names still match. A mapped builtin (`size` / `getSize`) is the only name difference that
-        // is final and that a Kotlin superclass already publishes.
-        let internal_name_bridge = function_target_is_internal(ir, callables, edge.overridden)
+        // is final and that a Kotlin superclass already publishes. An external name that already
+        // carries `$<module>` is that slot: a module that cannot see the member does not publish it,
+        // even when `override` is required by another visible declaration of the same Kotlin name.
+        let sees_internal = sees_internal_member(
+            classpath,
+            edge.overridden_owner,
+            matches!(
+                edge.overridden,
+                crate::fir::ResolvedFunctionOverrideTarget::External(_)
+            ),
+        );
+        if !sees_internal && jvm_name_is_module_suffix(&edge.name, &bridge_name) {
+            continue;
+        }
+        let internal_name_bridge = sees_internal
+            && function_target_is_internal(ir, callables, edge.overridden)
             && !function_target_is_internal(ir, callables, edge.implementation);
         let special = matches!(
             edge.overridden,
@@ -541,13 +601,27 @@ fn property_bridges(
                 }
             }
         };
-        let internal_getter_bridge =
-            property_target_is_internal(ir, callables, edge.overridden, false)
-                && !property_target_is_internal(ir, callables, edge.implementation, false);
-        let internal_setter_bridge = edge.overridden_mutable
+        let sees_internal = sees_internal_member(
+            classpath,
+            edge.overridden_owner,
+            matches!(
+                edge.overridden,
+                crate::fir::ResolvedPropertyOverrideTarget::External(_)
+            ),
+        );
+        let internal_getter_bridge = sees_internal
+            && property_target_is_internal(ir, callables, edge.overridden, false)
+            && !property_target_is_internal(ir, callables, edge.implementation, false);
+        let internal_setter_bridge = sees_internal
+            && edge.overridden_mutable
             && edge.implementation_mutable
             && property_target_is_internal(ir, callables, edge.overridden, true)
             && !property_target_is_internal(ir, callables, edge.implementation, true);
+        // Same rule as a method: `getV$module` belongs to a friend. Another visible property of
+        // the Kotlin name does not make this class the internal slot's override.
+        if !sees_internal && jvm_name_is_module_suffix(&source_getter, &bridge_getter) {
+            continue;
+        }
         crate::trace_compiler!(
             "bridges",
             "stable property override class={internal_name} implementation={:?} owner={} overridden={:?} owner={} source={} bridge={bridge_getter} target={target_getter} covering={:?}",
@@ -702,6 +776,16 @@ fn push_member_extension_accessor_bridges(
     }
 }
 
+/// `getV$main` or `getP-HASH$lib1` shares its suffix with `setV$main` / `setP-HASH$lib1`.
+fn setter_name_with_getter_suffix(property: &str, getter_jvm: &str) -> String {
+    let getter = property_getter_name(property);
+    let setter = property_setter_name(property);
+    match getter_jvm.strip_prefix(&getter) {
+        Some(rest) if rest.starts_with('$') || rest.starts_with('-') => format!("{setter}{rest}"),
+        _ => setter,
+    }
+}
+
 /// The `get<X>()` bridge (and, for a `var` override, the `set<X>()` one). A bridge already recorded
 /// under the accessor's name and descriptor wins — the first supertype in the walk is the nearest
 /// one. Each delegates to the implementation's own accessor function when this class declares it.
@@ -753,7 +837,7 @@ fn push_property_bridge(
             overridden_owner: None,
             collection_barrier: None,
             parameters: Vec::new(),
-            name: getter_name,
+            name: getter_name.clone(),
             erased_params: vec![],
             erased_ret: getter_results.declared,
             concrete_params: vec![],
@@ -771,7 +855,12 @@ fn push_property_bridge(
     // The setter keeps the declared types: over a slot whose getter only differs by the boxed
     // result, the setter's descriptor is already the implementation's own.
     let setter_param = bridge_erasure(edge.declared_type);
-    let sname = property_setter_name(&edge.name);
+    // The getter bridge already uses the overridden accessor's JVM name (`getV$main`). The setter
+    // has no separate external identity on the edge, so it takes that same suffix (`setV$main`).
+    // A same-module override still spells the Kotlin accessor here; the suffix pass renames the
+    // bridge afterwards. It has to be recorded now, with `target_name` equal to that Kotlin name,
+    // or the value-class retain drops it as a duplicate of the public setter.
+    let sname = setter_name_with_getter_suffix(&edge.name, &getter_name);
     let has_setter = (!internal_setter_bridge
         && crate::jvm::names::same_type_descriptor(setter_param, edge.implementation_type))
         || ir.classes[cid].bridges.iter().any(|b| {

@@ -4,10 +4,11 @@
 //! different module cannot override or link the declaration by its Kotlin name. The suffix is
 //! applied after value-class mangling and after lifted-callable naming: a lambda inside an internal
 //! function is named from the value-class spelling and does not carry the module (`intl_txdesME$lambda$0`
-//! beside `intl-txdesME$main`). Top-level functions, constructors, and the file facade stay
-//! unmangled. A public override keeps the Kotlin name and a bridge of the mangled name delegates to it.
+//! beside `intl-txdesME$main`). Top-level functions, constructors, the file facade, and
+//! `@PublishedApi` members stay unmangled. A public override keeps the Kotlin name and a bridge of
+//! the mangled name delegates to it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::ir::{Callee, FunId, IrExpr, IrFile, IrLocalPropertyLayout, IrVirtualTarget};
@@ -48,9 +49,6 @@ pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade
         function.name = format!("{old}{suffix}");
         old_names.insert(fid, old);
     }
-    if old_names.is_empty() {
-        return;
-    }
     let new_name = |fid: FunId| ir.functions[fid as usize].name.clone();
     for class in &mut ir.classes {
         for property in &mut class.properties {
@@ -62,14 +60,31 @@ pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade
             }
         }
     }
-    suffix_override_bridges(ir, &old_names, &suffix);
-    rewrite_call_names(ir, &old_names);
+    // A plain `internal var v` has no accessor function. The emitter synthesizes `getV`/`setV`
+    // from the property, so the suffix has to land on that JVM name too.
+    let synthesized = synthesized_internal_accessors(ir, facade_name, &suffix);
+    // A sibling file may declare none of these members and still call them. Its calls spell the
+    // Kotlin name until this rewrite, so an empty rename set is not a reason to leave them.
+    let rewrites_sibling_calls = ir
+        .referenced_module_callables
+        .values()
+        .any(module_callable_is_mangled)
+        || ir.referenced_module_properties.values().any(|property| {
+            module_getter_is_mangled(property) || module_setter_is_mangled(property)
+        });
+    if old_names.is_empty() && synthesized.is_empty() && !rewrites_sibling_calls {
+        return;
+    }
+    suffix_override_bridges(ir, &old_names, &synthesized, &suffix);
+    apply_synthesized_accessors(ir, &synthesized, &suffix);
+    rewrite_call_names(ir, &old_names, &synthesized, &suffix);
 }
 
 /// An internal member of a real class. Facade functions stay on their Kotlin names, as do
-/// constructors. A value-class `-impl` is static and still takes the suffix (`m-impl$lib1`).
+/// constructors and `@PublishedApi` members (another module's public inline function links the
+/// Kotlin name). A value-class `-impl` is static and still takes the suffix (`m-impl$lib1`).
 fn declares_mangled_member(ir: &IrFile, function: FunId, facade: TypeName) -> bool {
-    if ir.method_visibility(function) != Visibility::Internal {
+    if ir.method_visibility(function) != Visibility::Internal || publishes_api(ir, function) {
         return false;
     }
     let name = ir.functions[function as usize].name.as_str();
@@ -81,7 +96,138 @@ fn declares_mangled_member(ir: &IrFile, function: FunId, facade: TypeName) -> bo
         .any(|class| class.fq_name != facade && class.methods.contains(&function))
 }
 
-fn suffix_override_bridges(ir: &mut IrFile, old_names: &HashMap<FunId, String>, suffix: &str) {
+/// `@PublishedApi` on the function, or on the property whose accessor it is. The annotation is
+/// binary-retained, so it is still on the declaration when names are chosen.
+fn publishes_api(ir: &IrFile, function: FunId) -> bool {
+    if ir
+        .function_annotations
+        .get(&function)
+        .is_some_and(annotations_publish_api)
+    {
+        return true;
+    }
+    ir.classes.iter().any(|class| {
+        class.properties.iter().any(|property| {
+            (property.getter == Some(function) || property.setter == Some(function))
+                && property_publishes_api(class, &property.name)
+        })
+    })
+}
+
+fn property_publishes_api(class: &crate::ir::IrClass, property: &str) -> bool {
+    class
+        .property_annotations
+        .iter()
+        .any(|entry| entry.property == property && annotations_publish_api(&entry.annotations))
+}
+
+fn annotations_publish_api(annotations: &crate::ir::DeclarationAnnotations) -> bool {
+    annotations
+        .iter()
+        .any(|retained| retained.annotation.internal == crate::types::wk::published_api())
+}
+
+struct SynthesizedAccessor {
+    property: crate::fir::PropertyId,
+    owner: TypeName,
+    property_name: String,
+    getter: Option<String>,
+    setter: Option<String>,
+}
+
+/// JVM names of internal accessors the emitter synthesizes because the property has no function.
+fn synthesized_internal_accessors(
+    ir: &IrFile,
+    facade: TypeName,
+    suffix: &str,
+) -> Vec<SynthesizedAccessor> {
+    let mut accessors = Vec::new();
+    for (&property, checked) in &ir.checked_properties {
+        let Some(class_id) = checked.class else {
+            continue;
+        };
+        let Some(class) = ir.classes.get(class_id as usize) else {
+            continue;
+        };
+        if class.fq_name == facade || property_publishes_api(class, &checked.name) {
+            continue;
+        }
+        let Some(member) = class
+            .properties
+            .iter()
+            .find(|member| member.name == checked.name)
+        else {
+            continue;
+        };
+        if member.visibility != Visibility::Internal || member.is_private {
+            continue;
+        }
+        let fresh = |current: &Option<String>, convention: String| {
+            let base = current.clone().unwrap_or(convention);
+            (!base.ends_with(suffix)).then_some(base)
+        };
+        let getter = member.getter.is_none().then(|| {
+            fresh(
+                &member.getter_jvm_name,
+                crate::names::property_getter_name(&member.name),
+            )
+        });
+        let setter = (member.is_var
+            && member.setter.is_none()
+            && member.setter_visibility == Visibility::Internal)
+            .then(|| {
+                fresh(
+                    &member.setter_jvm_name,
+                    crate::names::property_setter_name(&member.name),
+                )
+            });
+        let getter = getter.flatten();
+        let setter = setter.flatten();
+        if getter.is_none() && setter.is_none() {
+            continue;
+        }
+        accessors.push(SynthesizedAccessor {
+            property,
+            owner: class.fq_name,
+            property_name: member.name.clone(),
+            getter,
+            setter,
+        });
+    }
+    accessors
+}
+
+fn apply_synthesized_accessors(ir: &mut IrFile, accessors: &[SynthesizedAccessor], suffix: &str) {
+    for accessor in accessors {
+        let Some(class) = ir
+            .classes
+            .iter_mut()
+            .find(|class| class.fq_name == accessor.owner)
+        else {
+            continue;
+        };
+        let Some(property) = class
+            .properties
+            .iter_mut()
+            .find(|property| property.name == accessor.property_name)
+        else {
+            continue;
+        };
+        if let Some(getter) = &accessor.getter {
+            property.getter_jvm_name = Some(format!("{getter}{suffix}"));
+        }
+        if let Some(setter) = &accessor.setter {
+            property.setter_jvm_name = Some(format!("{setter}{suffix}"));
+        }
+    }
+}
+
+fn suffix_override_bridges(
+    ir: &mut IrFile,
+    old_names: &HashMap<FunId, String>,
+    synthesized: &[SynthesizedAccessor],
+    suffix: &str,
+) {
     let class_index = ir
         .classes
         .iter()
@@ -97,13 +243,22 @@ fn suffix_override_bridges(ir: &mut IrFile, old_names: &HashMap<FunId, String>, 
             let ResolvedFunctionOverrideTarget::Module(callable) = edge.overridden else {
                 continue;
             };
-            let Some(function) = ir.checked_callable_functions.get(&callable).copied() else {
+            if let Some(function) = ir.checked_callable_functions.get(&callable).copied() {
+                if let Some(old) = old_names.get(&function) {
+                    pending.push((class, old.clone()));
+                }
                 continue;
-            };
-            let Some(old) = old_names.get(&function) else {
-                continue;
-            };
-            pending.push((class, old.clone()));
+            }
+            // The overridden member lives in another file of this module, so this file never
+            // renamed it. The bridge was recorded under the Kotlin name and still needs `$<module>`.
+            if let Some(name) = ir
+                .referenced_module_callables
+                .get(&callable)
+                .filter(|callable| module_callable_is_mangled(callable))
+                .map(|callable| callable.name.to_string())
+            {
+                pending.push((class, name));
+            }
         }
     }
     for (owner, edges) in &ir.property_overrides {
@@ -120,6 +275,25 @@ fn suffix_override_bridges(ir: &mut IrFile, old_names: &HashMap<FunId, String>, 
                     continue;
                 };
                 pending.push((class, old.clone()));
+            }
+            if let Some(accessor) = synthesized
+                .iter()
+                .find(|accessor| accessor.property == property)
+            {
+                pending.extend(accessor.getter.iter().map(|name| (class, name.clone())));
+                pending.extend(accessor.setter.iter().map(|name| (class, name.clone())));
+            }
+            if ir.local_property_layouts.contains_key(&property) {
+                continue;
+            }
+            let Some(record) = ir.referenced_module_properties.get(&property) else {
+                continue;
+            };
+            if module_getter_is_mangled(record) {
+                pending.push((class, crate::names::property_getter_name(&record.name)));
+            }
+            if module_setter_is_mangled(record) {
+                pending.push((class, crate::names::property_setter_name(&record.name)));
             }
         }
     }
@@ -148,7 +322,12 @@ fn property_accessors(ir: &IrFile, property: crate::fir::PropertyId) -> Vec<FunI
     }
 }
 
-fn rewrite_call_names(ir: &mut IrFile, old_names: &HashMap<FunId, String>) {
+fn rewrite_call_names(
+    ir: &mut IrFile,
+    old_names: &HashMap<FunId, String>,
+    synthesized: &[SynthesizedAccessor],
+    suffix: &str,
+) {
     let mut by_callable = HashMap::<crate::fir::CallableId, String>::new();
     for (&callable, &function) in &ir.checked_callable_functions {
         if old_names.contains_key(&function) {
@@ -185,18 +364,102 @@ fn rewrite_call_names(ir: &mut IrFile, old_names: &HashMap<FunId, String>) {
             );
         }
     }
+    for accessor in synthesized {
+        if let Some(getter) = &accessor.getter {
+            getter_names.insert(accessor.property, format!("{getter}{suffix}"));
+            by_owner.insert(
+                (accessor.owner, getter.clone()),
+                format!("{getter}{suffix}"),
+            );
+        }
+        if let Some(setter) = &accessor.setter {
+            setter_names.insert(accessor.property, format!("{setter}{suffix}"));
+            by_owner.insert(
+                (accessor.owner, setter.clone()),
+                format!("{setter}{suffix}"),
+            );
+        }
+    }
+    // A sibling file of this module does not own the function, so its call still spells the
+    // Kotlin name (or the value-class mangling of it). The declaration record says whether that
+    // name gained `$<module>`.
+    let module_functions = ir
+        .referenced_module_callables
+        .iter()
+        .filter(|(_, callable)| module_callable_is_mangled(callable))
+        .map(|(&callable, _)| callable)
+        .collect::<HashSet<_>>();
+    let module_getters = ir
+        .referenced_module_properties
+        .iter()
+        .filter(|(_, property)| module_getter_is_mangled(property))
+        .map(|(&property, _)| property)
+        .collect::<HashSet<_>>();
+    let module_setters = ir
+        .referenced_module_properties
+        .iter()
+        .filter(|(_, property)| module_setter_is_mangled(property))
+        .map(|(&property, _)| property)
+        .collect::<HashSet<_>>();
+    let rename = CallRename {
+        by_callable: &by_callable,
+        getter_names: &getter_names,
+        setter_names: &setter_names,
+        by_owner: &by_owner,
+        module_functions: &module_functions,
+        module_getters: &module_getters,
+        module_setters: &module_setters,
+        suffix,
+    };
     for expression in &mut ir.exprs {
         let IrExpr::Call { callee, .. } = expression else {
             continue;
         };
-        rewrite_callee(
-            callee,
-            &by_callable,
-            &getter_names,
-            &setter_names,
-            &by_owner,
-        );
+        rewrite_callee(callee, &rename);
     }
+}
+
+pub(super) fn module_callable_is_mangled(callable: &crate::ir::IrModuleCallable) -> bool {
+    callable.owner.is_some()
+        && callable.visibility == Visibility::Internal
+        && !callable
+            .annotations
+            .iter()
+            .any(|annotation| annotation.identity == crate::types::wk::published_api())
+}
+
+pub(super) fn module_getter_is_mangled(property: &crate::ir::IrModuleProperty) -> bool {
+    property.owner.is_some()
+        && property.visibility == Visibility::Internal
+        && !property
+            .annotations
+            .iter()
+            .any(|annotation| *annotation == crate::types::wk::published_api())
+}
+
+pub(super) fn module_setter_is_mangled(property: &crate::ir::IrModuleProperty) -> bool {
+    property.owner.is_some()
+        && property.mutable
+        && property.setter_visibility == Visibility::Internal
+        && !property
+            .annotations
+            .iter()
+            .any(|annotation| *annotation == crate::types::wk::published_api())
+}
+
+/// Append `$<module>` to a name the value-class pass may already have mangled, keeping a
+/// default stub's trailing `$default`.
+fn append_module_suffix(name: &str, suffix: &str) -> String {
+    if name.ends_with(suffix) {
+        return name.to_string();
+    }
+    if let Some(base) = name.strip_suffix("$default") {
+        if base.ends_with(suffix) {
+            return name.to_string();
+        }
+        return format!("{base}{suffix}$default");
+    }
+    format!("{name}{suffix}")
 }
 
 /// A value-class default call is already a static `name$default`. The member rename is `name`,
@@ -223,13 +486,18 @@ fn keep_default_stub(current: &str, renamed: String) -> String {
     }
 }
 
-fn rewrite_callee(
-    callee: &mut Callee,
-    by_callable: &HashMap<crate::fir::CallableId, String>,
-    getter_names: &HashMap<crate::fir::PropertyId, String>,
-    setter_names: &HashMap<crate::fir::PropertyId, String>,
-    by_owner: &HashMap<(TypeName, String), String>,
-) {
+struct CallRename<'a> {
+    by_callable: &'a HashMap<crate::fir::CallableId, String>,
+    getter_names: &'a HashMap<crate::fir::PropertyId, String>,
+    setter_names: &'a HashMap<crate::fir::PropertyId, String>,
+    by_owner: &'a HashMap<(TypeName, String), String>,
+    module_functions: &'a HashSet<crate::fir::CallableId>,
+    module_getters: &'a HashSet<crate::fir::PropertyId>,
+    module_setters: &'a HashSet<crate::fir::PropertyId>,
+    suffix: &'a str,
+}
+
+fn rewrite_callee(callee: &mut Callee, rename: &CallRename<'_>) {
     match callee {
         Callee::Virtual {
             owner,
@@ -241,18 +509,20 @@ fn rewrite_callee(
             let renamed = match target {
                 Some(IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::Module(
                     callable,
-                ))) => by_callable.get(callable).cloned(),
+                ))) => rename.by_callable.get(callable).cloned(),
                 Some(IrVirtualTarget::PropertyGetter(
                     crate::fir::ResolvedPropertyOverrideTarget::Module(property),
-                )) => getter_names.get(property).cloned(),
+                )) => rename.getter_names.get(property).cloned(),
                 Some(IrVirtualTarget::PropertySetter(
                     crate::fir::ResolvedPropertyOverrideTarget::Module(property),
-                )) => setter_names.get(property).cloned(),
-                _ => module_target.and_then(|callable| by_callable.get(&callable).cloned()),
+                )) => rename.setter_names.get(property).cloned(),
+                _ => module_target.and_then(|callable| rename.by_callable.get(&callable).cloned()),
             }
-            .or_else(|| owner_renamed(by_owner, *owner, name));
+            .or_else(|| owner_renamed(rename.by_owner, *owner, name));
             if let Some(renamed) = renamed {
                 *name = keep_default_stub(name, renamed);
+            } else if sibling_member_is_mangled(rename, module_target, target) {
+                *name = append_module_suffix(name, rename.suffix);
             }
         }
         Callee::Super {
@@ -263,13 +533,17 @@ fn rewrite_callee(
         } => {
             let renamed = match declaration {
                 Some(ResolvedFunctionOverrideTarget::Module(callable)) => {
-                    by_callable.get(callable).cloned()
+                    rename.by_callable.get(callable).cloned()
                 }
                 _ => None,
             }
-            .or_else(|| owner_renamed(by_owner, *owner, name));
+            .or_else(|| owner_renamed(rename.by_owner, *owner, name));
             if let Some(renamed) = renamed {
                 *name = keep_default_stub(name, renamed);
+            } else if let Some(ResolvedFunctionOverrideTarget::Module(callable)) = declaration {
+                if rename.module_functions.contains(callable) {
+                    *name = append_module_suffix(name, rename.suffix);
+                }
             }
         }
         Callee::Special {
@@ -279,23 +553,46 @@ fn rewrite_callee(
             ..
         } => {
             let renamed = source
-                .and_then(|callable| by_callable.get(&callable).cloned())
-                .or_else(|| owner_renamed(by_owner, *owner, name));
+                .and_then(|callable| rename.by_callable.get(&callable).cloned())
+                .or_else(|| owner_renamed(rename.by_owner, *owner, name));
             if let Some(renamed) = renamed {
                 *name = keep_default_stub(name, renamed);
+            } else if source.is_some_and(|callable| rename.module_functions.contains(&callable)) {
+                *name = append_module_suffix(name, rename.suffix);
             }
         }
         Callee::Module { target, name, .. } | Callee::ModuleWithDefaults { target, name, .. } => {
-            if let Some(renamed) = by_callable.get(target) {
+            if let Some(renamed) = rename.by_callable.get(target) {
                 *name = keep_default_stub(name, renamed.clone());
+            } else if rename.module_functions.contains(target) {
+                *name = append_module_suffix(name, rename.suffix);
             }
         }
         Callee::Static { owner, name, .. } => {
-            if let Some(renamed) = owner_renamed(by_owner, *owner, name) {
+            if let Some(renamed) = owner_renamed(rename.by_owner, *owner, name) {
                 *name = renamed;
             }
         }
         _ => {}
+    }
+}
+
+fn sibling_member_is_mangled(
+    rename: &CallRename<'_>,
+    module_target: &Option<crate::fir::CallableId>,
+    target: &Option<IrVirtualTarget>,
+) -> bool {
+    match target {
+        Some(IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::Module(callable))) => {
+            rename.module_functions.contains(callable)
+        }
+        Some(IrVirtualTarget::PropertyGetter(
+            crate::fir::ResolvedPropertyOverrideTarget::Module(property),
+        )) => rename.module_getters.contains(property),
+        Some(IrVirtualTarget::PropertySetter(
+            crate::fir::ResolvedPropertyOverrideTarget::Module(property),
+        )) => rename.module_setters.contains(property),
+        _ => module_target.is_some_and(|callable| rename.module_functions.contains(&callable)),
     }
 }
 

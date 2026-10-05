@@ -2035,9 +2035,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and unmangled. A same-module override that stays `internal` keeps the mangled name and does not
   gain a second method. A public override keeps the Kotlin name and also emits
   `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` under the mangled name; that bridge `invokevirtual`s the
-  public method, so a call through the internal declaration reaches the override. A class in
+  public method, so a call through the internal declaration reaches the override. A public
+  override of an internal `var` emits that bridge for both accessors (`getV$<module>` and
+  `setV$<module>`), including when the accessors are still spelled with the Kotlin name because
+  the overridden declaration is in another file of the same module. A call
+  from another file of the same module is not a same-file method index: it keeps the Kotlin
+  spelling until this suffix, then uses `name$<module>` (a default stub keeps `$default` after
+  the suffix). `@PublishedApi` leaves the member on its Kotlin name (`demo`, `getV`): a public inline function in another
+  module links that name, and a same-named method there overrides the slot. A class in
   another module that declares the same Kotlin name without `override` does not override the
-  mangled slot. `@Metadata` keeps the Kotlin name and records the JVM name when it differs.
+  mangled slot. A module that is not a friend cannot take the slot with `override` either:
+  the member is not visible there, so the internal call still reaches the declaring module.
+  `@Metadata` keeps the Kotlin name and records the JVM name when it differs.
   Tests: `tests/internal_member_names_e2e.rs`, and
   `compiler/testData/codegen/box/bridges/internalMethodOverrideInOtherModule.kt` plus
   `internalMethodOverrideMultipleInheritance.kt`.

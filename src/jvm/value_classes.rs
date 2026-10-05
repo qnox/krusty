@@ -1402,12 +1402,16 @@ pub(crate) fn lower_value_classes(
             })
             .collect();
         // A dropped bridge takes its plan with it, and a later one's plan follows its ordinal.
+        // An internal-name bridge is recorded with `target_name == name` while the module suffix
+        // is still pending, so it shares the implementation's name and descriptor at this point.
+        // A true duplicate has no target of its own; that is the bridge this filter drops.
         let kept = c
             .bridges
             .iter()
             .map(|b| {
                 let desc = ir_method_desc(&b.erased_params, &b.erased_ret);
-                method_keys.insert((b.name.clone(), desc))
+                let internal_name_bridge = b.target_name.as_deref() == Some(b.name.as_str());
+                method_keys.insert((b.name.clone(), desc)) || internal_name_bridge
             })
             .collect::<Vec<_>>();
         bridge_adaptations.retain(c.fq_name_id(), &kept);
