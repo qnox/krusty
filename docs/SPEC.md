@@ -2433,6 +2433,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type-parameter field even when it has no accessors, a boxed nullable primitive, a value class's
   carrier, a reference array and a delegate field. One rule serves class, companion and facade
   properties. Tests: `tests/metadata_field_signature_e2e.rs`.
+- **`HAS_CONSTANT` follows kotlinc's serializer exactly.** A `val` records it when its declared
+  type could be a `const val` type (a non-null primitive, unsigned integer or `String`) and its
+  initializer passes `FirToConstantValueChecker`: a literal, a string template or concatenation of
+  string literals over constants, a `const val` read, or a number conversion (`toByte` …
+  `toDouble`, `toChar`) or `unaryMinus` applied to a constant. `val x: Any = "s"`, `1 + 2` and
+  `!true` have none, while `0.toDouble()` and `"$X"` do. Common lowering decides it once from the
+  checked initializer (`fir_lower::metadata_constants`) for class and package properties alike.
+  Known gap: checked FIR already holds a `const val` read as its value, so `"a" + S` is taken for a
+  literal concatenation, which kotlinc does not merge. Tests: `tests/metadata_property_flags_e2e.rs`.
 - **Accessor and function records follow declaration identity, never a JVM name.** A property's
   `JvmPropertySignature` names only the accessors the property owns. A private property with
   default accessors has none, so `operator fun getValue(...)` beside `private val value` is a

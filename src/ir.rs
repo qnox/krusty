@@ -1958,10 +1958,6 @@ pub struct IrFile {
     /// type): the value is already known to be a `T`, so a backend narrows it with a plain cast
     /// rather than the checked cast a written `as` needs.
     pub written_casts: std::collections::HashSet<ExprId>,
-    /// Constants that are the value of an operation over constants (`1 + 2`), folded like kotlinc's
-    /// `ConstEvaluationLowering`, rather than a literal the source wrote. Kotlin metadata's
-    /// `HAS_CONSTANT` describes only a literal initializer, so a backend must not read it from these.
-    pub folded_constants: std::collections::HashSet<ExprId>,
     /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.
