@@ -1546,7 +1546,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `inline class` is unboxed without the annotation. With the feature, the class is a final JVM
   class: public constructor, private final fields, getters, and data-class `equals`/`hashCode`/
   `toString` (`A(x=1)`, `31 * acc + field.hashCode()`) without `componentN`, `copy`, or the
-  `-impl`/`box-impl` family. `@JvmInline value class` keeps the unboxed inline ABI either way.
+  `-impl`/`box-impl` family. Those three generated members actualize between an `expect value
+  class` and its `actual`: they are not source members, and a headerless pair of the same name
+  is one declaration. `@JvmInline value class` keeps the unboxed inline ABI either way.
   `tests/full_value_classes_e2e.rs`.
 - `==` on `String` (Kotlin `==` = `.equals`, `===` = reference). Structural
   `==`/`!=` on reference operands compiles to `kotlin/jvm/internal/Intrinsics.areEqual(Object,Object)Z`
