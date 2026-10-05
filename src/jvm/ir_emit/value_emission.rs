@@ -752,7 +752,7 @@ impl super::Emitter<'_> {
                         match super::super::type_of::generate(
                             *ty,
                             &parameters,
-                            self.recursive_type_of,
+                            self.ir.recursive_type_of,
                             &mut instructions,
                         ) {
                             Ok(()) => {
@@ -956,7 +956,7 @@ impl super::Emitter<'_> {
                         self.ir,
                         e,
                         &self.facade,
-                        self.recursive_type_of,
+                        self.ir.recursive_type_of,
                         &|ty| self.rendered_inlined_cast_target(ty),
                     );
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have

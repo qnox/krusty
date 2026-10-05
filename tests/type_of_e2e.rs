@@ -133,6 +133,43 @@ fun box(): String {
     assert_eq!(run(&[("main.kt", MAIN)]).expect("recursive typeOf"), "OK");
 }
 
+/// The language feature is a frontend policy. Without it, reject the selected call at its source
+/// span with kotlinc's complete diagnostic rather than letting JVM emission discover the cycle.
+#[test]
+fn recursive_type_of_requires_the_language_feature() {
+    const SOURCE: &str = "import kotlin.reflect.typeOf\n\nfun <T : Comparable<T>> rejected() =\n    typeOf<List<T>>()\n";
+    let expected = vec![
+        "main.kt:4:5: non-reified type parameters with recursive bounds are not supported yet: T"
+            .to_owned(),
+    ];
+    assert_eq!(
+        common::reference_error_ledger(&[("main.kt", SOURCE)], &[]),
+        expected
+    );
+    assert_eq!(
+        common::krusty_error_ledger_with_args(&[("main.kt", SOURCE)], &[]),
+        expected
+    );
+}
+
+/// A source-local test directive must not enable a sibling file. This guards the compiler boundary
+/// against collapsing finalized per-file language policy into one module-wide backend switch.
+#[test]
+fn recursive_type_of_feature_does_not_leak_between_files() {
+    const ENABLED: &str = "// LANGUAGE: +JvmSupportRecursiveTypeOf\nimport kotlin.reflect.typeOf\nfun <T : Comparable<T>> accepted() = typeOf<List<T>>()\n";
+    const DISABLED: &str = "import kotlin.reflect.typeOf\n\nfun <U : Comparable<U>> rejected() =\n    typeOf<List<U>>()\n";
+    assert_eq!(
+        common::krusty_error_ledger_with_args(
+            &[("enabled.kt", ENABLED), ("disabled.kt", DISABLED)],
+            &[],
+        ),
+        vec![
+            "disabled.kt:4:5: non-reified type parameters with recursive bounds are not supported yet: U"
+                .to_owned(),
+        ]
+    );
+}
+
 /// kotlinc's `generateTypeOfArguments` reads `KTypeProjection.star` and calls the class's static
 /// `invariant`/`contravariant`/`covariant`, never the companion, so the facade names no
 /// `KTypeProjection$Companion` and lists no row for it.

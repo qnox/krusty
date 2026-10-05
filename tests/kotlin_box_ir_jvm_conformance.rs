@@ -304,8 +304,7 @@ fn compile_source(
     );
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_jvm_default(krusty::conformance::jvm_default_mode(src))
-        .with_lambda_modes(box_lambda_modes([src]))
-        .with_recursive_type_of(features.has("JvmSupportRecursiveTypeOf"));
+        .with_lambda_modes(box_lambda_modes([src]));
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     T_EMIT.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
@@ -612,8 +611,7 @@ fn compile_blocks_mixed(
         .with_jvm_default(jvm_default)
         .with_lambda_modes(box_lambda_modes(
             blocks.iter().map(|(_, source)| source.as_str()),
-        ))
-        .with_recursive_type_of(features.has("JvmSupportRecursiveTypeOf"));
+        ));
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let classes = outputs
         .into_iter()

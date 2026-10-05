@@ -125,7 +125,7 @@ impl<'a> Emitter<'a> {
             self.ir,
             call_expression,
             &self.facade,
-            self.recursive_type_of,
+            self.ir.recursive_type_of,
             &|ty| self.rendered_inlined_cast_target(ty),
         );
         CallObjects {

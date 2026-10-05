@@ -409,8 +409,6 @@ pub struct JvmBackend {
     /// `LanguageFeature.AnnotationsInMetadata`. This is deliberately independent of the physical
     /// metadata stamp: an internal stamp override must not change source-language semantics.
     annotations_in_metadata: bool,
-    /// `LanguageFeature.JvmSupportRecursiveTypeOf`.
-    recursive_type_of: bool,
 }
 
 impl JvmBackend {
@@ -425,15 +423,7 @@ impl JvmBackend {
             call_assertions: true,
             metadata_version: None,
             annotations_in_metadata: true,
-            recursive_type_of: false,
         }
-    }
-
-    /// `JvmSupportRecursiveTypeOf`: realize `typeOf` of a non-reified parameter whose bounds reach
-    /// itself. Off unless the invocation's language features enable it.
-    pub fn with_recursive_type_of(mut self, enabled: bool) -> JvmBackend {
-        self.recursive_type_of = enabled;
-        self
     }
 
     /// `-language-version X.Y` stamps every `@kotlin.Metadata` `mv` and the `.kotlin_module`
@@ -538,10 +528,6 @@ pub fn shipping_emit_options(
         // The shipping default language level is 2.4, where this feature is enabled. A configured
         // compiler invocation overrides it through `EmitOptions::with_annotations_in_metadata`.
         annotations_in_metadata: true,
-        // Experimental and off unless `-XXLanguage:+JvmSupportRecursiveTypeOf` (or the same
-        // `// LANGUAGE:` directive) selects it. The backend applies that with
-        // `EmitOptions::with_recursive_type_of`.
-        recursive_type_of: false,
     }
 }
 
@@ -946,8 +932,7 @@ impl JvmBackend {
                 .with_param_assertions(self.param_assertions)
                 .with_metadata_version(self.metadata_version)
                 .with_annotations_in_metadata(self.annotations_in_metadata)
-                .with_java_parameters(self.java_parameters)
-                .with_recursive_type_of(self.recursive_type_of);
+                .with_java_parameters(self.java_parameters);
         emit_opts.inner_class_resolver = Some(inner_class_resolver);
         let run = crate::jvm::ir_emit::EmitRun::default();
         let emit_metadata = crate::jvm::ir_emit::EmitMetadata {

@@ -497,10 +497,7 @@ fn compile_in_process_report(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
             .expect("JVM provider initialization"),
     );
-    let mut features = krusty::features::LangFeatures::new();
-    features.apply_source_directives(src);
-    let backend = krusty::jvm::JvmBackend::new(cp)
-        .with_recursive_type_of(features.has("JvmSupportRecursiveTypeOf"));
+    let backend = krusty::jvm::JvmBackend::new(cp);
     let report = emit_in_process(src, stem, platform, &backend);
     let classes = report
         .artifacts
