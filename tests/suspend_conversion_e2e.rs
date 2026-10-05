@@ -150,3 +150,38 @@ fn bound_reference_converts_to_a_nullable_suspend_parameter() {
         common::assert_class_matches_kotlinc("ScNullable", NULLABLE_SUSPEND_TARGET_SRC, class);
     }
 }
+
+#[test]
+fn suspend_function_checks_keep_stable_proof_across_unrelated_casts_like_kotlinc() {
+    common::expect_box_same_as_kotlinc(
+        r#"import kotlin.coroutines.Continuation
+import kotlin.reflect.KFunction2
+import kotlin.reflect.KSuspendFunction1
+
+class Foo(val x: Int) {
+    suspend fun bar(y: Int) = y + x
+}
+
+fun box(): String {
+    val ref = Foo(42)::bar
+    (ref as KFunction2<Int, Continuation<Int>, Any?>)
+    (ref as Function2<Int, Continuation<Int>, Any?>)
+    if (ref !is KSuspendFunction1<Int, Any?>) return "bound-k"
+    if (ref !is SuspendFunction1<Int, Any?>) return "bound-s"
+
+    val lambda = suspend { x: Int -> x }
+    if (lambda is KSuspendFunction1<Int, Any?>) return "lambda-k"
+    if (lambda is KFunction2<*, *, *>) return "lambda-reflect"
+    (lambda as Function2<Int, Continuation<Int>, Any?>)
+    if (lambda !is SuspendFunction1<Int, Any?>) return "lambda-s"
+    if (lambda !is Function2<Int, Continuation<Int>, Any?>) return "lambda-f"
+
+    var reassigned: Any = Foo(0)::bar
+    reassigned = "not a function"
+    if (reassigned is KSuspendFunction1<*, *>) return "stale-reference-shape"
+    return "OK"
+}
+"#,
+        "SuspendFunctionCastProof",
+    );
+}

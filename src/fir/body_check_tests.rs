@@ -1965,7 +1965,7 @@ suspend fun inspect(): Boolean {
     assert_eq!(runtime_targets.len(), 4);
     assert!(matches!(
         runtime_targets[0],
-        Ty::Obj(name, _) if name.matches("kotlin/reflect/KSuspendFunction1")
+        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
     ));
     assert!(matches!(
         runtime_targets[1],
@@ -1973,7 +1973,7 @@ suspend fun inspect(): Boolean {
     ));
     assert!(matches!(
         runtime_targets[2],
-        Ty::Obj(name, _) if name.matches("kotlin/reflect/KSuspendFunction1")
+        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
     ));
     assert!(matches!(
         runtime_targets[3],
@@ -2078,7 +2078,7 @@ fun box(): String {
     ));
     assert!(matches!(
         runtime_targets[3],
-        Ty::Obj(name, _) if name.matches("kotlin/reflect/KFunction2")
+        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KFunction2")
     ));
     assert!(matches!(
         runtime_targets[4],

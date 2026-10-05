@@ -61802,8 +61802,13 @@ impl<'a> Checker<'a> {
                 if let Some((_, local)) = self.visible_flow_value(scope, *identity) {
                     types.push(local.declared_ty);
                     types.push(local.ty);
-                    if let Some(function) = local.callable_reference_type {
-                        types.push(function);
+                    // A mutable binding can now hold a different value of its declared storage
+                    // type. Its initializer's callable-reference shape is not a fact about that
+                    // later value.
+                    if !local.is_var {
+                        if let Some(function) = local.callable_reference_type {
+                            types.push(function);
+                        }
                     }
                 }
             }

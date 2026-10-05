@@ -10362,9 +10362,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier replaces the later read with that classifier's signature, and the binding keeps the
   type it was declared with. `Foo::bar as KFunction2` and `suspend { x: Int -> x } as Function2`
   therefore still prove `is KSuspendFunction1`, `is SuspendFunction1`, and `is Function2` with
-  concrete arguments: each is the always-true check kotlinc accepts.
+  concrete arguments: each is the always-true check kotlinc accepts. A mutable binding does not
+  retain its initializer's callable-reference proof after reassignment.
   (`src/fir/body_check_tests.rs`,
-  `a_suspend_reference_keeps_its_type_after_an_unrelated_function_cast`.)
+  `a_suspend_reference_keeps_its_type_after_an_unrelated_function_cast`, and
+  `tests/suspend_conversion_e2e.rs`.)
   `x as SuspendFunctionN` is only the
   `checkcast` to `Function{N+1}`; the marker test stays on `is` and on `as?`. A reference to a
   suspend function keeps that suspend function type even with no expected function type, including
