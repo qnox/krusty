@@ -86,6 +86,7 @@ impl SymbolResolver<'_> {
         }
         self.advance_classifier_path(ClassifierPathPrefix::Package(TypeName::ROOT), &segments)
             .ok()
+            .map(|selected| selected.classifier)
     }
 
     /// Advance a qualified classifier path from an already selected first-segment identity.

@@ -53616,7 +53616,7 @@ impl<'a> Checker<'a> {
                 if current_owner.is_some() {
                     self.lexical_class_context.remove(0);
                 }
-                self.active_statement_suppressions
+                self.active_lexical_policies
                     .truncate(class_suppression_depth);
                 return;
             }
