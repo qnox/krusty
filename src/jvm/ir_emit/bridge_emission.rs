@@ -496,19 +496,21 @@ fn emit_bridge(
                 return;
             }
             unbox_prim_from(cw, &mut code, cr, er);
-        } else if er.is_reference() && cr.is_reference() {
-            // kotlinc's bridge casts the delegated result to the bridge's return type
-            // (`irCastIfNeeded`), and the JVM coercion emits that cast for every differing
-            // reference type but `Object`: a covariant override (`f(): String` over
-            // `f(): CharSequence`) casts up, an erased generic getter (`Object` under a
-            // `String` interface) and `Nothing?`'s `Void` cast down.
-            let erased = crate::jvm::names::instanceof_internal_name(er);
-            if erased != "java/lang/Object"
-                && erased != crate::jvm::names::instanceof_internal_name(cr)
-            {
-                let ci = cw.class_ref(&erased);
-                code.checkcast(ci);
-            }
+        } else if er.is_reference()
+            && !er.is_array()
+            && cr.is_reference()
+            && !crate::jvm::names::same_type_descriptor(cr, er)
+            && crate::jvm::names::instanceof_internal_name(er) != "java/lang/Object"
+        {
+            // kotlinc's bridge materializes the delegated result at its own return type, and
+            // `StackValue.coerce` casts between two different reference types unless the target is
+            // `Object`: it does not consult the class hierarchy. So a `String` override bridged to
+            // a `CharSequence` declaration is cast, as is the erased `Object` of a generic getter
+            // bridged to a narrower declaration and `Nothing?`'s `Void` bridged to a box. A bridge
+            // returning `Object` or an array (`Array<String>` over `Array<out Any>`) takes the
+            // result as it is.
+            let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(er));
+            code.checkcast(ci);
         }
     }
     emit_return(er, &mut code);

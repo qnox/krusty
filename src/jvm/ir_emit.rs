@@ -13,7 +13,7 @@ use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
 };
 use crate::jvm::classreader::{MethodCode, C};
-use crate::jvm::constructor_debug::property_line;
+use crate::jvm::constructor_debug::{primary_constructor_line, property_line};
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
     mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
@@ -159,6 +159,7 @@ use class_metadata::build_class_metadata;
 #[cfg(test)]
 use class_metadata::build_class_metadata_with_facts;
 mod constructor_delegation_arguments;
+mod primary_super_call;
 mod secondary_constructor;
 mod static_accessors;
 mod static_fields;
@@ -3012,45 +3013,7 @@ fn emit_class(
                 ctor_desc.clone(),
                 u16::try_from(debug_start).expect("a JVM method body fits in u16"),
             ));
-            for &statement in &c.super_arg_prelude {
-                e.emit(statement, &mut ctor);
-            }
-            // A base whose primary ctor takes a value-class param — or a SEALED base — has a PRIVATE
-            // primary. The checker records whether this exact selection is that primary; only then
-            // must a subclass `super(…)` reach it through the PUBLIC|SYNTHETIC
-            // `(…args, DefaultConstructorMarker)` accessor rather than the inaccessible declaration.
-            let (mut super_param_tys, super_accessor) = super_ctor_jvm_tys(e.ir, c, &superclass);
-            e.emit_constructor_delegation_arguments(
-                &c.super_args,
-                &c.super_ctor_params,
-                &[],
-                &mut ctor,
-            );
-            let super_defaults =
-                e.ir.super_constructor_default_arguments
-                    .get(&c.fq_name_id())
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-            if !super_defaults.is_empty() {
-                super_param_tys = jvm_tys(&c.super_ctor_params);
-                for mask in constructor_default_masks(super_defaults, c.super_ctor_params.len()) {
-                    ctor.push_int(mask, e.cw);
-                    super_param_tys.push(Ty::Int);
-                }
-                ctor.aconst_null();
-                super_param_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-            } else if super_accessor {
-                ctor.aconst_null();
-            }
-            let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-            let super_descriptor =
-                e.ir.external_super_constructors
-                    .get(&c.fq_name_id())
-                    .and_then(|target| target.descriptor.as_deref())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| method_descriptor(&super_param_tys, Ty::Unit));
-            let super_init = e.cw.methodref(&superclass, "<init>", &super_descriptor);
-            ctor.invokespecial(super_init, aw, 0);
+            ctor_lines.extend(e.emit_primary_super_call(c, &superclass, &mut ctor));
             e.this_uninitialized = false;
             // Interface delegation runs after `super(…)` and before constructor-property stores.
             // The delegate expression sees parameters, not the properties those parameters become.
@@ -3123,8 +3086,9 @@ fn emit_class(
             // The trailing `return` goes back on the class-declaration line, closing the ctor's table.
             if !ctor_lines.is_empty() {
                 // A closing `init` line still pending owns a `nop` before the return's line.
-                ctor.mark_line(c.decl_line);
-                ctor_lines.push((ctor.bytes.len() as u16, c.decl_line));
+                let line = primary_constructor_line(ir, c);
+                ctor.mark_line(line);
+                ctor_lines.push((ctor.bytes.len() as u16, line));
             }
             ctor.ret_void();
         }
@@ -8527,20 +8491,6 @@ fn norm_nothing(t: Ty) -> Ty {
 }
 
 pub use crate::jvm::physical_type::ir_ty_to_jvm;
-
-fn super_ctor_jvm_tys(ir: &IrFile, c: &IrClass, superclass: &str) -> (Vec<Ty>, bool) {
-    let mut params = jvm_tys(&c.super_ctor_params);
-    let uses_accessor = (c.super_ctor.primary() && ir.has_value_param_ctor(superclass))
-        || constructor_accessors::reached_through_accessor(
-            c.super_ctor,
-            Some(c.fq_name_id()),
-            c.superclass,
-        );
-    if uses_accessor {
-        params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-    }
-    (params, uses_accessor)
-}
 
 /// The JVM element type of an array given its whole array type. `ir_ty_to_jvm` already maps
 /// `kotlin/Array<Int>` → `[Ljava/lang/Integer;` (boxed) and `kotlin/IntArray` → `[I` (primitive), so the

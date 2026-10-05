@@ -36,7 +36,9 @@ use inline_capability::{metadata_inline, property_accessor_inline};
 use java_nullability::{
     java_result_enhancement, java_type_argument_nullability, java_type_nullability,
 };
-use mapped_builtin_member_status::{mapped_builtin_member_status, MappedBuiltinMemberStatus};
+use mapped_builtin_member_status::{
+    mapped_builtin_member_status, retain_joined_mapped_members, MappedBuiltinMemberStatus,
+};
 
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
@@ -44,7 +46,6 @@ use super::classpath::{
 use super::classreader::{ConstVal, FieldSig, JavaNullability};
 use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
-use crate::jvm::names::same_mapped_virtual_name_of;
 use crate::jvm::names::{property_getter_name, type_descriptor};
 use crate::libraries::builtin_top_level_realization::attach_function_realization;
 use crate::libraries::{
@@ -2385,26 +2386,12 @@ impl JvmLibraries {
                     mapped_builtin_member_status(internal_name, ci.this_class, member).is_visible()
                 });
             } else {
-                // A mapped JVM method and its Kotlin builtin entry describe one declaration. Prefer the
-                // builtin's Kotlin-only facts while retaining the same physical target.
-                members.retain(|member| {
-                    !builtin_members.iter().any(|builtin| {
-                        let member_physical = member
-                            .physical_name
-                            .as_deref()
-                            .unwrap_or(member.name.as_str());
-                        let builtin_physical = builtin
-                            .physical_name
-                            .as_deref()
-                            .unwrap_or(builtin.name.as_str());
-                        same_mapped_virtual_name_of(
-                            internal_name,
-                            member_physical,
-                            builtin_physical,
-                            &member.descriptor,
-                        ) && member.descriptor == builtin.descriptor
-                    })
-                });
+                retain_joined_mapped_members(
+                    internal_name,
+                    ci.this_class,
+                    &mut members,
+                    &builtin_members,
+                );
             }
             // A static Java declaration blocks an inherited instance property but does not itself
             // become one. Private instance declarations are normalized as private PropertyInfo
