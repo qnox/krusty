@@ -595,6 +595,8 @@ mod definitely_non_null_type_e2e;
 mod delegate_by_lazy_e2e;
 #[path = "delegate_initializer_constraint_e2e.rs"]
 mod delegate_initializer_constraint_e2e;
+#[path = "delegate_member_call_e2e.rs"]
+mod delegate_member_call_e2e;
 #[path = "delegate_scalar_boundary_e2e.rs"]
 mod delegate_scalar_boundary_e2e;
 #[path = "delegated_local_prop_e2e.rs"]

@@ -57,11 +57,11 @@ use hierarchy_projection::{
     classifier_type_parameter_bounds, direct_supertypes_from_classifier, receiver_hierarchy,
 };
 pub use lambda_call_shape::LambdaCallShape;
-use member_hierarchy::declared_callables;
 pub(crate) use member_hierarchy::{
-    bound_inner_constructor_candidates, declared_member_callables, imported_object_member_symbols,
-    inherited_nested_classifier_name, lexical_enclosing_classifier_names, member_is_inheritable,
-    members_in_hierarchy, normalize_inherited_member_functions, override_input_shapes_match,
+    bound_inner_constructor_candidates, declared_member_callables, function_input_shapes_match,
+    imported_object_member_symbols, inherited_nested_classifier_name,
+    lexical_enclosing_classifier_names, member_is_inheritable, members_in_hierarchy,
+    normalize_inherited_member_functions, override_input_shapes_match,
     override_parameter_types_match, specialize_member_function, supertype_preorder,
     InheritedNestedClassifier, OverrideInputShape,
 };

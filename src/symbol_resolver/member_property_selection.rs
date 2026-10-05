@@ -1,8 +1,8 @@
 //! Selection of one semantic member-property declaration through an applied receiver hierarchy.
 
 use super::{
-    declared_callables, direct_supertypes, hierarchy_projection, member_is_inheritable, PropKind,
-    SelectedMemberProperty, SymbolResolver, Ty,
+    direct_supertypes, hierarchy_projection, member_hierarchy::declared_callables,
+    member_is_inheritable, PropKind, SelectedMemberProperty, SymbolResolver, Ty,
 };
 use crate::symbol_source::SymbolSource;
 
