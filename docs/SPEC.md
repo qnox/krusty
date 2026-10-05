@@ -736,8 +736,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same-module box-returning callee
   does: each consumer takes the carrier at its own boundary, and `suspend fun f(i: Impl): Any =
   i.value()` forwards its continuation (`aload_0; aload_1; invokevirtual Impl.value-…; areturn`). An intrinsic point
-  (`suspendCoroutineUninterceptedOrReturn<X>`, `suspendCoroutine<X>`) yields the box on either
-  path, since its block returns `Any?`, so a function returning the carrier unboxes it and does not
+  (`suspendCoroutineUninterceptedOrReturn<X>`) yields the box on either path, since its block
+  returns `Any?`, as does an inline call whose erased result is `Any?` (`suspendCoroutine<X>`), so a function returning the carrier unboxes it and does not
   forward its continuation to it. A suspend lambda returns `X` boxed, as every lambda does, so its
   continuation does not box it again. A direct caller of a carrier-returning declaration unboxes
   the resumed box, because that call's erased return is the carrier and no use-site wrapper unboxes
@@ -766,6 +766,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   block do not decline the transformer: the block is one point at its own line. Suspend lambdas
   that read their continuation still take the IR machine (`jvm/suspend/bytecode_machine.rs`,
   `jvm/ir_emit/transformed_suspensions.rs`). Tests: `tests/intrinsic_suspension_probes_e2e.rs`.
+- **`suspendCoroutine` is an ordinary inline suspend call.** The stdlib declares it a public
+  `@InlineOnly` suspend function whose compiled body already holds kotlinc's suspension markers
+  and `SafeContinuation` protocol, and kotlinc inlines that body like any other: no declaration
+  carries a compiler intrinsic for it. The continuation an inline suspend callee is given is never
+  stored: its body reads the caller's own continuation local, as every suspension point in the
+  caller does, unless the caller passes kotlinc's fake continuation. A suspend function that calls
+  an inline function is still a candidate for the bytecode transformer, which reads the inlined
+  markers like any other. The literal `Unit` lambda the inlined body invokes marks its closing
+  brace on the return it falls into, which the inliner keeps as a `nop` on that line
+  (`jvm/ir_emit/bytecode_inline_call.rs`, `jvm/ir_emit/bytecode_inline_call/lambda_node.rs`).
+  Tests: the `coroutines/` box corpus through the kotlinc byte-diff harness, and
+  `fir/body_check/call_tests.rs::suspend_coroutine_is_an_ordinary_inline_suspend_call`.
 - **An `@InlineOnly` call's last operands are read in place.** kotlinc's
   `InplaceArgumentsMethodTransformer` moves each argument of an `@InlineOnly` callee that passes
   `canInlineArgumentsInPlace` to where the body loads it. Common lowering keeps a dependency

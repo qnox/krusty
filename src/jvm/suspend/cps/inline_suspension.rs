@@ -27,7 +27,7 @@ use std::collections::HashSet;
 /// Carrying an `inline_body` does NOT make a lambda's body part of this frame: lowering attaches
 /// one wherever it can, including to the lambda of an ordinary function (`launch { … }`). Only the
 /// argument of an INLINE call can be spliced, so only there does the body belong to this frame.
-pub(crate) fn calls_an_inline_function(ir: &IrFile, expression: ExprId) -> bool {
+fn calls_an_inline_function(ir: &IrFile, expression: ExprId) -> bool {
     let IrExpr::Call {
         callee: Callee::Static { name, inline, .. },
         ..
@@ -391,20 +391,15 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint};
+    use crate::ir::IrIntrinsicSuspensionPoint;
     use crate::types::Ty;
 
     /// Mark `point` as a suspension the way an intrinsic one is recorded, so these tests need no
     /// function table.
     fn suspension(ir: &mut IrFile) -> ExprId {
         let point = ir.add_expr(IrExpr::UnitInstance);
-        ir.intrinsic_suspension_points.insert(
-            point,
-            IrIntrinsicSuspensionPoint {
-                result: Ty::Unit,
-                kind: IrIntrinsicSuspensionKind::Safe,
-            },
-        );
+        ir.intrinsic_suspension_points
+            .insert(point, IrIntrinsicSuspensionPoint { result: Ty::Unit });
         point
     }
 

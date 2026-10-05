@@ -66,7 +66,6 @@ pub enum CompilerIntrinsic {
     /// `@InlineOnly` suspend property whose private throwing accessor is never invoked directly.
     CoroutineContext,
     CoroutineSuspended,
-    SuspendCoroutine,
     SuspendCoroutineUninterceptedOrReturn,
     EnumValues,
     EnumValueOf,

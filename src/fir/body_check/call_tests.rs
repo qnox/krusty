@@ -1065,7 +1065,7 @@ fn unintercepted_coroutine_primitive_is_a_checked_fir_intrinsic() {
 }
 
 #[test]
-fn safe_coroutine_primitive_is_a_distinct_checked_fir_intrinsic() {
+fn suspend_coroutine_is_an_ordinary_inline_suspend_call() {
     let (body, _) = checked_function_body_with_platform(
         "// WITH_STDLIB\n\
          import kotlin.coroutines.suspendCoroutine\n\
@@ -1077,16 +1077,17 @@ fn safe_coroutine_primitive_is_a_distinct_checked_fir_intrinsic() {
     );
     let FirExprKind::Call(call) = &body
         .expr(root_expression(&body))
-        .expect("safe coroutine primitive call")
+        .expect("suspendCoroutine call")
         .kind
     else {
-        panic!("the selected safe coroutine primitive must remain an explicit checked call")
+        panic!("suspendCoroutine must remain an explicit checked call")
     };
+    // kotlinc inlines the stdlib's own body: the declaration carries no compiler intrinsic.
     assert!(matches!(
         call.target,
-        FirCallTarget::Intrinsic {
-            operation: FirIntrinsic::SuspendCoroutine,
-            receiver: None,
+        FirCallTarget::External {
+            suspend: true,
+            can_inline: true,
             ..
         }
     ));

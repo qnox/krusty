@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use crate::ir::{for_each_child, ExprId, IrExpr, IrFile, IrIntrinsicSuspensionKind};
+use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 
 /// Bind every current-coroutine placeholder in `root` to the continuation value at `slot`: a read
 /// of it, `coroutineContext` as its interface call, and the value an unintercepted block probes.
@@ -40,11 +40,7 @@ fn bind_probed_continuations(
         if !seen.insert(expression) {
             continue;
         }
-        if ir
-            .intrinsic_suspension_points
-            .get(&expression)
-            .is_some_and(|point| point.kind == IrIntrinsicSuspensionKind::Unintercepted)
-        {
+        if ir.is_unintercepted_suspension(expression) {
             continuations.insert(expression, slot);
         }
         for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));

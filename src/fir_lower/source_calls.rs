@@ -249,27 +249,21 @@ impl BodyLowering<'_> {
             ret: self.ir.functions.get(implementation as usize)?.ret,
         });
         // The unintercepted primitive is kotlinc's own inline intrinsic: the block it is given
-        // opens a frame named after it. The safe one wraps the block in a stdlib body whose frames
-        // this splice does not reproduce, so it declares none.
-        let (kind, callee) = match operation {
-            crate::fir::FirIntrinsic::SuspendCoroutine => {
-                (crate::ir::IrIntrinsicSuspensionKind::Safe, None)
-            }
-            crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { callee } => (
-                crate::ir::IrIntrinsicSuspensionKind::Unintercepted,
-                Some(&**callee),
-            ),
-            _ => return None,
+        // opens a frame named after it.
+        let crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { callee } = operation
+        else {
+            return None;
         };
         self.splice_inline_lambda(
             invocation,
-            super::inlining::LambdaParameterBinding::Declared { callee },
+            super::inlining::LambdaParameterBinding::Declared {
+                callee: Some(callee),
+            },
         )?;
         self.ir.intrinsic_suspension_points.insert(
             invocation,
             crate::ir::IrIntrinsicSuspensionPoint {
                 result: result.get(),
-                kind,
             },
         );
         Some(invocation)
@@ -1156,13 +1150,19 @@ impl BodyLowering<'_> {
 
     pub(super) fn wrap_call_statements(&mut self, statements: Vec<ExprId>, call: ExprId) -> ExprId {
         if statements.is_empty() {
-            call
-        } else {
-            self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
-                value: Some(call),
-            })
+            return call;
         }
+        let binds_operands_only = statements
+            .iter()
+            .all(|statement| self.ir.call_operand_bindings.contains(statement));
+        let block = self.ir.add_expr(IrExpr::Block {
+            stmts: statements,
+            value: Some(call),
+        });
+        if binds_operands_only {
+            self.operand_bound_calls.insert(block, call);
+        }
+        block
     }
 
     pub(super) fn external_constructor_call(

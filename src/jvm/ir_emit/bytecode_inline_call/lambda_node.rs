@@ -481,6 +481,13 @@ impl Emitter<'_> {
         if self.machine_next_ordinal != states_before {
             return Err("a lambda planned for the inliner started a suspension");
         }
+        // kotlinc's lambda method marks its closing brace on the return a `Unit` body falls off
+        // its end into, which the inliner turns into the `nop` that keeps that line.
+        if !scratch.is_dead() {
+            if let Some(line) = self.lambda_fallthrough_line(impl_fn) {
+                self.mark_expression_line(inline_body, line, &mut scratch);
+            }
+        }
         // A `Unit` body may or may not leave `Unit.INSTANCE`; any other body leaves its value. A
         // body that always throws ends without a return.
         let return_type = match type_descriptor(result).as_str() {
@@ -584,6 +591,16 @@ impl Emitter<'_> {
                 .zip(capture_types.iter().copied())
                 .collect(),
         })
+    }
+
+    /// The closing line of the lambda `impl_fn` when its body falls off its end into the implicit
+    /// return of `Unit`.
+    fn lambda_fallthrough_line(&self, impl_fn: u32) -> Option<u32> {
+        let body = self.ir.functions[impl_fn as usize].body?;
+        let IrExpr::Block { stmts, value: None } = self.ir.expr(body) else {
+            return None;
+        };
+        self.ir.fallthrough_return_line(*stmts.last()?)
     }
 
     /// The names kotlinc's `capturedVars` give the lambda `impl_fn`'s first `count` parameters, its
