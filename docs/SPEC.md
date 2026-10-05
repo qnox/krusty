@@ -4435,8 +4435,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   effect to reorder: a constant (folded ones such as `1 + 2` and `"a" + "b"` included), a read of a
   `val`, a parameter or a receiver, a function literal that is not SAM-converted, an unbound
   callable reference and an unbound class literal. A `var` read, an object, a string template, a
-  property read and a SAM-converted lambda are stored. A scalar stored for a reference parameter is
-  boxed where it is passed. Operands stored because one of them suspends or because the callee is an
+  property read, a SAM-converted lambda and a bound reference (its receiver evaluates where it is
+  written) are stored. A scalar stored for a reference parameter is boxed where it is passed, in a
+  call and in a constructor delegation alike. Operands stored because one of them suspends or because the callee is an
   inline function from a dependency are unchanged. Tests: `tests/named_argument_operands_e2e.rs`.
 
 - **Method type parameter that shadows its class's (`class Box<T> { fun <T> m(x: T): T }`).** The
