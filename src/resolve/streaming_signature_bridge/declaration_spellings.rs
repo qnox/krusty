@@ -199,7 +199,7 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
         scoped_constraints: std::cell::RefCell::new(std::collections::HashMap::new()),
         completed_scoped_constraints: std::cell::RefCell::new(std::collections::HashMap::new()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
-        selected_call_contracts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        selected_calls: Default::default(),
         source_contracts: std::cell::RefCell::new(std::collections::HashMap::new()),
         file_import_scopes: super::file_import_scopes::FileImportScopes::default(),
     };

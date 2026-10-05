@@ -195,7 +195,7 @@ pub(crate) fn spelling_of_ref_with(
 
 /// Place a use site's argument spellings into an alias expansion's PARAMETER positions, keeping the
 /// right-hand side's own spelling everywhere else. See the call site for why both sources exist.
-fn expansion_arg_spellings(
+pub(super) fn expansion_arg_spellings(
     template: Option<(&Spelled, &[String], Ty)>,
     use_site: &[(Ty, Spelled)],
 ) -> Vec<Spelled> {

@@ -9,7 +9,90 @@
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
 
-use super::{classifier_candidates_at_scope_level, CandidateSelection, FunctionScopeRef};
+use super::{CandidateSelection, FunctionScopeRef};
+
+/// A classifier selected on the classifier tower together with the typealias declaration, when
+/// any, whose record named it on the winning rung. The provenance travels with the selection, so a
+/// consumer never rediscovers alias-ness from the spelling after a nearer rung already won.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ScopedClassifier {
+    pub(crate) classifier: TypeName,
+    pub(crate) alias: Option<crate::libraries::AliasExpansion>,
+}
+
+/// The classifier candidates `name` denotes in `owners` (packages, or classifiers whose nested
+/// classifiers are in scope), each with the declaration that supplied it. Candidates naming one
+/// classifier collapse before ambiguity is decided; a collapsed candidate whose records name
+/// different aliases names no single alias, so it carries none.
+pub(crate) fn scoped_classifier_candidates_at_scope_level<S: SymbolSource + ?Sized>(
+    source: &S,
+    name: &str,
+    owners: &[TypeName],
+) -> Vec<ScopedClassifier> {
+    let mut candidates: Vec<ScopedClassifier> = Vec::new();
+    for &owner in owners {
+        let candidate = if source.classifier(owner).is_some() {
+            let nested = owner
+                .existing_nested_child(name)
+                .unwrap_or_else(|| crate::types::type_name_nested_child(owner, name));
+            source
+                .classifier(nested)
+                .filter(|classifier| classifier.is_nested && nested.nested_owner() == Some(owner))
+                .map(|_| ScopedClassifier {
+                    classifier: nested,
+                    alias: None,
+                })
+        } else {
+            let record = source.symbols(SymbolNamespace::Package(owner), name);
+            record.classifier_name.map(|classifier| ScopedClassifier {
+                classifier,
+                alias: match &record.classifier_declaration {
+                    Some(crate::libraries::ClassifierDeclaration::TypeAlias(alias)) => {
+                        Some(alias.clone())
+                    }
+                    Some(crate::libraries::ClassifierDeclaration::Ordinary(_)) | None => None,
+                },
+            })
+        };
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        match candidates
+            .iter_mut()
+            .find(|previous| previous.classifier == candidate.classifier)
+        {
+            Some(previous) => {
+                let same_alias = previous.alias.as_ref().map(|alias| alias.identity)
+                    == candidate.alias.as_ref().map(|alias| alias.identity);
+                if !same_alias {
+                    previous.alias = None;
+                }
+            }
+            None => candidates.push(candidate),
+        }
+    }
+    candidates
+}
+
+impl<T> CandidateSelection<T> {
+    pub(crate) fn map<U>(self, f: impl FnOnce(T) -> U) -> CandidateSelection<U> {
+        match self {
+            Self::None => CandidateSelection::None,
+            Self::Selected(selected) => CandidateSelection::Selected(f(selected)),
+            Self::Ambiguous => CandidateSelection::Ambiguous,
+        }
+    }
+}
+
+impl super::SymbolResolver<'_> {
+    /// [`Self::classifier_in_scope`] with the alias declaration that named the selection, if any.
+    pub(crate) fn scoped_classifier_in_scope(
+        &self,
+        name: &str,
+    ) -> CandidateSelection<ScopedClassifier> {
+        select(&self.src, self.fn_scope, name)
+    }
+}
 
 /// One rung of classifier import precedence.
 ///
@@ -38,12 +121,24 @@ pub(crate) fn classifier_candidates_at_import_level<S: SymbolSource + ?Sized>(
     name: &str,
     level: &ClassifierImportLevel,
 ) -> Vec<TypeName> {
-    let mut candidates = classifier_candidates_at_scope_level(source, name, &level.packages);
+    scoped_classifier_candidates_at_import_level(source, name, level)
+        .into_iter()
+        .map(|candidate| candidate.classifier)
+        .collect()
+}
+
+/// [`classifier_candidates_at_import_level`] with each candidate's declaration provenance.
+pub(crate) fn scoped_classifier_candidates_at_import_level<S: SymbolSource + ?Sized>(
+    source: &S,
+    name: &str,
+    level: &ClassifierImportLevel,
+) -> Vec<ScopedClassifier> {
+    let mut candidates = scoped_classifier_candidates_at_scope_level(source, name, &level.packages);
     if level.builtins_only {
         candidates.retain(|candidate| {
-            let (namespace, leaf) = SymbolNamespace::classifier_key(*candidate);
+            let (namespace, leaf) = SymbolNamespace::classifier_key(candidate.classifier);
             let record = source.symbols(namespace, leaf);
-            record.builtin_classifier && record.classifier_name == Some(*candidate)
+            record.builtin_classifier && record.classifier_name == Some(candidate.classifier)
         });
     }
     candidates
@@ -98,23 +193,36 @@ pub(super) fn select(
     source: &dyn SymbolSource,
     scope: Option<FunctionScopeRef<'_>>,
     name: &str,
-) -> CandidateSelection<TypeName> {
+) -> CandidateSelection<ScopedClassifier> {
     match scope {
         None => CandidateSelection::None,
-        Some(FunctionScopeRef::Flat(packages)) => {
-            choose(classifier_candidates_at_scope_level(source, name, packages))
-        }
+        Some(FunctionScopeRef::Flat(packages)) => choose(
+            scoped_classifier_candidates_at_scope_level(source, name, packages),
+        ),
         Some(FunctionScopeRef::Imports(imports)) => {
             if imports.explicit_is_ambiguous(name) {
                 return CandidateSelection::Ambiguous;
             }
             if let Some((owner, declared_name)) = imports.explicit_target(name) {
-                if let Some(candidate) = source.symbols(owner, &declared_name).classifier_name {
-                    return CandidateSelection::Selected(candidate);
+                let record = source.symbols(owner, &declared_name);
+                if let Some(classifier) = record.classifier_name {
+                    return CandidateSelection::Selected(ScopedClassifier {
+                        classifier,
+                        alias: match &record.classifier_declaration {
+                            Some(crate::libraries::ClassifierDeclaration::TypeAlias(alias)) => {
+                                Some(alias.clone())
+                            }
+                            Some(crate::libraries::ClassifierDeclaration::Ordinary(_)) | None => {
+                                None
+                            }
+                        },
+                    });
                 }
             }
             for level in imports.classifier_levels() {
-                match choose(classifier_candidates_at_import_level(source, name, level)) {
+                match choose(scoped_classifier_candidates_at_import_level(
+                    source, name, level,
+                )) {
                     CandidateSelection::None => {}
                     selected => return selected,
                 }
@@ -124,10 +232,10 @@ pub(super) fn select(
     }
 }
 
-fn choose(candidates: Vec<TypeName>) -> CandidateSelection<TypeName> {
-    match candidates.as_slice() {
-        [] => CandidateSelection::None,
-        [candidate] => CandidateSelection::Selected(*candidate),
+fn choose(mut candidates: Vec<ScopedClassifier>) -> CandidateSelection<ScopedClassifier> {
+    match candidates.len() {
+        0 => CandidateSelection::None,
+        1 => CandidateSelection::Selected(candidates.remove(0)),
         _ => CandidateSelection::Ambiguous,
     }
 }
