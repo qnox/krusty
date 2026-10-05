@@ -296,6 +296,10 @@ fn run_backend_passes_after_plugins(
         .map_err(|_| SkipReason::DefaultCalls)?;
     }
     crate::jvm::shared_captures::lower_class_capture_slots(ir);
+    // An inline expansion rewrites a type-parameter cell to the call-site element. A lambda that
+    // still uses the shared erased implementation takes the erased holder, and suspension spilling
+    // reads that holder from the cell, so the two have to agree before either pass.
+    crate::jvm::shared_captures::restore_erased_escaping_capture_holders(ir);
     let null_out_dead_spills =
         crate::jvm::runtime_capabilities::null_out_spilled_variable(classpath);
     if !crate::jvm::suspend::lower_suspend(

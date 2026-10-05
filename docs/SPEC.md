@@ -11415,6 +11415,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the enclosing scope reassigns after the closure is built (KT-4656). Unsigned `UInt`/`ULong` share the
   signed `Ref$IntRef`/`Ref$LongRef` holder (their unboxed JVM representation).
 
+- **Erased holder of an inlined type-parameter cell**: inlining substitutes the copied template,
+  including the shared cell of a `var` whose type is a type parameter. A call with `T = Int` would
+  otherwise build `Ref$IntRef`. A lambda that escapes that expansion and was not cloned — an ordinary
+  parameter stays on the shared implementation — still takes the erased holder (`Ref$ObjectRef`).
+  The cell keeps that holder. The call site boxes a primitive element into it and unboxes on the way
+  out. A by-value capture of that same parameter is boxed to the shared implementation's erased
+  parameter when the closure is built. A cell whose capture already uses the same holder, including
+  a primitive `var` an inlined lambda splices, stays on that holder. Test:
+  `tests/inline_erased_capture_e2e.rs`.
+
 - **Inner-class outer access**: an inner method reads an enclosing-instance member through `this$0`
   (field 0) via the outer's synthesized getter (`this.this$0.getX()`) — the outer backing field is
   private, so direct field access would be illegal. The checker makes the outer class's backing-field

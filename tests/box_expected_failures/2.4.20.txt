@@ -5,7 +5,6 @@
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 coroutines/functionReference_Function_SuspendFunction_casts.kt
-coroutines/tailCallOptimizations/crossinline.kt
 fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt

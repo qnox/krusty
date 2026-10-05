@@ -1730,6 +1730,7 @@ impl super::Emitter<'_> {
                     indy,
                     cap_words,
                     captures,
+                    cap_tys,
                     sam.as_ref().is_some_and(|target| target.nullable),
                 );
             }
