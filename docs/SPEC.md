@@ -10860,6 +10860,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   carries kotlinc's `@NotNull`/`@Nullable` on its result and parameters in an abstract class and an
   enum exactly as in an interface. Tests: `tests/abstract_member_shape_e2e.rs`.
 
+- **Enum constructors are private; an entry body's subclass uses a marker accessor.** Every enum
+  constructor, primary or secondary, is `private` in the class file and private in its metadata
+  record, whose JVM descriptor includes the `(String, int)` name and ordinal. An entry with a body
+  becomes `Enum$ENTRY`, which calls the constructor its entry selected through a public synthetic
+  `(String, int, …, DefaultConstructorMarker)` accessor. The accessors follow the enum's members
+  and bridges, one per targeted constructor, in the order the entries first select them. The
+  subclass's constructor writes a `Signature` without the prefix, maps to its entry's line, and
+  lists `this`, `$enum$name` and `$enum$ordinal`. Tests: `tests/enum_entry_constructor_accessor_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

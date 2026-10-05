@@ -49,6 +49,7 @@ mod constant_emission;
 mod constructor_accessors;
 mod constructor_defaults;
 mod constructor_initialization;
+mod enum_constructor_accessors;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
 mod companion_field;
 mod copied_code;
@@ -4156,11 +4157,10 @@ fn emit_enum_class(
     ctor.ret_void();
     ctor.ensure_locals(max_locals);
     ctor.link();
-    // A plain enum's constructor is `private` (matching kotlinc — javap then hides the synthetic
-    // `(String,int)` params in its display). A subclassed enum's ctor must be reachable from its entry
-    // subclasses' `<init>` (an `invokespecial` from another class): kotlinc keeps it `private` and relies
-    // on nestmate access, which krusty doesn't emit, so it stays package-private + synthetic here.
-    let base_ctor_acc = if has_subclass { ACC_SYNTHETIC } else { 0x0002 };
+    // An enum's constructor is `private` (matching kotlinc — javap then hides the synthetic
+    // `(String,int)` params in its display). Its entry subclasses reach it through the public
+    // synthetic `(…, DefaultConstructorMarker)` accessor emitted after the members.
+    let base_ctor_acc = 0x0002;
     // kotlinc emits a generic `Signature` on the enum ctor listing only the USER params (the synthetic
     // leading `(String, int)` are excluded) — e.g. `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
     // javap reads it to display `Color()` instead of `Color(String, int)`; without it the synthetic
@@ -4450,6 +4450,7 @@ fn emit_enum_class(
     // before `<clinit>`, forwarders first.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
+    enum_constructor_accessors::emit(ir, c, &fq, &mut cw);
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.

@@ -42,6 +42,19 @@ pub(super) fn emit_enum_entry_subclass(
         .chain(user_jvm.iter().copied())
         .collect();
     let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
+    let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
+    // As on the enum's own constructor, the generic `Signature` leaves out the `(String, int)`
+    // prefix. kotlinc visits the name, descriptor and signature before the body's constants.
+    let ctor_signature = format!(
+        "({})V",
+        user_jvm
+            .iter()
+            .map(|ty| type_descriptor(*ty))
+            .collect::<String>()
+    );
+    cw.reserve_method_name("<init>");
+    cw.reserve_descriptor(&ctor_desc);
+    cw.reserve_descriptor(&ctor_signature);
     let mut ctor = CodeBuilder::new(1 + ctor_words);
     ctor.aload(0);
     let mut slot = 1u16;
@@ -49,12 +62,20 @@ pub(super) fn emit_enum_entry_subclass(
         load(*t, slot, &mut ctor);
         slot += slot_words(*t);
     }
+    // The enum's constructor is private: the subclass reaches it through its marker accessor.
+    ctor.aconst_null();
+    let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
+    let accessor_params = ctor_params
+        .iter()
+        .copied()
+        .chain(std::iter::once(marker))
+        .collect::<Vec<_>>();
     let super_init = cw.methodref(
         &superclass,
         "<init>",
-        &method_descriptor(&ctor_params, Ty::Unit),
+        &method_descriptor(&accessor_params, Ty::Unit),
     );
-    let argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
+    let argw: i32 = accessor_params.iter().map(|t| slot_words(*t) as i32).sum();
     ctor.invokespecial(super_init, argw, 0);
     let mut ctor_max = 1 + ctor_words;
     if let Some(init_body) = c.init_body {
@@ -81,12 +102,29 @@ pub(super) fn emit_enum_entry_subclass(
     ctor.ret_void();
     ctor.ensure_locals(ctor_max);
     ctor.link();
-    cw.add_method(
-        0x0000,
-        "<init>",
-        &method_descriptor(&ctor_params, Ty::Unit),
-        &ctor,
-    );
+    cw.add_method_sig(0x0000, "<init>", &ctor_desc, &ctor, Some(&ctor_signature));
+    // The constructor maps to its entry's line and lists the receiver and the enum prefix.
+    let locals = [
+        ("this".to_string(), format!("L{fq_name};"), 0),
+        (
+            "$enum$name".to_string(),
+            "Ljava/lang/String;".to_string(),
+            1,
+        ),
+        ("$enum$ordinal".to_string(), "I".to_string(), 2),
+    ];
+    let line = ir
+        .class_id_by_name(c.superclass)
+        .and_then(|enum_class| {
+            ir.classes[enum_class as usize]
+                .enum_entries
+                .iter()
+                .find(|entry| entry.subclass == Some(c.fq_name))
+        })
+        .map(|entry| entry.decl_line)
+        .filter(|&line| line != 0)
+        .map(|line| (0, line));
+    cw.set_method_debug("<init>", &ctor_desc, line, &locals);
     if let Some(defaults) = ir
         .class_ctor_defaults(&superclass)
         .filter(|defaults| defaults.iter().any(Option::is_some))
