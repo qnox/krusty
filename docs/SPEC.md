@@ -827,12 +827,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that is a plain read or constant, or the trailing run of such operands whatever their values
   (unless one suspends), is passed directly, which keeps the source evaluation order. The JVM
   splice then reads a constructor call or `Unit` in place too, so `x.resume(P("OK"))` stores no
-  local   (`fir_lower/source_calls.rs`, `jvm/ir_emit/in_place_arguments.rs`). Tests:
+  local (`fir_lower/source_calls.rs`, `jvm/ir_emit/in_place_arguments.rs`). Tests:
   `tests/inline_arguments_in_place_e2e.rs`.
 - **An `@InlineOnly` call reads a local through a representation-preserving coercion.**
   `println(message)` widens a non-null `String` to `Any?`. That coercion emits no bytecode, so
   kotlinc's `genOrGetLocal` still loads the caller's local after `getstatic System.out`. A
-  reference coercion that narrows (`String` to `CharSequence`) loads the same local and
+  reference coercion that changes the view (`String` to `CharSequence`) loads the same local and
   `checkcast`s it. A coercion that boxes or unboxes (`Int` to `Any`) is stored
   (`jvm/ir_emit/bytecode_inline_call.rs`). Test:
   `tests/inline_arguments_in_place_e2e.rs::an_inline_only_println_of_a_local_loads_the_local_after_system_out`.
