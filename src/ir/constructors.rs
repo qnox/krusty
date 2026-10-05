@@ -119,6 +119,26 @@ pub struct IrSecondaryCtorLines {
     pub defaults: Vec<u32>,
 }
 
+impl IrSecondaryCtorLines {
+    /// The line kotlinc builds the delegating call at: the `this`/`super` keyword, or the
+    /// `constructor` keyword when the delegation is implicit.
+    pub fn delegation_call_line(&self) -> Option<u32> {
+        [self.delegation_line, self.decl_line]
+            .into_iter()
+            .find(|&line| line != 0)
+    }
+}
+
+impl super::IrClass {
+    /// The line kotlinc builds a primary constructor's delegating call at: where the declaration
+    /// starts, annotations included.
+    pub fn primary_delegation_line(&self) -> Option<u32> {
+        [self.decl_start_line, self.decl_line]
+            .into_iter()
+            .find(|&line| line != 0)
+    }
+}
+
 /// A compiler-generated secondary constructor's semantic role. Producers record this exact class
 /// and ordinal edge once; later plugin/backend phases must not recover the constructor from
 /// `synthetic`, its parameter arity, descriptor, or generated spelling.

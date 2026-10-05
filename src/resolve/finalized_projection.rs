@@ -7,6 +7,7 @@
 
 use super::{Signature, SymbolTable};
 use crate::fir::{DeclarationId, ResolvedModuleIndex};
+use crate::spelling::Spelled;
 
 fn resolved_result(
     index: &ResolvedModuleIndex,
@@ -383,8 +384,20 @@ pub(crate) fn publish_stable_declaration_metadata(
     for (declaration, hierarchy) in classifier_hierarchies {
         index.publish_classifier_hierarchy(declaration, hierarchy);
     }
-    for (&declaration, spellings) in &table.stable_declared_spellings {
-        index.publish_declaration_spellings(declaration, spellings.clone());
+    let mut spellings = table.stable_declared_spellings.clone();
+    for (declaration, abbreviation) in index.result_abbreviations() {
+        if index.declaration_header(declaration).is_none() {
+            continue;
+        }
+        let record = spellings.entry(declaration).or_default();
+        // A declared result keeps its own spelling; only an inferred one takes the abbreviation
+        // its type was reached through.
+        if record.ret.is_none() {
+            record.ret = abbreviation_spelling(table, abbreviation);
+        }
+    }
+    for (declaration, spellings) in spellings {
+        index.publish_declaration_spellings(declaration, spellings);
     }
     for class in table.classes.values() {
         if let Some(declaration) = class.stable_declaration {
@@ -479,5 +492,39 @@ pub(crate) fn publish_stable_declaration_metadata(
             };
             index.publish_compile_time_constant(declaration, constant.clone());
         }
+    }
+}
+
+/// The spelling of a type reached through a typealias application, as if the alias had been
+/// written: the alias with its arguments, and the expansion's argument spellings its right-hand
+/// side supplies.
+fn abbreviation_spelling(
+    table: &SymbolTable,
+    abbreviation: &crate::fir::ResolvedTypeAbbreviation,
+) -> Spelled {
+    let alias_args = abbreviation
+        .arguments
+        .iter()
+        .map(|&argument| (argument, Spelled::default()))
+        .collect::<Vec<_>>();
+    let library = table.libraries.type_alias_expansion(abbreviation.alias);
+    let template = table
+        .alias_expansion_spellings
+        .get(&abbreviation.alias)
+        .map(|(rhs, formals, expansion)| (rhs, formals.as_slice(), *expansion))
+        .or_else(|| {
+            library.as_ref().map(|alias| {
+                (
+                    &alias.expansion_spelling,
+                    alias.formals.as_slice(),
+                    alias.expansion,
+                )
+            })
+        });
+    Spelled {
+        alias: Some(abbreviation.alias),
+        args: super::type_spellings::expansion_arg_spellings(template, &alias_args),
+        alias_args,
+        ..Spelled::default()
     }
 }
