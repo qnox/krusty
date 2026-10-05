@@ -11039,7 +11039,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class: a `private data class` nested in a `private companion object` is constructed and read from
   the outer class's methods. A `private` or `protected` companion keeps that visibility on the outer
   class's `Companion` field (`private static final`), as kotlinc writes it; an interface's field
-  stays public. Verified against kotlinc 2.4.20. (`tests/companion_private_members_e2e.rs`.)
+  stays public. Every other JVM class that reads a private `Companion` field (a nested or inner
+  class, an object expression, the companion's own methods) calls the outer class's synthetic
+  `public static final access$getCompanion$p()` instead, appended with the outer class's other
+  accessors in first-use order; the outer class's own code and its indy lambdas read the field
+  directly. Verified against kotlinc 2.4.20. (`tests/companion_private_members_e2e.rs`.)
 - **The receiver of a compound member assignment.** `receiver.x op= value` evaluates `receiver`
   once. A read of a `val`, a parameter, or a value a lambda or local function lifted to a method
   receives as a parameter is read again for the setter, and so is every `this` receiver, including

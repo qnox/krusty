@@ -18,6 +18,45 @@ pub(super) fn companion_field_access(ir: &IrFile, class: &IrClass, companion: Ty
         }
 }
 
+/// The class whose PRIVATE `Companion` field holds singleton `companion`. Another JVM class (a
+/// nested or inner class, an object expression, the companion itself) may not read that field, so
+/// kotlinc's `SyntheticAccessorLowering` reads it through the owner's `access$get<Companion>$p`.
+fn private_companion_field_owner(ir: &IrFile, companion: TypeName) -> Option<TypeName> {
+    let owner = companion.nested_owner()?;
+    let class = ir.classes.get(ir.class_id_by_name(owner)? as usize)?;
+    (class.companion_class == Some(companion)
+        && companion_field_access(ir, class, companion) & 0x0002 != 0)
+        .then_some(owner)
+}
+
+/// The private `Companion` field read by `expression`, as (owner, companion): a checked singleton
+/// value, or a lowered read of the outer class's `Companion` field.
+pub(super) fn private_companion_read(
+    ir: &IrFile,
+    expression: &IrExpr,
+) -> Option<(TypeName, TypeName)> {
+    let companion = match expression {
+        IrExpr::SingletonValue { classifier } => *classifier,
+        IrExpr::StaticInstance { owner, ty, .. } if owner != ty => {
+            ir.classes.get(*ty as usize)?.fq_name
+        }
+        IrExpr::ExternalStaticInstance { owner, ty, .. } if owner != ty => *ty,
+        _ => return None,
+    };
+    private_companion_field_owner(ir, companion).map(|owner| (owner, companion))
+}
+
+/// The name and descriptor of the accessor that reads `companion`'s private `Companion` field.
+pub(super) fn companion_instance_accessor(companion: TypeName) -> (String, String) {
+    (
+        format!(
+            "access${}$p",
+            property_getter_name(companion.nested_segment_ref())
+        ),
+        format!("()L{};", companion.render()),
+    )
+}
+
 pub(super) fn add_companion_field(cw: &mut ClassWriter, class: &IrClass) {
     let Some(companion) = class.companion_class else {
         return;

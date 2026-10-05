@@ -27,6 +27,20 @@ impl super::Emitter<'_> {
         node: &IrExpr,
         code: &mut CodeBuilder,
     ) {
+        // Another class reads a private `Companion` field through its owner's accessor.
+        if let Some((owner, companion)) =
+            super::companion_field::private_companion_read(self.ir, node).filter(|(owner, _)| {
+                self.static_owner
+                    != Some(crate::jvm::private_static_access::StaticOwner::Class(
+                        *owner,
+                    ))
+            })
+        {
+            let (name, descriptor) = super::companion_field::companion_instance_accessor(companion);
+            let method = self.cw.methodref(&owner.render(), &name, &descriptor);
+            code.invokestatic(method, 0, 1);
+            return;
+        }
         match node {
             IrExpr::BottomValue { producer, .. } => {
                 let baseline = code.stack_height();

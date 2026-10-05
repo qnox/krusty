@@ -62,3 +62,37 @@ fn the_companion_field_keeps_the_companion_visibility() {
         byte_identical("companion_visibilities", COMPANION_VISIBILITIES, class);
     }
 }
+
+/// Every other JVM class that reads a private companion (a nested or inner class, an object
+/// expression, the companion itself) goes through the owner's `access$getCompanion$p`.
+const PRIVATE_COMPANION_FROM_OTHER_CLASSES: &str = r#"
+class Outer {
+    private companion object {
+        val result = "OK"
+        fun self() = Outer.Companion
+        fun viaName() = Outer.result
+    }
+    class Nested { fun foo() = result }
+    inner class Inner { fun foo() = result + Companion.result }
+    fun obj() = object { fun f() = result }.f()
+    fun lam() = { result }
+    fun direct() = result
+}
+"#;
+
+#[test]
+fn other_classes_read_a_private_companion_through_its_accessor() {
+    for class in [
+        "Outer",
+        "Outer$Companion",
+        "Outer$Nested",
+        "Outer$Inner",
+        "Outer$obj$1",
+    ] {
+        byte_identical(
+            "private_companion_from_other_classes",
+            PRIVATE_COMPANION_FROM_OTHER_CLASSES,
+            class,
+        );
+    }
+}
