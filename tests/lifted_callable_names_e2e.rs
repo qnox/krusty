@@ -217,3 +217,31 @@ fn lambdas_number_and_order_their_nested_callables_like_kotlinc() {
          }\n";
     common::assert_classes_identical_to_kotlinc("LiftedLambdaNames", src, &["Rack"]);
 }
+
+/// Each local class and anonymous object numbers its members' lambdas on its own, from zero, though
+/// the file's other top-level declarations write objects with a same-named member: the compiler
+/// reads a file one top-level declaration at a time, and the objects of two of them took one
+/// sequence, so `get$lambda$1` and `get$lambda$2` followed `get$lambda$0`.
+#[test]
+fn each_local_class_numbers_its_own_lambdas_across_top_level_declarations() {
+    let source = "interface Box { fun get(): Any }\n\
+        class Holder { fun a(): Box = object : Box { override fun get(): Any { val f = { 1 }; return f() } } }\n\
+        fun top(): Box = object : Box { override fun get(): Any { val f = { 2 }; return f() } }\n\
+        fun local(): Box {\n\
+        \x20   class L : Box { override fun get(): Any { val f = { 3 }; return f() } }\n\
+        \x20   return L()\n\
+        }\n\
+        object Q { val b = object : Box { override fun get(): Any { val f = { 4 }; return f() } } }\n";
+    let classes = common::classes_against_kotlinc_module(&[("ObjectLambdas.kt", source)]);
+    for class in [
+        "Holder$a$1",
+        "ObjectLambdasKt$top$1",
+        "ObjectLambdasKt$local$L",
+        "Q$b$1",
+    ] {
+        let (reference, krusty) = classes
+            .method_declarations(class)
+            .unwrap_or_else(|| panic!("both compilers write {class}"));
+        assert_eq!(krusty, reference, "{class}: kotlinc's methods");
+    }
+}

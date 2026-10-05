@@ -1897,7 +1897,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   name-clashing local functions: overloads share it, as do constructors and `init` blocks; a lambda
   spliced at an inline call site still takes its number, and so does each accessor of a local
   delegated property. A suspend lambda becomes a class of its own and takes none. A local class or
-  anonymous object starts sequences of its own. The frontend walk
+  anonymous object starts sequences of its own, keyed by where the file writes it: the frontend
+  reads a file one top-level declaration at a time and a declaration id is only unique within one,
+  so keying by id made the objects of two top-level declarations share a sequence
+  (`get$lambda$1` after another object's `get$lambda$0`). The frontend walk
   (`frontend::local_function_names`) records each callable's position; checking decides whether a
   lambda is lifted (its type); the JVM backend numbers every sequence of the file whole and renames
   the lowered functions once they are placed, keeping a method's previous name only where the
@@ -9582,6 +9585,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `src/jvm/suspend/cps/member_parameters.rs`,
   `tests/value_class_receiver_capture_debug_names_e2e.rs`,
   `tests/value_class_mangled_lambda_names_e2e.rs`, `tests/java_parameters_attribute_e2e.rs`.
+- **`MethodParameters` of a value class's interface entries, abstract members and receiver-first
+  statics (`-java-parameters`).** A value class keeps on its box an interface entry for each member
+  lowered to a static `-impl` (the boxed override `abs(String)` calling `abs-impl`). kotlinc
+  reflects the entry's parameters as the static names them, less the carrier `arg0`, and its
+  extension receiver is the receiver of an instance method again, so `$this$abs` is unflagged there
+  while the static's is `mandated`. An abstract member, of an interface or a class, reflects its
+  parameters as a concrete one does. `box-impl`, `unbox-impl`, the private constructor and the
+  `ACC_BRIDGE` bridges reflect none; the boxed `equals(other)`, `constructor-impl`, every `-impl`
+  static and `equals-impl0(p1, p2)` already matched. A static that takes a member's dispatch
+  receiver first (an interface member's body or `enable` forward on `DefaultImpls`, the interface's
+  `access$<name>$jd` bridge, a `<name>$suspendImpl`) names the interface or class instance `$this`
+  and the extension receiver `$receiver` on every surface: its local-variable row, its null check
+  and, flagged `mandated` beside the `synthetic` `$this`, its reflection name; a sub-interface's
+  republished forward of an inherited member does too. The JVM backend formats the entry from the
+  static's recorded identities (an arity mismatch is an internal error), and the `$receiver`
+  spelling from the extension-receiver role where the function is written on a holder or records a
+  holder receiver. Not yet matched: kotlinc lowers an interface default a value class inherits to
+  a `dflt-impl` static with an entry, where krusty writes a forward with no `MethodParameters`, and
+  orders an accessor's entry beside its static. Tests: `tests/java_parameters_attribute_e2e.rs`,
+  `tests/interface_default_method_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**
   `class Test(val x: S, val y: S = S("K"))` fills an omitted `y` in its synthetic
   `<init>(String, String, int, DefaultConstructorMarker)`. The default expression runs over the

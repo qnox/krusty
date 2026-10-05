@@ -49,3 +49,34 @@ fun box(): String {\n\
     let out = run(SRC).expect("default method reading an abstract property should compile + run");
     assert_eq!(out, "OK");
 }
+
+/// kotlinc writes an interface member's body on `DefaultImpls`, and its `access$<name>$jd` bridge,
+/// as a static that takes the interface instance as `$this` and the extension receiver as an
+/// ordinary parameter `$receiver`: its local-variable row and its null check read `$receiver`, and
+/// so does the forward a sub-interface republishes for an inherited member. A `$suspendImpl` that
+/// takes a class's instance first names it the same way. krusty named it `$this$ie` and checked it
+/// as `<this>`.
+#[test]
+fn a_default_impls_extension_receiver_is_named_receiver() {
+    let source = "interface Face {\n\
+        \x20   fun String.ie(n: Int): Int = length + n\n\
+        \x20   val String.pe: Int get() = length\n\
+        \x20   fun plain(y: Int): Int = y\n\
+        }\n\
+        interface Sub : Face\n\
+        open class Open { open suspend fun String.se(n: Int): Int = n + length }\n";
+    let classes = common::classes_against_kotlinc_module(&[("DefaultImplsReceiver.kt", source)]);
+    for class in [
+        "Face$DefaultImpls",
+        "Face",
+        "Sub$DefaultImpls",
+        "Sub",
+        "Open",
+    ] {
+        let (reference, krusty) = classes.class_listing(class);
+        assert_eq!(
+            krusty, reference,
+            "{class}: kotlinc's code and debug tables"
+        );
+    }
+}

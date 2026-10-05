@@ -8,8 +8,9 @@ pub(super) fn add_abstract(
     cw: &mut ClassWriter,
     function: u32,
     formatter: &JvmSignatureFormatter<'_>,
-    override_results: &crate::jvm::override_results::OverrideResults,
+    env: &super::EmitEnv<'_>,
 ) -> String {
+    let override_results = env.override_results;
     let declaration = &ir.functions[function as usize];
     let descriptor = declared_method_desc(ir, override_results, function);
     cw.add_abstract_method_sig(
@@ -18,6 +19,16 @@ pub(super) fn add_abstract(
         &descriptor,
         declared_method_signature(formatter, ir, override_results, function).as_deref(),
     );
+    // An abstract member declares its parameters as a concrete one does, `$this$name` included.
+    if env.java_parameters {
+        let parameters = crate::jvm::method_parameters::function(
+            ir,
+            function,
+            &super::jvm_function_params(ir, function),
+            None,
+        );
+        cw.set_method_parameters(&declaration.name, &descriptor, &parameters);
+    }
     emit_recorded(ir, cw, function, &declaration.name, &descriptor);
     descriptor
 }

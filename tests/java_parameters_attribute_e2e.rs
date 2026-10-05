@@ -497,6 +497,60 @@ fn java_parameters_flags_a_value_class_static_members_extension_receiver_mandate
     );
 }
 
+/// A value class keeps an interface entry on its box for each member lowered to a static `-impl`:
+/// the boxed override `abs(String)` calling `abs-impl`. kotlinc reflects the entry's parameters as
+/// the static names them, less the carrier, and its extension receiver `$this$abs` is unflagged
+/// there: it is the receiver of an instance method again. krusty wrote no `MethodParameters` on an
+/// entry, nor on an abstract interface member. The boxed `equals(other)`, `constructor-impl`, the
+/// `-impl` statics and `equals-impl0` keep theirs, `box-impl`, `unbox-impl`, the private
+/// constructor and the bridges none.
+#[test]
+fn java_parameters_names_a_value_class_boxed_members() {
+    assert_parameter_parity(
+        "JavaParametersBoxedMembers",
+        "package demo\n\
+         interface Abs { fun String.abs(): Int; fun plain(x: Int): Int }\n\
+         interface Gen<T> { fun f(t: T): T; fun Int.prop2(): String }\n\
+         interface Sized { val pp: Int }\n\
+         @JvmInline value class Held(val raw: String) : Abs, Gen<String>, Sized, Comparable<Held> {\n\
+         \x20 override fun String.abs(): Int = length + raw.length\n\
+         \x20 override fun plain(x: Int): Int = x\n\
+         \x20 override fun f(t: String): String = t + raw\n\
+         \x20 override fun Int.prop2(): String = raw\n\
+         \x20 override val pp: Int get() = 1\n\
+         \x20 override fun compareTo(other: Held): Int = 0\n\
+         \x20 fun own(y: String): Int = y.length\n\
+         }\n",
+        &["demo/Held", "demo/Abs", "demo/Gen"],
+    );
+}
+
+/// kotlinc writes an interface member's body on `DefaultImpls` as a static that takes the
+/// interface instance as `$this`, synthetic, and the extension receiver as an ordinary parameter
+/// `$receiver`, flagged mandated like every receiver a static moves; so do the forward a
+/// sub-interface republishes for an inherited member and a class's `<name>$suspendImpl`. krusty
+/// named it `$this$ie`, unflagged.
+#[test]
+fn java_parameters_flags_a_default_impls_extension_receiver_mandated() {
+    assert_parameter_parity(
+        "JavaParametersDefaultImplsReceiver",
+        "package demo\n\
+         interface Face {\n\
+         \x20 fun String.ie(n: Int): Int = length + n\n\
+         \x20 val String.pe: Int get() = length\n\
+         \x20 fun plain(y: Int): Int = y\n\
+         }\n\
+         interface Sub : Face\n\
+         open class Open { open suspend fun String.se(n: Int): Int = n + length }\n",
+        &[
+            "demo/Face$DefaultImpls",
+            "demo/Face",
+            "demo/Sub$DefaultImpls",
+            "demo/Open",
+        ],
+    );
+}
+
 #[test]
 fn method_parameters_remain_opt_in() {
     let jdk = common::jdk_modules();

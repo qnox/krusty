@@ -103,17 +103,28 @@ pub(super) fn function(
         physical_parameters.len(),
         "recorded function parameter identities must match the physical JVM parameters"
     );
-    let projected_names =
-        crate::jvm::parameter_names::function_method_parameters(ir, function, physical_parameters)
-            .expect("published MethodParameters identities have JVM projections");
-    let value_class_static = ir.jvm_value_class_receiver_impls.contains(&function);
+    let projected_names = crate::jvm::parameter_names::placed(
+        ir,
+        function,
+        holder_receiver,
+        crate::jvm::parameter_names::function_method_parameters(ir, function, physical_parameters),
+    )
+    .expect("published MethodParameters identities have JVM projections");
+    // A value-class member lowered to a static `-impl`, an interface member's body on its
+    // `DefaultImpls` holder and a `$suspendImpl` all take their receivers as ordinary parameters.
+    let moved_receivers = ir.jvm_value_class_receiver_impls.contains(&function)
+        || crate::jvm::parameter_names::takes_dispatch_receiver_first(
+            ir,
+            function,
+            holder_receiver,
+        );
     let mut parameters = identities
         .into_iter()
         .enumerate()
         .map(|(index, identity)| {
             (
                 projected_names[index].clone(),
-                function_parameter_flags(identity.role, value_class_static),
+                function_parameter_flags(identity.role, moved_receivers),
             )
         })
         .collect::<Vec<_>>();
@@ -123,20 +134,64 @@ pub(super) fn function(
     parameters
 }
 
-/// kotlinc flags a compiler-generated receiver or capture `SYNTHETIC`. A value-class member lowered
-/// to a static moves its dispatch receiver into the carrier (`arg0`, synthetic) and its extension
-/// receiver into an ordinary parameter, which it flags `MANDATED` (`$this$mext`); an extension
-/// receiver that stays one, of an ordinary class's member or a top-level function, has no flag.
-fn function_parameter_flags(role: IrParameterRole, value_class_static: bool) -> u16 {
+/// kotlinc flags a compiler-generated receiver or capture `SYNTHETIC`. A static that takes a
+/// member's receivers as parameters moves its dispatch receiver into a synthetic one (a value-class
+/// `-impl`'s carrier `arg0`, `DefaultImpls`' `$this`) and its extension receiver into an ordinary
+/// parameter, which it flags `MANDATED` (`$this$mext`, `$receiver`); an extension receiver that
+/// stays one, of an instance method or a top-level function, has no flag.
+fn function_parameter_flags(role: IrParameterRole, moved_receivers: bool) -> u16 {
     match role {
         IrParameterRole::Generated(
             IrGeneratedParameterRole::HolderReceiver | IrGeneratedParameterRole::ValueClassCarrier,
         )
         | IrParameterRole::CapturedValue { .. }
         | IrParameterRole::CapturedReceiver { .. } => SYNTHETIC,
-        IrParameterRole::ExtensionReceiver if value_class_static => MANDATED,
+        IrParameterRole::ExtensionReceiver if moved_receivers => MANDATED,
         _ => 0,
     }
+}
+
+/// The interface entry a value class keeps on its box for a member lowered to a static `-impl`
+/// declares that member's parameters less the carrier, named as the member names them. Its
+/// extension receiver is the receiver of an instance method again, so it has no flag (`$this$abs`
+/// beside the static's mandated one). `member_parameters` are the static's physical parameters.
+pub(super) fn value_class_interface_entry(
+    ir: &IrFile,
+    member: u32,
+    member_parameters: &[Ty],
+    entry_parameters: usize,
+) -> Vec<MethodParameter> {
+    let identities = ir
+        .function_parameter_identities(member)
+        .expect("a value-class member lowered to a static records its parameter identities");
+    assert_eq!(
+        identities.len(),
+        member_parameters.len(),
+        "recorded function parameter identities must match the physical JVM parameters"
+    );
+    assert!(
+        matches!(
+            identities.first().map(|identity| identity.role),
+            Some(IrParameterRole::Generated(
+                IrGeneratedParameterRole::ValueClassCarrier
+            ))
+        ),
+        "an interface entry's static member leads with its carrier"
+    );
+    assert_eq!(
+        identities.len() - 1,
+        entry_parameters,
+        "an interface entry declares its static member's parameters less the carrier"
+    );
+    let names =
+        crate::jvm::parameter_names::function_method_parameters(ir, member, member_parameters)
+            .expect("published MethodParameters identities have JVM projections");
+    identities
+        .iter()
+        .zip(names)
+        .skip(1)
+        .map(|(identity, name)| (name, function_parameter_flags(identity.role, false)))
+        .collect()
 }
 
 fn constructor_prefix(ir: &IrFile, class: &IrClass, count: usize) -> Vec<MethodParameter> {
@@ -332,10 +387,13 @@ pub(super) fn enum_value_of() -> [MethodParameter; 1] {
     [parameter("value", 0)]
 }
 
-/// Compatibility-holder forwards prepend a JVM-generated receiver to the declaration's parameters.
-/// Metadata/provider boundaries must supply every source identity; inventing `pN` names would make
-/// reflection succeed with a semantically false parameter list.
-pub(super) fn holder_forward(
+/// A compatibility-holder forward republishing an inherited member prepends a JVM-generated
+/// receiver to the declaration's parameters, and takes an extension receiver as an ordinary,
+/// mandated parameter like every static that moves a member's receivers. Metadata/provider
+/// boundaries must supply every source identity; inventing `pN` names would make reflection
+/// succeed with a semantically false parameter list.
+pub(super) fn resolved_holder_forward(
+    identities: &[crate::fir::ResolvedParameterIdentity],
     names: &[Option<String>],
     physical_parameters: &[Ty],
 ) -> Vec<MethodParameter> {
@@ -344,8 +402,19 @@ pub(super) fn holder_forward(
         physical_parameters.len(),
         "compatibility-holder parameter identities must match its declaration"
     );
+    assert_eq!(
+        identities.len(),
+        names.len(),
+        "one spelling per compatibility-holder parameter identity"
+    );
     std::iter::once(parameter("$this", SYNTHETIC))
-        .chain(names.iter().cloned().map(|name| (name, 0)))
+        .chain(identities.iter().zip(names).map(|(identity, name)| {
+            let flags = match identity {
+                crate::fir::ResolvedParameterIdentity::ExtensionReceiver => MANDATED,
+                _ => 0,
+            };
+            (name.clone(), flags)
+        }))
         .collect()
 }
 

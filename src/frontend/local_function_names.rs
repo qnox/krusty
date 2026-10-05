@@ -24,8 +24,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, File, FunBody, FunDecl,
-    LiftingSite, LiftingStep, LocalDelegateProvenance, PropDecl, Stmt, StmtId,
+    ClassDecl, ClassInit, CtorDelegation, Decl, Expr, ExprId, File, FunBody, FunDecl, LiftingSite,
+    LiftingStep, LocalDelegateProvenance, PropDecl, Stmt, StmtId,
 };
 use crate::lifting_provenance::LiftingCallableKind;
 
@@ -308,7 +308,8 @@ impl Walker<'_> {
                 for argument in &class.base_args {
                     self.expr(*argument, scope);
                 }
-                self.class_body(class, &Self::local_owner("anonymous", declaration), true);
+                let owner = Self::local_owner("anonymous", file.expr_spans[expression.0 as usize]);
+                self.class_body(class, &owner, true);
             }
             _ => {
                 let children = std::cell::RefCell::new(Vec::new());
@@ -333,8 +334,11 @@ impl Walker<'_> {
         }
     }
 
-    fn local_owner(kind: &str, declaration: DeclId) -> String {
-        format!("{kind}:{}", declaration.0)
+    /// The sequence owner of a local class or anonymous object, keyed by where the file writes it.
+    /// A declaration id is only unique within its declaration unit, while the sequences span the
+    /// whole file: two units' anonymous objects would otherwise share one owner and number on.
+    fn local_owner(kind: &str, written: crate::diag::Span) -> String {
+        format!("{kind}@{}", written.lo)
     }
 
     fn stmt(&mut self, statement: StmtId, scope: &Scope) {
@@ -378,7 +382,9 @@ impl Walker<'_> {
             Stmt::LocalClass(_) => {
                 if let Some(&declaration) = file.local_class_decls.get(&statement) {
                     if let Decl::Class(hoisted) = file.decl(declaration) {
-                        self.class_body(hoisted, &Self::local_owner("local", declaration), false);
+                        let owner =
+                            Self::local_owner("local", file.stmt_spans[statement.0 as usize]);
+                        self.class_body(hoisted, &owner, false);
                     }
                 }
             }
