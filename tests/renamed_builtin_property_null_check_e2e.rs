@@ -7,7 +7,10 @@
 //!
 //! An extension call's explicit receiver is checked like any Java value
 //! (`System.getProperty(name).measure()` checks `getProperty(...)`), unless the declared receiver
-//! is a type parameter whose bound admits `null` (`T.same()`) or the call is a safe call.
+//! is a type parameter whose bound admits `null` (`T.same()`) or the call is a safe call. A member
+//! extension's explicit receiver is the same receiver argument: a class's or a companion's member
+//! extension invoked on `System.getProperty(name)` checks `getProperty(...)` under the same two
+//! exclusions.
 
 use super::common;
 
@@ -63,6 +66,66 @@ fun box(): String {
     return "O" + (map.get("O") ?: "missing")
 }
 "#;
+
+const MEMBER_EXTENSION_SOURCE: &str = r#"
+class Host {
+    fun String.shout(): String = this + "!"
+
+    fun <T> T.wrap(): String = "[" + this + "]"
+
+    fun shouted(name: String): String = System.getProperty(name).shout()
+
+    fun wrapped(name: String): String = System.getProperty(name).wrap()
+
+    fun safeShouted(name: String): String? = System.getProperty(name)?.shout()
+
+    companion object {
+        fun String.twice(): String = this + this
+
+        fun doubled(name: String): String = System.getProperty(name).twice()
+    }
+}
+
+fun box(): String {
+    System.setProperty("krusty.member.extension", "v")
+    val host = Host()
+    val key = "krusty.member.extension"
+    val result = host.shouted(key) + host.wrapped(key) + host.safeShouted(key) +
+        host.safeShouted("krusty.absent") + Host.doubled(key)
+    return if (result == "v![v]v!nullvv") "OK" else result
+}
+"#;
+
+#[test]
+fn member_extension_receivers_are_checked_like_kotlinc() {
+    let cases: &[(&str, &[&str])] = &[
+        ("Host", &["shouted", "wrapped", "safeShouted"]),
+        ("Host$Companion", &["doubled"]),
+    ];
+    for (class, methods) in cases {
+        let pair = common::ModuleClassPair::compile(
+            &[("MemberExtensionReceiver.kt", MEMBER_EXTENSION_SOURCE)],
+            class,
+        );
+        for method in *methods {
+            let (kotlinc, krusty) = pair.method_code(class, method);
+            assert_eq!(krusty, kotlinc, "{class}.{method}");
+        }
+    }
+}
+
+#[test]
+fn member_extension_receivers_run_like_kotlinc() {
+    let jdk = common::jdk_modules();
+    let output = common::compile_and_run_box(
+        MEMBER_EXTENSION_SOURCE,
+        "MemberExtensionReceiver",
+        &[common::stdlib_jar()],
+        Some(jdk.as_path()),
+    )
+    .expect("krusty compiles and runs the box");
+    assert_eq!(output, "OK");
+}
 
 #[test]
 fn renamed_builtin_property_reads_are_checked_like_kotlinc() {

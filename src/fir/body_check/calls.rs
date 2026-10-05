@@ -368,7 +368,11 @@ impl BodyFirChecker<'_> {
                 Ok(FirExprKind::Call(FirCall {
                     target: target.target,
                     dispatch_receiver: Some(dispatch_receiver),
-                    extension_receiver: Some(self.explicit_receiver(receiver)?),
+                    extension_receiver: Some(self.explicit_extension_receiver(
+                        expression,
+                        receiver,
+                        target.extension_receiver,
+                    )?),
                     parameter_types,
                     arguments: self.member_extension_arguments(
                         expression,
@@ -1497,6 +1501,7 @@ impl BodyFirChecker<'_> {
                 substitutions: self.call_substitutions(expression, *declaration)?,
                 parameters,
                 extension_parameter: None,
+                extension_receiver: *extension_receiver,
             });
         }
 
@@ -1559,6 +1564,7 @@ impl BodyFirChecker<'_> {
             substitutions,
             parameters,
             extension_parameter: Some(extension_parameter),
+            extension_receiver: *extension_receiver,
         })
     }
 

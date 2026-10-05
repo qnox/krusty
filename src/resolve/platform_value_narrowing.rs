@@ -74,6 +74,20 @@ impl Checker<'_> {
         }
     }
 
+    /// A member extension's explicit receiver is the argument of its extension receiver
+    /// parameter, guarded like an ordinary extension's against the receiver the member extension
+    /// declares (its dispatch class's type arguments applied).
+    pub(super) fn narrow_member_extension_receiver(
+        &mut self,
+        call: ExprId,
+        selected: &super::MemberExtensionFunctionCandidate,
+    ) {
+        if let Some(receiver) = crate::ast::explicit_call_receiver(self.file, call) {
+            let declared = Some(selected.priority.declared_receiver);
+            self.narrow_extension_receiver(call, receiver, declared, selected.extension_receiver);
+        }
+    }
+
     /// An enhanced Java result initializing a declaration whose type is inferred from it.
     ///
     /// kotlinc's expected type there is the declaration's own type, which is the initializer's

@@ -2239,7 +2239,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument (including the parameter of a non-null-typed lambda, which is an `invoke` argument), a
   `return` / expression body, an assignment to a non-null target, and the explicit receiver of a
   Kotlin extension call whose DECLARED receiver rejects null (`getenv(..).trim()`; not a `T.ext()`
-  whose `T` admits null, and not a safe call). kotlinc does NOT guard: an
+  whose `T` admits null, and not a safe call). A MEMBER extension's explicit receiver is the same
+  receiver argument under the same exclusions: a class's or a companion's `String.shout()` invoked
+  on `System.getProperty(name)` checks `getProperty(...)`, measured against kotlinc 2.4.20
+  (`renamed_builtin_property_null_check_e2e`). kotlinc does NOT guard: an
   INFERRED local (`val x = getenv(...)` stays `T!`), a nullable target (`String?`, elvis, `?.`), a
   `when` subject, a string-template interpolation, or the receiver of a Java member call (`getenv(..).length`
   NPEs on its own). Guards are recorded by the checker at the narrowing positions
