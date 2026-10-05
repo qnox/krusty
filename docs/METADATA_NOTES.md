@@ -179,7 +179,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `writeTo` emits every message's fields in ascending field-number order, repeated fields together
   and extensions last, so `Type.flags` (f1, e.g. `SUSPEND_TYPE`) comes first and a function's
   `return_type` (f3) precedes its `type_parameter` (f4). Interning order in `d2` is independent of
-  it. A `Type` naming a type parameter the declaration being written owns (a member function's or
+  it, yet follows the same order for these two: a function or property, top-level or member,
+  interns its return type before its type parameters' names and bounds (`fun <U> f(u: U) =
+  Result()` writes `Result`, then `U`). A `Type` naming a type parameter the declaration being written owns (a member function's or
   property's own, bounds included) uses `type_parameter_name` (f9); an enclosing class's uses
   `type_parameter` (f7). A class header is the class's own declaration, so its type parameters'
   bounds and its supertypes name the class's parameters too (`class C<T : Comparable<T>>`,
@@ -207,6 +209,15 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   So `vararg x: Int` records nothing, while a nullable primitive, a `Unit` parameter, a suspend
   function type, `KSuspendFunctionN` or any context parameter does. Test:
   `tests/metadata_version_requirement_e2e.rs`.
+- `JvmFieldSignature.desc` presence (kotlinc 2.4.20, `requiresSignature`) follows the same
+  mapping: a backing field, a hoisted companion field or a delegate's `x$delegate` records its
+  descriptor exactly when it differs from the property type's `ClassMapperLite` descriptor. So a
+  type-parameter field (`private var x: T` -> `Ljava/lang/Object;`, with or without accessors), a
+  boxed `Int?`, a value class's carrier (`UInt` -> `I`), a reference array (`Array<String>` ->
+  `[Ljava/lang/String;`) and a delegate of another type record it, while `IntArray`, `List<T>?` and a
+  delegate of the property's own class do not. A property without a field (abstract, or in an
+  interface) interns no field string. The descriptor interns after the accessors' strings, so a
+  constructor property's comes after its getter's. Test: `tests/metadata_field_signature_e2e.rs`.
 - Local classifiers (kotlinc 2.4.20): a local class, an anonymous object, and any class nested in
   one get a full `Class` record with LOCAL visibility (5): members, supertypes (`Any` when none is
   declared) and nested class names. An anonymous object records no constructor. The class id is
@@ -306,8 +317,9 @@ f8 is still 66 with a `<set-?>` parameter, and another class in the file writes 
 `access$set<X>$p`.
 
 A delegated top-level property records `isDelegated` as a member property does, and its
-`JvmPropertySignature.field` names the `x$delegate` storage with both name and descriptor, interned
-after the accessors. A top-level `lateinit` property likewise records `isLateinit`. A private
+`JvmPropertySignature.field` names the `x$delegate` storage, interned after the accessors, with its
+descriptor when the field's type maps differently from the property's (see `JvmFieldSignature.desc`
+presence above). A top-level `lateinit` property likewise records `isLateinit`. A private
 delegated property's accessors are private methods. Tests:
 `a_delegated_top_level_property_records_its_delegate_field` and
 `a_top_level_lateinit_property_records_lateinit`.
@@ -390,6 +402,8 @@ Observed rules, each pinned by a fixture in `tests/typealias_abbreviated_type_e2
 | `import dep.Payload as P` | an import RENAME is not a typealias — NO abbreviation |
 | `(Cargo) -> Cargo` | an INLINE function type abbreviates its components; the arrow node itself spells nothing |
 | `vararg xs: Cargo` | spelled as the ELEMENT, recorded as `Array<Cargo>` — the abbreviation goes on the element and on `vararg_element_type`, never on the array |
+| `Handler` (`= (Cargo) -> Cargo`) | a USE of a function-type alias carries the right-hand side's component spellings on its expanded `Function1` arguments |
+| `(count: Int) -> Unit` | the parameter's `Type` records `Type.annotation` `@kotlin/ParameterName` with one argument (`name` = string-table id, value `{type=8 STRING, string_value(f5)="count"}`), after the type's own annotations; d2 interns the class, then `name`, then the value |
 | supertype, type-parameter bound, property type, extension receiver, ctor param, member fn | all carry it |
 
 **Interning order** (what keeps `d2` byte-identical): at every `Type` node — the main one and the

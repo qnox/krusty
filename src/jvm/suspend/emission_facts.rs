@@ -41,9 +41,20 @@ pub(crate) enum SuspendedResultReturn {
 pub(crate) type SuspendedResultReturns =
     std::collections::HashMap<crate::ir::ExprId, SuspendedResultReturn>;
 
-/// JVM value indices holding the continuation passed to an unintercepted intrinsic suspension
-/// point. The CPS pass owns this physical choice; common IR retains only the semantic point kind.
-pub(crate) type IntrinsicProbeContinuations = std::collections::HashMap<crate::ir::ExprId, u32>;
+/// The continuation passed to an unintercepted intrinsic suspension point, which its debug probe
+/// reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProbedContinuation {
+    /// The JVM value index the CPS pass bound the block's continuation to.
+    Value(u32),
+    /// The continuation of a machine emission owns, wherever emission keeps it.
+    Machine,
+}
+
+/// The continuation each unintercepted intrinsic suspension point probes. The CPS pass owns this
+/// physical choice; common IR retains only the semantic point kind.
+pub(crate) type IntrinsicProbeContinuations =
+    std::collections::HashMap<crate::ir::ExprId, ProbedContinuation>;
 
 /// What building a file's machines records for their emission.
 pub(super) struct MachineOutputs<'b> {

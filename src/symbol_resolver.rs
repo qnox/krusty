@@ -22,6 +22,7 @@ mod classifier_scope;
 
 pub(crate) use classifier_scope::{
     classifier_candidates_at_import_level, classifier_precedence_levels, ClassifierImportLevel,
+    ScopedClassifier,
 };
 mod declaration_specificity;
 mod generic_inference;
@@ -55,6 +56,7 @@ pub(crate) use hierarchy_projection::{
 };
 use hierarchy_projection::{
     classifier_type_parameter_bounds, direct_supertypes_from_classifier, receiver_hierarchy,
+    supertype_with_classifier,
 };
 pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
@@ -121,26 +123,10 @@ pub(crate) fn classifier_candidates_at_scope_level<S: SymbolSource + ?Sized>(
     name: &str,
     owners: &[TypeName],
 ) -> Vec<TypeName> {
-    let mut candidates = Vec::new();
-    for &owner in owners {
-        let candidate = if source.classifier(owner).is_some() {
-            let nested = owner
-                .existing_nested_child(name)
-                .unwrap_or_else(|| crate::types::type_name_nested_child(owner, name));
-            source
-                .classifier(nested)
-                .filter(|classifier| classifier.is_nested && nested.nested_owner() == Some(owner))
-                .map(|_| nested)
-        } else {
-            source
-                .symbols(SymbolNamespace::Package(owner), name)
-                .classifier_name
-        };
-        if let Some(candidate) = candidate.filter(|candidate| !candidates.contains(candidate)) {
-            candidates.push(candidate);
-        }
-    }
-    candidates
+    classifier_scope::scoped_classifier_candidates_at_scope_level(source, name, owners)
+        .into_iter()
+        .map(|candidate| candidate.classifier)
+        .collect()
 }
 
 impl FunctionImportScope {
@@ -1406,6 +1392,7 @@ fn ranked_extension_candidates<'a>(
     // final overload selection evaluates applicability one scope-tower rung at a time.
     out.sort_by_key(|(rank, _, o)| {
         let hides_members = o
+            .callable
             .annotations
             .contains(&crate::types::type_name("kotlin/internal/HidesMembers"));
         (
@@ -1920,7 +1907,8 @@ impl<'a> SymbolResolver<'a> {
     }
 
     pub(crate) fn classifier_in_scope(&self, name: &str) -> CandidateSelection<TypeName> {
-        classifier_scope::select(&self.src, self.fn_scope, name)
+        self.scoped_classifier_in_scope(name)
+            .map(|selected| selected.classifier)
     }
 
     /// Select a nested classifier from an applied value/classifier receiver using the common
@@ -3533,14 +3521,23 @@ impl<'a> SymbolResolver<'a> {
                 .is_some()
         };
         if parsed.iter().any(|candidate| {
-            !candidate.0.annotations.contains(&crate::types::type_name(
-                "kotlin/internal/LowPriorityInOverloadResolution",
-            )) && applicable(candidate)
-        }) {
-            parsed.retain(|candidate| {
-                !candidate.0.annotations.contains(&crate::types::type_name(
+            !candidate
+                .0
+                .callable
+                .annotations
+                .contains(&crate::types::type_name(
                     "kotlin/internal/LowPriorityInOverloadResolution",
                 ))
+                && applicable(candidate)
+        }) {
+            parsed.retain(|candidate| {
+                !candidate
+                    .0
+                    .callable
+                    .annotations
+                    .contains(&crate::types::type_name(
+                        "kotlin/internal/LowPriorityInOverloadResolution",
+                    ))
             });
         }
 
@@ -5403,6 +5400,7 @@ fn select_overload_tracking_with_functions(
             .map(|(rank, receiver, overload)| {
                 (
                     if overload
+                        .callable
                         .annotations
                         .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
                     {
@@ -5411,6 +5409,7 @@ fn select_overload_tracking_with_functions(
                         EXTENSION_PRIORITY
                     },
                     if overload
+                        .callable
                         .annotations
                         .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
                     {
@@ -6083,9 +6082,12 @@ fn best_by_args_with_ties<'a>(
     let ordinary = cands
         .iter()
         .filter(|(candidate, _)| {
-            !candidate.annotations.contains(&crate::types::type_name(
-                "kotlin/internal/LowPriorityInOverloadResolution",
-            ))
+            !candidate
+                .callable
+                .annotations
+                .contains(&crate::types::type_name(
+                    "kotlin/internal/LowPriorityInOverloadResolution",
+                ))
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -6094,9 +6096,12 @@ fn best_by_args_with_ties<'a>(
             let low = cands
                 .iter()
                 .filter(|(candidate, _)| {
-                    candidate.annotations.contains(&crate::types::type_name(
-                        "kotlin/internal/LowPriorityInOverloadResolution",
-                    ))
+                    candidate
+                        .callable
+                        .annotations
+                        .contains(&crate::types::type_name(
+                            "kotlin/internal/LowPriorityInOverloadResolution",
+                        ))
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -8026,6 +8031,7 @@ mod tests {
             overridden_call_realizations: Box::new([]),
             declared_ret: None,
             overridden_results: Box::new([]),
+            annotations: Vec::new(),
         };
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),

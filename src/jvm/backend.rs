@@ -30,6 +30,9 @@ pub enum SkipReason {
     CallArguments(String),
     /// A selected overridden call could not be joined to its checked dispatch classifier facts.
     MemberDispatch(crate::types::TypeName),
+    /// A lambda argument of an inline call carried no published parameter modifier and declared
+    /// type, so whether the call inlines it is unknown.
+    InlineParameters,
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -314,7 +317,15 @@ fn run_backend_passes_after_plugins(
     // Source lambda names are inputs to lifting. Fix them before reparenting so the lifted-name
     // pass can retain the final caller-qualified path and ordinal.
     crate::jvm::debug_local_names::realize_source_lambda_implementation_names(ir);
-    crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
+    crate::jvm::ir_emit::mark_must_inline_lambdas(ir).map_err(|missing| {
+        crate::trace_compiler!(
+            "splice",
+            "inline call {} published no parameter facts for lambda operand {}",
+            missing.call,
+            missing.parameter
+        );
+        SkipReason::InlineParameters
+    })?;
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
     crate::jvm::lifted_names::realize(ir, &facts.override_results);
@@ -984,6 +995,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             diags.error(crate::diag::Span::new(0, 0), detail);
             return;
         }
+        SkipReason::InlineParameters => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "internal error: an inline call's lambda argument has no published parameter modifier and declared type".to_string(),
+            );
+            return;
+        }
         SkipReason::MemberDispatch(classifier) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1003,6 +1021,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         SkipReason::DefaultCalls
         | SkipReason::SuperCalls
         | SkipReason::CallArguments(_)
+        | SkipReason::InlineParameters
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
         }
@@ -1351,6 +1370,7 @@ pub fn facade_package_metadata_from_ir(
                     | None => (true, declaration.mutable, None),
                 };
             let companion = declaration.is_companion_extension();
+            let field = property_field(ir, declaration);
             let accessor_parameters = declaration
                 .context_parameters
                 .iter()
@@ -1423,8 +1443,14 @@ pub fn facade_package_metadata_from_ir(
                 modifiers: declaration.modifiers,
                 setter_visibility: declaration.setter_visibility,
                 companion,
-                delegate_field: delegate_field(ir, declaration),
-                field_desc: erased_value_class_descriptor(ir, declaration),
+                field_name: field.as_ref().and_then(|(name, _)| name.clone()),
+                field_desc: field.map(|(_, descriptor)| descriptor).filter(|physical| {
+                    super::metadata_method_signatures::requires_field_signature(
+                        declaration.ty,
+                        physical,
+                        &Default::default(),
+                    )
+                }),
             }
         })
         .collect::<Vec<_>>();
@@ -1479,22 +1505,25 @@ fn erased_value_class_descriptor(
         .then(|| crate::jvm::names::type_descriptor(field.ty))
 }
 
-fn delegate_field(
+/// The facade field realizing a property, if any: a delegate's storage by its JVM name, or a
+/// backing field (named by the property), with its physical descriptor.
+fn property_field(
     ir: &crate::ir::IrFile,
     declaration: &crate::ir::IrPackageProperty,
-) -> Option<(String, String)> {
-    let Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
-        delegate: Some(storage),
-        ..
-    }) = ir.local_property_layouts.get(&declaration.property)
-    else {
-        return None;
+) -> Option<(Option<String>, String)> {
+    let (name, storage) = match ir.local_property_layouts.get(&declaration.property)? {
+        crate::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. } => (None, *storage),
+        crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+            delegate: Some(storage),
+            ..
+        } => (
+            Some(ir.static_field_jvm_name(*storage).to_string()),
+            *storage,
+        ),
+        _ => return None,
     };
-    let field = &ir.statics[*storage as usize];
-    Some((
-        ir.static_field_jvm_name(*storage).to_string(),
-        crate::jvm::names::type_descriptor(field.ty),
-    ))
+    let field = ir.statics.get(storage as usize)?;
+    Some((name, crate::jvm::names::type_descriptor(field.ty)))
 }
 
 /// The JVM descriptor of a package function realized from its declaration: context parameters,
