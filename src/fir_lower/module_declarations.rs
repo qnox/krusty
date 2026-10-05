@@ -415,6 +415,12 @@ pub(super) fn publish_referenced(
             crate::fir::ResolvedFunctionOverrideTarget::External(_) => None,
         }
     }));
+    properties.extend(ir.property_overrides.values().flatten().filter_map(|edge| {
+        match edge.overridden {
+            crate::fir::ResolvedPropertyOverrideTarget::Module(target) => Some(target),
+            crate::fir::ResolvedPropertyOverrideTarget::External(_) => None,
+        }
+    }));
     for callable in callables {
         publish_callable(index, ir, callable)?;
     }
