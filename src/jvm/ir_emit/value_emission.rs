@@ -1657,8 +1657,10 @@ impl super::Emitter<'_> {
                             ) {
                                 Ok(metadata) => Some(metadata),
                                 Err(error) => {
+                                    // The class is discarded; a placeholder keeps the frames
+                                    // computable.
                                     self.run.set_emit_error(error);
-                                    return;
+                                    return code.aconst_null();
                                 }
                             }
                         }

@@ -78,6 +78,8 @@ pub(super) fn class_mode_lambda_metadata(
                     | IrParameterRole::ContextValue
                     | IrParameterRole::AnonymousContextParameter { .. }
                     | IrParameterRole::ContextReceiver { .. }
+                    // A suspend lambda's continuation is not a parameter of its function type.
+                    | IrParameterRole::Generated(_)
             )
         })
         .map(|identity| {
@@ -86,11 +88,19 @@ pub(super) fn class_mode_lambda_metadata(
                 .ok_or_else(|| format!("lambda fid={function} has an unnamed value parameter"))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let type_parameters = ir
+        .recorded_lambda_type_parameters(function)
+        .ok_or_else(|| {
+            format!(
+                "lambda fid={function} names a type parameter declared outside this module, which \
+             its class's metadata cannot describe yet"
+            )
+        })?;
     Ok(lambda_function_metadata(
         ir,
         function_type,
         &names,
-        ir.lambda_type_parameters(function),
+        type_parameters,
         formatter,
     ))
 }

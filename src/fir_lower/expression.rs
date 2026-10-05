@@ -1444,14 +1444,24 @@ impl BodyLowering<'_> {
                     }
                 }
                 // A target that writes the lambda's class describes its function in metadata,
-                // naming these type parameters.
+                // naming these type parameters. A suspend lambda always has a class; another
+                // lambda has one only under a target's class strategy, which rejects a lambda
+                // whose type names a type parameter declared outside this module.
                 let &IrExpr::Lambda { impl_fn, .. } = &self.ir.exprs[lambda as usize] else {
                     unreachable!("a checked lambda lowers to a lambda")
                 };
-                let type_parameters =
-                    super::generics::named_type_parameters(self.index, expression.ty.get());
-                self.ir
-                    .record_lambda_type_parameters(impl_fn, type_parameters);
+                let type_parameters = if suspend {
+                    Some(super::generics::named_type_parameters(
+                        self.index,
+                        expression.ty.get(),
+                    ))
+                } else {
+                    super::generics::module_named_type_parameters(self.index, expression.ty.get())
+                };
+                if let Some(type_parameters) = type_parameters {
+                    self.ir
+                        .record_lambda_type_parameters(impl_fn, type_parameters);
+                }
                 lambda
             }
         };

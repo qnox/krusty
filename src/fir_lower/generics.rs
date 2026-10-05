@@ -88,20 +88,29 @@ pub(super) fn named_type_parameters(
     index: &ResolvedModuleIndex,
     function_type: Ty,
 ) -> Vec<IrTypeParameter> {
+    module_named_type_parameters(index, function_type)
+        .expect("a type parameter a type names has a resolved declaration")
+}
+
+/// [`named_type_parameters`] when every type parameter `function_type` names, directly or through
+/// a bound, is declared in this module; `None` when one is not (a library function's own type
+/// parameter left in a builder-inferred lambda's type).
+pub(super) fn module_named_type_parameters(
+    index: &ResolvedModuleIndex,
+    function_type: Ty,
+) -> Option<Vec<IrTypeParameter>> {
     let mut names = Vec::new();
     type_parameters_named_by(function_type, &mut names);
     let mut parameters: Vec<IrTypeParameter> = Vec::new();
     while let Some(&name) = names.get(parameters.len()) {
-        let declaration = index
-            .type_parameter_by_semantic_name(name)
-            .expect("a type parameter a type names has a resolved declaration");
+        let declaration = index.type_parameter_by_semantic_name(name)?;
         let parameter = type_parameter(index, declaration);
         for &(bound, _) in &parameter.bounds {
             type_parameters_named_by(bound, &mut names);
         }
         parameters.push(parameter);
     }
-    parameters
+    Some(parameters)
 }
 
 fn type_parameter(index: &ResolvedModuleIndex, parameter: TypeParameterId) -> IrTypeParameter {
