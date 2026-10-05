@@ -1239,6 +1239,8 @@ mod lateinit_companion_read_e2e;
 mod lateinit_field_nullability_e2e;
 #[path = "lateinit_field_visibility_e2e.rs"]
 mod lateinit_field_visibility_e2e;
+#[path = "lateinit_getter_shape_e2e.rs"]
+mod lateinit_getter_shape_e2e;
 #[path = "lateinit_local_e2e.rs"]
 mod lateinit_local_e2e;
 #[path = "lateinit_operand_stack_e2e.rs"]
