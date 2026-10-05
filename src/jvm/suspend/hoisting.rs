@@ -226,6 +226,7 @@ fn desugar_spliced_value_try(
     suspend_set: &HashSet<u32>,
     ret: &Ty,
 ) -> ExprId {
+    let body = sink_result_coercion_into_block(ir, body, suspend_set);
     let (mut stmts, value) = match ir.exprs[body as usize].clone() {
         IrExpr::Block { stmts, value } => (stmts, value),
         _ => (Vec::new(), Some(body)),
@@ -260,6 +261,52 @@ fn desugar_spliced_value_try(
     // body yields is a consumer here.
     normalize_statement_try_results(ir, block, false);
     block
+}
+
+/// A lambda whose declared result is wider than its body (`(T) -> R?` given an `Out` body, as
+/// `mapNotNull` passes it) carries the result coercion around its WHOLE body block:
+/// `coerce(Block { …; try { … } })`. The coercion converts only the block's value, so it is moved
+/// onto that value, where the tail value-`try` is recognized with the coercion applied to each arm,
+/// exactly as for an expression body. Left outside, the `try` stayed a value whose arm stored the
+/// call's raw `Object`, and the body was declined; the function was then emitted with no
+/// continuation to pass (`call arity mismatch`).
+///
+/// Rewritten only when that value is a suspending `try`, into a NEW block: the original nodes may be
+/// shared with the lambda's standalone body.
+fn sink_result_coercion_into_block(
+    ir: &mut IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> ExprId {
+    let IrExpr::TypeOp {
+        op,
+        arg,
+        type_operand,
+    } = ir.exprs[body as usize].clone()
+    else {
+        return body;
+    };
+    let IrExpr::Block {
+        stmts,
+        value: Some(value),
+    } = ir.exprs[arg as usize].clone()
+    else {
+        return body;
+    };
+    if !matches!(ir.exprs[value as usize], IrExpr::Try { .. })
+        || suspending_value_try(ir, value, suspend_set).is_none()
+    {
+        return body;
+    }
+    let coerced = ir.add_expr(IrExpr::TypeOp {
+        op,
+        arg: value,
+        type_operand,
+    });
+    ir.add_expr(IrExpr::Block {
+        stmts,
+        value: Some(coerced),
+    })
 }
 
 /// The type a spliced body's tail value-`try` binds to, when that value is a suspending `try`
