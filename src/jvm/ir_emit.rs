@@ -23,7 +23,7 @@ use crate::jvm::property_references::local_delegated_properties::LocalDelegatedP
 use crate::jvm::value_classes::instance_representation;
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
-use companion_field::{add_companion_field, emit_companion_init};
+use companion_field::{add_companion_field, companion_field_access, emit_companion_init};
 use field_visibility::{declared_field_access, default_accessor_access, is_jvm_field};
 
 mod access_bridges;
@@ -2741,7 +2741,11 @@ fn emit_class(
     // entries intern LATE (the `<clinit>` body's `putstatic` introduces them; the field visit dedups).
     if let Some(companion) = c.companion_class {
         let desc = format!("L{};", companion.render());
-        let field = (0x0019, companion.nested_segment_ref(), desc.as_str());
+        let field = (
+            companion_field_access(ir, c, companion),
+            companion.nested_segment_ref(),
+            desc.as_str(),
+        );
         cw.add_field_late_leading(field, None, Some("Lorg/jetbrains/annotations/NotNull;"));
     }
     // `$$delegatedProperties` follows it; a singleton's follows its INSTANCE, below.
@@ -3874,7 +3878,11 @@ fn emit_enum_class(
     // constant pool and reordered nearly all of it.
     if let Some(companion) = c.companion_class {
         let desc = format!("L{};", companion.render());
-        let field = (0x0019, companion.nested_segment_ref(), desc.as_str());
+        let field = (
+            companion_field_access(ir, c, companion),
+            companion.nested_segment_ref(),
+            desc.as_str(),
+        );
         cw.add_field_late_leading(field, None, Some("Lorg/jetbrains/annotations/NotNull;"));
     }
     // `$$delegatedProperties` follows `Companion`, as in an ordinary class.
@@ -6865,7 +6873,7 @@ impl<'a> Emitter<'a> {
             IrExpr::SingletonValue { classifier } => singleton_instance_load::published_singleton(
                 self.ir,
                 *classifier,
-                self.bodies.singleton_storage(*classifier),
+                crate::jvm::singleton_storage::of(self.classifiers, *classifier),
             )
             .is_some_and(|published| published.owner == access_owner),
             IrExpr::ExternalStaticField { owner, .. }

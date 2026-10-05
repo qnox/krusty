@@ -38,7 +38,10 @@ mod stable_function_index;
 mod top_level_call;
 mod type_parameter_publication;
 mod value_parameter_publication;
+mod value_selection;
 mod vararg_constructor_property;
+
+use value_selection::{SelectedEnumEntry, SelectedValue};
 
 pub(super) use declaration_aliases::publish_compact_nested_aliases;
 pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;

@@ -221,7 +221,7 @@ fn enclosing_protected_subclass(
 /// Every exact classifier edge out of `class`'s lexical enclosure. A function can be attached to
 /// several specialized class copies, so this returns the recorded set instead of choosing one by
 /// whether it happens to inherit the protected target.
-fn enclosing_classes(ir: &IrFile, class: crate::ir::ClassId) -> Vec<crate::ir::ClassId> {
+pub(super) fn enclosing_classes(ir: &IrFile, class: crate::ir::ClassId) -> Vec<crate::ir::ClassId> {
     let Some(enclosure) = ir
         .classes
         .get(class as usize)

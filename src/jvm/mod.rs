@@ -88,6 +88,7 @@ mod result_null_checks;
 mod runtime_capabilities;
 mod sam_wrappers;
 mod shared_captures;
+mod singleton_storage;
 pub mod source_map;
 mod string_constant;
 pub mod suspend;

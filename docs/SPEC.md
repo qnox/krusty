@@ -11485,6 +11485,70 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   carries kotlinc's `@NotNull`/`@Nullable` on its result and parameters in an abstract class and an
   enum exactly as in an interface. Tests: `tests/abstract_member_shape_e2e.rs`.
 
+- **Private members of a companion object.** Kotlin's `private` is lexical, so a declaration that
+  is private inside a companion object is visible from everything in the companion's containing
+  class: a `private data class` nested in a `private companion object` is constructed and read from
+  the outer class's methods. A `private` or `protected` companion keeps that visibility on the outer
+  class's `Companion` field (`private static final`), as kotlinc writes it; an interface's field
+  stays public. Every other JVM class that reads a private `Companion` field (a nested or inner
+  class, an object expression, the companion's own methods) calls the outer class's synthetic
+  `public static final access$getCompanion$p()` instead, appended with the outer class's other
+  accessors in first-use order; the outer class's own code and its indy lambdas read the field
+  directly. A `protected` companion's field is read directly from its holder's package and from
+  the holder's subclasses. Any other class (a nested class or object expression of a subclass in
+  another package, or the class whose companion subclasses the holder and runs the companion's
+  initializer) calls `access$getCompanion$p$s<hash>()` on the class that grants the access, where
+  `<hash>` is the Java `String.hashCode` of the holder's simple name. kotlinc's `accessorParent`
+  picks that class: the innermost enclosing class that subclasses the holder, else the innermost
+  enclosing class's companion that does. The holder, its companion field and the companion's
+  visibility come from the holder's classifier record, which a source declaration and a
+  dependency's Kotlin metadata publish alike, so the accessor is the same whether the holder is
+  compiled with the reader, by kotlinc beforehand or by krusty beforehand. Each read calls the
+  accessor the plan placed for it. A dependency superclass's companion is also an implicit
+  receiver while Pass 1 infers a declaration's type, as a source one is. Verified against kotlinc
+  2.4.20. (`tests/companion_private_members_e2e.rs`.)
+- **Contracts.** A `returns(…) implies` conclusion narrows the caller's arguments like the
+  matching `is` or null test, a primitive type included; a Boolean call in a condition applies
+  `returns(true)`/`returns(false)`, and a call compared with `null` applies `returnsNotNull()`
+  (`!= null`) or `returns(null)` (`== null`). A conclusion about a parameter narrows the
+  argument the call's committed mapping gives that parameter (named, reordered and after a
+  defaulted parameter alike) or, for a context parameter supplied from scope, the selected context
+  source; a parameter the mapping leaves without an argument narrows nothing. Its `is` type is the
+  one the declaration's own signature scope bound, never re-read at the call site. A final member
+  function's contract narrows at its call sites and is written to class metadata like a top-level
+  one. An `is` conclusion's type goes to the declaration's `type_table` (deduplicated) and the
+  expression names it by `is_instance_type_id`; a conjunction reuses its left operand's message and appends the right one
+  as an `and_argument` (a disjunction as an `or_argument`), nesting the left operand only when it
+  already carries the other connective. kotlinc's declaration errors are reported at the
+  `contract` call: it must be the first statement of a function's block body (not of a lambda, an
+  `init` block or a nested block, and not an expression body); local, open, abstract, overriding
+  and non-private interface functions cannot declare one; property accessors and secondary
+  constructors may. Its description may refer only to the owner's value parameters and extension
+  receiver, and describes each parameter with at most one `callsInPlace`. Recognition follows the
+  declarations a call selects, never its spelling past raw FIR: a first statement spelled
+  `contract` (simple or package-qualified) declares a contract only when ordinary overload
+  selection picks the `kotlin.contracts.contract` intrinsic, by its complete signature
+  `contract(builder: ContractBuilder.() -> Unit): Unit`, so an applicable same-package
+  `contract` shadows it silently and an import alias of the intrinsic is a misplaced contract
+  ("contract should be the first statement."). Each description call is an effect only when it
+  selects a `ContractBuilder` or `SimpleEffect` member by the member's complete signature (exact
+  declaring classifier, name, dispatch receiver with no context parameters, every parameter type
+  and the return type; `callsInPlace` takes `Function<R>` and exactly
+  `kotlin.contracts.InvocationKind`); any other selection is reported at its statement as
+  "'pkg/name' is not part of the contracts DSL.". An invocation kind is the enum entry ordinary
+  value selection chooses, with its enum and entry identity kept, and it must be an entry of the
+  enum the selected `callsInPlace` declares (imported, star-imported, aliased or fully qualified
+  alike); a same-named top-level
+  property, object member or parameter is "'R|pkg/NAME|' is not a valid invocation kind." (object
+  members as `Q|Owner|.R|/Owner.NAME|`, parameters as `R|<local>/name|`). Verified against kotlinc
+  2.4.20. (`tests/contract_smart_casts_e2e.rs`, `tests/contract_declarations_e2e.rs`.)
+- **The receiver of a compound member assignment.** `receiver.x op= value` evaluates `receiver`
+  once. A read of a `val`, a parameter, or a value a lambda or local function lifted to a method
+  receives as a parameter is read again for the setter, and so is every `this` receiver, including
+  a local class's captured `this@Outer`. Any other receiver is saved in a temporary first: a `var`,
+  a property, or a `val` a local class or a suspend lambda captured into a field, which kotlinc's
+  local declaration lowering turns into a field read. Verified against kotlinc 2.4.20.
+  (`tests/compound_receiver_reuse_e2e.rs`.)
 - **A constant with a body evaluates its arguments in its own subclass.** Every enum constructor,
   primary or secondary, is `private` in the class file and private in its metadata record, whose
   JVM descriptor includes the `(String, int)` name and ordinal. A constant with a body becomes
@@ -11495,8 +11559,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(String, int, …, DefaultConstructorMarker)` accessor. Lambdas among the arguments are the
   subclass's `_init_$lambda$N` methods, numbered in the subclass, so the enum numbers only its own.
   The accessors follow the enum's members and bridges in the order the constants first select them;
-  every `$default` constructor overload interns its descriptor before its body's constants.
-  Tests: `tests/enum_entry_constructor_e2e.rs`.
+   every `$default` constructor overload interns its descriptor before its body's constants.
+   Tests: `tests/enum_entry_constructor_e2e.rs`.
 
 ## 8. Success criteria for the PoC
 
