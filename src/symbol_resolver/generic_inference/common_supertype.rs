@@ -13,11 +13,9 @@ use super::super::SourceOracle;
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName, TypeVariance};
 
-const DEPTH_LIMIT: u32 = 16;
-
 pub(super) fn common_super_type(source: &dyn SymbolSource, left: Ty, right: Ty) -> Ty {
     let nullable = left.is_nullable() || right.is_nullable();
-    let result = common_at(source, left.non_null(), right.non_null(), 0);
+    let result = common_at(source, left.non_null(), right.non_null());
     if nullable {
         Ty::nullable(result.non_null())
     } else {
@@ -25,8 +23,8 @@ pub(super) fn common_super_type(source: &dyn SymbolSource, left: Ty, right: Ty) 
     }
 }
 
-fn common_at(source: &dyn SymbolSource, left: Ty, right: Ty, depth: u32) -> Ty {
-    if depth > DEPTH_LIMIT || left == right {
+fn common_at(source: &dyn SymbolSource, left: Ty, right: Ty) -> Ty {
+    if left == right {
         return left;
     }
     let oracle = SourceOracle(source);
@@ -41,7 +39,7 @@ fn common_at(source: &dyn SymbolSource, left: Ty, right: Ty, depth: u32) -> Ty {
     }
     if let (Ty::Obj(left_name, left_args), Ty::Obj(right_name, right_args)) = (left, right) {
         if left_name == right_name && left_args.len() == right_args.len() {
-            return combine_classifier(source, left_name, left_args, right_args, depth);
+            return combine_classifier(source, left_name, left_args, right_args);
         }
     }
     let mut candidates = Vec::new();
@@ -58,7 +56,7 @@ fn common_at(source: &dyn SymbolSource, left: Ty, right: Ty, depth: u32) -> Ty {
             let combined = if left_type == right_type {
                 left_type
             } else {
-                combine_classifier(source, left_name, left_args, right_args, depth)
+                combine_classifier(source, left_name, left_args, right_args)
             };
             if !candidates.contains(&combined) {
                 candidates.push(combined);
@@ -89,7 +87,6 @@ fn combine_classifier(
     classifier: TypeName,
     left_args: &[Ty],
     right_args: &[Ty],
-    depth: u32,
 ) -> Ty {
     let variances = source
         .classifier(classifier)
@@ -109,7 +106,6 @@ fn combine_classifier(
             source,
             left.projection_read_ty().non_null(),
             right.projection_read_ty().non_null(),
-            depth + 1,
         );
         arguments.push(match variance {
             TypeVariance::Out => joined,
@@ -248,8 +244,29 @@ fn closure(source: &dyn SymbolSource, root: Ty) -> Vec<Ty> {
 
 #[cfg(test)]
 mod tests {
-    use super::reified_runtime_type;
+    use super::{common_super_type, reified_runtime_type};
+    use crate::symbol_source::SymbolSource;
     use crate::types::{type_name, Ty};
+
+    struct EmptySource;
+
+    impl SymbolSource for EmptySource {}
+
+    #[test]
+    fn a_deep_invariant_join_is_not_operand_order_dependent() {
+        let mut left = Ty::obj("demo/Left");
+        let mut right = Ty::obj("demo/Right");
+        for _ in 0..24 {
+            left = Ty::obj_args("demo/Inv", &[left]);
+            right = Ty::obj_args("demo/Inv", &[right]);
+        }
+
+        let left_first = common_super_type(&EmptySource, left, right);
+        let right_first = common_super_type(&EmptySource, right, left);
+        assert_eq!(left_first, right_first);
+        assert_ne!(left_first, left);
+        assert_ne!(left_first, right);
+    }
 
     #[test]
     fn an_intersection_reifies_as_its_single_common_supertype() {
