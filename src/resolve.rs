@@ -61833,12 +61833,17 @@ impl<'a> Checker<'a> {
                 branch_types.push((c.body, ht));
                 // In VALUE position, REFERENCE branches use the same full join as other conditional
                 // expressions: `try { x } catch { null }` is `T?`, and different reference classes
-                // join to `Any`. Restricting this to reference-like branches is intentional. An
-                // integer constant is adapted to a sibling primitive after this loop. A non-constant
+                // join to `Any`. Two primitive branches deliberately do not take it: an integer
+                // constant is adapted to a sibling primitive after this loop, and a non-constant
                 // primitive disagreement (`Int` versus `Long`) keeps `try_branch_join`.
                 let reference_like =
                     |ty: Ty| ty.is_reference() || matches!(ty, Ty::Nothing | Ty::Error);
-                result = if wanted.value_required && reference_like(result) && reference_like(ht) {
+                // A primitive beside a REAL reference joins the same way: `try { s.length } catch
+                // (e: Exception) { null }` is `Int?`, as `if (c) s.length else null` is.
+                let joins = (reference_like(result) && reference_like(ht))
+                    || result.is_reference()
+                    || ht.is_reference();
+                result = if wanted.value_required && joins {
                     // Join against the EXPECTATION, exactly as `if`/`when` do: a `try` in value
                     // position is a conditional expression like any other. A blind join of two
                     // generic branches invents an out-projection (`R<out Any>`) that no INVARIANT

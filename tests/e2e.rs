@@ -1787,6 +1787,8 @@ mod stack_peephole_e2e;
 mod temporary_elimination_e2e;
 #[path = "try_debug_lines_e2e.rs"]
 mod try_debug_lines_e2e;
+#[path = "try_primitive_nullable_join_e2e.rs"]
+mod try_primitive_nullable_join_e2e;
 #[path = "uncast_continuation_operand_e2e.rs"]
 mod uncast_continuation_operand_e2e;
 #[path = "unmatched_null_check_temporaries_e2e.rs"]
