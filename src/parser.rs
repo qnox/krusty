@@ -2409,7 +2409,7 @@ impl<'a> Parser<'a> {
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
-                let ty = self.parse_type();
+                let ty = self.parse_vararg_aware_type(is_vararg);
                 // A default value (`enum class C(val x: Int = 1)`) — same as a regular class ctor param;
                 // each enum entry that omits the argument gets it at its construction site.
                 let default = if self.eat(TokenKind::Eq) {
@@ -3335,7 +3335,7 @@ impl<'a> Parser<'a> {
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
-                let ty = self.parse_type();
+                let ty = self.parse_vararg_aware_type(is_vararg);
                 let default = if self.eat(TokenKind::Eq) {
                     self.skip_newlines();
                     Some(self.parse_expr())
@@ -4770,33 +4770,25 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        // Statement annotations have no codegen representation, but `@Suppress` is a scoped
-        // frontend directive. Retain only its compact names on the decorated transient statement.
+        // Statement annotations have no codegen representation, but `@Suppress` and opt-in
+        // acceptance are scoped frontend policies. Retain what they read on the transient statement.
         if self.at(TokenKind::At) {
-            let mut suppressions = Vec::new();
+            let mut annotations = Vec::new();
             while self.at(TokenKind::At) {
                 let (annotation, arguments) = self.parse_annotation();
-                if annotation.as_ref().is_some_and(|annotation| {
-                    annotation
-                        .name
-                        .rsplit('.')
-                        .next()
-                        .is_some_and(|name| name == "Suppress")
-                }) {
-                    suppressions.extend(
-                        arguments
-                            .into_iter()
-                            .filter_map(|argument| self.file.const_string_value(argument))
-                            .map(|value| value.to_lossy().to_owned()),
-                    );
+                if let Some(annotation) = annotation {
+                    annotations.push(UseSiteAnnotation {
+                        annotation,
+                        arguments,
+                    });
                 }
                 self.skip_newlines();
             }
             let statement = self.parse_stmt();
-            if !suppressions.is_empty() {
+            if !annotations.is_empty() {
                 self.file
-                    .statement_suppressions
-                    .insert(statement, suppressions);
+                    .statement_annotations
+                    .insert(statement, annotations);
             }
             return statement;
         }

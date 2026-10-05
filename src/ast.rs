@@ -20,12 +20,14 @@ pub(crate) mod definitely_evaluated;
 mod destructuring;
 mod operators;
 mod type_refs;
+mod use_site_annotations;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
 pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use operators::{BinOp, UnOp};
+pub use use_site_annotations::UseSiteAnnotation;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct ExprId(pub u32);
@@ -562,6 +564,8 @@ impl TrFlags {
     // sole diagnostic authority, however; marking the duplicate detached occurrence prevents a
     // file-scope fallback from rechecking it outside its declaration's lexical suppression scope.
     const ANNOTATION: u16 = 1 << 8;
+    /// The element type written on a `vararg` parameter; the parameter's type is its array.
+    const VARARG_ELEMENT: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -612,6 +616,10 @@ impl TrFlags {
     #[inline]
     pub const fn with_annotation(self, on: bool) -> Self {
         self.with(Self::ANNOTATION, on)
+    }
+    #[inline]
+    pub const fn with_vararg_element(self, on: bool) -> Self {
+        self.with(Self::VARARG_ELEMENT, on)
     }
 }
 
@@ -1583,9 +1591,10 @@ pub struct File {
     /// This keeps access diagnostics attached to the exact annotation occurrence instead of treating
     /// one declaration's `@Suppress` as file-wide.
     pub detached_type_ref_suppressions: std::collections::HashMap<u32, Vec<String>>,
-    /// Diagnostic names suppressed by an annotation on one executable statement. This remains
-    /// transient parse state and is discarded with the active body AST after checking.
-    pub statement_suppressions: std::collections::HashMap<StmtId, Vec<String>>,
+    /// Annotations on one executable statement or expression. This remains transient parse state
+    /// and is discarded with the active body AST after checking.
+    pub statement_annotations: std::collections::HashMap<StmtId, Vec<UseSiteAnnotation>>,
+    pub expression_annotations: std::collections::HashMap<ExprId, Vec<UseSiteAnnotation>>,
     /// Number of source lines, including a final empty line after a trailing newline.
     pub source_line_count: u32,
     pub decls: Vec<DeclId>,
@@ -1921,6 +1930,8 @@ pub struct File {
     /// `+EagerLambdaAnalysis`: a lambda that does not discriminate applicable candidates by its
     /// shape is analyzed before the most specific candidate is chosen.
     pub eager_lambda_analysis: bool,
+    /// Opt-in markers accepted module-wide (`-opt-in`), as dotted fully qualified names.
+    pub opted_in_markers: Vec<String>,
 }
 
 impl File {

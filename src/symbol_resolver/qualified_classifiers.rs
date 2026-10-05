@@ -74,6 +74,21 @@ impl SymbolResolver<'_> {
         }
     }
 
+    /// Bind a fully qualified classifier name (`a.b.Outer.Nested`) from the root package, outside
+    /// any file's imports, as a compiler argument names one.
+    pub(crate) fn fully_qualified_classifier(&self, name: &str) -> Option<TypeName> {
+        let segments = name
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        if segments.is_empty() {
+            return None;
+        }
+        self.advance_classifier_path(ClassifierPathPrefix::Package(TypeName::ROOT), &segments)
+            .ok()
+            .map(|selected| selected.classifier)
+    }
+
     /// Advance a qualified classifier path from an already selected first-segment identity.
     /// Failure is final: the caller must not retry another root or reconstruct the path spelling.
     pub(crate) fn classifier_path_from_selected_root(

@@ -30,7 +30,11 @@ impl SymbolResolver<'_> {
     ) {
         let hides_members_annotation = crate::types::type_name("kotlin/internal/HidesMembers");
         candidates.retain(|(_, _, candidate)| {
-            candidate.annotations.contains(&hides_members_annotation) == hides_members
+            candidate
+                .callable
+                .annotations
+                .contains(&hides_members_annotation)
+                == hides_members
         });
         inaccessible.extend(
             candidates

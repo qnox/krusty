@@ -42,6 +42,7 @@ pub mod kt_string;
 pub mod language_settings;
 pub mod language_version;
 pub mod lexer;
+pub mod lexical_policy;
 pub mod libraries;
 pub mod lifting_provenance;
 pub mod lru;

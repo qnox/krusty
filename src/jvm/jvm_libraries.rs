@@ -498,6 +498,7 @@ impl JvmLibraries {
                 )
                 .flatten();
             let mut callable = LibraryCallable {
+                annotations: meta.annotations.clone(),
                 inline: inline_kind,
                 suspend,
                 default_call: is_default,
@@ -556,7 +557,6 @@ impl JvmLibraries {
                     inherited_by_delegation: false,
                     return_value_status: None,
                 },
-                annotations: meta.annotations.clone(),
                 ..FunctionInfo::plain(kind, None, callable)
             });
             cm.attach_tail(c.paired_common, namespace, name, &mut overloads);
@@ -627,7 +627,7 @@ impl JvmLibraries {
                 inherited_by_delegation: false,
                 return_value_status: None,
             };
-            function.annotations = builtin.annotations;
+            function.callable.annotations = builtin.annotations;
             attach_function_realization(pkg, name, &mut function);
             overloads.push(function);
         }
@@ -772,6 +772,7 @@ impl JvmLibraries {
             let ret = metadata_return_info(function.ret_class, function.ret_nullable())
                 .apply(physical_ret);
             let callable = LibraryCallable {
+                annotations: function.annotations.clone(),
                 suspend: function.is_suspend(),
                 inline: function_inline,
                 context_count: function.context_count(),
@@ -810,7 +811,6 @@ impl JvmLibraries {
                     inherited_by_delegation: false,
                     return_value_status: Some(function.return_value_status),
                 },
-                annotations: function.annotations.clone(),
                 ..FunctionInfo::plain(
                     if receiver.is_some() {
                         FnKind::Extension
@@ -4273,6 +4273,7 @@ impl JvmLibraries {
                     })
                     .flatten();
                 let mut callable = LibraryCallable {
+                    annotations: mf.annotations.clone(),
                     inline,
                     suspend: mf.is_suspend(),
                     source_receiver,
@@ -4333,7 +4334,6 @@ impl JvmLibraries {
                         inherited_by_delegation: false,
                         return_value_status: Some(mf.return_value_status),
                     },
-                    annotations: mf.annotations.clone(),
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
@@ -4877,6 +4877,7 @@ impl JvmLibraries {
                         let collection_barrier =
                             collection_barrier_role(builtin_cn, scope_name, &params, ret);
                         let callable = LibraryCallable {
+                            annotations: m.annotations.clone(),
                             reflection_name: Some(m.name.clone()),
                             physical_name: m.physical_name.clone(),
                             inline: m.inline,
@@ -4961,7 +4962,6 @@ impl JvmLibraries {
                                 inherited_by_delegation: m.inherited_by_delegation(),
                                 return_value_status: m.return_value_status,
                             },
-                            annotations: m.annotations.clone(),
                             ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
                         });
                         if let Some(function) = overloads.last_mut() {

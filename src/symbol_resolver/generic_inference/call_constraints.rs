@@ -723,17 +723,7 @@ fn collect_call_inference_constraints(
             while let Ty::TyParam(_, bound) = actual {
                 actual = bound.projection_inner().unwrap_or(*bound).non_null();
             }
-            let projected = match actual {
-                Ty::Obj(actual_owner, _) if owner == actual_owner => Some(actual),
-                Ty::Obj(_, _) => receiver_hierarchy(source, actual)
-                    .into_iter()
-                    .map(|(ty, _)| ty)
-                    .find(|ty| {
-                        ty.obj_internal()
-                            .is_some_and(|actual_owner| owner == actual_owner)
-                    }),
-                _ => None,
-            };
+            let projected = supertype_with_classifier(source, actual, owner);
             let Some(Ty::Obj(_, actual_arguments)) = projected else {
                 return;
             };

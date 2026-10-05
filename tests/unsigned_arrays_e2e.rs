@@ -18,16 +18,23 @@ use super::common;
 /// Both halves: equality alone would pass if both compilers agreed on the same wrong answer, and an
 /// expectation alone would pin my reading rather than Kotlin's.
 fn agrees_with_kotlinc(stem: &str, body: &str) {
+    let body = &opted_in(body);
     let krusty = common::expect_box_run_with_stdlib(body, stem);
     assert_eq!(krusty, "OK", "{stem}: krusty");
     assert_eq!(common::kotlinc_box_result(body), "OK", "{stem}: kotlinc");
+}
+
+/// Unsigned arrays are `@ExperimentalUnsignedTypes`; opt in so both compilers accept the fixture
+/// without the warning-level opt-in report.
+fn opted_in(body: &str) -> String {
+    format!("@file:OptIn(ExperimentalUnsignedTypes::class)\n{body}")
 }
 
 /// krusty's disassembly of `body`'s `box()`, so an ABI or opcode claim is read off the bytecode
 /// rather than inferred from what the program printed.
 fn disassembled_box(stem: &str, body: &str) -> String {
     let classes = common::expect_compile_in_process(
-        body,
+        &opted_in(body),
         stem,
         &[common::stdlib_jar()],
         Some(common::jdk_modules().as_path()),

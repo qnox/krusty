@@ -56,6 +56,10 @@ impl TypeRef {
     pub fn is_annotation(&self) -> bool {
         self.flags.has(TrFlags::ANNOTATION)
     }
+    #[inline]
+    pub fn is_vararg_element(&self) -> bool {
+        self.flags.has(TrFlags::VARARG_ELEMENT)
+    }
     /// An underscore in a call-site type-argument list asks inference to solve this position.
     /// It is neither an unresolved classifier nor a star projection; checked call data must replace
     /// it with the inferred semantic argument.

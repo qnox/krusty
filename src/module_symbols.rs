@@ -963,6 +963,7 @@ fn fn_info(
     let declared_params = Some(params.clone().into_boxed_slice());
     let call_sig = sig.call_sig();
     let callable = LibraryCallable {
+        annotations: sig.annotations.clone(),
         external_identity: None,
         external_default_provider: None,
         external_property_identity: None,
@@ -1048,7 +1049,6 @@ fn fn_info(
             return_value_status: None,
         },
         visibility: sig.visibility,
-        annotations: sig.annotations.clone(),
         ..FunctionInfo::plain(kind, receiver, callable)
     }
 }
@@ -1092,6 +1092,7 @@ fn source_callable(
     let declared_params = Some(params.clone().into_boxed_slice());
     LibraryCallable {
         external_identity: None,
+        annotations: Vec::new(),
         external_default_provider: None,
         external_property_identity: None,
         owner,

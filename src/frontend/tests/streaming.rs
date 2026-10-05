@@ -1109,6 +1109,7 @@ fn pass_two_reparse_removes_the_complete_actualized_expect_class_subtree() {
 fn source_optional_expectation_keeps_finalized_constructor_and_file_suppression() {
     let source = "// WITH_STDLIB\n\
                   // LANGUAGE: +MultiPlatformProjects\n\
+                  // OPT_IN: kotlin.ExperimentalMultiplatform\n\
                   @file:Suppress(\"OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE\")\n\
                   import kotlin.OptionalExpectation as MayDisappear\n\
                   @MayDisappear\n\

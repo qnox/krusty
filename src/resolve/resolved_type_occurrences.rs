@@ -25,6 +25,7 @@ impl Checker<'_> {
             .insert((reference.span.lo, reference.span.hi), declaration);
         self.resolved_declaration_types
             .insert((reference.span.lo, reference.span.hi), declaration);
+        self.check_finalized_type_reference_opt_in(reference, declaration);
         semantic
     }
 
@@ -40,6 +41,7 @@ impl Checker<'_> {
             .insert((reference.span.lo, reference.span.hi), semantic);
         self.resolved_declaration_types
             .insert((reference.span.lo, reference.span.hi), semantic);
+        self.check_finalized_type_reference_opt_in(reference, semantic);
         semantic
     }
 }
