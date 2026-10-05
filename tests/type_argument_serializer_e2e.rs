@@ -334,7 +334,9 @@ fn typealias_type_argument_serializers_match_kotlinc_bytecode() {
     let (plugin, cp) = plugin_and_runtime()
         .expect("the serialization plugin and runtime are provisioned for byte comparisons");
     let extra = vec![format!("-Xplugin={}", plugin.display())];
-    let source = format!("{SERIALIZERS}{ALIAS_SOURCE}");
+    // The byte comparison compiles against the core runtime alone, without the JSON format.
+    let serializers = SERIALIZERS.replace("import kotlinx.serialization.json.Json\n", "");
+    let source = format!("{serializers}{ALIAS_SOURCE}");
     let serializer = compare_with_kotlinc_plugin(
         "TypeAliasArgumentSerializers",
         &source,
