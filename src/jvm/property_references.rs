@@ -204,8 +204,14 @@ pub(super) fn realize(
                 (getter_name.as_ref(), setter_name.as_deref()),
                 ModulePropertySite {
                     caller: reference_owner,
-                    dispatch: referenced_member_dispatch(ir, reflection_owner)
-                        .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?,
+                    dispatch: referenced_member_dispatch(
+                        ir,
+                        reflection_owner,
+                        ir.referenced_module_properties
+                            .get(&property)
+                            .and_then(|property| property.owner),
+                    )
+                    .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?,
                 },
             )?,
             FirPropertyReferenceTarget::Classifier {
@@ -739,10 +745,18 @@ struct ReferencedMemberDispatch {
 fn referenced_member_dispatch(
     ir: &IrFile,
     reflection_owner: Option<TypeName>,
+    declaration_owner: Option<TypeName>,
 ) -> Result<Option<ReferencedMemberDispatch>, ()> {
     let Some(class) = reflection_owner else {
         return Ok(None);
     };
+    // A reference written on the declaring classifier needs no retargeting. In particular, a
+    // function-local classifier has no module classifier record to query here; its declaration
+    // owner already carries the exact physical and reflective identity. Only an inherited
+    // reference crosses owners and needs the written classifier's kind for dispatch.
+    if Some(class) == declaration_owner {
+        return Ok(None);
+    }
     let is_interface = matches!(
         ir.source_classifier_kind(class).ok_or(())?,
         IrClassifierKind::Interface | IrClassifierKind::Annotation
@@ -1173,7 +1187,20 @@ mod tests {
     #[test]
     fn a_written_owner_without_a_published_kind_is_not_a_declaration_owner_fallback() {
         let ir = IrFile::default();
-        assert!(referenced_member_dispatch(&ir, None).unwrap().is_none());
-        assert!(referenced_member_dispatch(&ir, Some(type_name("sample/Missing"))).is_err());
+        let missing = type_name("sample/Missing");
+        assert!(referenced_member_dispatch(&ir, None, None)
+            .unwrap()
+            .is_none());
+        assert!(
+            referenced_member_dispatch(&ir, Some(missing), Some(missing))
+                .unwrap()
+                .is_none()
+        );
+        assert!(referenced_member_dispatch(
+            &ir,
+            Some(missing),
+            Some(type_name("sample/Declaration"))
+        )
+        .is_err());
     }
 }

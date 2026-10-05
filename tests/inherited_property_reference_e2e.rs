@@ -89,3 +89,17 @@ fn an_inherited_property_reference_in_another_file_uses_the_referenced_classifie
     assert_eq!(krusty, reference);
     assert_eq!(reference, "OK");
 }
+
+#[test]
+fn a_direct_local_property_reference_keeps_its_declaring_owner() {
+    let source = r#"
+        fun <T> unwrap(value: T): T {
+            data class Local<T>(val item: T, val other: T)
+            val property = if (value != null) Local<T>::item else Local<T>::other
+            return property.get(Local(value, value))
+        }
+
+        fun box(): String = unwrap("OK")
+    "#;
+    assert_eq!(common::Fixture::new().run_box(source), "OK");
+}
