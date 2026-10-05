@@ -238,7 +238,7 @@ impl BodyLowering<'_> {
             .iter()
             .map(|operand| plan_value(self, *operand))
             .collect::<Option<Vec<_>>>()?;
-        let (inline_body, receiver_spill) = self.materialize_external_inline_lambda(
+        let (inline_body, callee_receiver) = self.materialize_external_inline_lambda(
             &mut statements,
             &args,
             lambda_parameter,
@@ -259,13 +259,11 @@ impl BodyLowering<'_> {
         };
         let expansion = if let Some(returned_value) = returned_value {
             statements.push(value);
-            // The callee's `return this` reads its receiver local — the spill the lambda's
-            // `$this$` copy was initialized from — not the caller's operand expression. That
-            // second read is what keeps the spill alive through temporary elimination even
-            // where the caller discards it.
-            let returned = match (returned_value, receiver_spill) {
-                (crate::fir::FirInlineValue::Receiver, Some(spill)) => (
-                    self.ir.add_expr(IrExpr::GetValue(spill)),
+            // A plan returning its receiver reads the inlined callee's receiver parameter. The
+            // lambda receiver is a separate semantic parameter initialized from that value.
+            let returned = match (returned_value, callee_receiver) {
+                (crate::fir::FirInlineValue::Receiver, Some(receiver)) => (
+                    self.ir.add_expr(IrExpr::GetValue(receiver)),
                     receiver_ty?.get(),
                 ),
                 _ => plan_value(self, returned_value)?,
@@ -1021,9 +1019,9 @@ impl BodyLowering<'_> {
     /// single local-slot rebasing path.
     ///
     /// The expansion reproduces the reference compiler's frame for the call: each invocation
-    /// operand becomes a local of the frame (the lambda's receiver operand is spilled once
-    /// unnamed, then copied into its named `$this$` local; a value parameter's operand becomes
-    /// the parameter's named local directly), then the lambda-argument marker opens the frame,
+    /// operand becomes a local of the frame (the inlined callee's receiver parameter initializes
+    /// the lambda's distinct named `$this$` parameter; a value parameter's operand becomes the
+    /// parameter's named local directly), then the lambda-argument marker opens the frame,
     /// attributed to the call's line — or to the synthetic inline line of an `@InlineOnly`
     /// declaration whose lambda body starts on that same line.
     fn materialize_external_inline_lambda(
@@ -1102,7 +1100,7 @@ impl BodyLowering<'_> {
             capture_declarations,
         );
         let capture_count = u32::try_from(formal_slots.len()).ok()?;
-        let mut receiver_spill = None;
+        let mut callee_receiver = None;
         let receiver_parameter = self
             .ir
             .lambda_origins
@@ -1115,20 +1113,18 @@ impl BodyLowering<'_> {
         for (operand, &(value, ty)) in invocation_operands.iter().enumerate() {
             let parameter = capture_count + u32::try_from(operand).ok()?;
             if receiver_parameter == Some(parameter) {
-                // kotlinc evaluates the receiver operand into the callee's receiver local, then
-                // initializes the lambda's named `$this$` local from it. The local is unnamed;
-                // it survives temporary elimination because the callee's own `return this`
-                // reads it again after the lambda runs (see the expansion's result value).
-                let spill = self.allocate_temporary();
+                // The inlined callee's receiver and the invoked extension lambda's receiver are
+                // distinct semantic parameters, even though both receive the same value.
+                let callee_slot = self.allocate_temporary();
                 statements.push(self.ir.add_expr(IrExpr::Variable {
-                    index: spill,
+                    index: callee_slot,
                     ty,
                     init: Some(value),
                     named: false,
                 }));
-                receiver_spill = Some(spill);
+                callee_receiver = Some(callee_slot);
                 let slot = self.allocate_temporary();
-                let read = self.ir.add_expr(IrExpr::GetValue(spill));
+                let read = self.ir.add_expr(IrExpr::GetValue(callee_slot));
                 let declaration = self.ir.add_expr(IrExpr::Variable {
                     index: slot,
                     ty,
@@ -1192,6 +1188,6 @@ impl BodyLowering<'_> {
         self.next_temporary = local_base.checked_add(local_count)?;
         self.ir.functions[implementation as usize].body = None;
         self.ir.inline_only_fns.insert(implementation);
-        Some((inline_body, receiver_spill))
+        Some((inline_body, callee_receiver))
     }
 }

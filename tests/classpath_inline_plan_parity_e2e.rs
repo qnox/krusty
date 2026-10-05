@@ -58,6 +58,33 @@ fn a_neutral_invoke_lambda_plan_is_the_reference_compilers_class() {
     common::assert_classes_identical_to_kotlinc_against("PlanStep", STEP, &["PlanStepKt"], &[lib]);
 }
 
+/// Nested repository-owned plans leave the outer lambda receiver below the inner expansion. This
+/// proves that stack preservation follows the recorded inline boundary rather than stdlib owners
+/// or an `apply`/`let`-specific receiver shape.
+const NESTED_STEP_LIB: &str = r#"inline fun <T> hold(value: T, action: T.() -> Unit): T {
+    value.action()
+    return value
+}
+
+inline fun <T, R> turn(value: T, transform: (T) -> R): R = transform(value)
+"#;
+
+const NESTED_STEP: &str = r#"fun box(): String =
+    hold(StringBuilder()) { append(turn("x") { it + "y" }) }.toString()
+"#;
+
+#[test]
+fn nested_neutral_inline_plans_are_the_reference_compilers_class() {
+    let lib = common::kotlinc_lib_out(&[("NestedStepLib.kt", NESTED_STEP_LIB)])
+        .expect("reference kotlinc is provisioned");
+    common::assert_classes_identical_to_kotlinc_against(
+        "PlanNestedStep",
+        NESTED_STEP,
+        &["PlanNestedStepKt"],
+        &[lib],
+    );
+}
+
 /// An iteration plan (`forEach` over a list): the callee is NOT inline-only, so its frame keeps
 /// the `$i$f$forEach` function marker and the named `$this$forEach$iv` / `element$iv` locals, and
 /// the lambda frame opens with `$i$a$-forEach-PlanForEachKt$box$1`.

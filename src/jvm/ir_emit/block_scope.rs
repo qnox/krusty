@@ -25,6 +25,11 @@ impl Emitter<'_> {
             self.emit_discarding(block, code);
             return;
         }
+        let normalizes_inline_stack =
+            self.ir.external_inline_expansions.contains(&block) && code.stack_height() != 0;
+        if normalizes_inline_stack {
+            code.inline_call_marker(true);
+        }
         self.link_safe_call_chain(block, code);
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
@@ -36,6 +41,9 @@ impl Emitter<'_> {
             self.close_external_inline_frame(block, code);
             self.close_scope_locals(code, marked_initializer);
             self.close_spliced_lambda_frame(block, code);
+        }
+        if normalizes_inline_stack {
+            code.inline_call_marker(false);
         }
         if let Some(discarded) = discard_after_close {
             super::discard(self.value_ty(discarded), code);
@@ -54,6 +62,14 @@ impl Emitter<'_> {
         value: Option<u32>,
         code: &mut CodeBuilder,
     ) {
+        // External inline plans record only their semantic boundary in common IR. When evaluation
+        // begins with caller operands already live, the finished-method FixStack pass derives and
+        // restores their complete JVM representation from these markers.
+        let normalizes_inline_stack =
+            self.ir.external_inline_expansions.contains(&block) && code.stack_height() != 0;
+        if normalizes_inline_stack {
+            code.inline_call_marker(true);
+        }
         self.link_safe_call_chain(block, code);
         let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
@@ -87,6 +103,9 @@ impl Emitter<'_> {
             self.close_scope_locals(code, false);
         }
         self.close_spliced_lambda_frame(block, code);
+        if normalizes_inline_stack {
+            code.inline_call_marker(false);
+        }
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
         self.statement_line = enclosing_statement_line;
