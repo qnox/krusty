@@ -38,7 +38,7 @@ impl Utf8Pool {
 impl super::ConstPool {
     pub(super) fn utf8(&mut self, text: &str) -> u16 {
         if let Some(index) = self.utf8_index.get(text) {
-            return index;
+            return self.noting(index);
         }
         self.intern(super::Const::Utf8(text.to_string()))
     }

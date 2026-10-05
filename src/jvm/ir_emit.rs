@@ -23,7 +23,7 @@ use crate::jvm::property_references::local_delegated_properties::LocalDelegatedP
 use crate::jvm::value_classes::instance_representation;
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
-use companion_field::{add_companion_field, emit_companion_init};
+use companion_field::{add_companion_field, companion_field_access, emit_companion_init};
 use field_visibility::{declared_field_access, default_accessor_access, is_jvm_field};
 
 mod access_bridges;
@@ -173,6 +173,7 @@ mod string_concatenation;
 mod supertype_markers;
 mod synth_debug_tables;
 mod type_operation_emission;
+mod type_parameter_signatures;
 mod unified_lambda_splice;
 mod value_emission;
 mod vararg;
@@ -184,6 +185,7 @@ use declared_property_accessor::{
 use signature_formatter::{JvmSignatureFormatter, Wildcards};
 use singleton_instance::{add_singleton_instance_field, emit_singleton_instance_clinit};
 use synth_debug_tables::attach_synth_debug_tables;
+use type_parameter_signatures::{jvm_class_signature, jvm_type_params};
 
 use super::metadata_flags::{
     class_metadata_flags, declaration_visibility_bits, declared_value_parameters, function_flags,
@@ -957,6 +959,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
                 ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&c.fq_name())
             })
             .map(|(_, s)| s)
+            .filter(|s| !s.is_lateinit)
         {
             if let Some(a) = ann(&s.name, jvm_declared_ty(&s.ty)) {
                 cw.set_field_nullability(&s.name, a);
@@ -2493,7 +2496,7 @@ fn emit_scheduled_member(
         return;
     };
     let f = &ir.functions[fid as usize];
-    if let Some(defaults) = ir.param_defaults(fid) {
+    if let Some(defaults) = ir.declared_param_defaults(fid) {
         if f.is_static {
             let marker = static_default_stub_marker(ir, fid);
             emit_facade_default_stub(
@@ -2739,7 +2742,11 @@ fn emit_class(
     // entries intern LATE (the `<clinit>` body's `putstatic` introduces them; the field visit dedups).
     if let Some(companion) = c.companion_class {
         let desc = format!("L{};", companion.render());
-        let field = (0x0019, companion.nested_segment_ref(), desc.as_str());
+        let field = (
+            companion_field_access(ir, c, companion),
+            companion.nested_segment_ref(),
+            desc.as_str(),
+        );
         cw.add_field_late_leading(field, None, Some("Lorg/jetbrains/annotations/NotNull;"));
     }
     // `$$delegatedProperties` follows it; a singleton's follows its INSTANCE, below.
@@ -3638,7 +3645,7 @@ fn emit_interface_class(
             .map(|(_, declaration)| *declaration)
             .unwrap_or(fid);
         if !deferred_suspend_declaration {
-            if let Some(defaults) = ir.param_defaults(default_fid) {
+            if let Some(defaults) = ir.declared_param_defaults(default_fid) {
                 // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
                 // sites go to the holder's copy instead.
                 if bodies_on_interface {
@@ -3872,7 +3879,11 @@ fn emit_enum_class(
     // constant pool and reordered nearly all of it.
     if let Some(companion) = c.companion_class {
         let desc = format!("L{};", companion.render());
-        let field = (0x0019, companion.nested_segment_ref(), desc.as_str());
+        let field = (
+            companion_field_access(ir, c, companion),
+            companion.nested_segment_ref(),
+            desc.as_str(),
+        );
         cw.add_field_late_leading(field, None, Some("Lorg/jetbrains/annotations/NotNull;"));
     }
     // `$$delegatedProperties` follows `Companion`, as in an ordinary class.
@@ -3893,11 +3904,16 @@ fn emit_enum_class(
     // The property backing fields are visited after the methods: each name interns where the
     // constructor body first stores it, after that body's own constants.
     for (f, t) in c.fields.iter().zip(&field_tys) {
-        let nullability = nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty));
-        cw.add_field_late(
+        let nullability = (!f.is_lateinit())
+            .then(|| nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty)))
+            .flatten();
+        let signature =
+            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref()).field;
+        cw.add_field_late_sig(
             enum_field_acc(f),
             &f.name,
             &type_descriptor(*t),
+            signature.as_deref(),
             None,
             nullability,
         );
@@ -3916,7 +3932,7 @@ fn emit_enum_class(
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
-        let ann = (field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
+        let ann = (!s.is_lateinit && field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
             .then_some("Lorg/jetbrains/annotations/NotNull;");
         cw.add_field_late_sig(
             acc,
@@ -4103,6 +4119,13 @@ fn emit_enum_class(
     for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
         cw.reserve_method_name(&property_getter_name(&f.name));
         cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
+        // A parameterized getter's generic `Signature` interns at its method visit, before the
+        // nullability annotation.
+        if let Some(getter) =
+            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref()).getter
+        {
+            cw.reserve_descriptor(&getter);
+        }
         // The nullability comes from the declared type; `t` is its erased JVM form.
         match field_nullability_kind(ir, &fq, &f.name, f.ty) {
             1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
@@ -4180,7 +4203,7 @@ fn emit_enum_class(
                 // silently had no stub at all — a call omitting the argument had nothing to dispatch to.
                 // Same call as the class path, so the super-call guard rides along: an enum IS
                 // inheritable (an entry body subclasses it), which is why kotlinc guards the stub.
-                if let Some(defaults) = ir.param_defaults(fid) {
+                if let Some(defaults) = ir.declared_param_defaults(fid) {
                     emit_default_stub(
                         ir,
                         fid,
@@ -5635,28 +5658,6 @@ fn emit_method_inner_with_holder(
     function_annotations::emit_recorded(ir, e.cw, fid, &f.name, &desc);
 }
 
-/// Format a class's generic shape into a JVM class `Signature` (`<T:Ljava/lang/Object;>Ljava/lang/Object;`).
-fn jvm_class_signature(
-    formatter: &JvmSignatureFormatter<'_>,
-    g: &crate::ir::IrGenericSig,
-) -> Option<String> {
-    let mut s = jvm_type_params(formatter, g)?;
-    if g.supers.is_empty() {
-        // A plain generic class with no (parameterized) supertypes: just extends `Object`.
-        s.push_str("Ljava/lang/Object;");
-    } else {
-        // The parameterized superclass + interfaces (`Ljava/lang/Object;LOperation<Lkotlin/Result<..>;>;`),
-        // formatted from the platform-agnostic `Ty`s so a reader recovers a member's concrete generic
-        // return. A class header is not a method-parameter position: declaration-site variance is
-        // not written on its own arguments (`interface L<E> : List<E>` implements Java `List<E>`).
-        // An explicit source projection remains encoded by `ty_at` itself.
-        for sup in &g.supers {
-            s.push_str(&formatter.supertype(sup)?);
-        }
-    }
-    Some(s).filter(|signature| signature.contains('<'))
-}
-
 /// A `Ty` as a JVM generic-signature type element: a primitive in a generic position is its BOXED wrapper
 /// (`Int` → `Ljava/lang/Integer;`), a reference maps its internal (`kotlin/Any` → `java/lang/Object`) and
 /// carries its (recursively formatted) type arguments. `None` for a shape not representable here.
@@ -5862,49 +5863,6 @@ fn method_parameterized_sig(
     s.push(')');
     s.push_str(&formatter.method_ty(ret, Wildcards::Suppressed)?);
     (s != ir_method_desc(params, ret)).then_some(s)
-}
-
-/// The shared `<T:bound…>` type-parameter DECLARATION section, or `""` when there are no own type
-/// parameters (e.g. a generic class's getter `getA()` → `()TA;` USES the class's `A` but declares none).
-/// `None` if any bound can't be represented.
-fn jvm_type_params(
-    formatter: &JvmSignatureFormatter<'_>,
-    g: &crate::ir::IrGenericSig,
-) -> Option<String> {
-    if g.type_params.is_empty() {
-        return Some(String::new());
-    }
-    let mut s = String::from("<");
-    for parameter in &g.type_params {
-        s.push_str(&parameter.name);
-        if parameter.bounds.is_empty() {
-            s.push_str(":Ljava/lang/Object;");
-            continue;
-        }
-        let bounds = parameter.bounds.iter();
-        if bounds.clone().all(|(_, is_interface)| *is_interface) {
-            s.push(':');
-        }
-        for (bound, _) in bounds {
-            s.push(':');
-            s.push_str(&jvm_bound_descriptor(formatter, bound)?);
-        }
-    }
-    s.push('>');
-    Some(s)
-}
-
-/// A type-parameter upper bound as a JVM signature element: `kotlin/Any` → `Ljava/lang/Object;`, a
-/// primitive → its boxed wrapper (`kotlin/Int` → `Ljava/lang/Integer;`), and anything else in
-/// kotlinc's generic-argument mode, which writes every declaration-site wildcard.
-fn jvm_bound_descriptor(formatter: &JvmSignatureFormatter<'_>, bound: &Ty) -> Option<String> {
-    if *bound == Ty::obj("kotlin/Any") {
-        return Some("Ljava/lang/Object;".to_string());
-    }
-    if bound.is_jvm_scalar() {
-        return bound.nullable_boxed().map(type_descriptor);
-    }
-    formatter.ty_at(bound, Wildcards::Generic)
 }
 
 fn default_mask_count(param_count: usize) -> usize {
@@ -6918,7 +6876,7 @@ impl<'a> Emitter<'a> {
             IrExpr::SingletonValue { classifier } => singleton_instance_load::published_singleton(
                 self.ir,
                 *classifier,
-                self.bodies.singleton_storage(*classifier),
+                crate::jvm::singleton_storage::of(self.classifiers, *classifier),
             )
             .is_some_and(|published| published.owner == access_owner),
             IrExpr::ExternalStaticField { owner, .. }
@@ -7373,60 +7331,6 @@ impl<'a> Emitter<'a> {
         }
         self.bind(end, code);
         code.set_stack(entry_stack);
-    }
-
-    /// The two operands of a `compare(a, b) <op> 0`, with the comparison to apply to them directly.
-    ///
-    /// `None` unless one side is the primitive three-way comparison and the other is the integer
-    /// literal `0` — the only shape in which that result is meaningful. With the zero on the LEFT
-    /// the comparison reverses (`0 < compare(a, b)` is `a > b`), so the operator is flipped rather
-    /// than the operands, which keeps evaluation order.
-    fn primitive_compare_operands(
-        &self,
-        op: IrBinOp,
-        lhs: u32,
-        rhs: u32,
-    ) -> Option<(u32, u32, IrBinOp)> {
-        use IrBinOp::*;
-        if !matches!(op, Lt | Le | Gt | Ge | Eq | Ne) {
-            return None;
-        }
-        let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
-        let (compared, direct) = if zero(rhs) {
-            (lhs, op)
-        } else if zero(lhs) {
-            let flipped = match op {
-                Lt => Gt,
-                Le => Ge,
-                Gt => Lt,
-                Ge => Le,
-                same => same,
-            };
-            (rhs, flipped)
-        } else {
-            return None;
-        };
-        let IrExpr::Call {
-            callee:
-                Callee::Intrinsic {
-                    operation:
-                        crate::ir::IrIntrinsic::PrimitiveCompare {
-                            relational_operator: true,
-                            ..
-                        },
-                    ..
-                },
-            dispatch_receiver: Some(receiver),
-            args,
-            ..
-        } = self.ir.expr(compared)
-        else {
-            return None;
-        };
-        let [argument] = args.as_slice() else {
-            return None;
-        };
-        Some((*receiver, *argument, direct))
     }
 
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control

@@ -1340,6 +1340,9 @@ impl<'a> CommonIrBodySink<'a> {
             if index.has_function_typed_parameter(callable.id) {
                 self.ir.function_typed_parameter_fns.insert(function);
             }
+            if let Some(contract) = index.contract(declaration).filter(|_| class.is_some()) {
+                self.ir.fn_contracts.insert(function, contract.clone());
+            }
             // An override also inherits `operator` / `infix`; see `finalize_inherited_statuses`.
             if declaration_header
                 .flags
@@ -1702,9 +1705,11 @@ impl CheckedBodySink for IndexedCommonIrBodySink<'_, '_> {
 }
 
 /// Record what each lowered callable inherits from the declarations it overrides: its return-value
-/// status, `operator` / `infix`, and final visibility. Access checking already consumed the same
-/// corrected declaration header. This refresh is a representation handoff for body-local methods,
-/// which can be predeclared before their local classifier publishes its override plan.
+/// status, `operator` / `infix`, and final visibility, and the language role of every
+/// current-module function that has one, which a call in this file may select from another file.
+/// Access checking already consumed the same corrected declaration header. This refresh is a
+/// representation handoff for body-local methods, which can be predeclared before their local
+/// classifier publishes its override plan.
 fn finalize_inherited_statuses(index: &ResolvedModuleIndex, ir: &mut IrFile) {
     let mut visibilities = Vec::new();
     for (&callable, &function) in &ir.checked_callable_functions {
@@ -1730,4 +1735,6 @@ fn finalize_inherited_statuses(index: &ResolvedModuleIndex, ir: &mut IrFile) {
     for (function, visibility) in visibilities {
         ir.set_method_visibility(function, visibility);
     }
+    ir.callable_semantic_roles
+        .extend(index.inherited_semantic_roles());
 }
