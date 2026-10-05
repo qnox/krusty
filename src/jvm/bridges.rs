@@ -137,6 +137,79 @@ fn external_method_name(
     .to_owned())
 }
 
+fn function_is_internal(ir: &IrFile, function: crate::ir::FunId) -> bool {
+    ir.method_visibility(function) == crate::types::Visibility::Internal
+}
+
+fn module_function_name(ir: &IrFile, callable: crate::fir::CallableId) -> Option<String> {
+    ir.checked_callable_functions
+        .get(&callable)
+        .map(|function| ir.functions[*function as usize].name.clone())
+}
+
+/// `m$lib1` or `m-WAeUQJs$lib1`: a module suffix, not a mapped-builtin special bridge (`size`).
+fn jvm_name_is_module_suffix(kotlin_name: &str, jvm_name: &str) -> bool {
+    let Some((base, module)) = jvm_name.rsplit_once('$') else {
+        return false;
+    };
+    !module.is_empty()
+        && (base == kotlin_name
+            || base
+                .strip_prefix(kotlin_name)
+                .is_some_and(|rest| rest.starts_with('-')))
+}
+
+fn function_target_is_internal(
+    ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
+    target: crate::fir::ResolvedFunctionOverrideTarget,
+) -> bool {
+    match target {
+        crate::fir::ResolvedFunctionOverrideTarget::Module(callable) => ir
+            .checked_callable_functions
+            .get(&callable)
+            .is_some_and(|function| function_is_internal(ir, *function)),
+        crate::fir::ResolvedFunctionOverrideTarget::External(callable) => callables
+            .callable(callable)
+            .is_some_and(|fact| fact.visibility == crate::types::Visibility::Internal),
+    }
+}
+
+fn property_accessor(
+    ir: &IrFile,
+    property: crate::fir::PropertyId,
+    setter: bool,
+) -> Option<crate::ir::FunId> {
+    let checked = ir.checked_properties.get(&property)?;
+    let class = ir.classes.get(checked.class? as usize)?;
+    let member = class
+        .properties
+        .iter()
+        .find(|member| member.name == checked.name)?;
+    if setter {
+        member.setter
+    } else {
+        member.getter
+    }
+}
+
+fn property_target_is_internal(
+    ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
+    target: crate::fir::ResolvedPropertyOverrideTarget,
+    setter: bool,
+) -> bool {
+    match target {
+        crate::fir::ResolvedPropertyOverrideTarget::Module(property) => {
+            property_accessor(ir, property, setter)
+                .is_some_and(|function| function_is_internal(ir, function))
+        }
+        crate::fir::ResolvedPropertyOverrideTarget::External(callable) => callables
+            .callable(callable)
+            .is_some_and(|fact| fact.visibility == crate::types::Visibility::Internal),
+    }
+}
+
 /// The common-IR function implementing `edge`: a compiler-generated forwarder's own function, or the
 /// function lowered from the selected source declaration.
 pub(super) fn implementation_function(
@@ -260,22 +333,37 @@ fn superclass_method_bridges(
             .collect::<Vec<_>>();
         let own_ret = bridge_erasure(concrete_ret);
         let bridge_name = match edge.overridden {
-            crate::fir::ResolvedFunctionOverrideTarget::Module(_) => edge.name.clone(),
+            crate::fir::ResolvedFunctionOverrideTarget::Module(callable) => {
+                module_function_name(ir, callable).unwrap_or_else(|| edge.name.clone())
+            }
             crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
                 external_method_name(callables, target)?
             }
         };
-        let target_name = if edge.implementation_function.is_some() {
-            edge.name.clone()
+        let target_name = if let Some(function) = own_fid {
+            ir.functions[function as usize].name.clone()
         } else {
             match edge.implementation {
-                crate::fir::ResolvedFunctionOverrideTarget::Module(_) => edge.name.clone(),
+                crate::fir::ResolvedFunctionOverrideTarget::Module(callable) => {
+                    module_function_name(ir, callable).unwrap_or_else(|| edge.name.clone())
+                }
                 crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
                     external_method_name(callables, target)?
                 }
             }
         };
-        if bridge_name != edge.name && edge.has_kotlin_superclass_override {
+        // A public override of an internal member keeps the Kotlin name. The internal declaration's
+        // JVM name gains `$<module>` after this pass, so the bridge has to exist even while the two
+        // names still match. A mapped builtin (`size` / `getSize`) is the only name difference that
+        // is final and that a Kotlin superclass already publishes.
+        let internal_name_bridge = function_target_is_internal(ir, callables, edge.overridden)
+            && !function_target_is_internal(ir, callables, edge.implementation);
+        let special = matches!(
+            edge.overridden,
+            crate::fir::ResolvedFunctionOverrideTarget::External(_)
+        ) && bridge_name != edge.name
+            && !jvm_name_is_module_suffix(&edge.name, &bridge_name);
+        if special && edge.has_kotlin_superclass_override {
             continue;
         }
         if bridge_name != target_name
@@ -314,6 +402,7 @@ fn superclass_method_bridges(
         if method_descriptor(&base_params, base_ret) == method_descriptor(&own_params, own_ret)
             && bridge_name == target_name
             && !value_class_return_difference
+            && !internal_name_bridge
         {
             continue;
         }
@@ -331,7 +420,7 @@ fn superclass_method_bridges(
                 .non_null()
                 .obj_internal()
                 .is_some_and(|n| crate::jvm::value_classes::is_boxed_value_class(ir, n));
-            if base_params == own_params && !vc_ret {
+            if base_params == own_params && !vc_ret && !internal_name_bridge {
                 continue;
             }
         }
@@ -349,7 +438,8 @@ fn superclass_method_bridges(
             }
             continue;
         }
-        let target_name = (bridge_name != target_name).then_some(target_name);
+        let target_name =
+            (internal_name_bridge || bridge_name != target_name).then_some(target_name);
         if parameter_identities.len() != concrete_params.len()
             || declared_parameters.len() != concrete_params.len()
         {
@@ -365,7 +455,6 @@ fn superclass_method_bridges(
                 .and_then(|function| ir.fn_source_order.get(&function).copied())
                 .unwrap_or(u32::MAX),
         );
-        let special = bridge_name != edge.name;
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::Function,
             target_function: own_fid,
@@ -429,18 +518,36 @@ fn property_bridges(
         }
         let source_getter = property_getter_name(&edge.name);
         let bridge_getter = match edge.overridden {
-            crate::fir::ResolvedPropertyOverrideTarget::Module(_) => source_getter.clone(),
+            crate::fir::ResolvedPropertyOverrideTarget::Module(property) => {
+                property_accessor(ir, property, false)
+                    .map(|function| ir.functions[function as usize].name.clone())
+                    .unwrap_or_else(|| source_getter.clone())
+            }
             crate::fir::ResolvedPropertyOverrideTarget::External(target) => {
                 external_method_name(callables, target)?
             }
         };
-        let target_getter = match edge.implementation {
-            _ if edge.implementation_getter.is_some() => source_getter.clone(),
-            crate::fir::ResolvedPropertyOverrideTarget::Module(_) => source_getter.clone(),
-            crate::fir::ResolvedPropertyOverrideTarget::External(target) => {
-                external_method_name(callables, target)?
+        let target_getter = if let Some(function) = edge.implementation_getter {
+            ir.functions[function as usize].name.clone()
+        } else {
+            match edge.implementation {
+                crate::fir::ResolvedPropertyOverrideTarget::Module(property) => {
+                    property_accessor(ir, property, false)
+                        .map(|function| ir.functions[function as usize].name.clone())
+                        .unwrap_or_else(|| source_getter.clone())
+                }
+                crate::fir::ResolvedPropertyOverrideTarget::External(target) => {
+                    external_method_name(callables, target)?
+                }
             }
         };
+        let internal_getter_bridge =
+            property_target_is_internal(ir, callables, edge.overridden, false)
+                && !property_target_is_internal(ir, callables, edge.implementation, false);
+        let internal_setter_bridge = edge.overridden_mutable
+            && edge.implementation_mutable
+            && property_target_is_internal(ir, callables, edge.overridden, true)
+            && !property_target_is_internal(ir, callables, edge.implementation, true);
         crate::trace_compiler!(
             "bridges",
             "stable property override class={internal_name} implementation={:?} owner={} overridden={:?} owner={} source={} bridge={bridge_getter} target={target_getter} covering={:?}",
@@ -464,10 +571,17 @@ fn property_bridges(
             }
             _ => false,
         } && bridge_getter == target_getter
+            && !internal_getter_bridge
+            && !internal_setter_bridge
         {
             continue;
         }
-        if bridge_getter != source_getter && edge.has_kotlin_superclass_override {
+        let getter_special = matches!(
+            edge.overridden,
+            crate::fir::ResolvedPropertyOverrideTarget::External(_)
+        ) && bridge_getter != source_getter
+            && !jvm_name_is_module_suffix(&source_getter, &bridge_getter);
+        if getter_special && edge.has_kotlin_superclass_override {
             continue;
         }
         let bridge_descriptor = method_descriptor(
@@ -500,7 +614,23 @@ fn property_bridges(
             );
             continue;
         }
-        push_property_bridge(ir, cid, &edge, getter_results, bridge_getter, target_getter);
+        let setter_target = edge
+            .implementation_setter
+            .map(|function| ir.functions[function as usize].name.clone())
+            .unwrap_or_else(|| property_setter_name(&edge.name));
+        push_property_bridge(
+            ir,
+            cid,
+            &edge,
+            getter_results,
+            PropertyBridgeNames {
+                getter_name: bridge_getter,
+                getter_target: target_getter,
+                setter_target,
+                internal_getter: internal_getter_bridge,
+                internal_setter: internal_setter_bridge,
+            },
+        );
         order.resize(
             order.len() + ir.classes[cid].bridges.len() - pushed_before,
             position,
@@ -575,14 +705,28 @@ fn push_member_extension_accessor_bridges(
 /// The `get<X>()` bridge (and, for a `var` override, the `set<X>()` one). A bridge already recorded
 /// under the accessor's name and descriptor wins — the first supertype in the walk is the nearest
 /// one. Each delegates to the implementation's own accessor function when this class declares it.
+struct PropertyBridgeNames {
+    getter_name: String,
+    getter_target: String,
+    setter_target: String,
+    internal_getter: bool,
+    internal_setter: bool,
+}
+
 fn push_property_bridge(
     ir: &mut IrFile,
     cid: usize,
     edge: &crate::ir::IrPropertyOverride,
     getter_results: PropertyGetterResults,
-    getter_name: String,
-    getter_target: String,
+    names: PropertyBridgeNames,
 ) {
+    let PropertyBridgeNames {
+        getter_name,
+        getter_target,
+        setter_target,
+        internal_getter: internal_getter_bridge,
+        internal_setter: internal_setter_bridge,
+    } = names;
     let own = |accessor: Option<u32>| accessor.filter(|f| ir.classes[cid].methods.contains(f));
     let (getter, setter) = (
         own(edge.implementation_getter),
@@ -600,8 +744,9 @@ fn push_property_bridge(
             )
     });
     if !has_getter {
-        let target_name = (getter_name != getter_target).then_some(getter_target);
-        let special = getter_name != property_getter_name(&edge.name);
+        let target_name =
+            (internal_getter_bridge || getter_name != getter_target).then_some(getter_target);
+        let special = !internal_getter_bridge && getter_name != property_getter_name(&edge.name);
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertyGetter,
             target_function: getter,
@@ -627,17 +772,19 @@ fn push_property_bridge(
     // result, the setter's descriptor is already the implementation's own.
     let setter_param = bridge_erasure(edge.declared_type);
     let sname = property_setter_name(&edge.name);
-    let has_setter =
-        crate::jvm::names::same_type_descriptor(setter_param, edge.implementation_type)
-            || ir.classes[cid].bridges.iter().any(|b| {
-                b.name == sname
-                    && b.erased_params.len() == 1
-                    && crate::jvm::names::same_type_descriptor(
-                        bridge_erasure(b.erased_params[0]),
-                        setter_param,
-                    )
-            });
+    let has_setter = (!internal_setter_bridge
+        && crate::jvm::names::same_type_descriptor(setter_param, edge.implementation_type))
+        || ir.classes[cid].bridges.iter().any(|b| {
+            b.name == sname
+                && b.erased_params.len() == 1
+                && crate::jvm::names::same_type_descriptor(
+                    bridge_erasure(b.erased_params[0]),
+                    setter_param,
+                )
+        });
     if !has_setter {
+        let setter_target_name =
+            (internal_setter_bridge || sname != setter_target).then_some(setter_target);
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertySetter,
             target_function: setter,
@@ -655,7 +802,7 @@ fn push_property_bridge(
             target_ret: None,
             barrier_plan: None,
             special: false,
-            target_name: None,
+            target_name: setter_target_name,
             property_implementation: property_implementation(edge, BridgeAccessorRole::Setter),
         });
     }
