@@ -181,6 +181,9 @@ pub struct ClassInfo {
     pub inner_classes: Vec<InnerClassRef>,
     /// For an annotation type: the default each element declares, in method order.
     pub annotation_element_defaults: Vec<(Box<str>, AnnotationElementDefault)>,
+    /// An inner class's packed `@Metadata`, kept until [`Self::within_outer`] decodes it in its
+    /// outer class's type-parameter scope. `None` for every other class.
+    pub inner_metadata: Option<std::sync::Arc<crate::jvm::metadata::RawMetadata>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,6 +211,44 @@ impl ClassInfo {
                 .this_class
                 .parent()
                 .unwrap_or_else(|| crate::types::type_name("")),
+        }
+    }
+
+    /// The outer class an inner Kotlin class's metadata addresses type parameters of, from its
+    /// `InnerClasses` self entry. `None` for every class [`Self::within_outer`] leaves unchanged.
+    pub fn metadata_outer_class(&self) -> Option<TypeName> {
+        self.inner_metadata.as_ref()?;
+        self.inner_class_self()?
+            .outer
+            .as_deref()
+            .map(crate::types::type_name)
+    }
+
+    /// Decode an inner class's metadata in `outer`'s type-parameter scope, so a member that
+    /// addresses an outer parameter by id resolves it as kotlinc's reader does.
+    pub fn within_outer(&self, outer: &ClassInfo) -> Result<ClassInfo, ReadError> {
+        let Some(raw) = self.inner_metadata.as_deref() else {
+            return Ok(self.clone());
+        };
+        let meta = crate::jvm::metadata::decode_metadata_within(
+            raw,
+            &self.this_class(),
+            &self.methods,
+            &outer.meta.type_parameter_scope,
+        )
+        .map_err(ReadError::BadKotlinMetadata)?;
+        Ok(ClassInfo {
+            meta,
+            inner_metadata: None,
+            ..self.clone()
+        })
+    }
+
+    /// This class with no metadata left to decode within an outer class.
+    pub fn without_inner_metadata(self) -> ClassInfo {
+        ClassInfo {
+            inner_metadata: None,
+            ..self
         }
     }
 
@@ -884,15 +925,16 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     // (for an annotation class) its `@Retention` policy.
     let attrs = read_class_attrs(&mut r, &cp);
 
-    let meta = crate::jvm::metadata::decode_metadata(
-        &attrs.d1.unwrap_or_default(),
-        &attrs.d2.unwrap_or_default(),
-        attrs.k,
-        &this_class,
-        attrs.pn.as_deref(),
-        &methods,
-    )
-    .map_err(ReadError::BadKotlinMetadata)?;
+    let raw_metadata = crate::jvm::metadata::RawMetadata {
+        d1: attrs.d1.unwrap_or_default(),
+        d2: attrs.d2.unwrap_or_default(),
+        k: attrs.k,
+        package_name: attrs.pn,
+    };
+    let meta =
+        crate::jvm::metadata::decode_metadata_within(&raw_metadata, &this_class, &methods, &[])
+            .map_err(ReadError::BadKotlinMetadata)?;
+    let inner_metadata = meta.is_inner.then(|| std::sync::Arc::new(raw_metadata));
     Ok(ClassInfo {
         major,
         access,
@@ -909,6 +951,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         java_targets: attrs.java_targets,
         inner_classes: attrs.inner_classes,
         annotation_element_defaults,
+        inner_metadata,
     })
 }
 

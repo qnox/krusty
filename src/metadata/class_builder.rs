@@ -591,8 +591,8 @@ pub enum ClassMemberOrder {
 /// The type parameters a class captures from enclosing declarations, and how kotlinc numbers them.
 #[derive(Clone, Copy, Debug)]
 pub enum CapturedTypeParameters<'a> {
-    /// An inner class's: the enclosing classes' parameters hold the ids before its own, outermost
-    /// first.
+    /// A nested class's: every enclosing class's parameters, outermost first, hold the ids before
+    /// its own. An inner class addresses the ones it captures by those ids.
     Reserved(&'a [String]),
     /// A local or anonymous class's: its own parameters come first, and each captured one takes
     /// the next id on first use (see `TypeParameters`).
@@ -737,7 +737,7 @@ impl Default for ClassTail<'_> {
             primary_ctor_jvm_signature: true,
             type_params: &[],
             type_param_bounds: &[],
-            captured_type_params: CapturedTypeParameters::Reserved(&[]),
+            captured_type_params: CapturedTypeParameters::default(),
             sealed_subclasses: &[],
             supertypes: &[],
             annotations: &crate::metadata::NO_ANNOTATIONS,
@@ -825,7 +825,7 @@ pub fn build_class(
         numbered_on_use.iter().cloned(),
     );
     for (index, semantic) in reserved.iter().enumerate() {
-        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Captured(index as u64));
+        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Id(index as u64));
     }
     for (index, (source, parameter)) in tail
         .type_params
@@ -1519,7 +1519,7 @@ pub fn build_class(
     let inline_underlying: Option<(u32, Option<Pb>)> = tail.inline_underlying.map(|(name, ty)| {
         (
             st.local(name),
-            ty.map(|ty| type_pb(&mut st, ty, &class_type_parameters)),
+            ty.map(|ty| type_pb(&mut st, ty, &class_header_type_parameters)),
         )
     });
 
