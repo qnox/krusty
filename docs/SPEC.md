@@ -6357,14 +6357,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **A folded `dependsOn` file is a common source.** An optional expectation with no JVM actual
   (`kotlin.js.JsStatic`, from the stdlib common-metadata klib) resolves in a common source and is
-  `unresolved reference 'kotlin.js.JsStatic'.` in a platform file. A `dependsOn` source set folded
-  into a platform compilation is that common source: the dependency-first prefix
+  rejected with `OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE` in a platform file. A `dependsOn`
+  source set folded into a platform compilation is that common source: the dependency-first prefix
   (`ModuleUnit.common_file_count`) is `SourceInput::common()`, and the platform module's own files
-  are not. `@kotlin.jvm.JvmStatic` on an object and `@kotlin.js.JsStatic` on a companion in that
-  prefix keep the members callable from a dependent platform module. Tests:
-  `mpp_expect_actual_e2e::optional_expectation_in_common_source_runs`,
-  `mpp_expect_actual_e2e::platform_source_rejects_targetless_optional_expectation`; corpus
-  `multiplatform/k2/kt66970.kt`.
+  are not. An optional annotation in that prefix is erased for the JVM while the annotated member
+  remains callable from the dependent platform file. Tests:
+  `kotlin_box_ir_jvm_conformance::folded_common_optional_expectation_uses_module_harness` and
+  `optional_expectation_annotation_e2e`; corpus `multiplatform/k2/kt66970.kt`.
 - **`@OptionalExpectation` annotation classes come from a library's `.kotlin_module`.** A JVM
   library carries no class file for an optional annotation that has no JVM actual
   (`kotlin.js.JsStatic`, `kotlin.native.CName`, …); kotlinc writes the `expect annotation class`
