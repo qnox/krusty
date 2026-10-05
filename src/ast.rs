@@ -714,6 +714,7 @@ impl FdFlags {
     const IS_EXTERNAL: u16 = 1 << 10;
     const IS_ACTUAL: u16 = 1 << 11;
     const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 12;
+    const HAS_VISIBILITY_MODIFIER: u16 = 1 << 13;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -780,6 +781,10 @@ impl FdFlags {
     #[inline]
     pub const fn with_is_companion_block_member(self, on: bool) -> Self {
         self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
+    }
+    #[inline]
+    pub const fn with_has_visibility_modifier(self, on: bool) -> Self {
+        self.with(Self::HAS_VISIBILITY_MODIFIER, on)
     }
 }
 
@@ -904,6 +909,12 @@ impl FunDecl {
     pub fn is_override(&self) -> bool {
         self.flags.has(FdFlags::IS_OVERRIDE)
     }
+    /// Whether the declaration wrote a visibility modifier. An `override` without one takes the
+    /// overridden member's visibility instead of defaulting to `public`.
+    #[inline]
+    pub fn has_visibility_modifier(&self) -> bool {
+        self.flags.has(FdFlags::HAS_VISIBILITY_MODIFIER)
+    }
     #[inline]
     pub fn is_abstract(&self) -> bool {
         self.flags.has(FdFlags::IS_ABSTRACT)
@@ -972,6 +983,9 @@ pub struct PropParam {
     /// A `private` property's backing field gets NO accessor (kotlinc reads it directly in-class), so
     /// the accessor synthesis skips it; `internal`/`protected` currently accessor like `public`.
     pub visibility: Visibility,
+    /// Whether the constructor-parameter modifier list wrote a visibility keyword. An `override`
+    /// property without one keeps the overridden member's visibility.
+    pub has_visibility_modifier: bool,
     /// Default value (`class C(val x: Int = 5)`). Used to synthesize a no-arg constructor when
     /// all primary-constructor parameters have defaults.
     pub default: Option<ExprId>,
@@ -1334,6 +1348,9 @@ pub struct PropDecl {
     /// Declaration visibility (`public` by default). A `private set` narrows only the SETTER — that
     /// lives on [`PropAccessor::visibility`]; this is the property's (getter's) visibility.
     pub visibility: Visibility,
+    /// Whether the declaration wrote a visibility modifier. An `override` property without one
+    /// keeps the overridden member's visibility instead of defaulting to `public`.
+    pub has_visibility_modifier: bool,
     /// Generic type parameters declared on an EXTENSION property (`val <T> Array<T>.length: Int`),
     /// scoped over the receiver, declared type, and accessor bodies. Erased to `Any` like a function's.
     pub type_params: Vec<String>,
@@ -1852,6 +1869,10 @@ pub struct File {
     /// Argument expressions of the type-use annotations in [`Self::type_annotations`] written with
     /// a non-empty argument list, keyed by the annotation reference's span.
     pub type_annotation_arguments: std::collections::HashMap<(u32, u32), Vec<ExprId>>,
+    /// Names written on function-type parameters (`(count: Int) -> Unit`), keyed by the parameter
+    /// type's start offset like [`Self::type_annotations`]. `@Metadata` records each as a
+    /// `@ParameterName` annotation on that parameter's type.
+    pub function_type_parameter_names: std::collections::HashMap<u32, String>,
     /// Declaration type parameters carrying annotations, keyed by the exact start of their owning
     /// declaration's signature and then kept in source order. This is distinct from
     /// [`Self::type_annotations`]: `class C<@Ann T>` annotates the declaration of `T`, not a type use.

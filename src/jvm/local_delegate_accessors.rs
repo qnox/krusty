@@ -304,7 +304,13 @@ fn emitted_expressions(ir: &IrFile) -> HashSet<ExprId> {
                 continue;
             }
             match ir.expr(expression) {
-                IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
+                // A lambda's own body is emitted where its implementation lands, and its inline
+                // body wherever an inline call inlines it.
+                IrExpr::Lambda {
+                    captures,
+                    inline_body,
+                    ..
+                } => pending.extend(captures.iter().copied().chain(*inline_body)),
                 _ => crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
                     pending.push(child)
                 }),

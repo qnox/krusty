@@ -505,7 +505,7 @@ fn realize_adapter_reference(
         },
         _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
     };
-    let carrier = install_carrier(ir, expression, carrier);
+    let carrier = install_carrier(ir, expression, carrier, internal);
     if let Some(parameters) = declared_parameters {
         ir.construction_declared_params.insert(carrier, parameters);
     }
@@ -513,12 +513,19 @@ fn realize_adapter_reference(
 }
 
 /// Replace the reference expression with its carrier. kotlinc's `FunctionReferenceLowering` hands
-/// the carrier to its use site through an implicit cast, which the JVM backend materializes only
-/// at the consumer: a `checkcast` to the consumer's own type (`Function1` for a function-typed
-/// parameter, `KFunction` for a reference-typed local), and none for `Object`.
-fn install_carrier(ir: &mut IrFile, expression: usize, carrier: IrExpr) -> ExprId {
+/// the carrier to its use site through an implicit cast, which writes no instruction: the value
+/// keeps its class's type, and a consumer that needs its `FunctionN`, `KFunction` or other function
+/// type casts it there, as a lambda class's consumer does.
+fn install_carrier(
+    ir: &mut IrFile,
+    expression: usize,
+    carrier: IrExpr,
+    class: crate::types::TypeName,
+) -> ExprId {
     ir.exprs[expression] = carrier;
-    ExprId::try_from(expression).expect("an expression id fits its index")
+    let carrier = ExprId::try_from(expression).expect("an expression id fits its index");
+    ir.logical_types.insert(carrier, Ty::obj_name(class));
+    carrier
 }
 
 /// `parameters` of `function`, with each shared mutable capture realized as its JVM holder.
