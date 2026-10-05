@@ -359,9 +359,10 @@ pub struct JvmBackend {
     /// Whether to emit the `Intrinsics.checkNotNullExpressionValue` guard on a narrowed platform
     /// value (`-Xno-call-assertions` clears this).
     call_assertions: bool,
-    /// Finalized public source-language level for JVM representation rules that changed between
-    /// Kotlin language releases. This is deliberately separate from the metadata output stamp.
-    language_version: crate::language_version::LanguageVersion,
+    /// Whether inferred `Nothing` lambda results require the pre-2.4 class realization that the
+    /// JVM metafactory could not adapt. The compiler driver derives this representation fact from
+    /// the finalized public language setting; the backend does not own language-version policy.
+    inferred_nothing_lambda_class_fallback: bool,
     /// `-language-version X.Y`: the `@kotlin.Metadata` `mv` and `.kotlin_module` header version to
     /// stamp; `None` keeps the default ([`crate::jvm::ir_emit::DEFAULT_METADATA_VERSION`]).
     metadata_version: Option<[i32; 3]>,
@@ -381,7 +382,7 @@ impl JvmBackend {
             lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
             param_assertions: true,
             call_assertions: true,
-            language_version: crate::language_version::LanguageVersion::default(),
+            inferred_nothing_lambda_class_fallback: false,
             metadata_version: None,
             annotations_in_metadata: true,
         }
@@ -414,12 +415,9 @@ impl JvmBackend {
         self
     }
 
-    /// Select JVM representation rules belonging to the public `-language-version` setting.
-    pub fn with_language_version(
-        mut self,
-        version: crate::language_version::LanguageVersion,
-    ) -> JvmBackend {
-        self.language_version = version;
+    /// Supply the finalized JVM representation fact selected by the public language settings.
+    pub fn with_inferred_nothing_lambda_class_fallback(mut self, enabled: bool) -> JvmBackend {
+        self.inferred_nothing_lambda_class_fallback = enabled;
         self
     }
 
@@ -1071,7 +1069,7 @@ impl Backend for JvmBackend {
             &delegate_closures,
             current_source,
             self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy,
-            self.language_version < crate::language_version::LanguageVersion::V2_4,
+            self.inferred_nothing_lambda_class_fallback,
         ) {
             Ok(methods) => methods,
             Err(()) => {

@@ -50,18 +50,18 @@ fn assert_identical(src: &str, stem: &str, class: &str) {
 
 #[test]
 fn current_language_keeps_the_null_returning_lambda_on_indy() {
-    let built = common::compare_with_kotlinc_plugin(
+    let settings = krusty::language_settings::LanguageSettings::default();
+    let built = common::compare_with_kotlinc_plugin_language_settings(
         "NothingLambdaCurrent",
         NOTHING_RESULT_SRC,
         "NothingLambdaCurrentKt",
         &[common::stdlib_jar()],
         "1.8",
-        &[],
+        &settings,
     )
     .expect("reference kotlinc is provisioned");
     assert_eq!(built.krusty_bytes, built.reference_bytes);
 
-    let settings = krusty::language_settings::LanguageSettings::default();
     let classes = common::source_set_compile::compile(
         &[("NothingLambdaCurrent.kt", NOTHING_RESULT_SRC)],
         &[common::stdlib_jar()],
