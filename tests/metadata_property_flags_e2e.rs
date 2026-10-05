@@ -330,3 +330,86 @@ fn a_class_lists_its_properties_in_declaration_order() {
         }\n";
     assert_identical("PropertyListOrder", SRC, "app/Host");
 }
+
+/// kotlinc writes `HAS_CONSTANT` only for a `val` whose DECLARED type could be a `const val`
+/// type: a constant initializer of a wider declared type has none.
+#[test]
+fn only_a_const_capable_declared_type_records_a_constant() {
+    const SRC: &str = "package app\n\
+        \n\
+        abstract class Base { abstract val x: Any }\n\
+        class K : Base() {\n\
+        \x20   override val x: Any = \"abc\"\n\
+        \x20   val boxed: Any = 0\n\
+        \x20   val text: Any = \"t\"\n\
+        \x20   val seq: CharSequence = \"abcd\"\n\
+        \x20   val str: String = \"s\"\n\
+        \x20   val maybe: String? = \"m\"\n\
+        \x20   val unsigned: UInt = 1u\n\
+        }\n\
+        val top: CharSequence = \"abcd\"\n\
+        val topAny: Any = 1\n\
+        val topText: String = \"t\"\n";
+    assert_identical("ConstCapableTypes", SRC, "app/K");
+    assert_identical("ConstCapableTypes", SRC, "app/ConstCapableTypesKt");
+}
+
+/// The constants kotlinc's serializer accepts beyond a literal: a number conversion or unary
+/// minus applied to a constant, a string template over constants and a concatenation of string
+/// literals. Any other operation over constants is not one. The conversions are what the rule
+/// is about, so this test has to call them.
+#[test]
+fn a_conversion_template_or_literal_concatenation_is_a_constant() {
+    const SRC: &str = "package app\n\
+        \n\
+        const val X = 5\n\
+        const val S = \"s\"\n\
+        class Q {\n\
+        \x20   val negated: Int = -X\n\
+        \x20   val widened: Long = X.toLong()\n\
+        \x20   val signed: Long = (-3).toLong()\n\
+        \x20   val folded: Long = (1 + 2).toLong()\n\
+        \x20   val real: Double = 0.toDouble()\n\
+        \x20   val truncated: Int = 1.0.toInt()\n\
+        \x20   val letter: Char = 65.toChar()\n\
+        \x20   val template: String = \"$X\"\n\
+        \x20   val mixed: String = \"a${S}b\"\n\
+        \x20   val joined: String = \"a\" + \"b\" + \"c\"\n\
+        \x20   val number: String = \"a\" + 1\n\
+        \x20   val inverted: Boolean = !true\n\
+        \x20   val sum: Int = 1 + 2\n\
+        \x20   val read: Int = X\n\
+        }\n\
+        val topReal: Double = 0.toDouble()\n\
+        val topByte: Byte = 1.toByte()\n\
+        val topTemplate: String = \"x$X\"\n\
+        val topSum: Int = 1 + 2\n";
+    assert_identical("ConstantOperations", SRC, "app/Q");
+    assert_identical("ConstantOperations", SRC, "app/ConstantOperationsKt");
+}
+
+/// kotlinc's parser folds only literals: `+3` and `"a" + "b"` are constants, while `+X` and
+/// `"a" + S` over `const val` reads stay `unaryPlus`/`plus` calls and record no constant.
+/// `-X`, `"$S"` and the bare read `S` are constants.
+#[test]
+fn a_constant_read_is_not_folded_like_a_literal() {
+    const SRC: &str = "package app\n\
+        \n\
+        const val X = 5\n\
+        const val S = \"s\"\n\
+        class R {\n\
+        \x20   val plusRead: Int = +X\n\
+        \x20   val plusLiteral: Int = +3\n\
+        \x20   val minusRead: Int = -X\n\
+        \x20   val joinedRead: String = \"a\" + S\n\
+        \x20   val readJoined: String = S + \"a\"\n\
+        \x20   val joinedLiteral: String = \"a\" + \"b\"\n\
+        \x20   val template: String = \"$S\"\n\
+        \x20   val read: String = S\n\
+        }\n\
+        val topPlusRead: Int = +X\n\
+        val topJoinedRead: String = \"a\" + S\n\
+        val topRead: String = S\n";
+    assert_identical("ConstantReads", SRC, "app/R");
+    assert_identical("ConstantReads", SRC, "app/ConstantReadsKt");
+}

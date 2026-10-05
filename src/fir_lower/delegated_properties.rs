@@ -409,6 +409,7 @@ pub(super) fn materialize_member_delegate(
         is_open: property.flags.has(DeclarationFlags::OPEN),
         modifiers: super::properties::member_property_modifiers(property.flags, false),
         delegate_field: Some(delegate_field),
+        has_constant_initializer: false,
         is_private: property.visibility.is_private(),
         setter_visibility: setter_visibility(index, property.declaration, property.visibility),
         getter: Some(getter),
