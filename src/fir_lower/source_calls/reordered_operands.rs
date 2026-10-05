@@ -11,10 +11,13 @@ impl BodyLowering<'_> {
     /// unbound class literal. Every other operand is first stored in a temporary, in source order.
     pub(in super::super) fn passes_reordered_operand_in_place(&self, value: ExprId) -> bool {
         match self.ir.expr(value) {
+            // A function literal's and a reference's captures are reads of the enclosing body's
+            // locals and shared cells, which kotlinc passes in place with the literal. A bound
+            // reference evaluates its receiver where it is written, so it is stored.
             IrExpr::Const(_)
-            | IrExpr::CallableReference(_)
             | IrExpr::KClassLiteral { value: None, .. }
             | IrExpr::Lambda { sam: None, .. } => true,
+            IrExpr::CallableReference(reference) => reference.bound_receiver.is_none(),
             IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,

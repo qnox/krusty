@@ -1,7 +1,9 @@
 //! A call whose named arguments reorder it stores each argument in a temporary in source order,
 //! except those kotlinc passes in place: a constant (folded ones included), a read of a `val`, a
 //! parameter or `this`, a function literal, an unbound reference and an unbound class literal. A
-//! scalar stored for a reference parameter is boxed where it is passed, not before it is stored.
+//! scalar stored for a reference parameter is boxed where it is passed, not before it is stored. A
+//! bound reference evaluates its receiver where it is written, so it is stored. Constructor
+//! delegations follow the same rules.
 
 use super::common;
 
@@ -12,7 +14,14 @@ fun next(): Int { counter += 1; return counter }
 fun take(first: Int, second: Any?): Int = first
 class Holder(val label: String) {
     fun pass(): Int = take(second = this, first = next())
+    fun member(): Int = label.length
 }
+fun make(): Holder { counter += 100; return Holder(\"m\") }
+open class Base(val first: Int, val second: Any?) {
+    constructor(label: String, first: Int) : this(second = next() + 1, first = first + label.length)
+}
+class Derived : Base(second = next() + 1, first = next())
+class Delegating(flag: Boolean) : Base(if (flag) \"y\" else \"no\", next())
 fun reordered(parameter: Int): Int {
     val fixed = \"v\"
     var changing = \"w\"
@@ -29,9 +38,15 @@ fun reordered(parameter: Int): Int {
     total += take(second = String::class, first = next())
     total += take(second = shared, first = next())
     total += take(second = 'c', first = next())
+    total += take(second = make()::member, first = next())
+    total += take(second = Holder::member, first = next())
+    total += Derived().first + Delegating(true).first
     return total + Holder(\"h\").pass()
 }
-fun box(): String = if (reordered(4) == 91) \"OK\" else \"fail\"
+fun box(): String {
+    val total = reordered(4)
+    return if (total == 658 && counter == 119) \"OK\" else \"$total,$counter\"
+}
 ";
 
 #[test]

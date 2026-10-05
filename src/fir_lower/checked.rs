@@ -989,7 +989,7 @@ impl BodyLowering<'_> {
                                 parameter: *parameter,
                             },
                         )?;
-                        *value = self.spill_call_operand(*value, ty, &mut prelude);
+                        *value = self.spill_reordered_operand(*value, ty, &mut prelude);
                     }
                     IrCheckedArgument::Vararg {
                         array_type,
