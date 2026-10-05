@@ -687,6 +687,9 @@ pub struct PropMeta {
     pub setter_visibility: crate::types::Visibility,
     /// Companion-associated (`companion val C.name`) — sets `Property.flags` bit 19.
     pub companion: bool,
+    /// The accessors' own annotations (`@A get`, `@A set`, `set(@A v)`): each accessor word's
+    /// `HAS_ANNOTATIONS` bit and the `getter_annotation`/`setter_annotation` records (f15/f16).
+    pub accessor_annotations: crate::metadata::AccessorMetadataAnnotations,
     /// A delegated property's name for the static field holding its delegate, which kotlinc
     /// records explicitly after the accessors' signatures.
     pub field_name: Option<String>,
@@ -796,14 +799,18 @@ impl AccessorWords {
                 0
             }
         };
-        let getter =
-            default_word | not_default(m.modifiers.declared_getter || m.modifiers.delegated);
+        let accessors = &m.accessor_annotations;
+        let getter = default_word
+            | not_default(m.modifiers.declared_getter || m.modifiers.delegated)
+            | u64::from(accessors.getter.declares_annotations());
         let narrowed = m.setter_visibility != m.visibility;
         let setter_not_default =
             m.is_var && (m.modifiers.declared_setter || m.modifiers.delegated || narrowed);
-        let setter = m
-            .is_var
-            .then(|| (visibility_bits(m.setter_visibility) << 1) | not_default(setter_not_default));
+        let setter = m.is_var.then(|| {
+            (visibility_bits(m.setter_visibility) << 1)
+                | not_default(setter_not_default)
+                | u64::from(accessors.setter.declares_annotations())
+        });
         Self {
             getter: (getter != default_word).then_some(getter),
             setter: setter.filter(|&word| word != default_word),
@@ -826,7 +833,7 @@ fn jvm_method_sig(st: &mut StringTable<'_>, name: &str, desc: &str) -> Pb {
     p
 }
 
-fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
+fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: bool) -> Pb {
     let mut p = Pb::new();
     assert_eq!(
         m.semantic_type_params.len(),
@@ -851,10 +858,21 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
             } else {
                 "value"
             });
+        let annotations = Some(&m.accessor_annotations.setter_parameter);
         let mut parameter = Pb::new();
+        let flags = crate::metadata::class_builder::param_annotation_flags(annotations);
+        if flags != 0 {
+            parameter.field_varint(1, flags); // ValueParameter.flags = 1
+        }
         parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
         let ty = type_pb_declared(st, m.ty, &m.spellings.ret, &tps);
         parameter.field_message(3, &ty); // ValueParameter.type = 3
+        crate::metadata::class_builder::append_param_annotations(
+            st,
+            &mut parameter,
+            annotations,
+            annotations_in_metadata,
+        );
         parameter
     });
     p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
@@ -981,6 +999,17 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
         jvm.field_message(4, setter);
     }
     p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
+
+    // The accessors' records intern after the JVM signature, the getter's first.
+    if annotations_in_metadata {
+        let accessors = &m.accessor_annotations;
+        for (field, annotations) in [(15, &accessors.getter), (16, &accessors.setter)] {
+            for annotation in annotations.records() {
+                // Property.getter_annotation = 15 / setter_annotation = 16
+                p.repeated_message(field, &annotation_pb(st, annotation));
+            }
+        }
+    }
     p
 }
 
@@ -1062,7 +1091,9 @@ pub(crate) fn build_package_with_intersection_approximation(
                     annotations_in_metadata,
                 ))
             }
-            Kind::Property => prop_pbs[index] = Some(property_pb(&mut st, &props[index])),
+            Kind::Property => {
+                prop_pbs[index] = Some(property_pb(&mut st, &props[index], annotations_in_metadata))
+            }
             Kind::Alias => alias_pbs[index] = Some(type_alias_pb(&mut st, &aliases[index])),
         }
     }
@@ -1185,6 +1216,7 @@ mod tests {
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
+                accessor_annotations: Default::default(),
                 field_name: None,
                 field_desc: None,
                 decl_order: 0,
@@ -1192,14 +1224,14 @@ mod tests {
         }
 
         let mut strings = StringTable::default();
-        let plain = property_pb(&mut strings, &property(false));
+        let plain = property_pb(&mut strings, &property(false), true);
         assert!(
             !plain.as_bytes().contains(&0x58),
             "a plain val must omit Property.flags at the protobuf default"
         );
 
         let mut strings = StringTable::default();
-        let constant = property_pb(&mut strings, &property(true));
+        let constant = property_pb(&mut strings, &property(true), true);
         assert!(
             constant
                 .as_bytes()
@@ -1241,6 +1273,7 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
+                accessor_annotations: Default::default(),
                 field_name: None,
                 field_desc: None,
                 has_constant: false,
@@ -1300,6 +1333,7 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
+                accessor_annotations: Default::default(),
                 field_name: None,
                 field_desc: None,
                 has_constant: false,
@@ -1358,6 +1392,7 @@ mod tests {
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
+                accessor_annotations: Default::default(),
                 field_name: None,
                 field_desc: None,
                 has_constant: false,
@@ -1409,6 +1444,7 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
+                accessor_annotations: Default::default(),
                 field_name: None,
                 field_desc: None,
                 decl_order: 0,
