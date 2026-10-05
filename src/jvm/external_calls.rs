@@ -424,7 +424,7 @@ pub(super) fn realize(
                 )
                 .ok_or(target)?;
                 ir.ext_call_source_receiver.remove(&expression);
-                ir.exprs[index] = operation;
+                operation.commit(ir, expression);
                 continue;
             }
         }
