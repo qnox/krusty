@@ -55,7 +55,21 @@ fn secondary_constructor_shape(
     ordinal: usize,
     constructor: &IrSecondaryCtor,
 ) -> Option<SecondaryConstructorMetadataShape> {
-    let visibility = constructor.metadata_visibility?;
+    // Every enum constructor is private, as the primary's record says too: entries are the only
+    // instances.
+    let visibility = constructor.metadata_visibility.map(|visibility| {
+        if class.is_enum {
+            Visibility::Private
+        } else {
+            visibility
+        }
+    })?;
+    // The JVM constructor takes the enum's `(String, int)` name and ordinal first.
+    let owner_prefix = if class.is_enum {
+        "Ljava/lang/String;I"
+    } else {
+        ""
+    };
     let mut params = constructor.named_params.clone();
     let physical_prefix_params = jvm_tys(&constructor.prefix_params);
     let physical_params = jvm_tys(&constructor.params);
@@ -81,7 +95,7 @@ fn secondary_constructor_shape(
         params,
         param_defaults: constructor.defaults.iter().map(Option::is_some).collect(),
         descriptor: format!(
-            "({}{}{})V",
+            "({owner_prefix}{}{}{})V",
             physical_prefix_params
                 .iter()
                 .map(|&ty| type_descriptor(ty))

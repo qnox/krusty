@@ -1391,7 +1391,7 @@ pub(super) fn build_class_metadata_with_facts(
             // An anonymous object's constructor (an enum entry body's too) is not callable.
             emit_primary_ctor: !c.is_interface
                 && !c.is_anonymous_object
-                && c.enum_entry_of.is_none()
+                && !c.is_enum_entry
                 && (c.has_primary_ctor || c.secondary_ctors.is_empty()),
             // `jvmClassFlags` describes the interface SHAPE this compilation produced, so it tracks
             // `-jvm-default` exactly: a consumer reads it to know whether method bodies live on the

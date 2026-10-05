@@ -15,71 +15,51 @@ use crate::ir::IrFile;
 use crate::jvm::private_static_access::StaticOwner;
 use crate::types::{Ty, TypeName};
 
-/// Emit the synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload for a class whose
-/// primary constructor has defaulted parameters. Unlike a `$default` method this is a CONSTRUCTOR: `this`
-/// is slot 0, the real parameters follow, then the mask + marker; after overwriting each masked slot with
-/// its default it `invokespecial`s the real `<init>`. Access is `PUBLIC | SYNTHETIC` (0x1001), matching
-/// kotlinc. The defaults were lowered in the instance frame (`this` = value 0, params = 1..=n).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn emit_ctor_default_stub(
+/// One constructor declaration's complete default-stub contract. Keeping these facts together
+/// makes the selected declaration explicit at each emission site instead of coupling a long list
+/// of positional arguments.
+pub(super) struct ConstructorDefaultStub<'a> {
+    pub(super) owner: &'a str,
+    pub(super) owner_identity: TypeName,
+    pub(super) facade: &'a str,
+    /// Compiler-supplied parameters before the source declaration's parameters. Enum constructors
+    /// contribute `(name, ordinal)` here; captured/local constructors contribute their captures.
+    pub(super) physical_prefix: &'a [Ty],
+    /// How much of `physical_prefix` is addressable by checked default expressions.
+    pub(super) logical_prefix_count: usize,
+    pub(super) real_params: &'a [Ty],
+    pub(super) defaults: &'a [Option<u32>],
+    /// Source provenance for the stub's `LineNumberTable`. `None` is the primary constructor's.
+    pub(super) secondary_lines: Option<(u32, &'a [Option<u32>], u32)>,
+    /// Whether this exact declaration is hidden behind its marker accessor.
+    pub(super) target_uses_marker_accessor: bool,
+    /// Whether the declaration is `@Deprecated`; kotlinc repeats the classic attribute on the stub.
+    pub(super) deprecated: bool,
+    pub(super) access: u16,
+}
+
+/// Emit the synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload for one
+/// constructor declaration. Unlike a `$default` method this is a constructor: `this` is slot 0,
+/// the real parameters follow, then the mask and marker; masked slots are filled before delegation.
+pub(super) fn emit_ctor_default_stub_with_prefix(
     ir: &IrFile,
-    owner: &str,
-    owner_identity: TypeName,
-    facade: &str,
-    real_params: &[Ty],
-    defaults: &[Option<u32>],
-    // Whether the constructor this stub fills defaults for is `@Deprecated`. kotlinc repeats the
-    // classic `Deprecated` attribute (not the annotation) on the synthetic overload, so a Java
-    // caller reaching the defaulted form is warned too.
-    deprecated: bool,
+    stub: ConstructorDefaultStub<'_>,
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
-    emit_ctor_default_stub_with_prefix(
-        ir,
+    let ConstructorDefaultStub {
         owner,
         owner_identity,
         facade,
-        &[],
-        0,
+        physical_prefix,
+        logical_prefix_count,
         real_params,
         defaults,
-        None,
-        false,
+        secondary_lines,
+        target_uses_marker_accessor,
         deprecated,
-        0x1001,
-        cw,
-        env,
-    );
-}
-
-/// Enum constructors have compiler-supplied `(name, ordinal)` parameters before their source value
-/// parameters. They participate in the physical descriptor and delegation but not in Kotlin's
-/// default-mask ordinals or in the checked default expression's value numbering.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn emit_ctor_default_stub_with_prefix(
-    ir: &IrFile,
-    owner: &str,
-    owner_identity: TypeName,
-    facade: &str,
-    physical_prefix: &[Ty],
-    logical_prefix_count: usize,
-    real_params: &[Ty],
-    defaults: &[Option<u32>],
-    // Source provenance for the stub's `LineNumberTable`. `None` is the PRIMARY constructor's: the
-    // class declaration line at entry and around the delegation, each masked fill at its property's
-    // declaration line, the return at the primary's closing paren. A SECONDARY constructor is a
-    // different declaration and must not borrow those — `Some` carries its own entry line and, per
-    // parameter, the line of the default expression being filled.
-    secondary_lines: Option<(u32, &[Option<u32>], u32)>,
-    // Whether this exact constructor declaration is hidden behind its marker accessor. The caller
-    // owns constructor selection; this emitter must not infer the target from its owner or shape.
-    target_uses_marker_accessor: bool,
-    deprecated: bool,
-    access: u16,
-    cw: &mut ClassWriter,
-    env: &EmitEnv,
-) {
+        access,
+    } = stub;
     debug_assert!(logical_prefix_count <= physical_prefix.len());
     let n = real_params.len();
     // The FILE facade, not the class. A default initializer is ordinary file-level code that happens
@@ -148,6 +128,17 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         .map(|(entry, _, _)| entry)
         .unwrap_or_else(|| class_decl.map_or(0, |candidate| candidate.decl_line));
     let mut lines: Vec<(u16, u32)> = vec![(0, class_line)];
+    let physical_params = physical_prefix
+        .iter()
+        .chain(real_params)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut stub_params = physical_params.clone();
+    stub_params.extend(std::iter::repeat_n(Ty::Int, mask_count));
+    stub_params.push(marker);
+    let desc = method_descriptor(&stub_params, Ty::Unit);
+    // kotlinc visits the overload's descriptor before its body's constants.
+    e.cw.reserve_descriptor(&desc);
     let mut code = CodeBuilder::new(e.frame.size());
     for (i, def) in defaults.iter().enumerate().take(n) {
         if let Some(def_expr) = def {
@@ -188,11 +179,6 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     for &(pslot, pty) in &param_slots {
         load(pty, pslot, &mut code);
     }
-    let physical_params = physical_prefix
-        .iter()
-        .chain(real_params)
-        .copied()
-        .collect::<Vec<_>>();
     // A constructor hidden for its value-class parameters is reached through its marker accessor,
     // as every construction outside the accessor is.
     let mut target_params = physical_params.clone();
@@ -223,13 +209,6 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     code.ensure_locals(e.frame.max());
     code.link();
 
-    let mut stub_params = physical_params;
-    stub_params.extend(std::iter::repeat_n(
-        Ty::Int,
-        default_mask_count(real_params.len()),
-    ));
-    stub_params.push(marker);
-    let desc = method_descriptor(&stub_params, Ty::Unit);
     // Once constructor selection recorded that this declaration is reached through a public
     // marker accessor, its default-argument realization is public as well. This is the same exact
     // declaration fact used for the delegation above; do not rediscover it from the owner or the
