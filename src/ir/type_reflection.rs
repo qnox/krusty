@@ -1,8 +1,18 @@
 //! Declaration facts used to realize reflective type descriptions.
 
-use super::{IrFile, IrGenericSig, IrModuleSource, IrTypeParameter};
+use super::{IrExpr, IrFile, IrGenericSig, IrModuleSource, IrTypeParameter};
 use crate::types::{Ty, TypeName};
 use std::collections::HashMap;
+
+/// Whether a lambda class is a source Kotlin function or a compiler-synthesized adapter.
+///
+/// Class-strategy reflection writes `@Metadata` only for a source function. A missing function
+/// type or parameter list is not evidence that the class is an adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LambdaClassProvenance {
+    SourceFunction,
+    SynthesizedAdapter,
+}
 
 /// A top-level generic extension property: the declaration that owns the type parameters its
 /// accessor bodies see.
@@ -23,10 +33,12 @@ pub(super) struct TypeReflectionFacts {
     /// Own type parameters of another file's classifiers whose inline members this file splices:
     /// a spliced body can describe them (`typeOf<List<T>>()`) although no class here declares them.
     foreign_template_classifiers: HashMap<TypeName, Vec<IrTypeParameter>>,
-    /// A suspend lambda's function → the declarations of the type parameters its function type
-    /// names, directly or through their bounds, in first-use order. Reflection reads the lambda's
-    /// function from its class, which records those it names.
+    /// A source lambda's function → the declarations of the type parameters its function type
+    /// names, directly or through their bounds, in first-use order. The checker published those
+    /// identities; reflection reads them from the lambda class.
     lambda_type_parameters: HashMap<u32, Vec<IrTypeParameter>>,
+    /// Lambda implementation → whether its class is a source function or a synthesized adapter.
+    lambda_class_provenance: HashMap<u32, LambdaClassProvenance>,
 }
 
 impl IrFile {
@@ -171,6 +183,50 @@ impl IrFile {
         );
     }
 
+    pub(crate) fn record_lambda_class_provenance(
+        &mut self,
+        lambda: u32,
+        provenance: LambdaClassProvenance,
+    ) {
+        if let Some(previous) = self
+            .type_reflection
+            .lambda_class_provenance
+            .insert(lambda, provenance)
+        {
+            assert_eq!(
+                previous, provenance,
+                "a lambda's class provenance is recorded once"
+            );
+        }
+    }
+
+    pub(crate) fn copy_lambda_class_provenance(&mut self, source: u32, target: u32) {
+        let Some(provenance) = self
+            .type_reflection
+            .lambda_class_provenance
+            .get(&source)
+            .copied()
+        else {
+            return;
+        };
+        self.record_lambda_class_provenance(target, provenance);
+    }
+
+    pub(crate) fn lambda_class_provenance(&self, lambda: u32) -> Option<LambdaClassProvenance> {
+        self.type_reflection
+            .lambda_class_provenance
+            .get(&lambda)
+            .copied()
+    }
+
+    /// The expression is a synthesized function adapter. Its class omits the source-lambda record.
+    pub(crate) fn note_synthesized_lambda(&mut self, expression: u32) {
+        let IrExpr::Lambda { impl_fn, .. } = self.exprs[expression as usize] else {
+            panic!("a synthesized adapter is a lambda expression");
+        };
+        self.record_lambda_class_provenance(impl_fn, LambdaClassProvenance::SynthesizedAdapter);
+    }
+
     pub(crate) fn copy_lambda_type_parameters(
         &mut self,
         source: u32,
@@ -195,10 +251,19 @@ impl IrFile {
 
     /// The type parameters `lambda`'s function type names, directly or through their bounds.
     pub(crate) fn lambda_type_parameters(&self, lambda: u32) -> &[IrTypeParameter] {
+        self.recorded_lambda_type_parameters(lambda)
+            .expect("a lambda records the type parameters its function type names")
+    }
+
+    /// The type parameters recorded for `lambda`, when lowering published them.
+    pub(crate) fn recorded_lambda_type_parameters(
+        &self,
+        lambda: u32,
+    ) -> Option<&[IrTypeParameter]> {
         self.type_reflection
             .lambda_type_parameters
             .get(&lambda)
-            .expect("a suspend lambda records the type parameters its function type names")
+            .map(Vec::as_slice)
     }
 
     pub fn class_signatures(&self) -> impl Iterator<Item = (TypeName, &IrGenericSig)> + '_ {
