@@ -71,13 +71,12 @@ fn a_lateinit_field_carries_no_nullability_annotation() {
     fs::create_dir_all(&kotlinc_dir).unwrap();
     let source = base.join("Late.kt");
     fs::write(&source, SOURCE).unwrap();
-    let Some((code, stderr)) = common::kotlinc_compile(&[
+    let (code, stderr) = common::kotlinc_compile(&[
         source.to_string_lossy().to_string(),
         "-d".to_string(),
         kotlinc_dir.to_string_lossy().to_string(),
-    ]) else {
-        return; // toolchain not provisioned
-    };
+    ])
+    .expect("reference kotlinc is provisioned");
     assert_eq!(code, 0, "kotlinc rejected the fixture: {stderr}");
     let classes = common::compile_in_process(
         SOURCE,
