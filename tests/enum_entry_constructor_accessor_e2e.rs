@@ -1,7 +1,9 @@
-//! An enum's constructors are private. An entry with a body becomes a subclass that reaches the
-//! constructor its entry selected through a public synthetic `(String, int, …,
-//! DefaultConstructorMarker)` accessor, as kotlinc compiles it. The subclass's own constructor
-//! carries the enum's `Signature` convention, its entry's line and the `$enum$` locals.
+//! An enum's constructors are private. An entry with a body becomes a subclass whose `(String,
+//! int)` constructor evaluates the entry's arguments and reaches the constructor its entry
+//! selected through a public synthetic `(String, int, …, DefaultConstructorMarker)` accessor, or
+//! through the package-private default-argument overload when the entry omits an argument, as
+//! kotlinc compiles it. The subclass's constructor carries the enum's `Signature` convention, its
+//! entry's line and the `$enum$` locals.
 
 use super::common;
 
@@ -12,7 +14,14 @@ enum class Labeled(val label: String) {
     constructor() : this(\"x\")
     open fun f(): Int = 0
 }
+enum class Sized(val size: Int, val unit: String = \"m\") {
+    X(1) { override fun f() = 1 },
+    Y(2, \"cm\") { override fun f() = 2 },
+    Z(3);
+    open fun f(): Int = 0
+}
 fun box(): String {
+    if (Sized.X.unit != \"m\" || Sized.Y.size != 2 || Sized.Z.f() != 0) return \"sized\"
     if (Plain.A.g() + Plain.B.g() != 3) return \"plain\"
     if (Labeled.A.label != \"x\" || Labeled.A.f() != 1 || Labeled.B.f() != 0) return \"labeled\"
     return \"OK\"

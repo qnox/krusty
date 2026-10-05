@@ -53,16 +53,17 @@ fn enum_prefixed(declared: Vec<Ty>) -> Vec<Ty> {
     [Ty::String, Ty::Int].into_iter().chain(declared).collect()
 }
 
-/// The constructors entry bodies delegate to, in the order the entries first select them. An
-/// entry's subclass passes the declared parameter types of the constructor its entry selected.
+/// The constructors entry bodies delegate to, in the order the entries first select them.
 fn targeted_constructors(class: &IrClass) -> Vec<EnumConstructor> {
     let emits_primary = class.has_primary_ctor || class.secondary_ctors.is_empty();
     let primary = class_ctor_jvm_tys(class);
     let mut targets = Vec::new();
+    // An entry that defaults an argument calls the constructor's default-argument overload,
+    // which is already reachable.
     for entry in class
         .enum_entries
         .iter()
-        .filter(|entry| entry.subclass.is_some())
+        .filter(|entry| entry.subclass.is_some() && entry.default_parameters.is_empty())
     {
         let selected = jvm_tys(&entry.constructor_parameter_types);
         let target = if emits_primary && selected == primary {

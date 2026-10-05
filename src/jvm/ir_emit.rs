@@ -50,6 +50,7 @@ mod constructor_accessors;
 mod constructor_defaults;
 mod constructor_initialization;
 mod enum_constructor_accessors;
+mod enum_entry_construction;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
 mod companion_field;
 mod copied_code;
@@ -2588,8 +2589,8 @@ fn emit_class(
     if c.is_interface {
         return emit_interface_class(ir, c, facade, env, opts, class_meta, extra);
     }
-    if let Some(user_tys) = &c.enum_entry_of {
-        return enum_entry_subclass::emit_enum_entry_subclass(ir, c, facade, env, opts, user_tys);
+    if c.enum_entry_of.is_some() {
+        return enum_entry_subclass::emit_enum_entry_subclass(ir, c, facade, env, opts);
     }
     if c.prop_ref.is_some() {
         return property_reference_class::emit_prop_ref_class(ir, c, facade, env, opts);
@@ -4171,18 +4172,6 @@ fn emit_enum_class(
     // `ClassFormatError: Duplicate method name "<init>"`. Its bytes are still built above so the
     // constant pool interns in kotlinc's order.
     seed_enum_constructor_locals(ir, c, &self_desc, &mut cw);
-    // The constructor's LocalVariableTable strings follow its body, and the property accessors
-    // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
-    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        cw.reserve_method_name(&property_getter_name(&f.name));
-        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
-        // The nullability comes from the declared type; `t` is its erased JVM form.
-        match field_nullability_kind(ir, &fq, &f.name, f.ty) {
-            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
-            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
-            _ => {}
-        }
-    }
     let emits_primary_ctor = c.has_primary_ctor || c.secondary_ctors.is_empty();
     if emits_primary_ctor {
         cw.add_method_sig(
@@ -4218,6 +4207,19 @@ fn emit_enum_class(
         .class_ctor_defaults(&fq)
         .filter(|defaults| defaults.iter().any(Option::is_some))
     {
+        // kotlinc visits the overload's descriptor before its body's constants.
+        let overload = ctor_params
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(
+                Ty::Int,
+                default_mask_count(all_param_tys.len()),
+            ))
+            .chain(std::iter::once(Ty::obj(
+                "kotlin/jvm/internal/DefaultConstructorMarker",
+            )))
+            .collect::<Vec<_>>();
+        cw.reserve_descriptor(&method_descriptor(&overload, Ty::Unit));
         constructor_defaults::emit_ctor_default_stub_with_prefix(
             ir,
             &fq,
@@ -4230,10 +4232,24 @@ fn emit_enum_class(
             None,
             false,
             false,
-            base_ctor_acc | ACC_SYNTHETIC,
+            // The default-argument overload is package-private, as kotlinc writes it: an entry
+            // body's subclass calls it from another class.
+            ACC_SYNTHETIC,
             &mut cw,
             env,
         );
+    }
+    // The constructors' LocalVariableTable strings follow their bodies, and the property accessors
+    // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
+    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
+        cw.reserve_method_name(&property_getter_name(&f.name));
+        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
+        // The nullability comes from the declared type; `t` is its erased JVM form.
+        match field_nullability_kind(ir, &fq, &f.name, f.ty) {
+            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
+            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
+            _ => {}
+        }
     }
 
     emit_declared_property_accessors(
@@ -4475,6 +4491,7 @@ fn emit_enum_class(
             Ty::Unit,
             c.enum_entries
                 .iter()
+                .filter(|entry| entry.subclass.is_none())
                 .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied()),
         );
         let mut clinit = CodeBuilder::new(0);
@@ -4486,84 +4503,34 @@ fn emit_enum_class(
             {
                 clinit_lines.push((clinit.bytes.len() as u16, entry.decl_line));
             }
-            for &statement in &entry.argument_prelude {
-                e.emit(statement, &mut clinit);
-            }
-            let args = &entry.args;
-            // An entry arg that cannot carry the operand stack (`X(try { 1 } finally {})`) runs on a
-            // clean stack: spill all args to temps first, then construct (as the `New` node does).
-            let spill = args.iter().any(|&a| e.spills_operand_prefix(a));
-            let temps = if spill {
-                e.spill_to_temps(args, &mut clinit)
-            } else {
-                Vec::new()
-            };
-            // A bodied entry is an instance of its synthesized subclass (`new Enum$ENTRY(...)`); the
-            // subclass constructor shares the enum's `(String,int,<user>)V` descriptor.
+            // A bodied entry is an instance of its synthesized subclass, whose constructor takes
+            // only the name and ordinal and evaluates the entry's arguments itself.
             let new_class = entry
                 .subclass
                 .map(TypeName::render)
                 .unwrap_or_else(|| fq.clone());
-            let cls = e.cw.class_ref(&new_class);
-            clinit.new_obj(cls);
-            clinit.dup();
-            clinit.push_string(&entry.name, e.cw);
-            clinit.push_int(i as i32, e.cw);
-            let entry_parameter_types = &entry.constructor_parameter_types;
-            if spill {
-                let mut supplied = temps.iter();
-                for (parameter, ty) in entry_parameter_types.iter().copied().enumerate() {
-                    if entry.default_parameters.contains(&(parameter as u32)) {
-                        push_zero(ty, &mut clinit, e.cw);
-                    } else {
-                        let (slot, ty, _) = supplied
-                            .next()
-                            .expect("checked enum constructor supplied-argument count");
-                        load(*ty, *slot, &mut clinit);
-                    }
-                }
-                e.release_operand_spills(&temps);
-            } else {
-                let mut supplied = args.iter().copied();
-                for (parameter, ty) in entry_parameter_types.iter().copied().enumerate() {
-                    if entry.default_parameters.contains(&(parameter as u32)) {
-                        push_zero(ty, &mut clinit, e.cw);
-                    } else {
-                        e.emit_value(
-                            supplied
-                                .next()
-                                .expect("checked enum constructor supplied-argument count"),
-                            &mut clinit,
-                        );
-                    }
-                }
-            }
-            let mut entry_ctor_params = vec![Ty::String, Ty::Int];
-            entry_ctor_params.extend(entry_parameter_types.iter().copied());
-            let (entry_ctor_desc, entry_ctor_argw) = if entry.default_parameters.is_empty() {
-                let words = entry_ctor_params
-                    .iter()
-                    .map(|ty| slot_words(*ty) as i32)
-                    .sum();
-                (method_descriptor(&entry_ctor_params, Ty::Unit), words)
-            } else {
-                emit_constructor_default_arguments(
-                    &entry.default_parameters,
-                    entry_parameter_types.len(),
-                    &mut clinit,
-                    e.cw,
-                );
-                entry_ctor_params.extend(std::iter::repeat_n(
-                    Ty::Int,
-                    default_mask_count(entry_parameter_types.len()),
-                ));
-                entry_ctor_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-                let words = entry_ctor_params
-                    .iter()
-                    .map(|ty| slot_words(*ty) as i32)
-                    .sum();
-                (method_descriptor(&entry_ctor_params, Ty::Unit), words)
+            let push_prefix = |e: &mut Emitter<'_>, clinit: &mut CodeBuilder| {
+                let cls = e.cw.class_ref(&new_class);
+                clinit.new_obj(cls);
+                clinit.dup();
+                clinit.push_string(&entry.name, e.cw);
+                clinit.push_int(i as i32, e.cw);
             };
+            let mut entry_ctor_params = vec![Ty::String, Ty::Int];
+            if entry.subclass.is_some() {
+                push_prefix(&mut e, &mut clinit);
+            } else {
+                entry_ctor_params.extend(e.emit_enum_entry_arguments(
+                    entry,
+                    &mut clinit,
+                    push_prefix,
+                ));
+            }
+            let entry_ctor_desc = method_descriptor(&entry_ctor_params, Ty::Unit);
+            let entry_ctor_argw = entry_ctor_params
+                .iter()
+                .map(|ty| slot_words(*ty) as i32)
+                .sum();
             let ctor_ref = e.cw.methodref(&new_class, "<init>", &entry_ctor_desc);
             clinit.invokespecial(ctor_ref, entry_ctor_argw, 0);
             let fref = e.cw.fieldref(&fq, &entry.name, &self_desc);
