@@ -140,9 +140,11 @@ pub(super) fn realize(
                 false,
             )
         };
-        // A private member bridge remains the physical call target. Its declaration's realized
-        // name is nevertheless the property identity Kotlin reflection reports.
-        if realization.accessor_role != PropertyAccessorRole::AccessBridge {
+        // A private property's bridge remains the physical call target. Its declaration's
+        // realized name is nevertheless the property identity Kotlin reflection reports.
+        if realization.accessor_role != PropertyAccessorRole::AccessBridge
+            && realization.bridged_getter.is_none()
+        {
             reference.getter_name.clone_from(&physical_getter_name);
         }
         // The accessor exchanges the value class's erased CARRIER, never the boxed object. A
@@ -173,7 +175,7 @@ pub(super) fn realize(
             name.clone_from(&physical_getter_name);
             *descriptor = erase_descriptor(descriptor, callable_under);
         }
-        if !realization.accessor_names_are_physical {
+        if !realization.accessor_names_are_physical && realization.bridged_setter.is_none() {
             if let (true, Some(declared_setter)) = (
                 reference.setter_name.is_some(),
                 realization.declared_setter_name.as_deref(),
