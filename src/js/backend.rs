@@ -204,8 +204,8 @@ fun box(): String {\n\
         // What this test is about: a call whose receiver and arguments are spilled into
         // temporaries is a checked BLOCK expression, and emitting one as a VALUE needs the
         // block-expression path rather than the statement one. `box()`'s named arguments, written
-        // out of order, are that shape.
-        assert!(source.contains("return v0.g(v2, v1);"), "{source}");
+        // out of order, are that shape; the constant `a = 1` is passed in place.
+        assert!(source.contains("return v0.g(1, v1);"), "{source}");
         assert!(!source.contains("cannot emit Block"), "{source}");
         // A member `tailrec` whose self-call dispatches on `this` is the same frame and steps
         // (docs/SPEC.md, "What `tailrec` loops is a FRAME"). The step sits in a branch of the

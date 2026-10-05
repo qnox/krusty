@@ -1,6 +1,7 @@
 //! Realization of stable same-file callable identities as ordinary common-IR calls.
 
 pub(super) mod argument_boundaries;
+mod reordered_operands;
 
 use crate::fir::{
     CallableId, DeclarationKind, ExternalCallableId, ExternalPropertyId, FirAnnotationConstruction,
@@ -928,8 +929,9 @@ impl BodyLowering<'_> {
         // remain substitution nodes through `preserve_inline_lambdas` below. Ordinary
         // calls have no such retained-body boundary and may keep an already ordered operand stream
         // direct.
-        let direct = matches!(mode, SelectedOperandMode::DirectWhenOrdered)
-            && !preserve_inline_lambdas
+        let passable =
+            matches!(mode, SelectedOperandMode::DirectWhenOrdered) && !preserve_inline_lambdas;
+        let direct = passable
             && argument_boundaries::follow_parameter_order(arguments, extension_receiver_parameter);
         let mut statements = Vec::new();
         let receiver = if member_extension {
@@ -970,6 +972,7 @@ impl BodyLowering<'_> {
                 preserve_inline_lambdas,
             },
             direct,
+            passable,
         )?;
         statements.extend(normalized.statements);
         let mut slots = normalized.slots;
@@ -1541,6 +1544,7 @@ impl BodyLowering<'_> {
                 inline: callable.is_inline(),
             },
             direct,
+            true,
         )?;
         statements.extend(normalized.statements);
         let mut slots = normalized.slots;
@@ -1841,6 +1845,9 @@ impl BodyLowering<'_> {
         arguments: &[IrCheckedArgument],
         policy: CheckedArgumentPolicy<'_>,
         direct: bool,
+        // Whether operands are stored only because named arguments reorder them, so the ones
+        // kotlinc passes in place may stay there.
+        passable: bool,
     ) -> Option<NormalizedCheckedArguments> {
         let mut statements = Vec::new();
         let mut inline_lambdas = vec![None; parameter_types.len()];
@@ -1885,10 +1892,12 @@ impl BodyLowering<'_> {
                         }
                         let value = if preserve || self.ir.is_delegated_property_operand(value) {
                             value
-                        } else if direct {
+                        } else if direct
+                            || (passable && self.passes_reordered_operand_in_place(value))
+                        {
                             self.direct_call_operand(value, parameter_ty)
                         } else {
-                            self.spill_call_operand(value, parameter_ty, &mut statements)
+                            self.spill_reordered_operand(value, parameter_ty, &mut statements)
                         };
                         Some(match policy {
                             CheckedArgumentPolicy::SameFileInline {
