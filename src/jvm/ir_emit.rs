@@ -2762,9 +2762,7 @@ fn emit_class(
                 format!("(Lkotlin/coroutines/Continuation<-L{fq_name};>;)V")
             }
         })
-        .or_else(|| {
-            constructor_signatures::primary_constructor_signature(&signature_formatter, ir, c)
-        });
+        .or_else(|| constructor_signatures::primary_constructor_signature(&signature_formatter, c));
     let value_param_ctor = ir.has_value_param_ctor(&fq_name);
     let ctor_access =
         method_access::primary_constructor_access(ir, c, is_continuation, value_param_ctor);
@@ -3955,7 +3953,7 @@ fn emit_enum_class(
         .chain(all_param_tys.iter().copied())
         .collect();
     let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
-    let ctor_sig = constructor_signatures::enum_constructor_signature(&signature_formatter, ir, c)
+    let ctor_sig = constructor_signatures::enum_constructor_signature(&signature_formatter, c)
         .expect("an enum constructor always signs its source parameters");
     let ctor_parameters = if env.java_parameters {
         super::method_parameters::enum_constructor(c).to_vec()
