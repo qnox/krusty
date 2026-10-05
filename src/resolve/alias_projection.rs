@@ -54,6 +54,9 @@ impl Checker<'_> {
         if resolved != Ty::Error && !syntax.is_import() {
             self.resolved_type_tys
                 .insert((syntax.span.lo, syntax.span.hi), resolved);
+            if !scope.tparam_contains(&syntax.name) {
+                self.check_type_reference_opt_in(syntax, resolved);
+            }
         }
         resolved
     }

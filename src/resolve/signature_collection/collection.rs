@@ -163,9 +163,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         );
             common || !optional
         });
-    // Normalize source annotation retention once identities are bound. The explicit retention
-    // argument is interpreted only under the resolved `kotlin.annotation.Retention` declaration;
-    // later phases receive the enum fact and never inspect its source spelling.
+    // Register every source annotation class with the default retention. A declared `@Retention`
+    // replaces it once the classifier-annotation pass has checked the application and selected its
+    // enum entry; the header never reads the argument's spelling.
     if let Some(headers) = compact_headers {
         collect_compact_annotation_policies(headers, &mut table);
     } else {
@@ -177,77 +177,14 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 if class.kind != crate::ast::ClassKind::Annotation {
                     continue;
                 }
-                let retention = class
-                    .annotations
-                    .iter()
-                    .zip(&class.annotation_args)
-                    .find_map(|(annotation, arguments)| {
-                        table
-                            .resolved_annotation(file_index as u32, annotation)
-                            .filter(|name| name.matches("kotlin/annotation/Retention"))?;
-                        let &argument = arguments.first()?;
-                        let Expr::Member { name, .. } = file.expr(argument) else {
-                            return None;
-                        };
-                        match name.as_str() {
-                            "RUNTIME" => Some(crate::types::AnnotationRetention::Runtime),
-                            "BINARY" => Some(crate::types::AnnotationRetention::Binary),
-                            "SOURCE" => Some(crate::types::AnnotationRetention::Source),
-                            _ => None,
-                        }
-                    })
-                    .unwrap_or(crate::types::AnnotationRetention::Default);
                 let Some(annotation_identity) = file_class_names[file_index].get_class(&class.name)
                 else {
                     continue;
                 };
-                table
-                    .annotation_retentions
-                    .insert(annotation_identity, retention);
-                // `@Target(AnnotationTarget.X, …)` decides where an application written with no use-site
-                // prefix lands. Only the three declaration sites a PROPERTY application can take are
-                // modeled; an annotation class that declares no `@Target` is applicable everywhere and is
-                // left out of the map entirely.
-                let declared_targets = class
-                    .annotations
-                    .iter()
-                    .zip(&class.annotation_args)
-                    .find_map(|(annotation, arguments)| {
-                        table
-                            .resolved_annotation(file_index as u32, annotation)
-                            .filter(|name| name.matches("kotlin/annotation/Target"))?;
-                        let mut targets = crate::types::AnnotationTargets {
-                            value_parameter: false,
-                            property: false,
-                            field: false,
-                        };
-                        for &argument in arguments {
-                            // `@Target` takes a `vararg` of enum entries. The NAMED form spells the
-                            // same list as an array literal or `arrayOf`, so both flatten here.
-                            let entries: Vec<ExprId> = match file.expr(argument) {
-                                Expr::AnnotationArrayLiteral(elements) => elements.clone(),
-                                Expr::Call { args, .. } => args.to_vec(),
-                                _ => vec![argument],
-                            };
-                            for entry in entries {
-                                let Expr::Member { name, .. } = file.expr(entry) else {
-                                    continue;
-                                };
-                                match name.as_str() {
-                                    "VALUE_PARAMETER" => targets.value_parameter = true,
-                                    "PROPERTY" => targets.property = true,
-                                    "FIELD" => targets.field = true,
-                                    _ => {}
-                                }
-                            }
-                        }
-                        Some(targets)
-                    });
-                if let Some(targets) = declared_targets {
-                    table
-                        .annotation_targets
-                        .insert(annotation_identity, targets);
-                }
+                table.annotation_retentions.insert(
+                    annotation_identity,
+                    crate::types::AnnotationRetention::Default,
+                );
             }
         }
     }
@@ -4339,32 +4276,27 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 }
             }
         }
+        // Compact headers carry the checked type-use annotations of every compiled source. Only
+        // the editor's declaration-only support sources arrive without headers: they are a
+        // dependency module's API, never emitted, so no `@Metadata` consumes their spellings.
+        let annotations = compact_headers
+            .map(|headers| {
+                let source = crate::fir::SourceFileId::from_raw(file_index as u32);
+                compact_source_type_annotations(&table, headers, source)
+            })
+            .unwrap_or_default();
         for (alias, formals, target) in &file_type_aliases[file_index] {
-            let names = &file_class_names[file_index];
-            let Some((expansion, expansion_spelling)) = resolve_source_alias_expansion(
-                target,
+            let alias = SourceAlias {
+                identity: crate::types::type_name_child(package, alias),
                 formals,
-                &visible_aliases,
-                names,
-                &table.alias_expansion_spellings,
-                diags,
-            ) else {
-                continue;
+                target,
             };
-            let identity = crate::types::type_name_child(package, alias);
-            if let Some(target) = crate::libraries::type_alias_target_classifier(expansion) {
-                table.source_alias_fqns.insert(identity, target);
-            }
-            table
-                .source_alias_expansions
-                .insert(identity, (formals.clone(), expansion));
-            // Recorded unconditionally: even a right-hand side that spells no alias carries the
-            // formals and expansion a use site needs to place ITS spellings into the parameter
-            // positions (`typealias Boxed<T> = PBox<T, T>` spells nothing, yet `Boxed<Cargo>`
-            // abbreviates both expanded arguments).
-            table
-                .alias_expansion_spellings
-                .insert(identity, (expansion_spelling, formals.clone(), expansion));
+            let scope = SourceAliasScope {
+                visible_aliases: &visible_aliases,
+                names: &file_class_names[file_index],
+                annotations: &annotations,
+            };
+            publish_source_alias(&mut table, alias, scope, diags);
         }
         // Nested aliases inhabit their declaring classifier's lexical namespace. Their semantic
         // identity follows the slash-separated path recorded by an explicit import; the expansion,
@@ -4437,31 +4369,21 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 }
             }
             for alias in &class.type_aliases {
-                let Some((expansion, expansion_spelling)) = resolve_source_alias_expansion(
-                    &alias.target,
-                    &alias.type_params,
-                    &nested_visible,
-                    &nested_names,
-                    &table.alias_expansion_spellings,
-                    diags,
-                ) else {
-                    continue;
-                };
                 let owner = class
                     .name
                     .split('.')
                     .fold(package, crate::types::type_name_child);
-                let identity = crate::types::type_name_child(owner, &alias.name);
-                if let Some(target) = crate::libraries::type_alias_target_classifier(expansion) {
-                    table.source_alias_fqns.insert(identity, target);
-                }
-                table
-                    .source_alias_expansions
-                    .insert(identity, (alias.type_params.clone(), expansion));
-                table.alias_expansion_spellings.insert(
-                    identity,
-                    (expansion_spelling, alias.type_params.clone(), expansion),
-                );
+                let source_alias = SourceAlias {
+                    identity: crate::types::type_name_child(owner, &alias.name),
+                    formals: &alias.type_params,
+                    target: &alias.target,
+                };
+                let scope = SourceAliasScope {
+                    visible_aliases: &nested_visible,
+                    names: &nested_names,
+                    annotations: &annotations,
+                };
+                publish_source_alias(&mut table, source_alias, scope, diags);
             }
         }
     }
@@ -4528,8 +4450,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
 
     if let Some(headers) = compact_headers {
         collect_compact_declared_spellings(&mut table, headers, &file_class_names);
-    } else {
-        collect_declared_spellings(&mut table, files, &file_class_names);
     }
     collect_stable_visibility_suppressions(&mut table, compact_headers);
 

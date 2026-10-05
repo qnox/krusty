@@ -26,9 +26,11 @@ mod late_fields;
 mod line_numbers;
 mod local_variables;
 mod member_mapping;
+mod method_annotations;
 mod method_parameters;
 mod method_rewrite;
 mod pool_layout;
+mod pool_noting;
 mod stack_maps;
 mod utf8_pool;
 
@@ -131,6 +133,8 @@ struct ConstPool {
     /// once one is interned slots and entries no longer line up; its second slot holds
     /// [`Self::UNUSABLE_SLOT`], which names no entry.
     slot_entries: Vec<u32>,
+    /// See [`pool_noting`].
+    noted: Option<Vec<u16>>,
 }
 
 impl ConstPool {
@@ -144,10 +148,10 @@ impl ConstPool {
     fn intern(&mut self, c: Const) -> u16 {
         if let Const::Utf8(text) = &c {
             if let Some(index) = self.utf8_index.get(text) {
-                return index;
+                return self.noting(index);
             }
         } else if let Some(&index) = self.dedup.get(&c) {
-            return index;
+            return self.noting(index);
         }
         let idx = self.slot_count() + 1; // 1-based
         self.slot_entries.push(self.entries.len() as u32);
@@ -161,7 +165,7 @@ impl ConstPool {
                 self.dedup.insert(other, idx);
             }
         }
-        idx
+        self.noting(idx)
     }
 
     /// Intern the `CONSTANT_Utf8` for a Kotlin string VALUE, keeping its code units.
@@ -819,25 +823,6 @@ impl ClassWriter {
         });
     }
 
-    /// Declare a field ahead of every field declared so far (a suspend lambda's spill fields,
-    /// which the coroutine transformer adds after the class's own).
-    pub(super) fn add_leading_field(&mut self, access: u16, name: &str, desc: &str) {
-        let n = self.cp.utf8(name);
-        let d = self.cp.utf8(desc);
-        self.fields.insert(
-            0,
-            FieldInfo {
-                access,
-                name: n,
-                desc: d,
-                signature: None,
-                const_value: None,
-                visible_anns: Vec::new(),
-                invisible_anns: Vec::new(),
-            },
-        );
-    }
-
     /// Add a field carrying a `ConstantValue` attribute (`const_idx` = a constant-pool index from
     /// `const_string`/`const_int`/… ). kotlinc emits this on a `const val`; the JVM initializes the
     /// field, so its `<clinit>` store is omitted.
@@ -1297,84 +1282,6 @@ impl ClassWriter {
         });
         if let Some(computed) = &computed {
             self.intern_frame_classes(&body, computed);
-        }
-    }
-
-    /// Attach kotlinc's non-null annotations to a previously-added method (matched by name+descriptor):
-    /// `@org.jetbrains.annotations.NotNull` / `@Nullable` on the return (a method-level
-    /// `RuntimeInvisibleAnnotations`) and/or on individual parameters (`RuntimeInvisibleParameterAnnotations`).
-    /// `ret` is the return annotation's type descriptor (e.g. `Lorg/jetbrains/annotations/NotNull;`) or
-    /// `None`; `params` gives each parameter's annotation type or `None`, in parameter order. Interning
-    /// the annotation types here fixes their constant-pool position. No-op if the method isn't found.
-    pub fn set_method_nullability(
-        &mut self,
-        name: &str,
-        desc: &str,
-        ret: Option<&str>,
-        params: &[Option<&str>],
-    ) {
-        if !self.nullability_annotations {
-            return;
-        }
-        // Resolve WITHOUT interning first, like `set_method_debug`: describing a method that was never
-        // emitted (the accessors of a `private` property, which are read straight from the field) must
-        // not perturb the constant pool — the name and descriptor would be orphan entries.
-        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
-            return;
-        };
-        if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
-            return;
-        }
-        // A parameterless annotation is `type_index(u2) + num_element_value_pairs(u2 = 0)`.
-        let empty_ann = |cp: &mut ConstPool, ty: &str| -> Vec<u8> {
-            let ti = cp.utf8(ty);
-            vec![(ti >> 8) as u8, ti as u8, 0, 0]
-        };
-        let invisible_anns: Vec<Vec<u8>> = ret
-            .map(|t| vec![empty_ann(&mut self.cp, t)])
-            .unwrap_or_default();
-        let has_param_ann = params.iter().any(|p| p.is_some());
-        let param_anns: Vec<Vec<Vec<u8>>> = if has_param_ann {
-            params
-                .iter()
-                .map(|p| {
-                    p.map(|t| vec![empty_ann(&mut self.cp, t)])
-                        .unwrap_or_default()
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
-            m.invisible_anns = invisible_anns;
-            m.param_anns = param_anns;
-        }
-    }
-
-    /// Attach USER annotations to a previously-added method (matched by name+descriptor), split by
-    /// retention: RUNTIME → `RuntimeVisibleAnnotations`, BINARY → `RuntimeInvisibleAnnotations` —
-    /// the method analogue of [`Self::set_last_field_annotations`]. Interning the annotation types
-    /// here fixes their constant-pool position. No-op if the method isn't found.
-    pub fn set_method_annotations(
-        &mut self,
-        name: &str,
-        desc: &str,
-        annotations: &crate::ir::DeclarationAnnotations,
-    ) {
-        // Resolve WITHOUT interning first (as `set_method_nullability` does): describing a method
-        // that was never emitted must not leave orphan name/descriptor entries in the pool.
-        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
-            return;
-        };
-        if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
-            return;
-        }
-        let (vis, invis) = self.encode_declaration_annotations(annotations);
-        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
-            m.visible_anns = vis;
-            // A DECLARED annotation precedes the compiler's own `@NotNull`/`@Nullable` on the
-            // return, whichever order the two setters ran in — kotlinc writes the user's first.
-            m.invisible_anns.splice(0..0, invis);
         }
     }
 

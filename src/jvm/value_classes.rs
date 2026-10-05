@@ -1347,15 +1347,10 @@ pub(crate) fn lower_value_classes(
         }
         // Common IR keeps the exact semantic constructor selected for each enum entry. The entry
         // arguments have now been rewritten to their JVM carriers, so realize the parallel
-        // descriptor types here as part of the same backend-owned value-class erasure. Bodied
-        // entries carry the identical selected signature on their synthesized subclass.
+        // descriptor types here as part of the same backend-owned value-class erasure. A bodied
+        // entry's selection is its subclass's superclass call.
         for entry in &mut c.enum_entries {
             for parameter in &mut entry.constructor_parameter_types {
-                *parameter = erase(parameter, &under);
-            }
-        }
-        if let Some(parameters) = &mut c.enum_entry_of {
-            for parameter in parameters {
                 *parameter = erase(parameter, &under);
             }
         }
@@ -1407,12 +1402,15 @@ pub(crate) fn lower_value_classes(
             })
             .collect();
         // A dropped bridge takes its plan with it, and a later one's plan follows its ordinal.
+        // An internal-name bridge still shares the implementation's name and descriptor: the
+        // module suffix is applied later. Only that bridge is kept; a duplicate whose target
+        // happens to spell the same name is still dropped.
         let kept = c
             .bridges
             .iter()
             .map(|b| {
                 let desc = ir_method_desc(&b.erased_params, &b.erased_ret);
-                method_keys.insert((b.name.clone(), desc))
+                method_keys.insert((b.name.clone(), desc)) || b.module_name_bridge
             })
             .collect::<Vec<_>>();
         bridge_adaptations.retain(c.fq_name_id(), &kept);
@@ -1765,16 +1763,19 @@ pub(crate) fn lower_value_classes(
             for (&argument, parameter) in args.iter().zip(
                 constructor_arguments::supplied_parameters(params, defaults, *default_prefix_count),
             ) {
-                let Target::UnboxedX(value_class) = target(parameter, &under) else {
+                // This pass owns the edges into an unboxed value-class parameter; the boundary
+                // operation itself is the one every parameter takes.
+                if !matches!(target(parameter, &under), Target::UnboxedX(_)) {
                     continue;
-                };
-                if repr_ctx.is_boxed_vc(argument, value_class)
-                    && !value_member_constructor_ops
-                        .iter()
-                        .any(|(existing, _)| *existing == argument)
-                {
-                    value_member_constructor_ops.push((argument, BoxOp::Unbox(value_class)));
                 }
+                record_value_boundary(
+                    &mut value_member_constructor_ops,
+                    &ir.exprs,
+                    &repr_ctx,
+                    argument,
+                    *parameter,
+                    &under,
+                );
             }
         }
         // First decide the rewrite WITHOUT holding a mutable borrow (so `prop_access` can `add_expr`).
@@ -3663,6 +3664,24 @@ pub(crate) fn lower_value_classes(
                             // suspend declaration's selected CPS boundary is its raw reference carrier.
                             // Convert that exact boxed tail once; ordinary carrier-producing tails are
                             // already unboxed and remain unchanged.
+                            let non_local_returns =
+                                return_unboxing::non_local_inline_return_values(ir, body);
+                            for returned in non_local_returns {
+                                return_unboxing::unbox_tail(
+                                    ir,
+                                    returned,
+                                    x,
+                                    ReprInputs {
+                                        rets: &orig_rets,
+                                        fields: &orig_fields,
+                                        slots: &slot_types[fid],
+                                        under: &under,
+                                        field_getters: &field_getters,
+                                        carrier_unboxes: &carrier_unboxes,
+                                    },
+                                    null_slot,
+                                );
+                            }
                             return_unboxing::unbox_tail(
                                 ir,
                                 body,

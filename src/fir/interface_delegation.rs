@@ -6,7 +6,7 @@
 use crate::types::TypeName;
 
 use super::{
-    CallableId, ExternalCallableId, PropertyId, ResolvedFunctionOverrideTarget,
+    CallableId, DeclarationId, ExternalCallableId, PropertyId, ResolvedFunctionOverrideTarget,
     ResolvedParameterIdentity, ResolvedPropertyOverrideTarget, ResolvedTy,
 };
 
@@ -144,6 +144,40 @@ pub struct ResolvedDelegatedPropertyDeclaration {
     pub depth: u32,
 }
 
+/// The call one generated forwarder makes on the delegate value's own static type.
+///
+/// kotlinc's forwarder calls the member of the delegate's type that overrides the delegated
+/// declaration (`ArrayList<String>.get` for `List<String> by ArrayList<String>()`), not the
+/// interface declaration. When that member's result is flexible or enhanced to not-null and the
+/// forwarder's result rejects `null`, kotlinc's implicit not-null cast checks it before returning,
+/// naming the call as a source call to that member would be named.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedDelegateCall {
+    pub call: ResolvedDelegatedCall,
+    pub result_check: Option<Box<str>>,
+}
+
+/// The delegate-side calls of one forwarding member, aligned with
+/// [`ResolvedInterfaceDelegation::members`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedDelegateMemberCalls {
+    Function(ResolvedDelegateCall),
+    Property {
+        getter: ResolvedDelegateCall,
+        setter: Option<ResolvedDelegateCall>,
+    },
+}
+
+/// The delegate-side calls of one interface delegation, selected once the checker knows the
+/// delegate value's type. The constructor body that evaluates the delegate carries them to
+/// lowering, which materializes the forwarders from them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInterfaceDelegateCalls {
+    pub classifier: DeclarationId,
+    pub delegation: u32,
+    pub members: Box<[ResolvedDelegateMemberCalls]>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedDelegatedContextParameter {
     pub name: Box<str>,
@@ -218,5 +252,15 @@ impl ResolvedInterfaceDelegation {
                     }
                 })
                 .sum::<usize>()
+    }
+}
+
+impl super::FirBody {
+    pub(crate) fn add_interface_delegate_calls(&mut self, calls: FirInterfaceDelegateCalls) {
+        self.interface_delegate_calls.push(calls);
+    }
+
+    pub(crate) fn interface_delegate_calls(&self) -> &[FirInterfaceDelegateCalls] {
+        &self.interface_delegate_calls
     }
 }

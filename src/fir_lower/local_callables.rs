@@ -43,6 +43,8 @@ impl BodyLowering<'_> {
             if *suspend && !self.ir.suspend_funs.contains(&function) {
                 self.ir.suspend_funs.push(function);
             }
+            let captured_type_parameters = self.local_captured_type_parameters(body);
+            self.attach_local_type_parameters(function, body, &captured_type_parameters);
             let realization = LocalCallableRealization {
                 function,
                 suspend: *suspend,
@@ -52,6 +54,7 @@ impl BodyLowering<'_> {
                 implicit_receiver_captures: body.implicit_receiver_captures().to_vec(),
                 context_parameter_count: body.context_receiver_types().len() as u32,
                 has_extension_receiver: body.receiver_type().is_some(),
+                captured_type_parameters,
             };
             let previous = self
                 .local_callable_scopes
@@ -372,13 +375,24 @@ impl BodyLowering<'_> {
         callable: LocalCallableId,
         body: &FirBody,
         suspend: bool,
+        // Whether the lambda implements a functional interface method that returns `Unit`.
+        unit_method: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
         let (function, owner) = self.predeclare_local_function(body, callable)?;
-        let unit_as_value = body
-            .result_type()
-            .is_some_and(|result| result.get() == Ty::Unit);
+        let unit_as_value = !unit_method
+            && body
+                .result_type()
+                .is_some_and(|result| result.get() == Ty::Unit);
         if unit_as_value {
             self.ir.functions[function as usize].ret = Ty::obj("kotlin/Unit");
+        }
+        let captured_type_parameters = self.local_captured_type_parameters(body);
+        // A lambda literal's method is signed without generics; an anonymous function's is not.
+        if body
+            .source_lambda()
+            .is_some_and(|lambda| lambda.form() == crate::fir::FirLambdaForm::AnonymousFunction)
+        {
+            self.attach_local_type_parameters(function, body, &captured_type_parameters);
         }
         let realization = LocalCallableRealization {
             function,
@@ -389,6 +403,7 @@ impl BodyLowering<'_> {
             implicit_receiver_captures: body.implicit_receiver_captures().to_vec(),
             context_parameter_count: body.context_receiver_types().len() as u32,
             has_extension_receiver: body.receiver_type().is_some(),
+            captured_type_parameters,
         };
         let previous = self
             .local_callable_scopes
@@ -761,6 +776,7 @@ impl BodyLowering<'_> {
                 declaration_result: selected_result,
                 declaration_suspend: realization.suspend,
                 adaptation: adaptation.cloned().map(Box::new),
+                reflection_owner: None,
             },
         ))))
     }
@@ -1254,38 +1270,39 @@ struct NestedCallableBodies {
 
 /// Build the value-producing form consumed by declaration-defined inline expansion. Unlike a
 /// callable method body, this form has no synthetic return: source returns remain control-flow
-/// nodes, while an implicit result remains the block value at the call site.
+/// nodes, while an implicit result remains the block value at the call site. The form carries its
+/// checked value type like every lowered expression, so a backend placing it never reconstructs the
+/// type from the callable's physical result.
 fn inline_callable_body(
     ir: &mut crate::ir::IrFile,
     roots: &[ExprId],
     result: Ty,
     implicit_return: bool,
 ) -> ExprId {
-    if !implicit_return {
-        return ir.add_expr(IrExpr::Block {
+    if !implicit_return || result == Ty::Unit {
+        let value = implicit_return.then(|| ir.add_expr(IrExpr::UnitInstance));
+        let block = ir.add_expr(IrExpr::Block {
             stmts: roots.to_vec(),
-            value: None,
+            value,
         });
-    }
-    if result == Ty::Unit {
-        let unit = ir.add_expr(IrExpr::UnitInstance);
-        return ir.add_expr(IrExpr::Block {
-            stmts: roots.to_vec(),
-            value: Some(unit),
-        });
+        ir.logical_types.insert(block, Ty::Unit);
+        return block;
     }
     let mut statements = roots.to_vec();
     let value = statements
         .pop()
         .expect("checked implicit non-Unit body has a result expression");
     if statements.is_empty() {
-        value
-    } else {
-        ir.add_expr(IrExpr::Block {
-            stmts: statements,
-            value: Some(value),
-        })
+        return value;
     }
+    let block = ir.add_expr(IrExpr::Block {
+        stmts: statements,
+        value: Some(value),
+    });
+    if let Some(&ty) = ir.logical_types.get(&value) {
+        ir.logical_types.insert(block, ty);
+    }
+    block
 }
 
 /// Where a declaration parameter sits among the logical parameters.

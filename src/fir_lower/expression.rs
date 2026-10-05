@@ -376,12 +376,7 @@ impl BodyLowering<'_> {
                 let call = self
                     .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
                 if *negated {
-                    let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Eq,
-                        lhs: call,
-                        rhs: false_value,
-                    })
+                    self.ir.add_negation(call)
                 } else {
                     call
                 }
@@ -398,6 +393,7 @@ impl BodyLowering<'_> {
                 extension_receiver,
                 substitutions,
                 adaptation,
+                reflection_owner,
             } => self.checked_callable_reference(super::checked::CheckedCallableReference {
                 target: target.clone(),
                 binding: *binding,
@@ -407,6 +403,7 @@ impl BodyLowering<'_> {
                 adaptation: adaptation.as_deref(),
                 reference_ty: function_type.get(),
                 reflective: *reflective,
+                reflection_owner: *reflection_owner,
             })?,
             FirExprKind::LocalCallableReference {
                 target,
@@ -609,14 +606,7 @@ impl BodyLowering<'_> {
                         }
                     }
                     FirUnaryOperation::Identity => operand,
-                    FirUnaryOperation::BooleanNot => {
-                        let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Eq,
-                            lhs: operand,
-                            rhs: false_value,
-                        })
-                    }
+                    FirUnaryOperation::BooleanNot => self.ir.add_negation(operand),
                     FirUnaryOperation::Increment | FirUnaryOperation::Decrement => {
                         // kotlinc's `inc`/`dec` intrinsic adds a signed delta: `dec` is `+ -1`.
                         let result = expression.ty.get();
@@ -879,12 +869,7 @@ impl BodyLowering<'_> {
                 let lhs_null_result = if *operation == FirBinaryOperation::Equal {
                     rhs_null_comparison
                 } else {
-                    let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Eq,
-                        lhs: rhs_null_comparison,
-                        rhs: false_value,
-                    })
+                    self.ir.add_negation(rhs_null_comparison)
                 };
                 let result = self.ir.add_expr(IrExpr::When {
                     branches: vec![
@@ -1062,67 +1047,50 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::SafeCall { receiver, selector } => {
-                self.safe_call_expression(receiver, *selector, expression.ty.get(), None)?
+                self.safe_call_expression(receiver, *selector, expression.ty.get())?
             }
             FirExprKind::Elvis { lhs, rhs } => {
-                let target = expression.ty.get();
-                let fused_safe_call = self.body.expr(*lhs).and_then(|lhs| match &lhs.kind {
-                    FirExprKind::SafeCall { receiver, selector }
-                        if self.body.expr(*selector).is_some_and(|selector| {
-                            selector.ty.get() == target && !selector.ty.get().is_nullable()
-                        }) =>
-                    {
-                        Some((*receiver, *selector))
-                    }
-                    _ => None,
+                let lhs_value = self.expression(*lhs)?;
+                let temporary = self.allocate_temporary();
+                let variable = self.ir.add_expr(IrExpr::Variable {
+                    index: temporary,
+                    ty: self
+                        .body
+                        .expr(*lhs)
+                        .ok_or(FirLoweringFailure::MissingExpression(*lhs))?
+                        .ty
+                        .get(),
+                    init: Some(lhs_value),
+                    named: false,
                 });
-                if let Some((receiver, selector)) = fused_safe_call {
-                    let rhs = self.expression(*rhs)?;
-                    let rhs = self.coerce_result(rhs, target);
-                    self.safe_call_expression(&receiver, selector, target, Some(rhs))?
-                } else {
-                    let lhs_value = self.expression(*lhs)?;
-                    let temporary = self.allocate_temporary();
-                    let variable = self.ir.add_expr(IrExpr::Variable {
-                        index: temporary,
-                        ty: self
-                            .body
-                            .expr(*lhs)
-                            .ok_or(FirLoweringFailure::MissingExpression(*lhs))?
-                            .ty
-                            .get(),
-                        init: Some(lhs_value),
-                        named: false,
-                    });
-                    let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
-                    let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                    let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Eq,
-                        lhs: condition_lhs,
-                        rhs: null,
-                    });
-                    let rhs = self.expression(*rhs)?;
-                    let rhs = self.coerce_result(rhs, expression.ty.get());
-                    let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
-                    let lhs = self.coerce_result(lhs, expression.ty.get());
-                    let result = self.ir.add_expr(IrExpr::When {
-                        branches: vec![(Some(condition), rhs), (None, lhs)],
-                    });
-                    // An elvis over a safe call is one more guard of that call's chain: its left
-                    // value's null check joins the chain's, and every `null` reaches the right side.
-                    let over_safe_call = matches!(
-                        self.ir.expr(lhs_value),
-                        IrExpr::Block { value: Some(guard), .. } if self.ir.null_guards.contains(guard)
-                    );
-                    if over_safe_call {
-                        self.ir.null_guards.insert(result);
-                        self.ir.elvis_safe_call_guards.insert(result);
-                    }
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![variable],
-                        value: Some(result),
-                    })
+                let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
+                let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Eq,
+                    lhs: condition_lhs,
+                    rhs: null,
+                });
+                let rhs = self.expression(*rhs)?;
+                let rhs = self.coerce_result(rhs, expression.ty.get());
+                let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
+                let lhs = self.coerce_result(lhs, expression.ty.get());
+                let result = self.ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(condition), rhs), (None, lhs)],
+                });
+                // An elvis over a safe call is one more guard of that call's chain: its left
+                // value's null check joins the chain's, and every `null` reaches the right side.
+                let over_safe_call = matches!(
+                    self.ir.expr(lhs_value),
+                    IrExpr::Block { value: Some(guard), .. } if self.ir.null_guards.contains(guard)
+                );
+                if over_safe_call {
+                    self.ir.null_guards.insert(result);
+                    self.ir.elvis_safe_call_guards.insert(result);
                 }
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![variable],
+                    value: Some(result),
+                })
             }
             FirExprKind::Throw(value) => {
                 let operand = self.expression(*value)?;
@@ -1428,12 +1396,17 @@ impl BodyLowering<'_> {
                     self.checked_local_call(target.clone(), *extension_receiver, arguments)?;
                 self.declaration_result(call, Some(declared), expression.ty.get())
             }
-            FirExprKind::Lambda { callable, body } => {
+            FirExprKind::Lambda {
+                callable,
+                type_parameters,
+                body,
+            } => {
                 let suspend = matches!(
                     expression.ty.get().non_null(),
                     crate::types::Ty::Fun(signature) if signature.suspend
                 );
-                let lambda = self.checked_lambda(*callable, body, suspend)?;
+                let unit_method = self.unit_method_lambda.take() == Some(expression_id);
+                let lambda = self.checked_lambda(*callable, body, suspend, unit_method)?;
                 self.record_generated_class_provenance(expression_id, lambda as usize);
                 // Every lambda keeps its place in the naming walk, whether or not a target writes
                 // a class for it: a spliced lambda's inline-depth marker is spelled after it.
@@ -1442,15 +1415,16 @@ impl BodyLowering<'_> {
                     if let Some(origin) = self.ir.lambda_origins.get_mut(&impl_fn) {
                         origin.class_provenance = provenance;
                     }
-                }
-                if suspend {
-                    let &IrExpr::Lambda { impl_fn, .. } = &self.ir.exprs[lambda as usize] else {
-                        unreachable!("a checked lambda lowers to a lambda")
-                    };
-                    let type_parameters =
-                        super::generics::named_type_parameters(self.index, expression.ty.get());
-                    self.ir
-                        .record_lambda_type_parameters(impl_fn, type_parameters);
+                    // The checker published the declarations. Lowering does not look them up by name.
+                    // Class-strategy `toString()` reads them from the lambda class's metadata,
+                    // including a non-suspend lambda. A suspend lambda's class reads the same record.
+                    let recorded =
+                        super::generics::type_parameters_by_identity(self.index, type_parameters);
+                    self.ir.record_lambda_type_parameters(impl_fn, recorded);
+                    self.ir.record_lambda_class_provenance(
+                        impl_fn,
+                        crate::ir::type_reflection::LambdaClassProvenance::SourceFunction,
+                    );
                 }
                 lambda
             }
@@ -1603,6 +1577,18 @@ impl BodyLowering<'_> {
             .ty
             .get();
         let value = expression;
+        if let Some(FirConversionKind::Sam(sam)) = conversion.map(|conversion| conversion.kind) {
+            let unit_method = self.body.sam_conversion(sam).is_some_and(|conversion| {
+                !conversion.suspend && conversion.declared_result.get() == crate::types::Ty::Unit
+            });
+            let literal = self
+                .body
+                .expr(value)
+                .is_some_and(|operand| matches!(operand.kind, FirExprKind::Lambda { .. }));
+            if unit_method && literal {
+                self.unit_method_lambda = Some(value);
+            }
+        }
         let expression = self.expression(value)?;
         let converted = self.lowered_with_conversion(expression, source_type, conversion)?;
         if conversion.is_some_and(|conversion| {
@@ -1726,9 +1712,8 @@ impl BodyLowering<'_> {
                         has_receiver: conversion.has_receiver,
                         suspend: conversion.suspend,
                         source_suspend: conversion.source_suspend,
-                        overrides_non_primitive_result: conversion.overrides_non_primitive_result,
-                        overridden_non_primitive_results: conversion
-                            .overridden_non_primitive_results
+                        overridden_results: conversion
+                            .overridden_results
                             .iter()
                             .map(|ty| ty.get())
                             .collect(),
@@ -1872,7 +1857,6 @@ impl BodyLowering<'_> {
         receiver: &FirReceiver,
         selector: FirExprId,
         result_type: Ty,
-        null_result: Option<ExprId>,
     ) -> Result<ExprId, FirLoweringFailure> {
         let receiver_value =
             self.expression_with_conversion(receiver.value, receiver.conversion)?;
@@ -1908,13 +1892,11 @@ impl BodyLowering<'_> {
         });
         let selector = self.expression(selector)?;
         let selector = self.coerce_result(selector, result_type);
-        let null_result = null_result.unwrap_or_else(|| {
-            if result_type == Ty::Unit {
-                self.ir.add_expr(IrExpr::UnitInstance)
-            } else {
-                self.ir.add_expr(IrExpr::Const(IrConst::Null))
-            }
-        });
+        let null_result = if result_type == Ty::Unit {
+            self.ir.add_expr(IrExpr::UnitInstance)
+        } else {
+            self.ir.add_expr(IrExpr::Const(IrConst::Null))
+        };
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });

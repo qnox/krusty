@@ -340,6 +340,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::GetValue(_)
         | IrExpr::ForwardedSuperArgument { .. }
         | IrExpr::SetValue { .. }
+        | IrExpr::SetFrameResult { .. }
         | IrExpr::Return(_)
         | IrExpr::Block { .. }
         | IrExpr::When { .. }
@@ -462,9 +463,6 @@ fn validate_class(class: &IrClass) -> Result<(), UndeterminedIrType> {
         "super-constructor parameter",
         class.super_ctor_params.iter().copied(),
     )?;
-    if let Some(types) = &class.enum_entry_of {
-        reject_all("enum-entry constructor parameter", types.iter().copied())?;
-    }
     if let Some(reference) = &class.prop_ref {
         validate_prop_ref(reference)?;
     }
@@ -880,8 +878,7 @@ mod tests {
             has_receiver: false,
             suspend: false,
             source_suspend: false,
-            overrides_non_primitive_result: false,
-            overridden_non_primitive_results: Vec::new(),
+            overridden_results: Vec::new(),
             function_adapter: false,
             wraps_function_value: true,
             nullable: true,

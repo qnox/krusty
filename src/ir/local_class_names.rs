@@ -291,6 +291,9 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
             reference.function_type = ty(reference.function_type, names);
             tys(&mut reference.declaration_parameters, names);
             reference.declaration_result = ty(reference.declaration_result, names);
+            if let Some(owner) = &mut reference.reflection_owner {
+                name(owner, names);
+            }
         }
         IrExpr::ClassConst {
             internal: Some(classifier),
@@ -624,9 +627,6 @@ impl super::IrFile {
                     .subclass
                     .iter_mut()
                     .for_each(|value| name(value, names));
-            }
-            if let Some(parameters) = &mut class.enum_entry_of {
-                tys(parameters, names);
             }
             if let Some(reference) = &mut class.prop_ref {
                 reference
@@ -1012,6 +1012,7 @@ impl super::IrFile {
         remap_keyed(&mut self.super_constructor_default_arguments, names);
         remap_keyed(&mut self.external_super_constructors, names);
         remap_keyed(&mut self.class_declared_spellings, names);
+        remap_keyed(&mut self.class_superclass_positions, names);
         remap_keyed(&mut self.class_ctor_defaults, names);
         remap_keyed(&mut self.class_signatures, names);
         remap_keyed(&mut self.field_signatures, names);

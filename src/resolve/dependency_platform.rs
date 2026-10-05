@@ -197,7 +197,7 @@ fn merge_functions(
             existing.call_sig = candidate.call_sig.clone();
             existing.default_values = candidate.default_values.clone();
             existing.context_count = candidate.context_count;
-            existing.annotations = candidate.annotations.clone();
+            existing.callable.annotations = candidate.callable.annotations.clone();
             existing.callable.inline = candidate.flags.inline;
             existing.callable.suspend = candidate.flags.suspend;
             existing.callable.is_abstract = candidate.flags.is_abstract;
@@ -525,6 +525,17 @@ impl SemanticPlatform for DependencyPlatform {
 
     fn is_erased_contract_callable(&self, callable: &crate::libraries::LibraryCallable) -> bool {
         self.platform.is_erased_contract_callable(callable)
+    }
+
+    fn top_level_callable_package(&self, callable: &crate::libraries::LibraryCallable) -> TypeName {
+        self.platform.top_level_callable_package(callable)
+    }
+
+    fn contract_dsl_member(
+        &self,
+        callable: &crate::contracts::SelectedDslCallable<'_>,
+    ) -> Option<crate::contracts::DslMember> {
+        self.platform.contract_dsl_member(callable)
     }
 
     fn boxed_primitive(&self, ty: Ty) -> Option<Ty> {

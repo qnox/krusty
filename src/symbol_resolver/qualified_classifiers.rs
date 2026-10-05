@@ -24,10 +24,7 @@ enum ClassifierPathPrefix {
 
 /// A completed classifier path and the typealias declaration on its final segment, when that
 /// segment's provider record is an alias whose target is the selected classifier.
-struct CompletedClassifierPath {
-    classifier: TypeName,
-    alias: Option<crate::libraries::AliasExpansion>,
-}
+type CompletedClassifierPath = ScopedClassifier;
 
 fn alias_on_selected_classifier(
     classifier: TypeName,
@@ -40,6 +37,10 @@ fn alias_on_selected_classifier(
 }
 
 impl SymbolResolver<'_> {
+    /// Advance through `segments`, one namespace per segment. The result carries the provenance of
+    /// the declaration the FINAL segment bound: `dep.Cargo` selects the `dep.Cargo` typealias
+    /// itself, so package qualification keeps that alias, while `Alias.Nested` ends on a nested
+    /// classifier that no alias names.
     fn advance_classifier_path(
         &self,
         mut prefix: ClassifierPathPrefix,
@@ -86,6 +87,25 @@ impl SymbolResolver<'_> {
         }
     }
 
+    /// Bind a fully qualified classifier name (`a.b.Outer.Nested`) from the root package, outside
+    /// any file's imports, as a compiler argument names one.
+    pub(crate) fn fully_qualified_classifier(&self, name: &str) -> Option<TypeName> {
+        let segments = name
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        if segments.is_empty() {
+            return None;
+        }
+        self.advance_classifier_path(
+            ClassifierPathPrefix::Package(TypeName::ROOT),
+            &segments,
+            None,
+        )
+        .ok()
+        .map(|selected| selected.classifier)
+    }
+
     /// Advance a qualified classifier path from an already selected first-segment identity.
     /// Failure is final: the caller must not retry another root or reconstruct the path spelling.
     pub(crate) fn classifier_path_from_selected_root(
@@ -108,11 +128,12 @@ impl SymbolResolver<'_> {
     /// Bind a qualified classifier and retain the first segment that could not advance from the
     /// selected namespace facet. Signature diagnostics consume the failed segment directly; they
     /// must not reconstruct it later from a module-wide spelling map, because import and
-    /// same-package bindings are file-scoped facts.
-    pub(crate) fn qualified_classifier_binding_in_scope(
+    /// same-package bindings are file-scoped facts. The selection keeps the alias declaration the
+    /// final segment bound, whether the path reached it unqualified or through its package.
+    pub(crate) fn qualified_scoped_classifier_binding_in_scope(
         &self,
         spelling: &str,
-    ) -> (CandidateSelection<TypeName>, Option<String>) {
+    ) -> (CandidateSelection<ScopedClassifier>, Option<String>) {
         let segments = spelling
             .split(['.', '/'])
             .filter(|segment| !segment.is_empty())
@@ -122,14 +143,17 @@ impl SymbolResolver<'_> {
         };
         // Expression qualification commits the first segment once. A missing later segment never
         // reinterprets that root as a lower-priority classifier or package.
-        match self.classifier_in_scope(first) {
-            CandidateSelection::Selected(classifier) => {
+        match self.scoped_classifier_in_scope(first) {
+            CandidateSelection::Selected(root) if segments.len() == 1 => {
+                return (CandidateSelection::Selected(root), None);
+            }
+            CandidateSelection::Selected(root) => {
                 match self.advance_classifier_path(
-                    ClassifierPathPrefix::Classifier(classifier),
+                    ClassifierPathPrefix::Classifier(root.classifier),
                     &segments[1..],
                     None,
                 ) {
-                    Ok(path) => return (CandidateSelection::Selected(path.classifier), None),
+                    Ok(selected) => return (CandidateSelection::Selected(selected), None),
                     Err((_, segment)) => return (CandidateSelection::None, Some(segment)),
                 }
             }
@@ -144,7 +168,7 @@ impl SymbolResolver<'_> {
                 &segments[1..],
                 None,
             ) {
-                Ok(path) => return (CandidateSelection::Selected(path.classifier), None),
+                Ok(selected) => return (CandidateSelection::Selected(selected), None),
                 Err((_, segment)) => {
                     let segment = if !segment.is_empty() {
                         segment

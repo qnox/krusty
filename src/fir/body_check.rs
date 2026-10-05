@@ -19,6 +19,7 @@ mod builder_inference_tests;
 #[cfg(test)]
 mod call_tests;
 mod calls;
+mod capture_order;
 #[cfg(test)]
 mod collection_literal_tests;
 #[cfg(test)]
@@ -56,6 +57,8 @@ mod local_classes;
 #[cfg(test)]
 mod local_function_tests;
 mod local_functions;
+mod session;
+pub use session::BodyCheckSession;
 #[cfg(test)]
 mod nothing_instantiation_tests;
 mod plugins;
@@ -533,70 +536,6 @@ struct BodyFirChecker<'a> {
     hoist_anonymous_super_argument: bool,
 }
 
-/// Transient checked context shared only by body callbacks for the currently active source unit.
-/// Any Pass-1 context needed later is owned by its retained inline/default [`FirBody`] and copied
-/// into a fresh session at the start of Pass 2; the session itself never crosses the pass boundary.
-#[derive(Default)]
-pub struct BodyCheckSession {
-    class_bodies: HashMap<DeclarationId, ClassBodyContext>,
-    local_callables: HashMap<BodyLocalCallableDeclarationId, PublishedLocalCallable>,
-    local_delegated_properties: super::local_delegated_properties::LocalDelegatedPropertyIds,
-    active_source: Option<ActiveSourceDeclarations>,
-}
-
-#[derive(Clone, Debug)]
-struct PublishedLocalCallable {
-    captures: Box<[FirCapture]>,
-    implicit_receiver_captures: Box<[FirImplicitReceiverCapture]>,
-}
-
-impl BodyCheckSession {
-    fn install_active_source(&mut self, active: &ActiveSourceDeclarations) {
-        // Pass 2 binds a fresh parser arena for every top-level declaration unit. Two successive
-        // bindings can belong to the same source file while assigning the same transient DeclId to
-        // different stable local classifiers, so source identity alone cannot make this cacheable.
-        self.active_source = Some(active.clone());
-    }
-
-    pub(crate) fn absorb_retained_body(&mut self, body: &FirBody) {
-        body.collect_class_body_contexts(&mut self.class_bodies);
-        self.absorb_checked_body(body);
-    }
-
-    fn absorb_checked_body(&mut self, body: &FirBody) {
-        for raw in 0..body.statement_count() {
-            let statement = FirStatementId::from_raw(
-                u32::try_from(raw).expect("too many FIR statements for a packed identity"),
-            );
-            let Some(FirStatement {
-                kind:
-                    FirStatementKind::LocalFunction {
-                        declaration, body, ..
-                    },
-                ..
-            }) = body.statement(statement)
-            else {
-                continue;
-            };
-            let published = PublishedLocalCallable {
-                captures: body.captures().to_vec().into_boxed_slice(),
-                implicit_receiver_captures: body
-                    .implicit_receiver_captures()
-                    .to_vec()
-                    .into_boxed_slice(),
-            };
-            if let Some(previous) = self.local_callables.insert(*declaration, published.clone()) {
-                debug_assert_eq!(previous.captures, published.captures);
-                debug_assert_eq!(
-                    previous.implicit_receiver_captures,
-                    published.implicit_receiver_captures
-                );
-            }
-            self.absorb_checked_body(body);
-        }
-    }
-}
-
 impl BodyFirChecker<'_> {
     fn safe_call_guard_receiver(&self, mut receiver: FirReceiver) -> FirReceiver {
         while let Some(FirExprKind::ImplicitConversion { value, .. }) = self
@@ -750,21 +689,16 @@ impl BodyFirChecker<'_> {
                 let Some(anchor) = index.declaration_anchor(current) else {
                     break None;
                 };
-                if anchor.kind == crate::fir::DeclarationKind::EnumEntry && first {
-                    // Constructor arguments of the entry itself execute in the enclosing enum's
-                    // initialization container. Members owned below the entry select it normally.
-                    current = match anchor.owner {
-                        Some(owner) => owner,
-                        None => break None,
-                    };
-                    first = false;
-                    continue;
-                }
-                if matches!(
-                    anchor.kind,
-                    crate::fir::DeclarationKind::Classifier
-                        | crate::fir::DeclarationKind::EnumEntry
-                ) {
+                // A body-less constant's own arguments run in the enum's initializer. A constant
+                // with a body is its own subclass, whose constructor evaluates them.
+                let selects = match anchor.kind {
+                    crate::fir::DeclarationKind::Classifier => true,
+                    crate::fir::DeclarationKind::EnumEntry => {
+                        !first || index.enum_entry_has_body(current)
+                    }
+                    _ => false,
+                };
+                if selects {
                     break Some(current);
                 }
                 current = match anchor.owner {
@@ -1056,13 +990,14 @@ impl BodyFirChecker<'_> {
     }
 
     fn bind_local(&mut self, name: &str, ty: ResolvedTy) -> LocalValueId {
-        self.bind_local_with_lateinit(name, ty, false)
+        self.bind_variable(name, ty, false, false)
     }
 
-    fn bind_local_with_lateinit(
+    fn bind_variable(
         &mut self,
         name: &str,
         ty: ResolvedTy,
+        mutable: bool,
         lateinit: bool,
     ) -> LocalValueId {
         let local = self.allocate_local();
@@ -1075,6 +1010,7 @@ impl BodyFirChecker<'_> {
                 LocalBinding {
                     value: local,
                     ty,
+                    mutable,
                     lateinit,
                 },
             );
@@ -2533,6 +2469,7 @@ impl BodyFirChecker<'_> {
                     LocalBinding {
                         value: variable,
                         ty: variable_ty,
+                        mutable: false,
                         lateinit: false,
                     },
                 )),
@@ -2595,7 +2532,7 @@ impl BodyFirChecker<'_> {
                 let conversion =
                     self.selected_value_conversion(*init, initializer, local_ty, origin)?;
                 FirStatementKind::Local {
-                    target: self.bind_local(name, local_ty),
+                    target: self.bind_variable(name, local_ty, *is_var, false),
                     ty: local_ty,
                     mutable: *is_var,
                     lateinit: false,
@@ -2610,7 +2547,7 @@ impl BodyFirChecker<'_> {
                 })?;
                 let local_ty = self.resolved_type(ty.span, local_ty)?;
                 FirStatementKind::Local {
-                    target: self.bind_local_with_lateinit(name, local_ty, true),
+                    target: self.bind_variable(name, local_ty, true, true),
                     ty: local_ty,
                     mutable: true,
                     lateinit: true,
@@ -2789,18 +2726,21 @@ impl BodyFirChecker<'_> {
                 } else {
                     selector
                 };
-                let expression = if let Some(declaration) = receiver_binding {
-                    self.body.add_expr(FirExpr {
-                        origin,
-                        ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
-                        kind: FirExprKind::Block {
-                            statements: vec![declaration].into_boxed_slice(),
-                            result: Some(expression),
-                        },
-                    })
-                } else {
-                    expression
-                };
+                let expression =
+                    if let Some(assignments::CompoundMemberReceiver::Snapshot(declaration)) =
+                        receiver_binding
+                    {
+                        self.body.add_expr(FirExpr {
+                            origin,
+                            ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
+                            kind: FirExprKind::Block {
+                                statements: vec![declaration].into_boxed_slice(),
+                                result: Some(expression),
+                            },
+                        })
+                    } else {
+                        expression
+                    };
                 FirStatementKind::Expression(expression)
             }
             Stmt::IncDec {
@@ -3333,6 +3273,7 @@ impl BodyFirChecker<'_> {
                         LocalBinding {
                             value: variable,
                             ty: variable_ty,
+                            mutable: false,
                             lateinit: false,
                         },
                     )),

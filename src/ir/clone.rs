@@ -237,7 +237,9 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             *lhs = map(*lhs);
             *rhs = map(*rhs);
         }
-        IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => *value = map(*value),
+        IrExpr::SetValue { value, .. }
+        | IrExpr::SetStatic { value, .. }
+        | IrExpr::SetFrameResult { value, .. } => *value = map(*value),
         IrExpr::SetField {
             receiver, value, ..
         }
@@ -351,6 +353,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(callable_reference_provenance);
     copy_map!(callable_reference_enclosures);
     copy_map!(checked_return_depths);
+    copy_map!(inline_return_frames);
     copy_map!(annotation_constructions);
     copy_map!(generated_secondary_constructor_calls);
     copy_map!(expr_lines);
@@ -407,6 +410,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.plain_updates.contains(&source) {
         ir.plain_updates.insert(target);
+    }
+    if ir.negations.contains(&source) {
+        ir.negations.insert(target);
     }
     if ir.transparent_loop_bodies.contains(&source) {
         ir.transparent_loop_bodies.insert(target);
@@ -547,6 +553,7 @@ fn copy_function_implementation_facts(
     copy_map!(fn_signature_offsets);
     copy_map!(fn_source_order);
     copy_map!(fn_continuation_ordinal);
+    copy_map!(fn_contracts);
     copy_set!(fn_debug_locals);
     copy_map!(lambda_own_params_from);
     copy_map!(lambda_enclosures);
@@ -620,6 +627,7 @@ fn copy_function_implementation_facts(
         ir.suspend_funs.push(target);
     }
     ir.copy_lambda_type_parameters(source, target, bindings);
+    ir.copy_lambda_class_provenance(source, target);
     // A specialization is another implementation of the same source lambda. Identity, ordinals, and
     // class provenance stay on that source record; [`super::IrSpecializedFunction`] is the generated
     // copy's identity.
@@ -721,6 +729,10 @@ mod tests {
             }],
         );
         ir.record_lambda_type_parameters(source, vec![signature(parameter).type_params[0].clone()]);
+        ir.record_lambda_class_provenance(
+            source,
+            crate::ir::type_reflection::LambdaClassProvenance::SourceFunction,
+        );
         let class = ir.add_class(blank_class("Holder"));
         ir.classes[class as usize].methods.push(source);
         ir.note_class_method(class, source);
@@ -785,6 +797,10 @@ mod tests {
         assert_eq!(
             ir.callable_bound_type_parameters[&first][0].bounds[0].0,
             specialized
+        );
+        assert_eq!(
+            ir.lambda_class_provenance(first),
+            Some(crate::ir::type_reflection::LambdaClassProvenance::SourceFunction)
         );
         assert_eq!(ir.lambda_type_parameters(first).len(), 1);
         assert_eq!(

@@ -3,15 +3,34 @@
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
+    /// The classifier a call spelling constructs: `lexical` when a nearer rung bound it, else the
+    /// file/import tower's own selection. Either carries the alias declaration that named it.
+    pub(super) fn constructed_classifier(
+        resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+        lexical: Option<crate::symbol_resolver::ScopedClassifier>,
+        spelling: &str,
+    ) -> Option<crate::symbol_resolver::ScopedClassifier> {
+        lexical.or_else(|| match resolver.scoped_classifier_in_scope(spelling) {
+            crate::symbol_resolver::CandidateSelection::Selected(selected) => Some(selected),
+            crate::symbol_resolver::CandidateSelection::Ambiguous
+            | crate::symbol_resolver::CandidateSelection::None => None,
+        })
+    }
+
+    /// The classifier a call spelling constructs, with the alias declaration that named it on the
+    /// winning scope-tower rung. A classifier already bound to its declaration names no alias.
     pub(super) fn bound_or_scoped_classifier(
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
         bound: Option<crate::fir::DeclarationId>,
-    ) -> Option<crate::types::TypeName> {
+    ) -> Option<crate::symbol_resolver::ScopedClassifier> {
         match bound {
-            Some(declaration) => Some(self.bound_classifier_identity(declaration)),
-            None => self.qualified_classifier(scope, spelling),
+            Some(declaration) => Some(crate::symbol_resolver::ScopedClassifier {
+                classifier: self.bound_classifier_identity(declaration),
+                alias: None,
+            }),
+            None => self.qualified_scoped_classifier_binding(scope, spelling).0,
         }
     }
 
@@ -516,6 +535,20 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         spelling: &str,
     ) -> (Option<crate::types::TypeName>, Option<String>) {
+        let (selected, failed_segment) = self.qualified_scoped_classifier_binding(scope, spelling);
+        (selected.map(|selected| selected.classifier), failed_segment)
+    }
+
+    /// [`Self::qualified_classifier_binding`] with the alias declaration that named the selection.
+    /// Only the file/import rung can select through an alias; a lexical classifier names none.
+    fn qualified_scoped_classifier_binding(
+        &self,
+        scope: crate::fir::SignatureScope,
+        spelling: &str,
+    ) -> (
+        Option<crate::symbol_resolver::ScopedClassifier>,
+        Option<String>,
+    ) {
         let segments = spelling.split('.').collect::<Vec<_>>();
         let Some(&first) = segments.first() else {
             return (None, Some(spelling.to_string()));
@@ -594,7 +627,7 @@ impl ProductionSignatureSemantics<'_> {
             }
             if current.is_none() {
                 let (selection, failed_segment) =
-                    resolver.qualified_classifier_binding_in_scope(spelling);
+                    resolver.qualified_scoped_classifier_binding_in_scope(spelling);
                 match selection {
                     crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
                         return Some((Some(classifier), None));
@@ -631,7 +664,13 @@ impl ProductionSignatureSemantics<'_> {
                 }
                 current = candidate;
             }
-            Some((Some(current), None))
+            Some((
+                Some(crate::symbol_resolver::ScopedClassifier {
+                    classifier: current,
+                    alias: None,
+                }),
+                None,
+            ))
         })
         .ok()
         .unwrap_or_else(|| (None, Some(first.to_string())))
@@ -826,7 +865,7 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Option<crate::types::TypeName> {
         self.qualified_classifier(scope, spelling).or_else(|| {
             self.applied_source_alias_expansion(scope, spelling, &[])
-                .and_then(|(_, expansion)| expansion.non_null().obj_internal())
+                .and_then(|alias| alias.expansion.non_null().obj_internal())
         })
     }
 
@@ -1019,18 +1058,21 @@ impl ProductionSignatureSemantics<'_> {
         let argument_ordinals = (0..arguments.len())
             .map(|ordinal| crate::ast::ExprId(ordinal as u32))
             .collect::<Vec<_>>();
+        let deferred_type_variables = self.active_postponed_type_variables(scope);
         let selected = super::super::member_extension_function_with(
             &source,
             &oracle,
             &receivers,
-            explicit_context_arguments,
-            &|parameters| {
-                super::super::context_argument_types(&[dispatch_receiver], parameters, &oracle)
-                    .map(|types| {
-                        types
-                            .into_iter()
-                            .map(|ty| {
-                                (
+            super::super::MemberExtensionProbes {
+                explicit_context_arguments,
+                deferred_type_variables: &deferred_type_variables,
+                select_context_arguments: &|parameters| {
+                    super::super::context_argument_types(&[dispatch_receiver], parameters, &oracle)
+                        .map(|types| {
+                            types
+                                .into_iter()
+                                .map(|ty| {
+                                    (
                                     super::super::ResolvedContextArgument::ImplicitReceiver(
                                         super::super::ImplicitReceiverSelection::signature_receiver(
                                             ty,
@@ -1038,55 +1080,56 @@ impl ProductionSignatureSemantics<'_> {
                                     ),
                                     ty,
                                 )
-                            })
-                            .collect()
-                    })
-                    .ok_or(super::super::MissingContextParameter {
-                        index: 0,
-                        ty: Ty::Error,
-                    })
-            },
-            &|argument| argument_kinds[argument].is_spread(),
-            &|_, _, _| None,
-            &|params, call_sig, slots| {
-                // Applicability is the shared per-argument rule: each argument must fit the
-                // parameter it maps to (a vararg's element unless the argument is spread).
-                let parameter_by_argument = super::super::call_argument_parameter_indices(
-                    slots.args.len(),
-                    params.len(),
-                    slots.arg_names,
-                    slots.trailing_lambda,
-                    call_sig,
-                )?;
-                for (argument, parameter) in parameter_by_argument.into_iter().enumerate() {
-                    let kind = &argument_kinds[argument];
-                    let declared = *params.get(parameter)?;
-                    let expected = if call_sig.vararg_index == Some(parameter) && !kind.is_spread()
-                    {
-                        declared.array_read_elem().unwrap_or(declared)
-                    } else {
-                        declared
-                    };
-                    if !kind.fits_parameter(&*self.table.libraries, &source, expected) {
-                        return None;
+                                })
+                                .collect()
+                        })
+                        .ok_or(super::super::MissingContextParameter {
+                            index: 0,
+                            ty: Ty::Error,
+                        })
+                },
+                is_spread_arg: &|argument| argument_kinds[argument].is_spread(),
+                unit_coerced_lambda: &|_, _, _| None,
+                score_candidate: &|params, call_sig, slots| {
+                    // Applicability is the shared per-argument rule: each argument must fit the
+                    // parameter it maps to (a vararg's element unless the argument is spread).
+                    let parameter_by_argument = super::super::call_argument_parameter_indices(
+                        slots.args.len(),
+                        params.len(),
+                        slots.arg_names,
+                        slots.trailing_lambda,
+                        call_sig,
+                    )?;
+                    for (argument, parameter) in parameter_by_argument.into_iter().enumerate() {
+                        let kind = &argument_kinds[argument];
+                        let declared = *params.get(parameter)?;
+                        let expected =
+                            if call_sig.vararg_index == Some(parameter) && !kind.is_spread() {
+                                declared.array_read_elem().unwrap_or(declared)
+                            } else {
+                                declared
+                            };
+                        if !kind.fits_parameter(&*self.table.libraries, &source, expected) {
+                            return None;
+                        }
                     }
-                }
-                let mapped = super::super::map_call_sig_args_with_trailing(
-                    slots.args,
-                    slots.arg_names,
-                    params.len(),
-                    call_sig,
-                    slots.trailing_lambda,
-                )
-                .ok()?;
-                Some(super::super::CallCandidateScore {
-                    rank: (
-                        0,
-                        std::cmp::Reverse(mapped.iter().filter(|slot| slot.is_none()).count()),
-                        !call_sig.vararg,
-                    ),
-                    sam_signatures: Vec::new(),
-                })
+                    let mapped = super::super::map_call_sig_args_with_trailing(
+                        slots.args,
+                        slots.arg_names,
+                        params.len(),
+                        call_sig,
+                        slots.trailing_lambda,
+                    )
+                    .ok()?;
+                    Some(super::super::CallCandidateScore {
+                        rank: (
+                            0,
+                            std::cmp::Reverse(mapped.iter().filter(|slot| slot.is_none()).count()),
+                            !call_sig.vararg,
+                        ),
+                        sam_signatures: Vec::new(),
+                    })
+                },
             },
             super::super::MemberExtensionFunctionCall {
                 extension_receiver,
@@ -1202,11 +1245,19 @@ impl ProductionSignatureSemantics<'_> {
                     .into_iter()
                     .map(|(inherited, _, _)| inherited),
             ) {
-                if let Some(companion) = self
-                    .table
-                    .class_by_type_name(candidate)
-                    .and_then(|signature| signature.companion_internal)
-                {
+                // A dependency superclass publishes its companion through its classifier record,
+                // exactly as a source one does through its signature.
+                let companion = match self.table.class_by_type_name(candidate) {
+                    Some(signature) => signature.companion_internal,
+                    None => self
+                        .table
+                        .libraries
+                        .classifier(candidate)
+                        .and_then(|declaration| {
+                            declaration.companion_object.as_ref().map(|(_, c)| *c)
+                        }),
+                };
+                if let Some(companion) = companion {
                     let ty = Ty::obj_name(companion);
                     if !receivers.contains(&ty) {
                         receivers.push(ty);

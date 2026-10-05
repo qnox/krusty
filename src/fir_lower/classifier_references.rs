@@ -243,13 +243,15 @@ impl BodyLowering<'_> {
         self.ir
             .lambda_own_params_from
             .insert(function, captures.len() as u32);
-        Ok(self.ir.add_expr(IrExpr::Lambda {
+        let lambda = self.ir.add_expr(IrExpr::Lambda {
             impl_fn: function,
             arity,
             captures,
             sam: None,
             inline_body: None,
-        }))
+        });
+        self.ir.note_synthesized_lambda(lambda);
+        Ok(lambda)
     }
 
     fn structural_classifier_reference(
@@ -275,6 +277,7 @@ impl BodyLowering<'_> {
                 declaration_result,
                 declaration_suspend: false,
                 adaptation: None,
+                reflection_owner: None,
             }))
     }
 
@@ -297,6 +300,7 @@ impl BodyLowering<'_> {
                 declaration_result: Ty::Unit,
                 declaration_suspend: false,
                 adaptation: None,
+                reflection_owner: None,
             }))
     }
 
@@ -494,13 +498,15 @@ impl BodyLowering<'_> {
             ));
         }
         self.ir.lambda_own_params_from.insert(function, 0);
-        Ok(self.ir.add_expr(IrExpr::Lambda {
+        let lambda = self.ir.add_expr(IrExpr::Lambda {
             impl_fn: function,
             arity,
             captures: Vec::new(),
             sam: None,
             inline_body: None,
-        }))
+        });
+        self.ir.note_synthesized_lambda(lambda);
+        Ok(lambda)
     }
 
     /// The call an adapter for `operation` makes, over the adapter's own parameter reads.

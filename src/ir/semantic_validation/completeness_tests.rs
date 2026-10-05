@@ -41,6 +41,7 @@ fn module_property(source: SourceFileId) -> IrModuleProperty {
         flags: Default::default(),
         placement: crate::ir::IrStaticPlacement::Package,
         compile_time_constant: None,
+        overridden_types: Box::new([]),
     }
 }
 
@@ -337,6 +338,7 @@ fn a_callable_reference_capture_obliges_the_adapter_parameter() {
         declaration_result: Ty::Unit,
         declaration_suspend: false,
         adaptation: None,
+        reflection_owner: None,
     }));
     function_holding(&mut ir, "outer", reference);
     assert_eq!(

@@ -37,6 +37,7 @@ pub(super) fn push_property_metadata(
     c: &IrClass,
     declared_props: &mut Vec<(u32, PropMeta)>,
 ) {
+    let local_classifiers = super::super::local_classifiers::names(ir);
     for property in ir.companion_blocks.properties_of(c.fq_name_id()) {
         let accessor_sig = |fid: u32| {
             ir.functions.get(fid as usize).map(|function| {
@@ -96,10 +97,19 @@ pub(super) fn push_property_metadata(
                     })
                     .flatten(),
                 setter_parameter_name: parameter_names::explicit_setter(ir, property.setter),
-                field_desc: None,
+                field_desc: storage
+                    .map(|storage| type_descriptor(storage.ty))
+                    .filter(|physical| {
+                        super::super::metadata_method_signatures::requires_field_signature(
+                            property.ty,
+                            physical,
+                            &local_classifiers,
+                        )
+                    }),
                 field_name: None,
                 annotations: Default::default(),
                 field_annotations: Default::default(),
+                accessor_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: true,
