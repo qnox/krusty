@@ -4189,6 +4189,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   negative String-scope tests use members declared only by `java.lang.String`, not members that may be
   added to `java.lang.CharSequence`.
 
+  A joined scope still drops the exact physical signatures in the provider-owned
+  `hidden_methods_2_4.tsv` policy, the joined-scope rows of
+  `JvmBuiltInsSignatures.HIDDEN_METHOD_SIGNATURES`: `Double`/`Float` `isNaN()`/`isInfinite()`,
+  `Boolean.booleanValue()`, `Char.charValue()`, `Enum.getDeclaringClass()`/`finalize()` and
+  `CharSequence.isEmpty()`. A call such as `d.isNaN()` therefore resolves to the stdlib's inline
+  extension, which kotlinc emits as `invokestatic java/lang/Double.isNaN(D)Z` on the unboxed value,
+  not as a boxing `Double.valueOf` followed by the instance method. Tests:
+  `tests/hidden_mapped_member_e2e.rs`.
+
 - **Kotlin members on JVM-mapped built-ins (`CharSequence`/`Number`/`Comparable`).** kotlinc maps these
   Kotlin types to JVM classes (`java/lang/CharSequence`, …) but their Kotlin API differs from the JVM
   class's methods — `CharSequence.get(i)` dispatches to `charAt`, `Number.toInt()` to `intValue`, and the

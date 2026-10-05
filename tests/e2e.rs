@@ -957,6 +957,8 @@ mod generic_suspend_member_return_e2e;
 mod generic_value_class_result_e2e;
 #[path = "generic_vararg_inference_e2e.rs"]
 mod generic_vararg_inference_e2e;
+#[path = "hidden_mapped_member_e2e.rs"]
+mod hidden_mapped_member_e2e;
 #[path = "hides_members_overload_e2e.rs"]
 mod hides_members_overload_e2e;
 #[path = "iconsapi_byte_residue_e2e.rs"]
