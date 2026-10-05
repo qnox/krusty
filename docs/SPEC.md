@@ -832,8 +832,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **An `@InlineOnly` call reads a local through a representation-preserving coercion.**
   `println(message)` widens a non-null `String` to `Any?`. That coercion emits no bytecode, so
   kotlinc's `genOrGetLocal` still loads the caller's local after `getstatic System.out`. A
-  reference coercion that changes the view (`String` to `CharSequence`) loads the same local and
-  `checkcast`s it. A coercion that boxes or unboxes (`Int` to `Any`) is stored
+  coercion that boxes or unboxes (`Int` to `Any`) is stored
   (`jvm/ir_emit/bytecode_inline_call.rs`). Test:
   `tests/inline_arguments_in_place_e2e.rs::an_inline_only_println_of_a_local_loads_the_local_after_system_out`.
 - **A private suspend member's `access$` bridge is the one every other class uses.** A

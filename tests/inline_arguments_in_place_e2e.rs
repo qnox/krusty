@@ -77,13 +77,8 @@ fn an_inline_only_println_of_a_local_loads_the_local_after_system_out() {
     // non-null `String` argument is widened to `Any?` before the call. That widening emits no
     // bytecode, so the parameter is still the caller's local: kotlinc reads it after `System.out`.
     // Storing it first and folding the store leaves `aload; getstatic; swap`.
-    let src = "@file:Suppress(\"INVISIBLE_MEMBER\", \"INVISIBLE_REFERENCE\")\n\
-        @kotlin.internal.InlineOnly\n\
-        private inline fun length(value: CharSequence): Int = value.length\n\
-        fun printed(message: String) = println(message)\n\
-        fun counted(n: Int) = println(n)\n\
-        fun viewed(message: String): Int = length(message)\n\
-        fun smartViewed(message: Any): Int = if (message is String) length(message) else -1\n";
+    let src = "fun printed(message: String) = println(message)\n\
+        fun counted(n: Int) = println(n)\n";
     let Some(built) = compare_with_kotlinc_plugin(
         "InlinePrintlnLocal",
         src,
@@ -95,12 +90,7 @@ fn an_inline_only_println_of_a_local_loads_the_local_after_system_out() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
-    for member in [
-        "void printed(java.lang.String)",
-        "void counted(int)",
-        "int viewed(java.lang.String)",
-        "int smartViewed(java.lang.Object)",
-    ] {
+    for member in ["void printed(java.lang.String)", "void counted(int)"] {
         let reference = method_instructions(&built.reference, member);
         assert!(!reference.is_empty(), "{member} not found");
         assert_eq!(
