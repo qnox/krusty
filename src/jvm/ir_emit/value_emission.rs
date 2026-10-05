@@ -1880,7 +1880,7 @@ impl super::Emitter<'_> {
                     self.release_operand_spills(&temps);
                 } else {
                     self.emit_value(*holder, code);
-                    self.emit_value(*value, code);
+                    self.emit_element_value(*elem, *value, code);
                 }
                 let (cls, fdesc) = ref_class(elem);
                 let f = self.cw.fieldref(cls, "element", fdesc);
