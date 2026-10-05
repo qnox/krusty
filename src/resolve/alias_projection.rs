@@ -26,7 +26,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         syntax: &TypeRef,
         base: Ty,
-        unresolved_segment: Option<String>,
+        unresolved_segment: Option<crate::symbol_resolver::ClassifierMiss>,
     ) -> Ty {
         let resolved = apply_written_type_modifiers(syntax, base);
         if resolved == Ty::Error {

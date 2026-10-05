@@ -490,7 +490,6 @@ impl ProductionSignatureSemantics<'_> {
                 .map(|alias| (alias.identity, alias.formals, alias.expansion))
         })
         .ok()
-        .flatten()
     }
 
     pub(super) fn qualified_classifier(
