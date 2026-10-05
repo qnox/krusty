@@ -692,15 +692,12 @@ impl Checker<'_> {
         ) {
             return InvokeResolution::Selected(Ty::Error);
         }
-        let context_args = shape
-            .context_sources
-            .iter()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>();
-        if !context_args.is_empty() {
-            self.context_args.insert(call, context_args.clone());
-            self.mark_context_extension_receiver_used(scope, call, &context_args);
+        let context_args = shape.context_sources.clone();
+        let implicit_context_args = context_args.iter().flatten().cloned().collect::<Vec<_>>();
+        if !implicit_context_args.is_empty() {
+            self.context_args
+                .insert(call, implicit_context_args.clone());
+            self.mark_context_extension_receiver_used(scope, call, &implicit_context_args);
         }
         let ret = selected.callable.ret;
         let target = if extension_receiver.is_none() {
@@ -1313,15 +1310,17 @@ impl Checker<'_> {
                     ) {
                         return InvokeResolution::Selected(Ty::Error);
                     }
-                    let context_args = shape
-                        .context_sources
-                        .iter()
-                        .flatten()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if !context_args.is_empty() {
-                        self.context_args.insert(call, context_args.clone());
-                        self.mark_context_extension_receiver_used(scope, call, &context_args);
+                    let context_args = shape.context_sources.clone();
+                    let implicit_context_args =
+                        context_args.iter().flatten().cloned().collect::<Vec<_>>();
+                    if !implicit_context_args.is_empty() {
+                        self.context_args
+                            .insert(call, implicit_context_args.clone());
+                        self.mark_context_extension_receiver_used(
+                            scope,
+                            call,
+                            &implicit_context_args,
+                        );
                     }
                     let ret = selected.callable.ret;
                     let target =

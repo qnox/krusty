@@ -417,6 +417,11 @@ pub(super) fn materialize_member_delegate(
         getter_jvm_name: None,
         setter_jvm_name: None,
         needs_access_bridge: false,
+        accessor_annotations: ir
+            .accessor_annotations
+            .get(&property_id)
+            .cloned()
+            .unwrap_or_default(),
     });
     realizations.insert(
         property_id,

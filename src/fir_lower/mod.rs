@@ -57,6 +57,7 @@ mod local_delegates;
 #[cfg(test)]
 mod local_property_reference_tests;
 mod local_property_references;
+mod local_type_parameters;
 mod loops;
 mod member_dispatch;
 mod metadata_constants;
@@ -457,6 +458,8 @@ pub(crate) struct LocalCallableRealization {
     implicit_receiver_captures: Vec<crate::fir::FirImplicitReceiverCapture>,
     context_parameter_count: u32,
     has_extension_receiver: bool,
+    /// The type parameters the callable's closure captures (see `local_type_parameters`).
+    captured_type_parameters: Box<[crate::types::Ty]>,
 }
 
 impl LocalCallableRealization {

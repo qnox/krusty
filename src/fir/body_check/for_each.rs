@@ -49,6 +49,7 @@ impl BodyFirChecker<'_> {
                 LocalBinding {
                     value: variable,
                     ty: element_ty,
+                    mutable: false,
                     lateinit: false,
                 },
             )),

@@ -254,6 +254,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         reified: false,
     };
     let methods = vec![FnMeta {
+        contract: None,
         context_count: 0,
         context_parameter_kinds: Vec::new(),
         spellings: krusty::spelling::DeclaredSpellings::default(),
@@ -341,6 +342,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
     };
     let parameter = |name: &str| (name.to_string(), Ty::ty_param(name, bound));
     let methods = vec![FnMeta {
+        contract: None,
         context_count: 0,
         context_parameter_kinds: Vec::new(),
         spellings: krusty::spelling::DeclaredSpellings::default(),

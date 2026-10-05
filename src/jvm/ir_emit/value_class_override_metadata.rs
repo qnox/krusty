@@ -42,6 +42,7 @@ fn equals(underlying: &str) -> FnMeta {
         annotations: Default::default(),
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
+        contract: None,
     }
 }
 
@@ -67,6 +68,7 @@ fn hash_code(underlying: &str) -> FnMeta {
         annotations: Default::default(),
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
+        contract: None,
     }
 }
 
@@ -92,5 +94,6 @@ fn to_string(underlying: &str) -> FnMeta {
         annotations: Default::default(),
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
+        contract: None,
     }
 }

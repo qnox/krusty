@@ -2180,15 +2180,15 @@ impl<'a> Parser<'a> {
     /// Kotlin gives setter parameters a deliberately narrower grammar than ordinary function
     /// parameters: annotations are allowed, while the property supplies the value type. Keep this
     /// parser narrow instead of routing through `parse_param_list`, which would require a type and
-    /// admit unrelated modifiers/defaults. Annotation values are parsed through the common annotation
-    /// grammar and then discarded because `PropAccessor` has no parameter-metadata contract.
-    fn parse_setter_param(&mut self) -> Option<String> {
+    /// admit unrelated modifiers/defaults. The parameter's annotations are returned beside its name.
+    fn parse_setter_param(&mut self) -> (Option<String>, Vec<crate::ast::AccessorAnnotation>) {
+        let mut annotations = Vec::new();
         if !self.eat(TokenKind::LParen) {
-            return None;
+            return (None, annotations);
         }
         self.skip_plain_newlines();
         while self.at(TokenKind::At) {
-            let _ = self.parse_annotation();
+            annotations.extend(self.parse_accessor_annotation());
             self.skip_plain_newlines();
         }
         let name = if self.at(TokenKind::Ident) {
@@ -2213,7 +2213,7 @@ impl<'a> Parser<'a> {
             self.skip_plain_newlines();
         }
         self.expect(TokenKind::RParen, "')'");
-        name
+        (name, annotations)
     }
 
     /// Parse a getter body after its `()`: `= expr` or `{ block }`.

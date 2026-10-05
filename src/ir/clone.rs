@@ -553,6 +553,7 @@ fn copy_function_implementation_facts(
     copy_map!(fn_signature_offsets);
     copy_map!(fn_source_order);
     copy_map!(fn_continuation_ordinal);
+    copy_map!(fn_contracts);
     copy_set!(fn_debug_locals);
     copy_map!(lambda_own_params_from);
     copy_map!(lambda_enclosures);

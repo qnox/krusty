@@ -81,8 +81,8 @@ mod when_facts;
 pub use crate::enclosing_declarations::EnclosingDeclaration;
 pub use crate::types::EqualityMode;
 pub use annotations::{
-    AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations, FieldAnnotations,
-    PropertyAnnotations, RetainedAnnotation,
+    AccessorAnnotations, AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations,
+    FieldAnnotations, PropertyAnnotations, RetainedAnnotation,
 };
 pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
@@ -2088,6 +2088,10 @@ pub struct IrFile {
     /// `@Metadata` both read it, so it must not be folded into either representation. Retention stays
     /// SEMANTIC here — the JVM split into visible/invisible attributes belongs to the emitter.
     pub fn_param_annotations: std::collections::HashMap<u32, Vec<DeclarationAnnotations>>,
+    /// Annotations written on a source property's accessors, by property. A declared accessor's
+    /// also land in [`Self::function_annotations`]; a default one exists only in a backend.
+    pub accessor_annotations:
+        std::collections::HashMap<crate::fir::PropertyId, AccessorAnnotations>,
     /// Per declared function, whether each PHYSICAL source parameter carries Kotlin's semantic
     /// `@NoInfer` type-use marker. Extension receivers occupy their physical slot with `false`;
     /// metadata projection removes that slot again. This is inference policy, not a JVM fact.
@@ -2350,6 +2354,9 @@ pub struct IrFile {
     /// carried as provenance; the JVM backend is where it becomes a class name. A suspend function
     /// with no entry has no source declaration behind it.
     pub fn_continuation_ordinal: std::collections::HashMap<u32, u32>,
+    /// The declared `contract { … }` of a member function, a Kotlin declaration fact the class's
+    /// metadata records. A package function carries its own on [`IrPackageFunction`].
+    pub fn_contracts: std::collections::HashMap<u32, crate::contracts::ResolvedContract>,
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     class_signatures: std::collections::HashMap<TypeName, IrGenericSig>,

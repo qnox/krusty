@@ -401,6 +401,9 @@ pub(super) fn build_class_metadata_with_facts(
                     // which the value-class pass may have mangled with the getter's).
                     annotations: property_metadata_annotations(c, &property.name),
                     field_annotations: property_backing_field_annotations(c, &property.name),
+                    accessor_annotations: crate::metadata::AccessorMetadataAnnotations::of(
+                        &property.accessor_annotations,
+                    ),
                     synthetic_method: property_marker_signature(ir, c, &property.name),
                     // kotlinc marks an interface companion's `@JvmField` property record: the
                     // backing field was MOVED onto the interface itself.
@@ -446,6 +449,7 @@ pub(super) fn build_class_metadata_with_facts(
                 field_name: None,
                 annotations: property_metadata_annotations(c, &prop.name),
                 field_annotations: property_backing_field_annotations(c, &prop.name),
+                accessor_annotations: Default::default(),
                 synthetic_method: property_marker_signature(ir, c, &prop.name),
                 moved_from_interface_companion: false,
                 companion: false,
@@ -505,6 +509,7 @@ pub(super) fn build_class_metadata_with_facts(
             field_name: ext_delegate.map(|field| instance_field_jvm_name(ir, c, field)),
             annotations: property_metadata_annotations(c, &ext.name),
             field_annotations: Default::default(),
+            accessor_annotations: Default::default(),
             synthetic_method: property_marker_signature(ir, c, &ext.name),
             moved_from_interface_companion: false,
             companion: false,
@@ -883,6 +888,7 @@ pub(super) fn build_class_metadata_with_facts(
                                 .unwrap_or(false)
                         })
                         .collect(),
+                    contract: ir.fn_contracts.get(&fid).map(|contract| contract.to_arc()),
                 })
             })
             .collect::<Vec<_>>()
@@ -923,6 +929,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if synthesizes_copy {
@@ -962,6 +969,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if ir
@@ -989,6 +997,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if ir
@@ -1016,6 +1025,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if ir
@@ -1043,6 +1053,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         // kotlinc visits the source declarations first, then the members the compiler generates.
