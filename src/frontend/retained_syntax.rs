@@ -365,8 +365,9 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
             }
         }
     }
-    // File and declaration-type-parameter annotations are header syntax. Inline checking may still
-    // consult their suppression/contract arguments, so retain these bounded roots as well.
+    // File, declaration-type-parameter, and type-use annotations are header syntax. Inline
+    // checking may still consult their suppression/contract arguments, and stable type-use
+    // annotation publication folds the type-use ones, so retain these bounded roots as well.
     retained.roots(
         file,
         file.file_annotations
@@ -377,7 +378,8 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                     .values()
                     .flatten()
                     .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
-            ),
+            )
+            .chain(file.type_annotation_arguments.values().flatten().copied()),
     );
     // A default declared inside a nested/local/anonymous classifier is evaluated in the lexical
     // scope where that classifier was introduced. Preserve its enclosing top-level declaration unit until the
@@ -628,6 +630,9 @@ fn remap_declarations(file: &mut File, expressions: &HashMap<ExprId, ExprId>) {
                 *argument = mapped_expr(expressions, *argument);
             }
         }
+    }
+    for argument in file.type_annotation_arguments.values_mut().flatten() {
+        *argument = mapped_expr(expressions, *argument);
     }
 }
 

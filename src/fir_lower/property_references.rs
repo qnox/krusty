@@ -232,12 +232,14 @@ impl BodyLowering<'_> {
             .lambda_own_params_from
             .insert(function, captures.len() as u32);
         self.attach_generated_static_to_lexical_class(function);
-        Ok(Some(self.ir.add_expr(IrExpr::Lambda {
+        let lambda = self.ir.add_expr(IrExpr::Lambda {
             impl_fn: function,
             arity,
             captures,
             sam: None,
             inline_body: None,
-        })))
+        });
+        self.ir.note_synthesized_lambda(lambda);
+        Ok(Some(lambda))
     }
 }
