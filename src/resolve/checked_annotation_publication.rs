@@ -273,11 +273,8 @@ impl Checker<'_> {
         function: &FunDecl,
         include_value_parameters: bool,
     ) -> usize {
-        let suppression_depth = self.push_declaration_suppressions(
-            scope,
-            &function.annotations,
-            &function.annotation_args,
-        );
+        let suppression_depth =
+            self.push_declaration_policies(scope, &function.annotations, &function.annotation_args);
         self.check_declaration_type_parameter_annotations(scope, function.signature_span.lo);
         for (annotation, arguments) in function.annotations.iter().zip(&function.annotation_args) {
             self.check_annotation_application(scope, annotation, arguments);
@@ -332,8 +329,7 @@ impl Checker<'_> {
             function,
             include_value_parameters,
         );
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(suppression_depth);
     }
 
     pub(super) fn fold_annotation_values(

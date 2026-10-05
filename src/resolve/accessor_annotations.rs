@@ -15,12 +15,9 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         property: &PropDecl,
     ) {
-        // The property's own `@Suppress` covers its accessors.
-        let suppression_depth = self.push_declaration_suppressions(
-            scope,
-            &property.annotations,
-            &property.annotation_args,
-        );
+        // The property's declaration policies cover its accessors.
+        let policy_depth =
+            self.push_declaration_policies(scope, &property.annotations, &property.annotation_args);
         self.check_accessor_annotation_site(
             scope,
             &property.getter_annotations,
@@ -38,8 +35,7 @@ impl Checker<'_> {
                 KotlinTarget::ValueParameter,
             );
         }
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(policy_depth);
     }
 
     fn check_accessor_annotation_site(

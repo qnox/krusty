@@ -221,17 +221,21 @@ impl Walker<'_> {
             let has_body = !entry.methods.is_empty()
                 || !entry.props.is_empty()
                 || !entry.init_order.is_empty();
-            // kotlinc numbers the arguments of an entry with a body in the entry's own class, where
-            // it places them. The arguments' code is emitted in the enum's static initializer here,
-            // so they are numbered with the enum's, which keeps their methods distinct.
-            for argument in &entry.args {
-                self.expr(*argument, &initializer);
-            }
+            // An entry with a body is its own class, whose constructor evaluates the entry's
+            // arguments, so kotlinc numbers them there, ahead of the entry's initializers.
             if has_body {
                 let entry_owner = format!("{owner}.{}", entry.name);
+                let entry_initializer = Scope::new(&entry_owner, "<init>");
+                for argument in &entry.args {
+                    self.expr(*argument, &entry_initializer);
+                }
                 self.initializers(&entry.init_order, &entry.props, &entry_owner);
                 for method in &entry.methods {
                     self.function(method, &entry_owner);
+                }
+            } else {
+                for argument in &entry.args {
+                    self.expr(*argument, &initializer);
                 }
             }
         }

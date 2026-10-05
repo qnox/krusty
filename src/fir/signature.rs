@@ -1532,6 +1532,9 @@ pub struct ResolvedModuleIndex {
     invisible_reference_suppressions: std::collections::HashSet<DeclarationId>,
     invisible_member_suppressions: std::collections::HashSet<DeclarationId>,
     optional_declaration_usage_suppressions: std::collections::HashSet<DeclarationId>,
+    /// The lexical policies each source's file annotations open, resolved once in Pass 1 from the
+    /// checked applications. Bounded Pass-2 units do not retain the file annotations' syntax.
+    file_lexical_policies: HashMap<SourceFileId, Box<[crate::lexical_policy::LexicalPolicy]>>,
     /// Resolved source annotation policies keyed by classifier identity. These are declaration
     /// header facts; no annotation syntax or source coordinate survives finalization.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
@@ -1942,6 +1945,29 @@ impl ResolvedModuleIndex {
         self.invisible_reference_suppressions.contains(&declaration)
     }
 
+    pub(crate) fn publish_file_lexical_policies(
+        &mut self,
+        source: SourceFileId,
+        policies: Vec<crate::lexical_policy::LexicalPolicy>,
+    ) {
+        let previous = self
+            .file_lexical_policies
+            .insert(source, policies.into_boxed_slice());
+        assert!(
+            previous.is_none(),
+            "a source's file lexical policies are published once"
+        );
+    }
+
+    pub(crate) fn file_lexical_policies(
+        &self,
+        source: SourceFileId,
+    ) -> &[crate::lexical_policy::LexicalPolicy] {
+        self.file_lexical_policies
+            .get(&source)
+            .map_or(&[], |policies| &policies[..])
+    }
+
     pub(crate) fn declaration_suppresses_invisible_member(
         &self,
         declaration: DeclarationId,
@@ -1955,6 +1981,22 @@ impl ResolvedModuleIndex {
     ) -> bool {
         self.optional_declaration_usage_suppressions
             .contains(&declaration)
+    }
+
+    /// Restrict a modifier-less override to the visibility it inherits from the declarations it
+    /// overrides. Override edges — and with them the overridden declarations' visibilities — exist
+    /// only after signature finalization, so the header starts at the parser's `public` default and
+    /// is corrected here, before any body is checked against or lowered from it.
+    pub(crate) fn publish_inherited_visibility(
+        &mut self,
+        declaration: DeclarationId,
+        visibility: Visibility,
+    ) {
+        let header = self
+            .declaration_headers
+            .get_mut(&declaration)
+            .expect("inherited visibility requires a finalized declaration header");
+        header.visibility = visibility;
     }
 
     pub(crate) fn publish_visibility_suppression(
@@ -3098,6 +3140,15 @@ impl ResolvedModuleIndex {
                 + self.invisible_member_suppressions.len()
                 + self.optional_declaration_usage_suppressions.len())
                 * std::mem::size_of::<DeclarationId>()
+            + self
+                .file_lexical_policies
+                .values()
+                .map(|policies| {
+                    std::mem::size_of::<SourceFileId>()
+                        + policies.len()
+                            * std::mem::size_of::<crate::lexical_policy::LexicalPolicy>()
+                })
+                .sum::<usize>()
             + self.classifiers.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ResolvedClassifierHeader>())

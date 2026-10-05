@@ -10,22 +10,8 @@
 use super::*;
 
 impl Checker<'_> {
-    /// Check a declaration's applications under the declaration's own `@Suppress`.
-    pub(super) fn check_annotation_applications_in_declaration_scope(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        annotations: &[AnnotationRef],
-        arguments: &[Vec<ExprId>],
-    ) {
-        let suppression_depth = self.push_declaration_suppressions(scope, annotations, arguments);
-        for (annotation, arguments) in annotations.iter().zip(arguments) {
-            self.check_annotation_application(scope, annotation, arguments);
-        }
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
-    }
-
-    /// Check one application and return the annotation class it names, once resolved.
+    /// Check one application and publish its folded arguments. Returns the annotation identity the
+    /// application binds, also when its arguments are rejected.
     pub(super) fn check_annotation_application(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -54,14 +40,9 @@ impl Checker<'_> {
             // Pass 1 already bound this exact occurrence. Metadata publication consumes that
             // identity directly: resolving its spelling again after actualization could resurrect
             // a target-excluded optional-expect annotation or select a different scope rung.
-            let Some(internal) = self
-                .bound_annotation_identities
+            self.bound_annotation_identities
                 .get(&(annotation.span.lo, annotation.span.hi))
-                .copied()
-            else {
-                return None;
-            };
-            internal
+                .copied()?
         } else {
             // Resolve the application in its owning lexical scope. Pass 1's declaration-header
             // inventory and Pass 2's body checking use the same scope rules.
@@ -74,8 +55,8 @@ impl Checker<'_> {
                 fun_params: Vec::new(),
                 fun_context_count: 0,
             };
-            let ty = self.type_ref_ty_reported(scope, &reference);
-            ty.kotlin_class_internal()?
+            self.type_ref_ty_reported(scope, &reference)
+                .kotlin_class_internal()?
         };
         if !self.file.is_common
             && self.is_optional_expectation_classifier(internal)
@@ -101,6 +82,9 @@ impl Checker<'_> {
             return Some(internal);
         }
         let Some(applied) = self.fold_annotation_application(internal, arguments) else {
+            if self.report_non_constant_annotation_arguments(arguments) {
+                return Some(internal);
+            }
             self.diags.error(
                 annotation.span,
                 "annotation argument is not a supported compile-time constant".to_string(),

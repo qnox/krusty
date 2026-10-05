@@ -592,6 +592,10 @@ fn companion_initializer_loads_instance(ir: &IrFile, body: crate::ir::ExprId) ->
             }),
             _ => None,
         };
+        if let crate::ir::IrExpr::Lambda { captures, .. } = ir.expr(expr) {
+            // The lambda's `inline_body` numbers its own values; only its captures read ours.
+            return captures.iter().any(|&capture| walk(ir, capture));
+        }
         let mut found = false;
         crate::ir::for_each_child(&ir.exprs, expr, &mut |child| {
             if dropped_receiver == Some(child) {

@@ -1347,15 +1347,10 @@ pub(crate) fn lower_value_classes(
         }
         // Common IR keeps the exact semantic constructor selected for each enum entry. The entry
         // arguments have now been rewritten to their JVM carriers, so realize the parallel
-        // descriptor types here as part of the same backend-owned value-class erasure. Bodied
-        // entries carry the identical selected signature on their synthesized subclass.
+        // descriptor types here as part of the same backend-owned value-class erasure. A bodied
+        // entry's selection is its subclass's superclass call.
         for entry in &mut c.enum_entries {
             for parameter in &mut entry.constructor_parameter_types {
-                *parameter = erase(parameter, &under);
-            }
-        }
-        if let Some(parameters) = &mut c.enum_entry_of {
-            for parameter in parameters {
                 *parameter = erase(parameter, &under);
             }
         }
@@ -1765,16 +1760,19 @@ pub(crate) fn lower_value_classes(
             for (&argument, parameter) in args.iter().zip(
                 constructor_arguments::supplied_parameters(params, defaults, *default_prefix_count),
             ) {
-                let Target::UnboxedX(value_class) = target(parameter, &under) else {
+                // This pass owns the edges into an unboxed value-class parameter; the boundary
+                // operation itself is the one every parameter takes.
+                if !matches!(target(parameter, &under), Target::UnboxedX(_)) {
                     continue;
-                };
-                if repr_ctx.is_boxed_vc(argument, value_class)
-                    && !value_member_constructor_ops
-                        .iter()
-                        .any(|(existing, _)| *existing == argument)
-                {
-                    value_member_constructor_ops.push((argument, BoxOp::Unbox(value_class)));
                 }
+                record_value_boundary(
+                    &mut value_member_constructor_ops,
+                    &ir.exprs,
+                    &repr_ctx,
+                    argument,
+                    *parameter,
+                    &under,
+                );
             }
         }
         // First decide the rewrite WITHOUT holding a mutable borrow (so `prop_access` can `add_expr`).

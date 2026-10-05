@@ -568,6 +568,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let declared_params = Some(parameters.clone().into_boxed_slice());
         LibraryCallable {
             external_identity: None,
+            annotations: Vec::new(),
             external_default_provider: None,
             external_property_identity: None,
             owner: TypeName::ROOT,
@@ -1019,7 +1020,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                 .declaration_anchor(declaration)
                 .map(|anchor| anchor.source.raw());
             function.stable_declaration = Some(declaration);
-            function.annotations = self.index.declaration_annotations(declaration).to_vec();
+            function.callable.annotations =
+                self.index.declaration_annotations(declaration).to_vec();
             functions.push(function);
 
             let mut member =
@@ -1461,7 +1463,8 @@ impl<'a> StreamedModuleSymbols<'a> {
             function.context_count = context_count;
             function.source_file = Some(anchor.source.raw());
             function.stable_declaration = Some(declaration);
-            function.annotations = self.index.declaration_annotations(declaration).to_vec();
+            function.callable.annotations =
+                self.index.declaration_annotations(declaration).to_vec();
             functions.push(function);
         }
         functions.sort_by_key(|function| function.overload_rank);

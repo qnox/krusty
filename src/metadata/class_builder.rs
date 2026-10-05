@@ -67,11 +67,10 @@ pub struct PropMeta {
     /// Exact source identity of an explicitly named custom setter parameter. An implicit setter
     /// has no source parameter declaration and therefore omits `Property.setter_value_parameter`.
     pub setter_parameter_name: Option<String>,
-    /// An explicit `JvmFieldSignature.desc` for a backing field whose descriptor the reader cannot
-    /// derive from the Kotlin type — a VALUE-CLASS-typed property, whose field holds the erased
-    /// underlying (`val k: K` → `Ljava/lang/String;`). `None` leaves the field derived, which is what
-    /// every ordinary property records. (The boxed-nullable-primitive and bare-type-parameter cases
-    /// below are derived from the property itself, since the shape alone determines them.)
+    /// The backing field's descriptor, when a reader cannot rebuild it by mapping the property
+    /// type's class id (kotlinc's `requiresSignature`): a type parameter (`T` →
+    /// `Ljava/lang/Object;`), a boxed nullable primitive, a value class's erased underlying, a
+    /// reference array, or a delegate of another type. `None` leaves the field derived.
     pub field_desc: Option<String>,
     /// An explicit `JvmFieldSignature.name` when the PHYSICAL backing field's JVM name differs from
     /// the property name — an instance property mangled to dodge a same-named companion static
@@ -1104,12 +1103,8 @@ pub fn build_class(
             prop.field_varint(11, pflags); // Property.flags = 11
         }
         let mut jvm = Pb::new();
-        // A nullable PRIMITIVE property (`Int?`, `Double?`, …) has a BOXED backing field
-        // (`Ljava/lang/Integer;`, `Ljava/lang/Double;`), which the reader can't derive from the
-        // nullable-primitive return type — so kotlinc records an explicit `JvmFieldSignature.desc`
-        // (the boxed descriptor = the getter's return type). Every other property leaves the field
-        // empty (the reader derives it). kotlinc interns the getter/setter strings BEFORE the field
-        // descriptor (even though the proto writes `field` (f1) first), so build them in that order.
+        // kotlinc interns the getter/setter strings BEFORE the field's (even though the proto
+        // writes `field` (f1) first), so build them in that order.
         // The marker interns BEFORE the getter, exactly as it serializes (f2 before f3).
         let synthetic_method = p
             .synthetic_method
@@ -1123,33 +1118,6 @@ pub fn build_class(
             .setter
             .as_ref()
             .map(|(sn, sd)| jvm_method_sig(st, Some(sn), sd));
-        let boxed_field_desc = p.field_desc.clone().or(match p.ty {
-            Ty::Nullable(inner)
-                if matches!(
-                    *inner,
-                    Ty::Int
-                        | Ty::Long
-                        | Ty::Double
-                        | Ty::Float
-                        | Ty::Byte
-                        | Ty::Short
-                        | Ty::Char
-                        | Ty::Boolean
-                ) =>
-            {
-                p.getter
-                    .as_ref()
-                    .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string))
-            }
-            // A bare type-parameter property erases to `Ljava/lang/Object;`, which the reader
-            // cannot derive from the type `T` — so kotlinc records the descriptor explicitly, the
-            // same way it does for a boxed nullable primitive.
-            _ if p.tparam.is_some() => p
-                .getter
-                .as_ref()
-                .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
-            _ => None,
-        });
         // An abstract property has no backing field at all: kotlinc omits the entry rather than
         // writing an empty one, and interns none of its strings.
         let field = p.has_backing_field.then(|| {
@@ -1157,7 +1125,7 @@ pub fn build_class(
             if let Some(n) = &p.field_name {
                 field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
             }
-            if let Some(d) = &boxed_field_desc {
+            if let Some(d) = &p.field_desc {
                 field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
             }
             field
@@ -1194,7 +1162,7 @@ pub fn build_class(
             prop.repeated_message(34, annotation); // Property.backingFieldAnnotation = 34
         }
         if let Some(field) = &field {
-            jvm.field_message(1, field); // field (empty → derived; boxed primitive → explicit desc)
+            jvm.field_message(1, field); // field (empty → derived)
         }
         if let Some(synthetic_method) = &synthetic_method {
             jvm.field_message(2, synthetic_method); // JvmPropertySignature.syntheticMethod = 2

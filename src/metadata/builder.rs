@@ -687,14 +687,15 @@ pub struct PropMeta {
     pub setter_visibility: crate::types::Visibility,
     /// Companion-associated (`companion val C.name`) — sets `Property.flags` bit 19.
     pub companion: bool,
-    /// A delegated property's `(name, descriptor)` of the static field holding its delegate, which
-    /// kotlinc records explicitly after the accessors' signatures.
-    pub delegate_field: Option<(String, String)>,
     /// The accessors' own annotations (`@A get`, `@A set`, `set(@A v)`): each accessor word's
     /// `HAS_ANNOTATIONS` bit and the `getter_annotation`/`setter_annotation` records (f15/f16).
     pub accessor_annotations: crate::metadata::AccessorMetadataAnnotations,
-    /// JVM field descriptor when storage is not what a reader derives from the Kotlin type. A
-    /// value class's field is its carrier (`S` stored as `Ljava/lang/String;`).
+    /// A delegated property's name for the static field holding its delegate, which kotlinc
+    /// records explicitly after the accessors' signatures.
+    pub field_name: Option<String>,
+    /// The field's descriptor, when a reader cannot rebuild it by mapping the property type's class
+    /// id (kotlinc's `requiresSignature`): a value class's carrier (`UInt` stored as `I`), a boxed
+    /// `Int?`, a reference array, or a delegate.
     pub field_desc: Option<String>,
 }
 
@@ -978,16 +979,14 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
         (getter, setter)
     };
     let mut jvm = Pb::new();
-    // A delegated property names its delegate field explicitly, interned after the accessors.
-    // Otherwise `field` (empty → derived) only when a backing field EXISTS: a computed or extension
-    // property has none, and kotlinc omits the entry rather than recording an empty one.
-    if let Some((name, descriptor)) = &m.delegate_field {
+    // `field` only when a field EXISTS (a delegate's storage included): a computed or extension
+    // property has none, and kotlinc omits the entry rather than recording an empty one. Its
+    // strings intern after the accessors'.
+    if m.has_backing_field || m.field_name.is_some() {
         let mut field = Pb::new();
-        field.field_varint(1, st.local(name) as u64); // JvmFieldSignature.name = 1
-        field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
-        jvm.field_message(1, &field);
-    } else if m.has_backing_field {
-        let mut field = Pb::new();
+        if let Some(name) = &m.field_name {
+            field.field_varint(1, st.local(name) as u64); // JvmFieldSignature.name = 1
+        }
         if let Some(descriptor) = &m.field_desc {
             field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
         }
@@ -1217,8 +1216,8 @@ mod tests {
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
                 accessor_annotations: Default::default(),
+                field_name: None,
                 field_desc: None,
                 decl_order: 0,
             }
@@ -1274,8 +1273,8 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
                 accessor_annotations: Default::default(),
+                field_name: None,
                 field_desc: None,
                 has_constant: false,
                 decl_order: 0,
@@ -1334,8 +1333,8 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
                 accessor_annotations: Default::default(),
+                field_name: None,
                 field_desc: None,
                 has_constant: false,
                 decl_order: 0,
@@ -1393,8 +1392,8 @@ mod tests {
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
                 accessor_annotations: Default::default(),
+                field_name: None,
                 field_desc: None,
                 has_constant: false,
                 decl_order: 0,
@@ -1445,8 +1444,8 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
                 accessor_annotations: Default::default(),
+                field_name: None,
                 field_desc: None,
                 decl_order: 0,
             }],

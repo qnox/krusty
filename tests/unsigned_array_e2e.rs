@@ -6,7 +6,9 @@
 use super::common;
 
 fn run_ok(stem: &str, body: &str) {
-    let src = format!("fun box(): String {{\n{body}\n}}\n");
+    let src = format!(
+        "@file:OptIn(ExperimentalUnsignedTypes::class)\nfun box(): String {{\n{body}\n}}\n"
+    );
     common::expect_box_ok_with_stdlib(&src, stem);
 }
 
