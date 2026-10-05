@@ -2432,6 +2432,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type-parameter field even when it has no accessors, a boxed nullable primitive, a value class's
   carrier, a reference array and a delegate field. One rule serves class, companion and facade
   properties. Tests: `tests/metadata_field_signature_e2e.rs`.
+- **Accessor and function records follow declaration identity, never a JVM name.** A property's
+  `JvmPropertySignature` names only the accessors the property owns. A private property with
+  default accessors has none, so `operator fun getValue(...)` beside `private val value` is a
+  `Function` record and not the property's getter, and a declared `fun getCount(): Int` beside a
+  private `count` stays a `Function` record. A setter's value parameter is its own declaration and
+  addresses the property's type parameters by table id. A class serializes each member list in the
+  order it builds the records, so a member extension property declared first stays first. Tests:
+  `tests/metadata_accessor_signature_e2e.rs`, `tests/metadata_property_flags_e2e.rs`.
 - **A class records only the supertypes source DECLARED.** An undeclared `kotlin/Any` is never a
   `Class.supertype`, generic or not — even though a generic class's JVM `Signature` attribute must
   materialize that superclass position, so the recorded generic signature krusty reuses for the

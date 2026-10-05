@@ -92,27 +92,6 @@ pub(super) fn build_class_metadata_with_facts(
     if c.is_value && !value_class_metadata_shape_admitted(ir, c) {
         return None;
     }
-    // A value class's compiler-synthesized members (the static `-impl` family + their instance
-    // delegators); allowed alongside the property accessor without disqualifying the shape.
-    let value_method_names: std::collections::HashSet<String> = if c.is_value {
-        [
-            "equals",
-            "hashCode",
-            "toString",
-            "equals-impl",
-            "equals-impl0",
-            "hashCode-impl",
-            "toString-impl",
-            "box-impl",
-            "unbox-impl",
-            "constructor-impl",
-        ]
-        .map(String::from)
-        .into_iter()
-        .collect()
-    } else {
-        std::collections::HashSet::new()
-    };
     let synthesizes_copy = synthesizes_data_class_members(c);
     // `data` synthesizes over the PRIMARY-CONSTRUCTOR properties only — `c.fields` also holds the
     // backing fields of body properties (`data class P(val x: Int) { val y = 1 }` has two fields but
@@ -131,50 +110,6 @@ pub(super) fn build_class_metadata_with_facts(
     } else {
         Vec::new()
     };
-    // The only methods allowed in this bounded shape are the properties' own accessors (`getX`/`setX`)
-    // plus a data class's synthesized set; any other real method is a shape not computed yet.
-    // Accessor spellings are matched by name AND shape below, so the getter and setter names stay
-    // in separate sets: a declared `operator fun getValue(thisRef, prop)` shares the JVM getter
-    // name of a property called `value` but takes parameters no getter has — swallowing it by name
-    // alone dropped its Function record from `@Metadata`, and a consumer could then not resolve
-    // the delegate operator.
-    // Accessor spellings map to the PROPERTY TYPE's descriptor: a declared function that merely
-    // shares the getter name but has a different return (`val x: String` beside
-    // `fun getX(): Int`) is a real Function record, not the accessor — the JVM holds both.
-    let mut getter_names: std::collections::HashMap<String, String> = Default::default();
-    let mut setter_names: std::collections::HashMap<String, String> = Default::default();
-    for (name, ty) in c
-        .fields
-        .iter()
-        .map(|f| (f.name.as_str(), f.ty))
-        // A HOISTED companion property has no companion field, but its delegating accessors are
-        // ordinary IR methods — they realize the Property record, never a Function one.
-        .chain(
-            c.properties
-                .iter()
-                .enumerate()
-                .filter(|(property, p)| {
-                    p.backing_field.is_none()
-                        && static_fields::hoisted_static_for(ir, c, *property).is_some()
-                })
-                .map(|(_, p)| (p.name.as_str(), p.ty)),
-        )
-        // An INTERFACE property's accessor is a real default-method `IrFunction` (there is no
-        // backing field to derive its name from), but it realizes the Property record — kotlinc
-        // emits no Function entry for `getX` of `val x: Int get() = 1`, and a kotlinc consumer
-        // reading both reports "inherited platform declarations clash" on every implementer.
-        .chain(
-            c.is_interface
-                .then(|| c.properties.iter().map(|p| (p.name.as_str(), p.ty)))
-                .into_iter()
-                .flatten(),
-        )
-    {
-        let (getter, setter) = accessor_jvm_names(c, name);
-        let descriptor = crate::jvm::names::type_descriptor(jvm_declared_ty(&ty));
-        getter_names.insert(getter, descriptor.clone());
-        setter_names.insert(setter, descriptor);
-    }
     // Member-extension-PROPERTY accessors are described as `Property` records (below), never as
     // functions — kotlinc emits no `Function` record for `getDoubled` of `val Int.doubled`.
     let ext_prop_accessor_fids: std::collections::HashSet<u32> = ir
@@ -219,22 +154,7 @@ pub(super) fn build_class_metadata_with_facts(
             if property_accessor_fids.contains(&fid) {
                 return false;
             }
-            let function = &ir.functions[fid as usize];
-            let n = &function.name;
-            let accessor_shaped = (function.params.is_empty()
-                && getter_names.get(n).is_some_and(|descriptor| {
-                    crate::jvm::names::type_descriptor(jvm_declared_ty(&function.ret))
-                        == *descriptor
-                }))
-                || (function.params.len() == 1
-                    && matches!(function.ret, Ty::Unit)
-                    && setter_names.get(n).is_some_and(|descriptor| {
-                        crate::jvm::names::type_descriptor(jvm_declared_ty(&function.params[0]))
-                            == *descriptor
-                    }));
-            !accessor_shaped
-                && !ir.is_data_class_member(c.fq_name_id(), fid)
-                && !value_method_names.contains(n)
+            !ir.is_data_class_member(c.fq_name_id(), fid)
         })
         .collect();
     declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
@@ -342,13 +262,6 @@ pub(super) fn build_class_metadata_with_facts(
                 .filter(|&fid| (fid as usize) < ir.functions.len())
                 .map(physical_getter)
                 .or_else(|| {
-                    c.methods
-                        .iter()
-                        .copied()
-                        .find(|&fid| ir.functions[fid as usize].name == default_getter)
-                        .map(physical_getter)
-                })
-                .or_else(|| {
                     backing.and_then(|(_, field)| {
                         // `@JvmField` suppresses the accessor pair entirely, so there is no
                         // synthesized getter to derive from the backing field — kotlinc records the
@@ -380,18 +293,6 @@ pub(super) fn build_class_metadata_with_facts(
                         function.name.clone(),
                         ir_method_desc(&function.params, &function.ret),
                     )
-                })
-                .or_else(|| {
-                    c.methods
-                        .iter()
-                        .map(|fid| &ir.functions[*fid as usize])
-                        .find(|function| function.name == default_setter)
-                        .map(|function| {
-                            (
-                                function.name.clone(),
-                                ir_method_desc(&function.params, &function.ret),
-                            )
-                        })
                 })
                 .or_else(|| {
                     backing.and_then(|(_, field)| {
