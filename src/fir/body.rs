@@ -411,6 +411,8 @@ pub struct FirCall {
 pub(crate) struct LocalBinding {
     pub(crate) value: LocalValueId,
     pub(crate) ty: ResolvedTy,
+    /// A `var` (or `lateinit var`): the binding can be reassigned after it is read.
+    pub(crate) mutable: bool,
     pub(crate) lateinit: bool,
 }
 

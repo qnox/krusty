@@ -64,6 +64,9 @@ pub struct BackendClassifierFact {
     pub value_declaration: Option<crate::types::DeclaredValueClass>,
     /// The role its provider published for the declaration in type checks and casts.
     pub role: Option<crate::types::ClassifierRole>,
+    /// The declared companion object: the name of the static field holding it and its classifier.
+    /// Kotlin metadata publishes it for a dependency and the source declaration for this module.
+    pub companion: Option<(Box<str>, TypeName)>,
 }
 
 /// Declaration facts of a current-module classifier that a dependency's classifier record carries
@@ -170,6 +173,10 @@ impl BackendClassifierFact {
             value_underlying: shape.value_underlying,
             value_declaration: shape.value_declaration.clone(),
             role: shape.classifier_role(),
+            companion: shape
+                .companion_object
+                .as_ref()
+                .map(|(field, companion)| (Box::from(field.as_str()), *companion)),
         }
     }
 
@@ -671,6 +678,7 @@ impl BackendModuleFacts {
                 value_declaration,
                 // A source declaration is neither a mapped collection builtin nor a `FunctionN`.
                 role: None,
+                companion: companion.clone(),
             };
             source_declarations.insert(
                 classifier.classifier,

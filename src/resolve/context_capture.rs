@@ -28,18 +28,17 @@ pub(crate) fn selected_context_values(
     body: ExprId,
     deep: bool,
 ) -> (Vec<ResolvedContextArgument>, Vec<ImplicitReceiverSelection>) {
-    let SelectedContextSources {
-        expr_types,
-        implicit_receiver_selections,
-        context_args,
-        resolved_calls,
-        resolved_super_calls,
-        stmt_lowers,
-    } = sources;
     #[derive(Clone, Copy, Default)]
     struct NestedReceiverCounts {
         all: usize,
         implicit_this: usize,
+    }
+
+    #[derive(Default)]
+    struct ScanState {
+        nested_bound_names: Vec<String>,
+        out: Vec<ResolvedContextArgument>,
+        direct_implicit_receivers: Vec<ImplicitReceiverSelection>,
     }
 
     fn push_unique(out: &mut Vec<ResolvedContextArgument>, source: &ResolvedContextArgument) {
@@ -118,77 +117,69 @@ pub(crate) fn selected_context_values(
         push_unique(out, &normalized);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn scan(
         file: &File,
-        expr_types: &[Ty],
-        implicit_receiver_selections: &HashMap<ExprId, ImplicitReceiverSelection>,
-        context_args: &HashMap<ExprId, Vec<ResolvedContextArgument>>,
-        resolved_calls: &HashMap<ExprId, ResolvedCall>,
-        resolved_super_calls: &HashMap<ExprId, ResolvedSuperCall>,
-        stmt_lowers: &HashMap<StmtId, StmtLowering>,
+        sources: &SelectedContextSources<'_>,
         e: ExprId,
         deep: bool,
         nested_callable: bool,
-        nested_bound_names: &mut Vec<String>,
         nested_receiver_count: NestedReceiverCounts,
-        out: &mut Vec<ResolvedContextArgument>,
-        direct_implicit_receivers: &mut Vec<ImplicitReceiverSelection>,
+        state: &mut ScanState,
     ) {
-        if let Some(selection) = implicit_receiver_selections.get(&e) {
+        if let Some(selection) = sources.implicit_receiver_selections.get(&e) {
             record_source(
-                out,
-                direct_implicit_receivers,
+                &mut state.out,
+                &mut state.direct_implicit_receivers,
                 &ResolvedContextArgument::ImplicitReceiver(selection.clone()),
                 nested_callable,
-                nested_bound_names,
+                &state.nested_bound_names,
                 nested_receiver_count,
             );
         }
-        if let Some(target) = resolved_super_calls.get(&e) {
+        if let Some(target) = sources.resolved_super_calls.get(&e) {
             record_source(
-                out,
-                direct_implicit_receivers,
+                &mut state.out,
+                &mut state.direct_implicit_receivers,
                 &ResolvedContextArgument::ImplicitReceiver(target.receiver.clone()),
                 nested_callable,
-                nested_bound_names,
+                &state.nested_bound_names,
                 nested_receiver_count,
             );
         }
-        if let Some(sources) = context_args.get(&e) {
-            for source in sources {
+        if let Some(context_args) = sources.context_args.get(&e) {
+            for source in context_args {
                 record_source(
-                    out,
-                    direct_implicit_receivers,
+                    &mut state.out,
+                    &mut state.direct_implicit_receivers,
                     source,
                     nested_callable,
-                    nested_bound_names,
+                    &state.nested_bound_names,
                     nested_receiver_count,
                 );
             }
         }
-        if let Some(call) = resolved_calls.get(&e) {
+        if let Some(call) = sources.resolved_calls.get(&e) {
             match call {
                 ResolvedCall::TopLevel(target) => {
                     for source in target.context_args.iter().flatten() {
                         record_source(
-                            out,
-                            direct_implicit_receivers,
+                            &mut state.out,
+                            &mut state.direct_implicit_receivers,
                             source,
                             nested_callable,
-                            nested_bound_names,
+                            &state.nested_bound_names,
                             nested_receiver_count,
                         );
                     }
                 }
                 ResolvedCall::Extension(target) => {
-                    for source in &target.context_args {
+                    for source in target.context_args.iter().flatten() {
                         record_source(
-                            out,
-                            direct_implicit_receivers,
+                            &mut state.out,
+                            &mut state.direct_implicit_receivers,
                             source,
                             nested_callable,
-                            nested_bound_names,
+                            &state.nested_bound_names,
                             nested_receiver_count,
                         );
                     }
@@ -199,49 +190,49 @@ pub(crate) fn selected_context_values(
                     ..
                 } => {
                     record_source(
-                        out,
-                        direct_implicit_receivers,
+                        &mut state.out,
+                        &mut state.direct_implicit_receivers,
                         &ResolvedContextArgument::ImplicitReceiver(dispatch_receiver.clone()),
                         nested_callable,
-                        nested_bound_names,
+                        &state.nested_bound_names,
                         nested_receiver_count,
                     );
                     for source in context_args.iter().flatten() {
                         record_source(
-                            out,
-                            direct_implicit_receivers,
+                            &mut state.out,
+                            &mut state.direct_implicit_receivers,
                             source,
                             nested_callable,
-                            nested_bound_names,
+                            &state.nested_bound_names,
                             nested_receiver_count,
                         );
                     }
                 }
                 ResolvedCall::LocalFunction(target) => {
                     if let Some(StmtLowering::LocalFunction(function)) =
-                        stmt_lowers.get(&target.stmt_id)
+                        sources.stmt_lowers.get(&target.stmt_id)
                     {
                         for capture in &function.captures {
                             record_source(
-                                out,
-                                direct_implicit_receivers,
+                                &mut state.out,
+                                &mut state.direct_implicit_receivers,
                                 &ResolvedContextArgument::Binding {
                                     name: capture.name.clone(),
                                     shadow_depth: 0,
                                 },
                                 nested_callable,
-                                nested_bound_names,
+                                &state.nested_bound_names,
                                 nested_receiver_count,
                             );
                         }
                     }
                     for source in &target.context_args {
                         record_source(
-                            out,
-                            direct_implicit_receivers,
+                            &mut state.out,
+                            &mut state.direct_implicit_receivers,
                             source,
                             nested_callable,
-                            nested_bound_names,
+                            &state.nested_bound_names,
                             nested_receiver_count,
                         );
                     }
@@ -250,30 +241,30 @@ pub(crate) fn selected_context_values(
             }
         }
         if let Expr::Block { stmts, trailing } = file.expr(e) {
-            let saved_bound_len = nested_bound_names.len();
+            let saved_bound_len = state.nested_bound_names.len();
             for &statement in stmts {
                 if let Some(StmtLowering::SuperPropertyWrite { target }) =
-                    stmt_lowers.get(&statement)
+                    sources.stmt_lowers.get(&statement)
                 {
                     record_source(
-                        out,
-                        direct_implicit_receivers,
+                        &mut state.out,
+                        &mut state.direct_implicit_receivers,
                         &ResolvedContextArgument::ImplicitReceiver(target.receiver.clone()),
                         nested_callable,
-                        nested_bound_names,
+                        &state.nested_bound_names,
                         nested_receiver_count,
                     );
                 }
                 if let Some(StmtLowering::BackingFieldWrite {
                     dispatch_receiver: Some(receiver),
-                }) = stmt_lowers.get(&statement)
+                }) = sources.stmt_lowers.get(&statement)
                 {
                     record_source(
-                        out,
-                        direct_implicit_receivers,
+                        &mut state.out,
+                        &mut state.direct_implicit_receivers,
                         &ResolvedContextArgument::ImplicitReceiver(receiver.clone()),
                         nested_callable,
-                        nested_bound_names,
+                        &state.nested_bound_names,
                         nested_receiver_count,
                     );
                 }
@@ -283,54 +274,33 @@ pub(crate) fn selected_context_values(
                     } => {
                         scan(
                             file,
-                            expr_types,
-                            implicit_receiver_selections,
-                            context_args,
-                            resolved_calls,
-                            resolved_super_calls,
-                            stmt_lowers,
+                            sources,
                             range.start,
                             deep,
                             nested_callable,
-                            nested_bound_names,
                             nested_receiver_count,
-                            out,
-                            direct_implicit_receivers,
+                            state,
                         );
                         scan(
                             file,
-                            expr_types,
-                            implicit_receiver_selections,
-                            context_args,
-                            resolved_calls,
-                            resolved_super_calls,
-                            stmt_lowers,
+                            sources,
                             range.end,
                             deep,
                             nested_callable,
-                            nested_bound_names,
                             nested_receiver_count,
-                            out,
-                            direct_implicit_receivers,
+                            state,
                         );
-                        nested_bound_names.push(name.clone());
+                        state.nested_bound_names.push(name.clone());
                         scan(
                             file,
-                            expr_types,
-                            implicit_receiver_selections,
-                            context_args,
-                            resolved_calls,
-                            resolved_super_calls,
-                            stmt_lowers,
+                            sources,
                             *body,
                             deep,
                             nested_callable,
-                            nested_bound_names,
                             nested_receiver_count,
-                            out,
-                            direct_implicit_receivers,
+                            state,
                         );
-                        nested_bound_names.pop();
+                        state.nested_bound_names.pop();
                     }
                     Stmt::ForEach {
                         name,
@@ -340,38 +310,24 @@ pub(crate) fn selected_context_values(
                     } => {
                         scan(
                             file,
-                            expr_types,
-                            implicit_receiver_selections,
-                            context_args,
-                            resolved_calls,
-                            resolved_super_calls,
-                            stmt_lowers,
+                            sources,
                             *iterable,
                             deep,
                             nested_callable,
-                            nested_bound_names,
                             nested_receiver_count,
-                            out,
-                            direct_implicit_receivers,
+                            state,
                         );
-                        nested_bound_names.push(name.clone());
+                        state.nested_bound_names.push(name.clone());
                         scan(
                             file,
-                            expr_types,
-                            implicit_receiver_selections,
-                            context_args,
-                            resolved_calls,
-                            resolved_super_calls,
-                            stmt_lowers,
+                            sources,
                             *body,
                             deep,
                             nested_callable,
-                            nested_bound_names,
                             nested_receiver_count,
-                            out,
-                            direct_implicit_receivers,
+                            state,
                         );
-                        nested_bound_names.pop();
+                        state.nested_bound_names.pop();
                     }
                     // Local functions are lifted and own a separate capture ABI. Their bodies must
                     // not influence the enclosing lambda's capture inventory.
@@ -380,19 +336,12 @@ pub(crate) fn selected_context_values(
                         file.any_child_stmt(statement, &mut |child| {
                             scan(
                                 file,
-                                expr_types,
-                                implicit_receiver_selections,
-                                context_args,
-                                resolved_calls,
-                                resolved_super_calls,
-                                stmt_lowers,
+                                sources,
                                 child,
                                 deep,
                                 nested_callable,
-                                nested_bound_names,
                                 nested_receiver_count,
-                                out,
-                                direct_implicit_receivers,
+                                state,
                             );
                             false
                         });
@@ -401,8 +350,10 @@ pub(crate) fn selected_context_values(
                 match file.stmt(statement) {
                     Stmt::Local { name, .. }
                     | Stmt::LocalLateinit { name, .. }
-                    | Stmt::LocalDelegate { name, .. } => nested_bound_names.push(name.clone()),
-                    Stmt::Destructure { entries, .. } => nested_bound_names.extend(
+                    | Stmt::LocalDelegate { name, .. } => {
+                        state.nested_bound_names.push(name.clone())
+                    }
+                    Stmt::Destructure { entries, .. } => state.nested_bound_names.extend(
                         entries
                             .iter()
                             .filter(|entry| !entry.ignored)
@@ -414,22 +365,15 @@ pub(crate) fn selected_context_values(
             if let Some(trailing) = trailing {
                 scan(
                     file,
-                    expr_types,
-                    implicit_receiver_selections,
-                    context_args,
-                    resolved_calls,
-                    resolved_super_calls,
-                    stmt_lowers,
+                    sources,
                     *trailing,
                     deep,
                     nested_callable,
-                    nested_bound_names,
                     nested_receiver_count,
-                    out,
-                    direct_implicit_receivers,
+                    state,
                 );
             }
-            nested_bound_names.truncate(saved_bound_len);
+            state.nested_bound_names.truncate(saved_bound_len);
             return;
         }
         if let Expr::Try {
@@ -440,61 +384,45 @@ pub(crate) fn selected_context_values(
         {
             scan(
                 file,
-                expr_types,
-                implicit_receiver_selections,
-                context_args,
-                resolved_calls,
-                resolved_super_calls,
-                stmt_lowers,
+                sources,
                 *body,
                 deep,
                 nested_callable,
-                nested_bound_names,
                 nested_receiver_count,
-                out,
-                direct_implicit_receivers,
+                state,
             );
             for catch in catches {
-                nested_bound_names.push(catch.name.clone());
+                state.nested_bound_names.push(catch.name.clone());
                 scan(
                     file,
-                    expr_types,
-                    implicit_receiver_selections,
-                    context_args,
-                    resolved_calls,
-                    resolved_super_calls,
-                    stmt_lowers,
+                    sources,
                     catch.body,
                     deep,
                     nested_callable,
-                    nested_bound_names,
                     nested_receiver_count,
-                    out,
-                    direct_implicit_receivers,
+                    state,
                 );
-                nested_bound_names.pop();
+                state.nested_bound_names.pop();
             }
             if let Some(finally) = finally {
                 scan(
                     file,
-                    expr_types,
-                    implicit_receiver_selections,
-                    context_args,
-                    resolved_calls,
-                    resolved_super_calls,
-                    stmt_lowers,
+                    sources,
                     *finally,
                     deep,
                     nested_callable,
-                    nested_bound_names,
                     nested_receiver_count,
-                    out,
-                    direct_implicit_receivers,
+                    state,
                 );
             }
             return;
         }
-        let lambda_sig = match expr_types.get(e.0 as usize).copied().unwrap_or(Ty::Error) {
+        let lambda_sig = match sources
+            .expr_types
+            .get(e.0 as usize)
+            .copied()
+            .unwrap_or(Ty::Error)
+        {
             Ty::Fun(sig) => Some(sig),
             _ => None,
         };
@@ -552,52 +480,36 @@ pub(crate) fn selected_context_values(
             },
         );
         for child in children.into_inner() {
-            let saved_bound_len = nested_bound_names.len();
+            let saved_bound_len = state.nested_bound_names.len();
             if let Some(params) = &nested_params {
-                nested_bound_names.extend(params.iter().cloned());
+                state.nested_bound_names.extend(params.iter().cloned());
             }
             scan(
                 file,
-                expr_types,
-                implicit_receiver_selections,
-                context_args,
-                resolved_calls,
-                resolved_super_calls,
-                stmt_lowers,
+                sources,
                 child,
                 deep,
                 nested_callable || expression_is_lambda,
-                nested_bound_names,
                 NestedReceiverCounts {
                     all: nested_receiver_count.all + expression_receiver_count,
                     implicit_this: nested_receiver_count.implicit_this
                         + expression_implicit_this_count,
                 },
-                out,
-                direct_implicit_receivers,
+                state,
             );
-            nested_bound_names.truncate(saved_bound_len);
+            state.nested_bound_names.truncate(saved_bound_len);
         }
     }
 
-    let mut out = Vec::new();
-    let mut direct_implicit_receivers = Vec::new();
-    let mut nested_bound_names = Vec::new();
+    let mut state = ScanState::default();
     scan(
         file,
-        expr_types,
-        implicit_receiver_selections,
-        context_args,
-        resolved_calls,
-        resolved_super_calls,
-        stmt_lowers,
+        &sources,
         body,
         deep,
         false,
-        &mut nested_bound_names,
         NestedReceiverCounts::default(),
-        &mut out,
-        &mut direct_implicit_receivers,
+        &mut state,
     );
-    (out, direct_implicit_receivers)
+    (state.out, state.direct_implicit_receivers)
 }

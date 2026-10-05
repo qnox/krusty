@@ -3,7 +3,14 @@
 //! application, and metadata emission. One representation for all four so a contract means the
 //! same thing no matter where it came from.
 
-use crate::ast::{Expr, ExprId, File, Stmt, TypeRef};
+use crate::ast::TypeRef;
+
+mod description;
+
+pub use description::{
+    CallBinding, Decoded, Description, DescriptionBinder, DescriptionOwner, DslMember, KindBinding,
+    SelectedDslCallable, Term, TermId, TermKind,
+};
 
 /// A contract whose source type references have all been bound to publishable semantic types.
 ///
@@ -187,6 +194,17 @@ pub enum InvocationKind {
 }
 
 impl InvocationKind {
+    /// The kind an entry of `kotlin.contracts.InvocationKind` stands for, by the entry's name.
+    pub fn of_entry(entry: &str) -> Option<InvocationKind> {
+        match entry {
+            "AT_MOST_ONCE" => Some(InvocationKind::AtMostOnce),
+            "EXACTLY_ONCE" => Some(InvocationKind::ExactlyOnce),
+            "AT_LEAST_ONCE" => Some(InvocationKind::AtLeastOnce),
+            "UNKNOWN" => Some(InvocationKind::Unknown),
+            _ => None,
+        }
+    }
+
     /// `Effect.kind` wire number (kotlinx-metadata's InvocationKind order). Shared by metadata
     /// decode and emit so the mapping lives in exactly one place.
     pub fn from_wire(kind: u64) -> InvocationKind {
@@ -285,206 +303,48 @@ impl PartialEq for ConditionType {
     }
 }
 
-/// Decode a source `contract { … }` call — ALREADY confirmed to be the `kotlin.contracts`
-/// intrinsic by the caller — into a [`Contract`]. `params` are the declaring function's
-/// value-parameter names, `fn_name` identifies the labeled receiver `this@<fn_name>`, and
-/// `has_receiver` says whether the function is an extension. Anything outside the
-/// `ContractBuilder` DSL yields `None` (treated as "no usable contract", never an error).
-pub fn decode_source(
-    file: &File,
-    call: ExprId,
-    params: &[String],
-    fn_name: &str,
-    has_receiver: bool,
-) -> Option<Contract> {
-    let ctx = SourceCtx {
-        file,
-        params,
-        fn_name,
-        has_receiver,
-    };
-    let Expr::Call { args, .. } = file.expr(call) else {
-        return None;
-    };
-    let lambda = args.iter().next_back()?;
-    let Expr::Lambda { body, .. } = file.expr(*lambda) else {
-        return None;
-    };
-    let Expr::Block { stmts, trailing } = file.expr(*body) else {
-        return None;
-    };
-    let mut effects = Vec::new();
-    for s in stmts {
-        let Stmt::Expr(e) = file.stmt(*s) else {
-            return None;
-        };
-        effects.push(ctx.effect(*e)?);
-    }
-    if let Some(t) = trailing {
-        effects.push(ctx.effect(*t)?);
-    }
-    Some(Contract { effects })
-}
-
-struct SourceCtx<'a> {
-    file: &'a File,
-    params: &'a [String],
-    fn_name: &'a str,
-    has_receiver: bool,
-}
-
-impl SourceCtx<'_> {
-    fn effect(&self, e: ExprId) -> Option<Effect> {
-        // `returns*(…) implies <cond>` parses as an infix call: `Call { Member { receiver:
-        // <returns-call>, "implies" }, [cond] }`.
-        if let Expr::Call { callee, args } = self.file.expr(e) {
-            if let Expr::Member { receiver, name } = self.file.expr(*callee) {
-                if name == "implies" && args.len() == 1 {
-                    let returns = self.simple_returns(*receiver)?;
-                    let conclusion = self.condition(args[0])?;
-                    return Some(Effect::ConditionalReturns {
-                        returns,
-                        conclusion,
-                    });
-                }
-            }
-        }
-        self.simple_effect(e)
-    }
-
-    fn simple_effect(&self, e: ExprId) -> Option<Effect> {
-        match self.simple_returns(e) {
-            Some(r) => Some(Effect::Returns(r)),
-            None => self.calls_in_place(e),
-        }
-    }
-
-    /// `returns()` / `returnsNotNull()` / `returns(true|false|null)`.
-    fn simple_returns(&self, e: ExprId) -> Option<ReturnsValue> {
-        let Expr::Call { callee, args } = self.file.expr(e) else {
-            return None;
-        };
-        let Expr::Name(n) = self.file.expr(*callee) else {
-            return None;
-        };
-        match (n.as_str(), args.as_slice()) {
-            ("returns", []) => Some(ReturnsValue::Any),
-            ("returnsNotNull", []) => Some(ReturnsValue::NotNull),
-            ("returns", [a]) => match self.file.expr(*a) {
-                Expr::BoolLit(b) => Some(ReturnsValue::Bool(*b)),
-                Expr::NullLit => Some(ReturnsValue::Null),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// `callsInPlace(x)` / `callsInPlace(x, InvocationKind.EXACTLY_ONCE)`.
-    fn calls_in_place(&self, e: ExprId) -> Option<Effect> {
-        let Expr::Call { callee, args } = self.file.expr(e) else {
-            return None;
-        };
-        let Expr::Name(n) = self.file.expr(*callee) else {
-            return None;
-        };
-        if n != "callsInPlace" || args.is_empty() || args.len() > 2 {
-            return None;
-        }
-        let Expr::Name(p) = self.file.expr(args[0]) else {
-            return None;
-        };
-        let param = self.param_ref(p)?;
-        let kind = match args.get(1) {
-            None => InvocationKind::Unknown,
-            Some(k) => {
-                // `InvocationKind.EXACTLY_ONCE` (qualified) or a star-imported bare name.
-                let kn = match self.file.expr(*k) {
-                    Expr::Member { name, .. } => name.as_str(),
-                    Expr::Name(n) => n.as_str(),
-                    _ => return None,
-                };
-                match kn {
-                    "EXACTLY_ONCE" => InvocationKind::ExactlyOnce,
-                    "AT_LEAST_ONCE" => InvocationKind::AtLeastOnce,
-                    "AT_MOST_ONCE" => InvocationKind::AtMostOnce,
-                    _ => InvocationKind::Unknown,
-                }
-            }
-        };
-        Some(Effect::CallsInPlace { param, kind })
-    }
-
-    fn condition(&self, e: ExprId) -> Option<Condition> {
-        match self.file.expr(e) {
-            Expr::Binary { op, lhs, rhs, .. } => {
-                use crate::ast::BinOp;
-                match op {
-                    BinOp::And => Some(Condition::And(
-                        Box::new(self.condition(*lhs)?),
-                        Box::new(self.condition(*rhs)?),
-                    )),
-                    BinOp::Or => Some(Condition::Or(
-                        Box::new(self.condition(*lhs)?),
-                        Box::new(self.condition(*rhs)?),
-                    )),
-                    BinOp::Eq | BinOp::Ne => {
-                        let negated = *op == BinOp::Ne;
-                        let (param, null_side) = if matches!(self.file.expr(*rhs), Expr::NullLit) {
-                            (lhs, rhs)
-                        } else {
-                            (rhs, lhs)
-                        };
-                        if !matches!(self.file.expr(*null_side), Expr::NullLit) {
-                            return None;
-                        }
-                        let Expr::Name(p) = self.file.expr(*param) else {
-                            return None;
-                        };
-                        Some(Condition::IsNull {
-                            param: self.param_ref(p)?,
-                            negated,
-                        })
-                    }
-                    _ => None,
-                }
-            }
-            Expr::Is {
-                operand,
-                ty,
-                negated,
-            } => {
-                let Expr::Name(p) = self.file.expr(*operand) else {
-                    return None;
-                };
-                Some(Condition::IsType {
-                    param: self.param_ref(p)?,
-                    ty: ConditionType::Source(ty.clone()),
-                    negated: *negated,
-                })
-            }
-            Expr::Name(p) => Some(Condition::BoolParam(self.param_ref(p)?)),
-            Expr::BoolLit(b) => Some(Condition::Const(*b)),
-            _ => None,
-        }
-    }
-
-    fn param_ref(&self, name: &str) -> Option<ParamRef> {
-        if self.has_receiver && (name == "this" || name == format!("this@{}", self.fn_name)) {
-            return Some(ParamRef::Receiver);
-        }
-        self.params
-            .iter()
-            .position(|p| p == name)
-            .map(ParamRef::Param)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Expr;
     use crate::diag::DiagSink;
     use crate::lexer::lex;
     use crate::parser::parse;
+
+    /// Binds each call by its spelling, standing in for the resolver's selection of the
+    /// `kotlin.contracts` declarations a real description's calls select.
+    struct SpellingBinder;
+
+    impl DescriptionBinder for SpellingBinder {
+        fn bind_call(&mut self, description: &Description, call: TermId) -> CallBinding {
+            let TermKind::Call { name, args, .. } = &description.term(call).kind else {
+                return CallBinding::Unresolved;
+            };
+            CallBinding::Dsl(match (name.as_str(), args.len()) {
+                ("returns", 0) => DslMember::Returns,
+                ("returns", 1) => DslMember::ReturnsValue,
+                ("returnsNotNull", 0) => DslMember::ReturnsNotNull,
+                ("callsInPlace", _) => DslMember::CallsInPlace,
+                ("implies", 1) => DslMember::Implies,
+                _ => return CallBinding::Foreign(format!("test/{name}")),
+            })
+        }
+
+        fn bind_kind(
+            &mut self,
+            description: &Description,
+            _call: TermId,
+            kind: TermId,
+        ) -> KindBinding {
+            let TermKind::Name(segments) = &description.term(kind).kind else {
+                return KindBinding::Unresolved;
+            };
+            segments
+                .last()
+                .and_then(|entry| InvocationKind::of_entry(entry))
+                .map_or(KindBinding::Unresolved, KindBinding::Entry)
+        }
+    }
 
     /// Parse `src` (a single function) and decode the contract in its body.
     fn contract_of(src: &str, params: &[&str], fn_name: &str, has_receiver: bool) -> Contract {
@@ -506,7 +366,18 @@ mod tests {
             })
             .expect("contract call in source");
         let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
-        decode_source(&file, call, &params, fn_name, has_receiver).expect("decodable contract")
+        let decoded = Description::read(&file, call)
+            .expect("contract description")
+            .decode(
+                &DescriptionOwner {
+                    params: &params,
+                    name: fn_name,
+                    has_receiver,
+                },
+                &mut SpellingBinder,
+            );
+        assert!(decoded.errors.is_empty(), "{:?}", decoded.errors);
+        decoded.contract.expect("decodable contract")
     }
 
     #[test]

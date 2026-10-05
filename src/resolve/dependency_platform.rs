@@ -527,6 +527,17 @@ impl SemanticPlatform for DependencyPlatform {
         self.platform.is_erased_contract_callable(callable)
     }
 
+    fn top_level_callable_package(&self, callable: &crate::libraries::LibraryCallable) -> TypeName {
+        self.platform.top_level_callable_package(callable)
+    }
+
+    fn contract_dsl_member(
+        &self,
+        callable: &crate::contracts::SelectedDslCallable<'_>,
+    ) -> Option<crate::contracts::DslMember> {
+        self.platform.contract_dsl_member(callable)
+    }
+
     fn boxed_primitive(&self, ty: Ty) -> Option<Ty> {
         self.platform.boxed_primitive(ty)
     }

@@ -334,7 +334,7 @@ fn redundant_feature_warnings(
             warnings.push(CliWarning {
                 name: WarningName::RedundantCliArg,
                 message: format!(
-                    "The argument '{argument}' is redundant for the current language version {}.",
+                    "the argument '{argument}' is redundant for the current language version {}.",
                     settings.language_version
                 ),
             });
@@ -1425,7 +1425,7 @@ mod tests {
             redundant.warnings,
             [CliWarning {
                 name: WarningName::RedundantCliArg,
-                message: "The argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
+                message: "the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
             }]
         );
     }
@@ -1523,7 +1523,7 @@ mod tests {
             parsed.warnings,
             [CliWarning {
                 name: WarningName::RedundantCliArg,
-                message: "The argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
+                message: "the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
             }]
         );
     }
@@ -1537,7 +1537,7 @@ mod tests {
             parsed.warnings,
             [CliWarning {
                 name: WarningName::RedundantCliArg,
-                message: "The argument '-Xnested-type-aliases' is redundant for the current language version 2.4.".to_string(),
+                message: "the argument '-Xnested-type-aliases' is redundant for the current language version 2.4.".to_string(),
             }]
         );
     }

@@ -84,7 +84,7 @@ impl BodyFirChecker<'_> {
                 .transpose()?
                 .unwrap_or(component_ty);
             let conversion = self.selected_type_conversion(component_ty, binding_ty, origin);
-            let target = self.bind_local(name, binding_ty);
+            let target = self.bind_variable(name, binding_ty, entry.mutable, false);
             checked.push(FirDestructureEntry::Binding {
                 origin,
                 target,

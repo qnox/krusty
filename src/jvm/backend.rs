@@ -721,7 +721,7 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
                     // The semantic handoff says whether a callable body exists; this JVM boundary
                     // owns only its representation as a facade static. Common IR lowering consumes
                     // the same answer, so registration cannot promise a body that lowering omits.
-                    let emitted = syms.source_fn_has_callable_body(file, i as u32, f);
+                    let emitted = syms.source_fn_has_callable_body(file, f);
                     if emitted {
                         fns.push((
                             i as u32,
@@ -1159,7 +1159,7 @@ impl Backend for JvmBackend {
         if let Err(target) = crate::jvm::module_calls::realize(
             &mut file.ir,
             file.stems,
-            &self.cp,
+            &file.classifiers,
             &file.callables,
             &mut property_realizations,
         ) {
