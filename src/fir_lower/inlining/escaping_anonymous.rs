@@ -107,30 +107,12 @@ fn retarget(
         else {
             continue;
         };
-        // The call's parameter types were substituted to the reified argument. The copy's
-        // constructor keeps the declaration erasure, so the construction must invoke that
-        // descriptor rather than `<init>(Token)`.
-        let class = ir
-            .class_id_by_name(specialized)
-            .ok_or_else(|| malformed(internal))?;
-        let declared = ir.classes[class as usize]
-            .ctor_args
-            .iter()
-            .map(|argument| argument.ty)
-            .collect::<Vec<_>>();
-        if let IrExpr::New {
-            internal: name,
-            ctor_params,
-            ..
-        } = &mut ir.exprs[expression as usize]
-        {
+        // Point the construction at the call-site class now. Its capture prefix is still being
+        // streamed independently from the class declaration, so constructor arity and the
+        // declaration-erased descriptor are finalized by `publish_one_copy` after every body has
+        // contributed its captures.
+        if let IrExpr::New { internal: name, .. } = &mut ir.exprs[expression as usize] {
             *name = specialized;
-            if let Some(parameters) = ctor_params {
-                if parameters.len() != declared.len() {
-                    return Err(malformed(internal));
-                }
-                *parameters = declared;
-            }
         }
     }
     ir.remap_reachable_classifier_identities(renames, [root], detached_impls);
@@ -757,8 +739,45 @@ fn publish_one_copy(
             inline_callee_source_name: &spec.inline_callee_source_name,
         },
     )?;
+    finalize_construction_signature(ir, copy_id, &spec, source_name)?;
     if let Some(record) = ir.specialized_anonymous_classes.get_mut(&copy_id) {
         record.method_clones = clones;
+    }
+    Ok(())
+}
+
+/// Finalize the copied construction only after the streamed class capture prefix is complete.
+/// Inline substitution may have specialized the call-site parameter types, while the anonymous
+/// class constructor retains its declaration erasure. The construction and declaration must now
+/// agree exactly; unlike the earlier copy step, a mismatch here is a malformed final IR state.
+fn finalize_construction_signature(
+    ir: &mut crate::ir::IrFile,
+    copy_id: ClassId,
+    spec: &crate::ir::IrSpecializedAnonymousClass,
+    source_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let declared = ir.classes[copy_id as usize]
+        .ctor_args
+        .iter()
+        .map(|argument| argument.ty)
+        .collect::<Vec<_>>();
+    let IrExpr::New {
+        internal,
+        args,
+        ctor_params,
+        ..
+    } = &mut ir.exprs[spec.order as usize]
+    else {
+        return Err(malformed(source_name));
+    };
+    if *internal != ir.classes[copy_id as usize].fq_name_id() || args.len() != declared.len() {
+        return Err(malformed(source_name));
+    }
+    if let Some(parameters) = ctor_params {
+        if parameters.len() != declared.len() {
+            return Err(malformed(source_name));
+        }
+        *parameters = declared;
     }
     Ok(())
 }
