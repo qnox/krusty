@@ -2995,7 +2995,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   context of the SAME primitive (`val v: Int? = uncheckedCastNull<Int>()`) reuses the original boxed
   reference (`checkcast` only) instead of unbox+re-box — the round-trip is not the identity on `null`
   (kt84727: `null as T` must survive, kotlinc keeps the reference)
-  (`generic_hof_vc_binding_e2e::nullable_generic_return_keeps_null`).
+  (`generic_hof_vc_binding_e2e::nullable_generic_return_keeps_null`). The same holds for every
+  reference consumer, not only `Int?`: an argument for `Any` or a type parameter, or a return of `Any`,
+  takes the erased `Object` result as the callee returned it (`share(42, holder.get())` passes it
+  straight through), with a `checkcast` only where the consumer's class is narrower than `Object`.
+  kotlinc never visits the substituted primitive there, so no `checkcast Number; intValue;
+  Integer.valueOf` round trip is written (`tests/erased_scalar_result_e2e.rs`).
 - **Return-only type parameters on `inline` functions use the expected type.** The inferred binding
   must satisfy its declared bound and is passed to the inline expander for reified operations. For a
   nullable return such as `T?`, inference removes the return nullability before binding `T`.
