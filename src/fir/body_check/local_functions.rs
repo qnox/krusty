@@ -294,6 +294,16 @@ impl BodyFirChecker<'_> {
             kind: FirStatementKind::Expression(result),
         });
         nested.body.push_root(root_statement);
+        let order = super::capture_order::first_use_captures(
+            &nested.body,
+            declaration,
+            &nested.session.local_function_captures,
+        );
+        nested.body.order_captures(&order);
+        nested
+            .session
+            .local_function_captures
+            .insert(declaration, nested.body.captures().into());
         Ok(self.body.add_statement(FirStatement {
             origin,
             kind: FirStatementKind::LocalFunction {
@@ -544,13 +554,22 @@ impl BodyFirChecker<'_> {
                 Some(StmtLowering::LocalFunction(function)) => function.captures.clone(),
                 _ => return Err(self.failure(None, BodyCheckFailureKind::MissingStableCallTarget)),
             };
-            if value_captures.len() != requirements.captures.len() {
+            if value_captures.len() != requirements.captures.len()
+                || requirements.declaration_ordinals.len() != requirements.captures.len()
+            {
                 return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
             }
             let mut arguments = Vec::with_capacity(
                 requirements.captures.len() + requirements.implicit_receiver_captures.len(),
             );
-            for (capture, required) in value_captures.iter().zip(&requirements.captures) {
+            // The resolver lists the captures as they were declared; the target takes them in
+            // its own order.
+            for (&ordinal, required) in requirements
+                .declaration_ordinals
+                .iter()
+                .zip(&requirements.captures)
+            {
+                let capture = &value_captures[ordinal as usize];
                 let binding = self
                     .class_values
                     .get(&capture.name)

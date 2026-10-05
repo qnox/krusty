@@ -12,6 +12,7 @@ pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
+mod capture_order;
 mod lifting_sites;
 mod local_type_parameters;
 pub use lifting_sites::{FirLiftingSite, FirLiftingStep};
@@ -1799,6 +1800,7 @@ pub struct FirBody {
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
+    capture_declaration_ordinals: Box<[u32]>,
     implicit_receiver_captures: Vec<FirImplicitReceiverCapture>,
     sam_conversions: Vec<FirSamConversion>,
     platform_narrowings: Vec<FirPlatformNarrowing>,
@@ -1856,6 +1858,7 @@ impl FirBody {
             parameters: Vec::new(),
             default_values: Vec::new(),
             captures: Vec::new(),
+            capture_declaration_ordinals: Box::default(),
             implicit_receiver_captures: Vec::new(),
             sam_conversions: Vec::new(),
             platform_narrowings: Vec::new(),
@@ -2774,6 +2777,7 @@ impl FirBody {
             + self.context_receiver_types.len() * std::mem::size_of::<ResolvedTy>()
             + self.type_parameter_payload_bytes()
             + self.captures.len() * std::mem::size_of::<FirCapture>()
+            + self.capture_declaration_ordinals.len() * std::mem::size_of::<u32>()
             + self.implicit_receiver_captures.len()
                 * std::mem::size_of::<FirImplicitReceiverCapture>()
             + self

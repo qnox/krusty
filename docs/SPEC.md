@@ -1960,12 +1960,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   copy of each type parameter its closure captures, ahead of its own:
   `fun <T, S> outer() { fun <U> f(a: U, b: T) }` signs `outer$f` as `<T:…;U:…;>(TU;TT;)I`. The
   closure sees the function's receiver, parameter and return types, its own type parameters'
-  bounds, then every type in its body, and includes the closure of each local function or lambda
-  it declares or calls; capturing a type parameter also sees its bound. A class type parameter is
+  bounds, then every type in its body, then includes the closure of each local function or lambda
+  it calls or contains (and of each local function it declares); capturing a type parameter also
+  sees its bound. A class type parameter is
   captured like any other, since the lifted method is static. The function's body is checked
   against its own type parameters, not their erasure; only the descriptor erases them. An
   anonymous function is signed the same way, while a lambda literal's method carries no
   `Signature` (`tests/local_function_signature_e2e.rs`).
+- **Lifted captured value order (kotlinc's `ClosureAnnotator`).** The captured values lead a lifted
+  local function's parameters in the order its closure first sees them, never by name: first the
+  values its defaults and body read, in reading order, then the closures of the local functions it
+  calls or references, of its lambdas and of the anonymous objects it creates, each in its own
+  order, as they are met. A local function it only declares, and a call to itself, add nothing.
+  `fun f() = g() + b` with `fun g() = a` takes `(b, a)`. The checker orders the declared captures
+  once the body is checked and keeps each one's declared position, so a streamed caller that
+  supplies them from the resolver's list places them (`tests/local_function_signature_e2e.rs`).
+  Not yet like kotlinc: kotlinc inlines an immediately invoked lambda literal (`{ … }()`), whose
+  reads are then the function's own; krusty still lifts it. An anonymous object's own fields are
+  still ordered by name, and a local function a body only declares still adds its captures.
 - **Inherited member call owner.** A call to an inherited member, or a read or write through an
   inherited property accessor, names the receiver's own class as the owner, as kotlinc does:
   `Leaf.m`, `Leaf.getBase`, `Leaf.hashCode`. An interface default reached through a class receiver

@@ -5,8 +5,9 @@
 //! declarations around it, so the lifted method declares a copy of each one its closure mentions,
 //! ahead of its own. kotlinc's `ClosureAnnotator` collects that closure: it sees the function's
 //! receiver, parameter and return types, then its own type parameters' bounds, then every type its
-//! body mentions, and it includes the closure of each local function the body declares or calls
-//! and of each lambda it contains. Capturing a type parameter also sees its bound.
+//! body mentions. Then it includes the closure of each local function the body calls and of each
+//! lambda it contains (a local function it declares is included with the body's own types).
+//! Capturing a type parameter also sees its bound.
 //!
 //! A lambda literal's method is signed without generics, so only a local function and an
 //! anonymous function are given the copies.
@@ -68,6 +69,9 @@ fn collect_closure(
             declared.insert(*declaration, nested);
         }
     }
+    // The closures of the local functions and lambdas the body uses come after everything the
+    // body itself mentions, as kotlinc's `ClosureBuilder` adds its includes last.
+    let mut included = Vec::new();
     for raw in 0..body.expression_count() {
         let Some(expression) = body.expr(FirExprId::from_raw(raw as u32)) else {
             continue;
@@ -82,14 +86,10 @@ fn collect_closure(
                         .map(|captured| captured.clone().into_boxed_slice())
                         .or_else(|| published(callee))
                 });
-                for ty in callee.iter().flat_map(|captured| captured.iter()) {
-                    closure.see(*ty);
-                }
+                included.extend(callee.iter().flat_map(|captured| captured.iter().copied()));
             }
             FirExprKind::Lambda { body, .. } => {
-                for ty in collect_closure(body, published, declared) {
-                    closure.see(ty);
-                }
+                included.extend(collect_closure(body, published, declared));
             }
             _ => {}
         }
@@ -104,6 +104,9 @@ fn collect_closure(
             }
             _ => {}
         }
+    }
+    for ty in included {
+        closure.see(ty);
     }
     closure.captured
 }
