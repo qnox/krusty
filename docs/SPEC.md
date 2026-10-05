@@ -6638,6 +6638,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `optional_expectation_annotation_e2e`, `jvm::optional_annotations` and
   `metadata::decode::module_mapping` unit tests.
 
+- **An annotation class's `@Retention` is the `AnnotationRetention` entry its checked argument
+  selects.** The header inventory only registers each source annotation class (with the default
+  retention); the declared retention is published after the classifier-annotation pass has bound
+  the `@Retention` argument to an enum entry through the ordinary scope/import rules, so `import
+  kotlin.annotation.AnnotationRetention.SOURCE` then `@Retention(SOURCE)`, and an aliased import
+  (`BINARY as Kept`, `@Retention(Kept)`), declare the retention they select, not their spelling.
+  Only an entry whose resolved owner is exactly `kotlin.annotation.AnnotationRetention` is a
+  retention, and only a valid application publishes one. A package-local `enum class
+  AnnotationRetention { SOURCE }` shadows the default import, so `@Retention(AnnotationRetention.SOURCE)`
+  is kotlinc's argument type mismatch (`actual type is 'sample.AnnotationRetention', but
+  'kotlin.annotation.AnnotationRetention' was expected.`, reported twice) and declares nothing. The
+  KLIB optional-annotation reader likewise checks the entry's enum class, and the class reader
+  keeps a Java `@Retention` only from a `java.lang.annotation.RetentionPolicy` constant. Verified
+  against kotlinc 2.4.20, byte-identical. (`tests/annotation_retention_identity_e2e.rs`.)
+
 - **Annotations on property accessors are declaration annotations of the getter, the setter and the
   setter's value parameter.** The parser keeps `@A get`, `@A set` and `set(@A v)` (with the `@`
   offset of each application). The checker resolves each through the ordinary scope/import rules to

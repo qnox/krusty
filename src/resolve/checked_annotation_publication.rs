@@ -107,6 +107,11 @@ pub(crate) fn publish_checked_classifier_annotations(
             if class.kind != crate::ast::ClassKind::Annotation {
                 continue;
             }
+            if let Some(retention) = checked_retention(file, file_index as u32, table, &info, class)
+            {
+                index.publish_annotation_retention(internal, retention);
+                table.annotation_retentions.insert(internal, retention);
+            }
             let Some(policy) = checked_target_policy(file, file_index as u32, table, &info, class)
             else {
                 continue;
@@ -220,6 +225,34 @@ fn checked_target_policy(
             }),
         ))
     })
+}
+
+/// The retention an annotation class's checked `@Retention` application declares; `None` when it
+/// declares none or the application is invalid. The argument is the enum entry the checker selected
+/// through the ordinary scope and import rules, so an unqualified or aliased import names the entry
+/// it selects, never its spelling. Only an entry declared by `kotlin.annotation.AnnotationRetention`
+/// itself is a retention: an entry of another enum, even one spelled the same, is an argument type
+/// mismatch, and the class keeps the default.
+fn checked_retention(
+    file: &File,
+    file_index: u32,
+    table: &SymbolTable,
+    info: &TypeInfo,
+    class: &ClassDecl,
+) -> Option<crate::types::AnnotationRetention> {
+    let retention = type_name("kotlin/annotation/Retention");
+    let index = class.annotations.iter().position(|annotation| {
+        table.resolved_annotation(file_index, annotation) == Some(retention)
+    })?;
+    info.applied_annotation(&class.annotations[index])?;
+    let mut leaves = Vec::new();
+    for &argument in &class.annotation_args[index] {
+        selected_entries(file, info, argument, &mut leaves);
+    }
+    let [Some(entry)] = leaves.as_slice() else {
+        return None;
+    };
+    crate::types::AnnotationRetention::of_entry(entry.classifier, &entry.name)
 }
 
 /// Each argument leaf's selected enum entry, `None` for a leaf that selected none. `@Target` takes

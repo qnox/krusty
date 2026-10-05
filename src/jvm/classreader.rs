@@ -1059,9 +1059,14 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                 if is_retention && ename == "value" {
                     let Ok(tag) = attr.u1() else { break };
                     if tag == b'e' {
-                        let _ = attr.u2(); // enum type descriptor index
+                        // Only a `java.lang.annotation.RetentionPolicy` constant is a policy.
+                        let owner = attr.u2().map(utf8);
                         if let Ok(ci) = attr.u2() {
-                            out.retention = Some(utf8(ci).to_string());
+                            if owner.is_ok_and(|owner| {
+                                owner == "Ljava/lang/annotation/RetentionPolicy;"
+                            }) {
+                                out.retention = Some(utf8(ci).to_string());
+                            }
                         }
                     } else {
                         // Unexpected shape — stop parsing this class's attributes rather than desync.

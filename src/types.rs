@@ -2075,6 +2075,24 @@ pub enum AnnotationRetention {
     Source,
 }
 
+impl AnnotationRetention {
+    /// The retention an enum entry denotes when its declaring enum is exactly
+    /// `kotlin.annotation.AnnotationRetention`. An entry of any other enum, whatever its name, is no
+    /// retention. `owner` is the resolved or provider-normalized declaring classifier; `entry` is the
+    /// entry's declared name.
+    pub fn of_entry(owner: TypeName, entry: &str) -> Option<Self> {
+        if owner != type_name("kotlin/annotation/AnnotationRetention") {
+            return None;
+        }
+        Some(match entry {
+            "RUNTIME" => Self::Runtime,
+            "BINARY" => Self::Binary,
+            "SOURCE" => Self::Source,
+            _ => return None,
+        })
+    }
+}
+
 /// One frontend-checked annotation argument. Every classifier identity is resolved before this
 /// crosses into common lowering; backends only choose the physical encoding of the recorded value.
 #[derive(Clone, Debug, PartialEq)]

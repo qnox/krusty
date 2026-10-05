@@ -320,9 +320,9 @@ pub(in crate::resolve) fn compact_source_imports(
         .collect()
 }
 
-/// Publish an annotation classifier's source-declared retention/target policy from compact
-/// headers. The annotation argument arena stores only resolved-policy enum spellings and owns no
-/// ordinary expression or parser identity.
+/// Register each source annotation classifier from compact headers with the default retention.
+/// Its declared `@Retention` and `@Target` are published once the classifier-annotation pass has
+/// checked those applications.
 pub(in crate::resolve) fn collect_compact_annotation_policies(
     headers: &crate::fir::StreamedHeaderModule,
     table: &mut SymbolTable,
@@ -333,29 +333,11 @@ pub(in crate::resolve) fn collect_compact_annotation_policies(
                 .flags
                 .has(crate::fir::DeclarationFlags::ANNOTATION_CLASS)
     }) {
-        let source = stub.source.raw();
-        let retention = headers
-            .annotation_policy_applications(stub.id)
-            .iter()
-            .find_map(|application| {
-                table
-                    .resolved_annotations
-                    .get(&(source, application.annotation.lo, application.annotation.hi))
-                    .filter(|name| name.matches("kotlin/annotation/Retention"))?;
-                let argument = *headers
-                    .annotation_policy_arguments(application.arguments)
-                    .first()?;
-                match headers.lookup_names.get(argument)? {
-                    "RUNTIME" => Some(crate::types::AnnotationRetention::Runtime),
-                    "BINARY" => Some(crate::types::AnnotationRetention::Binary),
-                    "SOURCE" => Some(crate::types::AnnotationRetention::Source),
-                    _ => None,
-                }
-            })
-            .unwrap_or(crate::types::AnnotationRetention::Default);
         let (_, annotation) = compact_classifier_identity(headers, stub)
             .expect("a compact annotation classifier must retain its stable identity");
-        table.annotation_retentions.insert(annotation, retention);
+        table
+            .annotation_retentions
+            .insert(annotation, crate::types::AnnotationRetention::Default);
     }
 }
 
