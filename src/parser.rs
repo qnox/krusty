@@ -30,6 +30,7 @@ mod nesting;
 mod properties;
 mod return_labels;
 mod value_parameters;
+use declaration_modifiers::{function_flags, visibility_of};
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use file_features::apply_file_features;
 use lexical_type_parameters::LexicalTypeParameters;
@@ -787,6 +788,7 @@ struct Parser<'a> {
     /// obtaining its name, before parsing anything that could read another one. Kotlin diagnostics
     /// about a declaration as a whole point at its name rather than at its keyword.
     declaration_name_span: Span,
+    declaration_prefix: declaration_modifiers::PrefixInProgress,
     is_script: bool,
     script_stmts: Vec<StmtId>,
     /// Current expression-recursion depth (see [`Parser::parse_bp`]). Bounded by
@@ -904,6 +906,7 @@ impl<'a> Parser<'a> {
             pending_context_span: None,
             member_declaration_prefix: None,
             declaration_name_span: Span::new(0, 0),
+            declaration_prefix: Default::default(),
             is_script,
             script_stmts: Vec::new(),
             expr_depth: 0,
@@ -1153,6 +1156,8 @@ impl<'a> Parser<'a> {
         declaration.visibility = visibility_of(modifiers);
         let id = self.file.add_decl(Decl::Class(declaration));
         self.file.decls.insert(declaration_index, id);
+        self.file
+            .adopt_hoisted_classifiers(id, declaration_index + 1);
     }
 
     fn parse_file(&mut self) {
@@ -1202,6 +1207,8 @@ impl<'a> Parser<'a> {
             // `expect` points at the keyword, so it is captured here, while it is being consumed,
             // rather than searched for afterwards among the file's modifiers.
             let modifiers_before = self.file.multiplatform_modifiers.len();
+            let declaration_start = self.tok().span.lo;
+            self.begin_declaration_prefix();
             let mut mods = if self.at(TokenKind::At) || self.at_modifier() {
                 let m = self.skip_decl_prefix();
                 self.skip_newlines();
@@ -1214,6 +1221,7 @@ impl<'a> Parser<'a> {
             // modifier, `companion` may follow it (`context(_: A) companion fun C.f()`).
             mods.extend(self.maybe_parse_context_receivers());
             self.take_top_level_companion_modifier(&mut mods);
+            self.record_declaration_prefix(declaration_start);
             // A `sealed` class is implicitly abstract and open (subclasses live in the same module).
             let is_sealed = mods.iter().any(|m| m == "sealed");
             // `expect` (multiplatform header): whatever declaration the arm below pushes is
@@ -2203,6 +2211,7 @@ impl<'a> Parser<'a> {
         };
         let id = self.file.add_decl(Decl::Class(declaration));
         self.file.decls.insert(nested_start, id);
+        self.file.adopt_hoisted_classifiers(id, nested_start + 1);
         declaration_modifiers::record_nested_actual(&mut self.file, modifiers, id);
         debug_assert!(self.lexical_type_parameters.names().is_empty());
         self.lexical_type_parameters = enclosing_type_parameters;
@@ -2230,7 +2239,9 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
                 let declaration_start = self.tok().span.lo;
+                self.begin_declaration_prefix();
                 let epmods = self.skip_decl_prefix();
+                self.record_declaration_prefix(declaration_start);
                 let is_vararg = epmods.iter().any(|m| m == "vararg");
                 let is_property = self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar);
                 let is_var = self.at(TokenKind::KwVar);
@@ -2770,6 +2781,7 @@ impl<'a> Parser<'a> {
     fn parse_member_decl_prefix(&mut self) -> Vec<String> {
         let start = self.tok().span.lo;
         self.pending_context_params.clear();
+        self.begin_declaration_prefix();
         let mut modifiers = if self.at(TokenKind::At) || self.at_modifier() {
             let modifiers = self.skip_decl_prefix();
             self.skip_newlines();
@@ -2778,6 +2790,7 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         modifiers.extend(self.maybe_parse_context_receivers());
+        self.record_declaration_prefix(start);
         self.member_declaration_prefix = Some((start, self.i));
         modifiers
     }
@@ -3139,6 +3152,7 @@ impl<'a> Parser<'a> {
                 let mut pannos = Vec::new();
                 let mut pannos_args = Vec::new();
                 let mut cpmods = Vec::new();
+                self.begin_declaration_prefix();
                 if self.at(TokenKind::At)
                     || (self.at(TokenKind::Ident) && self.at_modifier() && self.text() != "value")
                 {
@@ -3146,6 +3160,7 @@ impl<'a> Parser<'a> {
                     pannos = self.take_pending_annotations();
                     pannos_args = self.take_pending_annotation_args();
                 }
+                self.record_declaration_prefix(declaration_start);
                 let is_vararg = cpmods.iter().any(|m| m == "vararg");
                 let (is_property, is_var) = match self.kind() {
                     TokenKind::KwVal => {
@@ -5246,48 +5261,6 @@ impl<'a> Parser<'a> {
 // ---- precedence ----
 const BP_CAST: u8 = 12;
 const BP_PREFIX: u8 = 13;
-
-/// The visibility a declaration's modifier list denotes — the first visibility keyword present, or
-/// `public` (Kotlin's default) when none is written.
-fn visibility_of(mods: &[String]) -> crate::types::Visibility {
-    mods.iter()
-        .find(|m| matches!(m.as_str(), "private" | "protected" | "internal" | "public"))
-        .map(|m| crate::types::Visibility::from_modifier(m))
-        .unwrap_or_default()
-}
-
-fn function_flags(modifiers: &[String]) -> FdFlags {
-    let mut flags = FdFlags::default();
-    let mut is_final = false;
-    let mut is_open = false;
-    for modifier in modifiers {
-        flags = match modifier.as_str() {
-            "inline" => flags.with_is_inline(true),
-            "final" => {
-                is_final = true;
-                flags.with_is_final(true)
-            }
-            "open" => {
-                is_open = true;
-                flags
-            }
-            "override" => {
-                is_open = true;
-                flags.with_is_override(true)
-            }
-            "abstract" => flags.with_is_abstract(true),
-            "suspend" => flags.with_is_suspend(true),
-            "tailrec" => flags.with_is_tailrec(true),
-            "operator" => flags.with_is_operator(true),
-            "infix" => flags.with_is_infix(true),
-            "companion" => flags.with_is_companion_extension(true),
-            "external" => flags.with_is_external(true),
-            "actual" => flags.with_is_actual(true),
-            _ => flags,
-        };
-    }
-    flags.with_is_open(is_open && !is_final)
-}
 
 /// Soft modifiers that don't change a declaration's *kind* (so krusty can ignore them). Excludes
 /// `data`/`enum`/`annotation`/`value`/`object`/`companion`/`inner`/`expect`/`actual`,

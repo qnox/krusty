@@ -63,3 +63,62 @@ fun box(): String {\n\
         "OK"
     );
 }
+
+const OPTIONAL: &str = "package model\n\
+\n\
+import kotlinx.serialization.KSerializer\n\
+import kotlinx.serialization.Serializable\n\
+import kotlinx.serialization.descriptors.SerialDescriptor\n\
+import kotlinx.serialization.encoding.Decoder\n\
+import kotlinx.serialization.encoding.Encoder\n\
+\n\
+@Serializable(with = OptionalSerializer::class)\n\
+sealed class Optional<out T> {\n\
+\x20   object Absent : Optional<Nothing>()\n\
+\n\
+\x20   data class Present<T>(val value: T) : Optional<T>()\n\
+}\n\
+\n\
+class OptionalSerializer<T>(private val dataSerializer: KSerializer<T>) : KSerializer<Optional<T>> {\n\
+\x20   override val descriptor: SerialDescriptor = dataSerializer.descriptor\n\
+\n\
+\x20   override fun serialize(encoder: Encoder, value: Optional<T>) {\n\
+\x20       when (value) {\n\
+\x20           is Optional.Absent -> error(\"absent\")\n\
+\x20           is Optional.Present -> encoder.encodeSerializableValue(dataSerializer, value.value)\n\
+\x20       }\n\
+\x20   }\n\
+\n\
+\x20   override fun deserialize(decoder: Decoder): Optional<T> =\n\
+\x20       Optional.Present(decoder.decodeSerializableValue(dataSerializer))\n\
+}\n";
+
+/// A sibling file's class whose `with =` names a serializer CLASS (one `KSerializer` constructor
+/// parameter per type parameter) is reached the way kotlinc reaches it: through the served class's
+/// generated `Companion.serializer(…)`, both as a collection element and as a direct property.
+/// Before the fix such an element was underivable and the whole module was rejected with the
+/// generic "this construct is not yet supported by the IR backend" error.
+#[test]
+fn a_sibling_custom_serializer_class_is_reached_through_the_companion() {
+    let main = "import kotlinx.serialization.Serializable\n\
+import kotlinx.serialization.json.Json\n\
+import model.Optional\n\
+\n\
+@Serializable\n\
+data class Patch(val fields: Map<String, Optional<String>>, val single: Optional<Int>)\n\
+\n\
+fun box(): String {\n\
+\x20   val patch = Patch(mapOf(\"a\" to Optional.Present(\"x\")), Optional.Present(3))\n\
+\x20   val json = Json.encodeToString(Patch.serializer(), patch)\n\
+\x20   val back = Json.decodeFromString(Patch.serializer(), json)\n\
+\x20   if (json != \"{\\\"fields\\\":{\\\"a\\\":\\\"x\\\"},\\\"single\\\":3}\") return \"FAIL: \" + json\n\
+\x20   return if (back == patch) \"OK\" else \"FAIL: \" + back\n\
+}\n";
+    assert_eq!(
+        both_compilers_box_files(
+            &[("Optional.kt", OPTIONAL), ("Main.kt", main)],
+            "sibling_generic_class"
+        ),
+        "OK"
+    );
+}

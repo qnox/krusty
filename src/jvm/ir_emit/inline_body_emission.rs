@@ -6,9 +6,10 @@ use crate::ir::{IrExpr, IrFile};
 use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
-use super::{ir_ty_to_jvm, Emitter};
+use super::local_variable_representation::slot_type;
+use super::Emitter;
 
-/// Map each declaration index reachable inside one body to its physical JVM type.
+/// Map each declaration index reachable inside one body to the JVM type of the slot it owns.
 ///
 /// Value indices restart for every body. A lambda construction belongs to the current body through
 /// its capture expressions, but its `inline_body` is a separate numbering domain and must not be
@@ -25,8 +26,10 @@ pub(super) fn collect_body_var_types(
         if !seen.insert(expression) {
             continue;
         }
+        // The slot the declaration owns, exactly as its emission enters it: a `Unit` declaration
+        // is a `kotlin/Unit` reference, and reading it pushes one operand.
         if let IrExpr::Variable { index, ty, .. } = ir.expr(expression) {
-            declarations.insert(*index, ir_ty_to_jvm(ty));
+            declarations.insert(*index, slot_type(ir, expression, *ty));
         }
         match ir.expr(expression) {
             IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
@@ -129,6 +132,24 @@ mod tests {
             collect_body_var_types(&ir, [nested_body]).get(&0),
             Some(&Ty::String),
             "the nested body owns its same-numbered declaration"
+        );
+    }
+
+    #[test]
+    fn a_unit_declaration_is_typed_as_the_reference_slot_it_owns() {
+        let mut ir = IrFile::default();
+        let unit = ir.add_expr(IrExpr::UnitInstance);
+        let declaration = ir.add_expr(IrExpr::Variable {
+            index: 0,
+            ty: Ty::Unit,
+            init: Some(unit),
+            named: false,
+        });
+
+        assert_eq!(
+            collect_body_var_types(&ir, [declaration]).get(&0),
+            Some(&Ty::obj("kotlin/Unit")),
+            "a read of the declaration pushes the reference its slot holds"
         );
     }
 

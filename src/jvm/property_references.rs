@@ -457,7 +457,7 @@ fn classifier_property(
             unboxed_receiver_value_class: None,
             getter_bridge_owner: None,
             setter_bridge_owner: None,
-            protected_reflection_getter: None,
+            reflection_getter: None,
             protected_bridge: None,
             protected_getter_bridge: None,
             protected_setter_bridge: None,
@@ -648,7 +648,7 @@ fn external_property(
             unboxed_receiver_value_class: None,
             getter_bridge_owner: None,
             setter_bridge_owner: None,
-            protected_reflection_getter: None,
+            reflection_getter: None,
             protected_bridge: None,
             protected_getter_bridge: None,
             protected_setter_bridge: None,
@@ -812,6 +812,13 @@ fn module_property(
             crate::jvm::names::method_descriptor(std::slice::from_ref(&receiver), property.ty)
         })
     };
+    let reflection_getter = access_bridge.then(|| {
+        let params = property.extension_receiver.into_iter().collect::<Vec<_>>();
+        (
+            declared_getter_name.clone(),
+            crate::jvm::names::method_descriptor(&params, property.ty),
+        )
+    });
     // `@JvmField` makes the declaration's storage its JVM surface. A compile-time constant instead
     // returns its semantic payload directly, matching kotlinc without choosing a field owner.
     let field = (getter_constant.is_none() && !access_bridge)
@@ -903,7 +910,7 @@ fn module_property(
             unboxed_receiver_value_class: None,
             getter_bridge_owner: None,
             setter_bridge_owner: None,
-            protected_reflection_getter: None,
+            reflection_getter,
             protected_bridge,
             protected_getter_bridge: None,
             protected_setter_bridge: None,
@@ -964,5 +971,133 @@ fn synthesize(
             ty: class,
             field: "INSTANCE",
         },
+    }
+}
+
+/// A private companion property is realized before its field moves to the outer class. Once that
+/// hoist (and any value-class carrier erasure) has happened, the reference calls
+/// `access$get<X>$cp` there, and a `var` calls `access$set<X>$cp` with the same physical value.
+/// Reflection still reports `get<X>` of that field type, including a nullable primitive carrier
+/// that stayed boxed.
+pub(crate) fn retarget_hoisted_companion_references(
+    ir: &mut IrFile,
+    realizations: &mut PropertyReferenceRealizations,
+) {
+    struct Retarget {
+        class_index: usize,
+        outer: TypeName,
+        getter_call: String,
+        getter_descriptor: String,
+        declared_getter: String,
+        setter_call: Option<String>,
+        physical: Ty,
+        value_class: Option<TypeName>,
+    }
+
+    let mut pending = Vec::new();
+    for (class_index, class) in ir.classes.iter().enumerate() {
+        if class.prop_ref.is_none() {
+            continue;
+        }
+        let Some(realization) = realizations.get(class.fq_name) else {
+            continue;
+        };
+        let Some(property) = realization.member_access_bridge else {
+            continue;
+        };
+        if ir
+            .checked_properties
+            .get(&property)
+            .is_some_and(|checked| checked.delegate.is_some())
+        {
+            continue;
+        }
+        let Some(IrLocalPropertyLayout::Member {
+            class: companion,
+            property: property_index,
+            ..
+        }) = ir.local_property_layouts.get(&property)
+        else {
+            continue;
+        };
+        let Some(companion_class) = ir.classes.get(*companion as usize) else {
+            continue;
+        };
+        if !companion_class.is_companion {
+            continue;
+        }
+        let Some(static_index) =
+            ir.jvm_companion_property_static(companion_class.fq_name, *property_index)
+        else {
+            continue;
+        };
+        if !ir.is_jvm_companion_hoisted_static(static_index) || ir.is_jvm_field_static(static_index)
+        {
+            continue;
+        }
+        let storage = &ir.statics[static_index as usize];
+        let Some(outer) = storage.owner else {
+            continue;
+        };
+        let physical = storage.ty;
+        let declared_getter = realization.declared_getter_name.clone();
+        let getter_descriptor = format!("(){}", crate::jvm::names::type_descriptor(physical));
+        let setter_call = realization
+            .declared_setter_name
+            .clone()
+            .map(|name| format!("access${name}$cp"));
+        pending.push(Retarget {
+            class_index,
+            outer,
+            getter_call: format!("access${declared_getter}$cp"),
+            getter_descriptor,
+            declared_getter,
+            setter_call,
+            physical,
+            // A field that is already the value class is the boxed nullable carrier (`I?`).
+            // Recording it as a carrier would unbox the bridge argument to the underlying primitive.
+            value_class: storage
+                .erased_declared_ty
+                .and_then(|original| original.non_null().obj_internal())
+                .filter(|value_class| physical.non_null().obj_internal() != Some(*value_class)),
+        });
+    }
+
+    for update in pending {
+        let reference_name = ir.classes[update.class_index].fq_name;
+        let Some(realization) = realizations.get_mut(reference_name) else {
+            continue;
+        };
+        let setter_descriptor = update
+            .setter_call
+            .as_ref()
+            .map(|_| format!("({})V", crate::jvm::names::type_descriptor(update.physical)));
+        realization.physical_getter_ret = Some(update.physical);
+        realization.getter_bridge_owner = Some(update.outer);
+        realization.reflection_getter =
+            Some((update.declared_getter, update.getter_descriptor.clone()));
+        realization.getter_field = None;
+        realization.setter_field = None;
+        realization.member_access_bridge = None;
+        realization.accessor_names_are_physical = true;
+        if update.setter_call.is_some() {
+            realization.physical_setter_value = Some(update.physical);
+            realization.setter_bridge_owner = Some(update.outer);
+        }
+        // The value-class pass may already have marked this reference for unboxing. A nullable
+        // primitive carrier is stored as the box, so that mark has to be cleared with the retarget.
+        realization.boxed_value_class = update.value_class;
+        let reference = ir.classes[update.class_index]
+            .prop_ref
+            .as_mut()
+            .expect("the scan only queued classes that have a property reference");
+        reference.call_owner_internal = Some(update.outer);
+        reference.getter_name = update.getter_call;
+        reference.getter_descriptor = Some(update.getter_descriptor);
+        reference.ext_facade = None;
+        if let Some(setter_call) = update.setter_call {
+            reference.setter_name = Some(setter_call);
+            reference.setter_descriptor = setter_descriptor;
+        }
     }
 }

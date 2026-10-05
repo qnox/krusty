@@ -63,7 +63,7 @@ impl JvmLibraries {
         let mut property = properties.pop()?;
         property.associated_classifier = Some(internal);
         property.associated_access_owner = Some(internal);
-        self.register_external_property(&mut property);
+        self.register_external_property(&mut property, None);
         Some(property)
     }
 
@@ -224,6 +224,7 @@ impl JvmLibraries {
         declaration.external_identity = Some(self.cp.intern_external_callable(
             &declaration,
             crate::libraries::ExternalCallableKind::StaticFieldRead,
+            None,
         ));
         field.external_identity = declaration.external_identity;
     }
@@ -263,7 +264,7 @@ impl JvmLibraries {
             producer: crate::libraries::PropertyProducer::Field,
             read_stability: crate::libraries::PropertyReadStability::Unstable,
         };
-        self.register_external_property(&mut property);
+        self.register_external_property(&mut property, None);
         Some(property)
     }
 
@@ -302,6 +303,7 @@ impl JvmLibraries {
             setter.external_identity = Some(self.cp.intern_external_callable(
                 &setter,
                 crate::libraries::ExternalCallableKind::StaticFieldWrite,
+                None,
             ));
             setter
         });

@@ -17,6 +17,9 @@ use super::*;
 mod lambda_node;
 mod lambda_route;
 mod regenerated_objects;
+use crate::jvm::bytecode_passes::coroutines::markers::{
+    is_after_inline_marker, is_before_inline_marker,
+};
 use crate::jvm::inliner::{self, Binding, InlineError, Parameter, Parameters};
 use crate::jvm::method_node::{
     encode_instruction, is_terminal, stack_shapes, word_delta, Category, Insn, MethodNode, Node,
@@ -370,9 +373,6 @@ impl Emitter<'_> {
             crate::trace_compiler!("splice", "unified inliner declines {shape:?}");
             return None;
         }
-        if inliner::requires_empty_stack_on_entry(&callee) && code.stack_height() != 0 {
-            return None;
-        }
         let physical = parse_descriptor_params(target.splice_desc)?;
         if physical.len() != args.len() {
             return None;
@@ -671,7 +671,27 @@ impl Emitter<'_> {
             in_place,
             origins: &origins,
         };
+        // kotlinc's `inlineCall`: a body with a loop or a try/catch (`requiresEmptyStackOnEntry`)
+        // is bracketed by `beforeInlineCall`/`afterInlineCall`, and FixStack saves whatever the
+        // caller already pushed into locals there, when the class is written. kotlinc brackets
+        // every such body; around an empty stack FixStack only removes the markers, so they are
+        // written where there is something to save.
+        let spills_operands =
+            inliner::requires_empty_stack_on_entry(callee) && code.stack_height() != 0;
+        if spills_operands {
+            crate::trace_compiler!(
+                "splice",
+                "{}.{} saves {} operand word(s) around its body",
+                target.owner,
+                target.name,
+                code.stack_height()
+            );
+            code.inline_call_marker(true);
+        }
         self.write_inlined_node(&inlined, placement, code);
+        if spills_operands {
+            code.inline_call_marker(false);
+        }
         // kotlinc's `markLineNumberAfterInlineIfNeeded`: inside a condition the caller's line is
         // marked again for the jump that follows; elsewhere it is forgotten, so the next mark of
         // any line is written.
@@ -771,7 +791,11 @@ impl Emitter<'_> {
             && !args.is_empty()
             && !args.iter().any(|&argument| function_typed(argument))
             && inliner::can_inline_arguments_in_place(callee)
-            && in_place_arguments::arguments_movable(self.ir, args);
+            && in_place_arguments::arguments_movable(self.ir, args, &|construction| {
+                !self
+                    .sam_wrapper_realizations
+                    .is_nullable_construction(construction)
+            });
         let mut supplies = Vec::with_capacity(args.len());
         for (index, &argument) in args.iter().enumerate() {
             let evaluated = if in_place {
@@ -779,6 +803,12 @@ impl Emitter<'_> {
             } else {
                 Supply::Stored
             };
+            // kotlinc never stores an inline suspend callee's continuation: the body reads the
+            // caller's own continuation local, as every suspension point in the caller does.
+            if self.reads_continuation_local(argument) {
+                supplies.push(Supply::CallerLocal);
+                continue;
+            }
             let local = matches!(self.ir.expr(argument), IrExpr::GetValue(v)
                 if self.slots.contains_key(v))
                 && self.local_needs_no_boxing(argument, physical[index]);
@@ -839,9 +869,27 @@ impl Emitter<'_> {
         local.scalar_value_repr().is_none() && parameter.scalar_value_repr().is_none()
     }
 
+    /// Whether `argument` is the continuation this emission reads from its own local, rather than
+    /// a fake continuation or one the CPS pass bound to a value.
+    fn reads_continuation_local(&self, argument: u32) -> bool {
+        matches!(self.ir.expr(argument), IrExpr::CurrentContinuation)
+            && self.continuation_slot.is_some()
+            && !self.is_fake_continuation(argument)
+    }
+
     /// The caller local an argument is read from, coerced to the parameter's class as kotlinc's
     /// `StackValue.coerce` does between two reference types.
     fn caller_local_binding(&self, argument: u32, parameter: Ty) -> Binding {
+        if self.reads_continuation_local(argument) {
+            let slot = self
+                .continuation_slot
+                .expect("a continuation read binds the continuation slot");
+            return Binding::CallerLocal {
+                slot,
+                category: Category::Reference,
+                checkcast: None,
+            };
+        }
         let IrExpr::GetValue(value) = self.ir.expr(argument) else {
             unreachable!("a caller-local argument is a local read");
         };
@@ -915,6 +963,18 @@ impl Emitter<'_> {
         }
         let mut top_local = 0u16;
         let mut duplicating: Option<(u8, u16)> = None;
+        // The expanded lambdas' `beforeInlineCall`/`afterInlineCall` brackets that are written:
+        // those with operands to save, the caller's or the body's own. FixStack stores them into
+        // locals when the class is written, so inside a written bracket the stack holds only what
+        // the lambda pushes, as `stack_shapes` follows it.
+        let mut brackets: Vec<bool> = Vec::new();
+        let under = |brackets: &[bool]| {
+            if brackets.contains(&true) {
+                0
+            } else {
+                baseline
+            }
+        };
         for (at, node) in inlined.nodes.iter().enumerate() {
             match node {
                 Node::Label(label) => {
@@ -922,17 +982,35 @@ impl Emitter<'_> {
                     match &shapes[at] {
                         Some(stack) if code.is_dead() => {
                             code.bind_external_target(caller);
-                            code.set_stack_height(baseline + words(stack));
+                            code.set_stack_height(under(&brackets) + words(stack));
                         }
                         Some(stack) => {
                             code.bind(caller);
-                            code.set_stack_height(baseline + words(stack));
+                            code.set_stack_height(under(&brackets) + words(stack));
                         }
                         None => code.bind(caller),
                     }
                     bound_at[label.index()] = Some(code.bytes.len());
                 }
                 Node::Line { line, .. } => code.inlined_line(*line),
+                Node::Insn(_) if is_before_inline_marker(node) => {
+                    let saves = shapes[at]
+                        .as_ref()
+                        .is_some_and(|stack| under(&brackets) + words(stack) > 0);
+                    if saves {
+                        code.inline_call_marker(true);
+                        code.set_stack_height(0);
+                    }
+                    brackets.push(saves);
+                }
+                Node::Insn(_) if is_after_inline_marker(node) => {
+                    if brackets.pop().unwrap_or(false) {
+                        code.inline_call_marker(false);
+                        if let Some(stack) = shapes.get(at + 1).cloned().flatten() {
+                            code.set_stack_height(under(&brackets) + words(&stack));
+                        }
+                    }
+                }
                 Node::Insn(insn) => {
                     if let Insn::Var { op, slot } = insn {
                         top_local = top_local.max(slot + var_words(*op));

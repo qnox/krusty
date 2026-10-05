@@ -805,6 +805,10 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
         "the expanded corpus cache must not reuse the immutable box-only key"
     );
     assert!(
+        workflow.contains("box-corpus-mock-jdk-${{ matrix.version }}-"),
+        "the box corpus cache must not reuse an immutable key from before its mock JDK input"
+    );
+    assert!(
         workflow.contains("recorded-kotlinc-bytes-conformance-${{ matrix.version }}-"),
         "recorded kotlinc bytes must be isolated by matrix version"
     );

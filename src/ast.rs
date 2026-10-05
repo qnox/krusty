@@ -13,7 +13,9 @@ pub(crate) use return_labels::ReturnLabelSpans;
 use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
 
 mod call_shape;
+mod classifier_owners;
 mod constructors;
+mod declaration_prefixes;
 pub(crate) mod definitely_evaluated;
 mod destructuring;
 mod operators;
@@ -21,6 +23,7 @@ mod type_refs;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
+pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use operators::{BinOp, UnOp};
 
@@ -1593,6 +1596,8 @@ pub struct File {
     /// included, since the two are legal only in a multiplatform project and the diagnostic points
     /// at the keyword rather than at the declaration it precedes.
     pub multiplatform_modifiers: Vec<(String, crate::diag::Span)>,
+    /// Each top-level or member declaration's modifier list, as written.
+    pub declaration_prefixes: DeclarationPrefixes,
     pub decl_arena: Vec<Decl>,
     pub expr_arena: Vec<Expr>,
     pub stmt_arena: Vec<Stmt>,
@@ -1724,6 +1729,8 @@ pub struct File {
     /// Written simple name of each parser-hoisted nested classifier. Ownership is carried by
     /// declaration identities separately; consumers never split the hoisted qualified spelling.
     pub hoisted_classifier_source_names: std::collections::HashMap<DeclId, String>,
+    /// Lexical owner of each classifier hoisted out of a classifier body (see `classifier_owners`).
+    pub(crate) hoisted_classifier_owners: std::collections::HashMap<DeclId, DeclId>,
     /// Explicit parameter type annotations on a lambda literal (`{ x: Int, y -> … }`), keyed by the
     /// lambda's `ExprId`, parallel to its `params`. `None` for an unannotated parameter. Lets the
     /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
@@ -1935,6 +1942,7 @@ impl File {
         self.local_class_lexical_classifier_owners = Default::default();
         self.local_class_nested = Default::default();
         self.hoisted_classifier_source_names = Default::default();
+        self.hoisted_classifier_owners = Default::default();
         self.lambda_param_types = Default::default();
         self.lambda_param_spans = Default::default();
         self.lambda_parameter_roles = Default::default();
@@ -2021,6 +2029,7 @@ impl File {
         let id = self.add_decl(Decl::Class(classifier));
         self.decls.insert(position, id);
         self.hoisted_classifier_source_names.insert(id, source_name);
+        self.adopt_hoisted_classifiers(id, position + 1);
         id
     }
 

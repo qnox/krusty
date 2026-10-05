@@ -432,11 +432,7 @@ fn first_error_module(
                 cp_paths.push(j.to_path_buf());
             }
             // Dependency-class dirs are unique per test — a fresh Classpath, not the shared cache.
-            let cp = Rc::new(Classpath::new_with_friend_paths_and_jdk_release(
-                cp_paths,
-                friend_paths,
-                Some(8),
-            ));
+            let cp = Rc::new(Classpath::new_with_friend_paths(cp_paths, friend_paths));
             // A later module resolves this unit through its emitted classpath. Only those dependency
             // units need backend output during a frontend survey; the terminal unit stops after
             // checking. If a dependency cannot be emitted, the frontend survey cannot inspect its
@@ -749,7 +745,7 @@ enum SurveyOutcome {
 
 fn survey_file(
     file: &Path,
-    jdk_modules: Option<&Path>,
+    jdk_roots: &krusty::conformance::BoxJdkRoots,
     frontend_only: bool,
     common_lowering_only: bool,
     cp_cache: &mut HashMap<Vec<PathBuf>, Rc<Classpath>>,
@@ -784,6 +780,8 @@ fn survey_file(
     }
     let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("File");
     let base_jars = krusty::toolchain::classpath_jars_for(&src);
+    let jdk = jdk_roots.select(&src);
+    let jdk_modules = jdk.classpath_root();
     let compilation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if src.contains("// MODULE:") {
             first_error_module(
@@ -800,7 +798,7 @@ fn survey_file(
             }
             let cp = cp_cache
                 .entry(cp_paths.clone())
-                .or_insert_with(|| Rc::new(Classpath::new_with_jdk_release(cp_paths, 8)))
+                .or_insert_with(|| Rc::new(Classpath::new(cp_paths)))
                 .clone();
             if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
                 let (mut blocks, java_blocks) = krusty::conformance::split_files(&src);
@@ -848,6 +846,7 @@ fn survey_file(
                 &src,
                 stem,
                 &base_jars,
+                jdk,
                 COROUTINE_HELPERS,
             ) {
                 krusty::conformance::ReferenceJvmAcceptance::Rejected => {
@@ -1073,11 +1072,14 @@ fn run() {
         run_parse_only(files, only_file.is_some(), report_path);
         return;
     }
-    // Kotlin's codegen corpus is compiled against its Java 8 mock-JDK surface. Resolve the same
-    // public API from the selected host JDK's `ct.sym`; reading `lib/modules` here makes results
-    // host-version dependent (for example JDK 21's `List.getLast()` changes Kotlin member
-    // precedence in old corpus sources). An explicit survey bootclasspath remains authoritative.
-    let jdk_modules = krusty::toolchain::jdk_symbols().or_else(krusty::toolchain::jdk_modules);
+    // Kotlin's codegen corpus compiles against JetBrains' mock JDK unless a test declares
+    // `// FULL_JDK`; the gate selects through the same `BoxJdkRoots`. Reading the host JDK for every
+    // test would make results host-version dependent (JDK 21's `List.getLast()` changes Kotlin
+    // member precedence in old corpus sources).
+    let mock_jdk = krusty::toolchain::box_mock_jdk_rt_jar(Path::new(&box_dir))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let jdk_roots =
+        krusty::conformance::BoxJdkRoots::new(mock_jdk, krusty::toolchain::jdk_modules());
     let jobs = std::env::var("KRUSTY_SURVEY_JOBS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -1132,7 +1134,7 @@ fn run() {
             let results = &results;
             let completed = Arc::clone(&completed);
             let active = Arc::clone(&active);
-            let jdk_modules = jdk_modules.as_deref();
+            let jdk_roots = &jdk_roots;
             workers.push(
                 std::thread::Builder::new()
                     .name(format!("survey-{worker}"))
@@ -1148,7 +1150,7 @@ fn run() {
                                 Some(file.to_string_lossy().into_owned());
                             let outcome = survey_file(
                                 file,
-                                jdk_modules,
+                                jdk_roots,
                                 frontend_only,
                                 common_lowering_only,
                                 &mut cp_cache,
@@ -1328,14 +1330,13 @@ mod tests {
             )
         );
         assert_eq!(frontend_census_error(&blocks, &[], 1, &cp, &features), None);
-        let platform_error = frontend_census_error(&blocks, &[], 0, &cp, &features);
-        assert!(
-            platform_error
-                .as_deref()
-                .is_some_and(|error| {
-                    error.contains("unresolved reference") && error.contains("JsStatic")
-                }),
-            "a target-less optional expectation must not leak into an ordinary JVM source: {platform_error:?}"
+        assert_eq!(
+            frontend_census_error(&blocks, &[], 0, &cp, &features).as_deref(),
+            Some(
+                "check: Rejected: Common:1:36: declaration annotated with '@OptionalExpectation' \
+                 can only be used in common module sources."
+            ),
+            "an optional expectation is rejected in an ordinary JVM source"
         );
     }
 
