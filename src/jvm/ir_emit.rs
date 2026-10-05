@@ -7025,14 +7025,25 @@ impl<'a> Emitter<'a> {
             splice_desc,
             inline_only,
             allow_owner_bridge,
+            for_inline_copy,
         } = target;
         crate::trace_compiler!(
             "splice",
             "inline target {owner}.{name}{descriptor} splice_descriptor={splice_desc} args={}",
             args.len()
         );
-        let Some(body) = self.bodies.body(owner, name, descriptor) else {
-            crate::trace_compiler!("splice", "no body for {owner}.{name}{descriptor}");
+        // Only a callable suspend inline function's `$$forInline` copy is spliced: its `name` body
+        // is already the callee's own state machine. Without the copy the call declines (a
+        // must-inline one bails), never splicing that machine.
+        let for_inline;
+        let body_name = if for_inline_copy {
+            for_inline = format!("{name}$$forInline");
+            for_inline.as_str()
+        } else {
+            name
+        };
+        let Some(body) = self.bodies.body(owner, body_name, descriptor) else {
+            crate::trace_compiler!("splice", "no body for {owner}.{body_name}{descriptor}");
             return false;
         };
         // A body that references a PRIVATE member (its own facade's helper or backing field) runs
@@ -7162,8 +7173,11 @@ impl<'a> Emitter<'a> {
             IrExpr::Block { stmts, value } => self.emit_statement_block(e, stmts, value, code),
             IrExpr::Return(value) => self.emit_return_node(e, value, code),
             IrExpr::Variable {
-                index, ty, init, ..
-            } => self.emit_local_variable(e, index, ty, init, code),
+                index,
+                ty,
+                init,
+                named,
+            } => self.emit_local_variable(e, index, ty, init, named, code),
             IrExpr::InlineFrameMarker => self.emit_inline_frame_marker(e, code),
             IrExpr::SetValue { var, value } => {
                 let Some(&(slot, jt)) = self.slots.get(&var) else {
