@@ -19,6 +19,13 @@ pub(super) fn add_abstract(
         declared_method_signature(formatter, ir, override_results, function).as_deref(),
     );
     emit_recorded(ir, cw, function, &declaration.name, &descriptor);
+    // An abstract method still carries kotlinc's nullability annotations, in an interface, an
+    // abstract class and an enum alike.
+    let (result, params) =
+        crate::jvm::abstract_method_nullability::annotations(ir, function, declaration);
+    if result.is_some() || params.iter().any(Option::is_some) {
+        cw.set_method_nullability(&declaration.name, &descriptor, result, &params);
+    }
     descriptor
 }
 
