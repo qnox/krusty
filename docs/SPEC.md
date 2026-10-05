@@ -11425,8 +11425,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter is boxed to the shared implementation's erased parameter when the closure is built.
   A cell whose implementation parameter already uses the same holder stays there. That includes a
   primitive `var` an inlined lambda splices and a value-class `var` whose non-inline lambda was
-  specialized to `Ref$IntRef` or `Ref$ByteRef`. Two implementations that require different holders
-  do not collapse the cell onto one of them. Test: `tests/inline_erased_capture_e2e.rs`.
+  specialized to `Ref$IntRef` or `Ref$ByteRef`. If two implementations initially require different
+  holders for one mutable cell, the specialized capture parameter and its accesses are retargeted
+  to the shared erased holder too. Test: `tests/inline_erased_capture_e2e.rs`.
 
 - **Inner-class outer access**: an inner method reads an enclosing-instance member through `this$0`
   (field 0) via the outer's synthesized getter (`this.this$0.getX()`) — the outer backing field is
