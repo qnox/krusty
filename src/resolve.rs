@@ -25657,11 +25657,15 @@ mod tests {
     #[test]
     fn value_class_constructor_keeps_its_semantic_array_parameter() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "value class UIntArray(private val storage: IntArray) { val size get() = storage.size }",
+        let jvm_annotations = parse_file(
+            "package kotlin.jvm\nannotation class JvmInline",
             &mut diagnostics,
         );
-        let symbols = collect_signatures(&[file], &mut diagnostics);
+        let file = parse_file(
+            "@JvmInline value class UIntArray(private val storage: IntArray) { val size get() = storage.size }",
+            &mut diagnostics,
+        );
+        let symbols = collect_signatures(&[jvm_annotations, file], &mut diagnostics);
 
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         let class = symbols
@@ -26460,12 +26464,15 @@ val result = object { fun value(): String = captured }
         let mut diagnostics = DiagSink::new();
         let kotlin_annotations = parse_file(
             "package kotlin\n\
-             annotation class Suppress(vararg val names: String)\n\
-             annotation class JvmInline",
+             annotation class Suppress(vararg val names: String)",
             &mut diagnostics,
         );
         let exact_annotation = parse_file(
             "package kotlin.internal\nannotation class Exact",
+            &mut diagnostics,
+        );
+        let jvm_annotations = parse_file(
+            "package kotlin.jvm\nannotation class JvmInline",
             &mut diagnostics,
         );
         let file = if detected_features {
@@ -26473,9 +26480,9 @@ val result = object { fun value(): String = captured }
         } else {
             parse_file(src, &mut diagnostics)
         };
-        let files = vec![kotlin_annotations, exact_annotation, file];
+        let files = vec![kotlin_annotations, exact_annotation, jvm_annotations, file];
         let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[2], &mut symbols, &mut diagnostics);
+        let info = check_file(&files[3], &mut symbols, &mut diagnostics);
         let errors = diagnostics
             .diags
             .iter()

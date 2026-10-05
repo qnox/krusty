@@ -2075,6 +2075,7 @@ fn qualified_alias_of_body_local_class_remains_pass_two_lexical_state() {
 #[test]
 fn compact_constructor_completion_preserves_integer_literal_bound_adaptation() {
     let source = "// LANGUAGE: +GenericInlineClassParameter\n\
+                  @JvmInline\n\
                   value class Bound<T : Long>(val value: T)\n\
                   val inferred = Bound(0)\n\
                   fun accept(value: Bound<Long>): Long = value.value\n\
@@ -2083,7 +2084,11 @@ fn compact_constructor_completion_preserves_integer_literal_bound_adaptation() {
                       accept(Bound(0))\n\
                       return \"OK\"\n\
                   }\n";
-    let inputs = [SourceInput::kotlin(source).with_file_stem("ConstructorLiteralBound")];
+    let inputs = [
+        SourceInput::kotlin("package kotlin.jvm\nannotation class JvmInline")
+            .with_file_stem("JvmInline"),
+        SourceInput::kotlin(source).with_file_stem("ConstructorLiteralBound"),
+    ];
     let features = LangFeatures::from_source(source);
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
