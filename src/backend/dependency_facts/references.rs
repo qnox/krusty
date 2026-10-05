@@ -40,6 +40,16 @@ pub(crate) fn referenced_dependencies(ir: &IrFile) -> ReferencedDependencies {
         referenced.property_override(edge.implementation);
         referenced.property_override(edge.overridden);
     }
+    for default in ir.inherited_defaults.values().flatten() {
+        match default.body {
+            crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration)
+            | crate::fir::InheritedDefaultBody::DependencyHolder(declaration) => {
+                referenced.callables.insert(declaration);
+            }
+            crate::fir::InheritedDefaultBody::Module
+            | crate::fir::InheritedDefaultBody::JavaDefaultMethod => {}
+        }
+    }
     for plan in ir
         .checked_properties
         .values()

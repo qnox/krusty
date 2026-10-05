@@ -151,6 +151,7 @@ impl Emitter<'_> {
             })
         });
         if let Some((to, arg, type_operand, internal)) = inst_fuse {
+            let arg = self.instance_check_operand(arg);
             let (physical_arg, semantic_arg) = self.emit_type_op_operand(arg, code);
             // `instanceof` takes a REFERENCE. A scalar operand is boxed first, exactly as the
             // unfused emit above does it — `if (n is Number)` where `n` is an `Int` reached here

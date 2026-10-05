@@ -26,6 +26,7 @@ pub(super) fn derive_bridges(
     callables: &crate::backend::CheckedBackendCallables,
     override_results: &crate::jvm::override_results::OverrideResults,
     argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
+    jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
         // Source-declared classes, declaration-owned enum-entry subclasses, and anonymous classes
@@ -48,6 +49,16 @@ pub(super) fn derive_bridges(
             &mut order,
         )?;
         property_bridges(ir, cid, classpath, callables, override_results, &mut order)?;
+        // A forwarder a specializing supertype types is not a declaration: its erased bridge
+        // follows the class's own members' bridges.
+        let inherited = crate::jvm::inherited_default_realization::inherited_default_bridges(
+            ir,
+            cid,
+            callables,
+            jvm_default,
+        );
+        order.extend(std::iter::repeat_n(u32::MAX, inherited.len()));
+        ir.classes[cid].bridges.extend(inherited);
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
     Ok(())
