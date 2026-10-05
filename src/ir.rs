@@ -47,9 +47,7 @@ mod fields;
 mod function_scope;
 mod inline_copies;
 mod suspension_points;
-pub use suspension_points::{
-    IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint, IrValueClassSuspendResult,
-};
+pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
 mod intrinsic;
 mod jvm_static_realization;
 mod lambda_classes;
@@ -62,6 +60,7 @@ pub(crate) use local_delegates::{
 };
 mod local_property_references;
 mod module_records;
+mod negations;
 mod null_checks;
 mod operators;
 mod overrides;
@@ -101,7 +100,7 @@ pub use constructors::{
     IrCapturedReceiver, IrConstructorCapture, IrCtorParameterProvenance,
     IrJvmValueClassSecondaryCtor,
 };
-pub use constructors::{IrConstructorAccess, IrConstructorTarget};
+pub use constructors::{IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction};
 pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
@@ -118,7 +117,7 @@ pub use module_records::{
 };
 pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
-pub use overrides::{is_kotlin_primitive, IrFunctionOverride, IrPropertyOverride};
+pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{
     IrEntryPoint, IrPackageFunction, IrPackageProperty, IrPackageTypeParameter, MainEntryParameters,
 };
@@ -508,6 +507,13 @@ pub enum IrExpr {
     /// `break` — exit the innermost enclosing loop, or the loop carrying `label` (`break@outer`).
     Break {
         label: Option<String>,
+    },
+    /// Store `value` as the result of the enclosing inline-return frame `frame`, from a lambda body
+    /// nested inside it. That body numbers its values separately, so it names the frame, never the
+    /// frame's result value. See [`IrFile::inline_return_frames`].
+    SetFrameResult {
+        frame: String,
+        value: ExprId,
     },
     /// `continue` — jump to the innermost enclosing loop's `update`/condition (or the labeled loop's).
     Continue {
@@ -1118,10 +1124,10 @@ pub struct IrClass {
     /// `valueOf(String)`. Each [`IrEnumEntry`] carries its name, lowered constructor args, and optional
     /// synthesized-subclass fq name.
     pub enum_entries: Vec<IrEnumEntry>,
-    /// `Some(user_field_types)` marks this class as a synthesized enum-entry subclass: it extends the
-    /// enum (`superclass`), has no own fields, and its constructor is `(String name, int ordinal,
-    /// <user_field_types>)V` delegating to the enum's `(String,int,<user>)V` constructor.
-    pub enum_entry_of: Option<Vec<Ty>>,
+    /// Marks this class as the subclass an enum constant with a body is an instance of. It extends
+    /// the enum (`superclass`), declares no constructor parameters of its own, and its primary
+    /// constructor's superclass call (`super_args`) carries the constant's arguments.
+    pub is_enum_entry: bool,
     /// `Some(..)` marks this class as a synthesized property-reference singleton: a `final class
     /// extends kotlin/jvm/internal/PropertyReference1Impl` (the `superclass`) with a `public static
     /// final INSTANCE`, a constructor `super(owner.class, name, signature, 0)`, and a `get(Object)
@@ -1178,7 +1184,8 @@ pub struct IrClass {
     /// `@Target` admits `PROPERTY`), by property name. Kotlin properties have no class-file
     /// declaration, so these are emitted onto a synthetic `get<Name>$annotations()` marker method
     /// that the property's `JvmPropertySignature` names. Empty for a class whose properties carry
-    /// none.
+    /// none. The marker pass consumes every entry that retains an annotation; an entry left after
+    /// it records only erased optional expectations, which reach `@Metadata` as a flag alone.
     pub property_annotations: Vec<PropertyAnnotations>,
     /// User annotations declared on the PRIMARY constructor (`class C @Mark constructor(…)`) — the
     /// primary-`<init>` analogue of [`IrSecondaryCtor::annotations`], carrying retention per
@@ -1255,7 +1262,7 @@ impl IrClass {
             super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
             is_enum: false,
             enum_entries: Vec::new(),
-            enum_entry_of: None,
+            is_enum_entry: false,
             prop_ref: None,
             func_ref: None,
             lambda: None,
@@ -1374,7 +1381,7 @@ impl IrClass {
             super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
             is_enum: flags.has(crate::fir::DeclarationFlags::ENUM),
             enum_entries: Vec::new(),
-            enum_entry_of: None,
+            is_enum_entry: false,
             prop_ref: None,
             func_ref: None,
             lambda: None,
@@ -1565,6 +1572,14 @@ pub struct IrSpecializedAnonymousClass {
     /// Later materialization appends backing fields and accessors past these prefixes.
     pub field_count: u32,
     pub property_count: u32,
+    /// Property reads and writes in the inlined caller whose receiver is this copy's construction.
+    /// Accessor functions are not available when the construction is retargeted, so the read is
+    /// rebound once the copy's properties exist.
+    pub caller_property_uses: Vec<ExprId>,
+    /// Cloned property initializer and accessor roots. Accessor functions do not exist yet, and
+    /// these roots are not constructor statements. Nested specialization walks this field;
+    /// [`IrClass::init_body`] stays the constructor body.
+    pub pending_property_roots: Vec<ExprId>,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
@@ -1627,6 +1642,10 @@ pub struct IrFile {
     /// Common resolution records the path distinction before flattening the complete hierarchy;
     /// target emitters consume it without reopening a classifier provider.
     pub superclass_interfaces: std::collections::HashMap<TypeName, Vec<TypeName>>,
+    /// The frontend-selected custom serializer construction of each source classifier whose
+    /// `@Serializable(with = …)` names a serializer class, keyed by that classifier.
+    pub custom_serializer_constructions:
+        std::collections::HashMap<TypeName, IrCustomSerializerConstruction>,
     /// Exact semantic property-override edges copied from stable FIR. A target backend may erase
     /// these types and materialize representation bridges, but it must not search declarations.
     pub property_overrides: std::collections::HashMap<TypeName, Vec<IrPropertyOverride>>,
@@ -1694,6 +1713,12 @@ pub struct IrFile {
     /// never searches the constructor IR for a matching field assignment.
     pub checked_interface_delegation_initializers:
         std::collections::HashSet<(crate::fir::DeclarationId, u32)>,
+    /// `(classifier declaration, interface-delegation ordinal)` to the calls its forwarders make on
+    /// the delegate value, published by the checked constructor body that evaluates it.
+    pub checked_interface_delegate_calls: std::collections::HashMap<
+        (crate::fir::DeclarationId, u32),
+        Box<[crate::fir::ResolvedDelegateMemberCalls]>,
+    >,
     /// Stable enum-entry declaration to its compiler-generated common-IR subclass. The entry keeps
     /// the enum classifier as its semantic receiver in FIR; this transient edge only owns where its
     /// declared methods/properties are physically attached in the active file.
@@ -1821,6 +1846,12 @@ pub struct IrFile {
     /// ordinary backend-neutral `IrExpr::Return`; inline expansion consumes/decrements this fact as
     /// lambda bodies cross lexical boundaries, so no source label or AST identity survives.
     pub checked_return_depths: std::collections::HashMap<ExprId, u32>,
+    /// The result declaration of each inline-return frame, by the frame's label. An inline
+    /// expansion's returns leave through `break` to that label after storing their value. A return
+    /// in the expansion's own body stores it by the declaration's value index; one in a lambda body
+    /// nested in it writes [`IrExpr::SetFrameResult`], which every renumbering of either body
+    /// leaves pointing at the same frame.
+    pub inline_return_frames: std::collections::HashMap<ExprId, String>,
     /// Sparse construction facts keyed by the ordinary [`IrExpr::New`] identity. Common lowering
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
     /// must realize annotation instances through a platform-specific implementation class.
@@ -1921,6 +1952,8 @@ pub struct IrFile {
     /// source update has (kotlinc's `index = index + 1` in `WithIndexLoopHeader`). A target emits
     /// them as the plain arithmetic and store they are, never as a fused increment.
     pub plain_updates: std::collections::HashSet<ExprId>,
+    /// Boolean negations (kotlinc's `not`), spelled as `operand == false`; see `negations`.
+    pub negations: std::collections::HashSet<ExprId>,
     /// Pre-test loops whose body block is a transparent scope, as the body of a `for` loop kotlinc's
     /// `ForLoopsLowering` rebuilt as a `while` is (an `IrComposite`): the declarations it opens with
     /// stay in scope until the loop ends.
@@ -1981,6 +2014,11 @@ pub struct IrFile {
     /// bounds), keyed by the class's fully-qualified name.
     pub class_declared_spellings:
         std::collections::HashMap<crate::types::TypeName, crate::spelling::DeclaredSpellings>,
+    /// Where a class's declared superclass stands in its source supertype list, keyed by the class's
+    /// fully-qualified name. `@Metadata` lists supertypes in source order (`class C : I, Base(), J`
+    /// writes `I, Base, J`), while [`IrClass::superclass`] keeps the superclass apart. Absent when
+    /// the superclass is written first or none is declared.
+    pub class_superclass_positions: std::collections::HashMap<crate::types::TypeName, u32>,
     /// The same, for a class PROPERTY, keyed by `(class fully-qualified name, property name)` —
     /// a property has no `FunId` to hang off.
     pub prop_declared_spellings: std::collections::HashMap<
@@ -2104,6 +2142,10 @@ pub struct IrFile {
     /// The static `constructor-impl` realizing each value-class constructor, with that constructor's
     /// ordinal (`0` is the primary). Its `$default` stub takes kotlinc's `DefaultConstructorMarker`.
     pub(crate) jvm_value_class_constructor_impls: std::collections::HashMap<u32, u32>,
+    /// The Kotlin-level signature of each value-class method the JVM pass creates or moves onto the
+    /// carrier before its main erasure (`constructor-impl`, the synthesized and user-written
+    /// `equals`/`hashCode`/`toString` statics, computed accessors), recorded while still semantic.
+    pub(crate) jvm_value_class_member_signatures: std::collections::HashMap<u32, IrGenericSig>,
     /// Generated JVM methods kotlinc writes without nullability annotations. The JVM value-class
     /// pass records exact function identities; common lowering does not interpret this set.
     pub(crate) jvm_nullability_unannotated_methods: std::collections::HashSet<u32>,
@@ -2323,6 +2365,10 @@ pub struct IrFile {
     /// native scalar (the unsigned integers) is recorded like any other; its representation is the
     /// backend's question.
     external_value_classes: std::collections::HashMap<TypeName, Ty>,
+    /// The declarations of [`Self::external_value_classes`] as their providers published them: the
+    /// underlying type over the declaration's own type parameters.
+    external_value_class_declarations:
+        std::collections::HashMap<TypeName, crate::types::DeclaredValueClass>,
     /// Expression identity → `(declared value-class name, erased underlying type)` for a construction
     /// rewritten in place by the JVM value-class pass. This records semantic origin rather than the
     /// generated helper's spelling: a source `new` remains distinguishable from an unrelated static call
@@ -2503,7 +2549,21 @@ pub struct IrTypeParameter {
     pub reified: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl IrTypeParameter {
+    /// A use of this parameter as a type.
+    pub(crate) fn ty(&self) -> Ty {
+        Ty::ty_param(&self.semantic_name, self.upper_bound())
+    }
+
+    /// The representative upper bound: the first declared bound, else `Any?`.
+    pub(crate) fn upper_bound(&self) -> Ty {
+        self.bounds
+            .first()
+            .map_or(Ty::nullable(Ty::obj("kotlin/Any")), |(bound, _)| *bound)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct IrTypeAlias {
     pub name: String,
     pub formals: Vec<String>,
@@ -2699,6 +2759,21 @@ impl IrFile {
         self.class_signatures.get(&internal)
     }
 
+    /// `class` applied to its own type parameters (`C<T>`): the type of its `this`.
+    pub(crate) fn class_type(&self, class: &IrClass) -> Ty {
+        let arguments: Vec<Ty> = self
+            .class_signature_name(class.fq_name)
+            .map(|signature| {
+                signature
+                    .type_params
+                    .iter()
+                    .map(IrTypeParameter::ty)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ty::obj_args_name(class.fq_name, &arguments)
+    }
+
     pub fn insert_field_signatures(&mut self, internal: &str, sigs: Vec<(String, String)>) {
         self.field_signatures
             .insert(crate::types::type_name(internal), sigs);
@@ -2810,6 +2885,7 @@ mod debug_lines;
 mod debug_locals;
 mod generated_members;
 pub(crate) use data_class_members::IrDataClassMemberRole;
+pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
 pub use generated_members::{

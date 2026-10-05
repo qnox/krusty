@@ -1288,18 +1288,30 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The source a constructor body is checked against: the transiently parsed file, its semantic
+/// tables, and the stable declarations it belongs to.
+pub(super) struct ConstructorBodySource<'a> {
+    pub(super) file: &'a File,
+    pub(super) info: &'a TypeInfo,
+    pub(super) source: SourceFileId,
+    pub(super) index: &'a ResolvedModuleIndex,
+    pub(super) active: Option<&'a ActiveSourceDeclarations>,
+}
+
 pub(super) fn check_and_dispatch_constructor_body(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
+    constructor_source: ConstructorBodySource<'_>,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
-    active: Option<&ActiveSourceDeclarations>,
 ) -> Result<(), CheckedBodyDriverFailure> {
+    let ConstructorBodySource {
+        file,
+        info,
+        source,
+        index,
+        active,
+    } = constructor_source;
     let anchor = index
         .declaration_anchor(work.declaration)
         .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
@@ -1399,6 +1411,19 @@ pub(super) fn check_and_dispatch_constructor_body(
             .zip(classifier.interface_delegations.iter())
             .enumerate()
         {
+            let members = info
+                .interface_delegate_calls
+                .get(&delegation.value)
+                .cloned()
+                .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
+            checker
+                .body
+                .add_interface_delegate_calls(crate::fir::FirInterfaceDelegateCalls {
+                    classifier: class_declaration,
+                    delegation: u32::try_from(ordinal)
+                        .map_err(|_| CheckedBodyDriverFailure::ParameterShapeMismatch)?,
+                    members,
+                });
             match resolved.source {
                 crate::fir::ResolvedInterfaceDelegateSource::ConstructorParameter(_)
                 | crate::fir::ResolvedInterfaceDelegateSource::ConstructorProperty(_)
@@ -1424,6 +1449,15 @@ pub(super) fn check_and_dispatch_constructor_body(
                 }
             }
         }
+        // The delegation's operands carry their source lines, as a secondary constructor's do.
+        let (expression_lines, statement_lines) = crate::fir::body::debug_lines::of_file(file);
+        checker.body.attach_debug_lines(
+            source,
+            file.source_line_count,
+            checker.origins,
+            &expression_lines,
+            &statement_lines,
+        );
         ordinary_sink.accept(work.owner, checker.body);
         return Ok(());
     }

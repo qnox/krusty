@@ -9,6 +9,7 @@
 use super::common;
 
 const SRC: &str = "\
+@file:OptIn(ExperimentalUnsignedTypes::class)\n\
 fun nullable(vararg us: UInt?): Int = us.size\n\
 fun callNullable(): Int = nullable(1u, null, 2u, null)\n\
 fun uint(vararg us: UInt): UInt = us.sum()\n\

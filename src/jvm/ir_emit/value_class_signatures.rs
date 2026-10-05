@@ -1,87 +1,70 @@
-//! The generic `Signature` of a function whose value-class positions the JVM pass erased.
+//! The generic `Signature` positions of a function the JVM value-class pass realized as a static
+//! replacement over its class's carrier.
 //!
-//! A value class in a top-level parameter or result position is signed as its physical slot, exactly
-//! as the descriptor spells it: kotlinc signs `fun <X> f(s: S, x: X)` over `S(val v: String)` as
-//! `<X>(Ljava/lang/String;TX;)`. A value-class member's static replacement also signs the carrier it
-//! receives first. A value class nested in a type argument (`List<S>`) keeps its own name. The IR
-//! shape itself stays semantic, since the declaration's metadata is written from it.
+//! kotlinc moves the dispatch receiver into the first parameter, typed as the class itself (`C<T>`),
+//! and its signature writer expands that position like any other value-class position
+//! (`signature_formatter::value_class_positions`). The function's declared positions keep their
+//! semantic types, so a value class among them is expanded the same way. The IR shape itself stays
+//! semantic, since the declaration's metadata is written from it.
 
 use std::borrow::Cow;
 
-use crate::ir::{IrFile, IrFunction, IrGenericSig};
+use crate::ir::{IrFile, IrGenericSig};
 use crate::types::Ty;
 
 pub(super) fn physical_generic_signature<'a>(
     ir: &IrFile,
     fid: u32,
-    function: &IrFunction,
     generic: &'a IrGenericSig,
 ) -> Cow<'a, IrGenericSig> {
-    let Some((params, ret)) = physical_positions(ir, fid, function, &generic.params, generic.ret)
-    else {
+    let Some(carrier) = moved_receiver(ir, fid) else {
         return Cow::Borrowed(generic);
     };
     let mut physical = generic.clone();
-    physical.params = params;
-    physical.ret = ret;
+    physical.params.insert(0, carrier);
     Cow::Owned(physical)
 }
 
 /// A member's recorded semantic parameters and result (an accessor's, or one using its class's
-/// type parameters), with the same value-class positions spelled physically.
+/// type parameters), after the receiver a static replacement takes first.
 pub(super) fn physical_member_signature<'a>(
     ir: &'a IrFile,
     fid: u32,
-    function: &IrFunction,
 ) -> Option<(Cow<'a, [Ty]>, Ty)> {
     let (params, ret) = ir.member_semantic_sigs.get(&fid)?;
-    Some(
-        match physical_positions(ir, fid, function, params, Some(*ret)) {
-            Some((params, ret)) => (Cow::Owned(params), ret.expect("a member keeps its result")),
-            None => (Cow::Borrowed(params.as_slice()), *ret),
-        },
-    )
+    Some(match moved_receiver(ir, fid) {
+        Some(carrier) => (
+            Cow::Owned(
+                std::iter::once(carrier)
+                    .chain(params.iter().copied())
+                    .collect(),
+            ),
+            *ret,
+        ),
+        None => (Cow::Borrowed(params.as_slice()), *ret),
+    })
 }
 
-/// `params` and `ret` with each top-level value-class position replaced by the function's physical
-/// slot, and a static replacement's carrier first; `None` when the pass erased nothing here.
-fn physical_positions(
-    ir: &IrFile,
-    fid: u32,
-    function: &IrFunction,
-    params: &[Ty],
-    ret: Option<Ty>,
-) -> Option<(Vec<Ty>, Option<Ty>)> {
-    let (_, declared_params, declared_ret) = ir.vc_declared_sigs.get(&fid)?;
-    // A value class written as such; a type parameter bounded by one keeps its own name (`TT;`).
-    let is_value_class = |ty: &Ty| matches!(ty.non_null(), Ty::Obj(classifier, _) if crate::jvm::value_classes::is_boxed_value_class(ir, classifier));
-    let carrier = usize::from(ir.jvm_value_class_receiver_impls.contains(&fid));
-    assert_eq!(
-        params.len(),
-        declared_params.len(),
-        "a signature shape and its value-class declaration list the same parameters"
-    );
-    let mut physical = params
-        .iter()
-        .zip(declared_params)
-        .enumerate()
-        .map(|(index, (param, declared))| {
-            if is_value_class(declared) {
-                function.params[index + carrier]
-            } else {
-                *param
-            }
-        })
-        .collect::<Vec<_>>();
-    if carrier == 1 {
-        physical.insert(0, function.params[0]);
+/// The declared parameters and result of a function whose value-class positions the JVM pass
+/// erased, after the receiver a static replacement takes first.
+pub(super) fn declared_value_class_signature(ir: &IrFile, fid: u32) -> Option<(Vec<Ty>, Ty)> {
+    let (_, params, ret) = ir.vc_declared_sigs.get(&fid)?;
+    let params = moved_receiver(ir, fid)
+        .into_iter()
+        .chain(params.iter().copied())
+        .collect();
+    Some((params, *ret))
+}
+
+/// The class type `C<T>` a static replacement's moved receiver is declared with.
+fn moved_receiver(ir: &IrFile, fid: u32) -> Option<Ty> {
+    if !ir.jvm_value_class_receiver_impls.contains(&fid) {
+        return None;
     }
-    let ret = ret.map(|ret| {
-        if is_value_class(declared_ret) {
-            function.ret
-        } else {
-            ret
-        }
-    });
-    Some((physical, ret))
+    let class = ir
+        .classes
+        .iter()
+        .find(|class| class.methods.contains(&fid))
+        .expect("a value-class static replacement is a member of its class");
+    Some(ir.class_type(class))
 }

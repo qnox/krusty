@@ -36,7 +36,7 @@ pub(super) fn class_capture(
 /// Only nested dispatch captures need a caller-supplied occurrence ordinal.
 fn receiver_name(receiver: &IrCapturedReceiver, dispatch: usize) -> String {
     match receiver {
-        IrCapturedReceiver::Enclosing => format!("this${dispatch}"),
+        IrCapturedReceiver::Enclosing { .. } => format!("this${dispatch}"),
         IrCapturedReceiver::Callable { label, .. } | IrCapturedReceiver::Lambda(Some(label)) => {
             format!("$this_{label}")
         }
@@ -161,7 +161,9 @@ fn receiver_capture(
 /// declare, so the receivers of such a declaration are no receivers any more but parameters of the
 /// static, which a class captures like any value, under its field name. The enclosing instance is
 /// named after the value the static realizes it as, `$`-prefixed: a member's or accessor's carrier
-/// parameter (`$arg0`), or the temporary a `constructor-impl` holds it in. The declaration's own
+/// parameter (`$arg0`), or the temporary a `constructor-impl` holds it in. That holds through any
+/// local or anonymous class between: the static's value is captured into each class in turn, so
+/// the instance of the value class is a value wherever it is captured. The declaration's own
 /// extension receiver keeps its `$this_name`. A local function is lifted, not lowered to a
 /// static, so its extension receiver stays one.
 fn realized_receiver(
@@ -171,21 +173,42 @@ fn realized_receiver(
     container: Option<FunId>,
 ) -> (String, bool) {
     let receiver = &receivers[ordinal];
-    let realization = container.and_then(|container| value_class_receiver_value(ir, container));
-    match (receiver, realization) {
-        (IrCapturedReceiver::Enclosing, Some(value)) => (format!("${value}"), false),
-        (
-            IrCapturedReceiver::Callable {
-                owner: CapturedCallableOwner::Declaration,
-                ..
-            },
-            Some(_),
-        ) => (lifted_receiver_name(receivers, ordinal), false),
-        _ => (
-            lifted_receiver_name(receivers, ordinal),
-            uses_receiver_constructor_parameter(receiver),
-        ),
+    if let Some(value) = realized_instance(ir, receiver, container) {
+        return (format!("${value}"), false);
     }
+    // Only the enclosing instances still captured as instances number kotlinc's `this$N`.
+    let dispatch = receivers[..ordinal]
+        .iter()
+        .filter(|receiver| matches!(receiver, IrCapturedReceiver::Enclosing { .. }))
+        .filter(|receiver| realized_instance(ir, receiver, container).is_none())
+        .count();
+    let name = receiver_name(receiver, dispatch);
+    match receiver {
+        IrCapturedReceiver::Callable {
+            owner: CapturedCallableOwner::Declaration,
+            ..
+        } if container
+            .is_some_and(|container| value_class_receiver_value(ir, container).is_some()) =>
+        {
+            (name, false)
+        }
+        _ => (name, uses_receiver_constructor_parameter(receiver)),
+    }
+}
+
+/// The value a value-class static realizes the enclosing instance `receiver` as, when a callable
+/// or class lifted out of `container` captures it: `container` itself, or the member of a local
+/// or anonymous class further out, belongs to the instance's class and is such a static.
+fn realized_instance(
+    ir: &IrFile,
+    receiver: &IrCapturedReceiver,
+    container: Option<FunId>,
+) -> Option<String> {
+    let IrCapturedReceiver::Enclosing { classifier } = receiver else {
+        return None;
+    };
+    let member = super::lifted_names::classifier_member(ir, container?, *classifier)?;
+    value_class_receiver_value(ir, member)
 }
 
 /// The name of the value the value-class static `container` realizes its receiver as. kotlinc's
@@ -210,26 +233,12 @@ fn value_class_receiver_value(ir: &IrFile, container: FunId) -> Option<String> {
     }
 }
 
-/// kotlinc's `LocalDeclarationsLowering` name for the parameter a captured implicit receiver is
-/// lifted into. The ordinal selects the semantic receiver origin; only preceding dispatch
-/// receivers contribute to kotlinc's `this$N` occurrence number.
-fn lifted_receiver_name(receivers: &[IrCapturedReceiver], ordinal: usize) -> String {
-    let receiver = receivers
-        .get(ordinal)
-        .expect("a lifted callable publishes the origin of each captured receiver");
-    let dispatch = receivers[..ordinal]
-        .iter()
-        .filter(|receiver| matches!(receiver, IrCapturedReceiver::Enclosing))
-        .count();
-    receiver_name(receiver, dispatch)
-}
-
 /// Whether kotlinc calls the capture's constructor parameter `$receiver` instead of giving it the
 /// same spelling as its field.
 fn uses_receiver_constructor_parameter(receiver: &IrCapturedReceiver) -> bool {
     matches!(
         receiver,
-        IrCapturedReceiver::Enclosing | IrCapturedReceiver::Callable { .. }
+        IrCapturedReceiver::Enclosing { .. } | IrCapturedReceiver::Callable { .. }
     )
 }
 

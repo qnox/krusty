@@ -954,6 +954,9 @@ pub struct LibraryCallable {
     /// extension receiver must unbox to the value class's underlying; `params[0]` is already erased and
     /// cannot make that distinction. This is the un-erased-source-type down payment on task B.
     pub source_receiver: Option<Ty>,
+    /// Annotation class identities declared on this callable. Consumers decide which annotations
+    /// affect resolution/emission; the library layer only records their qualified identities.
+    pub annotations: Vec<crate::types::TypeName>,
     /// The callee's DECLARED (un-erased, pre-substitution) parameter types in physical source order:
     /// leading contexts, then an extension receiver when present, then value parameters. An ordinary
     /// member's dispatch receiver is not included. This is the parameter analogue of
@@ -1626,9 +1629,6 @@ pub struct FunctionInfo {
     /// receiver's member level beside same-named member functions; selection runs once over both
     /// and the constructor path then materializes the selected declaration.
     pub bound_inner_constructor: Option<BoundInnerConstructor>,
-    /// Annotation class identities declared on this callable. Consumers decide which annotations affect
-    /// resolution/emission; the library layer only records their qualified identities.
-    pub annotations: Vec<crate::types::TypeName>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1851,7 +1851,6 @@ impl FunctionInfo {
             source_member: None,
             implicit_classifier_callable: None,
             bound_inner_constructor: None,
-            annotations: Vec::new(),
         }
     }
 
@@ -1894,7 +1893,7 @@ impl FunctionInfo {
         member.projected_return_hazard = self.projected_return_hazard;
         member.inline = self.flags.inline;
         member.reified = self.flags.reified;
-        member.annotations = self.annotations.clone();
+        member.annotations = self.callable.annotations.clone();
         member.visibility = self.visibility;
         member.set_suspend(self.flags.suspend);
         member.set_is_operator(self.flags.operator);
@@ -2375,9 +2374,10 @@ pub struct LibraryType {
     /// (`UInt` → `Int`, `Result` → `Any`); `None` for an ordinary class. The JVM backend erases the value
     /// class to this everywhere (like a user value class), reproducing kotlinc's unboxed representation.
     pub value_underlying: Option<Ty>,
-    /// Source name of a value class's sole underlying property. Kept beside its underlying type because
-    /// together they are the complete semantic value-class shape used by the JVM representation pass.
-    pub value_underlying_property: Option<String>,
+    /// A value class's sole underlying property and its declared type over the class's own type
+    /// parameters. Kept beside its underlying type because together they are the complete semantic
+    /// value-class shape used by the JVM representation pass.
+    pub value_declaration: Option<crate::types::DeclaredValueClass>,
     /// When this name is a `typealias`, the target internal it expands to (`kotlin/collections/ArrayList`
     /// → `java/util/ArrayList`); `None` for a real type. Name resolution records the target, so an alias
     /// resolves to the underlying type with no separate alias query.
@@ -2514,7 +2514,7 @@ impl LibraryType {
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target: None,
             type_parameters: crate::types::TypeParameters::default(),
             own_type_parameter_count: 0,
@@ -2805,7 +2805,7 @@ mod tests {
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target: None,
             type_parameters: crate::types::TypeParameters::default(),
             own_type_parameter_count: 0,

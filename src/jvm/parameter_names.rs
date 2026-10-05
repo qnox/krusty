@@ -548,6 +548,79 @@ pub(super) fn function_assertions(
     )
 }
 
+/// kotlinc's name for an extension receiver that a static taking the interface instance first
+/// (`DefaultImpls`, `access$<name>$jd`) receives as an ordinary parameter.
+const HOLDER_EXTENSION_RECEIVER: &str = "$receiver";
+
+/// One surface's spellings of `function`'s parameters where its body is emitted. kotlinc writes a
+/// static that takes a member's dispatch receiver first — an interface member's body on
+/// `DefaultImpls` (`holder_receiver`) or `access$<name>$jd`, a suspend member's body moved to
+/// `<name>$suspendImpl` (a recorded holder receiver) — with the interface or class instance as
+/// `$this` and the extension receiver moved into an ordinary parameter named `$receiver`, which its
+/// local-variable row, null check and reflection name all read. Elsewhere `names` stand.
+pub(super) fn placed(
+    ir: &IrFile,
+    function: u32,
+    holder_receiver: Option<crate::types::TypeName>,
+    names: Option<Vec<Option<String>>>,
+) -> Option<Vec<Option<String>>> {
+    let mut names = names?;
+    if !takes_dispatch_receiver_first(ir, function, holder_receiver) {
+        return Some(names);
+    }
+    let identities = ir
+        .function_parameter_identities(function)
+        .expect("parameter spellings are projected from recorded parameter identities");
+    assert_eq!(
+        identities.len(),
+        names.len(),
+        "one spelling per recorded parameter identity"
+    );
+    for (name, identity) in names.iter_mut().zip(identities) {
+        if identity.role == IrParameterRole::ExtensionReceiver {
+            *name = Some(HOLDER_EXTENSION_RECEIVER.to_string());
+        }
+    }
+    Some(names)
+}
+
+/// Whether `function` is emitted as a static taking its member's dispatch receiver as `$this`:
+/// written onto an interface's holder, or recorded with a holder receiver of its own.
+pub(super) fn takes_dispatch_receiver_first(
+    ir: &IrFile,
+    function: u32,
+    holder_receiver: Option<crate::types::TypeName>,
+) -> bool {
+    holder_receiver.is_some()
+        || ir
+            .function_parameter_identities(function)
+            .and_then(<[IrParameterIdentity]>::first)
+            .is_some_and(|identity| {
+                identity.role
+                    == IrParameterRole::Generated(IrGeneratedParameterRole::HolderReceiver)
+            })
+}
+
+/// [`placed`] for a provider-published parameter list republished on a `DefaultImpls` holder.
+pub(super) fn resolved_on_holder(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    names: &mut [Option<String>],
+) {
+    assert_eq!(
+        identities.len(),
+        names.len(),
+        "one spelling per provider-published parameter identity"
+    );
+    for (name, identity) in names.iter_mut().zip(identities) {
+        if matches!(
+            identity,
+            crate::fir::ResolvedParameterIdentity::ExtensionReceiver
+        ) {
+            *name = Some(HOLDER_EXTENSION_RECEIVER.to_string());
+        }
+    }
+}
+
 /// Text passed to `Intrinsics.checkNotNullParameter` for one checked parameter.
 pub(super) fn assertion(identity: &IrParameterIdentity) -> Option<String> {
     match identity.role {
@@ -1120,7 +1193,9 @@ mod suspend_lambda_member_tests {
         let lambda = SuspendLambdaParameters::new(
             vec![captured, IrParameterIdentity::captured_receiver(0)],
             1,
-            vec![IrCapturedReceiver::Enclosing],
+            vec![IrCapturedReceiver::Enclosing {
+                classifier: crate::types::type_name("Outer"),
+            }],
             None,
         );
         let constructor = [Ty::Long, Ty::obj("Outer"), Ty::obj("Continuation")];

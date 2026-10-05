@@ -10,12 +10,14 @@
 use super::*;
 
 impl Checker<'_> {
+    /// Check one application and publish its folded arguments. Returns the annotation identity the
+    /// application binds, also when its arguments are rejected.
     pub(super) fn check_annotation_application(
         &mut self,
         scope: &CheckerScope<'_>,
         annotation: &AnnotationRef,
         arguments: &[ExprId],
-    ) {
+    ) -> Option<TypeName> {
         if arguments
             .iter()
             .any(|argument| self.file.expr_span(*argument).is_none())
@@ -32,20 +34,15 @@ impl Checker<'_> {
                 "a complete pass reached released annotation syntax; fragment={:?}",
                 self.fragment
             );
-            return;
+            return None;
         }
-        let internal = if self.fragment.is_classifier_annotations() {
+        let internal = if self.fragment.publishes_annotation_metadata() {
             // Pass 1 already bound this exact occurrence. Metadata publication consumes that
             // identity directly: resolving its spelling again after actualization could resurrect
             // a target-excluded optional-expect annotation or select a different scope rung.
-            let Some(internal) = self
-                .module
-                .legacy_symbols()
-                .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
-            else {
-                return;
-            };
-            internal
+            self.bound_annotation_identities
+                .get(&(annotation.span.lo, annotation.span.hi))
+                .copied()?
         } else {
             // Resolve the application in its owning lexical scope. Pass 1's declaration-header
             // inventory and Pass 2's body checking use the same scope rules.
@@ -58,41 +55,45 @@ impl Checker<'_> {
                 fun_params: Vec::new(),
                 fun_context_count: 0,
             };
-            let ty = self.type_ref_ty_reported(scope, &reference);
-            let Some(internal) = ty.kotlin_class_internal() else {
-                return;
-            };
-            internal
+            self.type_ref_ty_reported(scope, &reference)
+                .kotlin_class_internal()?
         };
         if !self.file.is_common
             && self.is_optional_expectation_classifier(internal)
             && !self.suppresses_diagnostic("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE")
         {
+            // kotlinc's OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE, on the type reference.
             self.diags.error(
                 annotation.span,
-                format!("unresolved reference '{}'.", annotation.name),
+                "declaration annotated with '@OptionalExpectation' can only be used in common \
+                 module sources."
+                    .to_string(),
             );
-            return;
+            return Some(internal);
         }
         let Some(shape) = self.annotation_shape(internal) else {
             self.diags.error(
                 annotation.span,
                 "resolved annotation has no semantic element declaration".to_string(),
             );
-            return;
+            return Some(internal);
         };
         if !self.check_annotation_arguments(scope, annotation.span, &shape, arguments, None) {
-            return;
+            return Some(internal);
         }
         let Some(applied) = self.fold_annotation_application(internal, arguments) else {
+            if self.report_non_constant_annotation_arguments(arguments) {
+                return Some(internal);
+            }
             self.diags.error(
                 annotation.span,
                 "annotation argument is not a supported compile-time constant".to_string(),
             );
-            return;
+            return Some(internal);
         };
         self.applied_annotations
             .insert((annotation.span.lo, annotation.span.hi), applied);
+        Some(internal)
     }
 
     /// A classifier's own annotations are resolved where the classifier is declared: a nested
@@ -121,4 +122,22 @@ impl Checker<'_> {
             debug_assert_eq!(removed, container);
         }
     }
+}
+
+/// The retention of an annotation classifier: the module's own normalized fact for a source
+/// declaration, otherwise the provider's declared policy. `None` for a policy this compiler does not
+/// know, which makes the application unsupported rather than silently retained.
+pub(super) fn annotation_retention(
+    module_retention: Option<crate::types::AnnotationRetention>,
+    classifier: &crate::libraries::LibraryType,
+) -> Option<crate::types::AnnotationRetention> {
+    module_retention.or_else(|| {
+        Some(match classifier.retention.as_deref() {
+            Some("SOURCE") => crate::types::AnnotationRetention::Source,
+            Some("BINARY" | "CLASS") => crate::types::AnnotationRetention::Binary,
+            Some("RUNTIME") => crate::types::AnnotationRetention::Runtime,
+            None => crate::types::AnnotationRetention::Default,
+            Some(_) => return None,
+        })
+    })
 }

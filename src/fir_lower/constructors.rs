@@ -581,8 +581,16 @@ pub(super) fn finalize_constructors(
                 )),
             ),
         };
+        // kotlinc builds an omitted default's placeholder at the delegating call's offsets.
+        let delegation_line = if constructor.ordinal == 0 {
+            ir.classes[constructor.class as usize].primary_delegation_line()
+        } else {
+            ir.secondary_ctor_lines
+                .get(&declaration)
+                .and_then(crate::ir::IrSecondaryCtorLines::delegation_call_line)
+        };
         let (mut arguments, default_parameters) =
-            constructor_arguments(arguments, &parameters, ir, declaration)?;
+            constructor_arguments(arguments, &parameters, ir, declaration, delegation_line)?;
         let mut parameters = parameters;
         let outer_shift = u32::from(outer_receiver.is_some());
         if let Some((outer_receiver, outer_parameter)) = outer_receiver.zip(outer_parameter) {
@@ -868,6 +876,7 @@ fn constructor_arguments(
     parameters: &[crate::types::Ty],
     ir: &mut IrFile,
     declaration: DeclarationId,
+    delegation_line: Option<u32>,
 ) -> Result<(Vec<crate::ir::ExprId>, Vec<u32>), FirFileLoweringFailure> {
     let slots = materialize_checked_arguments(
         &arguments,
@@ -896,11 +905,13 @@ fn constructor_arguments(
             })),
             CheckedArgumentSlot::Default(ordinal) => {
                 defaults.push(ordinal);
-                Some(
-                    ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(
-                        *parameters.get(parameter)?,
-                    ))),
-                )
+                let placeholder = ir.add_expr(IrExpr::Const(
+                    crate::ir::IrConst::zero_for_value_type(*parameters.get(parameter)?),
+                ));
+                if let Some(line) = delegation_line {
+                    ir.expr_source_lines.insert(placeholder, line);
+                }
+                Some(placeholder)
             }
             CheckedArgumentSlot::Missing => None,
         })
@@ -1298,10 +1309,11 @@ pub(super) fn accept_constructor_body(
 }
 
 /// The declaration facts of a selected module constructor: its place among its class's constructors, and
-/// who may call it, from its class's modality and its declared visibility. Every source constructor
-/// of a sealed class is restricted, whatever its modifier says: Kotlin makes an unmodified one
-/// `protected` and rejects a public one. `None` when a header is missing, which a checked selection
-/// never leaves.
+/// who may call it, from its class's kind and modality and its declared visibility. Every source
+/// constructor of a sealed class is restricted, whatever its modifier says: Kotlin makes an
+/// unmodified one `protected` and rejects a public one. An enum class's constructors are private,
+/// whatever their modifier says. `None` when a header is missing, which a checked selection never
+/// leaves.
 pub(super) fn module_constructor_target(
     index: &ResolvedModuleIndex,
     constructor: DeclarationId,
@@ -1309,13 +1321,12 @@ pub(super) fn module_constructor_target(
     let ordinal = index.declaration_anchor(constructor)?.sibling;
     let classifier = index.enclosing_classifier(constructor)?;
     let visibility = index.declaration_header(constructor)?.visibility;
-    let sealed = index
-        .declaration_header(classifier.declaration)?
-        .flags
-        .has(crate::fir::DeclarationFlags::SEALED);
-    let access = if sealed {
+    let flags = index.declaration_header(classifier.declaration)?.flags;
+    let access = if flags.has(crate::fir::DeclarationFlags::SEALED) {
         IrConstructorAccess::SealedClass
-    } else if visibility == crate::types::Visibility::Private {
+    } else if flags.has(crate::fir::DeclarationFlags::ENUM)
+        || visibility == crate::types::Visibility::Private
+    {
         IrConstructorAccess::Private
     } else {
         IrConstructorAccess::Unrestricted

@@ -3,15 +3,34 @@
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
+    /// The classifier a call spelling constructs: `lexical` when a nearer rung bound it, else the
+    /// file/import tower's own selection. Either carries the alias declaration that named it.
+    pub(super) fn constructed_classifier(
+        resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+        lexical: Option<crate::symbol_resolver::ScopedClassifier>,
+        spelling: &str,
+    ) -> Option<crate::symbol_resolver::ScopedClassifier> {
+        lexical.or_else(|| match resolver.scoped_classifier_in_scope(spelling) {
+            crate::symbol_resolver::CandidateSelection::Selected(selected) => Some(selected),
+            crate::symbol_resolver::CandidateSelection::Ambiguous
+            | crate::symbol_resolver::CandidateSelection::None => None,
+        })
+    }
+
+    /// The classifier a call spelling constructs, with the alias declaration that named it on the
+    /// winning scope-tower rung. A classifier already bound to its declaration names no alias.
     pub(super) fn bound_or_scoped_classifier(
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
         bound: Option<crate::fir::DeclarationId>,
-    ) -> Option<crate::types::TypeName> {
+    ) -> Option<crate::symbol_resolver::ScopedClassifier> {
         match bound {
-            Some(declaration) => Some(self.bound_classifier_identity(declaration)),
-            None => self.qualified_classifier(scope, spelling),
+            Some(declaration) => Some(crate::symbol_resolver::ScopedClassifier {
+                classifier: self.bound_classifier_identity(declaration),
+                alias: None,
+            }),
+            None => self.qualified_scoped_classifier_binding(scope, spelling).0,
         }
     }
 
@@ -585,6 +604,20 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         spelling: &str,
     ) -> (Option<crate::types::TypeName>, Option<String>) {
+        let (selected, failed_segment) = self.qualified_scoped_classifier_binding(scope, spelling);
+        (selected.map(|selected| selected.classifier), failed_segment)
+    }
+
+    /// [`Self::qualified_classifier_binding`] with the alias declaration that named the selection.
+    /// Only the file/import rung can select through an alias; a lexical classifier names none.
+    fn qualified_scoped_classifier_binding(
+        &self,
+        scope: crate::fir::SignatureScope,
+        spelling: &str,
+    ) -> (
+        Option<crate::symbol_resolver::ScopedClassifier>,
+        Option<String>,
+    ) {
         let segments = spelling.split('.').collect::<Vec<_>>();
         let Some(&first) = segments.first() else {
             return (None, Some(spelling.to_string()));
@@ -663,7 +696,7 @@ impl ProductionSignatureSemantics<'_> {
             }
             if current.is_none() {
                 let (selection, failed_segment) =
-                    resolver.qualified_classifier_binding_in_scope(spelling);
+                    resolver.qualified_scoped_classifier_binding_in_scope(spelling);
                 match selection {
                     crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
                         return Some((Some(classifier), None));
@@ -700,7 +733,13 @@ impl ProductionSignatureSemantics<'_> {
                 }
                 current = candidate;
             }
-            Some((Some(current), None))
+            Some((
+                Some(crate::symbol_resolver::ScopedClassifier {
+                    classifier: current,
+                    alias: None,
+                }),
+                None,
+            ))
         })
         .ok()
         .unwrap_or_else(|| (None, Some(first.to_string())))
@@ -714,10 +753,18 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
-    ) -> (Option<crate::types::TypeName>, Option<String>) {
+    ) -> (
+        Option<crate::types::TypeName>,
+        Option<crate::symbol_resolver::ClassifierMiss>,
+    ) {
         let segments = spelling.split('.').collect::<Vec<_>>();
         let Some(&first) = segments.first() else {
-            return (None, Some(spelling.to_string()));
+            return (
+                None,
+                Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                    spelling.to_string(),
+                )),
+            );
         };
         let mut lexical_owners = Vec::new();
         let mut owner = self
@@ -727,7 +774,12 @@ impl ProductionSignatureSemantics<'_> {
             .and_then(|anchor| anchor.owner);
         while let Some(declaration) = owner {
             let Some(anchor) = self.headers.declarations.anchor(declaration) else {
-                return (None, Some(first.to_string()));
+                return (
+                    None,
+                    Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                        first.to_string(),
+                    )),
+                );
             };
             if anchor.kind == crate::fir::DeclarationKind::Classifier {
                 if let Some(classifier) = self.classifier_types.get(&declaration).copied() {
@@ -799,7 +851,12 @@ impl ProductionSignatureSemantics<'_> {
                         return Some((Some(classifier), None));
                     }
                     crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                        return Some((None, Some(first.to_string())));
+                        return Some((
+                            None,
+                            Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                                first.to_string(),
+                            )),
+                        ));
                     }
                     crate::symbol_resolver::CandidateSelection::None => {}
                 }
@@ -807,13 +864,30 @@ impl ProductionSignatureSemantics<'_> {
             let (selection, failed_segment) =
                 resolver.qualified_type_classifier_binding_in_scope(spelling);
             match selection {
-                crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                crate::symbol_resolver::CandidateSelectionWithTies::Selected(classifier) => {
                     return Some((Some(classifier), None));
                 }
-                crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                    return Some((None, failed_segment));
+                // Conflicting explicit imports name no complete candidates; the import list
+                // owns that conflict, so the reference reports its unbound root.
+                crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(candidates)
+                    if candidates.is_empty() =>
+                {
+                    return Some((
+                        None,
+                        Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                            failed_segment.unwrap_or_else(|| first.to_string()),
+                        )),
+                    ));
                 }
-                crate::symbol_resolver::CandidateSelection::None => {
+                crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(candidates) => {
+                    return Some((
+                        None,
+                        Some(crate::symbol_resolver::ClassifierMiss::Ambiguous(
+                            candidates,
+                        )),
+                    ));
+                }
+                crate::symbol_resolver::CandidateSelectionWithTies::None => {
                     if failure.is_none() && failed_segment.is_some() {
                         failure = failed_segment;
                     }
@@ -825,15 +899,32 @@ impl ProductionSignatureSemantics<'_> {
                         return Some((Some(classifier), None));
                     }
                     crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                        return Some((None, Some(first.to_string())));
+                        return Some((
+                            None,
+                            Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                                first.to_string(),
+                            )),
+                        ));
                     }
                     crate::symbol_resolver::CandidateSelection::None => {}
                 }
             }
-            Some((None, failure.or_else(|| Some(first.to_string()))))
+            Some((
+                None,
+                Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                    failure.unwrap_or_else(|| first.to_string()),
+                )),
+            ))
         })
         .ok()
-        .unwrap_or_else(|| (None, Some(first.to_string())))
+        .unwrap_or_else(|| {
+            (
+                None,
+                Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                    first.to_string(),
+                )),
+            )
+        })
     }
 
     pub(super) fn qualified_classifier_or_source_alias(
@@ -843,7 +934,7 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Option<crate::types::TypeName> {
         self.qualified_classifier(scope, spelling).or_else(|| {
             self.applied_source_alias_expansion(scope, spelling, &[])
-                .and_then(|(_, expansion)| expansion.non_null().obj_internal())
+                .and_then(|alias| alias.expansion.non_null().obj_internal())
         })
     }
 

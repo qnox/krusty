@@ -502,8 +502,7 @@ mod tests {
             context_count: 0,
             has_receiver: false,
             suspend: false,
-            overrides_non_primitive_result: false,
-            overridden_non_primitive_results: Vec::new(),
+            overridden_results: Vec::new(),
             kotlin_interface: true,
             parameter_identities: Box::new([]),
         }

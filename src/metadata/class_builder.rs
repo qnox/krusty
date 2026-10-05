@@ -67,11 +67,10 @@ pub struct PropMeta {
     /// Exact source identity of an explicitly named custom setter parameter. An implicit setter
     /// has no source parameter declaration and therefore omits `Property.setter_value_parameter`.
     pub setter_parameter_name: Option<String>,
-    /// An explicit `JvmFieldSignature.desc` for a backing field whose descriptor the reader cannot
-    /// derive from the Kotlin type — a VALUE-CLASS-typed property, whose field holds the erased
-    /// underlying (`val k: K` → `Ljava/lang/String;`). `None` leaves the field derived, which is what
-    /// every ordinary property records. (The boxed-nullable-primitive and bare-type-parameter cases
-    /// below are derived from the property itself, since the shape alone determines them.)
+    /// The backing field's descriptor, when a reader cannot rebuild it by mapping the property
+    /// type's class id (kotlinc's `requiresSignature`): a type parameter (`T` →
+    /// `Ljava/lang/Object;`), a boxed nullable primitive, a value class's erased underlying, a
+    /// reference array, or a delegate of another type. `None` leaves the field derived.
     pub field_desc: Option<String>,
     /// An explicit `JvmFieldSignature.name` when the PHYSICAL backing field's JVM name differs from
     /// the property name — an instance property mangled to dodge a same-named companion static
@@ -81,10 +80,10 @@ pub struct PropMeta {
     /// Annotations that landed on the PROPERTY (`Property.annotation` = f14). A Kotlin property has
     /// no class-file declaration, so their attribute lives on the synthetic marker named by
     /// [`Self::synthetic_method`]; this record is how a consumer gets from the property to them.
-    pub annotations: Vec<crate::ir::AppliedAnnotation>,
+    pub annotations: crate::metadata::MetadataAnnotations,
     /// Annotations that landed on the BACKING FIELD (`@Target(FIELD)`) — recorded separately (f34),
     /// because the reader must not attribute a field annotation to the property.
-    pub field_annotations: Vec<crate::ir::AppliedAnnotation>,
+    pub field_annotations: crate::metadata::MetadataAnnotations,
     /// `(name, descriptor)` of the `get<Name>$annotations()` marker method carrying
     /// [`Self::annotations`] — `JvmPropertySignature.syntheticMethod` (f2). `None` when the property
     /// has no property-targeted annotation.
@@ -152,11 +151,11 @@ pub struct FnMeta {
     /// class file's `Runtime[In]VisibleAnnotations` attribute makes the annotation work at RUNTIME;
     /// this record is what a KOTLIN consumer (and `kotlin-reflect`) reads the declaration's
     /// annotations back from. SOURCE-retained annotations never enter this list.
-    pub annotations: Vec<crate::ir::AppliedAnnotation>,
+    pub annotations: crate::metadata::MetadataAnnotations,
     /// User annotations on each value parameter (`fun f(@Mark a: Int)`), parallel to `params`. Empty
     /// (or a short list) ⇒ the missing parameters carry none. Recorded regardless of retention:
     /// `@Metadata` is the Kotlin-level record, so a BINARY-retained annotation appears here too.
-    pub param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>>,
+    pub param_annotations: Vec<crate::metadata::MetadataAnnotations>,
     /// Kotlin type-use inference policy, parallel to `params`.
     pub no_infer_params: Vec<bool>,
 }
@@ -183,7 +182,7 @@ impl FnMeta {
             jvm_sig: None,
             jvm_sig_name: None,
             spellings: crate::spelling::DeclaredSpellings::default(),
-            annotations: Vec::new(),
+            annotations: Default::default(),
             param_annotations: Vec::new(),
             no_infer_params: Vec::new(),
         }
@@ -227,9 +226,9 @@ pub(crate) const HAS_ANNOTATIONS: u64 = 1;
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE`.
 const DECLARES_DEFAULT_VALUE: u64 = 2;
 /// Append a value parameter's `annotation` records (f7) — one per applied annotation, in DECLARATION
-/// order. `ValueParameter.flags` serializes BEFORE these, so the caller must have already decided
-/// `HAS_ANNOTATIONS` with [`records_annotations`]; when `annotations_in_metadata` is false the bit
-/// stays set and this appends nothing.
+/// order. `ValueParameter.flags` serializes BEFORE these and already carries `HAS_ANNOTATIONS` from
+/// [`crate::metadata::MetadataAnnotations::declares_annotations`]; when `annotations_in_metadata`
+/// is false the bit stays set and this appends nothing.
 ///
 /// The records are appended AFTER the parameter's type, which is also the order kotlinc interns their
 /// class ids in: a parameter's annotation descriptor lands in `d2` after the parameter's own name.
@@ -239,15 +238,30 @@ const DECLARES_DEFAULT_VALUE: u64 = 2;
 pub(crate) fn append_param_annotations(
     st: &mut StringTable<'_>,
     vp: &mut Pb,
-    annotations: &[crate::ir::AppliedAnnotation],
+    annotations: Option<&crate::metadata::MetadataAnnotations>,
     annotations_in_metadata: bool,
 ) {
-    if !annotations_in_metadata {
+    let Some(annotations) = annotations.filter(|_| annotations_in_metadata) else {
         return;
-    }
-    for annotation in annotations.iter().filter(|a| records_annotation(a)) {
+    };
+    for annotation in annotations
+        .records()
+        .iter()
+        .filter(|a| records_annotation(a))
+    {
         let encoded = encode_annotation(st, annotation.internal);
         vp.field_message(7, &encoded); // ValueParameter.annotation = 7
+    }
+}
+
+/// The `HAS_ANNOTATIONS` bit of a value parameter's `flags`.
+pub(crate) fn param_annotation_flags(
+    annotations: Option<&crate::metadata::MetadataAnnotations>,
+) -> u64 {
+    if annotations.is_some_and(crate::metadata::MetadataAnnotations::declares_annotations) {
+        HAS_ANNOTATIONS
+    } else {
+        0
     }
 }
 
@@ -273,12 +287,6 @@ pub(crate) fn append_param_annotations(
 ///   NAMES intern in that same order, after the annotation's own class id.
 pub(crate) fn records_annotation(annotation: &crate::ir::AppliedAnnotation) -> bool {
     annotation.values.is_empty()
-}
-
-/// Whether a parameter's annotations produce any `@Metadata` record — i.e. whether `HAS_ANNOTATIONS`
-/// belongs in its `flags`.
-pub(crate) fn records_annotations(annotations: &[crate::ir::AppliedAnnotation]) -> bool {
-    annotations.iter().any(records_annotation)
 }
 
 /// A declaration visibility's `flags` bits, which a property and its accessors share.
@@ -416,14 +424,14 @@ struct CtorShape<'a> {
     param_defaults: &'a [bool],
     param_tparams: &'a [Option<u32>],
     /// User annotations on each parameter, parallel to `params` (a short list ⇒ the rest carry none).
-    param_annotations: &'a [Vec<crate::ir::AppliedAnnotation>],
+    param_annotations: &'a [crate::metadata::MetadataAnnotations],
     sig_name: Option<&'a str>,
     emit_jvm_signature: bool,
     /// Index into `params` of a `vararg` parameter — emits `ValueParameter.vararg_element_type` (f4),
     /// the only place ctor vararg-ness survives into metadata.
     vararg_index: Option<usize>,
     /// Applied annotations → `Constructor.annotation` (f3) + the `HAS_ANNOTATIONS` flag bit.
-    annotations: &'a [crate::ir::AppliedAnnotation],
+    annotations: &'a crate::metadata::MetadataAnnotations,
     /// kotlinc's `LanguageFeature.AnnotationsInMetadata` (since 2.4): `false` writes the
     /// `HAS_ANNOTATIONS` flags but none of the annotation records. Selected from finalized
     /// source-language settings, not inferred from the metadata stamp.
@@ -443,7 +451,7 @@ fn build_ctor(
     // materialized first: a public primary constructor carries 0 here precisely because 6 (visibility
     // PUBLIC) is the default and the field is omitted at that value — OR-ing bit 0 onto the 0 would
     // write 1 (visibility INTERNAL) where kotlinc writes 7.
-    let flags = if shape.annotations.is_empty() {
+    let flags = if !shape.annotations.declares_annotations() {
         shape.flags
     } else {
         (if shape.flags == 0 {
@@ -457,11 +465,7 @@ fn build_ctor(
     }
     for (i, (pname, pty)) in shape.params.iter().enumerate() {
         let mut vp = Pb::new();
-        let annotations = shape
-            .param_annotations
-            .get(i)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
+        let annotations = shape.param_annotations.get(i);
         // `ValueParameter.flags` (f1) — DECLARES_DEFAULT_VALUE for a param that declares a default,
         // HAS_ANNOTATIONS when it carries annotations (the f7 records below are gated on the
         // source feature; the bit is not). Both precede the name, as kotlinc does.
@@ -469,11 +473,7 @@ fn build_ctor(
             DECLARES_DEFAULT_VALUE
         } else {
             0
-        } | if records_annotations(annotations) {
-            HAS_ANNOTATIONS
-        } else {
-            0
-        };
+        } | param_annotation_flags(annotations);
         if flags != 0 {
             vp.field_varint(1, flags);
         }
@@ -524,6 +524,7 @@ fn build_ctor(
     let annotations: Vec<Pb> = if shape.annotations_in_metadata {
         shape
             .annotations
+            .records()
             .iter()
             .map(|annotation| crate::metadata::builder::annotation_pb(st, annotation))
             .collect()
@@ -572,7 +573,7 @@ pub struct CtorMeta<'a> {
     pub flags: u64,
     /// BINARY/RUNTIME-retained annotations applied to the constructor — `Constructor.annotation`
     /// (f3), the constructor analogue of [`FnMeta::annotations`].
-    pub annotations: &'a [crate::ir::AppliedAnnotation],
+    pub annotations: &'a crate::metadata::MetadataAnnotations,
 }
 
 /// Source declaration order across the protobuf's separately stored function/property lists. The
@@ -589,8 +590,8 @@ pub enum ClassMemberOrder {
 /// The type parameters a class captures from enclosing declarations, and how kotlinc numbers them.
 #[derive(Clone, Copy, Debug)]
 pub enum CapturedTypeParameters<'a> {
-    /// An inner class's: the enclosing classes' parameters hold the ids before its own, outermost
-    /// first.
+    /// A nested class's: every enclosing class's parameters, outermost first, hold the ids before
+    /// its own. An inner class addresses the ones it captures by those ids.
     Reserved(&'a [String]),
     /// A local or anonymous class's: its own parameters come first, and each captured one takes
     /// the next id on first use (see `TypeParameters`).
@@ -637,7 +638,7 @@ pub struct ClassTail<'a> {
     pub ctor_param_tparams: &'a [Option<u32>],
     /// Per-primary-constructor-parameter user annotations (`class C(@Mark val x: Int)`), parallel to
     /// `ctor_params`. Empty ⇒ no parameter carries one.
-    pub ctor_param_annotations: &'a [Vec<crate::ir::AppliedAnnotation>],
+    pub ctor_param_annotations: &'a [crate::metadata::MetadataAnnotations],
     /// A `@JvmInline value class`'s sole underlying property `(name, type)` → `Class`
     /// `inlineClassUnderlyingPropertyName` (f17, the name's string-table id) +
     /// `inlineClassUnderlyingType` (f18, an inline `Type`). kotlinc records the type only when the
@@ -684,10 +685,10 @@ pub struct ClassTail<'a> {
     /// reflection and downstream type substitution do not see a raw `H`.
     pub supertypes: &'a [Ty],
     /// BINARY/RUNTIME-retained annotations attached to the class declaration.
-    pub annotations: &'a [crate::ir::AppliedAnnotation],
+    pub annotations: &'a crate::metadata::MetadataAnnotations,
     /// BINARY/RUNTIME-retained annotations declared on the PRIMARY constructor — `Constructor.annotation`
     /// (f3) of the primary record, the counterpart of [`CtorMeta::annotations`] for the secondaries.
-    pub primary_ctor_annotations: &'a [crate::ir::AppliedAnnotation],
+    pub primary_ctor_annotations: &'a crate::metadata::MetadataAnnotations,
     /// The file's local classifiers (declared in executable code or nested in one). The string
     /// table names each by its raw internal name, marked local, wherever it appears.
     pub local_classifiers: &'a std::collections::HashSet<TypeName>,
@@ -735,11 +736,11 @@ impl Default for ClassTail<'_> {
             primary_ctor_jvm_signature: true,
             type_params: &[],
             type_param_bounds: &[],
-            captured_type_params: CapturedTypeParameters::Reserved(&[]),
+            captured_type_params: CapturedTypeParameters::default(),
             sealed_subclasses: &[],
             supertypes: &[],
-            annotations: &[],
-            primary_ctor_annotations: &[],
+            annotations: &crate::metadata::NO_ANNOTATIONS,
+            primary_ctor_annotations: &crate::metadata::NO_ANNOTATIONS,
             local_classifiers: &NO_LOCAL_CLASSIFIERS,
             enum_entry_bodies: &NO_LOCAL_CLASSIFIERS,
             is_enum: false,
@@ -756,7 +757,7 @@ impl Default for ClassTail<'_> {
 /// leaves metadata that describes a differently-named constant to every reflective reader.
 pub struct EnumEntryMeta<'a> {
     pub name: &'a str,
-    pub annotations: Option<&'a crate::ir::DeclarationAnnotations>,
+    pub annotations: crate::metadata::MetadataAnnotations,
 }
 
 /// f13 = an enum entry (`EnumEntry { name = f1, annotation = f2 }`). The entry's NAME interns
@@ -770,11 +771,9 @@ fn enum_entry_pb(
     let mut ee = Pb::new();
     ee.field_varint(1, st.local(entry.name) as u64);
     if annotations_in_metadata {
-        if let Some(annotations) = entry.annotations {
-            for annotation in annotations.applications() {
-                let encoded = crate::metadata::builder::annotation_pb(st, annotation);
-                ee.repeated_message(2, &encoded);
-            }
+        for annotation in entry.annotations.records() {
+            let encoded = crate::metadata::builder::annotation_pb(st, annotation);
+            ee.repeated_message(2, &encoded);
         }
     }
     ee
@@ -789,7 +788,8 @@ pub fn build_class(
     enum_entries: &[EnumEntryMeta<'_>],
     tail: &ClassTail,
 ) -> (Vec<u8>, Vec<String>) {
-    let class_flags = tail.flags;
+    // `HAS_ANNOTATIONS` (bit 0) is the declaration's own fact, set whether or not records follow.
+    let class_flags = tail.flags | u64::from(tail.annotations.declares_annotations());
     let companion_name = tail.companion;
     let nested_class_names = tail.nested;
     let annotations_in_metadata = tail.annotations_in_metadata;
@@ -824,7 +824,7 @@ pub fn build_class(
         numbered_on_use.iter().cloned(),
     );
     for (index, semantic) in reserved.iter().enumerate() {
-        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Captured(index as u64));
+        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Id(index as u64));
     }
     for (index, (source, parameter)) in tail
         .type_params
@@ -836,6 +836,16 @@ pub fn build_class(
         class_type_parameters.insert(source.clone(), id.clone());
         class_type_parameters.insert(parameter.semantic_name.clone(), id);
     }
+    // The class header (its type parameters' bounds and its supertypes) belongs to the class
+    // itself, so like any declaration being written it names its own parameters
+    // (`Type.type_parameter_name`); its members address them by table id.
+    let mut class_header_type_parameters = class_type_parameters.clone();
+    class_header_type_parameters.extend(semantic_named_type_parameters(
+        tail.type_params.iter().map(String::as_str),
+        tail.type_param_bounds
+            .iter()
+            .map(|parameter| parameter.semantic_name.as_str()),
+    ));
     let tparam_msgs: Vec<Pb> = tail
         .type_param_bounds
         .iter()
@@ -856,7 +866,7 @@ pub fn build_class(
                         .cloned()
                         .unwrap_or_default(),
                 },
-                &class_type_parameters,
+                &class_header_type_parameters,
             )
             .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"))
         })
@@ -877,7 +887,7 @@ pub fn build_class(
                 tail.supertype_spellings
                     .get(index)
                     .unwrap_or(crate::spelling::Spelled::NONE),
-                &class_type_parameters,
+                &class_header_type_parameters,
             ));
         }
         supertype_msgs.push(type_pb(
@@ -886,13 +896,13 @@ pub fn build_class(
                 crate::types::wk::kotlin_enum(),
                 &[Ty::obj_name(class_internal)],
             ),
-            &class_type_parameters,
+            &class_header_type_parameters,
         ));
     } else if tail.supertypes.is_empty() {
         supertype_msgs.push(type_pb(
             &mut st,
             Ty::obj("kotlin/Any"),
-            &class_type_parameters,
+            &class_header_type_parameters,
         ));
     } else {
         for (index, supertype) in tail.supertypes.iter().enumerate() {
@@ -902,7 +912,7 @@ pub fn build_class(
                 tail.supertype_spellings
                     .get(index)
                     .unwrap_or(crate::spelling::Spelled::NONE),
-                &class_type_parameters,
+                &class_header_type_parameters,
             ));
         }
     }
@@ -1007,7 +1017,10 @@ pub fn build_class(
             parameter.field_message(3, &return_type(st, &setter_type_parameters)); // ValueParameter.type = 3
             parameter
         });
+        // kotlinc interns the type before the type parameters, as at the top level.
         prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
+        let ty = return_type(st, &property_type_parameters);
+        prop.field_message(3, &ty); // Property.return_type = 3
         for (index, parameter) in p.type_params.iter().enumerate() {
             let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
@@ -1030,8 +1043,6 @@ pub fn build_class(
             .unwrap_or_else(|error| panic!("invalid emitted property type parameter: {error}"));
             prop.repeated_message(4, &parameter);
         }
-        let ty = return_type(st, &property_type_parameters);
-        prop.field_message(3, &ty); // Property.return_type = 3
         if let Some(recv) = p.receiver {
             // Property.receiver_type = 5 — a member EXTENSION property's declared receiver;
             // its presence is what makes the record an extension.
@@ -1067,7 +1078,8 @@ pub fn build_class(
         // `HAS_ANNOTATIONS` (bit 0) follows from the property's applied annotations, on EITHER use
         // site: kotlinc sets it for a field-targeted annotation too, and keeps it at metadata
         // versions where the records below are gated off.
-        let annotated = !p.annotations.is_empty() || !p.field_annotations.is_empty();
+        let annotated =
+            p.annotations.declares_annotations() || p.field_annotations.declares_annotations();
         let pflags = property_flags(p) | u64::from(annotated);
         // An accessor's flags word is emitted when it differs from the DEFAULT one, which kotlinc
         // derives from the PROPERTY (its `hasAnnotations` bit included). An annotated property whose
@@ -1106,12 +1118,8 @@ pub fn build_class(
             prop.field_varint(11, pflags); // Property.flags = 11
         }
         let mut jvm = Pb::new();
-        // A nullable PRIMITIVE property (`Int?`, `Double?`, …) has a BOXED backing field
-        // (`Ljava/lang/Integer;`, `Ljava/lang/Double;`), which the reader can't derive from the
-        // nullable-primitive return type — so kotlinc records an explicit `JvmFieldSignature.desc`
-        // (the boxed descriptor = the getter's return type). Every other property leaves the field
-        // empty (the reader derives it). kotlinc interns the getter/setter strings BEFORE the field
-        // descriptor (even though the proto writes `field` (f1) first), so build them in that order.
+        // kotlinc interns the getter/setter strings BEFORE the field's (even though the proto
+        // writes `field` (f1) first), so build them in that order.
         // The marker interns BEFORE the getter, exactly as it serializes (f2 before f3).
         let synthetic_method = p
             .synthetic_method
@@ -1125,47 +1133,24 @@ pub fn build_class(
             .setter
             .as_ref()
             .map(|(sn, sd)| jvm_method_sig(st, Some(sn), sd));
-        let boxed_field_desc = p.field_desc.clone().or(match p.ty {
-            Ty::Nullable(inner)
-                if matches!(
-                    *inner,
-                    Ty::Int
-                        | Ty::Long
-                        | Ty::Double
-                        | Ty::Float
-                        | Ty::Byte
-                        | Ty::Short
-                        | Ty::Char
-                        | Ty::Boolean
-                ) =>
-            {
-                p.getter
-                    .as_ref()
-                    .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string))
+        // An abstract property has no backing field at all: kotlinc omits the entry rather than
+        // writing an empty one, and interns none of its strings.
+        let field = p.has_backing_field.then(|| {
+            let mut field = Pb::new();
+            if let Some(n) = &p.field_name {
+                field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
             }
-            // A bare type-parameter property erases to `Ljava/lang/Object;`, which the reader
-            // cannot derive from the type `T` — so kotlinc records the descriptor explicitly, the
-            // same way it does for a boxed nullable primitive.
-            _ if p.tparam.is_some() => p
-                .getter
-                .as_ref()
-                .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
-            _ => None,
+            if let Some(d) = &p.field_desc {
+                field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
+            }
+            field
         });
-        let mut field = Pb::new();
-        if let Some(n) = &p.field_name {
-            field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
-        }
-        if let Some(d) = &boxed_field_desc {
-            field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
-        }
-        // An abstract property has no backing field at all — kotlinc omits the entry rather than
-        // writing an empty one (which is what a concrete property's derived field looks like).
         // Property.annotation = 14 / the backing field's = 34, both interning after the signature's
         // strings (kotlinc's serializer writes the JVM extension first). A disabled source feature
         // keeps the `HAS_ANNOTATIONS` flag above but writes no records.
         let annotations: Vec<Pb> = if annotations_in_metadata {
             p.annotations
+                .records()
                 .iter()
                 .map(|annotation| crate::metadata::builder::annotation_pb(st, annotation))
                 .collect()
@@ -1174,6 +1159,7 @@ pub fn build_class(
         };
         let field_annotations: Vec<Pb> = if annotations_in_metadata {
             p.field_annotations
+                .records()
                 .iter()
                 .map(|annotation| crate::metadata::builder::annotation_pb(st, annotation))
                 .collect()
@@ -1186,8 +1172,8 @@ pub fn build_class(
         for annotation in &field_annotations {
             prop.repeated_message(34, annotation); // Property.backingFieldAnnotation = 34
         }
-        if p.has_backing_field {
-            jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
+        if let Some(field) = &field {
+            jvm.field_message(1, field); // field (empty → derived)
         }
         if let Some(synthetic_method) = &synthetic_method {
             jvm.field_message(2, synthetic_method); // JvmPropertySignature.syntheticMethod = 2
@@ -1223,6 +1209,20 @@ pub fn build_class(
             m.type_params.iter().map(String::as_str),
             m.semantic_type_params.iter().map(String::as_str),
         ));
+        // kotlinc interns the return type before the type parameters, as at the top level.
+        let ret = crate::metadata::type_encoder::encode_declared_type(
+            st,
+            m.ret,
+            &m.spellings.ret,
+            &function_type_parameters,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "invalid emitted metadata return type for '{class_internal}.{}': {error}",
+                m.name
+            )
+        });
+        func.field_message(3, &ret);
         for (index, name) in m.type_params.iter().enumerate() {
             let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
@@ -1245,19 +1245,6 @@ pub fn build_class(
             .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"));
             func.repeated_message(4, &parameter);
         }
-        let ret = crate::metadata::type_encoder::encode_declared_type(
-            st,
-            m.ret,
-            &m.spellings.ret,
-            &function_type_parameters,
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "invalid emitted metadata return type for '{class_internal}.{}': {error}",
-                m.name
-            )
-        });
-        func.field_message(3, &ret);
         if let Some(recv) = m.receiver {
             // Function.receiver_type = 5 — a MEMBER EXTENSION's receiver, restored from the
             // physical `params[0]` realization so consumers see the LOGICAL shape.
@@ -1292,7 +1279,7 @@ pub fn build_class(
                 continue;
             }
             let mut vp = Pb::new();
-            let annotations = m.param_annotations.get(i).map(Vec::as_slice).unwrap_or(&[]);
+            let annotations = m.param_annotations.get(i);
             // `ValueParameter.flags` (f1): DECLARES_DEFAULT_VALUE for a defaulted parameter,
             // HAS_ANNOTATIONS when it carries annotations (the f7 records below are gated on the
             // source feature; the bit is not). Both precede the name.
@@ -1302,11 +1289,7 @@ pub fn build_class(
             } else {
                 0
             } | declared.flags()
-                | if records_annotations(annotations) {
-                    HAS_ANNOTATIONS
-                } else {
-                    0
-                };
+                | param_annotation_flags(annotations);
             if flags != 0 {
                 vp.field_varint(1, flags); // ValueParameter.flags = 1
             }
@@ -1318,7 +1301,7 @@ pub fn build_class(
             } else {
                 m.spellings.param(i).clone()
             };
-            let mut ty = crate::metadata::type_encoder::encode_declared_type(
+            let ty = crate::metadata::type_encoder::encode_declared_type(
                 st,
                 *pty,
                 &declared_spelling,
@@ -1332,13 +1315,6 @@ pub fn build_class(
                         )
                     },
                 );
-            if m.no_infer_params.get(i).copied().unwrap_or(false) {
-                let annotation = crate::metadata::type_encoder::encode_annotation(
-                    st,
-                    crate::types::type_name("kotlin/internal/NoInfer"),
-                );
-                ty.field_message(100, &annotation);
-            }
             vp.field_message(3, &ty);
             if m.vararg_index == Some(i) {
                 // ValueParameter.vararg_element_type = 4 — the ELEMENT next to the array type.
@@ -1375,7 +1351,7 @@ pub fn build_class(
         }
         // An annotated declaration sets `HAS_ANNOTATIONS` (bit 0) on top of whatever the caller
         // derived — the bit is a function OF the records below, never an independent input.
-        let flags = m.flags | u64::from(!m.annotations.is_empty());
+        let flags = m.flags | u64::from(m.annotations.declares_annotations());
         // Omitted at the public-final-declaration default, exactly like `Class.flags`.
         if flags != DEFAULT_FUNCTION_FLAGS {
             func.field_varint(9, flags); // Function.flags = 9
@@ -1403,6 +1379,7 @@ pub fn build_class(
         // A disabled source feature keeps the `HAS_ANNOTATIONS` flag above but writes no records.
         let annotations: Vec<Pb> = if annotations_in_metadata {
             m.annotations
+                .records()
                 .iter()
                 .map(|annotation| crate::metadata::builder::annotation_pb(st, annotation))
                 .collect()
@@ -1508,7 +1485,7 @@ pub fn build_class(
     let inline_underlying: Option<(u32, Option<Pb>)> = tail.inline_underlying.map(|(name, ty)| {
         (
             st.local(name),
-            ty.map(|ty| type_pb(&mut st, ty, &class_type_parameters)),
+            ty.map(|ty| type_pb(&mut st, ty, &class_header_type_parameters)),
         )
     });
 
@@ -1539,6 +1516,7 @@ pub fn build_class(
     // (`annotations_in_metadata` = false) writes no records and interns nothing here.
     let annotation_msgs: Vec<Pb> = if annotations_in_metadata {
         tail.annotations
+            .records()
             .iter()
             .map(|annotation| crate::metadata::builder::annotation_pb(&mut st, annotation))
             .collect()
@@ -1661,8 +1639,8 @@ mod tests {
                 setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
-                annotations: Vec::new(),
-                field_annotations: Vec::new(),
+                annotations: Default::default(),
+                field_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -1737,8 +1715,8 @@ mod tests {
                 setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
-                annotations: Vec::new(),
-                field_annotations: Vec::new(),
+                annotations: Default::default(),
+                field_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -1798,8 +1776,8 @@ mod tests {
                 setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
-                annotations: Vec::new(),
-                field_annotations: Vec::new(),
+                annotations: Default::default(),
+                field_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -1853,7 +1831,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
-                annotations: Vec::new(),
+                annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
             },
@@ -1875,7 +1853,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
-                annotations: Vec::new(),
+                annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
             },
@@ -1897,7 +1875,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
-                annotations: Vec::new(),
+                annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
             },
@@ -1919,7 +1897,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
-                annotations: Vec::new(),
+                annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
             },
@@ -1941,7 +1919,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
-                annotations: Vec::new(),
+                annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
             },
@@ -1963,7 +1941,7 @@ mod tests {
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
-                annotations: Vec::new(),
+                annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
             },
@@ -1990,8 +1968,8 @@ mod tests {
                 setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
-                annotations: Vec::new(),
-                field_annotations: Vec::new(),
+                annotations: Default::default(),
+                field_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2017,8 +1995,8 @@ mod tests {
                 setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
-                annotations: Vec::new(),
-                field_annotations: Vec::new(),
+                annotations: Default::default(),
+                field_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2093,8 +2071,8 @@ mod tests {
                 setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
-                annotations: Vec::new(),
-                field_annotations: Vec::new(),
+                annotations: Default::default(),
+                field_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2248,8 +2226,8 @@ mod tests {
                 setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
-                annotations: Vec::new(),
-                field_annotations: Vec::new(),
+                annotations: Default::default(),
+                field_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2311,8 +2289,8 @@ mod tests {
                 setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
-                annotations: Vec::new(),
-                field_annotations: Vec::new(),
+                annotations: Default::default(),
+                field_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2327,7 +2305,7 @@ mod tests {
                     sig_name: None,
                     vararg_index: None,
                     flags: 22,
-                    annotations: &[],
+                    annotations: &crate::metadata::NO_ANNOTATIONS,
                 }],
                 ..Default::default()
             },
@@ -2382,8 +2360,8 @@ mod tests {
                     setter_parameter_name: None,
                     field_desc: None,
                     field_name: None,
-                    annotations: Vec::new(),
-                    field_annotations: Vec::new(),
+                    annotations: Default::default(),
+                    field_annotations: Default::default(),
                     synthetic_method: None,
                     moved_from_interface_companion: false,
                     companion: false,
@@ -2413,8 +2391,8 @@ mod tests {
                     setter_parameter_name: Some("replacement".into()),
                     field_desc: None,
                     field_name: None,
-                    annotations: Vec::new(),
-                    field_annotations: Vec::new(),
+                    annotations: Default::default(),
+                    field_annotations: Default::default(),
                     synthetic_method: None,
                     moved_from_interface_companion: false,
                     companion: false,

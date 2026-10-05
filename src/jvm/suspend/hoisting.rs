@@ -159,7 +159,6 @@ pub(super) fn hoist_spliced_inline_bodies(
     hoist_spliced_walk(ir, body, suspend_set, orig_rets, ret, &mut seen);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn hoist_spliced_walk(
     ir: &mut IrFile,
     expression: ExprId,
@@ -186,6 +185,11 @@ fn hoist_spliced_walk(
         if rewritten != inner {
             if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[expression as usize] {
                 *inline_body = Some(rewritten);
+            }
+            // The rewritten body computes the same value, so it carries the checked result type
+            // the backend places the literal by.
+            if let Some(&result) = ir.logical_types.get(&inner) {
+                ir.logical_types.insert(rewritten, result);
             }
         }
         for capture in captures {
@@ -1614,7 +1618,7 @@ fn hoisted_value_ty(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint};
+    use crate::ir::IrIntrinsicSuspensionPoint;
 
     #[test]
     fn a_shared_operand_is_hoisted_independently_at_each_use() {
@@ -1622,10 +1626,7 @@ mod tests {
         let suspension = ir.add_expr(IrExpr::UnitInstance);
         ir.intrinsic_suspension_points.insert(
             suspension,
-            IrIntrinsicSuspensionPoint {
-                result: Ty::String,
-                kind: IrIntrinsicSuspensionKind::Safe,
-            },
+            IrIntrinsicSuspensionPoint { result: Ty::String },
         );
         let shared = ir.add_expr(IrExpr::EnumValueOf {
             classifier: type_name("example/Level"),
@@ -1665,6 +1666,57 @@ mod tests {
     }
 
     #[test]
+    fn a_rewritten_spliced_body_keeps_its_checked_result_type() {
+        let mut ir = IrFile::default();
+        let impl_fn = ir.add_fun(crate::ir::IrFunction {
+            name: "caller$lambda".to_string(),
+            params: Vec::new(),
+            ret: Ty::String,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let mut level = || {
+            let suspension = ir.add_expr(IrExpr::UnitInstance);
+            ir.intrinsic_suspension_points.insert(
+                suspension,
+                IrIntrinsicSuspensionPoint { result: Ty::String },
+            );
+            ir.add_expr(IrExpr::EnumValueOf {
+                classifier: type_name("example/Level"),
+                arg: suspension,
+                declaration: crate::ir::EnumValueOfDeclaration::Member,
+            })
+        };
+        let operands = vec![level(), level()];
+        let body = ir.add_expr(IrExpr::StringConcat(operands));
+        ir.logical_types.insert(body, Ty::String);
+        let lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(body),
+        });
+
+        hoist_spliced_inline_bodies(&mut ir, lambda, &HashSet::new(), &[], &Ty::Unit);
+
+        let IrExpr::Lambda {
+            inline_body: Some(rewritten),
+            ..
+        } = ir.exprs[lambda as usize]
+        else {
+            panic!("hoisting must keep the literal's inline body")
+        };
+        assert_ne!(
+            rewritten, body,
+            "the suspension is hoisted out of the operand"
+        );
+        assert_eq!(ir.logical_types.get(&rewritten), Some(&Ty::String));
+    }
+
+    #[test]
     fn a_static_instance_uses_the_stored_class_identity() {
         let mut ir = IrFile::default();
         ir.classes
@@ -1686,10 +1738,7 @@ mod tests {
             let suspension = ir.add_expr(IrExpr::UnitInstance);
             ir.intrinsic_suspension_points.insert(
                 suspension,
-                IrIntrinsicSuspensionPoint {
-                    result: Ty::String,
-                    kind: IrIntrinsicSuspensionKind::Safe,
-                },
+                IrIntrinsicSuspensionPoint { result: Ty::String },
             );
             let expression = match shape {
                 "ref-get" => IrExpr::RefGet {

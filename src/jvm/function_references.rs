@@ -46,6 +46,50 @@ fn reflection_descriptor_ty(ty: Ty) -> Ty {
     }
 }
 
+/// Reflection names the method the declaration was compiled as. A use-site specialization of
+/// that declaration (`::foo` typed `KFunction1<Int, Int>`) belongs to the adapter, not to this
+/// descriptor: the generic method is still the declaration's erased JVM signature
+/// (`foo(Ljava/lang/Object;)Ljava/lang/Object;` for an unbounded `T`, and
+/// `foo(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;` when `T : CharSequence`).
+///
+/// A companion-associated extension's receiver names the classifier whose static scope it joins.
+/// It is not a parameter of the method kotlin-reflect looks up. The receiver is identified by the
+/// parameter identity parallel to the declaration parameter; a signature whose identities do not
+/// line up is not a different reflection shape.
+fn module_declaration_reflection(
+    declaration: &crate::ir::IrModuleCallable,
+) -> Result<(Vec<Ty>, Ty), FunctionReferenceRealizationTarget> {
+    let companion = declaration
+        .flags
+        .has(crate::fir::DeclarationFlags::COMPANION);
+    let parameters = if companion {
+        if declaration.parameters.len() != declaration.parameter_identities.len() {
+            return Err(FunctionReferenceRealizationTarget::Invalid);
+        }
+        declaration
+            .parameters
+            .iter()
+            .zip(declaration.parameter_identities.iter())
+            .filter(|(_, identity)| identity.role != crate::ir::IrParameterRole::ExtensionReceiver)
+            .map(|(parameter, _)| *parameter)
+            .collect()
+    } else {
+        declaration.parameters.to_vec()
+    };
+    let parameters = super::generic_erasure::erased_callable_parameters(
+        &parameters,
+        &declaration.type_parameters,
+    );
+    let result = super::generic_erasure::erased_callable_parameters(
+        std::slice::from_ref(&declaration.result),
+        &declaration.type_parameters,
+    );
+    let Some(result) = result.into_iter().next() else {
+        return Err(FunctionReferenceRealizationTarget::Invalid);
+    };
+    Ok((parameters, result))
+}
+
 /// The class a callable reference at `expression` compiles to: the name the source file's
 /// local-class naming walk gives it. A reference that walk never saw (one lowering synthesized, or
 /// a second copy an inline splice made) keeps an internal name.
@@ -206,6 +250,7 @@ fn realize_adapter_reference(
             .map(|index| format!("$captured${index}"))
             .collect()
     });
+    let mut module_reflection = None;
     let reflected = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(_) => crate::ir::ReflectedCallable::Source,
         crate::ir::IrCallableReferenceTarget::Local { function, .. } => {
@@ -245,6 +290,7 @@ fn realize_adapter_reference(
             ..
         }
     );
+    let inherited_owner = reference.reflection_owner;
     let (owner_class, name, top_level, reflection_signature) = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(target) => {
             let declaration = ir
@@ -258,7 +304,12 @@ fn realize_adapter_reference(
                 (crate::ir::IrStaticPlacement::CompanionBlock { declaring_class }, _) => {
                     (Some(declaring_class), false)
                 }
-                (crate::ir::IrStaticPlacement::Package, Some(owner)) => (Some(owner), false),
+                (crate::ir::IrStaticPlacement::Package, Some(owner)) => {
+                    // `A::foo` names the member on A even when the declaration lives on a supertype.
+                    // kotlin-reflect substitutes the return type from that owner (`test.A?`), not
+                    // from the declaring class (`T?`). `H<A>::foo` still names H.
+                    (Some(inherited_owner.unwrap_or(owner)), false)
+                }
                 (crate::ir::IrStaticPlacement::Package, None) => (
                     Some(
                         super::module_calls::facade_for(declaration.source, facades.stems)
@@ -267,6 +318,7 @@ fn realize_adapter_reference(
                     true,
                 ),
             };
+            module_reflection = Some(module_declaration_reflection(declaration)?);
             (owner, declaration.name.to_string(), top_level, None)
         }
         crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
@@ -338,17 +390,21 @@ fn realize_adapter_reference(
         invoke_result = Ty::obj("kotlin/Any");
         target_result = Ty::obj("kotlin/Any");
     }
-    let (mut reflection_parameters, mut reflection_result) = match lifted {
-        Some(lifted) => lifted,
-        None => (
+    let (mut reflection_parameters, mut reflection_result) = if let Some(lifted) = lifted {
+        lifted
+    } else if let Some(declared) = module_reflection {
+        // The published declaration signature, not the use-site specialization stored on the
+        // reference. A local function is reflected by the signature it was lifted to instead.
+        declared
+    } else {
+        (
             reference.declaration_parameters.into_vec(),
             reference.declaration_result,
-        ),
+        )
     };
-    // Common IR retains the selected declaration's use-site captures for reflection identity. A
-    // top-level projection is not a JVM value type, however: the carrier's physical reflection
-    // descriptor uses the capture's exact readable upper bound. This is representation lowering
-    // of an already-selected declaration, not another resolution or a descriptor fallback.
+    // A projection left in that signature is not a JVM value type: the carrier's physical
+    // reflection descriptor uses its readable upper bound. This is representation of an
+    // already-selected declaration, not another resolution or a descriptor fallback.
     reflection_parameters = reflection_parameters
         .into_iter()
         .map(reflection_descriptor_ty)
@@ -449,29 +505,26 @@ fn realize_adapter_reference(
         },
         _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
     };
-    let carrier = install_carrier(ir, expression, carrier, reference.function_type);
+    let carrier = install_carrier(ir, expression, carrier, internal);
     if let Some(parameters) = declared_parameters {
         ir.construction_declared_params.insert(carrier, parameters);
     }
     Ok(())
 }
 
-/// Replace the reference expression with its carrier, cast to the reference's function type.
-/// kotlinc's `FunctionReferenceLowering` hands the carrier to its use site through that implicit
-/// cast, which the JVM writes as a `checkcast` to the `FunctionN` interface.
-/// Replace `expression` with `carrier` cast to its function type; the carrier's new id.
+/// Replace the reference expression with its carrier. kotlinc's `FunctionReferenceLowering` hands
+/// the carrier to its use site through an implicit cast, which writes no instruction: the value
+/// keeps its class's type, and a consumer that needs its `FunctionN`, `KFunction` or other function
+/// type casts it there, as a lambda class's consumer does.
 fn install_carrier(
     ir: &mut IrFile,
     expression: usize,
     carrier: IrExpr,
-    function_type: Ty,
+    class: crate::types::TypeName,
 ) -> ExprId {
-    let carrier = ir.add_expr(carrier);
-    ir.exprs[expression] = IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::Cast,
-        arg: carrier,
-        type_operand: function_type.non_null(),
-    };
+    ir.exprs[expression] = carrier;
+    let carrier = ExprId::try_from(expression).expect("an expression id fits its index");
+    ir.logical_types.insert(carrier, Ty::obj_name(class));
     carrier
 }
 
@@ -841,6 +894,7 @@ mod tests {
             declaration_result: signature.ret,
             declaration_suspend,
             adaptation: None,
+            reflection_owner: None,
         };
         own_invoke_realizable(&ir, &reference)
     }
