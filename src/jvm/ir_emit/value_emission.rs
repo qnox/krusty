@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Callee, IrExpr};
+use crate::ir::{Callee, IrExpr, NullCheck};
 use crate::jvm::classfile::CodeBuilder;
 use crate::jvm::names::{method_descriptor, type_descriptor};
 use crate::jvm::value_classes::instance_representation;
@@ -10,14 +10,15 @@ use crate::types::Ty;
 
 use super::{
     access_bridges, array_jvm_element, bottom_values, boxed_descriptor, bytecode_inline_call,
-    class_ctor_jvm_tys, constant_emission, constructor_accessors, declared_jvm_interface,
-    default_mask_bit, default_mask_count, emit_box_impl, emit_constructor_default_arguments,
-    instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty, jvm_function_interface,
-    jvm_function_invoke_descriptor, jvm_function_params, jvm_tys, lambda_class, lambda_class_names,
-    load, method_defaults, native_unsigned_impl_target, parse_descriptor_params,
-    physical_call_result_words, prim_newarray_atype, push_zero, ref_class, singleton_instance_load,
-    slot_words, try_emission, ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan,
-    LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
+    class_ctor_jvm_tys, class_lambda_reflection, constant_emission, constructor_accessors,
+    declared_jvm_interface, default_mask_bit, default_mask_count, emit_box_impl,
+    emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty,
+    jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params, jvm_tys,
+    lambda_class, lambda_class_names, load, method_defaults, native_unsigned_impl_target,
+    parse_descriptor_params, physical_call_result_words, prim_newarray_atype, push_zero, ref_class,
+    signature_formatter::JvmSignatureFormatter, singleton_instance_load, slot_words, try_emission,
+    ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation,
+    LMF_METAFACTORY_DESC,
 };
 
 impl super::Emitter<'_> {
@@ -27,6 +28,43 @@ impl super::Emitter<'_> {
         node: &IrExpr,
         code: &mut CodeBuilder,
     ) {
+        // A `Companion` field this class may not read is read through the accessor the plan
+        // placed for it.
+        if let (Some(context), Some(read)) = (
+            self.static_owner,
+            super::companion_field::companion_field_read(self.ir, self.classifiers, node),
+        ) {
+            match super::companion_field::companion_field_accessor(self.ir, context, &read) {
+                Err(error) => {
+                    *self.run.emit_error.borrow_mut() = Some(error);
+                    return;
+                }
+                Ok(Some((owner, accessor))) => {
+                    let planned = self.run.static_accessor_plan.borrow().declares(
+                        crate::jvm::private_static_access::StaticOwner::Class(owner),
+                        accessor,
+                    );
+                    if !planned {
+                        *self.run.emit_error.borrow_mut() = Some(format!(
+                            "{} declares no accessor for companion {}",
+                            owner.render(),
+                            read.companion.render()
+                        ));
+                        return;
+                    }
+                    let (name, descriptor) = super::companion_field::companion_instance_accessor(
+                        owner,
+                        read.holder,
+                        read.companion,
+                        &read.field,
+                    );
+                    let method = self.cw.methodref(&owner.render(), &name, &descriptor);
+                    code.invokestatic(method, 0, 1);
+                    return;
+                }
+                Ok(None) => {}
+            }
+        }
         match node {
             IrExpr::BottomValue { producer, .. } => {
                 let baseline = code.stack_height();
@@ -60,19 +98,12 @@ impl super::Emitter<'_> {
                 type_argument,
             } => self.emit_kclass_literal(*classifier, *value, *type_argument, code),
             IrExpr::GetValue(i) => {
-                // A slot that was never allocated means the lowering produced malformed IR (e.g. an
-                // unsupported suspend shape). Don't panic — flag the file unemittable and skip it.
                 let Some(&(slot, jt)) = self.slots.get(i) else {
-                    crate::trace_compiler!(
-                        "suspend",
-                        "EMIT_BAIL GetValue unallocated slot i={i} owner={} known={:?}",
+                    panic!(
+                        "malformed IR: value {i} has no allocated JVM slot while emitting {}; known slots: {:?}",
                         self.owner,
                         self.slots.keys().collect::<Vec<_>>()
                     );
-                    self.run.set_emit_error(
-                        "value read references a slot that was never declared".to_string(),
-                    );
-                    return;
                 };
                 self.load_constructor_value(*i, jt, slot, code);
             }
@@ -750,9 +781,13 @@ impl super::Emitter<'_> {
                         };
                         self.emit_value(receiver, code);
                         self.emit_value(*argument, code);
+                        // kotlinc's `CompareTo` intrinsic: the int category and `long` go through
+                        // `Intrinsics.compare`, `Boolean` and the floating types through their
+                        // wrappers.
                         let (owner, descriptor) = match *operand {
-                            Ty::Int => ("java/lang/Integer", "(II)I"),
-                            Ty::Long => ("java/lang/Long", "(JJ)I"),
+                            Ty::Boolean => ("java/lang/Boolean", "(ZZ)I"),
+                            Ty::Int => ("kotlin/jvm/internal/Intrinsics", "(II)I"),
+                            Ty::Long => ("kotlin/jvm/internal/Intrinsics", "(JJ)I"),
                             Ty::Float => ("java/lang/Float", "(FF)I"),
                             Ty::Double => ("java/lang/Double", "(DD)I"),
                             _ => unreachable!(
@@ -933,7 +968,9 @@ impl super::Emitter<'_> {
                         );
                         // The call's temporaries go with its frame, as kotlinc's `leaveTemps` does.
                         self.frame.drop_to(call_frame);
-                        if spliced {
+                        // A lowering that owned the call, even one that failed, is final: only a
+                        // call no inline lowering applied to is called for real.
+                        if spliced.owns_call() {
                             return;
                         }
                         // The selected declaration already owns fallback legality. `MustInline`
@@ -1369,11 +1406,10 @@ impl super::Emitter<'_> {
                 code.getstatic(f, 1);
             }
             IrExpr::SingletonValue { classifier } => {
-                let Some(published) = singleton_instance_load::published_singleton(
-                    self.ir,
-                    *classifier,
-                    self.bodies.singleton_storage(*classifier),
-                ) else {
+                let dependency = crate::jvm::singleton_storage::of(self.classifiers, *classifier);
+                let Some(published) =
+                    singleton_instance_load::published_singleton(self.ir, *classifier, dependency)
+                else {
                     *self.run.emit_error.borrow_mut() = Some(format!(
                         "missing JVM storage for singleton {}",
                         classifier.render()
@@ -1644,6 +1680,30 @@ impl super::Emitter<'_> {
                         &self.facade,
                         self.lambda_modes,
                     );
+                    let reflection = if sam.is_none() {
+                        let formatter = JvmSignatureFormatter::with_symbols(
+                            self.ir,
+                            self.classifiers,
+                            self.run,
+                        );
+                        let invoke = class_lambda_reflection::ClassLambdaInvoke {
+                            own: lam_tys,
+                            result: impl_ret,
+                        };
+                        match class_lambda_reflection::reflect(
+                            self.ir, e, *impl_fn, invoke, &formatter,
+                        ) {
+                            Ok(reflection) => reflection,
+                            Err(error) => {
+                                // The class is discarded; a placeholder keeps the frames
+                                // computable.
+                                self.run.set_emit_error(error);
+                                return code.aconst_null();
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     self.run.lambda_classes.borrow_mut().push(LambdaClassPlan {
                         internal: internal.clone(),
                         iface: iface.clone(),
@@ -1658,6 +1718,7 @@ impl super::Emitter<'_> {
                         function_adapter,
                         identity,
                         owner_is_interface: impl_owner_is_interface,
+                        reflection,
                     });
                     let nullable = sam.as_ref().is_some_and(|target| target.nullable);
                     if nullable {
@@ -1709,6 +1770,7 @@ impl super::Emitter<'_> {
                     indy,
                     cap_words,
                     captures,
+                    cap_tys,
                     sam.as_ref().is_some_and(|target| target.nullable),
                 );
             }
@@ -1728,7 +1790,7 @@ impl super::Emitter<'_> {
                 };
                 code.aload(slot);
             }
-            IrExpr::NotNullAssert { operand, message } => {
+            IrExpr::NotNullAssert { operand, check } => {
                 self.emit_value(*operand, code);
                 // Flow typing can prove a stable nullable scalar non-null before a later, redundant
                 // `!!`. Its checked FIR assertion remains visible, but the selected smart-cast
@@ -1743,8 +1805,8 @@ impl super::Emitter<'_> {
                 // A platform value narrowed to a declared non-null type names the checked expression
                 // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
                 // one-argument form. Both consume the duplicate and leave the value in place.
-                let m = match message {
-                    Some(message) => {
+                let m = match check {
+                    NullCheck::Named(message) => {
                         code.push_string(message, self.cw);
                         self.cw.methodref(
                             "kotlin/jvm/internal/Intrinsics",
@@ -1752,13 +1814,18 @@ impl super::Emitter<'_> {
                             "(Ljava/lang/Object;Ljava/lang/String;)V",
                         )
                     }
-                    None => self.cw.methodref(
+                    NullCheck::Source | NullCheck::Unnamed => self.cw.methodref(
                         "kotlin/jvm/internal/Intrinsics",
                         "checkNotNull",
                         "(Ljava/lang/Object;)V",
                     ),
                 };
-                code.invokestatic(m, if message.is_some() { 2 } else { 1 }, 0);
+                let arguments = if matches!(check, NullCheck::Named(_)) {
+                    2
+                } else {
+                    1
+                };
+                code.invokestatic(m, arguments, 0);
             }
             IrExpr::LateinitCheck { operand, name } => {
                 // A `lateinit var` local read: throw `UninitializedPropertyAccessException` while the slot
@@ -1853,7 +1920,7 @@ impl super::Emitter<'_> {
                     self.release_operand_spills(&temps);
                 } else {
                     self.emit_value(*holder, code);
-                    self.emit_value(*value, code);
+                    self.emit_element_value(*elem, *value, code);
                 }
                 let (cls, fdesc) = ref_class(elem);
                 let f = self.cw.fieldref(cls, "element", fdesc);

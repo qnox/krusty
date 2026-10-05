@@ -156,6 +156,7 @@ pub(super) fn realize(
             | IrExpr::SingletonValue { .. }
             | IrExpr::GetValue(_)
             | IrExpr::SetValue { .. }
+            | IrExpr::SetFrameResult { .. }
             | IrExpr::Call { .. }
             | IrExpr::Return(_)
             | IrExpr::Block { .. }

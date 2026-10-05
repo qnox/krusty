@@ -32,18 +32,19 @@ pub(crate) fn realize_calls(
     let callables =
         crate::backend::CheckedBackendCallables::freeze(ir, &ClasspathCallables(classpath))
             .expect("every selected dependency callable has a frozen realization");
-    super::module_calls::realize(
-        ir,
-        &stems,
-        classpath,
-        &callables,
-        &mut property_realizations,
-    )
-    .expect("every module call is realized");
-    let mut default_call_operands = super::default_call_operands::DefaultCallOperands::default();
     let module = crate::backend::BackendModuleFacts::from_classifiers([], [])
         .expect("an empty module classifier snapshot is valid");
     let classifiers = crate::backend::CheckedBackendClassifiers::new(&module, dependencies);
+    super::module_calls::realize(
+        ir,
+        &stems,
+        &classifiers,
+        &callables,
+        &mut property_realizations,
+        crate::jvm::ir_emit::JvmDefaultMode::default(),
+    )
+    .expect("every module call is realized");
+    let mut default_call_operands = super::default_call_operands::DefaultCallOperands::default();
     super::external_calls::realize(
         ir,
         &classifiers,

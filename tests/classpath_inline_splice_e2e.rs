@@ -195,20 +195,32 @@ fn bootstrap_methods(disassembly: &str) -> Vec<String> {
         .collect()
 }
 
+/// A method's javap entry, from its signature line to the blank line that ends it (code, line and
+/// local-variable tables, stack map), with constant-pool indices erased because their numbering is
+/// an emission-order artifact.
+fn method_entry(disassembly: &str, signature: &str) -> Vec<String> {
+    disassembly
+        .lines()
+        .skip_while(|line| line.trim() != signature)
+        .take_while(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .filter(|word| !word.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
 /// The complete ordered method list and `BootstrapMethods` table, against kotlinc's own, at one
 /// target.
 ///
-/// Both sides are spelled out rather than asserted equal, because they are NOT equal and this is
-/// where the difference is recorded rather than described.
+/// Both sides are spelled out rather than asserted equal, so a splice that regressed to a real
+/// call fails here with the method it left behind.
 ///
-/// The spliced shapes agree: `runPlainInt`, `runConcat` and `box` carry no lambda implementation
-/// method on either side, so the bodies AND the lambdas passed to them were inlined. What remains
-/// is the DECLINED case — `runSuspend`, whose `suspend inline` callee is spliced after suspend
-/// lowering has already built the state machine — and its lambda is the one method krusty has that
-/// kotlinc does not, along with the `LambdaMetafactory` entry that binds it.
-///
-/// Pinning both sides means neither direction can move silently: a splice that regressed to a real
-/// call and a splice that grew to cover the suspend case both fail this test.
+/// The spliced shapes agree: `runPlainInt`, `runConcat`, `runSuspend` and `box` carry no lambda
+/// implementation method on either side, so the bodies AND the lambdas passed to them were
+/// inlined, the `suspend inline` one included.
 #[test]
 fn the_emitted_shape_against_kotlincs_own_at_the_same_target() {
     assert_eq!(
@@ -228,9 +240,8 @@ fn the_emitted_shape_against_kotlincs_own_at_the_same_target() {
             "public static final java.lang.String runConcat(java.lang.String);",
             "public static final java.lang.Object runSuspend(int, kotlin.coroutines.Continuation<? super java.lang.Integer>);",
             "public static final java.lang.String box();",
-            "private static final int runSuspend$lambda$0(int);",
         ],
-        "the one extra method is the DECLINED suspend splice's lambda"
+        "krusty emits no lambda implementation methods either"
     );
 
     // The tables, by what each entry's handle names. Counting the handles rather than comparing
@@ -260,8 +271,8 @@ fn the_emitted_shape_against_kotlincs_own_at_the_same_target() {
     );
     assert_eq!(
         handles(krusty.clone(), "LambdaMetafactory"),
-        1,
-        "and binds exactly one lambda: the one whose splice DECLINED:\n{krusty:#?}"
+        0,
+        "and binds no lambda through a bootstrap either:\n{krusty:#?}"
     );
 }
 
@@ -322,15 +333,21 @@ fn the_relocated_concatenation_bootstrap_links_and_runs() {
     assert_eq!(output, "OK", "the spliced bodies must produce their values");
 }
 
-/// A `suspend inline` function declines for a different reason and with no `invokedynamic` in its
-/// body at all: a classpath body is spliced from bytecode at emit, after suspend lowering has
-/// already built the state machine, so there is nowhere left to put a suspending body. This is the
-/// shape the measured corpus is built from.
+/// A `suspend inline` library function is spliced from its private `twiceSuspend$$forInline`
+/// copy, which keeps the suspension markers, so the caller builds its own state machine around the
+/// inlined `fetchInt` call exactly as kotlinc does. Its plain `twiceSuspend` body is already the
+/// callee's own state machine and leaves the caller nothing to suspend at.
 #[test]
-fn a_classpath_suspend_inline_body_declines() {
-    let text = main_disassembly();
+fn a_classpath_suspend_inline_body_is_spliced_from_its_for_inline_copy_like_kotlinc() {
+    let signature = "public static final java.lang.Object runSuspend(int, \
+                     kotlin.coroutines.Continuation<? super java.lang.Integer>);";
+    let reference = method_entry(&reference_disassembly(), signature);
+    assert!(!reference.is_empty(), "kotlinc must emit runSuspend");
+    assert_eq!(method_entry(&main_disassembly(), signature), reference);
     assert!(
-        calls(&text, "runSuspend", "fixture/LibKt.twiceSuspend"),
-        "expected a real call, the splice having declined:\n{text}"
+        krusty_classes()
+            .iter()
+            .any(|(internal, _)| internal == "MainKt$runSuspend$1"),
+        "expected runSuspend's continuation class, as kotlinc emits"
     );
 }

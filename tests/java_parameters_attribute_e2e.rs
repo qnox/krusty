@@ -388,6 +388,232 @@ fn java_parameters_names_an_anonymous_objects_value_class_receiver() {
     );
 }
 
+/// A value-class member's extension receiver is a parameter of the member's static, so the class
+/// of a lambda, suspend lambda, anonymous object or local class written there reflects it as a
+/// captured value, synthetic, under its field name `$this_mext`; so does an ordinary class's or a
+/// local function's, though their constructors' local-variable tables call it `$receiver`. A suspend
+/// lambda's class reflects its constructor's captures and `$completion`, `create`'s `value` and
+/// `$completion`, and the typed `invoke`'s `p1`, `p2`, … like kotlinc.
+#[test]
+fn java_parameters_names_a_value_class_member_extension_receiver_capture() {
+    assert_parameter_parity(
+        "JavaParametersMemberExtension",
+        "package demo\n\
+         interface Box { fun get(k: Int): Any }\n\
+         class Two(val first: Any, val second: Any)\n\
+         @JvmInline value class Tag(val raw: String)\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 fun Tag.mext(): () -> Held = { Held(raw + this.raw) }\n\
+         \x20 fun Tag.msus(): suspend () -> Two = { Two(this, this@Held) }\n\
+         \x20 fun Tag.mo(): Box = object : Box { override fun get(k: Int): Any = this@mo }\n\
+         \x20 fun Tag.mlc(): Box { class L : Box { override fun get(k: Int): Any = this@mlc }; return L() }\n\
+         \x20 fun m(): Any {\n\
+         \x20\x20 fun Tag.loc(): () -> Held = { Held(this.raw) }\n\
+         \x20\x20 return Tag(raw).loc()\n\
+         \x20 }\n\
+         \x20 fun su(): suspend () -> Box = { object : Box { override fun get(k: Int): Any = this@Held } }\n\
+         }\n\
+         class Plain(val raw: String) {\n\
+         \x20 fun Tag.pext(): () -> Held = { Held(raw + this.raw) }\n\
+         }\n\
+         fun ps(x: Int): suspend (Int) -> Two = { y -> Two(x, y) }\n\
+         fun pair(): suspend (Int, Long) -> Long = { a, b -> a + b }\n",
+        &[
+            "demo/Held$mext$1",
+            "demo/Held$msus$1",
+            "demo/Held$mo$1",
+            "demo/Held$mlc$L",
+            "demo/Held$m$loc$1",
+            "demo/Held$su$1",
+            "demo/Held$su$1$1",
+            "demo/Plain$pext$1",
+            "demo/JavaParametersMemberExtensionKt$ps$1",
+            "demo/JavaParametersMemberExtensionKt$pair$1",
+        ],
+    );
+}
+
+/// An object written in a member of an anonymous object or local class inside a value-class member
+/// reflects the value class's instance as the static's value it captures, `$arg0`, synthetic,
+/// ahead of the enclosing class's instance `this$0` when it captures that too.
+#[test]
+fn java_parameters_names_a_nested_objects_value_class_receiver() {
+    assert_parameter_parity(
+        "JavaParametersNestedObjectCapture",
+        "package demo\n\
+         interface Box { fun get(k: Int): Any }\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 fun inObj(): Box = object : Box {\n\
+         \x20\x20 override fun get(k: Int): Any {\n\
+         \x20\x20\x20 val o = object : Box { override fun get(k: Int): Any = this@Held }\n\
+         \x20\x20\x20 return o.get(k)\n\
+         \x20\x20 }\n\
+         \x20 }\n\
+         \x20 fun inLocal(): Box {\n\
+         \x20\x20 class L(val n: Int) : Box {\n\
+         \x20\x20\x20 override fun get(k: Int): Any {\n\
+         \x20\x20\x20\x20 val o = object : Box { override fun get(k: Int): Any = this@Held.raw + this@L.n }\n\
+         \x20\x20\x20\x20 return o.get(k)\n\
+         \x20\x20\x20 }\n\
+         \x20\x20 }\n\
+         \x20\x20 return L(1)\n\
+         \x20 }\n\
+         }\n",
+        &[
+            "demo/Held$inObj$1",
+            "demo/Held$inObj$1$get$o$1",
+            "demo/Held$inLocal$L",
+            "demo/Held$inLocal$L$get$o$1",
+        ],
+    );
+}
+
+/// kotlinc's value-class lowering moves a member's dispatch receiver into the static's carrier
+/// `arg0`, flagged synthetic, and its extension receiver into an ordinary parameter `$this$name`,
+/// flagged mandated: a member function's and a property accessor's alike. An extension receiver
+/// that stays one has no flag: an ordinary class's member extension and a top-level extension.
+#[test]
+fn java_parameters_flags_a_value_class_static_members_extension_receiver_mandated() {
+    assert_parameter_parity(
+        "JavaParametersMovedExtensionReceiver",
+        "package demo\n\
+         @JvmInline value class Tag(val raw: String)\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 fun Tag.mext(x: Int): Int = x\n\
+         \x20 var String.pp: Int\n\
+         \x20\x20 get() = length\n\
+         \x20\x20 set(v) {}\n\
+         \x20 fun String.withDefault(x: Int = 1): Int = x\n\
+         }\n\
+         class Plain(val raw: String) {\n\
+         \x20 fun Tag.pmext(x: Int): Int = x\n\
+         }\n\
+         fun Tag.top(x: Int): Int = x\n",
+        &[
+            "demo/Held",
+            "demo/Plain",
+            "demo/JavaParametersMovedExtensionReceiverKt",
+        ],
+    );
+}
+
+/// A value class keeps an interface entry on its box for each member lowered to a static `-impl`:
+/// the boxed override `abs(String)` calling `abs-impl`. kotlinc reflects the entry's parameters as
+/// the static names them, less the carrier, and its extension receiver `$this$abs` is unflagged
+/// there: it is the receiver of an instance method again. krusty wrote no `MethodParameters` on an
+/// entry, nor on an abstract interface member. The boxed `equals(other)`, `constructor-impl`, the
+/// `-impl` statics and `equals-impl0` keep theirs, `box-impl`, `unbox-impl`, the private
+/// constructor and the bridges none.
+#[test]
+fn java_parameters_names_a_value_class_boxed_members() {
+    assert_parameter_parity(
+        "JavaParametersBoxedMembers",
+        "package demo\n\
+         interface Abs { fun String.abs(): Int; fun plain(x: Int): Int }\n\
+         interface Gen<T> { fun f(t: T): T; fun Int.prop2(): String }\n\
+         interface Sized { val pp: Int }\n\
+         @JvmInline value class Held(val raw: String) : Abs, Gen<String>, Sized, Comparable<Held> {\n\
+         \x20 override fun String.abs(): Int = length + raw.length\n\
+         \x20 override fun plain(x: Int): Int = x\n\
+         \x20 override fun f(t: String): String = t + raw\n\
+         \x20 override fun Int.prop2(): String = raw\n\
+         \x20 override val pp: Int get() = 1\n\
+         \x20 override fun compareTo(other: Held): Int = 0\n\
+         \x20 fun own(y: String): Int = y.length\n\
+         }\n",
+        &["demo/Held", "demo/Abs", "demo/Gen"],
+    );
+}
+
+/// A value class's interface entries for property accessors reflect like a function's: a setter
+/// entry names its value, and a member-extension entry keeps its receiver unflagged, labeled after
+/// the entry's own JVM name with its non-identifier characters escaped (`$this$getC`,
+/// `$this$getE_u2d<hash>`, `$this$f_u2d<hash>`), never after the property (`$this$c`) as the static
+/// names it. krusty wrote no setter entry and no member-extension getter entry, and labeled a
+/// mangled function entry's receiver after the source name.
+#[test]
+fn java_parameters_names_a_value_class_property_entries() {
+    assert_parameter_parity(
+        "JavaParametersPropertyEntries",
+        "package demo\n\
+         @JvmInline value class Tag(val n: Int)\n\
+         interface Shape {\n\
+         \x20 var b: Int\n\
+         \x20 val String.c: Int\n\
+         \x20 var t: Tag\n\
+         \x20 val String.e: Tag\n\
+         \x20 fun String.f(w: Tag): Int\n\
+         }\n\
+         @JvmInline value class Box(val x: Int) : Shape {\n\
+         \x20 override var b: Int\n\
+         \x20\x20 get() = x\n\
+         \x20\x20 set(value) { }\n\
+         \x20 override val String.c: Int get() = x\n\
+         \x20 override var t: Tag\n\
+         \x20\x20 get() = Tag(x)\n\
+         \x20\x20 set(v) { }\n\
+         \x20 override val String.e: Tag get() = Tag(x)\n\
+         \x20 override fun String.f(w: Tag): Int = x\n\
+         }\n",
+        &["demo/Box"],
+    );
+}
+
+/// kotlinc writes an interface member's body on `DefaultImpls` as a static that takes the
+/// interface instance as `$this`, synthetic, and the extension receiver as an ordinary parameter
+/// `$receiver`, flagged mandated like every receiver a static moves; so do the forward a
+/// sub-interface republishes for an inherited member and a class's `<name>$suspendImpl`. krusty
+/// named it `$this$ie`, unflagged.
+#[test]
+fn java_parameters_flags_a_default_impls_extension_receiver_mandated() {
+    assert_parameter_parity(
+        "JavaParametersDefaultImplsReceiver",
+        "package demo\n\
+         interface Face {\n\
+         \x20 fun String.ie(n: Int): Int = length + n\n\
+         \x20 val String.pe: Int get() = length\n\
+         \x20 fun plain(y: Int): Int = y\n\
+         }\n\
+         interface Sub : Face\n\
+         open class Open { open suspend fun String.se(n: Int): Int = n + length }\n",
+        &[
+            "demo/Face$DefaultImpls",
+            "demo/Face",
+            "demo/Sub$DefaultImpls",
+            "demo/Open",
+        ],
+    );
+}
+
+/// A class that inherits an interface default it does not override gets a forwarder: kotlinc
+/// reflects its parameters as the member names them, and its extension receiver `$this$decorate`
+/// is unflagged, since the forwarder is an instance method. A value class realizes each such forwarder with a static `<name>-impl` (or the
+/// forwarder's own mangled name) as well, whose carrier `arg0` is synthetic and whose extension
+/// receiver is mandated, like every value-class static. krusty wrote no `MethodParameters` on a
+/// forwarder and no static at all. (A generic or `suspend` member's rows match too, but the
+/// comparison keys a member by its generic `Signature`, a recorded gap of every forwarder.)
+#[test]
+fn java_parameters_names_an_inherited_default_forwarder_and_its_value_class_static() {
+    assert_parameter_parity(
+        "JavaParametersInheritedDefault",
+        "package demo\n\
+         @JvmInline value class Tag(val id: Int)\n\
+         interface Base {\n\
+         \x20 fun shared(x: Int, s: String): String = s + x\n\
+         \x20 var count: Int\n\
+         \x20\x20 get() = 7\n\
+         \x20\x20 set(value) {}\n\
+         \x20 fun String.decorate(times: Long): String = this + times\n\
+         \x20 fun tagged(tag: Tag): Int = tag.id\n\
+         }\n\
+         interface Left : Base { fun left(): String = \"left\" }\n\
+         interface Right : Base\n\
+         @JvmInline value class Held(val raw: Long) : Left, Right\n\
+         class Plain : Left, Right\n",
+        &["demo/Held", "demo/Plain"],
+    );
+}
+
 #[test]
 fn method_parameters_remain_opt_in() {
     let jdk = common::jdk_modules();

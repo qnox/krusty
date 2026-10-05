@@ -20,6 +20,7 @@ mod inline_body;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
+mod result_nullability;
 pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
     AnnotationPositionalPolicy,
@@ -39,6 +40,7 @@ pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
 pub use property_producer::PropertyProducer;
+pub use result_nullability::{ResultEnhancement, ReturnInfo};
 
 use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
@@ -576,6 +578,21 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         false
     }
 
+    /// The Kotlin package that declares library top-level callable `callable`, whose `owner` may
+    /// be the platform container realizing it rather than the package itself.
+    fn top_level_callable_package(&self, callable: &LibraryCallable) -> TypeName {
+        callable.owner
+    }
+
+    /// The contract-DSL member the selected declaration `callable` is, by its complete signature:
+    /// a description's call means an effect only when it selected one of these declarations.
+    fn contract_dsl_member(
+        &self,
+        _callable: &crate::contracts::SelectedDslCallable<'_>,
+    ) -> Option<crate::contracts::DslMember> {
+        None
+    }
+
     /// Primitive represented by a platform wrapper type.
     fn boxed_primitive(&self, _ty: Ty) -> Option<Ty> {
         None
@@ -953,6 +970,9 @@ pub struct LibraryCallable {
     /// extension receiver must unbox to the value class's underlying; `params[0]` is already erased and
     /// cannot make that distinction. This is the un-erased-source-type down payment on task B.
     pub source_receiver: Option<Ty>,
+    /// Annotation class identities declared on this callable. Consumers decide which annotations
+    /// affect resolution/emission; the library layer only records their qualified identities.
+    pub annotations: Vec<crate::types::TypeName>,
     /// The callee's DECLARED (un-erased, pre-substitution) parameter types in physical source order:
     /// leading contexts, then an extension receiver when present, then value parameters. An ordinary
     /// member's dispatch receiver is not included. This is the parameter analogue of
@@ -1086,6 +1106,8 @@ pub struct CallSig {
     pub inline_modifiers: Vec<InlineParameterModifier>,
     /// Per logical Java parameter, whether nullable arguments are accepted.
     pub platform_nullable_params: Vec<bool>,
+    /// Java signature enhancement of the declared result's nullability.
+    pub result_enhancement: ResultEnhancement,
     /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
     pub required: usize,
     /// True if a logical param is `vararg` (callers pack values into its array).
@@ -1556,46 +1578,6 @@ fn vec_for_arity<T>(items: Vec<T>, param_count: usize) -> Vec<T> {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct ReturnInfo {
-    pub nullable: bool,
-    pub class: Option<Ty>,
-}
-
-impl ReturnInfo {
-    pub fn new(nullable: bool, class: Option<Ty>) -> Self {
-        ReturnInfo { nullable, class }
-    }
-
-    pub fn apply(self, fallback: Ty) -> Ty {
-        self.apply_with_class(self.class, fallback)
-    }
-
-    pub fn apply_with_class(self, class: Option<Ty>, fallback: Ty) -> Ty {
-        let ret = match class {
-            // Nullability wraps the declared generic result; it must not hide the already-solved
-            // type arguments. Otherwise a dependency `Box<T>?` specialized as `Box<Base>?` is
-            // collapsed back to raw `Box?` while the equivalent source declaration stays precise.
-            Some(meta) if !fallback.non_null().type_args().is_empty() => {
-                let specialized = Ty::obj_args(&meta.name(), fallback.non_null().type_args());
-                if matches!(meta, Ty::PlatformNullable(_)) {
-                    Ty::platform_nullable(specialized)
-                } else {
-                    specialized
-                }
-            }
-            Some(meta) => meta,
-            None => fallback,
-        };
-        if self.nullable && !ret.is_nullable() && (ret.boxed_ref().is_some() || ret.is_reference())
-        {
-            Ty::nullable(ret)
-        } else {
-            ret
-        }
-    }
-}
-
 /// One overload in a [`FunctionSet`]: the full platform-neutral shape of a single function the front end
 /// needs, in ONE place — no follow-up metadata calls. `callable` is the opaque emit handle (the platform
 /// emitter consumes it; the front end never inspects it).
@@ -1663,9 +1645,6 @@ pub struct FunctionInfo {
     /// receiver's member level beside same-named member functions; selection runs once over both
     /// and the constructor path then materializes the selected declaration.
     pub bound_inner_constructor: Option<BoundInnerConstructor>,
-    /// Annotation class identities declared on this callable. Consumers decide which annotations affect
-    /// resolution/emission; the library layer only records their qualified identities.
-    pub annotations: Vec<crate::types::TypeName>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1888,7 +1867,6 @@ impl FunctionInfo {
             source_member: None,
             implicit_classifier_callable: None,
             bound_inner_constructor: None,
-            annotations: Vec::new(),
         }
     }
 
@@ -1931,7 +1909,7 @@ impl FunctionInfo {
         member.projected_return_hazard = self.projected_return_hazard;
         member.inline = self.flags.inline;
         member.reified = self.flags.reified;
-        member.annotations = self.annotations.clone();
+        member.annotations = self.callable.annotations.clone();
         member.visibility = self.visibility;
         member.set_suspend(self.flags.suspend);
         member.set_is_operator(self.flags.operator);
@@ -2412,9 +2390,10 @@ pub struct LibraryType {
     /// (`UInt` → `Int`, `Result` → `Any`); `None` for an ordinary class. The JVM backend erases the value
     /// class to this everywhere (like a user value class), reproducing kotlinc's unboxed representation.
     pub value_underlying: Option<Ty>,
-    /// Source name of a value class's sole underlying property. Kept beside its underlying type because
-    /// together they are the complete semantic value-class shape used by the JVM representation pass.
-    pub value_underlying_property: Option<String>,
+    /// A value class's sole underlying property and its declared type over the class's own type
+    /// parameters. Kept beside its underlying type because together they are the complete semantic
+    /// value-class shape used by the JVM representation pass.
+    pub value_declaration: Option<crate::types::DeclaredValueClass>,
     /// When this name is a `typealias`, the target internal it expands to (`kotlin/collections/ArrayList`
     /// → `java/util/ArrayList`); `None` for a real type. Name resolution records the target, so an alias
     /// resolves to the underlying type with no separate alias query.
@@ -2551,7 +2530,7 @@ impl LibraryType {
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target: None,
             type_parameters: crate::types::TypeParameters::default(),
             own_type_parameter_count: 0,
@@ -2842,7 +2821,7 @@ mod tests {
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target: None,
             type_parameters: crate::types::TypeParameters::default(),
             own_type_parameter_count: 0,

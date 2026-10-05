@@ -1,12 +1,21 @@
 //! Type model: Kotlin scalar, object, array, function, nullable, platform-flexible, and type-parameter
 //! shapes. Backend-specific names and descriptors are kept out of this module.
 
+mod classifier_declarations;
 mod intersection;
 pub(crate) use intersection::declaration_approximation;
 mod semantic_call_role;
+pub use classifier_declarations::{
+    ClassifierDeclarationFacts, ClassifierDeclarationKind, DeclaredValueClass,
+    GeneratedClassifierFact, GeneratedClassifierKind, GeneratedClassifierPurpose,
+};
 pub use semantic_call_role::SemanticCallRole;
+mod annotation_targets;
 mod interning;
 mod spelling;
+pub use annotation_targets::{
+    AnnotationTargets, DeclaredTargetPolicies, KotlinTarget, PropertyAnnotationSite,
+};
 mod substitute;
 mod type_parameter_identity;
 
@@ -658,32 +667,6 @@ pub const JAVA_ELEMENT_TYPES: [&str; 10] = [
     "TYPE_PARAMETER",
     "TYPE_USE",
 ];
-
-/// Index into [`JAVA_ELEMENT_TYPES`] for a `kotlin.annotation.AnnotationTarget` constant — the Java
-/// counterpart kotlinc mirrors that target onto. `None` for a Kotlin-only target (`PROPERTY`, `FILE`,
-/// `TYPEALIAS`, `EXPRESSION`, which the JVM cannot express) or an unknown name; such a target
-/// contributes nothing to the mirror, though the mirror itself is still emitted — a set of only
-/// Kotlin-only targets mirrors to an EMPTY array, matching kotlinc, rather than being omitted.
-///
-/// The rows are measured against kotlinc, not derived: the mapping is neither an identity (`CLASS`
-/// becomes `TYPE`, `VALUE_PARAMETER` becomes `PARAMETER`) nor injective (`FUNCTION`,
-/// `PROPERTY_GETTER` and `PROPERTY_SETTER` all become `METHOD`, and collapse to one entry).
-pub fn java_element_type_of_annotation_target(target: &str) -> Option<usize> {
-    let element = match target {
-        "CLASS" => "TYPE",
-        "ANNOTATION_CLASS" => "ANNOTATION_TYPE",
-        "TYPE_PARAMETER" => "TYPE_PARAMETER",
-        "FIELD" => "FIELD",
-        "LOCAL_VARIABLE" => "LOCAL_VARIABLE",
-        "VALUE_PARAMETER" => "PARAMETER",
-        "CONSTRUCTOR" => "CONSTRUCTOR",
-        "FUNCTION" | "PROPERTY_GETTER" | "PROPERTY_SETTER" => "METHOD",
-        "TYPE" => "TYPE_USE",
-        // PROPERTY / FILE / TYPEALIAS / EXPRESSION have no `ElementType` counterpart.
-        _ => return None,
-    };
-    JAVA_ELEMENT_TYPES.iter().position(|&e| e == element)
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
@@ -1562,6 +1545,18 @@ impl Ty {
         context: &[Ty],
         type_parameter: &dyn Fn(&str) -> String,
     ) -> String {
+        self.source_name_with_classifier_in(context, type_parameter, &|_| None)
+    }
+
+    /// Render one type for a diagnostic while allowing the frontend to replace an opaque semantic
+    /// classifier identity with its recorded source declaration name. The callback is consulted
+    /// only while rendering; lookup and equality continue to use the interned identity.
+    pub(crate) fn source_name_with_classifier_in(
+        self,
+        context: &[Ty],
+        type_parameter: &dyn Fn(&str) -> String,
+        classifier: &dyn Fn(TypeName) -> Option<String>,
+    ) -> String {
         match self {
             Ty::Int => "Int".to_string(),
             Ty::Byte => "Byte".to_string(),
@@ -1578,22 +1573,28 @@ impl Ty {
             Ty::String => "String".to_string(),
             Ty::Unit => "Unit".to_string(),
             Ty::Obj(n, args) => {
-                let base = if context
-                    .iter()
-                    .copied()
-                    .any(|ty| ty.contains_distinct_classifier_with_segment(n))
-                {
-                    n.render().replace(['/', '$'], ".")
-                } else {
-                    n.segment_ref().replace('$', ".")
-                };
+                let base = classifier(n).unwrap_or_else(|| {
+                    if context
+                        .iter()
+                        .copied()
+                        .any(|ty| ty.contains_distinct_classifier_with_segment(n))
+                    {
+                        n.render().replace(['/', '$'], ".")
+                    } else {
+                        n.segment_ref().replace('$', ".")
+                    }
+                });
                 if args.is_empty() {
                     base
                 } else {
                     let arguments = args
                         .iter()
                         .map(|argument| {
-                            argument.source_name_with_type_parameter_in(context, type_parameter)
+                            argument.source_name_with_classifier_in(
+                                context,
+                                type_parameter,
+                                classifier,
+                            )
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
@@ -1608,45 +1609,53 @@ impl Ty {
                     .params
                     .iter()
                     .map(|parameter| {
-                        parameter.source_name_with_type_parameter_in(context, type_parameter)
+                        parameter.source_name_with_classifier_in(
+                            context,
+                            type_parameter,
+                            classifier,
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let suspend = if signature.suspend { "suspend " } else { "" };
                 format!(
                     "{suspend}({parameters}) -> {}",
-                    signature
-                        .ret
-                        .source_name_with_type_parameter_in(context, type_parameter)
+                    signature.ret.source_name_with_classifier_in(
+                        context,
+                        type_parameter,
+                        classifier
+                    )
                 )
             }
             Ty::Nullable(inner) => intersection::spell_nullable(
                 *inner,
-                |ty| ty.source_name_with_type_parameter_in(context, type_parameter),
+                |ty| ty.source_name_with_classifier_in(context, type_parameter, classifier),
                 true,
             ),
             Ty::PlatformNullable(inner) => {
                 format!(
                     "{}!",
-                    inner.source_name_with_type_parameter_in(context, type_parameter)
+                    inner.source_name_with_classifier_in(context, type_parameter, classifier)
                 )
             }
             Ty::InProjection(inner) => format!(
                 "in {}",
-                inner.source_name_with_type_parameter_in(context, type_parameter)
+                inner.source_name_with_classifier_in(context, type_parameter, classifier)
             ),
             Ty::OutProjection(inner) => format!(
                 "out {}",
-                inner.source_name_with_type_parameter_in(context, type_parameter)
+                inner.source_name_with_classifier_in(context, type_parameter, classifier)
             ),
             Ty::StarProjection(_) => "*".to_string(),
             Ty::DefinitelyNotNull(inner) => format!(
                 "{} & Any",
-                inner.source_name_with_type_parameter_in(context, type_parameter)
+                inner.source_name_with_classifier_in(context, type_parameter, classifier)
             ),
             Ty::Intersection(parts) => parts
                 .iter()
-                .map(|part| part.source_name_with_type_parameter_in(context, type_parameter))
+                .map(|part| {
+                    part.source_name_with_classifier_in(context, type_parameter, classifier)
+                })
                 .collect::<Vec<_>>()
                 .join(" & "),
             Ty::TyParam(n, _) => type_parameter(n),
@@ -2092,6 +2101,24 @@ pub enum AnnotationRetention {
     Source,
 }
 
+impl AnnotationRetention {
+    /// The retention an enum entry denotes when its declaring enum is exactly
+    /// `kotlin.annotation.AnnotationRetention`. An entry of any other enum, whatever its name, is no
+    /// retention. `owner` is the resolved or provider-normalized declaring classifier; `entry` is the
+    /// entry's declared name.
+    pub fn of_entry(owner: TypeName, entry: &str) -> Option<Self> {
+        if owner != type_name("kotlin/annotation/AnnotationRetention") {
+            return None;
+        }
+        Some(match entry {
+            "RUNTIME" => Self::Runtime,
+            "BINARY" => Self::Binary,
+            "SOURCE" => Self::Source,
+            _ => return None,
+        })
+    }
+}
+
 /// One frontend-checked annotation argument. Every classifier identity is resolved before this
 /// crosses into common lowering; backends only choose the physical encoding of the recorded value.
 #[derive(Clone, Debug, PartialEq)]
@@ -2148,68 +2175,8 @@ impl ResolvedAnnotation {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AnnotationSemanticFacts {
     pub deprecated_hidden: bool,
-}
-
-/// A plugin-generated classifier published with the source header that owns it. The common
-/// frontend records semantic declaration facts; a representation backend maps them to its own
-/// class flags without recognizing generated JVM spellings.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GeneratedClassifierFact {
-    pub classifier: TypeName,
-    pub lexical_owner: TypeName,
-    pub purpose: GeneratedClassifierPurpose,
-    pub source_name: Box<str>,
-    pub visibility: Visibility,
-    pub kind: GeneratedClassifierKind,
-    pub is_abstract: bool,
-    pub is_final: bool,
-    pub captures_outer: bool,
-    pub compiler_generated: bool,
-}
-
-/// Semantic reason a frontend plugin contributed a classifier. Consumers select this contract,
-/// never a generated source/JVM spelling.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GeneratedClassifierPurpose {
-    SerializationSerializer,
-    SerializationCompanion,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GeneratedClassifierKind {
-    Class,
-    Interface,
-    Annotation,
-    Enum,
-}
-
-/// Declaration facts of a classifier, as its declaring compilation fixed them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClassifierDeclarationFacts {
-    pub kind: ClassifierDeclarationKind,
-    /// `abstract` or `sealed`: no instance has exactly this class. An interface is always abstract.
-    pub is_abstract: bool,
-    /// Type parameters the classifier declares itself, not the ones it captures lexically.
-    pub own_type_parameter_count: usize,
-    /// The companion object: the name of the static field holding it and its classifier. A source
-    /// classifier of this module reports only a DECLARED companion; one a compiler plugin adds is
-    /// that plugin's to name.
-    pub companion: Option<(Box<str>, TypeName)>,
-    /// The Kotlin qualified name with every boundary dotted (`lib.Outer.Nested`), as metadata and
-    /// source declare it. It is not derivable from the internal name, where `$` is also a legal
-    /// identifier character.
-    pub qualified_name: Option<Box<str>>,
-    /// Declared in a source file of this module rather than read from a dependency.
-    pub source: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClassifierDeclarationKind {
-    Class,
-    Interface,
-    Annotation,
-    Enum,
-    Object,
+    /// An `@OptionalExpectation` without an actual here (see `ir::DeclarationAnnotations`).
+    pub optional_expectation: bool,
 }
 
 /// Provider-neutral checked facts for a classifier. Consumers receive stable identities and typed
@@ -2263,6 +2230,12 @@ pub trait ClassifierFactSource {
         None
     }
 
+    /// The value class's declared underlying type over its own type parameters. A provider that
+    /// answers [`Self::classifier_value_underlying`] for a declaration answers this for it too.
+    fn classifier_value_declaration(&self, _classifier: TypeName) -> Option<DeclaredValueClass> {
+        None
+    }
+
     /// Source identity of the sole underlying property for a value class. This travels beside the
     /// underlying type so a representation backend never has to reopen metadata or inspect a
     /// classfile to recover it.
@@ -2286,58 +2259,8 @@ pub struct AppliedAnnotation {
     pub values: Vec<(String, AnnotationValue)>,
     pub facts: AnnotationSemanticFacts,
     pub retention: AnnotationRetention,
-    /// The annotation's DECLARED `@Target` set, as far as it decides where an application written
-    /// without a use-site prefix lands (see [`AnnotationTargets`]).
+    /// The annotation's DECLARED `@Target` set (see [`AnnotationTargets`]).
     pub targets: AnnotationTargets,
-}
-
-/// The subset of an annotation's declared `@Target` set that decides the USE-SITE of an application
-/// written on a property declaration. Kotlin picks the first applicable of
-/// `param` → `property` → `field`, and the three land in three different places in the class file,
-/// so this is a semantic fact, never a guess at emission time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AnnotationTargets {
-    pub value_parameter: bool,
-    pub property: bool,
-    pub field: bool,
-}
-
-/// Where an annotation written on a property declaration with no use-site prefix belongs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PropertyAnnotationSite {
-    /// A primary-constructor `val`/`var` parameter's own annotation — `RuntimeVisible…
-    /// ParameterAnnotations` on the constructor.
-    ValueParameter,
-    /// The Kotlin PROPERTY, which has no class-file declaration of its own: the annotation goes on a
-    /// synthetic `get<Name>$annotations()` marker method.
-    Property,
-    /// The backing field.
-    Field,
-}
-
-impl AnnotationTargets {
-    /// An annotation class that declares no `@Target` is applicable everywhere.
-    pub const DEFAULT: Self = Self {
-        value_parameter: true,
-        property: true,
-        field: true,
-    };
-
-    /// Kotlin's use-site default for an annotation written on a property declaration: the first
-    /// applicable of `param` (a primary-constructor property parameter only) → `property` → `field`.
-    /// `None` when the annotation targets none of the three (its application is a frontend error).
-    pub fn property_declaration_site(
-        self,
-        on_constructor_parameter: bool,
-    ) -> Option<PropertyAnnotationSite> {
-        if on_constructor_parameter && self.value_parameter {
-            return Some(PropertyAnnotationSite::ValueParameter);
-        }
-        if self.property {
-            return Some(PropertyAnnotationSite::Property);
-        }
-        self.field.then_some(PropertyAnnotationSite::Field)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

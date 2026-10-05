@@ -82,11 +82,8 @@ impl<'a> ModuleSymbols<'a> {
         self.syms.annotation_retention(classifier)
     }
 
-    pub(crate) fn annotation_targets(
-        &self,
-        classifier: TypeName,
-    ) -> crate::types::AnnotationTargets {
-        self.syms.annotation_targets(classifier)
+    pub(crate) fn annotation_targets(&self) -> &'a crate::types::DeclaredTargetPolicies {
+        self.syms.annotation_targets()
     }
 
     /// Temporary Pass-1 graph access for inference-only checker operations. The streamed module
@@ -321,6 +318,19 @@ impl<'a> ModuleSymbols<'a> {
                 )
             })
             .collect::<Vec<_>>();
+        // A function supertype the signature keeps as a callable shape (`suspend () -> R`,
+        // `(P1, ..., P23) -> R`) is still an edge to the function classifier it instantiates,
+        // which declares the `invoke` the class overrides.
+        for callable in &c.callable_signatures {
+            let classifier =
+                crate::libraries::function_classifiers::supertype_classifier(*callable);
+            if let Some(owner) = classifier.obj_internal() {
+                if !supertypes.contains(&owner) {
+                    supertypes.push(owner);
+                    supertype_templates.push(classifier);
+                }
+            }
+        }
         let enum_entries = self.syms.enum_entries_of(c.internal_name()).cloned();
         if enum_entries.is_some() {
             // An enum's implicit superclass is the applied Kotlin declaration `Enum<Self>`.
@@ -452,7 +462,28 @@ impl<'a> ModuleSymbols<'a> {
             // does, so every downstream query (identity diagnostics included) can use the common
             // `SymbolSource::is_value_name` contract instead of branching on symbol provenance.
             value_underlying: c.value_field.as_ref().map(|(_, ty)| *ty),
-            value_underlying_property: c.value_field.as_ref().map(|(name, _)| name.clone()),
+            value_declaration: c.value_field.as_ref().map(|(property, underlying)| {
+                crate::types::DeclaredValueClass {
+                    property: property.as_str().into(),
+                    underlying: *underlying,
+                    // The class's own formals are already its declaration-scoped identities.
+                    type_parameters: c
+                        .type_params
+                        .iter()
+                        .enumerate()
+                        .map(|(index, name)| {
+                            Ty::ty_param(
+                                name,
+                                c.type_param_bounds
+                                    .get(index)
+                                    .copied()
+                                    .filter(|bound| *bound != Ty::Error)
+                                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
+                            )
+                        })
+                        .collect(),
+                }
+            }),
             alias_target: None,
             // Preserve the classifier's formals on the common type shape. Receiver-coupled queries can
             // then bind `Scope<String>` before selecting a member extension declared on `Scope<T>`, in
@@ -929,6 +960,7 @@ fn fn_info(
     let declared_params = Some(params.clone().into_boxed_slice());
     let call_sig = sig.call_sig();
     let callable = LibraryCallable {
+        annotations: sig.annotations.clone(),
         external_identity: None,
         external_default_provider: None,
         external_property_identity: None,
@@ -1014,7 +1046,6 @@ fn fn_info(
             return_value_status: None,
         },
         visibility: sig.visibility,
-        annotations: sig.annotations.clone(),
         ..FunctionInfo::plain(kind, receiver, callable)
     }
 }
@@ -1058,6 +1089,7 @@ fn source_callable(
     let declared_params = Some(params.clone().into_boxed_slice());
     LibraryCallable {
         external_identity: None,
+        annotations: Vec::new(),
         external_default_provider: None,
         external_property_identity: None,
         owner,

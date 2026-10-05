@@ -17,6 +17,9 @@
 //!   tables, then the frames' classes, every entry after the entries it names. That includes an
 //!   entry something kotlinc visits after the method also names, such as `@Metadata`: the
 //!   rewritten code interned it first;
+//! - the entries a coroutine transformation interned for the class ahead of its body (a suspend
+//!   lambda's spill fields and `@DebugMetadata`) lead that method's entries: kotlinc's
+//!   transformer visits them as it writes the method, before the body's code;
 //! - an entry a rewritten method interned for code its rewrite removed, and that code emitted
 //!   as it was names later, is placed where that code first names it: ASM interns it there;
 //! - every other entry keeps its relative place.
@@ -40,6 +43,9 @@ pub(super) struct RelaidMethod {
     /// The indices interned while the method was emitted and added: those past the previous
     /// method's.
     pub(super) added: Range<u16>,
+    /// The indices its coroutine transformation named for the class ahead of its body, in the
+    /// order it named them.
+    pub(super) leading: Vec<u16>,
     /// The indices its rewrite interned when the class was written.
     pub(super) interned: Range<u16>,
 }
@@ -150,14 +156,38 @@ impl<'a> Layout<'a> {
         // the entry the code interned.
         let mut visited = vec![false; count];
         let mut visited_first = vec![false; count];
-        for slot in read.visit_order() {
+        // Where in kotlinc's visit order each entry is first named, and each method's code begins.
+        let mut first_named = vec![usize::MAX; count];
+        let mut code_starts: HashMap<usize, usize> = HashMap::new();
+        for (position, slot) in read.visit_order().enumerate() {
+            if let Holder::Code(method, _) = slot.holder {
+                code_starts.entry(method).or_insert(position);
+            }
             let rewritten = matches!(
                 slot.holder,
                 Holder::Code(method, _) if by_method.contains_key(&method)
             );
             for index in reached_from(read, slot.index) {
-                if !std::mem::replace(&mut visited[index], true) && !rewritten {
-                    visited_first[index] = true;
+                if !std::mem::replace(&mut visited[index], true) {
+                    first_named[index] = position;
+                    if !rewritten {
+                        visited_first[index] = true;
+                    }
+                }
+            }
+        }
+        // A transformation's leading entry moves ahead of its method's code unless kotlinc's writer
+        // interns it earlier, for a holder it visits before that code.
+        let mut leading = vec![false; count];
+        for method in relaid {
+            let code_start = code_starts
+                .get(&method.index)
+                .copied()
+                .unwrap_or(usize::MAX);
+            for &index in &method.leading {
+                let at = usize::from(index);
+                if at < count && first_named[at] >= code_start {
+                    leading[at] = true;
                 }
             }
         }
@@ -167,7 +197,7 @@ impl<'a> Layout<'a> {
             }
         }
         let orphaned: Vec<bool> = (0..count)
-            .map(|index| owned[index] && kept[index] && !rewritten_reach[index])
+            .map(|index| owned[index] && kept[index] && !rewritten_reach[index] && !leading[index])
             .collect();
         let anchored = orphan_anchors(read, &by_method, &orphaned);
         if unnamed == Unnamed::Kept {
@@ -180,7 +210,7 @@ impl<'a> Layout<'a> {
             }
         }
         let movable: Vec<bool> = (0..count)
-            .map(|index| kept[index] && !fixed[index] && owned[index])
+            .map(|index| kept[index] && (leading[index] || !fixed[index] && owned[index]))
             .collect();
         let sequences = relaid
             .iter()
@@ -191,9 +221,14 @@ impl<'a> Layout<'a> {
                     .clone()
                     .map(usize::from)
                     .find(|&index| movable.get(index).copied().unwrap_or(false));
+                let leading = method
+                    .leading
+                    .iter()
+                    .copied()
+                    .filter(|&index| leading.get(usize::from(index)).copied().unwrap_or(false));
                 (
                     first.unwrap_or(usize::from(method.added.end)),
-                    parts.concat(),
+                    leading.chain(parts.concat()).collect(),
                 )
             })
             .collect();
@@ -266,7 +301,7 @@ impl<'a> Layout<'a> {
         }
         placed[at] = true;
         if let Some(entry) = &self.read.entries[at] {
-            for &(_, component) in &entry.components {
+            for component in entry.named() {
                 self.place(component, placed, order);
             }
         }
@@ -362,7 +397,7 @@ fn reached_from(read: &ClassSlots, index: u16) -> Vec<usize> {
         }
         reached.push(at);
         if let Some(entry) = &read.entries[at] {
-            pending.extend(entry.components.iter().map(|&(_, component)| component));
+            pending.extend(entry.named());
         }
     }
     reached
@@ -387,7 +422,7 @@ fn reach(read: &ClassSlots, index: u16, reached: &mut [bool]) {
         }
         reached[at] = true;
         if let Some(entry) = &read.entries[at] {
-            pending.extend(entry.components.iter().map(|&(_, component)| component));
+            pending.extend(entry.named());
         }
     }
 }

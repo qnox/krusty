@@ -73,6 +73,9 @@ pub struct DiagSink {
     /// Pass-1 retained-fragment preparation uses this while traversing lexical containers whose
     /// ordinary expressions are authoritative only in Pass 2.
     authoritative_ranges: Option<Vec<Span>>,
+    /// Warnings about the compilation's configuration rather than a source position, such as an
+    /// unresolved `-opt-in` marker. Each message is kept once, in first-report order.
+    pub module_warnings: Vec<String>,
 }
 
 impl DiagSink {
@@ -81,6 +84,15 @@ impl DiagSink {
             diags: Vec::new(),
             current_file: 0,
             authoritative_ranges: None,
+            module_warnings: Vec::new(),
+        }
+    }
+
+    /// Report a warning about the module's configuration, once however many units report it.
+    pub fn module_warning(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if !self.module_warnings.contains(&message) {
+            self.module_warnings.push(message);
         }
     }
 
@@ -296,6 +308,11 @@ impl DiagSink {
     /// (defensive) falls back to the first file. This is the multi-file-correct renderer.
     pub fn render_all(&self, files: &[(&str, &str)]) -> String {
         let mut out = String::new();
+        for warning in &self.module_warnings {
+            out.push_str("warning: ");
+            out.push_str(warning);
+            out.push('\n');
+        }
         for d in &self.diags {
             let (path, src) = files
                 .get(d.file as usize)

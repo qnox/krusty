@@ -24,13 +24,14 @@ mod file_features;
 mod for_loops;
 mod function_types;
 mod incdec;
+mod interface_delegation;
 mod lambda_literals;
 mod lexical_type_parameters;
 mod nesting;
 mod properties;
 mod return_labels;
 mod value_parameters;
-use declaration_modifiers::{function_flags, visibility_of};
+use declaration_modifiers::{function_flags, has_visibility_modifier, visibility_of};
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use file_features::apply_file_features;
 use lexical_type_parameters::LexicalTypeParameters;
@@ -1483,6 +1484,7 @@ impl<'a> Parser<'a> {
                     );
                     Self::mark_inline_accessors(&mut d, &mods);
                     d.visibility = visibility_of(&mods);
+                    d.has_visibility_modifier = has_visibility_modifier(&mods);
                     d.is_override = mods.iter().any(|m| m == "override");
                     d.is_external |= mods.iter().any(|m| m == "external");
                     d.is_expect = is_expect;
@@ -2178,15 +2180,15 @@ impl<'a> Parser<'a> {
     /// Kotlin gives setter parameters a deliberately narrower grammar than ordinary function
     /// parameters: annotations are allowed, while the property supplies the value type. Keep this
     /// parser narrow instead of routing through `parse_param_list`, which would require a type and
-    /// admit unrelated modifiers/defaults. Annotation values are parsed through the common annotation
-    /// grammar and then discarded because `PropAccessor` has no parameter-metadata contract.
-    fn parse_setter_param(&mut self) -> Option<String> {
+    /// admit unrelated modifiers/defaults. The parameter's annotations are returned beside its name.
+    fn parse_setter_param(&mut self) -> (Option<String>, Vec<crate::ast::AccessorAnnotation>) {
+        let mut annotations = Vec::new();
         if !self.eat(TokenKind::LParen) {
-            return None;
+            return (None, annotations);
         }
         self.skip_plain_newlines();
         while self.at(TokenKind::At) {
-            let _ = self.parse_annotation();
+            annotations.extend(self.parse_accessor_annotation());
             self.skip_plain_newlines();
         }
         let name = if self.at(TokenKind::Ident) {
@@ -2211,7 +2213,7 @@ impl<'a> Parser<'a> {
             self.skip_plain_newlines();
         }
         self.expect(TokenKind::RParen, "')'");
-        name
+        (name, annotations)
     }
 
     /// Parse a getter body after its `()`: `= expr` or `{ block }`.
@@ -2407,7 +2409,7 @@ impl<'a> Parser<'a> {
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
-                let ty = self.parse_type();
+                let ty = self.parse_vararg_aware_type(is_vararg);
                 // A default value (`enum class C(val x: Int = 1)`) — same as a regular class ctor param;
                 // each enum entry that omits the argument gets it at its construction site.
                 let default = if self.eat(TokenKind::Eq) {
@@ -2434,6 +2436,7 @@ impl<'a> Parser<'a> {
                             .iter()
                             .any(|modifier| modifier == "open" || modifier == "override"),
                     visibility: visibility_of(&epmods),
+                    has_visibility_modifier: has_visibility_modifier(&epmods),
                     default,
                     annotations: Vec::new(),
                     annotation_args: Vec::new(),
@@ -3332,7 +3335,7 @@ impl<'a> Parser<'a> {
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
-                let ty = self.parse_type();
+                let ty = self.parse_vararg_aware_type(is_vararg);
                 let default = if self.eat(TokenKind::Eq) {
                     self.skip_newlines();
                     Some(self.parse_expr())
@@ -3357,6 +3360,7 @@ impl<'a> Parser<'a> {
                             .iter()
                             .any(|modifier| modifier == "open" || modifier == "override"),
                     visibility: visibility_of(&cpmods),
+                    has_visibility_modifier: has_visibility_modifier(&cpmods),
                     default,
                     annotations: pannos,
                     annotation_args: pannos_args,
@@ -3537,16 +3541,19 @@ impl<'a> Parser<'a> {
                 let sup_span = self.tok().span;
                 let mut supertype_annotations = Vec::new();
                 while self.at(TokenKind::At) {
-                    let (annotation, _) = self.parse_annotation();
+                    let (annotation, arguments) = self.parse_annotation();
                     if let Some(annotation) = annotation {
+                        self.record_type_annotation_arguments(annotation.span, arguments);
                         supertype_annotations.push(annotation);
                     }
                     self.skip_plain_newlines();
                 }
+                // Keyed by the annotated reference's span start, which for a supertype is `sup_span`.
                 if !supertype_annotations.is_empty() {
+                    let annotated = sup_span.lo;
                     self.file
                         .type_annotations
-                        .insert(self.tok().span.lo, supertype_annotations);
+                        .insert(annotated, supertype_annotations);
                 }
                 // A FUNCTION-TYPE supertype (`class C : () -> R`, `(A) -> R`, `Recv.() -> R`): retain
                 // Kotlin's semantic `kotlin/FunctionN` classifier (arity N = value parameters, with an
@@ -3582,6 +3589,13 @@ impl<'a> Parser<'a> {
                             fun_params: ft.fun_params.clone(),
                             fun_context_count: ft.fun_context_count,
                         });
+                    }
+                    if let Some(delegation) = self.parse_interface_delegation(
+                        u32::try_from(ifaces.len() - 1).ok(),
+                        ifaces[ifaces.len() - 1].name.clone(),
+                        false,
+                    ) {
+                        interface_delegations.push(delegation);
                     }
                     if !self.eat(TokenKind::Comma) {
                         break;
@@ -3676,28 +3690,12 @@ impl<'a> Parser<'a> {
                     });
                     delegation_supertype = u32::try_from(ifaces.len() - 1).ok();
                 }
-                // Class delegation: `: Iface by delegate`. Preserve both the simple-name field form
-                // and a general delegate expression; representation support belongs to later phases.
-                if self.at(TokenKind::Ident) && self.keyword_text("by") {
-                    self.bump();
-                    // A following `{` opens the CLASS BODY, not a lambda on the delegate call.
-                    let saved = self.no_trailing_lambda;
-                    self.no_trailing_lambda = true;
-                    let value = self.parse_expr();
-                    self.no_trailing_lambda = saved;
-                    // Parentheses leave no node, so `by d` and `by (d)` both name the delegate
-                    // directly; any other shape (`by Impl()`, `by a.b`, …) is an EXPRESSION delegate.
-                    let bare_name = match self.file.expr(value) {
-                        Expr::Name(name) => Some(name.clone()),
-                        _ => None,
-                    };
-                    interface_delegations.push(InterfaceDelegation {
-                        supertype: delegation_supertype,
-                        interface: effective.clone(),
-                        value,
-                        bare_name,
-                        has_primitive_type_argument: has_primitive_targ,
-                    });
+                if let Some(delegation) = self.parse_interface_delegation(
+                    delegation_supertype,
+                    effective.clone(),
+                    has_primitive_targ,
+                ) {
+                    interface_delegations.push(delegation);
                 }
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -3788,6 +3786,7 @@ impl<'a> Parser<'a> {
                             p.is_abstract = true;
                         }
                         p.visibility = visibility_of(&imods);
+                        p.has_visibility_modifier = has_visibility_modifier(&imods);
                         p.is_open =
                             !imods.iter().any(|m| m == "final") && !p.visibility.is_private();
                         p.is_override = imods.iter().any(|m| m == "override");
@@ -4170,12 +4169,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_atom(&mut self) -> TypeRef {
-        // Leading type annotations (`@Composable () -> Unit`, `@UnsafeVariance T`): consume them and
-        // record by the type's start offset so a plugin can recover them via `TypeRef.span.lo`.
-        // Without this, an `@` before a type would fail to parse. NOTE: a following `(` is NOT consumed
-        // as an annotation argument list here — in type position it belongs to a function type
-        // (`@Composable () -> Unit`); an argument-bearing type annotation (`@Foo(1) Bar`, rare) is not
-        // yet handled.
+        // Leading type annotations (`@Composable () -> Unit`, `@UnsafeVariance T`), recorded by the
+        // type's start offset (`TypeRef.span.lo`) with any argument list keyed by annotation span.
         let mut type_anns = Vec::new();
         while self.at(TokenKind::At) {
             self.bump(); // '@'
@@ -4185,7 +4180,8 @@ impl<'a> Parser<'a> {
             // has the `(` belong to the type. Disambiguate by peeking past the balanced `(…)`: an
             // `->` after it means a function type (leave the `(`), otherwise consume the args.
             if self.at(TokenKind::LParen) && !self.paren_group_precedes_arrow(self.i) {
-                let _ = self.parse_annotation_args();
+                let arguments = self.parse_annotation_args();
+                self.record_type_annotation_arguments(annotation_span, arguments);
             }
             if !qname.is_empty() {
                 type_anns.push(AnnotationRef {
@@ -4774,33 +4770,25 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        // Statement annotations have no codegen representation, but `@Suppress` is a scoped
-        // frontend directive. Retain only its compact names on the decorated transient statement.
+        // Statement annotations have no codegen representation, but `@Suppress` and opt-in
+        // acceptance are scoped frontend policies. Retain what they read on the transient statement.
         if self.at(TokenKind::At) {
-            let mut suppressions = Vec::new();
+            let mut annotations = Vec::new();
             while self.at(TokenKind::At) {
                 let (annotation, arguments) = self.parse_annotation();
-                if annotation.as_ref().is_some_and(|annotation| {
-                    annotation
-                        .name
-                        .rsplit('.')
-                        .next()
-                        .is_some_and(|name| name == "Suppress")
-                }) {
-                    suppressions.extend(
-                        arguments
-                            .into_iter()
-                            .filter_map(|argument| self.file.const_string_value(argument))
-                            .map(|value| value.to_lossy().to_owned()),
-                    );
+                if let Some(annotation) = annotation {
+                    annotations.push(UseSiteAnnotation {
+                        annotation,
+                        arguments,
+                    });
                 }
                 self.skip_newlines();
             }
             let statement = self.parse_stmt();
-            if !suppressions.is_empty() {
+            if !annotations.is_empty() {
                 self.file
-                    .statement_suppressions
-                    .insert(statement, suppressions);
+                    .statement_annotations
+                    .insert(statement, annotations);
             }
             return statement;
         }
@@ -4844,9 +4832,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::KwWhile => {
                 self.bump();
-                self.expect(TokenKind::LParen, "'('");
-                let cond = self.parse_expr();
-                self.expect(TokenKind::RParen, "')'");
+                let cond = self.parse_parenthesized_condition();
                 let body = self.parse_loop_body();
                 self.finish_stmt(
                     Stmt::While {
@@ -4877,9 +4863,7 @@ impl<'a> Parser<'a> {
                 };
                 self.skip_newlines();
                 self.expect(TokenKind::KwWhile, "'while'");
-                self.expect(TokenKind::LParen, "'('");
-                let cond = self.parse_expr();
-                self.expect(TokenKind::RParen, "')'");
+                let cond = self.parse_parenthesized_condition();
                 self.finish_stmt(
                     Stmt::DoWhile {
                         body,

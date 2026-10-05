@@ -17,6 +17,29 @@ impl IrFile {
         self.external_value_classes.insert(internal, underlying);
     }
 
+    pub(crate) fn insert_external_value_class_declaration(
+        &mut self,
+        internal: TypeName,
+        declaration: crate::types::DeclaredValueClass,
+    ) {
+        let recorded = self
+            .external_value_class_declarations
+            .entry(internal)
+            .or_insert_with(|| declaration.clone());
+        assert_eq!(
+            *recorded, declaration,
+            "checked providers disagreed about one value-class declaration"
+        );
+    }
+
+    /// A value class declared elsewhere, as its provider published its declaration.
+    pub(crate) fn external_value_class_declaration(
+        &self,
+        internal: TypeName,
+    ) -> Option<&crate::types::DeclaredValueClass> {
+        self.external_value_class_declarations.get(&internal)
+    }
+
     pub fn external_value_class_name(&self, internal: TypeName) -> Option<&Ty> {
         self.external_value_classes.get(&internal)
     }

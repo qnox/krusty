@@ -22,10 +22,9 @@ pub struct FnMeta {
     pub ret: Ty,
     /// Position of the declaration in the FILE (see [`PropMeta::decl_order`]).
     pub decl_order: usize,
-    /// BINARY/RUNTIME-retained annotations applied to the function, including their frontend-checked
-    /// element values. These become `Function.annotation` (field 12) records; SOURCE annotations never
-    /// enter this list.
-    pub annotations: Vec<crate::ir::AppliedAnnotation>,
+    /// The function's annotations: the `HAS_ANNOTATIONS` flag and the BINARY/RUNTIME-retained
+    /// `Function.annotation` (field 12) records with their frontend-checked element values.
+    pub annotations: crate::metadata::MetadataAnnotations,
     /// Extension-receiver type (`Function.receiver_type` = 5), `Some` for an extension function. Recorded
     /// SEPARATELY from `params` (the LOGICAL value params, receiver excluded), so a reader recovers the
     /// extension's true source arity — `fun T.f(a)` is one value param, not two. `None` for a plain fn.
@@ -97,7 +96,7 @@ pub struct FnMeta {
     pub spellings: crate::spelling::DeclaredSpellings,
     /// User annotations on each value parameter (`fun f(@Mark a: Int)`), parallel to `params`. A short
     /// or empty vec leaves the remaining parameters unannotated.
-    pub param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>>,
+    pub param_annotations: Vec<crate::metadata::MetadataAnnotations>,
     /// Kotlin type-use inference policy, parallel to `params`.
     pub no_infer_params: Vec<bool>,
 }
@@ -114,7 +113,7 @@ impl FnMeta {
             params,
             ret,
             decl_order: 0,
-            annotations: Vec::new(),
+            annotations: Default::default(),
             receiver: None,
             param_modifiers: Vec::new(),
             suspend: false,
@@ -161,22 +160,64 @@ fn type_pb_declared(
         .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
 
+/// The containing declaration's `TypeTable` (`Package.type_table` / `Class.type_table` = 30). kotlinc
+/// writes a contract's `is` type here and refers to it by index (`Expression.is_instance_type_id`)
+/// instead of inlining it; an equal type is written once.
+#[derive(Default)]
+pub(crate) struct ContractTypeTable {
+    types: Vec<Pb>,
+}
+
+impl ContractTypeTable {
+    fn id(&mut self, ty: Pb) -> u64 {
+        let index = match self
+            .types
+            .iter()
+            .position(|known| known.as_bytes() == ty.as_bytes())
+        {
+            Some(index) => index,
+            None => {
+                self.types.push(ty);
+                self.types.len() - 1
+            }
+        };
+        index as u64
+    }
+
+    /// The `TypeTable` message (`repeated Type type` = 1), or `None` when no contract needed it.
+    pub(crate) fn encode(&self) -> Option<Pb> {
+        (!self.types.is_empty()).then(|| {
+            let mut table = Pb::new();
+            for ty in &self.types {
+                table.repeated_message(1, ty);
+            }
+            table
+        })
+    }
+}
+
 /// Serialize a decoded contract as a `Contract` message (`repeated Effect effect` = 1), the exact
 /// mirror of the reader in `src/jvm/metadata.rs`. `tps` maps the function's type-parameter names
 /// to their table ids (for an `is R` conclusion).
-fn contract_pb(
+pub(crate) fn contract_pb(
     st: &mut StringTable<'_>,
+    types: &mut ContractTypeTable,
     contract: &crate::contracts::Contract,
     tps: &TypeParameters,
 ) -> Pb {
     let mut p = Pb::new();
     for e in &contract.effects {
-        p.repeated_message(1, &effect_pb(st, e, tps));
+        p.repeated_message(1, &effect_pb(st, types, e, tps));
     }
     p
 }
 
-fn effect_pb(st: &mut StringTable<'_>, e: &crate::contracts::Effect, tps: &TypeParameters) -> Pb {
+fn effect_pb(
+    st: &mut StringTable<'_>,
+    types: &mut ContractTypeTable,
+    e: &crate::contracts::Effect,
+    tps: &TypeParameters,
+) -> Pb {
     use crate::contracts::Effect;
     let mut p = Pb::new();
     match e {
@@ -189,11 +230,11 @@ fn effect_pb(st: &mut StringTable<'_>, e: &crate::contracts::Effect, tps: &TypeP
                 p.field_varint(4, k); // Effect.kind
             }
         }
-        Effect::Returns(rv) => write_returns_effect(&mut p, st, rv, None, tps),
+        Effect::Returns(rv) => write_returns_effect(&mut p, st, types, rv, None, tps),
         Effect::ConditionalReturns {
             returns,
             conclusion,
-        } => write_returns_effect(&mut p, st, returns, Some(conclusion), tps),
+        } => write_returns_effect(&mut p, st, types, returns, Some(conclusion), tps),
     }
     p
 }
@@ -201,6 +242,7 @@ fn effect_pb(st: &mut StringTable<'_>, e: &crate::contracts::Effect, tps: &TypeP
 fn write_returns_effect(
     p: &mut Pb,
     st: &mut StringTable<'_>,
+    types: &mut ContractTypeTable,
     rv: &crate::contracts::ReturnsValue,
     conclusion: Option<&crate::contracts::Condition>,
     tps: &TypeParameters,
@@ -225,7 +267,7 @@ fn write_returns_effect(
         }
     }
     if let Some(c) = conclusion {
-        let cb = condition_pb(st, c, tps);
+        let cb = condition_pb(st, types, c, tps);
         p.field_message(3, &cb); // Effect.conclusion_of_conditional_effect
     }
 }
@@ -240,9 +282,30 @@ fn expression_param_ref_pb(param: crate::contracts::ParamRef) -> Pb {
 
 fn condition_pb(
     st: &mut StringTable<'_>,
+    types: &mut ContractTypeTable,
     c: &crate::contracts::Condition,
     tps: &TypeParameters,
 ) -> Pb {
+    condition_expression(st, types, c, tps).pb
+}
+
+/// One `Expression` message being built, with which repeated operand fields it already carries.
+struct ConditionExpression {
+    pb: Pb,
+    has_and: bool,
+    has_or: bool,
+}
+
+/// kotlinc's `ContractSerializer`: a conjunction reuses its left operand's message and appends the
+/// right operand as an `and_argument` (field 6), a disjunction likewise with `or_argument` (field
+/// 7). The left message is nested as the first argument instead only when it already carries the
+/// other connective's arguments, which would otherwise change its meaning.
+fn condition_expression(
+    st: &mut StringTable<'_>,
+    types: &mut ContractTypeTable,
+    c: &crate::contracts::Condition,
+    tps: &TypeParameters,
+) -> ConditionExpression {
     use crate::contracts::{Condition, ConditionType};
     let mut p = Pb::new();
     match c {
@@ -259,7 +322,7 @@ fn condition_pb(
                 panic!("unresolved source type reached metadata contract emission");
             };
             let it = type_pb_generic(st, *ty, tps);
-            p.field_message(4, &it); // Expression.is_instance_type
+            p.field_varint(5, types.id(it)); // Expression.is_instance_type_id
         }
         Condition::BoolParam(param) => {
             p.field_varint(2, param.to_wire());
@@ -267,38 +330,36 @@ fn condition_pb(
         Condition::Const(b) => {
             p.field_varint(3, if *b { 0 } else { 1 }); // Expression.constant_value TRUE/FALSE
         }
-        Condition::And(..) | Condition::Or(..) => {
-            // Flatten the formula; every operand rides the repeated field (the reader handles
-            // both the embedded-first-operand optimization and this plain form).
+        Condition::And(left, right) | Condition::Or(left, right) => {
             let and = matches!(c, Condition::And(..));
-            let field = if and { 6 } else { 7 };
-            let mut flat = Vec::new();
-            flatten_condition(c, and, &mut flat);
-            for operand in flat {
-                let ob = condition_pb(st, operand, tps);
-                p.repeated_message(field, &ob);
+            let left = condition_expression(st, types, left, tps);
+            let mut combined = if (and && left.has_or) || (!and && left.has_and) {
+                let mut nested = Pb::new();
+                nested.repeated_message(if and { 6 } else { 7 }, &left.pb);
+                ConditionExpression {
+                    pb: nested,
+                    has_and: and,
+                    has_or: !and,
+                }
+            } else {
+                left
+            };
+            let right = condition_expression(st, types, right, tps);
+            combined
+                .pb
+                .repeated_message(if and { 6 } else { 7 }, &right.pb);
+            if and {
+                combined.has_and = true;
+            } else {
+                combined.has_or = true;
             }
+            return combined;
         }
     }
-    p
-}
-
-fn flatten_condition<'a>(
-    c: &'a crate::contracts::Condition,
-    and: bool,
-    out: &mut Vec<&'a crate::contracts::Condition>,
-) {
-    use crate::contracts::Condition;
-    match (and, c) {
-        (true, Condition::And(l, r)) => {
-            flatten_condition(l, true, out);
-            flatten_condition(r, true, out);
-        }
-        (false, Condition::Or(l, r)) => {
-            flatten_condition(l, false, out);
-            flatten_condition(r, false, out);
-        }
-        _ => out.push(c),
+    ConditionExpression {
+        pb: p,
+        has_and: false,
+        has_or: false,
     }
 }
 
@@ -357,9 +418,10 @@ fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -
                 out.field_varint(1, 6);
                 out.field_fixed64(4, value.to_bits());
             }
+            // `int_value` is a `sint64` for every integral kind, a boolean included.
             IrConst::Boolean(value) => {
                 out.field_varint(1, 7);
-                out.field_varint(2, u64::from(*value));
+                out.field_varint(2, zigzag_i64(i64::from(*value)));
             }
             IrConst::String(value) => {
                 out.field_varint(1, 8);
@@ -424,6 +486,7 @@ fn function_pb(
     st: &mut StringTable<'_>,
     f: &FnMeta,
     requirements: &mut VersionRequirementTable,
+    contract_types: &mut ContractTypeTable,
     param_assertions: bool,
     annotations_in_metadata: bool,
 ) -> Pb {
@@ -443,7 +506,7 @@ fn function_pb(
             )
         }
     };
-    let flags = u64::from(!f.annotations.is_empty())
+    let flags = u64::from(f.annotations.declares_annotations())
         | (vis << 1)
         | (u64::from(f.suspend) << 13)
         | (u64::from(f.tailrec) << 11)
@@ -517,7 +580,7 @@ fn function_pb(
             continue;
         }
         let mut vp = Pb::new();
-        let annotations = f.param_annotations.get(i).map(Vec::as_slice).unwrap_or(&[]);
+        let annotations = f.param_annotations.get(i);
         // ValueParameter.flags = 1 (before name, matching kotlinc's field order): what the
         // parameter declared, plus bit 0 = HAS_ANNOTATIONS when it carries annotations — the bit
         // stays set when the source feature is disabled; the `annotation` records are gated
@@ -528,11 +591,7 @@ fn function_pb(
             .copied()
             .unwrap_or_default()
             .flags()
-            | if crate::metadata::class_builder::records_annotations(annotations) {
-                crate::metadata::class_builder::HAS_ANNOTATIONS
-            } else {
-                0
-            };
+            | crate::metadata::class_builder::param_annotation_flags(annotations);
         if flags != 0 {
             vp.field_varint(1, flags);
         }
@@ -556,14 +615,7 @@ fn function_pb(
         } else {
             (*pty, f.spellings.param(i).clone())
         };
-        let mut ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
-        if f.no_infer_params.get(i).copied().unwrap_or(false) {
-            let annotation = crate::metadata::type_encoder::encode_annotation(
-                st,
-                crate::types::type_name("kotlin/internal/NoInfer"),
-            );
-            ty.field_message(100, &annotation);
-        }
+        let ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
         vp.field_message(3, &ty); // ValueParameter.type = 3
                                   // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
                                   // kotlinc's declared type stays the array.
@@ -600,7 +652,7 @@ fn function_pb(
     // though it SERIALIZES after them — kotlinc's serializer writes the extension first, so an
     // ANNOTATED suspend function's CPS descriptor precedes `Lp/Mark;` in d2. Interning it early only
     // when annotations exist leaves every unannotated function's string table exactly where it was.
-    let mut signature = (!f.annotations.is_empty())
+    let mut signature = (!f.annotations.records().is_empty())
         .then(|| method_signature_pb(st, f))
         .flatten();
     // Applied annotations (Function.annotation = 12): `Annotation.id` (field 1) referencing the class
@@ -609,7 +661,7 @@ fn function_pb(
     // language level 2.4) gates the records, not the flags: an older source-language configuration
     // keeps the `HAS_ANNOTATIONS` bit above and writes nothing here.
     if annotations_in_metadata {
-        for annotation in &f.annotations {
+        for annotation in f.annotations.records() {
             p.repeated_message(12, &annotation_pb(st, annotation));
         }
     }
@@ -620,7 +672,7 @@ fn function_pb(
     // The declared contract (Function.contract = 32) — `returns(…) implies …` / `callsInPlace`
     // effects a separate compilation applies at call sites.
     if let Some(contract) = &f.contract {
-        let cb = contract_pb(st, contract, &tps);
+        let cb = contract_pb(st, contract_types, contract, &tps);
         p.field_message(32, &cb);
     }
     // JvmProtoBuf.methodSignature extension (Function field 100): only the descriptor (field 2) — the
@@ -698,9 +750,16 @@ pub struct PropMeta {
     pub setter_visibility: crate::types::Visibility,
     /// Companion-associated (`companion val C.name`) — sets `Property.flags` bit 19.
     pub companion: bool,
-    /// A delegated property's `(name, descriptor)` of the static field holding its delegate, which
-    /// kotlinc records explicitly after the accessors' signatures.
-    pub delegate_field: Option<(String, String)>,
+    /// The accessors' own annotations (`@A get`, `@A set`, `set(@A v)`): each accessor word's
+    /// `HAS_ANNOTATIONS` bit and the `getter_annotation`/`setter_annotation` records (f15/f16).
+    pub accessor_annotations: crate::metadata::AccessorMetadataAnnotations,
+    /// A delegated property's name for the static field holding its delegate, which kotlinc
+    /// records explicitly after the accessors' signatures.
+    pub field_name: Option<String>,
+    /// The field's descriptor, when a reader cannot rebuild it by mapping the property type's class
+    /// id (kotlinc's `requiresSignature`): a value class's carrier (`UInt` stored as `I`), a boxed
+    /// `Int?`, a reference array, or a delegate.
+    pub field_desc: Option<String>,
 }
 
 /// A source typealias declaration in package or classifier metadata.
@@ -803,14 +862,18 @@ impl AccessorWords {
                 0
             }
         };
-        let getter =
-            default_word | not_default(m.modifiers.declared_getter || m.modifiers.delegated);
+        let accessors = &m.accessor_annotations;
+        let getter = default_word
+            | not_default(m.modifiers.declared_getter || m.modifiers.delegated)
+            | u64::from(accessors.getter.declares_annotations());
         let narrowed = m.setter_visibility != m.visibility;
         let setter_not_default =
             m.is_var && (m.modifiers.declared_setter || m.modifiers.delegated || narrowed);
-        let setter = m
-            .is_var
-            .then(|| (visibility_bits(m.setter_visibility) << 1) | not_default(setter_not_default));
+        let setter = m.is_var.then(|| {
+            (visibility_bits(m.setter_visibility) << 1)
+                | not_default(setter_not_default)
+                | u64::from(accessors.setter.declares_annotations())
+        });
         Self {
             getter: (getter != default_word).then_some(getter),
             setter: setter.filter(|&word| word != default_word),
@@ -833,7 +896,7 @@ fn jvm_method_sig(st: &mut StringTable<'_>, name: &str, desc: &str) -> Pb {
     p
 }
 
-fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
+fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: bool) -> Pb {
     let mut p = Pb::new();
     assert_eq!(
         m.semantic_type_params.len(),
@@ -858,10 +921,21 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
             } else {
                 "value"
             });
+        let annotations = Some(&m.accessor_annotations.setter_parameter);
         let mut parameter = Pb::new();
+        let flags = crate::metadata::class_builder::param_annotation_flags(annotations);
+        if flags != 0 {
+            parameter.field_varint(1, flags); // ValueParameter.flags = 1
+        }
         parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
         let ty = type_pb_declared(st, m.ty, &m.spellings.ret, &tps);
         parameter.field_message(3, &ty); // ValueParameter.type = 3
+        crate::metadata::class_builder::append_param_annotations(
+            st,
+            &mut parameter,
+            annotations,
+            annotations_in_metadata,
+        );
         parameter
     });
     p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
@@ -968,16 +1042,18 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
         (getter, setter)
     };
     let mut jvm = Pb::new();
-    // A delegated property names its delegate field explicitly, interned after the accessors.
-    // Otherwise `field` (empty → derived) only when a backing field EXISTS: a computed or extension
-    // property has none, and kotlinc omits the entry rather than recording an empty one.
-    if let Some((name, descriptor)) = &m.delegate_field {
+    // `field` only when a field EXISTS (a delegate's storage included): a computed or extension
+    // property has none, and kotlinc omits the entry rather than recording an empty one. Its
+    // strings intern after the accessors'.
+    if m.has_backing_field || m.field_name.is_some() {
         let mut field = Pb::new();
-        field.field_varint(1, st.local(name) as u64); // JvmFieldSignature.name = 1
-        field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
+        if let Some(name) = &m.field_name {
+            field.field_varint(1, st.local(name) as u64); // JvmFieldSignature.name = 1
+        }
+        if let Some(descriptor) = &m.field_desc {
+            field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
+        }
         jvm.field_message(1, &field);
-    } else if m.has_backing_field {
-        jvm.field_message(1, &Pb::new());
     }
     if let Some(getter) = &getter {
         jvm.field_message(3, getter);
@@ -986,6 +1062,17 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
         jvm.field_message(4, setter);
     }
     p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
+
+    // The accessors' records intern after the JVM signature, the getter's first.
+    if annotations_in_metadata {
+        let accessors = &m.accessor_annotations;
+        for (field, annotations) in [(15, &accessors.getter), (16, &accessors.setter)] {
+            for annotation in annotations.records() {
+                // Property.getter_annotation = 15 / setter_annotation = 16
+                p.repeated_message(field, &annotation_pb(st, annotation));
+            }
+        }
+    }
     p
 }
 
@@ -1022,6 +1109,7 @@ pub(crate) fn build_package_with_intersection_approximation(
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::with_intersection_approximation(intersection_approximation);
     let mut requirements = VersionRequirementTable::default();
+    let mut contract_types = ContractTypeTable::default();
     let mut package = Pb::new();
     // STRINGS INTERN IN SOURCE DECLARATION ORDER across kinds (a `const val` before a `fun`
     // interns first), while the proto still writes functions (f3) before properties (f4) — so the
@@ -1063,11 +1151,14 @@ pub(crate) fn build_package_with_intersection_approximation(
                     &mut st,
                     &funcs[index],
                     &mut requirements,
+                    &mut contract_types,
                     param_assertions,
                     annotations_in_metadata,
                 ))
             }
-            Kind::Property => prop_pbs[index] = Some(property_pb(&mut st, &props[index])),
+            Kind::Property => {
+                prop_pbs[index] = Some(property_pb(&mut st, &props[index], annotations_in_metadata))
+            }
             Kind::Alias => alias_pbs[index] = Some(type_alias_pb(&mut st, &aliases[index])),
         }
     }
@@ -1079,6 +1170,9 @@ pub(crate) fn build_package_with_intersection_approximation(
     }
     for ap in alias_pbs.iter().flatten() {
         package.repeated_message(5, ap); // Package.type_alias = 5
+    }
+    if let Some(table) = contract_types.encode() {
+        package.field_message(30, &table); // Package.type_table = 30
     }
     if let Some(table) = requirements.encode() {
         package.field_message(32, &table); // Package.version_requirement_table = 32
@@ -1190,20 +1284,22 @@ mod tests {
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
+                accessor_annotations: Default::default(),
+                field_name: None,
+                field_desc: None,
                 decl_order: 0,
             }
         }
 
         let mut strings = StringTable::default();
-        let plain = property_pb(&mut strings, &property(false));
+        let plain = property_pb(&mut strings, &property(false), true);
         assert!(
             !plain.as_bytes().contains(&0x58),
             "a plain val must omit Property.flags at the protobuf default"
         );
 
         let mut strings = StringTable::default();
-        let constant = property_pb(&mut strings, &property(true));
+        let constant = property_pb(&mut strings, &property(true), true);
         assert!(
             constant
                 .as_bytes()
@@ -1245,7 +1341,9 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
+                accessor_annotations: Default::default(),
+                field_name: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1303,7 +1401,9 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
+                accessor_annotations: Default::default(),
+                field_name: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1360,7 +1460,9 @@ mod tests {
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
+                accessor_annotations: Default::default(),
+                field_name: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1410,7 +1512,9 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
+                accessor_annotations: Default::default(),
+                field_name: None,
+                field_desc: None,
                 decl_order: 0,
             }],
             &[],

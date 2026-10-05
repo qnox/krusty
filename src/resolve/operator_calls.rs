@@ -81,7 +81,15 @@ impl<'a> Checker<'a> {
                 }
                 crate::symbol_resolver::CandidateSelection::None => {
                     return match self.member_extension_operator_call(
-                        scope, site, receiver, name, arg_exprs, arg_tys, span,
+                        scope,
+                        CallArgs {
+                            call: site,
+                            args: arg_exprs,
+                            arg_tys,
+                        },
+                        receiver,
+                        name,
+                        span,
                     ) {
                         Ok(selected) => selected,
                         Err(()) => {
@@ -146,22 +154,22 @@ impl<'a> Checker<'a> {
             } else {
                 let mut callable = selected.callable.clone();
                 callable.ret = ret;
-                ResolvedCall::source_extension(
+                ResolvedCall::source_extension(ResolvedSourceExtensionCall {
                     callable,
                     receiver,
                     params,
-                    context_args,
+                    context_args: context_args.into_iter().map(Some).collect(),
                     ret,
-                    selected.source_key,
-                    selected.stable_declaration,
-                    vararg.is_some(),
-                    vararg,
-                    selected
+                    source: selected.source_key,
+                    stable_declaration: selected.stable_declaration,
+                    vararg: vararg.is_some(),
+                    vararg_index: vararg,
+                    param_default_values: selected
                         .default_values
                         .get(selected.context_count..)
                         .unwrap_or_default()
                         .to_vec(),
-                )
+                })
             };
             return Some((ret, target));
         }
@@ -247,7 +255,15 @@ impl<'a> Checker<'a> {
                 | LocalExtensionSelection::None => {}
             }
             match self.member_extension_operator_call(
-                scope, site, receiver, name, arg_exprs, arg_tys, span,
+                scope,
+                CallArgs {
+                    call: site,
+                    args: arg_exprs,
+                    arg_tys,
+                },
+                receiver,
+                name,
+                span,
             ) {
                 Ok(Some(selected)) => return Some(selected),
                 Ok(None) => {}
@@ -318,22 +334,22 @@ impl<'a> Checker<'a> {
                 .and_then(|index| index.checked_sub(selected.context_count));
             let mut callable = selected.callable.clone();
             callable.ret = ret;
-            ResolvedCall::source_extension(
+            ResolvedCall::source_extension(ResolvedSourceExtensionCall {
                 callable,
                 receiver,
                 params,
-                context_args,
+                context_args: context_args.into_iter().map(Some).collect(),
                 ret,
-                selected.source_key,
-                selected.stable_declaration,
-                vararg.is_some(),
-                vararg,
-                selected
+                source: selected.source_key,
+                stable_declaration: selected.stable_declaration,
+                vararg: vararg.is_some(),
+                vararg_index: vararg,
+                param_default_values: selected
                     .default_values
                     .get(selected.context_count..)
                     .unwrap_or_default()
                     .to_vec(),
-            )
+            })
         };
         Some((ret, target))
     }

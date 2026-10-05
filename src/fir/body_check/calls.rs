@@ -54,6 +54,7 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::PrimitiveCompare
         | crate::libraries::CompilerIntrinsic::BooleanNot
         | crate::libraries::CompilerIntrinsic::PrimitiveHashCode
+        | crate::libraries::CompilerIntrinsic::PrimitiveEquals
         | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
         | crate::libraries::CompilerIntrinsic::Assert
         | crate::libraries::CompilerIntrinsic::AssertFailsWith
@@ -62,7 +63,6 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::StartCoroutine
         | crate::libraries::CompilerIntrinsic::CoroutineContext
         | crate::libraries::CompilerIntrinsic::CoroutineSuspended
-        | crate::libraries::CompilerIntrinsic::SuspendCoroutine
         | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
         | crate::libraries::CompilerIntrinsic::EnumValues
         | crate::libraries::CompilerIntrinsic::EnumValueOf
@@ -326,7 +326,8 @@ impl BodyFirChecker<'_> {
                 {
                     return Ok(FirExprKind::Constant(FirConstant::String(constant)));
                 }
-                let receiver = self.explicit_receiver(receiver)?;
+                let receiver =
+                    self.explicit_extension_receiver(expression, receiver, extension.receiver)?;
                 self.selected_extension_call(expression, arguments, *extension, Some(receiver))
             }
             Some(ResolvedCall::MemberExtension {
@@ -368,7 +369,11 @@ impl BodyFirChecker<'_> {
                 Ok(FirExprKind::Call(FirCall {
                     target: target.target,
                     dispatch_receiver: Some(dispatch_receiver),
-                    extension_receiver: Some(self.explicit_receiver(receiver)?),
+                    extension_receiver: Some(self.explicit_extension_receiver(
+                        expression,
+                        receiver,
+                        target.extension_receiver,
+                    )?),
                     parameter_types,
                     arguments: self.member_extension_arguments(
                         expression,
@@ -746,7 +751,7 @@ impl BodyFirChecker<'_> {
             expression,
             arguments,
             &parameters,
-            extension.context_args.iter().map(Some),
+            extension.context_args.iter().map(Option::as_ref),
             extension.vararg_index,
         )?;
         Ok(FirExprKind::Call(FirCall {
@@ -1002,7 +1007,7 @@ impl BodyFirChecker<'_> {
                     target,
                     substitutions,
                     true,
-                    selected.context_args.iter().cloned().map(Some).collect(),
+                    selected.context_args.clone(),
                     selected.vararg_index,
                     parameters,
                 ))
@@ -1201,7 +1206,7 @@ impl BodyFirChecker<'_> {
                     context_parameters,
                     value_parameters: parameters,
                     vararg_index: selected.vararg_index,
-                    context_arguments: selected.context_args.iter().cloned().map(Some).collect(),
+                    context_arguments: selected.context_args.clone(),
                 })
             }
             Some(ResolvedCall::MemberExtension {
@@ -1497,6 +1502,7 @@ impl BodyFirChecker<'_> {
                 substitutions: self.call_substitutions(expression, *declaration)?,
                 parameters,
                 extension_parameter: None,
+                extension_receiver: *extension_receiver,
             });
         }
 
@@ -1559,6 +1565,7 @@ impl BodyFirChecker<'_> {
             substitutions,
             parameters,
             extension_parameter: Some(extension_parameter),
+            extension_receiver: *extension_receiver,
         })
     }
 
@@ -1753,9 +1760,6 @@ impl BodyFirChecker<'_> {
                     crate::types::AssertionMode::Runtime
                 };
                 Some(FirIntrinsic::Assert { mode })
-            }
-            Some(crate::libraries::CompilerIntrinsic::SuspendCoroutine) => {
-                Some(FirIntrinsic::SuspendCoroutine)
             }
             Some(crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn) => {
                 Some(FirIntrinsic::SuspendCoroutineUninterceptedOrReturn {

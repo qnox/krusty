@@ -592,7 +592,7 @@ fn a_defaulted_construction_maps_its_lines_like_kotlinc() {
     );
 }
 
-/// A primitive `compareTo` is lowered to `Integer.compare`, which is still a real dispatch and
+/// A primitive `compareTo` is lowered to `Intrinsics.compare`, which is still a real dispatch and
 /// still returns to the call's line.
 #[test]
 fn a_multi_line_primitive_compare_to_returns_to_its_line() {
@@ -687,5 +687,44 @@ fn a_reified_enum_value_of_template_marks_its_call_site() {
         "ReifiedEnumValueOfDispatchKt",
         "T lookup(java.lang.String)",
         &["line 3: 8", "line 4: 8", "line 5: 21"],
+    );
+}
+
+/// A setter falls off the end of its body into the implicit `return`, which kotlinc marks on the
+/// body's last line: the closing `}` of a block body.
+#[test]
+fn a_block_bodied_setter_returns_at_its_closing_brace() {
+    assert_line_table(
+        "SetterBlockFallthrough",
+        "class Holder {\n\
+         \x20   var g: Int = 1\n\
+         \x20       set(value) {\n\
+         \x20           if (value > 0) return\n\
+         \x20           field = value\n\
+         \x20       }\n\
+         }\n",
+        "Holder",
+        "void setG(int)",
+        &["line 4: 0", "line 5: 5", "line 6: 10"],
+    );
+}
+
+/// The same fall-through for an expression-bodied setter is marked on the expression's last line.
+#[test]
+fn an_expression_bodied_setter_returns_at_its_last_line() {
+    assert_line_table(
+        "SetterExpressionFallthrough",
+        "fun sink(a: Int, b: Int) {}\n\
+         \n\
+         class Holder {\n\
+         \x20   var e: Int = 1\n\
+         \x20       set(value) = sink(\n\
+         \x20           value,\n\
+         \x20           1\n\
+         \x20       )\n\
+         }\n",
+        "Holder",
+        "void setE(int)",
+        &["line 6: 0", "line 7: 1", "line 5: 2", "line 8: 5"],
     );
 }

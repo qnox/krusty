@@ -29,10 +29,38 @@ impl Emitter<'_> {
                 if !init.is_some_and(|value| self.spills_operand_prefix(value))
                     && !self.inlined_only_cells.contains(&declaration) =>
             {
-                Some((elem, init))
+                Some((elem, self.holder_initial_value(elem, init)))
             }
             _ => None,
         }
+    }
+
+    /// The initial value a new holder's `element` is set to. A constant equal to the field's JVM
+    /// default (zero bits, `false`, `null`) is left unset, as kotlinc's `SharedVariablesManager`
+    /// leaves it: the fresh holder already holds it. kotlinc stores an unsigned zero, whose
+    /// constant it does not read as a default.
+    pub(super) fn holder_initial_value(&self, elem: Ty, init: Option<ExprId>) -> Option<ExprId> {
+        use crate::ir::IrConst;
+        let value = init?;
+        let IrExpr::Const(constant) = self.ir.expr(value) else {
+            return Some(value);
+        };
+        // An `ObjectRef` holds a reference, whose default is `null` whatever value it boxes.
+        if ref_class(&elem).1 == "Ljava/lang/Object;" {
+            return (!matches!(constant, IrConst::Null)).then_some(value);
+        }
+        let default = match constant {
+            IrConst::Boolean(value) => !value,
+            IrConst::Byte(value) => *value == 0,
+            IrConst::Short(value) => *value == 0,
+            IrConst::Int(value) => *value == 0,
+            IrConst::Long(value) => *value == 0,
+            IrConst::Float(value) => value.to_bits() == 0,
+            IrConst::Double(value) => value.to_bits() == 0,
+            IrConst::Char(value) => *value == 0,
+            _ => false,
+        };
+        (!default).then_some(value)
     }
 
     /// Record which of a block's captured-local declarations only inlined lambdas capture: every
@@ -81,7 +109,7 @@ impl Emitter<'_> {
             // and the `putfield` returns to the declaration's.
             load(holder, slot, code);
             self.mark_expression_start(value, code);
-            self.emit_value(value, code);
+            self.emit_element_value(elem, value, code);
             debug_lines::mark_statement(self.ir, declaration, code);
             self.put_element(&elem, code);
         }
@@ -97,7 +125,7 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         let (class, _) = ref_class(&elem);
-        let Some(init) = init else {
+        let Some(init) = self.holder_initial_value(elem, init) else {
             self.emit_new_holder(class, code);
             return;
         };
@@ -112,9 +140,22 @@ impl Emitter<'_> {
         } else {
             self.emit_new_holder(class, code);
             code.dup();
-            self.emit_value(init, code);
+            self.emit_element_value(elem, init, code);
         }
         self.put_element(&elem, code);
+    }
+
+    /// Emit a value stored into a holder's `element`. An `ObjectRef` stores `Object`, so a
+    /// suspension point's erased result is stored as it is, without the narrowing kotlinc writes
+    /// only for a consumer that needs it.
+    pub(super) fn emit_element_value(&mut self, elem: Ty, value: ExprId, code: &mut CodeBuilder) {
+        let object = Ty::obj("java/lang/Object");
+        if ir_ty_to_jvm(&elem).is_reference()
+            && self.emit_erased_suspension_result(value, object, code)
+        {
+            return;
+        }
+        self.emit_value(value, code);
     }
 
     fn emit_new_holder(&mut self, class: &str, code: &mut CodeBuilder) {
@@ -200,8 +241,8 @@ impl Emitter<'_> {
 }
 
 /// Whether every use of local `index` under `root` reads or writes its holder's element, or is a
-/// capture of a lambda an inline call expands: a literal argument of a call with published inline
-/// parameter modifiers, for a parameter that is not `noinline`. Such a lambda's body is spliced
+/// capture of a lambda an inline call expands: a literal argument for one of the call's inline
+/// parameters ([`super::inline_parameters`]). Such a lambda's body is spliced
 /// into the caller, so the search follows the holder into it: the body numbers its captures first,
 /// and the capture at position `k` is that body's value `k`. Any other lambda's body is its own
 /// function, so only its captures are searched, and capturing the holder there lets it escape.
@@ -223,16 +264,15 @@ fn only_inlined_captures(ir: &crate::ir::IrFile, root: ExprId, index: u32) -> bo
                 ..
             } if ir.call_inline_modifiers.contains_key(&expression) => {
                 pending.extend(dispatch_receiver.map(|receiver| (receiver, local)));
-                let modifiers = &ir.call_inline_modifiers[&expression];
                 for (position, &argument) in args.iter().enumerate() {
                     match ir.expr(argument) {
                         IrExpr::Lambda {
                             captures,
                             inline_body: Some(body),
                             ..
-                        } if modifiers.get(position).is_some_and(|modifier| {
-                            *modifier != crate::types::InlineParameterModifier::Noinline
-                        }) =>
+                        } if super::inline_parameters::is_inline_parameter(
+                            ir, expression, position,
+                        ) == Some(true) =>
                         {
                             for (slot, &capture) in captures.iter().enumerate() {
                                 if is_local(capture, local) {

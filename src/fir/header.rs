@@ -18,6 +18,8 @@ mod annotation_strings;
 mod executable_owners;
 mod flags;
 mod nested_classifiers;
+mod type_use_annotations;
+mod visibility_suppressions;
 
 use annotation_strings::HeaderAnnotationStringArena;
 use executable_owners::local_executable_owner;
@@ -25,6 +27,9 @@ pub use flags::{HeaderParameterFlags, HeaderTypeFlags, HeaderTypeParameterFlags}
 use nested_classifiers::{
     bind_parser_identity, classifier_identity, companion_declarations, nested_classifier_owners,
 };
+use type_use_annotations::HeaderTypeUseAnnotationArena;
+pub(crate) use visibility_suppressions::HeaderVisibilitySuppressionApplication;
+use visibility_suppressions::HeaderVisibilitySuppressionArena;
 
 mod actualization;
 
@@ -909,6 +914,10 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::OPERATOR, function.is_operator())
                 .with(DeclarationFlags::INFIX, function.is_infix())
                 .with(
+                    DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                    function.has_visibility_modifier(),
+                )
+                .with(
                     DeclarationFlags::COMPANION,
                     function.is_companion_extension(),
                 )
@@ -1034,6 +1043,10 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::OVERRIDE, property.is_override)
                 .with(DeclarationFlags::ABSTRACT, property.is_abstract)
                 .with(DeclarationFlags::MUTABLE, property.is_var)
+                .with(
+                    DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                    property.has_visibility_modifier,
+                )
                 .with(DeclarationFlags::LATEINIT, property.is_lateinit)
                 .with(DeclarationFlags::DELEGATED, property.delegate.is_some())
                 .with(
@@ -1232,7 +1245,11 @@ fn extract_file_stub_inventory(
                     .with(DeclarationFlags::PROPERTY_PARAMETER, true)
                     .with(DeclarationFlags::MUTABLE, property.is_var)
                     .with(DeclarationFlags::OPEN, property.is_open)
-                    .with(DeclarationFlags::OVERRIDE, property.is_override),
+                    .with(DeclarationFlags::OVERRIDE, property.is_override)
+                    .with(
+                        DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                        property.has_visibility_modifier,
+                    ),
             });
         }
         // Data-class component/copy callables participate in ordinary overload selection during
@@ -2633,8 +2650,8 @@ pub struct StreamedHeaderModule {
     /// survives the active source parse.
     pub(super) detached_types: Vec<(SourceFileId, HeaderTypeId)>,
     annotation_strings: HeaderAnnotationStringArena,
-    annotation_policies: HeaderAnnotationPolicyArena,
     visibility_suppressions: HeaderVisibilitySuppressionArena,
+    type_use_annotations: HeaderTypeUseAnnotationArena,
     /// Read freely; append through [`StreamedHeaderModule::push_stub`] so the identity index below
     /// covers the new stub (a direct push is still found — by a scan of the un-indexed tail).
     pub stubs: Vec<DeclarationStub>,
@@ -2875,8 +2892,8 @@ impl StreamedHeaderModule {
             + self.syntax.storage_payload_bytes()
             + self.detached_types.len() * std::mem::size_of::<(SourceFileId, HeaderTypeId)>()
             + self.annotation_strings.storage_payload_bytes()
-            + self.annotation_policies.storage_payload_bytes()
             + self.visibility_suppressions.storage_payload_bytes()
+            + self.type_use_annotations.storage_payload_bytes()
             + self.stubs.len() * std::mem::size_of::<DeclarationStub>()
             + self.stub_positions.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<usize>())
@@ -2887,13 +2904,6 @@ impl StreamedHeaderModule {
                 .map(|declarations| declarations.len() * std::mem::size_of::<DeclarationId>())
                 .sum::<usize>()
             + self.excluded.len() * std::mem::size_of::<DeclarationId>()
-    }
-
-    pub(crate) fn annotation_policy_applications(
-        &self,
-        declaration: DeclarationId,
-    ) -> &[HeaderAnnotationPolicyApplication] {
-        self.annotation_policies.applications(declaration)
     }
 
     /// Constant string arguments attached to one declaration annotation. Pass 1 copies the values
@@ -2907,13 +2917,6 @@ impl StreamedHeaderModule {
     ) -> &[Box<str>] {
         self.annotation_strings
             .arguments(declaration, annotation_ordinal)
-    }
-
-    pub(crate) fn annotation_policy_arguments(
-        &self,
-        range: HeaderAnnotationArgumentRange,
-    ) -> &[LookupNameId] {
-        self.annotation_policies.arguments(range)
     }
 
     pub(crate) fn file_visibility_suppressions(
@@ -2959,6 +2962,24 @@ impl StreamedHeaderModule {
             .collect()
     }
 
+    /// Annotated type occurrences of `source`, by start offset, each with its annotation spans in
+    /// source order.
+    pub(crate) fn type_use_annotations(
+        &self,
+        source: SourceFileId,
+    ) -> impl Iterator<Item = (u32, &[crate::diag::Span])> + '_ {
+        self.type_use_annotations.occurrences(source)
+    }
+
+    /// Each named function-type parameter of `source`: its type's start offset and its name, which
+    /// `@Metadata` records as a `@ParameterName` annotation on that type.
+    pub(crate) fn function_type_parameter_names(
+        &self,
+        source: SourceFileId,
+    ) -> impl Iterator<Item = (u32, &str)> + '_ {
+        self.type_use_annotations.parameter_names(source)
+    }
+
     pub(crate) fn detached_type_roots(
         &self,
         source: SourceFileId,
@@ -2967,274 +2988,6 @@ impl StreamedHeaderModule {
             .iter()
             .filter(move |(candidate, _)| *candidate == source)
             .map(|(_, ty)| *ty)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HeaderVisibilitySuppressionApplication {
-    pub annotation: Span,
-    pub invisible_reference: bool,
-    pub invisible_member: bool,
-    pub optional_declaration_usage: bool,
-}
-
-/// Compact `@Suppress` argument facts needed while signatures are solved after ordinary expression
-/// arenas have been released. Annotation identity is deliberately not guessed here: the ordinary
-/// resolver later joins `annotation` to its resolved classifier and accepts these flags only for
-/// `kotlin.Suppress`.
-#[derive(Default)]
-struct HeaderVisibilitySuppressionArena {
-    files: std::collections::HashMap<SourceFileId, Vec<HeaderVisibilitySuppressionApplication>>,
-    declarations:
-        std::collections::HashMap<DeclarationId, Vec<HeaderVisibilitySuppressionApplication>>,
-}
-
-impl HeaderVisibilitySuppressionArena {
-    fn applications(
-        file: &File,
-        annotations: &[crate::ast::AnnotationRef],
-        arguments: &[Vec<crate::ast::ExprId>],
-    ) -> Vec<HeaderVisibilitySuppressionApplication> {
-        annotations
-            .iter()
-            .zip(arguments)
-            .filter_map(|(annotation, arguments)| {
-                let mut invisible_reference = false;
-                let mut invisible_member = false;
-                let mut optional_declaration_usage = false;
-                for argument in arguments {
-                    let Some(value) = file.const_string_value(*argument) else {
-                        continue;
-                    };
-                    match value.as_str() {
-                        Some("INVISIBLE_REFERENCE") => invisible_reference = true,
-                        Some("INVISIBLE_MEMBER") => invisible_member = true,
-                        Some("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE") => {
-                            optional_declaration_usage = true
-                        }
-                        _ => {}
-                    }
-                }
-                (invisible_reference || invisible_member || optional_declaration_usage).then_some(
-                    HeaderVisibilitySuppressionApplication {
-                        annotation: annotation.span,
-                        invisible_reference,
-                        invisible_member,
-                        optional_declaration_usage,
-                    },
-                )
-            })
-            .collect()
-    }
-
-    fn add_file(&mut self, source: SourceFileId, file: &File, stubs: &[DeclarationStub]) {
-        let file_applications = file
-            .file_annotations
-            .iter()
-            .filter_map(|(annotation, arguments)| {
-                Self::applications(
-                    file,
-                    std::slice::from_ref(annotation),
-                    std::slice::from_ref(arguments),
-                )
-                .into_iter()
-                .next()
-            })
-            .collect::<Vec<_>>();
-        if !file_applications.is_empty() {
-            self.files.insert(source, file_applications);
-        }
-
-        let mut record = |range: Span,
-                          kind: DeclarationKind,
-                          annotations: &[crate::ast::AnnotationRef],
-                          arguments: &[Vec<crate::ast::ExprId>]| {
-            let applications = Self::applications(file, annotations, arguments);
-            if let (false, Some(declaration)) = (
-                applications.is_empty(),
-                stubs
-                    .iter()
-                    .find(|stub| stub.range == range && stub.kind == kind)
-                    .map(|stub| stub.id),
-            ) {
-                self.declarations
-                    .entry(declaration)
-                    .or_default()
-                    .extend(applications);
-            }
-        };
-        for &declaration in &file.decls {
-            match file.decl(declaration) {
-                Decl::Fun(function) => record(
-                    function.span,
-                    DeclarationKind::Function,
-                    &function.annotations,
-                    &function.annotation_args,
-                ),
-                Decl::Property(property) => record(
-                    property.span,
-                    DeclarationKind::Property,
-                    &property.annotations,
-                    &property.annotation_args,
-                ),
-                Decl::Class(class) => {
-                    record(
-                        class.span,
-                        DeclarationKind::Classifier,
-                        &class.annotations,
-                        &class.annotation_args,
-                    );
-                    if let Some(annotations) = &class.primary_ctor_annotations {
-                        record(
-                            class.span,
-                            DeclarationKind::Constructor,
-                            annotations,
-                            &class.primary_ctor_annotation_args,
-                        );
-                    }
-                    for function in &class.methods {
-                        record(
-                            function.span,
-                            DeclarationKind::Function,
-                            &function.annotations,
-                            &function.annotation_args,
-                        );
-                    }
-                    for property in &class.body_props {
-                        record(
-                            property.span,
-                            DeclarationKind::Property,
-                            &property.annotations,
-                            &property.annotation_args,
-                        );
-                    }
-                    for entry in &class.enum_entries {
-                        for function in &entry.methods {
-                            record(
-                                function.span,
-                                DeclarationKind::Function,
-                                &function.annotations,
-                                &function.annotation_args,
-                            );
-                        }
-                        for property in &entry.props {
-                            record(
-                                property.span,
-                                DeclarationKind::Property,
-                                &property.annotations,
-                                &property.annotation_args,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn file(&self, source: SourceFileId) -> &[HeaderVisibilitySuppressionApplication] {
-        self.files
-            .get(&source)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
-    fn declaration(&self, declaration: DeclarationId) -> &[HeaderVisibilitySuppressionApplication] {
-        self.declarations
-            .get(&declaration)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
-    fn storage_payload_bytes(&self) -> usize {
-        self.files
-            .values()
-            .chain(self.declarations.values())
-            .map(|applications| {
-                applications.len() * std::mem::size_of::<HeaderVisibilitySuppressionApplication>()
-            })
-            .sum()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct HeaderAnnotationArgumentRange {
-    start: u32,
-    len: u32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HeaderAnnotationPolicyApplication {
-    pub annotation: Span,
-    pub arguments: HeaderAnnotationArgumentRange,
-}
-
-/// Bounded declaration metadata needed to interpret an annotation class's own `@Retention` and
-/// `@Target` applications after its expression arena is gone. Only terminal enum-entry spellings
-/// are copied; arbitrary annotation expressions remain ordinary checked body work.
-#[derive(Default)]
-struct HeaderAnnotationPolicyArena {
-    applications: std::collections::HashMap<DeclarationId, Vec<HeaderAnnotationPolicyApplication>>,
-    arguments: Vec<LookupNameId>,
-}
-
-impl HeaderAnnotationPolicyArena {
-    fn add_class(
-        &mut self,
-        declaration: DeclarationId,
-        class: &ClassDecl,
-        file: &File,
-        names: &mut LookupNames,
-    ) {
-        let mut applications = Vec::with_capacity(class.annotations.len());
-        for (annotation, source_arguments) in class.annotations.iter().zip(&class.annotation_args) {
-            let start = next_id(self.arguments.len(), "annotation policy arguments");
-            for &source_argument in source_arguments {
-                let entries = match file.expr(source_argument) {
-                    Expr::AnnotationArrayLiteral(elements) => elements.as_slice(),
-                    Expr::Call { args, .. } => args.as_slice(),
-                    _ => std::slice::from_ref(&source_argument),
-                };
-                for &entry in entries {
-                    if let Expr::Member { name, .. } = file.expr(entry) {
-                        self.arguments.push(names.intern(name));
-                    }
-                }
-            }
-            let end = next_id(self.arguments.len(), "annotation policy arguments");
-            applications.push(HeaderAnnotationPolicyApplication {
-                annotation: annotation.span,
-                arguments: HeaderAnnotationArgumentRange {
-                    start,
-                    len: end - start,
-                },
-            });
-        }
-        if !applications.is_empty() {
-            self.applications.insert(declaration, applications);
-        }
-    }
-
-    fn applications(&self, declaration: DeclarationId) -> &[HeaderAnnotationPolicyApplication] {
-        self.applications
-            .get(&declaration)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
-    fn arguments(&self, range: HeaderAnnotationArgumentRange) -> &[LookupNameId] {
-        let start = range.start as usize;
-        &self.arguments[start..start + range.len as usize]
-    }
-
-    fn storage_payload_bytes(&self) -> usize {
-        self.arguments.len() * std::mem::size_of::<LookupNameId>()
-            + self
-                .applications
-                .values()
-                .map(|applications| {
-                    applications.len() * std::mem::size_of::<HeaderAnnotationPolicyApplication>()
-                })
-                .sum::<usize>()
     }
 }
 
@@ -3302,8 +3055,8 @@ pub struct HeaderInventoryBuilder {
     syntax: HeaderSyntaxArena,
     detached_types: Vec<(SourceFileId, HeaderTypeId)>,
     annotation_strings: HeaderAnnotationStringArena,
-    annotation_policies: HeaderAnnotationPolicyArena,
     visibility_suppressions: HeaderVisibilitySuppressionArena,
+    type_use_annotations: HeaderTypeUseAnnotationArena,
     stubs: Vec<DeclarationStub>,
     inventory: Vec<DeclarationId>,
     expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
@@ -3375,6 +3128,7 @@ impl HeaderInventoryBuilder {
             let ty = self.syntax.add_type(ty, &mut self.lookup_names);
             self.detached_types.push((source, ty));
         }
+        self.type_use_annotations.add_file(source, file);
         let extracted = extract_file_stub_inventory(
             file,
             source,
@@ -3432,8 +3186,6 @@ impl HeaderInventoryBuilder {
                         &class.annotations,
                         &class.annotation_args,
                     );
-                    self.annotation_policies
-                        .add_class(stable, class, file, &mut self.lookup_names);
                 }
                 Decl::Property(property) => {
                     self.annotation_strings.add(
@@ -3464,8 +3216,8 @@ impl HeaderInventoryBuilder {
             syntax: self.syntax,
             detached_types: self.detached_types,
             annotation_strings: self.annotation_strings,
-            annotation_policies: self.annotation_policies,
             visibility_suppressions: self.visibility_suppressions,
+            type_use_annotations: self.type_use_annotations,
             stubs: self.stubs,
             expect_keywords: self.expect_keywords,
             continuation_ordinals: self.continuation_ordinals,

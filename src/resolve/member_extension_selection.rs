@@ -224,6 +224,7 @@ pub(super) fn candidate(
         overridden_results: shape.function.overridden_results.clone(),
         owner: shape.owner,
         physical_name: shape.function.physical_name.clone(),
+        type_arguments: instantiated.type_arguments,
     }
 }
 
@@ -276,6 +277,63 @@ impl MemberExtensionFunctionCandidate {
             interface,
             vararg_index: self.physical_vararg_index,
         }
+    }
+}
+
+impl Checker<'_> {
+    /// Select an operator declared as a member extension of an implicit dispatch receiver. This is
+    /// the same candidate engine used by explicit member-extension calls; the only syntax-specific
+    /// work here is recording the selected call under the operator convention key.
+    pub(super) fn member_extension_operator_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: CallArgs<'_>,
+        extension_receiver: Ty,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<(Ty, ResolvedCall)>, ()> {
+        let CallArgs {
+            call: expression,
+            args,
+            arg_tys,
+        } = call;
+        let request = MemberExtensionFunctionCall {
+            extension_receiver,
+            result_constraint: CallResultConstraint::direct(None),
+            name,
+            args,
+            arg_tys,
+            arg_names: None,
+            explicit_type_args: &[],
+            trailing_lambda: false,
+        };
+        let candidate = match self.member_extension_function(
+            scope,
+            request,
+            MemberExtensionSelection::Operators,
+        ) {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => return Ok(None),
+            Err(()) => {
+                self.diags.error(
+                    span,
+                    format!("overload resolution ambiguity for operator '{name}'"),
+                );
+                return Err(());
+            }
+        };
+        if candidate.visibility != Visibility::Public {
+            self.reject_if_inaccessible(candidate.visibility, name, candidate.owner, span);
+        }
+        let interface = self
+            .resolver()
+            .classifier(candidate.owner)
+            .is_some_and(|shape| shape.is_interface());
+        let dispatch_receiver = self.implicit_receiver_selection(candidate.dispatch_receiver);
+        let result = candidate.ret;
+        let call = candidate.resolved_call(dispatch_receiver, extension_receiver, interface);
+        self.mark_extension_receiver_used(expression, candidate.dispatch_receiver);
+        Ok(Some((result, call)))
     }
 }
 
