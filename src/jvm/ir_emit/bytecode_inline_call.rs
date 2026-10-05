@@ -261,6 +261,16 @@ impl Emitter<'_> {
             body: &body,
             reified,
         };
+        // Descriptor compatibility is an eligibility check, before any literal is selected and
+        // this lowering owns the call. Suspend lowering can append a continuation to the physical
+        // call while the classpath body still has its declaration descriptor; a public inline
+        // method in that shape remains a legal real call. Once a matching call selects literals,
+        // every later missing fact or realization failure is an emission error.
+        if parse_descriptor_params(splice_desc)
+            .is_none_or(|parameters| parameters.len() != args.len())
+        {
+            return InlineCallOutcome::NotApplicable;
+        }
         let has_lambda_arg = args.iter().any(|&argument| {
             matches!(
                 self.ir.expr(argument),
