@@ -10,6 +10,9 @@ pub(in crate::fir::body_check) struct MemberExtensionFirTarget {
     /// receiver into the provider parameter list.
     pub(in crate::fir::body_check) parameters: Vec<Ty>,
     pub(in crate::fir::body_check) extension_parameter: Option<u32>,
+    /// The extension receiver parameter's type as the checker applied it, which an explicit
+    /// receiver argument is converted to.
+    pub(in crate::fir::body_check) extension_receiver: Ty,
 }
 
 pub(super) struct ExternalCallTarget<'a> {

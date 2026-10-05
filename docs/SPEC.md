@@ -2286,7 +2286,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Measured against kotlinc 2.4.10, the GUARDED positions are: a property with an explicit type (member
   or top-level — the top-level one runs in `<clinit>`), a local with an explicit type, a value
   argument (including the parameter of a non-null-typed lambda, which is an `invoke` argument), a
-  `return` / expression body, and an assignment to a non-null target. kotlinc does NOT guard: an
+  `return` / expression body, an assignment to a non-null target, and the explicit receiver of a
+  Kotlin extension call whose DECLARED receiver rejects null (`getenv(..).trim()`; not a `T.ext()`
+  whose `T` admits null, and not a safe call). A MEMBER extension's explicit receiver is the same
+  receiver argument under the same exclusions: a class's or a companion's `String.shout()` invoked
+  on `System.getProperty(name)` checks `getProperty(...)`, measured against kotlinc 2.4.20
+  (`renamed_builtin_property_null_check_e2e`). kotlinc does NOT guard: an
   INFERRED local (`val x = getenv(...)` stays `T!`), a nullable target (`String?`, elvis, `?.`), a
   `when` subject, a string-template interpolation, or the receiver of a Java member call (`getenv(..).length`
   NPEs on its own). Guards are recorded by the checker at the narrowing positions
@@ -2315,8 +2320,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Also unimplemented:
   kotlinc's OTHER form, the message-less `Intrinsics.checkNotNull(Object)V`, which it emits wherever the
   narrowed value has no name to report — a plain read of a platform-typed local, a source-block branch,
-  a `try` value, the merged value of a conditional in argument position; and the guard on a non-null
-  Kotlin extension RECEIVER (`getenv(..).trim()`). krusty emits the NAMED form only, so a narrowing it
+  a `try` value, the merged value of a conditional in argument position. krusty emits the NAMED form
+  only, so a narrowing it
   cannot name stays unguarded rather than guarded under an invented name.
   Tests: `tests/platform_call_assertions_e2e.rs` (per-position `checkNotNullExpressionValue` call-site
   and message differential vs kotlinc, every guarded position run for its exception and message, and
@@ -2371,6 +2376,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type-argument enhancement outside a `for` loop, enhanced Java PROPERTY reads (`map.keys`), and
   `NULLABLE` enhancement (`HashMap.get` stays `V!`).
   Tests: `tests/enhanced_result_null_check_e2e.rs` (per-method differential vs kotlinc and a run).
+- **A Java method overriding a builtin property is that property, even under another JVM name.**
+  kotlinc's Java scope shows `java.util.HashMap.keySet()` as `Map.keys` and `entrySet()` as
+  `Map.entries` (the special realizations of `BuiltinSpecialProperties`), exactly as it shows
+  `values()` as `values`. The provider publishes the property on the Java class that declares the
+  realizing method, read through that method, so a read of `hashMap.keys` is the Java result, not the
+  builtin declaration, and is guarded with the getter's name (`<get-keys>(...)`) at a declared result,
+  an extension receiver (`hashMap.entries.first()`), and an interface-delegation forwarder
+  (`Map<K, V> by HashMap()`). krusty
+  types the read flexible; kotlinc enhances it to the overridden property's not-null type, so an
+  inferred `val keys = hashMap.keys` and the enhanced type arguments (`entries.iterator().next()`)
+  are still unguarded (the enhanced PROPERTY read gap above).
+  Tests: `tests/renamed_builtin_property_null_check_e2e.rs` (per-method differential vs kotlinc and a
+  run).
 - `try { … } catch (e: E) { … }` (no `finally`): the body value (and each catch value) is stored into a
   result temp and loaded at the merge, like kotlinc. The protected region covers the body + result
   store; each catch is an exception-table handler whose StackMapTable frame has the caught exception on

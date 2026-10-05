@@ -81,7 +81,15 @@ impl<'a> Checker<'a> {
                 }
                 crate::symbol_resolver::CandidateSelection::None => {
                     return match self.member_extension_operator_call(
-                        scope, site, receiver, name, arg_exprs, arg_tys, span,
+                        scope,
+                        CallArgs {
+                            call: site,
+                            args: arg_exprs,
+                            arg_tys,
+                        },
+                        receiver,
+                        name,
+                        span,
                     ) {
                         Ok(selected) => selected,
                         Err(()) => {
@@ -247,7 +255,15 @@ impl<'a> Checker<'a> {
                 | LocalExtensionSelection::None => {}
             }
             match self.member_extension_operator_call(
-                scope, site, receiver, name, arg_exprs, arg_tys, span,
+                scope,
+                CallArgs {
+                    call: site,
+                    args: arg_exprs,
+                    arg_tys,
+                },
+                receiver,
+                name,
+                span,
             ) {
                 Ok(Some(selected)) => return Some(selected),
                 Ok(None) => {}
