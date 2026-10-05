@@ -12346,6 +12346,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so a jump the constant folder removes shares their output line instead of remaining as its own
   `nop`. Tests: `tests/comparison_jump_line_e2e.rs`, `tests/constant_conditions_e2e.rs`.
 
+- **An explicit primitive `compareTo` calls kotlinc's `CompareTo` owner.** The int category
+  (`Int`, `Char`, `Short`, `Byte`) and `Long` call `kotlin/jvm/internal/Intrinsics.compare`,
+  `Boolean` calls `java/lang/Boolean.compare(ZZ)`, and `Float`/`Double` their wrappers' `compare`.
+  The checked comparison operand of `Boolean.compareTo(Boolean)` is `Boolean` (a `Char` pair still
+  compares as `Int`). Only a numeric operand's relational form folds into a direct comparison; a
+  `Boolean` `<` stays `Boolean.compare` tested against zero, as kotlinc's comparison intrinsics
+  cover only numbers. Test: `tests/primitive_compare_to_owner_e2e.rs`.
+
 - **A null-cast message spells the root package `<root>`.** kotlinc's `TypeOperatorLowering`
   writes `null cannot be cast to non-null type ${type.render()}`, and the IR renderer writes a
   declaration's package with `FqName.toString()`, which is `<root>` for the root package. So every

@@ -1982,6 +1982,8 @@ mod primitive_bound_generic_e2e;
 mod primitive_box_cast_e2e;
 #[path = "primitive_compare_branch_e2e.rs"]
 mod primitive_compare_branch_e2e;
+#[path = "primitive_compare_to_owner_e2e.rs"]
+mod primitive_compare_to_owner_e2e;
 #[path = "primitive_iterator_next_e2e.rs"]
 mod primitive_iterator_next_e2e;
 #[path = "primitive_operator_extension_e2e.rs"]

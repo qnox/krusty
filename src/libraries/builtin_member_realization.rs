@@ -366,14 +366,15 @@ pub(crate) fn primitive_binary_operands(
     }
 }
 
-/// Common comparison carrier of an exact builtin scalar `compareTo`: `Char`/`Boolean` compare as
-/// `Int`, numeric operands at their promoted type (`Int.compareTo(Long)` compares `Long`s).
+/// Common comparison carrier of an exact builtin scalar `compareTo`: `Char` compares as `Int`,
+/// `Boolean` as itself, numeric operands at their promoted type (`Int.compareTo(Long)` compares
+/// `Long`s).
 pub(crate) fn primitive_compare_operand(receiver: Ty, parameter: Ty) -> Option<Ty> {
     let receiver = receiver.canonical_semantic().non_null();
     let parameter = parameter.canonical_semantic().non_null();
-    if (receiver == Ty::Boolean && parameter == Ty::Boolean)
-        || (receiver == Ty::Char && parameter == Ty::Char)
-    {
+    if receiver == Ty::Boolean && parameter == Ty::Boolean {
+        Some(Ty::Boolean)
+    } else if receiver == Ty::Char && parameter == Ty::Char {
         Some(Ty::Int)
     } else {
         Ty::promote(receiver, parameter)

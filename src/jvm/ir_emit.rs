@@ -7322,60 +7322,6 @@ impl<'a> Emitter<'a> {
         code.set_stack(entry_stack);
     }
 
-    /// The two operands of a `compare(a, b) <op> 0`, with the comparison to apply to them directly.
-    ///
-    /// `None` unless one side is the primitive three-way comparison and the other is the integer
-    /// literal `0` — the only shape in which that result is meaningful. With the zero on the LEFT
-    /// the comparison reverses (`0 < compare(a, b)` is `a > b`), so the operator is flipped rather
-    /// than the operands, which keeps evaluation order.
-    fn primitive_compare_operands(
-        &self,
-        op: IrBinOp,
-        lhs: u32,
-        rhs: u32,
-    ) -> Option<(u32, u32, IrBinOp)> {
-        use IrBinOp::*;
-        if !matches!(op, Lt | Le | Gt | Ge | Eq | Ne) {
-            return None;
-        }
-        let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
-        let (compared, direct) = if zero(rhs) {
-            (lhs, op)
-        } else if zero(lhs) {
-            let flipped = match op {
-                Lt => Gt,
-                Le => Ge,
-                Gt => Lt,
-                Ge => Le,
-                same => same,
-            };
-            (rhs, flipped)
-        } else {
-            return None;
-        };
-        let IrExpr::Call {
-            callee:
-                Callee::Intrinsic {
-                    operation:
-                        crate::ir::IrIntrinsic::PrimitiveCompare {
-                            relational_operator: true,
-                            ..
-                        },
-                    ..
-                },
-            dispatch_receiver: Some(receiver),
-            args,
-            ..
-        } = self.ir.expr(compared)
-        else {
-            return None;
-        };
-        let [argument] = args.as_slice() else {
-            return None;
-        };
-        Some((*receiver, *argument, direct))
-    }
-
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
     /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     fn diverges(&self, e: u32) -> bool {
