@@ -70,3 +70,16 @@ fn a_value_class_with_only_synthesized_any_members_records_none_of_them() {
         }\n";
     assert_identical("AccessorSignatureValuePlain", src, "app/Label");
 }
+
+#[test]
+fn same_named_value_class_overloads_do_not_replace_any_members() {
+    let src = "package app\n\
+        \n\
+        @JvmInline\n\
+        value class Token(val value: Int) {\n\
+        \x20   fun toString(radix: Int): String = value.toString()\n\
+        \x20   fun hashCode(seed: Int): Int = value + seed\n\
+        \x20   fun equals(text: String): Boolean = value.toString() == text\n\
+        }\n";
+    assert_identical("AccessorSignatureValueAnyOverloads", src, "app/Token");
+}

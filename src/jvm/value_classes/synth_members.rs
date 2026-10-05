@@ -239,6 +239,32 @@ pub(super) fn synth_value_members(
     // the first static parameter slot, so the body itself needs no slot rewrite; value-class property
     // reads inside it are lowered to the carrier later in this pass. The ordinary instance override is
     // synthesized below as the ABI delegator back to this implementation.
+    let custom_any_roles = ir
+        .function_overrides
+        .get(&internal_name)
+        .into_iter()
+        .flatten()
+        .filter_map(|edge| {
+            let role = edge.overridden_semantic_role?;
+            if !matches!(
+                role,
+                crate::types::SemanticCallRole::KotlinAnyEquals
+                    | crate::types::SemanticCallRole::KotlinAnyHashCode
+                    | crate::types::SemanticCallRole::KotlinAnyToString
+            ) {
+                return None;
+            }
+            let crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) =
+                edge.implementation
+            else {
+                return None;
+            };
+            ir.checked_callable_functions
+                .get(&declaration)
+                .copied()
+                .map(|function| (function, role))
+        })
+        .collect::<HashMap<_, _>>();
     let mut custom_equals = false;
     let mut custom_hash_code = false;
     let mut custom_to_string = false;
@@ -247,16 +273,16 @@ pub(super) fn synth_value_members(
         let Some(function) = ir.functions.get_mut(fid as usize) else {
             continue;
         };
-        let custom_impl = match (function.name.as_str(), function.params.as_slice()) {
-            ("equals", [_]) => {
+        let custom_impl = match custom_any_roles.get(&fid) {
+            Some(crate::types::SemanticCallRole::KotlinAnyEquals) => {
                 custom_equals = true;
                 Some("equals-impl")
             }
-            ("hashCode", []) => {
+            Some(crate::types::SemanticCallRole::KotlinAnyHashCode) => {
                 custom_hash_code = true;
                 Some("hashCode-impl")
             }
-            ("toString", []) => {
+            Some(crate::types::SemanticCallRole::KotlinAnyToString) => {
                 custom_to_string = true;
                 Some("toString-impl")
             }
@@ -293,28 +319,19 @@ pub(super) fn synth_value_members(
         ir.classes[class_id as usize].methods.push(fid);
         fid
     };
-    let add_inst =
-        |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| -> Option<u32> {
-            // Don't synthesize over a user-defined member of the same name.
-            let exists = ir.classes[class_id as usize]
-                .methods
-                .iter()
-                .any(|&m| ir.functions.get(m as usize).is_some_and(|f| f.name == name));
-            if exists {
-                return None;
-            }
-            let fid = ir.add_fun(crate::ir::IrFunction {
-                name: name.to_string(),
-                params,
-                ret,
-                body: Some(body),
-                is_static: false,
-                dispatch_receiver: Some(internal_name),
-                param_checks: Vec::new(),
-            });
-            ir.classes[class_id as usize].methods.push(fid);
-            Some(fid)
-        };
+    let add_inst = |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| -> u32 {
+        let fid = ir.add_fun(crate::ir::IrFunction {
+            name: name.to_string(),
+            params,
+            ret,
+            body: Some(body),
+            is_static: false,
+            dispatch_receiver: Some(internal_name),
+            param_checks: Vec::new(),
+        });
+        ir.classes[class_id as usize].methods.push(fid);
+        fid
+    };
     let this_field = |ir: &mut IrFile| {
         let recv = ir.add_expr(IrExpr::GetValue(0));
         ir.add_expr(IrExpr::GetField {
@@ -340,10 +357,9 @@ pub(super) fn synth_value_members(
     {
         let g = this_field(ir);
         let body = ret_block(ir, g);
-        if let Some(fid) = add_inst(ir, "unbox-impl", vec![], u_ir, body) {
-            ir.synthetic_methods.insert(fid);
-            ir.jvm_value_class_representation_order.insert(fid, 2);
-        }
+        let fid = add_inst(ir, "unbox-impl", vec![], u_ir, body);
+        ir.synthetic_methods.insert(fid);
+        ir.jvm_value_class_representation_order.insert(fid, 2);
     }
     // box-impl(U): X  — `new X(u)`. Also ACC_SYNTHETIC.
     {
@@ -533,11 +549,10 @@ pub(super) fn synth_value_members(
             args: vec![fv],
         });
         let ibody = ret_block(ir, call);
-        if let Some(fid) = add_inst(ir, "toString", vec![], str_ir, ibody) {
-            ir.open_methods.insert(fid);
-            if !custom_to_string {
-                ir.jvm_nullability_unannotated_methods.insert(fid);
-            }
+        let fid = add_inst(ir, "toString", vec![], str_ir, ibody);
+        ir.open_methods.insert(fid);
+        if !custom_to_string {
+            ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }
     // hashCode-impl(U v): v.hashCode() ; hashCode(): return hashCode-impl(this.field)
@@ -569,11 +584,10 @@ pub(super) fn synth_value_members(
             args: vec![fv],
         });
         let ibody = ret_block(ir, call);
-        if let Some(fid) = add_inst(ir, "hashCode", vec![], int_ir, ibody) {
-            ir.open_methods.insert(fid);
-            if !custom_hash_code {
-                ir.jvm_nullability_unannotated_methods.insert(fid);
-            }
+        let fid = add_inst(ir, "hashCode", vec![], int_ir, ibody);
+        ir.open_methods.insert(fid);
+        if !custom_hash_code {
+            ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }
     // equals-impl(U v, Object other): other is X && equals-impl0(v, other.unbox-impl())
@@ -665,12 +679,11 @@ pub(super) fn synth_value_members(
             args: vec![fv, other_i],
         });
         let ibody = ret_block(ir, call);
-        if let Some(fid) = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody) {
-            crate::jvm::method_parameters::record_function(ir, fid, &["other"], &[]);
-            ir.open_methods.insert(fid);
-            if !custom_equals {
-                ir.jvm_nullability_unannotated_methods.insert(fid);
-            }
+        let fid = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody);
+        crate::jvm::method_parameters::record_function(ir, fid, &["other"], &[]);
+        ir.open_methods.insert(fid);
+        if !custom_equals {
+            ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }
 
