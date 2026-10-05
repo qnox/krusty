@@ -3639,6 +3639,24 @@ pub(crate) fn lower_value_classes(
                             // suspend declaration's selected CPS boundary is its raw reference carrier.
                             // Convert that exact boxed tail once; ordinary carrier-producing tails are
                             // already unboxed and remain unchanged.
+                            let non_local_returns =
+                                return_unboxing::non_local_inline_return_values(ir, body);
+                            for returned in non_local_returns {
+                                return_unboxing::unbox_tail(
+                                    ir,
+                                    returned,
+                                    x,
+                                    ReprInputs {
+                                        rets: &orig_rets,
+                                        fields: &orig_fields,
+                                        slots: &slot_types[fid],
+                                        under: &under,
+                                        field_getters: &field_getters,
+                                        carrier_unboxes: &carrier_unboxes,
+                                    },
+                                    null_slot,
+                                );
+                            }
                             return_unboxing::unbox_tail(
                                 ir,
                                 body,

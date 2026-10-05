@@ -43,6 +43,7 @@ mod captured_storage;
 mod checked_facts;
 mod class_lambda_reflection;
 mod class_literals;
+mod class_mode_lambda_members;
 mod class_pool_seed;
 mod companion_blocks;
 mod comparison_branches;
@@ -1901,10 +1902,10 @@ fn emit_pass(
 /// lambda additionally gets a `static final INSTANCE` initialized in `<clinit>`; a capturing one
 /// stores each captured value in a field and reads it back in `invoke`.
 ///
-/// `invoke` is emitted at the interface's ERASED descriptor only — that is the slot the JVM
-/// dispatches through, so the specialized overload kotlinc also emits is not required for
-/// correctness. Arguments are unboxed into the implementation's physical parameter types and the
-/// result reboxed, exactly as the metafactory's adapter would have done under `indy`.
+/// A source lambda declares kotlinc's typed `invoke` when its implementation has that physical
+/// shape, plus the erased `FunctionN.invoke` bridge used for dispatch. Arguments are adapted to the
+/// implementation's physical types and the result is adapted back to the declared function type,
+/// exactly as the metafactory's adapter would have done under `indy`.
 fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Vec<u8>) {
     let super_name = if plan.kotlin_function {
         "kotlin/jvm/internal/Lambda"
@@ -1975,6 +1976,25 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         .get(plan.captures.len()..)
         .unwrap_or(&[])
         .to_vec();
+    // A Kotlin lambda's class declares kotlinc's typed `invoke` over the lambda's own parameters,
+    // which its metadata names; the erased `FunctionN.invoke` is a bridge to it. A typed `invoke`
+    // that erases to the interface slot (`invoke(Object)Object` over an unbounded `T`) is that
+    // slot itself, with no bridge.
+    let typed_invoke = plan
+        .reflection
+        .as_ref()
+        .and_then(|reflection| reflection.typed_invoke.as_ref())
+        .filter(|typed| typed.descriptor != plan.sam_desc);
+    if let Some(typed) = typed_invoke {
+        class_mode_lambda_members::emit_typed_lambda_invoke(
+            &mut cw,
+            plan,
+            &field_descs,
+            &own_params,
+            impl_ret,
+            typed,
+        );
+    }
     let mut invoke_locals: u16 = 1;
     let mut arg_slots = Vec::new();
     for param in &sam_params {
@@ -1982,7 +2002,15 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         invoke_locals += if *param == "J" || *param == "D" { 2 } else { 1 };
     }
     let mut invoke = CodeBuilder::new(invoke_locals);
-    for (index, ty) in plan.captures.iter().enumerate() {
+    if typed_invoke.is_some() {
+        invoke.aload(0);
+    }
+    for (index, ty) in plan
+        .captures
+        .iter()
+        .enumerate()
+        .filter(|_| typed_invoke.is_none())
+    {
         invoke.aload(0);
         let field = cw.fieldref(
             &plan.internal,
@@ -2044,6 +2072,22 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
             }
         }
     }
+    if let Some(typed) = typed_invoke {
+        let typed_desc = typed.descriptor.as_str();
+        let own_words: i32 = own_params.iter().map(|t| slot_words(*t) as i32).sum();
+        let typed = cw.methodref(&plan.internal, "invoke", typed_desc);
+        if typed_desc.ends_with(")V") {
+            invoke.invokevirtual(typed, own_words, 0);
+            let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+            invoke.getstatic(unit, 1);
+        } else {
+            invoke.invokevirtual(typed, own_words, 1);
+        }
+        invoke.areturn();
+        // ACC_PUBLIC | ACC_BRIDGE | ACC_SYNTHETIC: the erased slot of the typed `invoke`.
+        cw.add_method(0x1041, &plan.sam_method, &plan.sam_desc, &invoke);
+        return class_mode_lambda_members::finish_lambda_class(cw, plan, &field_descs, opts);
+    }
     let impl_words: i32 = impl_params.iter().map(|t| slot_words(*t) as i32).sum();
     let impl_ref = if plan.owner_is_interface {
         cw.interface_methodref(&plan.impl_owner, &plan.impl_name, &plan.impl_desc)
@@ -2066,93 +2110,23 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
     } else {
         return_primitive(&mut invoke, impl_ret);
     }
+    // A typed `invoke` that erases to the interface slot is the slot itself, and keeps its generic
+    // `Signature` (`(TT;)TT;`).
+    let slot_signature = plan
+        .reflection
+        .as_ref()
+        .and_then(|reflection| reflection.typed_invoke.as_ref())
+        .filter(|typed| typed.descriptor == plan.sam_desc)
+        .and_then(|typed| typed.signature.as_deref());
     // ACC_PUBLIC | ACC_FINAL: the interface slot, implemented once.
-    cw.add_method(0x0011, &plan.sam_method, &plan.sam_desc, &invoke);
-
-    if plan.function_adapter {
-        assert_eq!(
-            plan.captures.len(),
-            1,
-            "a FunctionAdapter SAM captures exactly its callable reference"
-        );
-        let delegate_field = cw.fieldref(&plan.internal, "$captured$0", &field_descs[0]);
-
-        let mut delegate = CodeBuilder::new(1);
-        delegate.aload(0);
-        delegate.getfield(delegate_field, 1);
-        delegate.areturn();
-        cw.add_method(
-            0x0011,
-            "getFunctionDelegate",
-            "()Lkotlin/Function;",
-            &delegate,
-        );
-
-        let mut equals = CodeBuilder::new(2);
-        let not_same = equals.new_label();
-        let adapter = equals.new_label();
-        equals.aload(0);
-        equals.aload(1);
-        equals.if_acmpne(not_same);
-        equals.push_int(1, &mut cw);
-        equals.ireturn();
-        equals.bind(not_same);
-        equals.aload(1);
-        let function_adapter = cw.class_ref("kotlin/jvm/internal/FunctionAdapter");
-        equals.instance_of(function_adapter);
-        equals.ifne(adapter);
-        equals.push_int(0, &mut cw);
-        equals.ireturn();
-        equals.bind(adapter);
-        equals.aload(0);
-        equals.getfield(delegate_field, 1);
-        equals.aload(1);
-        equals.checkcast(function_adapter);
-        let get_delegate = cw.interface_methodref(
-            "kotlin/jvm/internal/FunctionAdapter",
-            "getFunctionDelegate",
-            "()Lkotlin/Function;",
-        );
-        equals.invokeinterface(get_delegate, 0, 1);
-        let object_equals = cw.methodref("java/lang/Object", "equals", "(Ljava/lang/Object;)Z");
-        equals.invokevirtual(object_equals, 1, 1);
-        equals.ireturn();
-        equals.link();
-        cw.add_method(0x0011, "equals", "(Ljava/lang/Object;)Z", &equals);
-
-        let mut hash_code = CodeBuilder::new(1);
-        hash_code.aload(0);
-        hash_code.getfield(delegate_field, 1);
-        let object_hash = cw.methodref("java/lang/Object", "hashCode", "()I");
-        hash_code.invokevirtual(object_hash, 0, 1);
-        hash_code.ireturn();
-        cw.add_method(0x0011, "hashCode", "()I", &hash_code);
-    }
-
-    if plan.captures.is_empty() {
-        let instance_desc = format!("L{};", plan.internal);
-        cw.add_field(0x0019, "INSTANCE", &instance_desc); // ACC_PUBLIC | ACC_STATIC | ACC_FINAL
-        let mut clinit = CodeBuilder::new(0);
-        let class_index = cw.class_ref(&plan.internal);
-        clinit.new_obj(class_index);
-        clinit.dup();
-        let ctor_ref = cw.methodref(&plan.internal, "<init>", "()V");
-        clinit.invokespecial(ctor_ref, 0, 0);
-        let field = cw.fieldref(&plan.internal, "INSTANCE", &instance_desc);
-        clinit.putstatic(field, 1);
-        clinit.ret_void();
-        cw.add_method(0x0008, "<clinit>", "()V", &clinit); // ACC_STATIC
-    }
-    if let Some(reflection) = &plan.reflection {
-        cw.set_kotlin_metadata(
-            3,
-            &opts.metadata_version(),
-            synthetic_class_xi(SYNTHETIC_LOCAL),
-            &reflection.d1,
-            &reflection.d2,
-        );
-    }
-    (plan.internal.clone(), cw.finish())
+    cw.add_method_sig(
+        0x0011,
+        &plan.sam_method,
+        &plan.sam_desc,
+        &invoke,
+        slot_signature,
+    );
+    class_mode_lambda_members::finish_lambda_class(cw, plan, &field_descs, opts)
 }
 
 /// Take the lambda classes recorded while emitting the class just finished, and write them.
@@ -6516,6 +6490,9 @@ impl<'a> Emitter<'a> {
                 let owner = owner.render();
                 let words = crate::jvm::physical_type::field_slot(&descriptor).words();
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
+                // kotlinc's `visitSetField` marks the assignment's line at the store, so the line
+                // returns after a value that ran on another line or under an inlined body.
+                self.mark_dispatch_line(operation.expression, code);
                 if is_static {
                     code.putstatic(fref, words);
                 } else {
@@ -6549,8 +6526,7 @@ impl<'a> Emitter<'a> {
                     self.cw.methodref(&owner, &name, &descriptor)
                 };
                 // The write through an ACCESSOR is a dispatch, so the assignment's own line returns
-                // here, after the value expression has marked its. A write realized as a FIELD is
-                // not one and marks nothing.
+                // here, after the value expression has marked its.
                 self.mark_dispatch_line(operation.expression, code);
                 if is_static {
                     code.invokestatic(m, words, ret_words);

@@ -36,6 +36,7 @@ mod access_control;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
+mod annotation_argument_constness;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 mod dependency_annotation_defaults;
@@ -55,6 +56,7 @@ pub(crate) use actualization_names::actualization_type_bindings;
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
 pub(crate) use checked_annotation_publication::publish_checked_classifier_annotations;
 pub(crate) use checked_constant_publication::publish_checked_compile_time_constants;
+pub(crate) use lexical_policies::publish_file_lexical_policies;
 pub(crate) use type_use_annotation_publication::publish_checked_type_use_annotations;
 mod call_constraints;
 mod call_diagnostics;
@@ -115,9 +117,11 @@ mod invoke_selection;
 mod lambda_call_shapes;
 mod property_read_selection;
 use lambda_call_shapes::UntypedLambdaCall;
+use lexical_policies::LexicalPolicy;
 mod lambda_expectation;
 mod lambda_returns;
 mod lexical_bindings;
+mod lexical_policies;
 mod local_callable_reference_selection;
 mod local_capture_dependencies;
 mod local_class_scope;
@@ -128,6 +132,7 @@ mod member_extension_selection;
 mod member_overload_clash;
 mod named_class_constructors;
 mod operator_calls;
+mod opt_in_usage;
 use operator_calls::{range_operator, ResolvedInRangeComparison};
 mod overload_diagnostics;
 mod override_plans;
@@ -12913,10 +12918,30 @@ fn contextual_call_shape_with(
     })
 }
 
-/// Instantiate one member-extension shape against a call: bind method formals from the receiver and
-/// the argument types, then score applicability. Argument SYNTAX is reached only through the two
-/// caller-supplied probes, so a caller with no expressions (signature solving in Pass 1, where the
-/// only member-extension reads are zero-argument) passes probes that are never consulted.
+/// Constrain one declared member-extension slot by its call-site evidence. The slot is unified both
+/// as declared and as already applied, so a formal reached only through another formal's solution
+/// (`P` bound to `List<Q>`) still learns from the argument. An active postponed call owns its own
+/// variables (`E` of `produce { onSend.call("") }`), so this nested candidate leaves those entries
+/// untouched and lets the argument check report the constraint to that owning frame. Every other
+/// solution remains candidate-local inference, including a delegate factory's formals and a stable
+/// enclosing declaration's type parameters.
+fn unify_member_extension_slot(
+    declared: Ty,
+    actual: Ty,
+    deferred_type_variables: &[String],
+    bindings: &mut crate::symbol_resolver::GSigBinds,
+) {
+    let mut inferred = bindings.clone();
+    let applied = apply_inference_bindings(declared, &inferred);
+    crate::symbol_resolver::unify_ty(applied, actual, &mut inferred);
+    crate::symbol_resolver::unify_ty(declared, actual, &mut inferred);
+    for (formal, solution) in inferred {
+        if !deferred_type_variables.contains(&formal) {
+            bindings.insert(formal, solution);
+        }
+    }
+}
+
 fn apply_inference_bindings(mut ty: Ty, bindings: &crate::symbol_resolver::GSigBinds) -> Ty {
     let mut seen = std::collections::HashSet::new();
     while seen.insert(ty) {
@@ -12929,17 +12954,42 @@ fn apply_inference_bindings(mut ty: Ty, bindings: &crate::symbol_resolver::GSigB
     ty
 }
 
-#[allow(clippy::too_many_arguments)]
-fn instantiate_member_extension_with(
+/// The caller-owned views a member-extension selection consults: how implicit context arguments
+/// are found, and how source arguments are inspected and scored. Signature solving has no
+/// expressions, so it supplies probes that never dereference argument syntax.
+#[derive(Clone, Copy)]
+pub(crate) struct MemberExtensionProbes<'p> {
     explicit_context_arguments: bool,
-    select_context_arguments: &ContextArgumentSelector<'_>,
-    is_spread_arg: &dyn Fn(usize) -> bool,
-    unit_coerced_lambda: &dyn Fn(usize, Ty, Ty) -> Option<Ty>,
-    score_candidate: &dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallCandidateScore>,
+    /// Variables owned by an active postponed-call frame. A nested candidate may expose them in an
+    /// applied parameter but must not consume their constraints before the owning frame sees them.
+    deferred_type_variables: &'p [String],
+    select_context_arguments: &'p ContextArgumentSelector<'p>,
+    is_spread_arg: &'p dyn Fn(usize) -> bool,
+    unit_coerced_lambda: &'p dyn Fn(usize, Ty, Ty) -> Option<Ty>,
+    score_candidate: &'p CandidateScorer<'p>,
+}
+
+/// Scores one candidate's parameters against the call's argument slots; `None` is inapplicable.
+type CandidateScorer<'s> = dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallCandidateScore> + 's;
+
+/// Instantiate one member-extension shape against a call: bind method formals from the receiver and
+/// the argument types, then score applicability. Argument SYNTAX is reached only through the
+/// caller-supplied probes, so a caller with no expressions (signature solving in Pass 1, where the
+/// only member-extension reads are zero-argument) passes probes that are never consulted.
+fn instantiate_member_extension_with(
+    probes: MemberExtensionProbes<'_>,
     result_constraint: CallResultConstraint,
     shape: &MemberExtensionFunctionShape,
     call: MemberExtensionCall<'_>,
 ) -> Option<InstantiatedMemberExtension> {
+    let MemberExtensionProbes {
+        explicit_context_arguments,
+        deferred_type_variables,
+        select_context_arguments,
+        is_spread_arg,
+        unit_coerced_lambda,
+        score_candidate,
+    } = probes;
     let MemberExtensionCall {
         extension_receiver,
         name,
@@ -13001,9 +13051,7 @@ fn instantiate_member_extension_with(
     for (parameter, actual) in context_actual_types.iter().enumerate() {
         let Some(actual) = actual else { continue };
         let declared = declared_params[parameter];
-        let applied = apply_inference_bindings(declared, &bindings);
-        crate::symbol_resolver::unify_ty(applied, *actual, &mut bindings);
-        crate::symbol_resolver::unify_ty(declared, *actual, &mut bindings);
+        unify_member_extension_slot(declared, *actual, deferred_type_variables, &mut bindings);
     }
     // Use the common index mapper over the SOURCE-VISIBLE shape. Implicit context parameters are
     // absent; explicitly named ones are present at the end and map back through
@@ -13042,16 +13090,17 @@ fn instantiate_member_extension_with(
         } else {
             *actual
         };
-        let applied = apply_inference_bindings(declared, &bindings);
-        crate::symbol_resolver::unify_ty(applied, actual, &mut bindings);
-        crate::symbol_resolver::unify_ty(declared, actual, &mut bindings);
+        unify_member_extension_slot(declared, actual, deferred_type_variables, &mut bindings);
     }
     if let Some(expected) = result_constraint.expected() {
         let declared_ret = generic.map_or(function.signature.ret, |signature| signature.ret);
         let declared_ret = result_constraint.declaration_result(declared_ret);
-        let applied = apply_inference_bindings(declared_ret, &bindings);
-        crate::symbol_resolver::unify_ty(applied, expected, &mut bindings);
-        crate::symbol_resolver::unify_ty(declared_ret, expected, &mut bindings);
+        unify_member_extension_slot(
+            declared_ret,
+            expected,
+            deferred_type_variables,
+            &mut bindings,
+        );
     }
     for (index, parameter) in method_type_params {
         let fallback = generic
@@ -16035,11 +16084,13 @@ impl<'a> Checker<'a> {
             crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
         if fitted.iter().any(|(_, index, ..)| {
             !overloads[*index]
+                .callable
                 .annotations
                 .contains(&low_priority_annotation)
         }) {
             fitted.retain(|(_, index, ..)| {
                 !overloads[*index]
+                    .callable
                     .annotations
                     .contains(&low_priority_annotation)
             });
@@ -22891,9 +22942,9 @@ impl<'a> Checker<'a> {
                             Some(CallableCandidateSelection::Selected(selected))
                             | Some(CallableCandidateSelection::MissingContext(selected)) => {
                                 selected.scope_rung.is_import()
-                                    && !selected.annotations.contains(&crate::types::type_name(
-                                        "kotlin/internal/HidesMembers",
-                                    ))
+                                    && !selected.callable.annotations.contains(
+                                        &crate::types::type_name("kotlin/internal/HidesMembers"),
+                                    )
                             }
                             Some(CallableCandidateSelection::Ambiguous(candidates)) => candidates
                                 .iter()
@@ -23662,14 +23713,9 @@ impl<'a> Checker<'a> {
     }
 
     fn stmt(&mut self, scope: &CheckerScope<'_>, s: StmtId) {
-        let suppression_depth = self.active_statement_suppressions.len();
-        if let Some(suppressions) = self.file.statement_suppressions.get(&s) {
-            self.active_statement_suppressions
-                .extend(suppressions.iter().cloned());
-        }
+        let policy_depth = self.push_statement_policies(scope, s);
         self.stmt_inner(scope, s);
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(policy_depth);
     }
 
     fn stmt_inner(&mut self, scope: &CheckerScope<'_>, s: StmtId) {
@@ -23808,6 +23854,7 @@ impl<'a> Checker<'a> {
                 // executable code — skip type-checking it and mark the statement for the lowerer to
                 // drop, instead of resolving the DSL members as if they were real calls.
                 if self.is_contract_call(scope, e) {
+                    self.expr_statement(scope, e);
                     self.stmt_lowers.insert(s, StmtLowering::Erased);
                 } else {
                     let result = self.expr_statement(scope, e);
@@ -25125,7 +25172,7 @@ impl<'a> Checker<'a> {
         self.local_function_receivers
             .extend(f.receiver.as_ref().map(|receiver| receiver.span));
         let suppression_depth =
-            self.push_declaration_suppressions(scope, &f.annotations, &f.annotation_args);
+            self.push_declaration_policies(scope, &f.annotations, &f.annotation_args);
         for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
             self.check_annotation_application(scope, annotation, arguments);
         }
@@ -25647,8 +25694,7 @@ impl<'a> Checker<'a> {
                 receiver,
             })),
         );
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(suppression_depth);
         self.lambda_returns.leave_function(enclosing_return_frame);
     }
 }
@@ -35549,16 +35595,11 @@ impl<'a> Checker<'a> {
 }
 
 /// Select one member-extension function using caller-owned source, receivers, and call probes.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn member_extension_function_with(
     source: &dyn SymbolSource,
     oracle: &dyn crate::assignable::TypeOracle,
     receivers: &[ImplicitReceiver],
-    explicit_context_arguments: bool,
-    select_context_arguments: &ContextArgumentSelector<'_>,
-    is_spread_arg: &dyn Fn(usize) -> bool,
-    unit_coerced_lambda: &dyn Fn(usize, Ty, Ty) -> Option<Ty>,
-    score_candidate: &dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallCandidateScore>,
+    probes: MemberExtensionProbes<'_>,
     call: MemberExtensionFunctionCall<'_>,
     selection: MemberExtensionSelection,
 ) -> MemberExtensionFunctionSelection {
@@ -35580,11 +35621,7 @@ pub(crate) fn member_extension_function_with(
             continue;
         }
         let Some(instantiated) = instantiate_member_extension_with(
-            explicit_context_arguments,
-            select_context_arguments,
-            is_spread_arg,
-            unit_coerced_lambda,
-            score_candidate,
+            probes,
             result_constraint,
             &shape,
             MemberExtensionCall {
@@ -35855,7 +35892,9 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         when_subject_numeric_equalities: HashMap::new(),
         resolved_type_tys: HashMap::new(),
         unresolved_type_segments: HashMap::new(),
-        active_statement_suppressions: Vec::new(),
+        active_lexical_policies: Vec::new(),
+        lexical_policy_facts: HashMap::new(),
+        command_line_opt_ins: std::cell::OnceCell::new(),
         resolved_type_bounds: HashMap::new(),
         resolved_declaration_types: HashMap::new(),
         resolved_declaration_type_parameters: HashMap::new(),
@@ -36013,7 +36052,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
     if resolved_index.is_none() {
         let (annotations, arguments): (Vec<_>, Vec<_>) =
             file.file_annotations.iter().cloned().unzip();
-        checker.push_declaration_suppressions(&CheckerScope::root(), &annotations, &arguments);
+        checker.push_declaration_policies(&CheckerScope::root(), &annotations, &arguments);
     }
     checker
 }
@@ -37046,8 +37085,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         // annotation's AST arguments, so seed the same lexical policy from that stable fact. A
         // declaration-local suppression still travels in the active unit AST; requiring every
         // selected body here prevents one such declaration from widening its siblings.
-        c.active_statement_suppressions
-            .push("INVISIBLE_REFERENCE".to_string());
+        c.active_lexical_policies
+            .push(LexicalPolicy::Suppress("INVISIBLE_REFERENCE".to_string()));
     }
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
@@ -37057,8 +37096,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 })
             })
     }) {
-        c.active_statement_suppressions
-            .push("INVISIBLE_MEMBER".to_string());
+        c.active_lexical_policies
+            .push(LexicalPolicy::Suppress("INVISIBLE_MEMBER".to_string()));
     }
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
@@ -37068,8 +37107,9 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 })
             })
     }) {
-        c.active_statement_suppressions
-            .push("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE".to_string());
+        c.active_lexical_policies.push(LexicalPolicy::Suppress(
+            "OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE".to_string(),
+        ));
     }
     // Entry point: the file scope is the root of every chain (see `scope`).
     let root = CheckerScope::root();
@@ -37089,6 +37129,15 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         for (annotation, arguments) in applications {
             c.check_annotation_application(scope, &annotation, &arguments);
         }
+    }
+    if let Some(index) = resolved_index {
+        // Every checking unit of a source opens the file annotations' policies that Pass 1
+        // resolved once for it, whether or not this unit still holds the annotations' syntax.
+        let policies = index
+            .file_lexical_policies(crate::fir::SourceFileId::from_raw(file_index))
+            .to_vec();
+        c.push_file_policies(&policies);
+        c.report_unresolved_command_line_opt_ins();
     }
 
     // The streaming path already published contracts as stable, semantically resolved Pass-1
@@ -37186,7 +37235,9 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         match file.decl(d) {
             Decl::Fun(f) => c.check_top_level_fun(scope, f, d),
             Decl::Class(cl) => {
+                let policy_depth = c.push_classifier_owner_policies(scope, d);
                 c.check_class(scope, cl, d);
+                c.active_lexical_policies.truncate(policy_depth);
             }
             Decl::Property(p) => {
                 c.check_property(scope, p, d);
@@ -38463,8 +38514,14 @@ struct Checker<'a> {
     when_subject_numeric_equalities: HashMap<ExprId, when_flow::WhenSubjectNumericEquality>,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
     unresolved_type_segments: HashMap<(u32, u32), crate::symbol_resolver::ClassifierMiss>,
-    /// Transient diagnostic directives inherited from annotated enclosing statements.
-    active_statement_suppressions: Vec<String>,
+    /// Lexical policies (`@Suppress`, opt-in acceptance) inherited from annotated enclosing
+    /// declarations, statements and expressions.
+    active_lexical_policies: Vec<LexicalPolicy>,
+    /// Each annotation application's policies, keyed by the application's span, resolved once
+    /// from its checked application.
+    lexical_policy_facts: HashMap<(u32, u32), std::rc::Rc<[LexicalPolicy]>>,
+    /// The markers `-opt-in` names, resolved once from their fully qualified spellings.
+    command_line_opt_ins: std::cell::OnceCell<Vec<TypeName>>,
     resolved_type_bounds: HashMap<(u32, u32), (Ty, bool)>,
     resolved_declaration_types: HashMap<(u32, u32), Ty>,
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
@@ -42957,7 +43014,7 @@ impl<'a> Checker<'a> {
         // a vararg loses only after element specificity, as a tie-break among equal shapes.
         let hides_members = crate::types::type_name("kotlin/internal/HidesMembers");
         let tower_rank = |candidate: &SelectedCallable| {
-            if candidate.is_extension() && candidate.annotations.contains(&hides_members) {
+            if candidate.is_extension() && candidate.callable.annotations.contains(&hides_members) {
                 (0_u8, 0_u32, candidate.receiver_rank)
             } else if candidate.kind == crate::libraries::FnKind::Member {
                 (1_u8, 0_u32, candidate.receiver_rank)
@@ -42982,10 +43039,16 @@ impl<'a> Checker<'a> {
         let low_priority_annotation =
             crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
         if applicable.iter().any(|(_, _, _, _, _, candidate, _, _)| {
-            !candidate.annotations.contains(&low_priority_annotation)
+            !candidate
+                .callable
+                .annotations
+                .contains(&low_priority_annotation)
         }) {
             applicable.retain(|(_, _, _, _, _, candidate, _, _)| {
-                !candidate.annotations.contains(&low_priority_annotation)
+                !candidate
+                    .callable
+                    .annotations
+                    .contains(&low_priority_annotation)
             });
         }
         let has_context = applicable
@@ -45334,7 +45397,10 @@ impl<'a> Checker<'a> {
         } = selected;
         self.reject_non_public_api_from_public_inline(
             call,
-            Self::is_public_api_for_inline_access(selected.visibility, &selected.annotations),
+            Self::is_public_api_for_inline_access(
+                selected.visibility,
+                &selected.callable.annotations,
+            ),
             selected.flags.inline,
         );
         let mut ret = selected.callable.ret;
@@ -49500,6 +49566,9 @@ impl<'a> Checker<'a> {
         if resolved != Ty::Error && !r.is_import() {
             self.resolved_type_tys
                 .insert((r.span.lo, r.span.hi), resolved);
+            if !scope.tparam_contains(&r.name) {
+                self.check_type_reference_opt_in(r, resolved);
+            }
         }
         resolved
     }
@@ -51916,8 +51985,7 @@ impl<'a> Checker<'a> {
         self.leave_block_body(block);
         self.lambda_returns.leave_function(enclosing_return_frame);
         self.retire_type_parameter_owners(&owned_type_parameters);
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(suppression_depth);
     }
 
     /// Check an instance method: the class properties are visible (implicit `this`), then the
@@ -52059,7 +52127,7 @@ impl<'a> Checker<'a> {
             .as_ref()
             .is_none_or(|selected| selected.contains(&p.span));
         let suppression_depth =
-            self.push_declaration_suppressions(scope, &p.annotations, &p.annotation_args);
+            self.push_declaration_policies(scope, &p.annotations, &p.annotation_args);
         // An extension property's own generic type parameters (`val <T> Array<T>.length: Int`)
         // scope over its receiver, declared type, and accessor bodies — bind them (erased) so
         // `T` resolves rather than reading as an unresolved reference.
@@ -52381,8 +52449,7 @@ impl<'a> Checker<'a> {
             );
         }
         self.leave_block_body(block);
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(suppression_depth);
     }
 
     fn report_property_inference_failure(
@@ -52807,7 +52874,7 @@ impl<'a> Checker<'a> {
         // bodies. Keep the class's suppression rung active until this entire recursive class walk
         // completes; member-specific suppressions nest inside it.
         let class_suppression_depth =
-            self.push_declaration_suppressions(scope, &cl.annotations, &cl.annotation_args);
+            self.push_declaration_policies(scope, &cl.annotations, &cl.annotation_args);
         if self.fragment.is_classifier_annotations() {
             for (annotation, arguments) in cl.annotations.iter().zip(&cl.annotation_args) {
                 if self
@@ -52837,7 +52904,7 @@ impl<'a> Checker<'a> {
                 }
             }
             self.diags.diags.truncate(diagnostics_before_methods);
-            self.active_statement_suppressions
+            self.active_lexical_policies
                 .truncate(class_suppression_depth);
             return;
         }
@@ -52946,6 +53013,7 @@ impl<'a> Checker<'a> {
         // declaration applications below belong to the passes that retain their arguments.
         if !self.fragment.is_type_use_annotations() {
             self.check_classifier_own_annotations(scope, cl, current_owner);
+            self.check_supertype_opt_in(cl, current_owner);
             for entry in &cl.enum_entries {
                 self.check_annotation_applications_in_declaration_scope(
                     scope,
@@ -53573,7 +53641,7 @@ impl<'a> Checker<'a> {
                 if current_owner.is_some() {
                     self.lexical_class_context.remove(0);
                 }
-                self.active_statement_suppressions
+                self.active_lexical_policies
                     .truncate(class_suppression_depth);
                 return;
             }
@@ -53696,7 +53764,7 @@ impl<'a> Checker<'a> {
                     } else {
                         property_scope
                     };
-                    let property_suppression_depth = self.push_declaration_suppressions(
+                    let property_suppression_depth = self.push_declaration_policies(
                         property_scope,
                         &property.annotations,
                         &property.annotation_args,
@@ -53752,7 +53820,7 @@ impl<'a> Checker<'a> {
                         })
                         .filter(|ty| *ty != Ty::Error)
                         .map(inferred_declaration_ty);
-                    self.active_statement_suppressions
+                    self.active_lexical_policies
                         .truncate(property_suppression_depth);
                     crate::trace_compiler!(
                         "signature",
@@ -53860,7 +53928,7 @@ impl<'a> Checker<'a> {
                     if !selected {
                         continue;
                     }
-                    let property_suppression_depth = self.push_declaration_suppressions(
+                    let property_suppression_depth = self.push_declaration_policies(
                         field_scope,
                         &property.annotations,
                         &property.annotation_args,
@@ -53908,7 +53976,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    self.active_statement_suppressions
+                    self.active_lexical_policies
                         .truncate(property_suppression_depth);
                 }
             }
@@ -54662,7 +54730,7 @@ impl<'a> Checker<'a> {
                 // Not yet collected: this run cannot determine the type it was asked for, so it
                 // declines and the declaration is resolved again after collection finishes.
                 self.inference_incomplete = true;
-                self.active_statement_suppressions
+                self.active_lexical_policies
                     .truncate(class_suppression_depth);
                 return;
             }
@@ -54874,7 +54942,7 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 let constructor_suppression_depth =
-                    self.push_declaration_suppressions(scope, &sc.annotations, &sc.annotation_args);
+                    self.push_declaration_policies(scope, &sc.annotations, &sc.annotation_args);
                 let semantic_params = &secondary_params[sc_index];
                 // Dispatch properties and constructor parameters are different scope-tower rungs.
                 // A same-named parameter shadows an unqualified property read, but must not erase the
@@ -54903,7 +54971,7 @@ impl<'a> Checker<'a> {
                     );
                 });
                 if self.signature_defaults_only && !default_owned_class {
-                    self.active_statement_suppressions
+                    self.active_lexical_policies
                         .truncate(constructor_suppression_depth);
                     continue;
                 }
@@ -55010,7 +55078,7 @@ impl<'a> Checker<'a> {
                         c.expr_statement(scope, body);
                     });
                 }
-                self.active_statement_suppressions
+                self.active_lexical_policies
                     .truncate(constructor_suppression_depth);
             }
             if !self.signature_defaults_only || default_owned_class {
@@ -55023,9 +55091,9 @@ impl<'a> Checker<'a> {
             // for a subclass or a typed `companion object : A()`). Mirrors `check_fun`'s param-default
             // pass so a function-typed parameter's lambda default types concretely.
             if check_primary_constructor {
-                let constructor_suppression_depth = self.active_statement_suppressions.len();
+                let constructor_suppression_depth = self.active_lexical_policies.len();
                 if let Some(annotations) = cl.primary_ctor_annotations.as_deref() {
-                    self.push_declaration_suppressions(
+                    self.push_declaration_policies(
                         scope,
                         annotations,
                         &cl.primary_ctor_annotation_args,
@@ -55042,7 +55110,7 @@ impl<'a> Checker<'a> {
                         &source_primary_params,
                     );
                 });
-                self.active_statement_suppressions
+                self.active_lexical_policies
                     .truncate(constructor_suppression_depth);
             }
             // A signature-owned default declared by a local classifier must be checked from the
@@ -55388,11 +55456,8 @@ impl<'a> Checker<'a> {
                     if !selected_property {
                         continue;
                     }
-                    let property_suppression_depth = self.push_declaration_suppressions(
-                        scope,
-                        &bp.annotations,
-                        &bp.annotation_args,
-                    );
+                    let property_suppression_depth =
+                        self.push_declaration_policies(scope, &bp.annotations, &bp.annotation_args);
                     let check_ordinary_property_body = self
                         .selected_body_declarations
                         .as_ref()
@@ -55828,7 +55893,7 @@ impl<'a> Checker<'a> {
                     }
                     self.this_extension_receiver = dispatch_extension_receiver;
                     self.symbolic_signature_inference = outer_symbolic_signature_inference;
-                    self.active_statement_suppressions
+                    self.active_lexical_policies
                         .truncate(property_suppression_depth);
                 }
                 for step in &cl.init_order {
@@ -56037,7 +56102,7 @@ impl<'a> Checker<'a> {
         if current_owner.is_some() {
             self.lexical_class_context.remove(0);
         }
-        self.active_statement_suppressions
+        self.active_lexical_policies
             .truncate(class_suppression_depth);
     }
 
@@ -56408,8 +56473,7 @@ impl<'a> Checker<'a> {
         self.leave_public_api_inline(public_api_inline);
         self.lambda_returns.leave_function(enclosing_return_frame);
         self.retire_type_parameter_owners(&owned_type_parameters);
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(suppression_depth);
     }
 
     fn obj_name_is_subtype(&self, sub: TypeName, sup: TypeName) -> bool {
@@ -58755,9 +58819,12 @@ impl<'a> Checker<'a> {
         // runs low (see [`crate::wide_stack`]).
         self.expectation_frames
             .push(conditional_branch::ExpectationFrame::new(e, declared));
+        let policy_depth = self.push_expression_policies(scope, e);
         let t = crate::wide_stack::on_wide_stack(|| {
             self.expr_inner(scope, e, expected, value_required)
         });
+        self.check_expression_opt_in(scope, e);
+        self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
         self.expr_depth -= 1;
         // A statement is done: a probe verdict no closed re-check superseded is authoritative.
@@ -60536,7 +60603,10 @@ impl<'a> Checker<'a> {
                     crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
                 candidates.push((
                     score.rank,
-                    function.annotations.contains(&low_priority_annotation),
+                    function
+                        .callable
+                        .annotations
+                        .contains(&low_priority_annotation),
                     signature,
                     bindings,
                 ));
@@ -71241,18 +71311,6 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn suppresses_diagnostic(&self, name: &str) -> bool {
-        self.active_statement_suppressions
-            .iter()
-            .rev()
-            .any(|suppressed| suppressed == name)
-    }
-
-    fn visibility_access_suppressed(&self) -> bool {
-        self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-            || self.suppresses_diagnostic("INVISIBLE_MEMBER")
-    }
-
     /// Resolve one annotation classifier in the active lexical type scope without performing its
     /// accessibility check. This staged identity lookup is required to establish declaration
     /// suppressions before the ordinary annotation application check validates internal annotation
@@ -71273,44 +71331,6 @@ impl<'a> Checker<'a> {
             .get(&(annotation.span.lo, annotation.span.hi))
             .map(|applied| applied.internal)
             .or_else(|| self.select_classifier(scope, &annotation.name).found())
-    }
-
-    fn push_declaration_suppressions(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        annotations: &[AnnotationRef],
-        arguments: &[Vec<ExprId>],
-    ) -> usize {
-        let depth = self.active_statement_suppressions.len();
-        for (annotation, arguments) in annotations.iter().zip(arguments) {
-            if !self
-                .annotation_identity_in_scope(scope, annotation)
-                .is_some_and(|identity| identity == type_name("kotlin/Suppress"))
-            {
-                continue;
-            }
-            self.active_statement_suppressions.extend(
-                arguments
-                    .iter()
-                    .filter_map(|argument| self.file.const_string_value(*argument))
-                    .map(|value| value.to_lossy()),
-            );
-        }
-        depth
-    }
-
-    fn check_annotation_applications_in_declaration_scope(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        annotations: &[AnnotationRef],
-        arguments: &[Vec<ExprId>],
-    ) {
-        let suppression_depth = self.push_declaration_suppressions(scope, annotations, arguments);
-        for (annotation, arguments) in annotations.iter().zip(arguments) {
-            self.check_annotation_application(scope, annotation, arguments);
-        }
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
     }
 
     /// Check the annotation-bearing portion of a function declaration on its already-established
@@ -71628,14 +71648,22 @@ impl<'a> Checker<'a> {
         result_constraint: CallResultConstraint,
     ) -> Option<InstantiatedMemberExtension> {
         let args = call.args;
+        let deferred_type_variables = self.active_postponed_type_variables();
         instantiate_member_extension_with(
-            self.file.explicit_context_arguments,
-            &|parameters| self.select_context_arguments_with_types(scope, parameters),
-            &|source| self.file.is_spread_arg(args[source]),
-            &|source, expected, actual| {
-                self.unit_coerced_lambda_type(args[source], expected, actual)
+            MemberExtensionProbes {
+                explicit_context_arguments: self.file.explicit_context_arguments,
+                deferred_type_variables: &deferred_type_variables,
+                select_context_arguments: &|parameters| {
+                    self.select_context_arguments_with_types(scope, parameters)
+                },
+                is_spread_arg: &|source| self.file.is_spread_arg(args[source]),
+                unit_coerced_lambda: &|source, expected, actual| {
+                    self.unit_coerced_lambda_type(args[source], expected, actual)
+                },
+                score_candidate: &|params, call_sig, slots| {
+                    self.call_candidate_score(scope, params, call_sig, slots)
+                },
             },
-            &|params, call_sig, slots| self.call_candidate_score(scope, params, call_sig, slots),
             result_constraint,
             shape,
             call,
@@ -71666,17 +71694,25 @@ impl<'a> Checker<'a> {
         let receivers =
             member_extension_selection::ordinary_dispatch_first(scope, receivers.to_vec());
         let args = call.args;
+        let deferred_type_variables = self.active_postponed_type_variables();
         member_extension_function_with(
             &self.fed_source(),
             self,
             &receivers,
-            self.file.explicit_context_arguments,
-            &|parameters| self.select_context_arguments_with_types(scope, parameters),
-            &|source| self.file.is_spread_arg(args[source]),
-            &|source, expected, actual| {
-                self.unit_coerced_lambda_type(args[source], expected, actual)
+            MemberExtensionProbes {
+                explicit_context_arguments: self.file.explicit_context_arguments,
+                deferred_type_variables: &deferred_type_variables,
+                select_context_arguments: &|parameters| {
+                    self.select_context_arguments_with_types(scope, parameters)
+                },
+                is_spread_arg: &|source| self.file.is_spread_arg(args[source]),
+                unit_coerced_lambda: &|source, expected, actual| {
+                    self.unit_coerced_lambda_type(args[source], expected, actual)
+                },
+                score_candidate: &|params, call_sig, slots| {
+                    self.call_candidate_score(scope, params, call_sig, slots)
+                },
             },
-            &|params, call_sig, slots| self.call_candidate_score(scope, params, call_sig, slots),
             call,
             selection,
         )
