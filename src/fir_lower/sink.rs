@@ -379,9 +379,11 @@ impl<'a> CommonIrBodySink<'a> {
         self.predeclare_inline_payload(index, declaration, &body)?;
         let mut dependencies = std::collections::HashSet::new();
         body.collect_referenced_module_callables(&mut dependencies);
-        let defaults = bodies.defaults(callable).cloned();
+        let defaults = bodies.defaults(callable).map(<[FirBody]>::to_vec);
         if let Some(defaults) = &defaults {
-            defaults.collect_referenced_module_callables(&mut dependencies);
+            for default in defaults {
+                default.collect_referenced_module_callables(&mut dependencies);
+            }
         }
         let mut dependencies = dependencies.into_iter().collect::<Vec<_>>();
         dependencies.sort_unstable_by_key(|dependency| dependency.raw());
@@ -417,7 +419,9 @@ impl<'a> CommonIrBodySink<'a> {
             .get(&callable)
             .is_some_and(|function| self.ir.has_param_defaults(*function));
         if let Some(defaults) = defaults.filter(|_| !defaults_attached) {
-            self.accept_body(index, defaults.owner(), defaults)?;
+            for default in defaults {
+                self.accept_body(index, default.owner(), default)?;
+            }
         }
         self.materialized_inline_callables.insert(callable);
         Ok(())
@@ -1650,16 +1654,11 @@ impl<'a> CommonIrBodySink<'a> {
         if lowered.is_empty() {
             return Ok(());
         }
-        if self
-            .ir
-            .fn_params
-            .get(&function)
-            .is_some_and(|parameters| parameters.defaults.is_some())
-        {
-            return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
-        }
         let physical_count = self.ir.functions[function as usize].params.len();
-        let mut defaults = vec![None; physical_count];
+        let info = self.ir.fn_params.entry(function).or_default();
+        let defaults = info
+            .defaults
+            .get_or_insert_with(|| vec![None; physical_count]);
         for (parameter, value) in lowered {
             let mut position = parameter as usize;
             if callable.shape.extension_receiver.is_some()
@@ -1673,11 +1672,11 @@ impl<'a> CommonIrBodySink<'a> {
                     callable.declaration,
                 ));
             };
-            *slot = Some(value);
+            if slot.replace(value).is_some() {
+                return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
+            }
         }
-        let info = self.ir.fn_params.entry(function).or_default();
-        info.defaults = Some(defaults);
-        info.defaults_inherited = defaults_inherited;
+        info.defaults_inherited |= defaults_inherited;
         Ok(())
     }
 }

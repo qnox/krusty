@@ -170,6 +170,40 @@ fun box(): String {
 "#);
 }
 
+/// Default-expression ownership is per parameter. The actual owns every default it writes, while
+/// an omitted actual default is inherited from the matching expect declaration. An override keeps
+/// that merged provider set instead of collapsing it back to either declaration.
+#[test]
+fn mixed_actual_and_expect_defaults_reach_direct_and_override_calls() {
+    const SRC: &str = r#"// LANGUAGE: +MultiPlatformProjects
+expect fun choose(a: Int = 1, b: Int = 2): Int
+
+@Suppress("ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS")
+actual fun choose(a: Int = 10, b: Int): Int = a + b
+
+expect open class Base() {
+    open fun text(a: String = "expect-a", b: String = "expect-b"): String
+}
+
+actual open class Base {
+    @Suppress("ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS")
+    actual open fun text(a: String = "actual-a", b: String): String = a + ":" + b
+}
+
+class Derived : Base() {
+    override fun text(a: String, b: String): String = a + ":" + b
+}
+
+fun box(): String {
+    if (choose() != 12) return "top:" + choose()
+    if (Base().text() != "actual-a:expect-b") return "base:" + Base().text()
+    if (Derived().text() != "actual-a:expect-b") return "derived:" + Derived().text()
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(SRC, "MixedActualExpectDefaults");
+}
+
 /// An interface actual's default is what an override's call site inserts. The expect string is not.
 #[test]
 fn actual_interface_default_reaches_an_override() {

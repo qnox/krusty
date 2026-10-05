@@ -265,57 +265,71 @@ fn actualize_headers_and_collect_inherited_defaults(
     // `actual typealias`, so it pairs `expect val S.tag: S` with `actual val String.tag: String`
     // where a name-and-arity key cannot.
     let actualized_targets = pairs.iter().map(|pair| pair.actual).collect();
-    let inherited_defaults = pairs
-        .into_iter()
-        .filter_map(|pair| {
-            let source_parameters = match headers.syntax.declaration(pair.expect)?.kind {
-                crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
-                | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
-                _ => return None,
-            };
-            let target_parameters = match headers.syntax.declaration(pair.actual)?.kind {
-                crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
-                | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
-                _ => return None,
-            };
-            let defaults = headers
-                .syntax
-                .parameters(source_parameters)
-                .iter()
-                .map(|parameter| parameter.flags.has_default())
-                .collect::<Vec<_>>();
-            let actual_defaults = headers
-                .syntax
-                .parameters(target_parameters)
-                .iter()
-                .map(|parameter| parameter.flags.has_default())
-                .collect::<Vec<_>>();
-            // An actual that writes a default on every parameter the expect defaulted owns those
-            // expressions. The expect stays the provider only for a parameter the actual left bare;
-            // publishing the expect here would evaluate its values and drop the actual's.
-            let actual_owns_defaults = defaults.len() == actual_defaults.len()
-                && actual_defaults.iter().any(|wrote| *wrote)
-                && defaults
-                    .iter()
-                    .zip(&actual_defaults)
-                    .all(|(expect_default, actual_default)| !expect_default || *actual_default);
-            if actual_owns_defaults {
-                return None;
-            }
-            (actual_defaults.len() == defaults.len() && defaults.iter().any(|default| *default))
-                .then_some((pair, target_parameters, defaults))
-        })
-        .collect::<Vec<_>>();
-    let work = inherited_defaults
-        .iter()
-        .map(|(pair, _, _)| crate::fir::DefaultArgumentProvider {
-            target: pair.actual,
-            provider: pair.expect,
-            relation: crate::fir::DefaultArgumentRelation::ActualizedDeclaration,
-        })
-        .collect::<Vec<_>>();
-    for (_, parameters, defaults) in inherited_defaults {
-        headers.syntax.set_parameter_defaults(parameters, &defaults);
+    let mut work = Vec::new();
+    for pair in pairs {
+        let Some(source_declaration) = headers.syntax.declaration(pair.expect) else {
+            continue;
+        };
+        let source_parameters = match source_declaration.kind {
+            crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
+            | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
+            _ => continue,
+        };
+        let Some(target_declaration) = headers.syntax.declaration(pair.actual) else {
+            continue;
+        };
+        let target_parameters = match target_declaration.kind {
+            crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
+            | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
+            _ => continue,
+        };
+        let expect_defaults = headers
+            .syntax
+            .parameters(source_parameters)
+            .iter()
+            .map(|parameter| parameter.flags.has_default())
+            .collect::<Vec<_>>();
+        let actual_defaults = headers
+            .syntax
+            .parameters(target_parameters)
+            .iter()
+            .map(|parameter| parameter.flags.has_default())
+            .collect::<Vec<_>>();
+        if expect_defaults.len() != actual_defaults.len()
+            || !expect_defaults.iter().any(|default| *default)
+        {
+            continue;
+        }
+        let merged = expect_defaults
+            .iter()
+            .zip(&actual_defaults)
+            .map(|(expect_default, actual_default)| *expect_default || *actual_default)
+            .collect::<Vec<_>>();
+        headers
+            .syntax
+            .set_parameter_defaults(target_parameters, &merged);
+
+        if actual_defaults.iter().any(|default| *default) {
+            work.push(crate::fir::DefaultArgumentProvider {
+                target: pair.actual,
+                provider: pair.actual,
+                relation: crate::fir::DefaultArgumentRelation::SameDeclaration,
+                parameters: actual_defaults.clone().into_boxed_slice(),
+            });
+        }
+        let inherited = expect_defaults
+            .iter()
+            .zip(&actual_defaults)
+            .map(|(expect_default, actual_default)| *expect_default && !*actual_default)
+            .collect::<Vec<_>>();
+        if inherited.iter().any(|default| *default) {
+            work.push(crate::fir::DefaultArgumentProvider {
+                target: pair.actual,
+                provider: pair.expect,
+                relation: crate::fir::DefaultArgumentRelation::ActualizedDeclaration,
+                parameters: inherited.into_boxed_slice(),
+            });
+        }
     }
     // Keep matched expect syntax in the active Pass-1 parser stream. Compact-header exclusion is
     // already authoritative for signature collection, while inherited defaults still need their
@@ -441,20 +455,38 @@ fn signature_default_work(
                 | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
                 _ => return None,
             };
-            headers
+            let defaults = headers
                 .syntax
                 .parameters(parameters)
                 .iter()
-                .any(|parameter| parameter.flags.has_default())
-                .then_some(crate::fir::DefaultArgumentProvider {
+                .map(|parameter| parameter.flags.has_default())
+                .collect::<Vec<_>>();
+            defaults
+                .iter()
+                .any(|default| *default)
+                .then(|| crate::fir::DefaultArgumentProvider {
                     target: stub.id,
                     provider: stub.id,
                     relation: crate::fir::DefaultArgumentRelation::SameDeclaration,
+                    parameters: defaults.into_boxed_slice(),
                 })
         })
         .collect::<Vec<_>>();
     work.extend_from_slice(inherited);
-    work.sort_by_key(|work| (work.provider, work.target, work.relation));
+    work.sort_by(|left, right| {
+        (
+            left.provider,
+            left.target,
+            left.relation,
+            left.parameters.as_ref(),
+        )
+            .cmp(&(
+                right.provider,
+                right.target,
+                right.relation,
+                right.parameters.as_ref(),
+            ))
+    });
     work.dedup();
     work
 }
@@ -480,10 +512,10 @@ fn inherit_override_default_work(
         .cloned()
         .collect::<Vec<_>>();
     loop {
-        let providers = work
-            .iter()
-            .map(|item| (item.target, item.provider))
-            .collect::<std::collections::HashMap<_, _>>();
+        let mut providers = std::collections::HashMap::<_, Vec<_>>::new();
+        for item in work.iter().cloned() {
+            providers.entry(item.target).or_default().push(item);
+        }
         let mut additions = Vec::new();
         for edge in &overrides {
             let (
@@ -512,24 +544,8 @@ fn inherit_override_default_work(
             else {
                 continue;
             };
-            let Some(provider) = providers.get(&overridden).copied() else {
+            let Some(inherited) = providers.get(&overridden) else {
                 continue;
-            };
-            let defaults = match headers
-                .syntax
-                .declaration(provider)
-                .map(|declaration| declaration.kind)
-            {
-                Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
-                | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
-                    headers
-                        .syntax
-                        .parameters(parameters)
-                        .iter()
-                        .map(|parameter| parameter.flags.has_default())
-                        .collect::<Vec<_>>()
-                }
-                _ => continue,
             };
             let target_parameters = match headers
                 .syntax
@@ -542,26 +558,53 @@ fn inherit_override_default_work(
                 }
                 _ => continue,
             };
-            if defaults.len() != headers.syntax.parameters(target_parameters).len()
-                || !defaults.iter().any(|default| *default)
+            let arity = headers.syntax.parameters(target_parameters).len();
+            if inherited
+                .iter()
+                .any(|provider| provider.parameters.len() != arity)
             {
+                continue;
+            }
+            let mut defaults = vec![false; arity];
+            for provider in inherited {
+                for (slot, supplied) in defaults.iter_mut().zip(provider.parameters.iter()) {
+                    *slot |= *supplied;
+                }
+            }
+            if !defaults.iter().any(|default| *default) {
                 continue;
             }
             headers
                 .syntax
                 .set_parameter_defaults(target_parameters, &defaults);
-            additions.push(crate::fir::DefaultArgumentProvider {
-                target,
-                provider,
-                relation: crate::fir::DefaultArgumentRelation::InheritedOverride,
-            });
+            additions.extend(inherited.iter().map(|provider| {
+                crate::fir::DefaultArgumentProvider {
+                    target,
+                    provider: provider.provider,
+                    relation: crate::fir::DefaultArgumentRelation::InheritedOverride,
+                    parameters: provider.parameters.clone(),
+                }
+            }));
         }
         if additions.is_empty() {
             break;
         }
         work.extend(additions);
     }
-    work.sort_by_key(|item| (item.provider, item.target, item.relation));
+    work.sort_by(|left, right| {
+        (
+            left.provider,
+            left.target,
+            left.relation,
+            left.parameters.as_ref(),
+        )
+            .cmp(&(
+                right.provider,
+                right.target,
+                right.relation,
+                right.parameters.as_ref(),
+            ))
+    });
     work.dedup();
 }
 
