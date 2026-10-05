@@ -82,8 +82,11 @@ pub(super) fn default_accessor_access(visibility: Visibility, overridable: bool)
 
 /// Whether a backing field publishes a nullability annotation. The constructor prefix's fields (the
 /// outer instance, lexical captures) and other compiler-generated storage (a `$$delegate_N`) are
-/// the compiler's own, and kotlinc annotates no synthetic declaration.
+/// the compiler's own, and kotlinc annotates no synthetic declaration. A `lateinit` field holds
+/// null until assigned, so kotlinc's `AnnotationCodegen` leaves it unannotated too.
 pub(super) fn publishes_field_nullability(c: &IrClass, field_index: usize) -> bool {
+    let field = &c.fields[field_index];
     field_index >= c.constructor_prefix_count as usize
-        && !c.fields[field_index].is_compiler_generated()
+        && !field.is_compiler_generated()
+        && !field.is_lateinit()
 }

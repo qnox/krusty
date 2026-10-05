@@ -98,9 +98,11 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         // emitter, and without this a top-level property's element type was lost to erasure.
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
         // A reference-typed facade static carries kotlinc's nullability annotation like any other
-        // backing field.
+        // backing field, except a `lateinit` one, which holds null until assigned.
         let nullability = field_nullability_kind(ir, facade, &s.name, s.ty);
-        let field_ann = super::nullability_annotation(nullability);
+        let field_ann = (!s.is_lateinit)
+            .then(|| super::nullability_annotation(nullability))
+            .flatten();
         // A `const val` initialized by a compile-time literal carries a `ConstantValue` attribute (the
         // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
         // LATE adds: kotlinc visits the facade's fields AFTER its methods, so a backing field's name
@@ -421,14 +423,17 @@ pub(super) fn emit_class_static_fields(
         // Generated storage with no declaration of its own is ACC_SYNTHETIC and unannotated.
         let synthetic = ir.is_compiler_generated_static(static_index);
         let acc = if synthetic { acc | 0x1000 } else { acc };
-        // Reference-typed statics, including private hoisted fields, carry nullability annotations.
-        let ann = (!synthetic && (desc.starts_with('L') || desc.starts_with('['))).then(|| {
-            if s.ty.is_nullable() {
-                "Lorg/jetbrains/annotations/Nullable;"
-            } else {
-                "Lorg/jetbrains/annotations/NotNull;"
-            }
-        });
+        // Reference-typed statics, including private hoisted fields, carry nullability annotations,
+        // except a `lateinit` one, which holds null until assigned.
+        let ann =
+            (!synthetic && !s.is_lateinit && (desc.starts_with('L') || desc.starts_with('[')))
+                .then(|| {
+                    if s.ty.is_nullable() {
+                        "Lorg/jetbrains/annotations/Nullable;"
+                    } else {
+                        "Lorg/jetbrains/annotations/NotNull;"
+                    }
+                });
         let signature = property_jvm_signatures(signature_formatter, &s.ty, None).field;
         cw.add_field_late_sig(
             acc,

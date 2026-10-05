@@ -951,6 +951,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
                 ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&c.fq_name())
             })
             .map(|(_, s)| s)
+            .filter(|s| !s.is_lateinit)
         {
             if let Some(a) = ann(&s.name, jvm_declared_ty(&s.ty)) {
                 cw.set_field_nullability(&s.name, a);
@@ -3908,7 +3909,9 @@ fn emit_enum_class(
     // The property backing fields are visited after the methods: each name interns where the
     // constructor body first stores it, after that body's own constants.
     for (f, t) in c.fields.iter().zip(&field_tys) {
-        let nullability = nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty));
+        let nullability = (!f.is_lateinit())
+            .then(|| nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty)))
+            .flatten();
         cw.add_field_late(
             enum_field_acc(f),
             &f.name,
@@ -3931,7 +3934,7 @@ fn emit_enum_class(
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
-        let ann = (field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
+        let ann = (!s.is_lateinit && field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
             .then_some("Lorg/jetbrains/annotations/NotNull;");
         cw.add_field_late_sig(
             acc,
