@@ -7,10 +7,11 @@
 
 use super::common;
 
-const CONSTRUCTORS: &str = "enum class Tone(val label: String) {\n\
-    SOFT(\"O\") { override fun mark(): String = label },\n\
-    LOUD(\"K\");\n\
-    open fun mark(): String = label\n\
+const CONSTRUCTORS: &str = "enum class Tone(val label: String) { SOFT(\"O\"), LOUD(\"K\") }\n\
+enum class Shade {\n\
+    DARK { override fun mark(): String = \"O\" },\n\
+    LIGHT;\n\
+    open fun mark(): String = \"K\"\n\
 }\n\
 enum class Rule(val pick: () -> String) { FIRST({ \"O\" }), SECOND({ \"K\" }) }\n\
 class Holder<T>(val item: T) {\n\
@@ -20,17 +21,17 @@ class Holder<T>(val item: T) {\n\
 }\n\
 class Plain(val text: String) { inner class Part(val more: String) { fun all(): String = text + more } }\n\
 fun box(): String {\n\
-    val tones = Tone.SOFT.mark() + Tone.LOUD.mark()\n\
+    val tones = Tone.SOFT.label + Tone.LOUD.label + Shade.DARK.mark() + Shade.LIGHT.mark()\n\
     val rules = Rule.FIRST.pick() + Rule.SECOND.pick()\n\
     val holder = Holder(\"O\")\n\
     val held = holder.Reader().read() + holder.Joined(\"K\").other + holder.Named(\"\").first()\n\
     val plain = Plain(\"O\").Part(\"K\").all()\n\
-    return if (tones == \"OK\" && rules == \"OK\" && held == \"OKO\") plain else \"fail\"\n\
+    return if (tones == \"OKOK\" && rules == \"OK\" && held == \"OKO\") plain else \"fail\"\n\
 }\n";
 
 const CLASSES: [&str; 8] = [
     "Tone",
-    "Tone$SOFT",
+    "Shade$DARK",
     "Rule",
     "Holder",
     "Holder$Reader",
