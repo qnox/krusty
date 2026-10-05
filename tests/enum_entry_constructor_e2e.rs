@@ -8,6 +8,7 @@
 //! them are the subclass's methods, numbered there.
 
 use super::common;
+use super::common::expect_native_box;
 
 const ENUMS: &str = "class Cell<T>(val value: T)\n\
 enum class Level(val base: Int, val step: Int = 7) {\n\
@@ -163,4 +164,35 @@ fn erased_methods(bytes: &[u8]) -> Vec<(u16, String, String)> {
             )
         })
         .collect()
+}
+
+const NATIVE: &str = "var counter = 0
+fun next(): Int { counter += 1; return counter }
+enum class Shelf(val width: Int, val depth: Int = 7) {
+    WIDE(next()) { override fun f() = 1 },
+    NAMED(depth = next() * 10, width = next()) { override fun f() = 2 },
+    SPLIT(100, next(), true) { override fun f() = 3 },
+    SHORT(200, true) { override fun f() = 4 },
+    PLAIN(9);
+    constructor(base: Int, extra: Int, flag: Boolean, scale: Int = 2) : this(base + extra * scale, if (flag) 5 else 6)
+    constructor(base: Int, flag: Boolean) : this(base, 0, flag, 3)
+    open fun f() = 0
+}
+fun box(): String {
+    var total = 0
+    total = total * 3 + Shelf.WIDE.width + Shelf.WIDE.depth + Shelf.WIDE.f()
+    total = total * 3 + Shelf.NAMED.width + Shelf.NAMED.depth + Shelf.NAMED.f()
+    total = total * 3 + Shelf.SPLIT.width + Shelf.SPLIT.depth + Shelf.SPLIT.f()
+    total = total * 3 + Shelf.SHORT.width + Shelf.SHORT.depth + Shelf.SHORT.f()
+    total = total * 3 + Shelf.PLAIN.width + Shelf.PLAIN.depth + Shelf.PLAIN.f()
+    return if (total == 3091 && counter == 4) \"OK\" else \"fail\"
+}
+";
+
+/// Native calls the constructor each constant's subclass selected, a secondary one with an
+/// omitted default among them, as the JVM does.
+#[test]
+fn a_constant_reaches_its_selected_constructor_on_native() {
+    common::expect_box_ok_with_stdlib(NATIVE, "NativeSelected");
+    expect_native_box(NATIVE, "NativeSelected", "OK");
 }
