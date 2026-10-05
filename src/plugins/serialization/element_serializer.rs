@@ -8,9 +8,9 @@ use super::{
     generated_serializer_accessor, is_nullable, kserializer_of, serializer_of_name,
     type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
 };
+use crate::ir::Spelled;
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::plugins::PluginContext;
-use crate::spelling::Spelled;
 
 use super::ExternalSerializer;
 use crate::types::{type_name, Ty, TypeName};

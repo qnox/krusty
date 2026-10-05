@@ -79,6 +79,9 @@ mod value_class_facts;
 mod when_facts;
 
 pub use crate::enclosing_declarations::EnclosingDeclaration;
+/// A declared type's checked source spelling, which the IR carries per declaration
+/// ([`IrFile::prop_declared_spellings`]) as part of its contract with backends and plugins.
+pub use crate::spelling::Spelled;
 pub use crate::types::EqualityMode;
 pub use annotations::{
     AccessorAnnotations, AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations,

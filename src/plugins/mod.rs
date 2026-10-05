@@ -424,14 +424,14 @@ impl PluginContext {
         ir: &'ir IrFile,
         class: ClassId,
         property: &str,
-    ) -> &'ir crate::spelling::Spelled {
+    ) -> &'ir crate::ir::Spelled {
         ir.classes
             .get(class as usize)
             .and_then(|class| {
                 ir.prop_declared_spellings
                     .get(&(class.fq_name_id(), property.to_owned()))
             })
-            .map_or(crate::spelling::Spelled::NONE, |spellings| &spellings.ret)
+            .map_or(crate::ir::Spelled::NONE, |spellings| &spellings.ret)
     }
 
     pub fn property_canonical_type(
