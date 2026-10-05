@@ -4832,9 +4832,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::KwWhile => {
                 self.bump();
-                self.expect(TokenKind::LParen, "'('");
-                let cond = self.parse_expr();
-                self.expect(TokenKind::RParen, "')'");
+                let cond = self.parse_parenthesized_condition();
                 let body = self.parse_loop_body();
                 self.finish_stmt(
                     Stmt::While {
@@ -4865,9 +4863,7 @@ impl<'a> Parser<'a> {
                 };
                 self.skip_newlines();
                 self.expect(TokenKind::KwWhile, "'while'");
-                self.expect(TokenKind::LParen, "'('");
-                let cond = self.parse_expr();
-                self.expect(TokenKind::RParen, "')'");
+                let cond = self.parse_parenthesized_condition();
                 self.finish_stmt(
                     Stmt::DoWhile {
                         body,

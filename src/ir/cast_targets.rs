@@ -2,8 +2,9 @@
 //!
 //! Every backend that raises that NullPointerException renders the same way. They differ only on
 //! where a top-level function lives: the JVM places one in a file facade, while a target without
-//! facades keeps it in its package. So the caller supplies that owner. The JVM inliner also
-//! qualifies a root-package classifier with `<root>.`; other diagnostic sites do not.
+//! facades keeps it in its package. So the caller supplies that owner. The JVM message is
+//! `IrType.render()`, which writes the root package as `<root>`, so a root-package classifier or
+//! type-parameter owner reads `<root>.Name` there; the native runtime message omits that prefix.
 
 use super::IrFile;
 use crate::types::{Ty, TypeName};
@@ -11,7 +12,7 @@ use crate::types::{Ty, TypeName};
 impl IrFile {
     /// Render `ty` for a null-cast message. `top_level_owner` names the owner of a function that
     /// has no dispatch receiver, and `None` leaves such a function unqualified.
-    /// `qualify_root_classifier` selects the inliner's `<root>.Type` spelling.
+    /// `qualify_root_classifier` selects the IR renderer's `<root>.Type` spelling.
     pub fn rendered_cast_target(
         &self,
         ty: Ty,
@@ -68,7 +69,9 @@ impl IrFile {
                 })
                 .collect::<Vec<_>>()
                 .join(" & "),
-            Ty::TyParam(name, _) => self.rendered_type_parameter(name, top_level_owner),
+            Ty::TyParam(name, _) => {
+                self.rendered_type_parameter(name, top_level_owner, qualify_root_classifier)
+            }
             Ty::Fun(signature) => format!(
                 "{}{}{}",
                 if signature.suspend {
@@ -88,6 +91,7 @@ impl IrFile {
         &self,
         identity: &str,
         top_level_owner: &dyn Fn(u32) -> Option<TypeName>,
+        qualify_root: bool,
     ) -> String {
         let source = crate::types::type_parameter_source_name(identity);
         if let Some((&function, _)) = self
@@ -110,7 +114,9 @@ impl IrFile {
                 .dispatch_receiver
                 .or_else(|| top_level_owner(function))
             {
-                Some(owner) => format!("{source} of {}.{name}", rendered_owner(owner, false)),
+                Some(owner) => {
+                    format!("{source} of {}.{name}", rendered_owner(owner, qualify_root))
+                }
                 None => format!("{source} of {name}"),
             };
         }
@@ -120,7 +126,7 @@ impl IrFile {
                 .iter()
                 .any(|parameter| parameter.semantic_name == identity)
         }) {
-            return format!("{source} of {}", rendered_owner(owner, false));
+            return format!("{source} of {}", rendered_owner(owner, qualify_root));
         }
         source.to_string()
     }

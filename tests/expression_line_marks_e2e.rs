@@ -592,7 +592,7 @@ fn a_defaulted_construction_maps_its_lines_like_kotlinc() {
     );
 }
 
-/// A primitive `compareTo` is lowered to `Integer.compare`, which is still a real dispatch and
+/// A primitive `compareTo` is lowered to `Intrinsics.compare`, which is still a real dispatch and
 /// still returns to the call's line.
 #[test]
 fn a_multi_line_primitive_compare_to_returns_to_its_line() {

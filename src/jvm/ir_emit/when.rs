@@ -434,6 +434,11 @@ impl Emitter<'_> {
             }
         }
         if !has_else && exhaustive_result.is_some() {
+            // fir2ir builds the implicit `else -> throw NoWhenBranchMatchedException()` at the
+            // `when`'s own offsets, and kotlinc's `visitThrow` marks that line.
+            if let Some(&line) = self.ir.whens.source_lines.get(&expression) {
+                code.mark_line(line);
+            }
             self.emit_no_when_branch_matched(code);
         }
         self.bind(end, code);

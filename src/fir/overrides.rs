@@ -117,12 +117,15 @@ pub struct ResolvedPropertyOverride {
 
 /// Declaration status a function takes from the declarations it overrides, as kotlinc's status
 /// resolution derives it: the return-value status of the first overridden declaration that records
-/// one, and the `operator` / `infix` modifiers when any overridden declaration has them.
+/// one, and the `operator` / `infix` modifiers when any overridden declaration has them. The
+/// language role travels the same way: an override of `Any.toString` is a `toString` too.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct InheritedCallableStatus {
     pub return_value: crate::types::ReturnValueStatus,
     pub operator: bool,
     pub infix: bool,
+    /// The language role of the nearest overridden declaration that has one.
+    pub semantic_role: Option<crate::types::SemanticCallRole>,
 }
 
 /// Stable identity of the overridden function declaration.
@@ -283,6 +286,15 @@ impl ResolvedModuleIndex {
             .get(&callable)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Every current-module function that inherits a language role, with that role.
+    pub fn inherited_semantic_roles(
+        &self,
+    ) -> impl Iterator<Item = (CallableId, crate::types::SemanticCallRole)> + '_ {
+        self.callable_inherited_statuses
+            .iter()
+            .filter_map(|(&callable, status)| status.semantic_role.map(|role| (callable, role)))
     }
 
     pub fn property_return_value_status(

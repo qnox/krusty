@@ -25,6 +25,7 @@ impl BodyLowering<'_> {
         line: u32,
     ) -> Result<ExprId, FirLoweringFailure> {
         let mut prefix = Vec::new();
+        let subject_expression = subject;
         let subject = subject
             .map(|subject| {
                 let subject_expression = self
@@ -79,7 +80,19 @@ impl BodyLowering<'_> {
                         }
                         comparison
                     }
-                    FirWhenCondition::Predicate(candidate) => self.expression(candidate)?,
+                    FirWhenCondition::Predicate(candidate) => {
+                        // fir2ir reads the subject afresh in each condition (`is T`, `in r`), at
+                        // that condition's offsets, so the read carries the condition's line.
+                        if let (Some(expression), Some(temporary)) = (subject_expression, subject) {
+                            let read = self.ir.add_expr(IrExpr::GetValue(temporary));
+                            let line = self.body.expression_debug_lines(candidate).source;
+                            if line != 0 {
+                                self.ir.expr_source_lines.insert(read, line);
+                            }
+                            self.set_expression_state(expression, LoweringState::Lowered(read));
+                        }
+                        self.expression(candidate)?
+                    }
                 };
                 condition = Some(match condition {
                     Some(previous) => self.short_circuit_or(previous, candidate),

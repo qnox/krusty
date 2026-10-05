@@ -109,8 +109,9 @@ fn a_cast_of_a_non_null_property_read_before_initialization_throws() {
     );
 }
 
-/// Native renders the same message with one difference: it has no file facades, so a top-level
-/// function's type parameter is qualified by its package (the root one here) instead of `NullCastKt`.
+/// The JVM message is kotlinc's `IrType.render()`, which spells the root package `<root>`. Native
+/// renders the same message without that prefix and without file facades, so a top-level function's
+/// type parameter is qualified by its package (the root one here) instead of `<root>.NullCastKt`.
 #[test]
 fn failed_null_casts_name_primitive_and_qualified_type_parameter_targets() {
     let source = r#"
@@ -125,7 +126,7 @@ fn failed_null_casts_name_primitive_and_qualified_type_parameter_targets() {
                     generic<String>(null)
                     "fail: type-parameter cast did not throw"
                 } catch (nested: NullPointerException) {
-                    if (nested.message == "null cannot be cast to non-null type T of NullCastKt.generic")
+                    if (nested.message == "null cannot be cast to non-null type T of <root>.NullCastKt.generic")
                         "OK"
                     else nested.message!!
                 }

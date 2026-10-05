@@ -268,6 +268,9 @@ fn run_backend_passes_after_plugins(
         &mut facts.property_reference_realizations,
     );
     crate::jvm::parameter_assertions::finalize_after_value_class_lowering(ir);
+    // A concatenation appends a `toString()` call's receiver itself, as kotlinc does once its
+    // value-class lowering has turned a value class's `toString()` into a static call.
+    crate::jvm::concatenated_to_string::flatten_to_string_operands(ir);
     // Every body of the file is lowered, so each lifting sequence is whole, and the value-class
     // pass has named the functions kotlinc names their lifted callables after: name those callables
     // before any pass renders a debug name from them.

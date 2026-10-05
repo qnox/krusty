@@ -9,7 +9,8 @@
 //!
 //! Status resolution also carries the `operator` and `infix` modifiers down an override chain: a
 //! function overriding one that has either modifier has it too, whatever it declares, and so does
-//! an override of that override.
+//! an override of that override. A language role (`Any.toString`) is inherited from the nearest
+//! overridden declaration that has one, so every override in the chain plays that role.
 //!
 //! Visibility follows the same graph: an override written WITHOUT a visibility modifier keeps the
 //! most permissive visibility among the declarations it overrides, transitively, instead of
@@ -58,6 +59,7 @@ struct OverriddenFunction {
     return_value: Option<ReturnValueStatus>,
     operator: bool,
     infix: bool,
+    semantic_role: Option<crate::types::SemanticCallRole>,
 }
 
 impl Status for InheritedCallableStatus {
@@ -68,6 +70,7 @@ impl Status for InheritedCallableStatus {
             return_value: Some(self.return_value),
             operator: self.operator,
             infix: self.infix,
+            semantic_role: self.semantic_role,
         }
     }
 
@@ -79,6 +82,7 @@ impl Status for InheritedCallableStatus {
                 .unwrap_or_default(),
             operator: own.operator || overridden.iter().any(|edge| edge.operator),
             infix: own.infix || overridden.iter().any(|edge| edge.infix),
+            semantic_role: overridden.iter().find_map(|edge| edge.semantic_role),
         }
     }
 }
@@ -174,6 +178,7 @@ pub(super) fn publish_inherited_statuses(
                     return_value: edge.overridden_return_value_status,
                     operator: edge.overridden_operator,
                     infix: edge.overridden_infix,
+                    semantic_role: edge.overridden_semantic_role,
                 })
             }
         },
@@ -206,6 +211,7 @@ pub(super) fn publish_inherited_statuses(
             return_value: ReturnValueStatus::Unspecified,
             operator: flags.is_some_and(|flags| flags.has(DeclarationFlags::OPERATOR)),
             infix: flags.is_some_and(|flags| flags.has(DeclarationFlags::INFIX)),
+            semantic_role: None,
         }
     };
     let functions = derive(&functions, own_function, |callable| {

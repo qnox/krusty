@@ -200,6 +200,14 @@ fn function_local_variable(
                 .expect("a lambda's extension receiver belongs to a source lambda");
             return Some(lambda_receiver(origin));
         }
+        // kotlinc names the receiver after the function's IR name when it writes the method. A
+        // local function has its lifted name by then (`top$wrap`), mangled for a JVM local.
+        if let Some(lifted) = ir.lifted_names.get(&function) {
+            return Some(format!(
+                "$this${}",
+                super::debug_local_names::escaped(lifted)
+            ));
+        }
         let source_name = ir
             .fn_source_names
             .get(&function)
