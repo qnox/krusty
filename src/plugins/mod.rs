@@ -54,15 +54,10 @@ pub struct PluginExpressionPlan {
 /// declaration and no later phase looks a member up by name.
 #[derive(Clone, Debug)]
 pub enum PluginSynthesizedOperand {
-    /// A call of a selected member on a singleton receiver.
+    /// A checker-selected call on a singleton receiver. The complete ordinary member-call result
+    /// crosses this boundary; FIR publication must not reconstruct any target fact from the name.
     SingletonCall {
-        /// The singleton classifier whose value is the dispatch receiver.
-        receiver: TypeName,
-        target: FrontendCallableTarget,
-        /// Call-site parameter types, parallel to `arguments`.
-        params: Vec<Ty>,
-        /// Call-site result type.
-        ret: Ty,
+        call: FrontendResolvedSingletonCall,
         arguments: Vec<PluginSynthesizedOperand>,
     },
     /// A nested plugin operation over synthesized operands, specialized by the named plugin.
@@ -76,27 +71,31 @@ pub enum PluginSynthesizedOperand {
     },
 }
 
-/// The stable identity of a declaration selected for a plugin plan.
-pub use crate::libraries::PluginCallableTarget as FrontendCallableTarget;
-
-/// One callable the resolver publishes for plugin planning, with its declaration-owned signature:
-/// parameter and result types as declared, before any call-site substitution.
+/// One ordinary member call selected by the frontend for a plugin-composed expression.
+///
+/// The receiver, declaration, specialized signature, capabilities, generic substitutions, and
+/// positional argument mapping are all the result of the normal resolver/checker path. A plugin may
+/// recognize the selected declaration's semantic shape, but cannot enumerate or choose candidates.
 #[derive(Clone, Debug)]
-pub struct FrontendDeclaredCallable {
-    pub name: String,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    pub target: FrontendCallableTarget,
+pub struct FrontendResolvedSingletonCall {
+    pub receiver: TypeName,
+    pub selected: crate::symbol_resolver::ResolvedMember,
+    pub type_arguments: Vec<Option<Ty>>,
+    pub type_argument_bounds: Vec<Vec<Ty>>,
+    pub argument_parameters: Vec<u32>,
 }
 
-/// The singleton through which a classifier's static-like members are called — its companion
-/// object, or the classifier itself when it is an `object` — and the members a plugin asked for.
-#[derive(Clone, Debug)]
-pub struct FrontendSingletonMembers {
-    pub receiver: TypeName,
-    /// Whether `receiver` is the classifier itself (an `object`) rather than its companion.
-    pub receiver_is_classifier: bool,
-    pub callables: Vec<FrontendDeclaredCallable>,
+/// The sole semantic query available while a plugin composes a source-less call. Implementations
+/// route it through ordinary member candidate collection, overload selection, generic inference,
+/// argument mapping, and access checking.
+pub trait FrontendCallResolver {
+    fn resolve_singleton_member_call(
+        &self,
+        classifier: TypeName,
+        name: &str,
+        arguments: &[Ty],
+        expected_result: Ty,
+    ) -> Option<FrontendResolvedSingletonCall>;
 }
 
 /// One already-selected call projected into the plugin contract. Declaration identity, overload,
@@ -121,23 +120,37 @@ pub struct FrontendSelectedCall {
     pub argument_slots: Vec<Option<crate::ast::ExprId>>,
 }
 
-/// Read-only, resolver-independent inputs for post-resolution plugin planning.
-pub struct FrontendExpressionContext {
+/// Read-only inputs for post-resolution plugin planning. Source calls and annotations are already
+/// bound; the narrow resolver capability can only select an ordinary singleton member call whose
+/// receiver, name, argument types, and expected result the plugin supplies.
+pub struct FrontendExpressionContext<'a> {
     pub calls: Vec<FrontendSelectedCall>,
     /// Qualified annotation identities for source and dependency classifiers named by these calls.
     pub classifier_annotations: HashMap<TypeName, Vec<TypeName>>,
-    /// For each classifier named by these calls, the singleton members whose names the enabled
-    /// plugins requested through [`IrPlugin::frontend_singleton_member_names`], as declared.
-    pub singleton_members: HashMap<TypeName, FrontendSingletonMembers>,
-    /// Own type-parameter count of each classifier named by these calls.
-    pub classifier_type_parameters: HashMap<TypeName, usize>,
+    /// Absent only in isolated plugin-unit tests that do not compose calls.
+    pub call_resolver: Option<&'a dyn FrontendCallResolver>,
 }
 
-impl FrontendExpressionContext {
+impl FrontendExpressionContext<'_> {
     pub fn has_classifier_annotation(&self, classifier: TypeName, annotation: TypeName) -> bool {
         self.classifier_annotations
             .get(&classifier)
             .is_some_and(|annotations| annotations.contains(&annotation))
+    }
+
+    pub fn resolve_singleton_member_call(
+        &self,
+        classifier: TypeName,
+        name: &str,
+        arguments: &[Ty],
+        expected_result: Ty,
+    ) -> Option<FrontendResolvedSingletonCall> {
+        self.call_resolver?.resolve_singleton_member_call(
+            classifier,
+            name,
+            arguments,
+            expected_result,
+        )
     }
 }
 
@@ -513,16 +526,9 @@ pub trait IrPlugin {
     /// resolver and must never change the type checker's result.
     fn plan_frontend_expressions(
         &self,
-        _ctx: &FrontendExpressionContext,
+        _ctx: &FrontendExpressionContext<'_>,
         _plans: &mut Vec<(crate::ast::ExprId, PluginExpressionPlan)>,
     ) {
-    }
-
-    /// Member names the plugin's expression planning selects on a classifier's singleton (its
-    /// companion, or the `object` itself). The resolver publishes those declarations, with their
-    /// stable identities and declared signatures, in [`FrontendExpressionContext::singleton_members`].
-    fn frontend_singleton_member_names(&self) -> &'static [&'static str] {
-        &[]
     }
 
     /// Report a source class the plugin rejects, as kotlinc's plugin checkers do. This runs in the
@@ -902,22 +908,9 @@ impl PluginHost {
         diagnostics
     }
 
-    /// Every singleton member name the registered plugins plan with.
-    pub fn frontend_singleton_member_names(&self) -> Vec<&'static str> {
-        let mut names = Vec::new();
-        for plugin in &self.plugins {
-            for name in plugin.frontend_singleton_member_names() {
-                if !names.contains(name) {
-                    names.push(*name);
-                }
-            }
-        }
-        names
-    }
-
     pub fn plan_frontend_expressions(
         &self,
-        ctx: &FrontendExpressionContext,
+        ctx: &FrontendExpressionContext<'_>,
     ) -> Vec<(crate::ast::ExprId, PluginExpressionPlan)> {
         let mut plans = Vec::new();
         for plugin in &self.plugins {

@@ -20,7 +20,7 @@ Lkotlinx/serialization/descriptors/SerialDescriptor;Ljava/util/List;Z)V";
 /// source spelling. The element's serializer is planned here too, as kotlinx's `serializer<T>()`
 /// intrinsic inside `element` obtains it, and travels as the last operand.
 pub(super) fn plan(
-    ctx: &FrontendExpressionContext,
+    ctx: &FrontendExpressionContext<'_>,
     call: &FrontendSelectedCall,
 ) -> Option<PluginExpressionPlan> {
     let signature = call.generic_sig.as_ref()?;

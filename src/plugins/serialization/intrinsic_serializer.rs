@@ -15,7 +15,8 @@
 
 use crate::ir::{ExprId, IrExpr, IrFile};
 use crate::plugins::{
-    FrontendDeclaredCallable, FrontendExpressionContext, PluginContext, PluginSynthesizedOperand,
+    FrontendExpressionContext, FrontendResolvedSingletonCall, PluginContext,
+    PluginSynthesizedOperand,
 };
 use crate::types::{type_name, Ty, TypeName};
 
@@ -32,7 +33,10 @@ const GENERAL: &str = "typeSerializer";
 /// Plan the intrinsic serializer for `ty`. `None` when no serializer can be planned: a star
 /// projection (kotlinc emits a throw), or a classifier whose singleton declares more than one
 /// matching accessor.
-pub(super) fn plan(ctx: &FrontendExpressionContext, ty: Ty) -> Option<PluginSynthesizedOperand> {
+pub(super) fn plan(
+    ctx: &FrontendExpressionContext<'_>,
+    ty: Ty,
+) -> Option<PluginSynthesizedOperand> {
     let checked = ty.non_null();
     let classifier = checked.kotlin_class_internal()?;
     let arguments = checked
@@ -45,15 +49,13 @@ pub(super) fn plan(ctx: &FrontendExpressionContext, ty: Ty) -> Option<PluginSynt
         })
         .collect::<Option<Vec<_>>>()?;
     let result = kserializer_of(checked);
-    let planned = match accessor(ctx, classifier, arguments.len())? {
-        Accessor::Selected(receiver, accessor) => PluginSynthesizedOperand::SingletonCall {
-            receiver,
-            target: accessor.target,
-            params: arguments
-                .iter()
-                .map(|&argument| kserializer_of(argument))
-                .collect(),
-            ret: result,
+    let parameter_types = arguments
+        .iter()
+        .map(|&argument| kserializer_of(argument))
+        .collect::<Vec<_>>();
+    let planned = match accessor(ctx, classifier, &parameter_types, result)? {
+        Accessor::Selected(call) => PluginSynthesizedOperand::SingletonCall {
+            call,
             arguments: arguments
                 .iter()
                 .map(|&argument| plan(ctx, argument))
@@ -104,45 +106,34 @@ fn operation(
 }
 
 /// What a classifier's singleton offers the intrinsic's fast path.
-enum Accessor<'a> {
+enum Accessor {
     Absent,
-    /// The singleton receiver and its accessor declaration.
-    Selected(TypeName, &'a FrontendDeclaredCallable),
+    Selected(FrontendResolvedSingletonCall),
 }
 
-/// The accessor of `classifier`'s singleton. `None` when its declarations are ambiguous, which
-/// leaves the type unplanned.
+/// Ask the ordinary resolver/checker for the singleton call. The plugin only recognizes whether the
+/// already-selected declaration is the serialization accessor contract; it never sees or chooses
+/// another candidate.
 fn accessor(
-    ctx: &FrontendExpressionContext,
+    ctx: &FrontendExpressionContext<'_>,
     classifier: TypeName,
-    arity: usize,
-) -> Option<Accessor<'_>> {
-    let (Some(members), Some(&type_parameters)) = (
-        ctx.singleton_members.get(&classifier),
-        ctx.classifier_type_parameters.get(&classifier),
-    ) else {
+    parameters: &[Ty],
+    result: Ty,
+) -> Option<Accessor> {
+    let call = ctx.resolve_singleton_member_call(classifier, ACCESSOR_NAME, parameters, result);
+    let Some(call) = call else {
         return Some(Accessor::Absent);
     };
     // Only a `@Serializable object` serves as its own accessor's receiver; any other classifier's
     // accessor lives on its companion.
-    if type_parameters != arity
-        || (members.receiver_is_classifier
-            && !ctx.has_classifier_annotation(classifier, type_name(SERIALIZABLE_FQ)))
+    if (call.receiver == classifier
+        && !ctx.has_classifier_annotation(classifier, type_name(SERIALIZABLE_FQ)))
+        || call.selected.suspend
+        || !is_serializer_accessor(&call, classifier, parameters.len())
     {
         return Some(Accessor::Absent);
     }
-    let mut matching = members
-        .callables
-        .iter()
-        .filter(|callable| is_serializer_accessor(callable, classifier, type_parameters));
-    let selected = matching.next();
-    if matching.next().is_some() {
-        return None;
-    }
-    Some(match selected {
-        Some(callable) => Accessor::Selected(members.receiver, callable),
-        None => Accessor::Absent,
-    })
+    Some(Accessor::Selected(call))
 }
 
 /// Whether `callable`'s DECLARED signature is exactly
@@ -150,17 +141,45 @@ fn accessor(
 /// `Pi` distinct type parameters in declaration order. A same-name, same-arity declaration whose
 /// parameter or result type arguments differ is a different function and is never selected.
 pub(super) fn is_serializer_accessor(
-    callable: &FrontendDeclaredCallable,
+    call: &FrontendResolvedSingletonCall,
+    classifier: TypeName,
+    type_parameters: usize,
+) -> bool {
+    let callable = &call.selected.member;
+    if callable.context_count != 0
+        || callable.call_sig.vararg_index.is_some()
+        || callable.call_sig.required != callable.params.len()
+        || !call
+            .argument_parameters
+            .iter()
+            .enumerate()
+            .all(|(index, &parameter)| usize::try_from(parameter) == Ok(index))
+    {
+        return false;
+    }
+    let (params, ret) = callable
+        .generic_sig
+        .as_ref()
+        .map_or((callable.params.as_slice(), callable.ret), |signature| {
+            (signature.params.as_slice(), signature.ret)
+        });
+    signature_is_serializer_accessor(&callable.name, params, ret, classifier, type_parameters)
+}
+
+fn signature_is_serializer_accessor(
+    name: &str,
+    params: &[Ty],
+    ret: Ty,
     classifier: TypeName,
     type_parameters: usize,
 ) -> bool {
     let serializer = type_name(KSERIALIZER_FQ);
-    if callable.name != ACCESSOR_NAME || callable.params.len() != type_parameters {
+    if name != ACCESSOR_NAME || params.len() != type_parameters {
         return false;
     }
     let mut formals: Vec<Ty> = Vec::with_capacity(type_parameters);
-    for parameter in &callable.params {
-        let Ty::Obj(owner, [argument]) = *parameter else {
+    for &parameter in params {
+        let Ty::Obj(owner, [argument]) = parameter else {
             return false;
         };
         if owner != serializer
@@ -172,7 +191,7 @@ pub(super) fn is_serializer_accessor(
         }
         formals.push(*argument);
     }
-    let Ty::Obj(owner, [served]) = callable.ret else {
+    let Ty::Obj(owner, [served]) = ret else {
         return false;
     };
     owner == serializer
@@ -230,16 +249,6 @@ pub(super) fn specialize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::FrontendCallableTarget;
-
-    fn callable(params: Vec<Ty>, ret: Ty) -> FrontendDeclaredCallable {
-        FrontendDeclaredCallable {
-            name: ACCESSOR_NAME.to_owned(),
-            params,
-            ret,
-            target: FrontendCallableTarget::module_for_test(0),
-        }
-    }
 
     fn serializer(argument: Ty) -> Ty {
         kserializer_of(argument)
@@ -248,18 +257,19 @@ mod tests {
     #[test]
     fn the_accessor_is_selected_by_its_full_declared_signature() {
         let reading = type_name("dep/Reading");
-        assert!(is_serializer_accessor(
-            &callable(Vec::new(), serializer(Ty::obj_name(reading))),
+        assert!(signature_is_serializer_accessor(
+            ACCESSOR_NAME,
+            &[],
+            serializer(Ty::obj_name(reading)),
             reading,
             0
         ));
         let boxed = type_name("dep/Box");
         let t = Ty::ty_param("T0", Ty::nullable(Ty::obj("kotlin/Any")));
-        assert!(is_serializer_accessor(
-            &callable(
-                vec![serializer(t)],
-                serializer(Ty::obj_args_name(boxed, &[t]))
-            ),
+        assert!(signature_is_serializer_accessor(
+            ACCESSOR_NAME,
+            &[serializer(t)],
+            serializer(Ty::obj_args_name(boxed, &[t])),
             boxed,
             1
         ));
@@ -274,41 +284,36 @@ mod tests {
         let boxed = type_name("dep/Box");
         let t = Ty::ty_param("T0", Ty::nullable(Ty::obj("kotlin/Any")));
         let u = Ty::ty_param("U0", Ty::nullable(Ty::obj("kotlin/Any")));
-        for (candidate, classifier, arity) in [
-            (callable(Vec::new(), serializer(Ty::String)), reading, 0),
+        for (params, ret, classifier, arity) in [
+            (Vec::new(), serializer(Ty::String), reading, 0),
             (
-                callable(Vec::new(), serializer(Ty::nullable(Ty::obj_name(reading)))),
+                Vec::new(),
+                serializer(Ty::nullable(Ty::obj_name(reading))),
                 reading,
                 0,
             ),
             (
-                callable(
-                    vec![serializer(Ty::String)],
-                    serializer(Ty::obj_args_name(boxed, &[Ty::String])),
-                ),
+                vec![serializer(Ty::String)],
+                serializer(Ty::obj_args_name(boxed, &[Ty::String])),
                 boxed,
                 1,
             ),
             (
-                callable(
-                    vec![serializer(t)],
-                    serializer(Ty::obj_args_name(boxed, &[u])),
-                ),
+                vec![serializer(t)],
+                serializer(Ty::obj_args_name(boxed, &[u])),
                 boxed,
                 1,
             ),
             (
-                callable(
-                    vec![serializer(t)],
-                    serializer(Ty::obj_args("kotlin/collections/List", &[t])),
-                ),
+                vec![serializer(t)],
+                serializer(Ty::obj_args("kotlin/collections/List", &[t])),
                 boxed,
                 1,
             ),
         ] {
             assert!(
-                !is_serializer_accessor(&candidate, classifier, arity),
-                "{candidate:?} must not be selected"
+                !signature_is_serializer_accessor(ACCESSOR_NAME, &params, ret, classifier, arity,),
+                "{params:?} -> {ret:?} must not be selected"
             );
         }
     }

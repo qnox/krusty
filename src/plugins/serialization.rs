@@ -473,7 +473,7 @@ fn call_external_companion_serializer(
 /// carries, so a deeper nesting (`List<List<Foo>>`) has no spelling here and keeps the generic
 /// inline path.
 fn serialized_type_spelling(
-    ctx: &FrontendExpressionContext,
+    ctx: &FrontendExpressionContext<'_>,
     serializable: TypeName,
     ty: Ty,
 ) -> Option<Vec<TypeName>> {
@@ -1218,13 +1218,9 @@ impl IrPlugin for SerializationPlugin {
         ));
     }
 
-    fn frontend_singleton_member_names(&self) -> &'static [&'static str] {
-        &[intrinsic_serializer::ACCESSOR_NAME]
-    }
-
     fn plan_frontend_expressions(
         &self,
-        ctx: &FrontendExpressionContext,
+        ctx: &FrontendExpressionContext<'_>,
         plans: &mut Vec<(crate::ast::ExprId, PluginExpressionPlan)>,
     ) {
         let serializer_package = type_name("kotlinx/serialization");
@@ -2165,8 +2161,7 @@ mod tests {
                 argument_slots: vec![Some(argument)],
             }],
             classifier_annotations: std::collections::HashMap::new(),
-            singleton_members: std::collections::HashMap::new(),
-            classifier_type_parameters: std::collections::HashMap::new(),
+            call_resolver: None,
         };
         let mut plans = Vec::new();
         SerializationPlugin::default().plan_frontend_expressions(&context, &mut plans);
@@ -2215,8 +2210,7 @@ mod tests {
             &FrontendExpressionContext {
                 calls: vec![call.clone()],
                 classifier_annotations: std::collections::HashMap::new(),
-                singleton_members: std::collections::HashMap::new(),
-                classifier_type_parameters: std::collections::HashMap::new(),
+                call_resolver: None,
             },
             &mut plans,
         );
@@ -2245,8 +2239,7 @@ mod tests {
             &FrontendExpressionContext {
                 calls: vec![unrelated],
                 classifier_annotations: std::collections::HashMap::new(),
-                singleton_members: std::collections::HashMap::new(),
-                classifier_type_parameters: std::collections::HashMap::new(),
+                call_resolver: None,
             },
             &mut plans,
         );

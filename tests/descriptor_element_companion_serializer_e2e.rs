@@ -268,3 +268,72 @@ fn a_sibling_file_class_element_reads_its_companion_accessor() {
         "leaf:Leaf:false, branch:Branch?:true, marks:kotlin.collections.ArrayList:false"
     );
 }
+
+/// Candidate collection for the synthetic call follows the ordinary member hierarchy. The
+/// declaration owner may therefore be a base of the companion while the companion remains the
+/// runtime dispatch receiver.
+#[test]
+fn an_inherited_companion_serializer_accessor_is_selected() {
+    let dependency = "package dep\n\
+        import kotlinx.serialization.KSerializer\n\
+        import kotlinx.serialization.descriptors.PrimitiveKind\n\
+        import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor\n\
+        import kotlinx.serialization.encoding.Decoder\n\
+        import kotlinx.serialization.encoding.Encoder\n\
+        class Inherited { companion object : Accessors() }\n\
+        open class Accessors { fun serializer(): KSerializer<Inherited> = InheritedSerializer }\n\
+        object InheritedSerializer : KSerializer<Inherited> {\n\
+        \x20   override val descriptor = PrimitiveSerialDescriptor(\"dep.Inherited\", PrimitiveKind.STRING)\n\
+        \x20   override fun serialize(encoder: Encoder, value: Inherited) = encoder.encodeString(\"v\")\n\
+        \x20   override fun deserialize(decoder: Decoder) = Inherited()\n\
+        }\n";
+    let consumer = "import dep.Inherited\n\
+        import kotlinx.serialization.descriptors.buildClassSerialDescriptor\n\
+        import kotlinx.serialization.descriptors.element\n\
+        val descriptor = buildClassSerialDescriptor(\"Holder\") { element<Inherited>(\"value\") }\n\
+        fun box(): String = descriptor.getElementDescriptor(0).serialName\n";
+    assert_eq!(
+        both_compilers_box_against_dependency(
+            dependency,
+            consumer,
+            "inherited_companion_serializer_accessor",
+        ),
+        "dep.Inherited"
+    );
+}
+
+/// An exact-shape declaration is still not a callable candidate when it is inaccessible at the
+/// element call site. The plugin must fall back instead of smuggling the private member into FIR.
+#[test]
+fn an_inaccessible_companion_serializer_accessor_is_not_selected() {
+    let dependency = "package dep\n\
+        import kotlinx.serialization.KSerializer\n\
+        import kotlinx.serialization.descriptors.PrimitiveKind\n\
+        import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor\n\
+        import kotlinx.serialization.encoding.Decoder\n\
+        import kotlinx.serialization.encoding.Encoder\n\
+        class Hidden { companion object { private fun serializer(): KSerializer<Hidden> = HiddenSerializer } }\n\
+        object HiddenSerializer : KSerializer<Hidden> {\n\
+        \x20   override val descriptor = PrimitiveSerialDescriptor(\"dep.Hidden\", PrimitiveKind.STRING)\n\
+        \x20   override fun serialize(encoder: Encoder, value: Hidden) = encoder.encodeString(\"v\")\n\
+        \x20   override fun deserialize(decoder: Decoder) = Hidden()\n\
+        }\n";
+    let dependency = reference_dependency(dependency, "private_serializer_accessor");
+    let mut classpath = vec![dependency];
+    classpath.extend(runtime_jars());
+    let consumer = "import dep.Hidden\n\
+        import kotlinx.serialization.descriptors.buildClassSerialDescriptor\n\
+        import kotlinx.serialization.descriptors.element\n\
+        val descriptor = buildClassSerialDescriptor(\"Holder\") { element<Hidden>(\"value\") }\n";
+    assert_eq!(
+        backend_outcome_in_process(
+            consumer,
+            "inaccessible_companion_serializer_accessor",
+            &classpath,
+            None,
+        ),
+        Some(BackendOutcome::Rejected(vec![
+            "krusty: this construct is not yet supported by the IR backend".to_owned()
+        ])),
+    );
+}
