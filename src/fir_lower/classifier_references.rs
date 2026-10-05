@@ -275,6 +275,7 @@ impl BodyLowering<'_> {
                 declaration_result,
                 declaration_suspend: false,
                 adaptation: None,
+                reflection_owner: None,
             }))
     }
 
@@ -297,6 +298,7 @@ impl BodyLowering<'_> {
                 declaration_result: Ty::Unit,
                 declaration_suspend: false,
                 adaptation: None,
+                reflection_owner: None,
             }))
     }
 

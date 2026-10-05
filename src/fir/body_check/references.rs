@@ -102,6 +102,7 @@ impl BodyFirChecker<'_> {
                     None,
                     None,
                     None,
+                    None,
                 )
             } else {
                 self.reference_to_external(
@@ -111,6 +112,7 @@ impl BodyFirChecker<'_> {
                         &reference.target.params,
                     ),
                     FirCallableReferenceBinding::Static,
+                    None,
                     None,
                     None,
                     None,
@@ -155,6 +157,7 @@ impl BodyFirChecker<'_> {
                 extension_receiver: None,
                 substitutions: Box::new([]),
                 adaptation: None,
+                reflection_owner: None,
             });
         }
 
@@ -183,6 +186,7 @@ impl BodyFirChecker<'_> {
                     None,
                     None,
                     Some(adaptation),
+                    None,
                 )
             } else {
                 self.reference_to_external(
@@ -192,6 +196,7 @@ impl BodyFirChecker<'_> {
                     None,
                     None,
                     Some(adaptation),
+                    None,
                 )
             };
         }
@@ -351,6 +356,7 @@ impl BodyFirChecker<'_> {
                         extension_receiver: None,
                         substitutions: Box::new([]),
                         adaptation: None,
+                        reflection_owner: None,
                     });
                 }
             }
@@ -542,6 +548,7 @@ impl BodyFirChecker<'_> {
                 extension_receiver: None,
                 substitutions: Box::new([]),
                 adaptation: adaptation.map(Box::new),
+                reflection_owner: None,
             });
         }
         let Some(ExprLowering::CallableReference { binding, target }) =
@@ -571,6 +578,19 @@ impl BodyFirChecker<'_> {
             } => {
                 let (binding, dispatch_receiver) =
                     self.reference_receiver(expression, receiver, binding)?;
+                // Only an unbound instance member written on a different classifier needs a
+                // reflection owner. A member extension's written receiver is not that identity,
+                // and a bound reference keeps the declaration owner.
+                let reflection_owner = if binding == FirCallableReferenceBinding::Unbound
+                    && !member.is_member_extension()
+                {
+                    match (receiver_ty.non_null().obj_internal(), member.owner) {
+                        (Some(written), Some(declared)) if written != declared => Some(written),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 if let Some(declaration) = member.stable_declaration {
                     self.reference_to_declaration(
                         expression,
@@ -579,6 +599,7 @@ impl BodyFirChecker<'_> {
                         dispatch_receiver,
                         None,
                         adaptation,
+                        reflection_owner,
                     )
                 } else {
                     self.reference_to_external(
@@ -591,6 +612,7 @@ impl BodyFirChecker<'_> {
                         dispatch_receiver,
                         None,
                         adaptation,
+                        reflection_owner,
                     )
                 }
             }
@@ -614,6 +636,7 @@ impl BodyFirChecker<'_> {
                         None,
                         extension_receiver,
                         adaptation,
+                        None,
                     )
                 } else {
                     let declared_receiver = callable.params.first().copied().ok_or_else(|| {
@@ -635,6 +658,7 @@ impl BodyFirChecker<'_> {
                         None,
                         extension_receiver,
                         adaptation,
+                        None,
                     )
                 }
             }
@@ -677,6 +701,7 @@ impl BodyFirChecker<'_> {
                         extension_receiver: None,
                         substitutions: Box::new([]),
                         adaptation: adaptation.map(Box::new),
+                        reflection_owner: None,
                     });
                 }
                 if let Some(declaration) = member.stable_declaration {
@@ -687,6 +712,7 @@ impl BodyFirChecker<'_> {
                         None,
                         None,
                         adaptation,
+                        None,
                     )
                 } else {
                     self.reference_to_external(
@@ -696,6 +722,7 @@ impl BodyFirChecker<'_> {
                         None,
                         None,
                         adaptation,
+                        None,
                     )
                 }
             }
@@ -937,6 +964,7 @@ impl BodyFirChecker<'_> {
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
         adaptation: Option<FirReferenceAdaptation>,
+        reflection_owner: Option<crate::types::TypeName>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let span = self.file.expr_span(expression);
         let callable = self
@@ -952,6 +980,7 @@ impl BodyFirChecker<'_> {
             extension_receiver,
             substitutions: self.call_substitutions(expression, declaration)?,
             adaptation: adaptation.map(Box::new),
+            reflection_owner,
         })
     }
 
@@ -963,6 +992,7 @@ impl BodyFirChecker<'_> {
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
         adaptation: Option<FirReferenceAdaptation>,
+        reflection_owner: Option<crate::types::TypeName>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let ExternalReferenceDeclaration {
             declaration,
@@ -1019,6 +1049,7 @@ impl BodyFirChecker<'_> {
                 extension_receiver: None,
                 substitutions: Box::new([]),
                 adaptation: adaptation.map(Box::new),
+                reflection_owner,
             });
         }
         let substitutions = self
@@ -1069,6 +1100,7 @@ impl BodyFirChecker<'_> {
             extension_receiver,
             substitutions: substitutions.into_boxed_slice(),
             adaptation: adaptation.map(Box::new),
+            reflection_owner,
         })
     }
 
