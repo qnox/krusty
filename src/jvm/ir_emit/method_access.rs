@@ -110,7 +110,7 @@ pub(super) fn is_reifiable(ir: &IrFile, fid: u32) -> bool {
 /// kotlinc sets `ACC_VARARGS` exactly when the method's LAST physical parameter is the declared
 /// `vararg`, so Java may call it in element form. Captured values and receivers lead the physical
 /// list and do not move it; a suspend function's trailing continuation does.
-fn varargs_access(ir: &IrFile, fid: u32) -> u16 {
+pub(super) fn varargs_access(ir: &IrFile, fid: u32) -> u16 {
     let trailing = ir.fn_varargs.get(&fid).is_some_and(|vararg| vararg.is_last);
     if trailing && !ir.suspend_funs.contains(&fid) {
         ACC_VARARGS

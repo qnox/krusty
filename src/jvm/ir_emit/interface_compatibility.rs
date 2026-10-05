@@ -57,6 +57,7 @@ pub(super) fn emit_inherited_default_surface(
                            assertion_names: &[Option<String>],
                            physical_ret: Ty,
                            semantic_ret: Ty,
+                           varargs: u16,
                            is_abstract: bool,
                            visibility: crate::types::Visibility,
                            realization: crate::libraries::MemberRealization,
@@ -90,10 +91,13 @@ pub(super) fn emit_inherited_default_surface(
                     cw,
                     c.fq_name,
                     c.decl_line,
-                    name,
-                    param_tys,
-                    local_variable_names,
-                    physical_ret,
+                    JdAccessBridgeMember {
+                        name,
+                        param_tys,
+                        parameter_names: local_variable_names,
+                        ret: physical_ret,
+                        varargs,
+                    },
                 );
             }
             let di = default_impls.get_or_insert_with(|| {
@@ -153,6 +157,7 @@ pub(super) fn emit_inherited_default_surface(
                     // kotlinc gives an inherited member's holder forwarder no line: it has no
                     // source in this interface.
                     decl_line: 0,
+                    varargs,
                     target,
                 },
             );
@@ -215,6 +220,13 @@ pub(super) fn emit_inherited_default_surface(
             } else {
                 Vec::new()
             };
+            // A suspend member's trailing continuation, not its vararg array, is the last physical
+            // parameter, so only a non-suspend vararg member keeps ACC_VARARGS on this surface.
+            let varargs = if member.vararg && !member.suspend() {
+                crate::jvm::classfile::ACC_VARARGS
+            } else {
+                0
+            };
             surface(
                 &name,
                 &param_tys,
@@ -224,6 +236,7 @@ pub(super) fn emit_inherited_default_surface(
                 &assertion_names,
                 physical_ret,
                 semantic_ret,
+                varargs,
                 member.is_abstract(),
                 member.visibility,
                 member.realization,
@@ -326,6 +339,7 @@ pub(super) fn emit_own_member_forward(
                     .map(|property| property.decl_line)
                     .unwrap_or(0)
             }),
+            varargs: method_access::varargs_access(ir, fid),
             target: JdHolderTarget::AccessBridge,
         },
     );
@@ -346,6 +360,8 @@ struct HolderForward<'a> {
     semantic_ret: Ty,
     signature: Option<&'a str>,
     decl_line: u32,
+    /// The member's own `ACC_VARARGS` when its last physical parameter is the declared vararg.
+    varargs: u16,
     target: JdHolderTarget<'a>,
 }
 
@@ -363,6 +379,7 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
         semantic_ret,
         signature,
         decl_line,
+        varargs,
         target,
     } = forward;
     assert_eq!(
@@ -446,7 +463,7 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
     emit_return(ret, &mut code);
     code.ensure_locals(argument_words);
     code.link();
-    cw.add_method_sig(0x0009, member_name, &desc, &code, signature);
+    cw.add_method_sig(0x0009 | varargs, member_name, &desc, &code, signature);
     cw.set_method_parameters(member_name, &desc, reflected);
 
     let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];

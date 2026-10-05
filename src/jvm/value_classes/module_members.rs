@@ -147,6 +147,7 @@ mod tests {
             suspend,
             abstract_member: false,
             visibility: crate::types::Visibility::Public,
+            vararg: false,
             parameter_identities: Box::new([]),
         }
     }
