@@ -525,6 +525,40 @@ fn java_parameters_names_a_value_class_boxed_members() {
     );
 }
 
+/// A value class's interface entries for property accessors reflect like a function's: a setter
+/// entry names its value, and a member-extension entry keeps its receiver unflagged, labeled after
+/// the entry's own JVM name with its non-identifier characters escaped (`$this$getC`,
+/// `$this$getE_u2d<hash>`, `$this$f_u2d<hash>`), never after the property (`$this$c`) as the static
+/// names it. krusty wrote no setter entry and no member-extension getter entry, and labeled a
+/// mangled function entry's receiver after the source name.
+#[test]
+fn java_parameters_names_a_value_class_property_entries() {
+    assert_parameter_parity(
+        "JavaParametersPropertyEntries",
+        "package demo\n\
+         @JvmInline value class Tag(val n: Int)\n\
+         interface Shape {\n\
+         \x20 var b: Int\n\
+         \x20 val String.c: Int\n\
+         \x20 var t: Tag\n\
+         \x20 val String.e: Tag\n\
+         \x20 fun String.f(w: Tag): Int\n\
+         }\n\
+         @JvmInline value class Box(val x: Int) : Shape {\n\
+         \x20 override var b: Int\n\
+         \x20\x20 get() = x\n\
+         \x20\x20 set(value) { }\n\
+         \x20 override val String.c: Int get() = x\n\
+         \x20 override var t: Tag\n\
+         \x20\x20 get() = Tag(x)\n\
+         \x20\x20 set(v) { }\n\
+         \x20 override val String.e: Tag get() = Tag(x)\n\
+         \x20 override fun String.f(w: Tag): Int = x\n\
+         }\n",
+        &["demo/Box"],
+    );
+}
+
 /// kotlinc writes an interface member's body on `DefaultImpls` as a static that takes the
 /// interface instance as `$this`, synthetic, and the extension receiver as an ordinary parameter
 /// `$receiver`, flagged mandated like every receiver a static moves; so do the forward a
@@ -548,6 +582,35 @@ fn java_parameters_flags_a_default_impls_extension_receiver_mandated() {
             "demo/Sub$DefaultImpls",
             "demo/Open",
         ],
+    );
+}
+
+/// A class that inherits an interface default it does not override gets a forwarder: kotlinc
+/// reflects its parameters as the member names them, and its extension receiver `$this$decorate`
+/// is unflagged, since the forwarder is an instance method. A value class realizes each such forwarder with a static `<name>-impl` (or the
+/// forwarder's own mangled name) as well, whose carrier `arg0` is synthetic and whose extension
+/// receiver is mandated, like every value-class static. krusty wrote no `MethodParameters` on a
+/// forwarder and no static at all. (A generic or `suspend` member's rows match too, but the
+/// comparison keys a member by its generic `Signature`, a recorded gap of every forwarder.)
+#[test]
+fn java_parameters_names_an_inherited_default_forwarder_and_its_value_class_static() {
+    assert_parameter_parity(
+        "JavaParametersInheritedDefault",
+        "package demo\n\
+         @JvmInline value class Tag(val id: Int)\n\
+         interface Base {\n\
+         \x20 fun shared(x: Int, s: String): String = s + x\n\
+         \x20 var count: Int\n\
+         \x20\x20 get() = 7\n\
+         \x20\x20 set(value) {}\n\
+         \x20 fun String.decorate(times: Long): String = this + times\n\
+         \x20 fun tagged(tag: Tag): Int = tag.id\n\
+         }\n\
+         interface Left : Base { fun left(): String = \"left\" }\n\
+         interface Right : Base\n\
+         @JvmInline value class Held(val raw: Long) : Left, Right\n\
+         class Plain : Left, Right\n",
+        &["demo/Held", "demo/Plain"],
     );
 }
 

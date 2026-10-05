@@ -190,6 +190,7 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 }
                 for p in &mut c.body_props {
                     p.decl_line = line_at(p.span.lo);
+                    p.accessor_lines = accessor_lines(p, line_at);
                 }
                 for e in &mut c.enum_entries {
                     e.decl_line = line_at(e.span.lo);
@@ -229,9 +230,27 @@ pub(super) fn attach(file: &mut File, src: &str) {
             // A top-level property's accessors and `<clinit>` store map to its declaration line.
             Decl::Property(p) => {
                 p.decl_line = line_at(p.span.lo);
+                p.accessor_lines = accessor_lines(p, line_at);
             }
         }
     }
+}
+
+/// The header lines of `property`'s accessors written with a body of their own.
+fn accessor_lines(
+    property: &crate::ast::PropDecl,
+    line_at: impl Fn(u32) -> u32,
+) -> crate::ast::AccessorLines {
+    let getter = property
+        .getter_span
+        .filter(|_| property.getter.is_some())
+        .map_or(0, |span| line_at(span.lo));
+    let setter = property
+        .setter
+        .as_ref()
+        .filter(|setter| setter.body.is_some())
+        .map_or(0, |setter| line_at(setter.span.lo));
+    crate::ast::AccessorLines { getter, setter }
 }
 
 #[cfg(test)]
