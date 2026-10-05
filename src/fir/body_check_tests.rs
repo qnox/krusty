@@ -2006,3 +2006,86 @@ fun invokeRaw(
     assert!(analysis.types[0].is_some(), "body must build checked FIR");
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
 }
+
+#[test]
+fn a_suspend_reference_keeps_its_type_after_an_unrelated_function_cast() {
+    let source = r#"
+import kotlin.coroutines.*
+import kotlin.reflect.KFunction2
+import kotlin.reflect.KSuspendFunction1
+
+class Foo(val x: Int) {
+    suspend fun bar(y: Int) = y + x
+}
+
+fun box(): String {
+    val ref = Foo(42)::bar
+    (ref as KFunction2<Int, Continuation<Int>, Any?>)
+    (ref as Function2<Int, Continuation<Int>, Any?>)
+    val k = ref is KSuspendFunction1<Int, Any?>
+    val s = ref is SuspendFunction1<Int, Any?>
+    val ref1 = suspend { x: Int -> x }
+    val notK = ref1 !is KSuspendFunction1<Int, Any?>
+    val notF = ref1 !is KFunction2<*, *, *>
+    (ref1 as Function2<Int, Continuation<Int>, Any?>)
+    val s1 = ref1 is SuspendFunction1<Int, Any?>
+    val f1 = ref1 is Function2<Int, Continuation<Int>, Any?>
+    return "$k$s$notK$notF$s1$f1"
+}
+"#;
+    let mut diagnostics = DiagSink::new();
+    let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            "// WITH_REFLECT",
+        )),
+    ))
+    .expect("JVM provider initialization");
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(source).with_file_stem("SuspendCastNarrowing")],
+        Box::new(platform),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let file = &analysis.files[0];
+    let info = analysis.types[0].as_ref().expect("checked file");
+    let runtime_targets = file
+        .expr_arena
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expression)| {
+            matches!(expression, Expr::Is { .. })
+                .then(|| info.expr_lowers.get(&crate::ast::ExprId(index as u32)))
+                .flatten()
+        })
+        .filter_map(|lowering| match lowering {
+            crate::resolve::ExprLowering::RuntimeTypeOperand(target) => Some(*target),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(runtime_targets.len(), 6);
+    assert!(matches!(
+        runtime_targets[0],
+        Ty::Obj(name, _) if name.matches("kotlin/reflect/KSuspendFunction1")
+    ));
+    assert!(matches!(
+        runtime_targets[1],
+        Ty::Fun(signature) if signature.suspend && signature.params.len() == 1
+    ));
+    assert!(matches!(
+        runtime_targets[2],
+        Ty::Obj(name, _) if name.matches("kotlin/reflect/KSuspendFunction1")
+    ));
+    assert!(matches!(
+        runtime_targets[3],
+        Ty::Obj(name, _) if name.matches("kotlin/reflect/KFunction2")
+    ));
+    assert!(matches!(
+        runtime_targets[4],
+        Ty::Fun(signature) if signature.suspend && signature.params.len() == 1
+    ));
+    assert!(matches!(
+        runtime_targets[5],
+        Ty::Fun(signature) if !signature.suspend && signature.params.len() == 2
+    ));
+}

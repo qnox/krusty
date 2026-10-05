@@ -10358,7 +10358,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `x is SuspendFunction0<*>` (and a reified `x is T` once `T` is `suspend () -> R`) is
   `instanceof kotlin/coroutines/jvm/internal/SuspendFunction` conjoined with
   `isFunctionOfArity(x, N+1)`. A source `is` of the function-type spelling itself stays rejected
-  as an erased type, the same way `is (Int) -> Int` is. `x as SuspendFunctionN` is only the
+  as an erased type, the same way `is (Int) -> Int` is. An `as` to an unrelated function
+  classifier replaces the later read with that classifier's signature, and the binding keeps the
+  type it was declared with. `Foo::bar as KFunction2` and `suspend { x: Int -> x } as Function2`
+  therefore still prove `is KSuspendFunction1`, `is SuspendFunction1`, and `is Function2` with
+  concrete arguments: each is the always-true check kotlinc accepts.
+  (`src/fir/body_check_tests.rs`,
+  `a_suspend_reference_keeps_its_type_after_an_unrelated_function_cast`.)
+  `x as SuspendFunctionN` is only the
   `checkcast` to `Function{N+1}`; the marker test stays on `is` and on `as?`. A reference to a
   suspend function keeps that suspend function type even with no expected function type, including
   a local `::suspendLocal`: its carrier implements `Function{N+1}` and

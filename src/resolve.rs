@@ -50195,7 +50195,9 @@ impl<'a> Checker<'a> {
         // A successful cast contributes an intersection with the path's existing stable type; it
         // never widens that type. In particular, evaluating `nonNull as T?` does not make later
         // reads nullable. Preserve the already-more-specific declaration/flow fact and only use
-        // the cast target when it actually narrows it.
+        // the cast target when it actually narrows it. An unrelated function cast therefore
+        // replaces the read projection with the target signature; the binding's declared type
+        // still proves a later `is` against the original suspend classifier.
         Some(
             declared
                 .filter(|declared| self.receiver_is_assignable(*declared, narrowed))
@@ -61785,6 +61787,37 @@ impl<'a> Checker<'a> {
         out.finish()
     }
 
+    /// Types a function `is` may use as proof. The read projection can be a cast's function
+    /// signature while the binding is still its declared classifier and callable-reference shape.
+    fn function_test_proof_operands(
+        &self,
+        scope: &CheckerScope<'_>,
+        operand: ExprId,
+        observed: Ty,
+    ) -> Vec<Ty> {
+        let mut types = vec![observed];
+        if let Some(path) = self.expr_access_path(operand) {
+            if let (scope::PathRoot::Value(identity), true) = (&path.root, path.segments.is_empty())
+            {
+                if let Some((_, local)) = self.visible_flow_value(scope, *identity) {
+                    types.push(local.declared_ty);
+                    types.push(local.ty);
+                    if let Some(function) = local.callable_reference_type {
+                        types.push(function);
+                    }
+                }
+            }
+        }
+        let mut expanded = Vec::new();
+        for ty in types {
+            match ty.non_null() {
+                Ty::Intersection(parts) => expanded.extend(parts.iter().copied()),
+                other => expanded.push(other),
+            }
+        }
+        expanded
+    }
+
     fn expr_inner_is(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -61855,38 +61888,49 @@ impl<'a> Checker<'a> {
                 let source = self.fed_source();
                 let proof_target =
                     crate::symbol_resolver::classifier_callable_signature(&source, tt.non_null());
-                let proof_operand =
-                    crate::symbol_resolver::classifier_callable_signature(&source, ot.non_null());
-                let callable_components_proven =
-                    proof_operand
-                        .zip(proof_target)
-                        .is_some_and(|(operand, target)| {
-                            self.receiver_is_assignable(operand, target)
-                                || match operand {
-                                    Ty::Fun(signature) if signature.suspend => {
-                                        // A suspend function value also implements the ordinary
-                                        // FunctionN+1 CPS interface: value parameters, trailing
-                                        // Continuation<R>, and nullable Any result. This is a runtime
-                                        // classifier fact used only to validate an explicit FunctionN
-                                        // type test; the expression's semantic suspend shape is retained.
-                                        let mut parameters = signature.params.to_vec();
-                                        parameters.push(Ty::obj_args(
-                                            "kotlin/coroutines/Continuation",
-                                            &[signature.ret],
-                                        ));
-                                        let cps = Ty::fun(
-                                            parameters,
-                                            Ty::nullable(Ty::obj("kotlin/Any")),
-                                        );
-                                        self.receiver_is_assignable(cps, target)
-                                    }
-                                    _ => false,
+                // A cast to an unrelated function classifier replaces the read projection with
+                // that classifier's signature (`KSuspendFunction1` becomes `(Int, Continuation) ->
+                // Any?`). The binding's declared type and callable-reference shape are still types
+                // the value has, so `is KSuspendFunction1` after `as KFunction2` stays the
+                // always-true check.
+                let proof_operands = self.function_test_proof_operands(scope, operand, ot);
+                let proof_operand = proof_operands.iter().copied().find_map(|candidate| {
+                    crate::symbol_resolver::classifier_callable_signature(&source, candidate)
+                });
+                let callable_components_proven = proof_target.is_some_and(|target| {
+                    proof_operands.iter().copied().any(|candidate| {
+                        let Some(operand) = crate::symbol_resolver::classifier_callable_signature(
+                            &source, candidate,
+                        ) else {
+                            return false;
+                        };
+                        self.receiver_is_assignable(operand, target)
+                            || match operand {
+                                Ty::Fun(signature) if signature.suspend => {
+                                    // A suspend function value also implements the ordinary
+                                    // FunctionN+1 CPS interface: value parameters, trailing
+                                    // Continuation<R>, and nullable Any result. This is a runtime
+                                    // classifier fact used only to validate an explicit FunctionN
+                                    // type test; the expression's semantic suspend shape is retained.
+                                    let mut parameters = signature.params.to_vec();
+                                    parameters.push(Ty::obj_args(
+                                        "kotlin/coroutines/Continuation",
+                                        &[signature.ret],
+                                    ));
+                                    let cps =
+                                        Ty::fun(parameters, Ty::nullable(Ty::obj("kotlin/Any")));
+                                    self.receiver_is_assignable(cps, target)
                                 }
-                        });
-                let statically_proven = !ot.contains_error()
-                    && !tt.contains_error()
-                    && (self.receiver_is_assignable(ot.non_null(), tt)
-                        || callable_components_proven);
+                                _ => false,
+                            }
+                    })
+                });
+                let statically_proven =
+                    !ot.contains_error()
+                        && !tt.contains_error()
+                        && (proof_operands.iter().copied().any(|candidate| {
+                            self.receiver_is_assignable(candidate, tt.non_null())
+                        }) || callable_components_proven);
                 crate::trace_compiler!(
                     "resolve",
                     "runtime function test operand={ot:?} proof_operand={proof_operand:?} target={tt:?} proof_target={proof_target:?} proven={statically_proven}",
