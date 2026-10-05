@@ -777,6 +777,8 @@ mod enum_value_of_intrinsic_e2e;
 mod enum_vararg_e2e;
 #[path = "erased_scalar_result_e2e.rs"]
 mod erased_scalar_result_e2e;
+#[path = "erased_type_check_e2e.rs"]
+mod erased_type_check_e2e;
 #[path = "error_branch_join_e2e.rs"]
 mod error_branch_join_e2e;
 #[path = "error_receiver_cascade_e2e.rs"]
@@ -1345,6 +1347,8 @@ mod local_fun_default_args_e2e;
 mod local_fun_overload_e2e;
 #[path = "local_fun_ref_e2e.rs"]
 mod local_fun_ref_e2e;
+#[path = "local_function_signature_e2e.rs"]
+mod local_function_signature_e2e;
 #[path = "local_inner_enclosing_line_e2e.rs"]
 mod local_inner_enclosing_line_e2e;
 #[path = "local_override_boxed_result_e2e.rs"]
@@ -2621,6 +2625,8 @@ mod value_class_param_generic_return_e2e;
 mod value_class_private_init_e2e;
 #[path = "value_class_property_argument_e2e.rs"]
 mod value_class_property_argument_e2e;
+#[path = "value_class_property_entry_e2e.rs"]
+mod value_class_property_entry_e2e;
 #[path = "value_class_property_reference_e2e.rs"]
 mod value_class_property_reference_e2e;
 #[path = "value_class_receiver_capture_debug_names_e2e.rs"]

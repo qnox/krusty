@@ -70,6 +70,7 @@ mod candidate_display;
 mod capture_analysis;
 mod capture_field_order;
 mod capture_storage;
+mod cast_erasure;
 mod cast_narrowing;
 mod catch_flow;
 mod checker_symbol_queries;
@@ -25052,9 +25053,8 @@ impl<'a> Checker<'a> {
         // the same spelling, including the constructor parameter a stored property shadows.
         let outer_names = Self::capturable_local_names(scope, &own_params);
 
-        // Captured outer locals: lifted to extra leading parameters. Parameter defaults execute in
-        // the lifted callable's `$default` body, so they are declaration bodies for capture purposes
-        // just like the function body itself.
+        // Captured outer locals become extra leading parameters. Parameter defaults run in the
+        // lifted callable's `$default` body, so they capture like the function body itself.
         let mut captured_locals: Vec<(String, Ty, bool)> = Vec::new();
         if !outer_names.is_empty() {
             let body = match &f.body {
@@ -25092,10 +25092,9 @@ impl<'a> Checker<'a> {
             .receiver
             .as_ref()
             .map(|receiver| self.type_ref_ty(&physical_signature_scope, receiver));
-        // The lifted callable's physical signature uses erased types, but its lexical body and
-        // defaults must see the declaration-owned symbolic parameters. Mixing the two views turns
-        // `fun <T> reference(): List<T>.() -> T = List<T>::item` into an `Any` expectation while
-        // the selected property reference correctly carries the local `T` identity.
+        // The lifted callable's physical signature is erased, but its body and defaults see the
+        // declaration-owned symbolic parameters: otherwise `fun <T> reference(): List<T>.() -> T =
+        // List<T>::item` expects `Any` while the selected reference carries the local `T` identity.
         let semantic_params = if f.type_params.is_empty() {
             params.clone()
         } else {
@@ -25237,7 +25236,9 @@ impl<'a> Checker<'a> {
                     f.type_param_bounds
                         .iter()
                         .filter(|(owner, _)| owner == parameter)
-                        .map(|(_, bound)| self.type_ref_ty(&semantic_signature_scope, bound))
+                        .map(|(_, bound)| {
+                            self.check_type_parameter_bound(&semantic_signature_scope, bound)
+                        })
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>();
@@ -61198,65 +61199,30 @@ impl<'a> Checker<'a> {
                 );
                 return self.set(e, Ty::Error);
             }
-            // A fully star-projected `FunctionN<*, ... , *>` is a reified runtime interface/arity
-            // check. Concrete components are also legal when the operand's static type already
-            // proves them: only the classifier/null check then remains at runtime (`c` in
-            // `c: suspend () -> String; c is suspend () -> String`).
-            if let Some(shape) = function_type_ref_shape(&ty)
-                .or_else(|| self.classifier_function_type_ref_shape(scope, &ty))
-            {
-                let fully_star_projected = ty.name != "<fun>"
-                    && ty.fun_params.is_empty()
-                    && shape.params.iter().all(TypeRef::is_star_projection)
-                    && shape.ret.is_some_and(TypeRef::is_star_projection);
-                // A nominal callable classifier is proved against a function-type target through
-                // the callable signature published by its declaration. This matters for reflective
-                // suspend references: `KSuspendFunction1<Int, Int>` is also a
-                // `SuspendFunction1<Int, Any?>`, with ordinary covariant result typing.
-                let source = self.fed_source();
-                let proof_target =
-                    crate::symbol_resolver::classifier_callable_signature(&source, tt.non_null());
-                let proof_operand =
-                    crate::symbol_resolver::classifier_callable_signature(&source, ot.non_null());
-                let callable_components_proven =
-                    proof_operand
-                        .zip(proof_target)
-                        .is_some_and(|(operand, target)| {
-                            self.receiver_is_assignable(operand, target)
-                                || match operand {
-                                    Ty::Fun(signature) if signature.suspend => {
-                                        // A suspend function value also implements the ordinary
-                                        // FunctionN+1 CPS interface: value parameters, trailing
-                                        // Continuation<R>, and nullable Any result. This is a runtime
-                                        // classifier fact used only to validate an explicit FunctionN
-                                        // type test; the expression's semantic suspend shape is retained.
-                                        let mut parameters = signature.params.to_vec();
-                                        parameters.push(Ty::obj_args(
-                                            "kotlin/coroutines/Continuation",
-                                            &[signature.ret],
-                                        ));
-                                        let cps = Ty::fun(
-                                            parameters,
-                                            Ty::nullable(Ty::obj("kotlin/Any")),
-                                        );
-                                        self.receiver_is_assignable(cps, target)
-                                    }
-                                    _ => false,
-                                }
-                        });
-                let statically_proven = !ot.contains_error()
-                    && !tt.contains_error()
-                    && (self.receiver_is_assignable(ot.non_null(), tt)
-                        || callable_components_proven);
+            // FIR's CANNOT_CHECK_FOR_ERASED: the runtime test checks only the target's classifier,
+            // so the operand's static type (its smart-cast intersection when flow narrowed it) must
+            // prove the rest of the target.
+            let function_shape = function_type_ref_shape(&ty)
+                .or_else(|| self.classifier_function_type_ref_shape(scope, &ty));
+            // A function-type target with an unresolved component still has its classifier, and
+            // kotlinc reports the erased test (rendering the component as `???`) in place of the
+            // unresolved reference.
+            if !tt.contains_error() || function_shape.is_some() {
+                let operand_ty = self.type_test_operand_ty(scope, operand, ot);
+                let reified_target = matches!(tt.non_null(), Ty::TyParam(..))
+                    && scope.reified_tparam(&ty.name).is_some();
+                let erased = self.is_cast_erased(operand_ty, tt, reified_target);
                 crate::trace_compiler!(
                     "resolve",
-                    "runtime function test operand={ot:?} proof_operand={proof_operand:?} target={tt:?} proof_target={proof_target:?} proven={statically_proven}",
+                    "runtime type test operand={operand_ty:?} target={tt:?} reified={reified_target} erased={erased}",
                 );
-                if !fully_star_projected && !statically_proven {
-                    let rendered = if function_type_ref_shape(&ty).is_some() {
-                        self.erased_function_type_display(scope, &ty)
-                    } else {
-                        self.erased_function_shape_display(scope, shape)
+                if erased {
+                    let rendered = match function_shape {
+                        Some(_) if function_type_ref_shape(&ty).is_some() => {
+                            self.erased_function_type_display(scope, &ty)
+                        }
+                        Some(shape) => self.erased_function_shape_display(scope, shape),
+                        None => self.diagnostic_type_name(tt, &[tt]),
                     };
                     self.diags.error(
                         ty.span,
@@ -61264,17 +61230,17 @@ impl<'a> Checker<'a> {
                     );
                     return Ty::Error;
                 }
-                if function_type_ref_shape(&ty).is_none() {
-                    // FunctionN/SuspendFunctionN are metadata-only classifier spellings and test
-                    // their physical function interface. Reflective KFunctionN/KSuspendFunctionN
-                    // are nominal runtime markers: retain that classifier so lowering does not
-                    // collapse `is KSuspendFunction1` into the broader `is Function2` test.
-                    let runtime_type =
-                        crate::symbol_resolver::declared_function_type(&self.fed_source(), tt)
-                            .unwrap_or(tt);
-                    self.expr_lowers
-                        .insert(e, ExprLowering::RuntimeTypeOperand(runtime_type));
-                }
+            }
+            if function_shape.is_some() && function_type_ref_shape(&ty).is_none() {
+                // FunctionN/SuspendFunctionN are metadata-only classifier spellings and test
+                // their physical function interface. Reflective KFunctionN/KSuspendFunctionN
+                // are nominal runtime markers: retain that classifier so lowering does not
+                // collapse `is KSuspendFunction1` into the broader `is Function2` test.
+                let runtime_type =
+                    crate::symbol_resolver::declared_function_type(&self.fed_source(), tt)
+                        .unwrap_or(tt);
+                self.expr_lowers
+                    .insert(e, ExprLowering::RuntimeTypeOperand(runtime_type));
             }
             // An unresolved non-function target reads exactly as kotlinc reports it — `unresolved
             // reference 'T'.` at the failing type's span — never as a compiler-specific rejection.

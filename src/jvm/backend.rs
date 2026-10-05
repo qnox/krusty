@@ -73,6 +73,9 @@ pub(crate) struct BackendPassFacts {
     /// Checked property operations realized before representation passes. Companion hoisting
     /// reads it to attach a private accessor to the operation that moves into `<clinit>`.
     property_realizations: crate::jvm::property_realizations::PropertyRealizations,
+    /// The `-jvm-default` mode, which decides the forwarders (and their bridges) a class writes for
+    /// the interface defaults it inherits.
+    jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -187,8 +190,13 @@ fn run_backend_passes_after_plugins(
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
-    crate::jvm::module_calls::realize_super_calls(ir, callables, &mut facts.property_realizations)
-        .map_err(|_| SkipReason::SuperCalls)?;
+    crate::jvm::module_calls::realize_super_calls(
+        ir,
+        callables,
+        &mut facts.property_realizations,
+        facts.jvm_default,
+    )
+    .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
     // declaration that has no class-file form. Before the value-class pass, which renames a marker
@@ -241,6 +249,7 @@ fn run_backend_passes_after_plugins(
         callables,
         &facts.override_results,
         &mut facts.function_argument_arrays,
+        facts.jvm_default,
     )?;
     crate::jvm::collection_barriers::select(
         ir,
@@ -270,6 +279,7 @@ fn run_backend_passes_after_plugins(
         &mut facts.property_reference_realizations,
     );
     crate::jvm::parameter_assertions::finalize_after_value_class_lowering(ir);
+    crate::jvm::default_parameter_representation::record_defaulted_primitive_bounds(ir);
     // A concatenation appends a `toString()` call's receiver itself, as kotlinc does once its
     // value-class lowering has turned a value class's `toString()` into a static call.
     crate::jvm::concatenated_to_string::flatten_to_string_operands(ir);
@@ -790,6 +800,7 @@ struct BackendReadyIr<'a> {
     facade_class: crate::types::TypeName,
     package: String,
     signature_symbols: &'a dyn BackendClassifierSource,
+    dependency_callables: crate::backend::CheckedBackendCallables,
     inner_class_resolver: crate::jvm::classfile::InnerClassResolver,
     pass_facts: BackendPassFacts,
     metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
@@ -873,6 +884,7 @@ impl JvmBackend {
                 facade_class,
                 package,
                 signature_symbols: &classifiers,
+                dependency_callables: callables,
                 inner_class_resolver,
                 pass_facts,
                 metadata,
@@ -897,6 +909,7 @@ impl JvmBackend {
             facade_class,
             package,
             signature_symbols,
+            dependency_callables,
             inner_class_resolver,
             pass_facts,
             metadata,
@@ -940,6 +953,7 @@ impl JvmBackend {
             crate::jvm::ir_emit::CheckedEmitFacts {
                 metadata: emit_metadata,
                 signature_symbols,
+                dependency_callables: &dependency_callables,
                 property_realizations: &pass_facts.property_realizations,
                 property_reference_realizations: &pass_facts.property_reference_realizations,
                 default_call_operands: &pass_facts.default_call_operands,
@@ -1166,6 +1180,7 @@ impl Backend for JvmBackend {
             &file.classifiers,
             &file.callables,
             &mut property_realizations,
+            self.jvm_default,
         ) {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1199,6 +1214,7 @@ impl Backend for JvmBackend {
                 default_call_operands,
                 local_delegate_access,
                 lambda_methods,
+                jvm_default: self.jvm_default,
                 ..BackendPassFacts::default()
             },
             state,
