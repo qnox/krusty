@@ -385,9 +385,10 @@ impl BodyLowering<'_> {
         }
         let captured_type_parameters = self.local_captured_type_parameters(body);
         // A lambda literal's method is signed without generics; an anonymous function's is not.
-        if body.source_lambda().is_some_and(|lambda| {
-            lambda.form() == crate::fir::FirLambdaForm::AnonymousFunction
-        }) {
+        if body
+            .source_lambda()
+            .is_some_and(|lambda| lambda.form() == crate::fir::FirLambdaForm::AnonymousFunction)
+        {
             self.attach_local_type_parameters(function, body, &captured_type_parameters);
         }
         let realization = LocalCallableRealization {

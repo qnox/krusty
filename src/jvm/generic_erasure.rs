@@ -8,7 +8,7 @@
 //! reconstruct an owner from a JVM name. Keeping the conversion here prevents common lowering from
 //! committing a backend representation.
 
-use super::default_parameter_representation::primitive_bounded_type_parameter;
+use super::default_parameter_representation::primitive_wrapper;
 use crate::ir::{IrFile, IrTypeParameter};
 use crate::types::{wk, Ty};
 use std::collections::{HashMap, HashSet};
@@ -67,11 +67,12 @@ fn resolve_primary_bound(
 /// `T : IC?` maps as the nullable value class), and a bare `T` is nullable when a bound along its
 /// chain is. A reference bound erases to the same class either way. A non-null occurrence bounded
 /// by a JVM primitive stays the type parameter: its descriptor is already the primitive, and its
-/// `$default` stub takes the JDK wrapper instead.
+/// `$default` stub takes the JDK wrapper instead. An unsigned or other value-class bound is not a
+/// JVM primitive and erases like any other bound.
 fn physical_type(ty: Ty, erasures: &HashMap<String, Ty>) -> Ty {
     match ty {
         Ty::TyParam(name, _) => match erasures.get(name).copied() {
-            Some(_) if primitive_bounded_type_parameter(ty).is_some() => ty,
+            Some(_) if primitive_bound(ty) => ty,
             Some(erasure) if ty.upper_bound_admits_null() => Ty::nullable(erasure),
             Some(erasure) => erasure,
             None => ty,
@@ -84,6 +85,11 @@ fn physical_type(ty: Ty, erasures: &HashMap<String, Ty>) -> Ty {
         }
         _ => ty,
     }
+}
+
+/// Whether `ty` is a non-null type-parameter occurrence whose bound is itself a JVM primitive.
+fn primitive_bound(ty: Ty) -> bool {
+    matches!(ty, Ty::TyParam(_, bound) if primitive_wrapper(*bound).is_some())
 }
 
 /// JVM primary erasure for each declaration-owned type parameter. Reified-operation realization

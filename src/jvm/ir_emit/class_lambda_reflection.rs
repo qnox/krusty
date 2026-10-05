@@ -3,8 +3,9 @@
 //! `Lambda.toString()` asks kotlin-reflect to read that record and render the function type.
 //! Without it, reflection falls back to the raw `FunctionN` interface.
 
+use crate::ir::type_reflection::type_parameters_named_by;
 use crate::ir::type_reflection::LambdaClassProvenance;
-use crate::ir::{IrFile, IrParameterRole};
+use crate::ir::{IrFile, IrParameterRole, IrTypeParameter};
 use crate::types::Ty;
 
 use super::signature_formatter::{JvmSignatureFormatter, Wildcards};
@@ -39,6 +40,10 @@ pub(super) fn reflect(
         .get(&expr)
         .copied()
         .ok_or("a source class lambda has no function type")?;
+    let recorded = ir
+        .recorded_lambda_type_parameters(impl_fn)
+        .ok_or("a source class lambda does not publish its type parameters")?;
+    let function_type = approximate_unpublished_type_parameters(function_type, recorded);
     let Ty::Fun(signature) = function_type.non_null() else {
         return Err("a source class lambda's type is not a function type".to_string());
     };
@@ -56,9 +61,6 @@ pub(super) fn reflect(
     };
     let names = value_parameter_names(ir, impl_fn, values.len())?
         .ok_or("a source class lambda has no parameter identities")?;
-    let recorded = ir
-        .recorded_lambda_type_parameters(impl_fn)
-        .ok_or("a source class lambda does not publish its type parameters")?;
     let rendered = formatter
         .ty_at(&function_type.non_null(), Wildcards::Suppressed)
         .ok_or("a class lambda's function type has no JVM signature")?;
@@ -107,6 +109,76 @@ pub(super) fn reflect(
         d1: crate::metadata::encoding::bytes_to_strings(&bytes),
         d2: strings,
     }))
+}
+
+/// `function_type` with each type parameter the checker did not publish for the lambda replaced
+/// by its bound. A builder-inferred lambda can name a type parameter of the library function that
+/// inferred it, an inference variable outside the lambda's scope; kotlinc's declaration
+/// approximation replaces it the same way.
+pub(super) fn approximate_unpublished_type_parameters(
+    function_type: Ty,
+    published: &[IrTypeParameter],
+) -> Ty {
+    let mut named = Vec::new();
+    type_parameters_named_by(function_type, &mut named);
+    let mut unpublished = Vec::new();
+    let mut index = 0;
+    while let Some(&name) = named.get(index) {
+        index += 1;
+        match published
+            .iter()
+            .find(|parameter| parameter.semantic_name == name)
+        {
+            Some(parameter) => {
+                for &(bound, _) in &parameter.bounds {
+                    type_parameters_named_by(bound, &mut named);
+                }
+            }
+            None => unpublished.push(name),
+        }
+    }
+    approximate_type_parameters(function_type, &unpublished)
+}
+
+/// `ty` with each type parameter in `names` replaced by its bound, itself approximated.
+fn approximate_type_parameters(ty: Ty, names: &[&str]) -> Ty {
+    if names.is_empty() {
+        return ty;
+    }
+    let approximate = |ty: Ty| approximate_type_parameters(ty, names);
+    match ty {
+        Ty::TyParam(name, bound) if names.contains(&name) => approximate(*bound),
+        Ty::Fun(signature) => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .map(|&parameter| approximate(parameter))
+                .collect(),
+            approximate(signature.ret),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
+        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            name,
+            &arguments
+                .iter()
+                .map(|&argument| approximate(argument))
+                .collect::<Vec<_>>(),
+        ),
+        Ty::Nullable(inner) => Ty::nullable(approximate(*inner)),
+        Ty::DefinitelyNotNull(inner) => approximate(*inner).non_null(),
+        Ty::PlatformNullable(inner) => Ty::platform_nullable(approximate(*inner)),
+        Ty::InProjection(inner) => Ty::in_projection(approximate(*inner)),
+        Ty::OutProjection(inner) => Ty::out_projection(approximate(*inner)),
+        Ty::Intersection(parts) => Ty::intersection(
+            &parts
+                .iter()
+                .map(|&part| approximate(part))
+                .collect::<Vec<_>>(),
+        ),
+        _ => ty,
+    }
 }
 
 /// Metadata names of the lambda's value parameters, in order. `None` when the implementation has
