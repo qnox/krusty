@@ -3,15 +3,20 @@
 //! that literal's body. `require(cond) { msg }`, `check(cond) { msg }`, and the branchless
 //! `let`/`also`/… shapes all take it.
 //!
-//! The call reaches this splice only after its literal positions are selected and its route is
-//! decided, so the splice owns the call: every fact it reads — the host's descriptor, each
-//! literal's checked function type and body result, the frame plan placing each literal's locals,
-//! and the operand-stack requirement of the spliced code — is either present, or the call fails
-//! with an emission error. Nothing is reconstructed from the physical lambda method, and a failure
-//! never hands the call to another lowering.
+//! The call reaches this splice after its literal positions are selected and its route is decided.
+//! [`unified_splice_plan`] then decides, before any capture is bound or any code is emitted:
 //!
-//! The checked facts and the frame plan are validated by [`unified_splice_plan`] before any capture
-//! is bound or any code is emitted.
+//! - each selected literal's checked facts (its function type sized to its arity, its body's
+//!   result, a method parameter per argument). A missing or mis-sized fact is invalid IR, and the
+//!   call fails with an emission error; nothing is reconstructed from the physical lambda method;
+//! - the host body's frame plan around those literals. A host whose frame cannot be planned (one
+//!   whose invokes move the lambda through another local, or a coroutine state machine compiled
+//!   for direct calls) is a shape this splice does not support. That is decided here, before
+//!   placement, so the call is [`InlineCallOutcome::NotApplicable`] and its caller lowers it as
+//!   for any other declined splice: a real call when the callee allows one, an error otherwise.
+//!
+//! Once the plan is made the splice owns the call: failing to build, decode, or splice a placed
+//! literal is an emission error, never another lowering.
 
 use super::inline_call_outcome::InlineCallOutcome;
 use super::*;
@@ -96,22 +101,39 @@ fn literal_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static s
     })
 }
 
+/// What planning a unified splice decided.
+#[derive(Debug, PartialEq)]
+pub(super) enum UnifiedSplice {
+    /// The splice is planned; placing it owns the call.
+    Planned(UnifiedSplicePlan),
+    /// The host body's frame cannot be planned around the selected literals: a host shape this
+    /// splice does not support, decided before anything is placed.
+    UnsupportedHost,
+}
+
 /// Plan the splice of the literals at `positions` among `args`, whose frame plan is `frame`.
-/// Every selected literal must carry its checked facts and have its place in the frame plan.
+/// Every selected literal must carry its checked facts, whatever the host; a planned frame must
+/// place every selected literal at one or more invoke sites.
 pub(super) fn unified_splice_plan(
     ir: &IrFile,
     args: &[ExprId],
     positions: &[usize],
     frame: Option<&SplicedFrame>,
-) -> Result<UnifiedSplicePlan, &'static str> {
-    let frame =
-        frame.ok_or("an inline body's frame cannot be planned around its placed lambdas")?;
-    let mut literals = Vec::with_capacity(positions.len());
-    for (ordinal, &operand) in positions.iter().enumerate() {
-        let lambda = *args
-            .get(operand)
-            .ok_or("a placed lambda's position is not an operand of the call")?;
-        let facts = literal_facts(ir, lambda)?;
+) -> Result<UnifiedSplice, &'static str> {
+    let facts = positions
+        .iter()
+        .map(|&operand| {
+            let lambda = *args
+                .get(operand)
+                .ok_or("a placed lambda's position is not an operand of the call")?;
+            Ok((operand, literal_facts(ir, lambda)?))
+        })
+        .collect::<Result<Vec<_>, &'static str>>()?;
+    let Some(frame) = frame else {
+        return Ok(UnifiedSplice::UnsupportedHost);
+    };
+    let mut literals = Vec::with_capacity(facts.len());
+    for (ordinal, (operand, facts)) in facts.into_iter().enumerate() {
         let (Some(&slot_base), Some(&sites)) = (
             frame.lambda_bases.get(ordinal),
             frame.site_counts.get(ordinal),
@@ -128,10 +150,10 @@ pub(super) fn unified_splice_plan(
             sites,
         });
     }
-    Ok(UnifiedSplicePlan {
+    Ok(UnifiedSplice::Planned(UnifiedSplicePlan {
         literals,
         top_local: frame.top_local,
-    })
+    }))
 }
 
 /// The spliced code's handlers clear the operand stack, and its external transfers target code
@@ -141,7 +163,8 @@ const OPERANDS_ACROSS_SPLICED_CONTROL: &str =
 
 impl Emitter<'_> {
     /// Splice `call`, whose selected literal positions are `positions`, with the host's locals from
-    /// `base`. The call is owned from here: a failure is the run's emission error.
+    /// `base`. [`InlineCallOutcome::NotApplicable`] only when the host's shape is unsupported, which
+    /// is decided before anything is placed; once placed, a failure is the run's emission error.
     pub(super) fn splice_selected_literals(
         &mut self,
         call: &bytecode_inline_call::ClasspathInlineCall<'_, '_>,
@@ -149,7 +172,24 @@ impl Emitter<'_> {
         base: u16,
         code: &mut CodeBuilder,
     ) -> InlineCallOutcome {
-        match self.splice_unified_call(call, positions, base, code) {
+        let (params, plan) = match self.plan_unified_splice(call, positions, base, code) {
+            Ok((params, UnifiedSplice::Planned(plan))) => (params, plan),
+            Ok((_, UnifiedSplice::UnsupportedHost)) => {
+                crate::trace_compiler!(
+                    "splice",
+                    "unified splice declined before placement: {}.{}{}",
+                    call.target.owner,
+                    call.target.name,
+                    call.target.splice_desc
+                );
+                return InlineCallOutcome::NotApplicable;
+            }
+            Err(reason) => {
+                self.run.set_emit_error(reason.to_string());
+                return InlineCallOutcome::HandledWithError;
+            }
+        };
+        match self.splice_unified_call(call, positions, base, (&params, &plan), code) {
             Ok(()) => InlineCallOutcome::Handled,
             Err(reason) => {
                 self.run.set_emit_error(reason.to_string());
@@ -158,11 +198,43 @@ impl Emitter<'_> {
         }
     }
 
+    /// Decide the splice of `call` from the checked IR and the host body, touching nothing. Also
+    /// returns the callee's physical parameters, one per operand.
+    fn plan_unified_splice(
+        &self,
+        call: &bytecode_inline_call::ClasspathInlineCall<'_, '_>,
+        positions: &[usize],
+        base: u16,
+        code: &CodeBuilder,
+    ) -> Result<(Vec<Ty>, UnifiedSplice), &'static str> {
+        let bytecode_inline_call::ClasspathInlineCall {
+            target, args, body, ..
+        } = *call;
+        let descriptor = target.splice_desc;
+        let params = parse_descriptor_params(descriptor)
+            .filter(|params| params.len() == args.len())
+            .ok_or("an inline callee's descriptor does not match the call's operands")?;
+        // ONE plan for caller locals: where the relocated host body ends, and where each
+        // substituted lambda's own locals begin. A substituted lambda's parameter slot is closed by
+        // the splice, so the body occupies that many slots fewer; and a lambda's locals go at the
+        // first slot free WHERE ITS INVOKE IS, not above every host local, because the reference
+        // compiler reuses slots belonging to host locals that are not written yet.
+        let frame = crate::jvm::inline::spliced_frame(body, descriptor, positions, base);
+        let plan = unified_splice_plan(self.ir, args, positions, frame.as_ref())?;
+        // The host's own handlers clear the operand stack: with caller operands below the call,
+        // the host is a shape this splice does not support.
+        if !body.handlers.is_empty() && code.stack_height() != 0 {
+            return Ok((params, UnifiedSplice::UnsupportedHost));
+        }
+        Ok((params, plan))
+    }
+
     fn splice_unified_call(
         &mut self,
         call: &bytecode_inline_call::ClasspathInlineCall<'_, '_>,
         positions: &[usize],
         base: u16,
+        (params, plan): (&[Ty], &UnifiedSplicePlan),
         code: &mut CodeBuilder,
     ) -> Result<(), &'static str> {
         let bytecode_inline_call::ClasspathInlineCall {
@@ -175,9 +247,6 @@ impl Emitter<'_> {
         let callee = target.name;
         let inline_only = target.inline_only;
         let descriptor = target.splice_desc;
-        let params = parse_descriptor_params(descriptor)
-            .filter(|params| params.len() == args.len())
-            .ok_or("an inline callee's descriptor does not match the call's operands")?;
         crate::trace_compiler!(
             "splice",
             "inline operands {:?}",
@@ -185,17 +254,6 @@ impl Emitter<'_> {
                 .map(|&argument| (argument, self.ir.expr(argument), self.value_ty(argument)))
                 .collect::<Vec<_>>()
         );
-        // ONE plan for caller locals: where the relocated host body ends, and where each
-        // substituted lambda's own locals begin. A substituted lambda's parameter slot is closed by
-        // the splice, so the body occupies that many slots fewer; and a lambda's locals go at the
-        // first slot free WHERE ITS INVOKE IS, not above every host local, because the reference
-        // compiler reuses slots belonging to host locals that are not written yet.
-        let frame = crate::jvm::inline::spliced_frame(body, descriptor, positions, base);
-        let plan = unified_splice_plan(self.ir, args, positions, frame.as_ref())?;
-        // The host's own handlers are known before anything is placed.
-        if !body.handlers.is_empty() && code.stack_height() != 0 {
-            return Err(OPERANDS_ACROSS_SPLICED_CONTROL);
-        }
         self.frame.reserve_through(plan.top_local);
         // Capture initializers belong to lambda-creation time, in argument evaluation order. A
         // capture that is already a caller local needs no code; every other checked value is
@@ -501,7 +559,7 @@ mod tests {
         };
         assert_eq!(
             unified_splice_plan(&ir, &args, &[1], Some(&frame(vec![4], vec![2]))),
-            Ok(UnifiedSplicePlan {
+            Ok(UnifiedSplice::Planned(UnifiedSplicePlan {
                 literals: vec![PlacedLiteral {
                     operand: 1,
                     facts: LiteralFacts {
@@ -517,7 +575,7 @@ mod tests {
                     sites: 2,
                 }],
                 top_local: 7,
-            })
+            }))
         );
     }
 
@@ -610,12 +668,32 @@ mod tests {
     }
 
     #[test]
-    fn an_undecided_frame_plan_rejects_the_splice() {
+    fn a_host_without_a_frame_plan_is_unsupported_before_placement() {
         let mut ir = IrFile::default();
         let args = checked_call(&mut ir);
         assert_eq!(
             unified_splice_plan(&ir, &args, &[1], None),
-            Err("an inline body's frame cannot be planned around its placed lambdas")
+            Ok(UnifiedSplice::UnsupportedHost)
+        );
+    }
+
+    /// The checked facts are decided before the host's shape: an unsupported host never turns
+    /// invalid IR into a declined call.
+    #[test]
+    fn missing_checked_facts_fail_even_where_the_host_is_unsupported() {
+        let mut ir = IrFile::default();
+        let (args, lambda, _) = call_with_literal(&mut ir);
+        ir.logical_types
+            .insert(lambda, function_type(vec![Ty::Int], Ty::Int));
+        assert_eq!(
+            unified_splice_plan(&ir, &args, &[1], None),
+            Err("a placed lambda's body has no checked result type")
+        );
+        let (args, _, body) = call_with_literal(&mut ir);
+        ir.logical_types.insert(body, Ty::Int);
+        assert_eq!(
+            unified_splice_plan(&ir, &args, &[1], None),
+            Err("a placed lambda has no checked function type with each argument's type")
         );
     }
 
@@ -744,20 +822,14 @@ mod tests {
         (emitted, run.emit_error(), run.inline_bail())
     }
 
-    /// The literal is selected, and the host's invoke reads no parameter, so no frame plan places
-    /// the literal. The call fails; it is never called for real, which `host` would allow.
+    /// The host's invoke reads no parameter, so no frame plan places the literal: a host shape the
+    /// splice does not support, decided before anything is placed. The call is declined and, as
+    /// `host` allows, called for real.
     #[test]
-    fn a_selected_literal_without_a_frame_plan_fails_the_call() {
+    fn a_host_whose_frame_cannot_be_planned_declines_before_placement() {
         let mut host = vec![0x01];
         host.extend(INVOKE_AND_READ_ASSERTIONS);
-        assert_eq!(
-            emit_box_calling(host),
-            (
-                false,
-                Some("an inline body's frame cannot be planned around its placed lambdas".into()),
-                None
-            )
-        );
+        assert_eq!(emit_box_calling(host), (true, None, None));
     }
 
     /// The literal is selected, placed, and its body built; the host's read of `_Assertions` then

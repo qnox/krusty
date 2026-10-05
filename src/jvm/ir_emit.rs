@@ -5625,6 +5625,11 @@ fn emit_method_inner_with_holder(
     // → its generic signature. `f.params`/`f.ret` are the SOURCE types (retain `<…>` args); `param_tys`/
     // `ret` are erased.
     let desc = reserved_desc;
+    // A method whose emission failed can stop with an incomplete operand stack; the pass is
+    // discarded, so its frames are never computed.
+    if env.run.emission_failed() {
+        return;
+    }
     e.cw.add_method_sig(access, &f.name, &desc, &code, reserved_sig.as_deref());
     if let Some((machine, slot)) = transformed {
         transformed_suspensions::request_transform(ir, e.cw, fid, (&f.name, &desc), machine, slot);
