@@ -2098,6 +2098,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instead uses `$$context_receiver_N`. A named context value remains an ordinary value capture.
   A lifted receiver lambda's guard quotes its receiver's local name (`$this$within`), not `<this>`
   (`tests/captured_receiver_names_e2e.rs`).
+- **Lifted type parameters (kotlinc's `ClosureAnnotator`).** A lifted local function declares a
+  copy of each type parameter its closure captures, ahead of its own:
+  `fun <T, S> outer() { fun <U> f(a: U, b: T) }` signs `outer$f` as `<T:…;U:…;>(TU;TT;)I`. The
+  closure sees the function's receiver, parameter and return types, its own type parameters'
+  bounds, then every type in its body, then includes the closure of each local function or lambda
+  it calls or contains (and of each local function it declares); capturing a type parameter also
+  sees its bound. A class type parameter is
+  captured like any other, since the lifted method is static. The function's body is checked
+  against its own type parameters, not their erasure; only the descriptor erases them. An
+  anonymous function is signed the same way, while a lambda literal's method carries no
+  `Signature` (`tests/local_function_signature_e2e.rs`).
+- **Lifted captured value order (kotlinc's `ClosureAnnotator`).** The captured values lead a lifted
+  local function's parameters in the order its closure first sees them, never by name: first the
+  values its defaults and body read, in reading order, then the closures of the local functions it
+  calls or references, of its lambdas and of the anonymous objects it creates, each in its own
+  order, as they are met. A local function it only declares, and a call to itself, add nothing.
+  `fun f() = g() + b` with `fun g() = a` takes `(b, a)`. The checker orders the declared captures
+  once the body is checked and keeps each one's declared position, so a streamed caller that
+  supplies them from the resolver's list places them (`tests/local_function_signature_e2e.rs`).
+  Not yet like kotlinc: kotlinc inlines an immediately invoked lambda literal (`{ … }()`), whose
+  reads are then the function's own; krusty still lifts it. An anonymous object's own fields are
+  still ordered by name.
 - **Inherited member call owner.** A call to an inherited member, or a read or write through an
   inherited property accessor, names the receiver's own class as the owner, as kotlinc does:
   `Leaf.m`, `Leaf.getBase`, `Leaf.hashCode`. An interface default reached through a class receiver
@@ -6517,7 +6539,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   PRIMITIVE-typed default slot passes the primitive zero (`iconst_0`), not `null` — `zero_placeholder` maps
   a non-nullable boxed-primitive `Obj("kotlin/Int")` (a JVM `int`) to `0`.
   A non-null type parameter bounded by a JVM primitive (`T : Char`) stays that primitive on the real
-  method and is the JDK wrapper (`java.lang.Character`) on the `$default` stub. An omitted call-site
+  method and is the JDK wrapper (`java.lang.Character`) on the `$default` stub when the parameter
+  declares a default; one without a default, and a captured value, stay the primitive on the stub
+  too (`fun <C : Char> f(a: C, b: C = a)` gives `f$default(char, Character, int, Object)`). A call
+  from another file reads which parameters declare defaults from the callee's header. An omitted call-site
   slot is `iconst_0; Character.valueOf`, the stub stores the default expression with the same
   `valueOf`, and the forward call unboxes with `charValue` (and the corresponding `valueOf` /
   `xxxValue` pair for the other primitive bounds). A nullable `T?` is already the wrapper on both

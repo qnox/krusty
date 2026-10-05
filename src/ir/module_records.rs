@@ -40,6 +40,8 @@ pub struct IrModuleCallable {
     /// a target-specific dispatch receiver, continuation, default mask, or marker. Backends use it
     /// for representation ABI without reopening FIR or reverse-engineering a synthetic descriptor.
     pub parameters: Box<[Ty]>,
+    /// The positions in `parameters` that declare a default value.
+    pub default_parameters: Box<[usize]>,
     /// Declaration type parameters and their complete bounds. A JVM realization erases a call to
     /// this declaration with the same primary class bound it uses for a same-file signature.
     pub type_parameters: Box<[IrCallableTypeParameter]>,

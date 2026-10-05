@@ -133,6 +133,16 @@ pub struct IrLambdaOrigin {
     pub(crate) class_provenance: Option<super::IrLocalClassNameProvenance>,
 }
 
+impl IrFile {
+    /// Whether `function` implements a lambda literal, rather than an anonymous function or a
+    /// declaration.
+    pub fn is_lambda_literal(&self, function: u32) -> bool {
+        self.lambda_origins
+            .get(&function)
+            .is_some_and(|origin| origin.form == IrLambdaForm::Literal)
+    }
+}
+
 /// The source form of a lowered function literal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrLambdaForm {

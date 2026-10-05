@@ -19,6 +19,7 @@ mod builder_inference_tests;
 #[cfg(test)]
 mod call_tests;
 mod calls;
+mod capture_order;
 #[cfg(test)]
 mod collection_literal_tests;
 #[cfg(test)]
@@ -56,6 +57,8 @@ mod local_classes;
 #[cfg(test)]
 mod local_function_tests;
 mod local_functions;
+mod session;
+pub use session::BodyCheckSession;
 #[cfg(test)]
 mod nothing_instantiation_tests;
 mod plugins;
@@ -531,70 +534,6 @@ struct BodyFirChecker<'a> {
     constructor_prefix_capture_access: bool,
     /// Whether an anonymous-super argument is being evaluated in its enclosing scope.
     hoist_anonymous_super_argument: bool,
-}
-
-/// Transient checked context shared only by body callbacks for the currently active source unit.
-/// Any Pass-1 context needed later is owned by its retained inline/default [`FirBody`] and copied
-/// into a fresh session at the start of Pass 2; the session itself never crosses the pass boundary.
-#[derive(Default)]
-pub struct BodyCheckSession {
-    class_bodies: HashMap<DeclarationId, ClassBodyContext>,
-    local_callables: HashMap<BodyLocalCallableDeclarationId, PublishedLocalCallable>,
-    local_delegated_properties: super::local_delegated_properties::LocalDelegatedPropertyIds,
-    active_source: Option<ActiveSourceDeclarations>,
-}
-
-#[derive(Clone, Debug)]
-struct PublishedLocalCallable {
-    captures: Box<[FirCapture]>,
-    implicit_receiver_captures: Box<[FirImplicitReceiverCapture]>,
-}
-
-impl BodyCheckSession {
-    fn install_active_source(&mut self, active: &ActiveSourceDeclarations) {
-        // Pass 2 binds a fresh parser arena for every top-level declaration unit. Two successive
-        // bindings can belong to the same source file while assigning the same transient DeclId to
-        // different stable local classifiers, so source identity alone cannot make this cacheable.
-        self.active_source = Some(active.clone());
-    }
-
-    pub(crate) fn absorb_retained_body(&mut self, body: &FirBody) {
-        body.collect_class_body_contexts(&mut self.class_bodies);
-        self.absorb_checked_body(body);
-    }
-
-    fn absorb_checked_body(&mut self, body: &FirBody) {
-        for raw in 0..body.statement_count() {
-            let statement = FirStatementId::from_raw(
-                u32::try_from(raw).expect("too many FIR statements for a packed identity"),
-            );
-            let Some(FirStatement {
-                kind:
-                    FirStatementKind::LocalFunction {
-                        declaration, body, ..
-                    },
-                ..
-            }) = body.statement(statement)
-            else {
-                continue;
-            };
-            let published = PublishedLocalCallable {
-                captures: body.captures().to_vec().into_boxed_slice(),
-                implicit_receiver_captures: body
-                    .implicit_receiver_captures()
-                    .to_vec()
-                    .into_boxed_slice(),
-            };
-            if let Some(previous) = self.local_callables.insert(*declaration, published.clone()) {
-                debug_assert_eq!(previous.captures, published.captures);
-                debug_assert_eq!(
-                    previous.implicit_receiver_captures,
-                    published.implicit_receiver_captures
-                );
-            }
-            self.absorb_checked_body(body);
-        }
-    }
 }
 
 impl BodyFirChecker<'_> {

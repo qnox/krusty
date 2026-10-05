@@ -633,7 +633,23 @@ fn a_local_reference_coerces_substituted_arguments_to_declared_slots() {
         "LocalGenericReferenceCoercion",
     );
 
-    let declared = Ty::obj("kotlin/Any");
+    // The generic slots are the lifted functions' declared `F`: the value's, and the vararg's
+    // element.
+    let declared_slot = |index: usize| {
+        let parameter = ir
+            .functions
+            .iter()
+            .filter(|function| function.name.starts_with("localFunction$"))
+            .nth(index)
+            .expect("each local function is lifted")
+            .params[0];
+        parameter.array_elem().unwrap_or(parameter)
+    };
+    let declared = [declared_slot(0), declared_slot(2)];
+    assert!(
+        declared.iter().all(|slot| matches!(slot, Ty::TyParam(..))),
+        "the generic local functions keep their type parameter: {declared:?}"
+    );
     let coercions = ir
         .exprs
         .iter()
@@ -642,13 +658,13 @@ fn a_local_reference_coerces_substituted_arguments_to_declared_slots() {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
-            } if *type_operand == declared => Some(*arg),
+            } => Some((*arg, *type_operand)),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        coercions.len(),
-        2,
+        coercions.iter().map(|&(_, operand)| operand).collect::<Vec<_>>(),
+        declared,
         "the erased value and vararg element are coerced, but the identical value is not; ops={:?} functions={:?}",
         ir.exprs
             .iter()
@@ -669,7 +685,7 @@ fn a_local_reference_coerces_substituted_arguments_to_declared_slots() {
     assert!(
         coercions
             .iter()
-            .all(|argument| matches!(ir.expr(*argument), IrExpr::GetValue(_))),
+            .all(|&(argument, _)| matches!(ir.expr(argument), IrExpr::GetValue(_))),
         "the coerced values are reference parameters"
     );
 }

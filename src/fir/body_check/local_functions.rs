@@ -31,7 +31,13 @@ impl BodyFirChecker<'_> {
                 BodyCheckFailureKind::UnsupportedStatement(StatementForm::LocalFunction),
             ));
         };
-        if function.params.len() != info.sig.params.len() {
+        // The body sees the function's own type parameters; only the lifted method's descriptor
+        // erases them.
+        let (params, result, receiver) = match &info.sig.generic_sig {
+            Some(generic) => (generic.params.as_slice(), generic.ret, generic.receiver),
+            None => (info.sig.params.as_slice(), info.sig.ret, info.receiver),
+        };
+        if function.params.len() != params.len() {
             return Err(self.failure(
                 Some(function.span),
                 BodyCheckFailureKind::UnsupportedCallShape,
@@ -52,7 +58,7 @@ impl BodyFirChecker<'_> {
         if let Some(owner) = self.body.lexical_class_owner() {
             body.set_lexical_class_owner(Some(owner));
         }
-        body.set_result_type(self.resolved_type(function.span, info.sig.ret)?);
+        body.set_result_type(self.resolved_type(function.span, result)?);
         if implicit_return {
             body.set_implicit_return();
         } else {
@@ -65,6 +71,7 @@ impl BodyFirChecker<'_> {
             );
         }
         body.set_debug_name(function.name.clone());
+        body.set_type_parameters(self.local_function_type_parameters(function)?);
         if let Some(site) = self.file.local_function_lifting_sites.get(&statement) {
             body.set_lifting_site(crate::fir::FirLiftingSite::from_source(site, true));
         }
@@ -84,7 +91,7 @@ impl BodyFirChecker<'_> {
             });
         }
         body.set_context_receiver_types(
-            info.sig.params[..context_count]
+            params[..context_count]
                 .iter()
                 .map(|ty| self.resolved_type(function.span, *ty))
                 .collect::<Result<Vec<_>, _>>()?,
@@ -95,7 +102,7 @@ impl BodyFirChecker<'_> {
                 .map(|parameter| parameter.context_kind)
                 .collect(),
         );
-        if let Some(receiver) = info.receiver {
+        if let Some(receiver) = receiver {
             let receiver_span = function
                 .receiver
                 .as_ref()
@@ -215,11 +222,11 @@ impl BodyFirChecker<'_> {
         for (ordinal, (parameter, ty)) in function
             .params
             .iter()
-            .zip(info.sig.params.iter().copied())
+            .zip(params.iter().copied())
             .enumerate()
         {
             if let Some(default) = parameter.default {
-                let target = nested.resolved_type(parameter.ty.span, info.sig.params[ordinal])?;
+                let target = nested.resolved_type(parameter.ty.span, params[ordinal])?;
                 let value = nested.value_at_selected_boundary(default, target)?;
                 let default_origin = nested.expression_origin(default)?;
                 nested.body.add_default_value(FirDefaultValue {
@@ -287,6 +294,16 @@ impl BodyFirChecker<'_> {
             kind: FirStatementKind::Expression(result),
         });
         nested.body.push_root(root_statement);
+        let order = super::capture_order::first_use_captures(
+            &nested.body,
+            declaration,
+            &nested.session.local_function_captures,
+        );
+        nested.body.order_captures(&order);
+        nested
+            .session
+            .local_function_captures
+            .insert(declaration, nested.body.captures().into());
         Ok(self.body.add_statement(FirStatement {
             origin,
             kind: FirStatementKind::LocalFunction {
@@ -297,6 +314,53 @@ impl BodyFirChecker<'_> {
                 body: Box::new(nested.body),
             },
         }))
+    }
+
+    /// The function's own type parameters, as the resolver identified and bounded them.
+    fn local_function_type_parameters(
+        &self,
+        function: &FunDecl,
+    ) -> Result<Vec<crate::fir::FirLocalTypeParameter>, BodyCheckFailure> {
+        let semantic_names = self
+            .info
+            .resolved_declaration_type_parameters(function.signature_span.lo);
+        if semantic_names.len() != function.type_params.len() {
+            return Err(self.failure(
+                Some(function.span),
+                BodyCheckFailureKind::UnresolvedTypeSyntax,
+            ));
+        }
+        function
+            .type_params
+            .iter()
+            .zip(semantic_names)
+            .map(|(name, semantic_name)| {
+                let bounds = function
+                    .type_param_bounds
+                    .iter()
+                    .filter(|(owner, _)| owner == name)
+                    .map(|(_, bound)| {
+                        let (ty, is_interface) =
+                            self.info.resolved_type_bound(bound).ok_or_else(|| {
+                                self.failure(
+                                    Some(bound.span),
+                                    BodyCheckFailureKind::UnresolvedTypeSyntax,
+                                )
+                            })?;
+                        Ok(crate::fir::ResolvedTypeParameterBound {
+                            ty: self.resolved_type(bound.span, ty)?,
+                            is_interface,
+                        })
+                    })
+                    .collect::<Result<Box<[_]>, BodyCheckFailure>>()?;
+                Ok(crate::fir::FirLocalTypeParameter {
+                    name: name.as_str().into(),
+                    semantic_name: semantic_name.as_str().into(),
+                    bounds,
+                    reified: function.reified_type_params.contains(name),
+                })
+            })
+            .collect()
     }
 
     pub(super) fn local_function_call(
@@ -490,13 +554,22 @@ impl BodyFirChecker<'_> {
                 Some(StmtLowering::LocalFunction(function)) => function.captures.clone(),
                 _ => return Err(self.failure(None, BodyCheckFailureKind::MissingStableCallTarget)),
             };
-            if value_captures.len() != requirements.captures.len() {
+            if value_captures.len() != requirements.captures.len()
+                || requirements.declaration_ordinals.len() != requirements.captures.len()
+            {
                 return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
             }
             let mut arguments = Vec::with_capacity(
                 requirements.captures.len() + requirements.implicit_receiver_captures.len(),
             );
-            for (capture, required) in value_captures.iter().zip(&requirements.captures) {
+            // The resolver lists the captures as they were declared; the target takes them in
+            // its own order.
+            for (&ordinal, required) in requirements
+                .declaration_ordinals
+                .iter()
+                .zip(&requirements.captures)
+            {
+                let capture = &value_captures[ordinal as usize];
                 let binding = self
                     .class_values
                     .get(&capture.name)
