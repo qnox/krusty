@@ -9,7 +9,7 @@ use crate::types::TypeName;
 /// A body group can be checked again after inherited visibility becomes final. The transient local
 /// providers were consumed by the first traversal, so validation binds the active parser method to
 /// its stable declaration and consumes the exact recorded edge instead of rediscovering it.
-pub(super) fn published_function_override_matches(
+pub(crate) fn published_function_override_matches(
     index: &ResolvedModuleIndex,
     active: &ActiveSourceDeclarations,
     file: &File,
