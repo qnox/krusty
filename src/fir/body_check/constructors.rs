@@ -1399,6 +1399,19 @@ pub(super) fn check_and_dispatch_constructor_body(
             .zip(classifier.interface_delegations.iter())
             .enumerate()
         {
+            let members = info
+                .interface_delegate_calls
+                .get(&delegation.value)
+                .cloned()
+                .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
+            checker
+                .body
+                .add_interface_delegate_calls(crate::fir::FirInterfaceDelegateCalls {
+                    classifier: class_declaration,
+                    delegation: u32::try_from(ordinal)
+                        .map_err(|_| CheckedBodyDriverFailure::ParameterShapeMismatch)?,
+                    members,
+                });
             match resolved.source {
                 crate::fir::ResolvedInterfaceDelegateSource::ConstructorParameter(_)
                 | crate::fir::ResolvedInterfaceDelegateSource::ConstructorProperty(_)

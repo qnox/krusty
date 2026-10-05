@@ -591,8 +591,8 @@ pub enum ClassMemberOrder {
 /// The type parameters a class captures from enclosing declarations, and how kotlinc numbers them.
 #[derive(Clone, Copy, Debug)]
 pub enum CapturedTypeParameters<'a> {
-    /// An inner class's: the enclosing classes' parameters hold the ids before its own, outermost
-    /// first.
+    /// A nested class's: every enclosing class's parameters, outermost first, hold the ids before
+    /// its own. An inner class addresses the ones it captures by those ids.
     Reserved(&'a [String]),
     /// A local or anonymous class's: its own parameters come first, and each captured one takes
     /// the next id on first use (see `TypeParameters`).
@@ -737,7 +737,7 @@ impl Default for ClassTail<'_> {
             primary_ctor_jvm_signature: true,
             type_params: &[],
             type_param_bounds: &[],
-            captured_type_params: CapturedTypeParameters::Reserved(&[]),
+            captured_type_params: CapturedTypeParameters::default(),
             sealed_subclasses: &[],
             supertypes: &[],
             annotations: &crate::metadata::NO_ANNOTATIONS,
@@ -825,7 +825,7 @@ pub fn build_class(
         numbered_on_use.iter().cloned(),
     );
     for (index, semantic) in reserved.iter().enumerate() {
-        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Captured(index as u64));
+        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Id(index as u64));
     }
     for (index, (source, parameter)) in tail
         .type_params
@@ -1164,15 +1164,18 @@ pub fn build_class(
                 .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
             _ => None,
         });
-        let mut field = Pb::new();
-        if let Some(n) = &p.field_name {
-            field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
-        }
-        if let Some(d) = &boxed_field_desc {
-            field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
-        }
-        // An abstract property has no backing field at all — kotlinc omits the entry rather than
-        // writing an empty one (which is what a concrete property's derived field looks like).
+        // An abstract property has no backing field at all: kotlinc omits the entry rather than
+        // writing an empty one, and interns none of its strings.
+        let field = p.has_backing_field.then(|| {
+            let mut field = Pb::new();
+            if let Some(n) = &p.field_name {
+                field.field_varint(1, st.local(n) as u64); // JvmFieldSignature.name = 1
+            }
+            if let Some(d) = &boxed_field_desc {
+                field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
+            }
+            field
+        });
         // Property.annotation = 14 / the backing field's = 34, both interning after the signature's
         // strings (kotlinc's serializer writes the JVM extension first). A disabled source feature
         // keeps the `HAS_ANNOTATIONS` flag above but writes no records.
@@ -1200,8 +1203,8 @@ pub fn build_class(
         for annotation in &field_annotations {
             prop.repeated_message(34, annotation); // Property.backingFieldAnnotation = 34
         }
-        if p.has_backing_field {
-            jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
+        if let Some(field) = &field {
+            jvm.field_message(1, field); // field (empty → derived; boxed primitive → explicit desc)
         }
         if let Some(synthetic_method) = &synthetic_method {
             jvm.field_message(2, synthetic_method); // JvmPropertySignature.syntheticMethod = 2
@@ -1519,7 +1522,7 @@ pub fn build_class(
     let inline_underlying: Option<(u32, Option<Pb>)> = tail.inline_underlying.map(|(name, ty)| {
         (
             st.local(name),
-            ty.map(|ty| type_pb(&mut st, ty, &class_type_parameters)),
+            ty.map(|ty| type_pb(&mut st, ty, &class_header_type_parameters)),
         )
     });
 
