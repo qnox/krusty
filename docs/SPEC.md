@@ -4756,8 +4756,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inline body normalizes them in the finished caller, so the save locals sit above every slot of
   the method as in kotlinc. Until then the emitter and the frame computation follow the stack as
   FixStack leaves it: empty inside a bracket, the saved values back under the lambda's result
-  after it. Tests: `tests/inlined_lambda_stack_spill_e2e.rs`,
-  `inliner::tests::a_lambda_invoked_over_a_stacked_value_is_bracketed_for_fix_stack`.
+  after it. Every analysis of a body that still carries the markers — the frame computation, the
+  coroutine machine's spill typing (`FrameTypes`), and the method-node stack shapes — follows the
+  brackets through one model (`bytecode::InlineCallBrackets`); the spill typing once kept the
+  saved values through a bracket, met the cleared frame recorded inside it, and declined a
+  suspension placed before an inlined `map` ("suspension inside a lambda that was not spliced").
+  Tests: `tests/inlined_lambda_stack_spill_e2e.rs`,
+  `inliner::tests::a_lambda_invoked_over_a_stacked_value_is_bracketed_for_fix_stack`,
+  `frame_types::tests::an_inline_call_bracket_saves_the_stack_and_puts_it_back_under_the_result`.
 - **A reified `catch (e: E)` uses the inline call's type argument as its JVM catch type.** The
   clause is checked as the reified parameter. Common IR stores only that semantic type. While the
   parameter is still unsubstituted, the JVM reified-operation pass records the declaration's
