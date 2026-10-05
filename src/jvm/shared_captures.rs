@@ -5,9 +5,9 @@
 //! constructor parameters as `kotlin.jvm.internal.Ref` holders without making that JVM choice part
 //! of frontend semantics.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::ir::{ClassId, IrExpr, IrFile};
+use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::types::Ty;
 
 const OBJECT_REF: &str = "kotlin/jvm/internal/Ref$ObjectRef";
@@ -128,6 +128,342 @@ pub(super) fn lower_class_capture_slots(ir: &mut IrFile) {
     }
 }
 
+/// Put a specialized shared cell back on the holder an uncloned escaping lambda still takes.
+///
+/// Inlining substitutes a type parameter in the copied template, including `RefNew`/`RefGet`/
+/// `RefSet`. That selects a primitive holder when the argument is `Int`. The lambda's
+/// implementation is not cloned for an ordinary parameter, and its capture parameter stays the
+/// erased `Ref$ObjectRef`. The cell has to use that holder; a primitive element is boxed into it
+/// and unboxed on the way out. A capture whose recorded element already selects the same holder,
+/// including a primitive cell an inlined lambda splices, is left alone.
+pub(crate) fn restore_erased_escaping_capture_holders(ir: &mut IrFile) {
+    let bodies = ir
+        .functions
+        .iter()
+        .filter_map(|function| function.body)
+        .collect::<Vec<_>>();
+    for body in bodies {
+        restore_body(ir, body);
+    }
+}
+
+fn restore_body(ir: &mut IrFile, body: ExprId) {
+    let mut declared: HashMap<u32, (Ty, Vec<ExprId>)> = HashMap::new();
+    let mut captured: Vec<(u32, u32, u32, Ty)> = Vec::new();
+    let mut reads: Vec<(ExprId, ExprId, Ty)> = Vec::new();
+    let mut writes: Vec<(ExprId, ExprId, Ty)> = Vec::new();
+    collect_body(
+        ir,
+        body,
+        &mut declared,
+        &mut captured,
+        &mut reads,
+        &mut writes,
+    );
+
+    // One slot can be captured by several implementations. Each implementation's current
+    // parameter is the holder that edge requires. The semantic type recorded when the capture
+    // was built is not that holder: value-class lowering may already have specialized both the
+    // cell and the parameter to `IntRef` while the record still names the value class.
+    let mut captures_by_slot: HashMap<u32, Vec<(u32, u32, Ty)>> = HashMap::new();
+    for (slot, function, ordinal, required) in captured {
+        captures_by_slot
+            .entry(slot)
+            .or_default()
+            .push((function, ordinal, required));
+    }
+    let mut erased_of = HashMap::new();
+    let mut retargeted = Vec::new();
+    for (slot, edges) in captures_by_slot {
+        let Some((specialized, _)) = declared.get(&slot) else {
+            continue;
+        };
+        let specialized_holder = holder_class(specialized).0;
+        if edges
+            .iter()
+            .all(|(_, _, required)| holder_class(required).0 == specialized_holder)
+        {
+            continue;
+        }
+        // A shared implementation over an erased type parameter requires ObjectRef. If another
+        // implementation was specialized to a primitive holder, move that exact capture contract
+        // to the erased holder too; two holder objects could not represent one mutable source var.
+        let Some(erased) = edges
+            .iter()
+            .map(|(_, _, required)| *required)
+            .find(|required| holder_class(required).0 == OBJECT_REF)
+        else {
+            continue;
+        };
+        for (function, ordinal, required) in edges {
+            if holder_class(&required).0 != OBJECT_REF {
+                retargeted.push((function, ordinal, erased));
+            }
+        }
+        erased_of.insert(slot, erased);
+    }
+    if erased_of.is_empty() {
+        return;
+    }
+    for (function, ordinal, erased) in retargeted {
+        retarget_capture_parameter(ir, function, ordinal, erased);
+    }
+    for (id, holder, element) in reads {
+        let Some(slot) = value_slot(ir, holder) else {
+            continue;
+        };
+        let Some(erased) = erased_of.get(&slot).copied() else {
+            continue;
+        };
+        if holder_class(&element).0 == holder_class(&erased).0 {
+            continue;
+        }
+        crate::trace_compiler!(
+            "lower",
+            "erased shared-cell read slot={slot} element={element:?} holder={erased:?}"
+        );
+        reread_through_erased_holder(ir, id, element, erased);
+    }
+    for (id, holder, element) in writes {
+        let Some(slot) = value_slot(ir, holder) else {
+            continue;
+        };
+        let Some(erased) = erased_of.get(&slot).copied() else {
+            continue;
+        };
+        if holder_class(&element).0 == holder_class(&erased).0 {
+            continue;
+        }
+        box_into_erased_holder(ir, id, erased);
+    }
+    for (slot, (_, holders)) in declared {
+        let Some(erased) = erased_of.get(&slot).copied() else {
+            continue;
+        };
+        for holder in holders {
+            let IrExpr::RefNew { elem, .. } = ir.expr(holder) else {
+                continue;
+            };
+            if holder_class(elem).0 == holder_class(&erased).0 {
+                continue;
+            }
+            crate::trace_compiler!(
+                "lower",
+                "erased shared-cell slot={slot} element={elem:?} holder={erased:?}"
+            );
+            box_into_erased_holder(ir, holder, erased);
+        }
+    }
+}
+
+/// Move one implementation's exact shared-capture parameter to `erased`, including every access
+/// through that parameter. This keeps all consumers of one mutable source cell on the same holder.
+fn retarget_capture_parameter(ir: &mut IrFile, function: u32, ordinal: u32, erased: Ty) {
+    let Some(parameter) = ir
+        .functions
+        .get_mut(function as usize)
+        .and_then(|function| function.params.get_mut(ordinal as usize))
+    else {
+        return;
+    };
+    if holder_class(parameter).0 == holder_class(&erased).0 {
+        return;
+    }
+    *parameter = erased;
+    if let Some(element) = ir.shared_capture_parameters.get_mut(&(function, ordinal)) {
+        *element = erased;
+    }
+    let Some(body) = ir
+        .functions
+        .get(function as usize)
+        .and_then(|function| function.body)
+    else {
+        return;
+    };
+    let expressions = crate::ir::value_namespace_expressions(ir, body);
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    for id in expressions {
+        match ir.expr(id) {
+            IrExpr::RefGet { holder, elem } if value_slot(ir, *holder) == Some(ordinal) => {
+                reads.push((id, *elem));
+            }
+            IrExpr::RefSet { holder, elem, .. } if value_slot(ir, *holder) == Some(ordinal) => {
+                writes.push((id, *elem));
+            }
+            _ => {}
+        }
+    }
+    for (id, specialized) in reads {
+        if holder_class(&specialized).0 != holder_class(&erased).0 {
+            reread_through_erased_holder(ir, id, specialized, erased);
+        }
+    }
+    for (id, specialized) in writes {
+        if holder_class(&specialized).0 != holder_class(&erased).0 {
+            box_into_erased_holder(ir, id, erased);
+        }
+    }
+}
+
+fn reread_through_erased_holder(ir: &mut IrFile, id: ExprId, specialized: Ty, erased: Ty) {
+    let moved = ir.exprs[id as usize].clone();
+    let moved_id = ir.add_expr(moved);
+    if let IrExpr::RefGet { elem, .. } = &mut ir.exprs[moved_id as usize] {
+        *elem = erased;
+    }
+    ir.exprs[id as usize] = IrExpr::TypeOp {
+        op: IrTypeOp::ImplicitCoercion,
+        arg: moved_id,
+        type_operand: specialized,
+    };
+}
+
+fn box_into_erased_holder(ir: &mut IrFile, id: ExprId, erased: Ty) {
+    match ir.expr(id) {
+        IrExpr::RefNew { init, .. } => {
+            let init = *init;
+            let init = init.map(|value| coerce_to(ir, value, erased));
+            if let IrExpr::RefNew { elem, init: slot } = &mut ir.exprs[id as usize] {
+                *elem = erased;
+                *slot = init;
+            }
+        }
+        IrExpr::RefSet { value, .. } => {
+            let value = *value;
+            let value = coerce_to(ir, value, erased);
+            if let IrExpr::RefSet {
+                elem, value: slot, ..
+            } = &mut ir.exprs[id as usize]
+            {
+                *elem = erased;
+                *slot = value;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn coerce_to(ir: &mut IrFile, value: ExprId, target: Ty) -> ExprId {
+    ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::ImplicitCoercion,
+        arg: value,
+        type_operand: target,
+    })
+}
+
+fn value_slot(ir: &IrFile, expr: ExprId) -> Option<u32> {
+    match ir.expr(expr) {
+        IrExpr::GetValue(slot) => Some(*slot),
+        _ => None,
+    }
+}
+
+enum BodyNode {
+    Lambda {
+        function: u32,
+        captures: Vec<ExprId>,
+    },
+    Variable {
+        index: u32,
+        init: Option<ExprId>,
+    },
+    Read {
+        holder: ExprId,
+        element: Ty,
+    },
+    Write {
+        holder: ExprId,
+        element: Ty,
+    },
+    Descend,
+}
+
+fn collect_body(
+    ir: &IrFile,
+    root: ExprId,
+    declared: &mut HashMap<u32, (Ty, Vec<ExprId>)>,
+    captured: &mut Vec<(u32, u32, u32, Ty)>,
+    reads: &mut Vec<(ExprId, ExprId, Ty)>,
+    writes: &mut Vec<(ExprId, ExprId, Ty)>,
+) {
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let node = match ir.expr(id) {
+            IrExpr::Lambda {
+                impl_fn, captures, ..
+            } => BodyNode::Lambda {
+                function: *impl_fn,
+                captures: captures.clone(),
+            },
+            IrExpr::Variable { index, init, .. } => BodyNode::Variable {
+                index: *index,
+                init: *init,
+            },
+            IrExpr::RefGet { holder, elem } => BodyNode::Read {
+                holder: *holder,
+                element: *elem,
+            },
+            IrExpr::RefSet { holder, elem, .. } => BodyNode::Write {
+                holder: *holder,
+                element: *elem,
+            },
+            _ => BodyNode::Descend,
+        };
+        match node {
+            BodyNode::Lambda { function, captures } => {
+                for (ordinal, capture) in captures.iter().copied().enumerate() {
+                    let ordinal = u32::try_from(ordinal).expect("capture ordinal fits u32");
+                    if ir
+                        .shared_capture_parameters
+                        .contains_key(&(function, ordinal))
+                    {
+                        let required = ir
+                            .functions
+                            .get(function as usize)
+                            .and_then(|function| function.params.get(ordinal as usize))
+                            .copied();
+                        if let (Some(slot), Some(required)) = (value_slot(ir, capture), required) {
+                            captured.push((slot, function, ordinal, required));
+                        }
+                    }
+                    pending.push(capture);
+                }
+            }
+            BodyNode::Variable { index, init } => {
+                if let Some(init) = init {
+                    if let IrExpr::RefNew { elem, .. } = ir.expr(init) {
+                        declared
+                            .entry(index)
+                            .or_insert_with(|| (*elem, Vec::new()))
+                            .1
+                            .push(init);
+                    }
+                    pending.push(init);
+                }
+            }
+            BodyNode::Read { holder, element } => {
+                reads.push((id, holder, element));
+                pending.push(holder);
+            }
+            BodyNode::Write { holder, element } => {
+                writes.push((id, holder, element));
+                pending.push(holder);
+                if let IrExpr::RefSet { value, .. } = ir.expr(id) {
+                    pending.push(*value);
+                }
+            }
+            BodyNode::Descend => {
+                crate::ir::for_each_child(&ir.exprs, id, &mut |child| pending.push(child));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +556,281 @@ mod tests {
             ir.classes[class as usize].super_ctor_params,
             [Ty::obj_args(OBJECT_REF, &[Ty::String]), Ty::String]
         );
+    }
+
+    fn function(name: &str) -> crate::ir::IrFunction {
+        crate::ir::IrFunction {
+            name: name.to_string(),
+            params: Vec::new(),
+            ret: Ty::Int,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn specialized_cell_captured_by_an_erased_lambda_keeps_the_erased_holder() {
+        let mut ir = IrFile::default();
+        let lambda = ir.add_fun(function("read"));
+        let initial = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(1)));
+        let cell = ir.add_expr(IrExpr::RefNew {
+            elem: Ty::Int,
+            init: Some(initial),
+        });
+        let declaration = ir.add_expr(IrExpr::Variable {
+            index: 0,
+            ty: Ty::Int,
+            init: Some(cell),
+            named: true,
+        });
+        let holder = ir.add_expr(IrExpr::GetValue(0));
+        let read = ir.add_expr(IrExpr::RefGet {
+            holder,
+            elem: Ty::Int,
+        });
+        let written = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(2)));
+        let write_holder = ir.add_expr(IrExpr::GetValue(0));
+        let write = ir.add_expr(IrExpr::RefSet {
+            holder: write_holder,
+            elem: Ty::Int,
+            value: written,
+        });
+        let capture = ir.add_expr(IrExpr::GetValue(0));
+        let inner_holder = ir.add_expr(IrExpr::GetValue(0));
+        let inner = ir.add_expr(IrExpr::RefGet {
+            holder: inner_holder,
+            elem: Ty::Int,
+        });
+        let lambda_expr = ir.add_expr(IrExpr::Lambda {
+            impl_fn: lambda,
+            arity: 0,
+            captures: vec![capture],
+            sam: None,
+            inline_body: Some(inner),
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration, write, lambda_expr],
+            value: Some(read),
+        });
+        let caller = ir.add_fun(function("box"));
+        ir.functions[caller as usize].body = Some(body);
+        ir.functions[lambda as usize].params = vec![Ty::ty_param("R", Ty::obj("kotlin/Any"))];
+        ir.shared_capture_parameters
+            .insert((lambda, 0), Ty::ty_param("R", Ty::obj("kotlin/Any")));
+
+        restore_erased_escaping_capture_holders(&mut ir);
+
+        let IrExpr::RefNew {
+            elem,
+            init: Some(init),
+        } = ir.expr(cell)
+        else {
+            panic!("cell");
+        };
+        assert!(matches!(elem, Ty::TyParam(name, _) if *name == "R"));
+        assert!(matches!(
+            ir.expr(*init),
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } if *arg == initial
+        ));
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: moved,
+            type_operand,
+        } = ir.expr(read)
+        else {
+            panic!("read");
+        };
+        assert_eq!(*type_operand, Ty::Int);
+        assert!(matches!(
+            ir.expr(*moved),
+            IrExpr::RefGet { elem, .. } if matches!(elem, Ty::TyParam(name, _) if *name == "R")
+        ));
+        let IrExpr::RefSet { elem, value, .. } = ir.expr(write) else {
+            panic!("write");
+        };
+        assert!(matches!(elem, Ty::TyParam(name, _) if *name == "R"));
+        assert!(matches!(
+            ir.expr(*value),
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } if *arg == written
+        ));
+        assert!(matches!(
+            ir.expr(inner),
+            IrExpr::RefGet { elem: Ty::Int, .. }
+        ));
+    }
+
+    #[test]
+    fn primitive_capture_on_the_same_holder_stays_primitive() {
+        let mut ir = IrFile::default();
+        let lambda = ir.add_fun(function("bump"));
+        let cell = ir.add_expr(IrExpr::RefNew {
+            elem: Ty::Int,
+            init: None,
+        });
+        let declaration = ir.add_expr(IrExpr::Variable {
+            index: 0,
+            ty: Ty::Int,
+            init: Some(cell),
+            named: true,
+        });
+        let capture = ir.add_expr(IrExpr::GetValue(0));
+        let lambda_expr = ir.add_expr(IrExpr::Lambda {
+            impl_fn: lambda,
+            arity: 0,
+            captures: vec![capture],
+            sam: None,
+            inline_body: None,
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration, lambda_expr],
+            value: None,
+        });
+        let caller = ir.add_fun(function("box"));
+        ir.functions[caller as usize].body = Some(body);
+        ir.functions[lambda as usize].params = vec![Ty::Int];
+        ir.shared_capture_parameters.insert((lambda, 0), Ty::Int);
+
+        restore_erased_escaping_capture_holders(&mut ir);
+
+        assert!(matches!(
+            ir.expr(cell),
+            IrExpr::RefNew { elem: Ty::Int, .. }
+        ));
+    }
+
+    #[test]
+    fn value_class_capture_keeps_the_specialized_holder() {
+        let mut ir = IrFile::default();
+        let lambda = ir.add_fun(function("write"));
+        ir.functions[lambda as usize].params = vec![Ty::Int];
+        let cell = ir.add_expr(IrExpr::RefNew {
+            elem: Ty::Int,
+            init: None,
+        });
+        let declaration = ir.add_expr(IrExpr::Variable {
+            index: 0,
+            ty: Ty::Int,
+            init: Some(cell),
+            named: true,
+        });
+        let capture = ir.add_expr(IrExpr::GetValue(0));
+        let lambda_expr = ir.add_expr(IrExpr::Lambda {
+            impl_fn: lambda,
+            arity: 0,
+            captures: vec![capture],
+            sam: None,
+            inline_body: None,
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration, lambda_expr],
+            value: None,
+        });
+        let caller = ir.add_fun(function("box"));
+        ir.functions[caller as usize].body = Some(body);
+        // The capture record still names the value class. The implementation parameter was
+        // specialized with the cell, and that parameter is the holder.
+        ir.shared_capture_parameters
+            .insert((lambda, 0), Ty::obj("demo/Z"));
+
+        restore_erased_escaping_capture_holders(&mut ir);
+
+        assert!(matches!(
+            ir.expr(cell),
+            IrExpr::RefNew { elem: Ty::Int, .. }
+        ));
+    }
+
+    #[test]
+    fn disagreeing_implementations_share_the_erased_holder() {
+        let mut ir = IrFile::default();
+        let erased = ir.add_fun(function("erased"));
+        ir.functions[erased as usize].params = vec![Ty::ty_param("R", Ty::obj("kotlin/Any"))];
+        let specialized = ir.add_fun(function("specialized"));
+        ir.functions[specialized as usize].params = vec![Ty::Int];
+        let specialized_holder = ir.add_expr(IrExpr::GetValue(0));
+        let specialized_read = ir.add_expr(IrExpr::RefGet {
+            holder: specialized_holder,
+            elem: Ty::Int,
+        });
+        ir.functions[specialized as usize].body = Some(specialized_read);
+        let cell = ir.add_expr(IrExpr::RefNew {
+            elem: Ty::Int,
+            init: None,
+        });
+        let declaration = ir.add_expr(IrExpr::Variable {
+            index: 0,
+            ty: Ty::Int,
+            init: Some(cell),
+            named: true,
+        });
+        let erased_capture = ir.add_expr(IrExpr::GetValue(0));
+        let erased_lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn: erased,
+            arity: 0,
+            captures: vec![erased_capture],
+            sam: None,
+            inline_body: None,
+        });
+        let specialized_capture = ir.add_expr(IrExpr::GetValue(0));
+        let specialized_lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn: specialized,
+            arity: 0,
+            captures: vec![specialized_capture],
+            sam: None,
+            inline_body: None,
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration, erased_lambda, specialized_lambda],
+            value: None,
+        });
+        let caller = ir.add_fun(function("box"));
+        ir.functions[caller as usize].body = Some(body);
+        ir.shared_capture_parameters
+            .insert((erased, 0), Ty::ty_param("R", Ty::obj("kotlin/Any")));
+        ir.shared_capture_parameters
+            .insert((specialized, 0), Ty::Int);
+
+        restore_erased_escaping_capture_holders(&mut ir);
+
+        assert!(matches!(
+            ir.expr(cell),
+            IrExpr::RefNew {
+                elem: Ty::TyParam(name, _),
+                ..
+            } if *name == "R"
+        ));
+        assert!(matches!(
+            ir.functions[specialized as usize].params.as_slice(),
+            [Ty::TyParam(name, _)] if *name == "R"
+        ));
+        assert!(matches!(
+            ir.shared_capture_parameters.get(&(specialized, 0)),
+            Some(Ty::TyParam(name, _)) if *name == "R"
+        ));
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: moved,
+            type_operand: Ty::Int,
+        } = ir.expr(specialized_read)
+        else {
+            panic!("specialized read");
+        };
+        assert!(matches!(
+            ir.expr(*moved),
+            IrExpr::RefGet {
+                elem: Ty::TyParam(name, _),
+                ..
+            } if *name == "R"
+        ));
     }
 }

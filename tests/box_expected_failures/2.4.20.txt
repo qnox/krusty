@@ -3,7 +3,6 @@
 # tests/box_expected_failures/2.4.20.txt with KRUSTY_BLESS_BOX_FAILURES=1 on a full local run.
 # The goal is to empty this list of expected failures.
 coroutines/functionReference_Function_SuspendFunction_casts.kt
-coroutines/tailCallOptimizations/crossinline.kt
 fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt
