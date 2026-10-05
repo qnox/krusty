@@ -24,8 +24,6 @@ fullValueClasses/nonFinalThisInInitSideEffects.kt
 fullValueClasses/recursive.kt
 fullValueClasses/reservedNames.kt
 fullValueClasses/vararg.kt
-functions/functionNtoString.kt
-functions/functionNtoStringGeneric.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
 reflection/typeOf/intersectionType.kt

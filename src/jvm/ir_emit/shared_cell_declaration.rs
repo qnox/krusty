@@ -81,7 +81,7 @@ impl Emitter<'_> {
             // and the `putfield` returns to the declaration's.
             load(holder, slot, code);
             self.mark_expression_start(value, code);
-            self.emit_value(value, code);
+            self.emit_element_value(elem, value, code);
             debug_lines::mark_statement(self.ir, declaration, code);
             self.put_element(&elem, code);
         }
@@ -112,9 +112,22 @@ impl Emitter<'_> {
         } else {
             self.emit_new_holder(class, code);
             code.dup();
-            self.emit_value(init, code);
+            self.emit_element_value(elem, init, code);
         }
         self.put_element(&elem, code);
+    }
+
+    /// Emit a value stored into a holder's `element`. An `ObjectRef` stores `Object`, so a
+    /// suspension point's erased result is stored as it is, without the narrowing kotlinc writes
+    /// only for a consumer that needs it.
+    pub(super) fn emit_element_value(&mut self, elem: Ty, value: ExprId, code: &mut CodeBuilder) {
+        let object = Ty::obj("java/lang/Object");
+        if ir_ty_to_jvm(&elem).is_reference()
+            && self.emit_erased_suspension_result(value, object, code)
+        {
+            return;
+        }
+        self.emit_value(value, code);
     }
 
     fn emit_new_holder(&mut self, class: &str, code: &mut CodeBuilder) {
@@ -197,8 +210,8 @@ impl Emitter<'_> {
 }
 
 /// Whether every use of local `index` under `root` reads or writes its holder's element, or is a
-/// capture of a lambda an inline call expands: a literal argument of a call with published inline
-/// parameter modifiers, for a parameter that is not `noinline`. Such a lambda's body is spliced
+/// capture of a lambda an inline call expands: a literal argument for one of the call's inline
+/// parameters ([`super::inline_parameters`]). Such a lambda's body is spliced
 /// into the caller, so the search follows the holder into it: the body numbers its captures first,
 /// and the capture at position `k` is that body's value `k`. Any other lambda's body is its own
 /// function, so only its captures are searched, and capturing the holder there lets it escape.
@@ -220,16 +233,15 @@ fn only_inlined_captures(ir: &crate::ir::IrFile, root: ExprId, index: u32) -> bo
                 ..
             } if ir.call_inline_modifiers.contains_key(&expression) => {
                 pending.extend(dispatch_receiver.map(|receiver| (receiver, local)));
-                let modifiers = &ir.call_inline_modifiers[&expression];
                 for (position, &argument) in args.iter().enumerate() {
                     match ir.expr(argument) {
                         IrExpr::Lambda {
                             captures,
                             inline_body: Some(body),
                             ..
-                        } if modifiers.get(position).is_some_and(|modifier| {
-                            *modifier != crate::types::InlineParameterModifier::Noinline
-                        }) =>
+                        } if super::inline_parameters::is_inline_parameter(
+                            ir, expression, position,
+                        ) == Some(true) =>
                         {
                             for (slot, &capture) in captures.iter().enumerate() {
                                 if is_local(capture, local) {

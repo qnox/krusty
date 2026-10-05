@@ -82,22 +82,12 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             Some(crate::types::Visibility::Protected) => 0x0004,
             _ => 0x0001,
         };
-        let enum_entry_subclass_target = !owner_prefix_tys.is_empty()
-            && c.enum_entries.iter().any(|entry| {
-                entry.subclass.is_some()
-                    && jvm_tys(&entry.constructor_parameter_types) == sc_source_tys
-            });
         let semantically_private =
             super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal)
                 || sc.vc_params
                 || !owner_prefix_tys.is_empty()
                 || declared_access == 0x0002;
-        let sc_access = (if enum_entry_subclass_target {
-            // Kotlin uses nestmate access for an entry-body subclass. Krusty does not emit
-            // nestmate attributes yet, so use the same package-private synthetic bridge contract
-            // as the enum primary constructor instead of emitting an inaccessible private target.
-            0x1000
-        } else if semantically_private {
+        let sc_access = (if semantically_private {
             0x0002
         } else {
             declared_access
@@ -320,13 +310,9 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             }
             // A declared constructor's table opens after whatever prologue precedes its delegation,
             // at the delegation's line, or at the `constructor` keyword when it is implicit.
-            let delegation_line = if sc.lines.delegation_line != 0 {
-                sc.lines.delegation_line
-            } else {
-                sc.lines.decl_line
-            };
-            if !generated && delegation_line != 0 {
-                sctor.mark_line(delegation_line);
+            let delegation_line = sc.lines.delegation_call_line().filter(|_| !generated);
+            if let Some(line) = delegation_line {
+                sctor.mark_line(line);
             }
             for &statement in &sc.delegate_prelude {
                 e.emit(statement, &mut sctor);
@@ -390,8 +376,8 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             let delegate_init =
                 e.cw.methodref(&target_class, "<init>", &delegate_descriptor);
             // The call itself is back on the delegation's line after an argument on another.
-            if !generated && delegation_line != 0 {
-                sctor.mark_line(delegation_line);
+            if let Some(line) = delegation_line {
+                sctor.mark_line(line);
             }
             sctor.invokespecial(delegate_init, aw, 0);
             e.this_uninitialized = false;
@@ -592,18 +578,24 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             let stub_access = if semantically_private { 0x1000 } else { 0x1001 };
             super::constructor_defaults::emit_ctor_default_stub_with_prefix(
                 ir,
-                fq_name,
-                c.fq_name,
-                facade,
-                &forwarded_prefix_tys,
-                sc_prefix_tys.len(),
-                &sc_source_tys,
-                &sc.defaults,
-                Some((sc.lines.decl_line, &default_lines, sc.lines.decl_end_line)),
-                sc.vc_params
-                    || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),
-                sc.annotations.deprecated(),
-                stub_access,
+                super::constructor_defaults::ConstructorDefaultStub {
+                    owner: fq_name,
+                    owner_identity: c.fq_name,
+                    facade,
+                    physical_prefix: &forwarded_prefix_tys,
+                    logical_prefix_count: sc_prefix_tys.len(),
+                    real_params: &sc_source_tys,
+                    defaults: &sc.defaults,
+                    secondary_lines: Some((
+                        sc.lines.decl_line,
+                        &default_lines,
+                        sc.lines.decl_end_line,
+                    )),
+                    target_uses_marker_accessor: sc.vc_params
+                        || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),
+                    deprecated: sc.annotations.deprecated(),
+                    access: stub_access,
+                },
                 cw,
                 env,
             );

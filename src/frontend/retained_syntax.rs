@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, Expr, ExprId, File, FunBody, FunDecl, Param,
-    PropDecl, Stmt, StmtId, TemplatePart, WhenCondition,
+    PropDecl, Stmt, StmtId, TemplatePart, UseSiteAnnotation, WhenCondition,
 };
 
 const MISSING_EXPR: ExprId = ExprId(u32::MAX);
@@ -46,6 +46,21 @@ impl Reachable {
         if let Some(&declaration) = file.anonymous_object_classes.get(&root) {
             self.declaration(file, declaration);
         }
+        self.use_site_annotation_arguments(file, file.expression_annotations.get(&root));
+    }
+
+    /// The arguments of the annotations on a retained statement or expression: checking it opens
+    /// their policies and checks those applications.
+    fn use_site_annotation_arguments(
+        &mut self,
+        file: &File,
+        annotations: Option<&Vec<UseSiteAnnotation>>,
+    ) {
+        for annotation in annotations.into_iter().flatten() {
+            for &argument in &annotation.arguments {
+                self.expression(file, argument);
+            }
+        }
     }
 
     fn statement(&mut self, file: &File, statement: StmtId) {
@@ -60,6 +75,7 @@ impl Reachable {
         for child in expressions {
             self.expression(file, child);
         }
+        self.use_site_annotation_arguments(file, file.statement_annotations.get(&statement));
         match file.stmt(statement) {
             Stmt::LocalFun(function) => self.function(file, function),
             Stmt::LocalClass(_) => {
@@ -365,8 +381,9 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
             }
         }
     }
-    // File and declaration-type-parameter annotations are header syntax. Inline checking may still
-    // consult their suppression/contract arguments, so retain these bounded roots as well.
+    // File, declaration-type-parameter, and type-use annotations are header syntax. Inline
+    // checking may still consult their suppression/contract arguments, and stable type-use
+    // annotation publication folds the type-use ones, so retain these bounded roots as well.
     retained.roots(
         file,
         file.file_annotations
@@ -377,7 +394,8 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                     .values()
                     .flatten()
                     .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
-            ),
+            )
+            .chain(file.type_annotation_arguments.values().flatten().copied()),
     );
     // A default declared inside a nested/local/anonymous classifier is evaluated in the lexical
     // scope where that classifier was introduced. Preserve its enclosing top-level declaration unit until the
@@ -628,6 +646,9 @@ fn remap_declarations(file: &mut File, expressions: &HashMap<ExprId, ExprId>) {
                 *argument = mapped_expr(expressions, *argument);
             }
         }
+    }
+    for argument in file.type_annotation_arguments.values_mut().flatten() {
+        *argument = mapped_expr(expressions, *argument);
     }
 }
 
@@ -1053,10 +1074,30 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, nested)| statements.get(&old).copied().map(|new| (new, nested)))
         .collect();
-    file.statement_suppressions = std::mem::take(&mut file.statement_suppressions)
+    let remap_annotations = |mut annotations: Vec<UseSiteAnnotation>| {
+        for annotation in &mut annotations {
+            for argument in &mut annotation.arguments {
+                *argument = mapped_expr(&expressions, *argument);
+            }
+        }
+        annotations
+    };
+    file.statement_annotations = std::mem::take(&mut file.statement_annotations)
         .into_iter()
-        .filter_map(|(old, suppressions)| {
-            statements.get(&old).copied().map(|new| (new, suppressions))
+        .filter_map(|(old, annotations)| {
+            statements
+                .get(&old)
+                .copied()
+                .map(|new| (new, remap_annotations(annotations)))
+        })
+        .collect();
+    file.expression_annotations = std::mem::take(&mut file.expression_annotations)
+        .into_iter()
+        .filter_map(|(old, annotations)| {
+            expressions
+                .get(&old)
+                .copied()
+                .map(|new| (new, remap_annotations(annotations)))
         })
         .collect();
     file.assignment_target_spans = std::mem::take(&mut file.assignment_target_spans)

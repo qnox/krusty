@@ -365,6 +365,27 @@ pub(crate) fn intersection_components(ty: Ty) -> Option<&'static [Ty]> {
     }
 }
 
+/// `actual` seen as its supertype whose classifier is `owner`, with that supertype's arguments. A
+/// function type has no classifier of its own: it reaches `owner` through its `FunctionN`
+/// classifier, so `() -> Unit` is `Function<Unit>`.
+pub(super) fn supertype_with_classifier(
+    source: &dyn SymbolSource,
+    actual: Ty,
+    owner: TypeName,
+) -> Option<Ty> {
+    let roots = match actual {
+        Ty::Obj(found, _) if found == owner => return Some(actual),
+        Ty::Obj(_, _) => vec![actual],
+        Ty::Fun(_) => direct_supertypes(source, actual),
+        _ => return None,
+    };
+    roots
+        .into_iter()
+        .flat_map(|root| receiver_hierarchy(source, root))
+        .map(|(ty, _)| ty)
+        .find(|ty| ty.obj_internal() == Some(owner))
+}
+
 pub(super) fn receiver_hierarchy(source: &dyn SymbolSource, receiver: Ty) -> Vec<(Ty, u32)> {
     let mut queue = std::collections::VecDeque::from([(receiver, 0)]);
     let mut seen = std::collections::HashSet::new();

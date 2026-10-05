@@ -201,7 +201,7 @@ fn same_package_dependency_internal_member_still_requires_a_friend_module() {
 
     assert_eq!(
         fixture.diagnostics(source),
-        ["cannot access 'hiddenMember': it is internal in 'lib/Visible'"]
+        ["cannot access 'fun hiddenMember(other: Int): Int': it is internal in 'lib.Visible'."]
     );
     assert_eq!(fixture.friend_diagnostics(source), Vec::<String>::new());
 }
