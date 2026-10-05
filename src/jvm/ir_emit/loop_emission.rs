@@ -66,7 +66,7 @@ impl Emitter<'_> {
                 IrExpr::Block { stmts, value } => {
                     let saved = self.open_slot_scope();
                     let discard_after_close =
-                        self.emit_open_block(stmts, value, Some(bottom), code);
+                        self.emit_open_block(stmts, value, Some(bottom), false, code);
                     if let Some(discarded) = discard_after_close {
                         super::discard(self.value_ty(discarded), code);
                     }

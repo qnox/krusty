@@ -27,7 +27,18 @@ impl Emitter<'_> {
         }
         let normalizes_inline_stack =
             self.ir.external_inline_expansions.contains(&block) && code.stack_height() != 0;
-        if normalizes_inline_stack {
+        // A spliced lambda's marker follows evaluation of the inline call's ordinary operands.
+        // Preserve the caller stack there so argument temporaries keep kotlinc's slot order. An
+        // expansion without a lambda marker (for example an iteration plan) still starts at the
+        // block boundary.
+        let delays_stack_normalization = normalizes_inline_stack
+            && stmts.iter().any(|&statement| {
+                matches!(
+                    self.ir.debug_local_provenance(statement),
+                    Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
+                )
+            });
+        if normalizes_inline_stack && !delays_stack_normalization {
             code.inline_call_marker(true);
         }
         self.link_safe_call_chain(block, code);
@@ -35,7 +46,13 @@ impl Emitter<'_> {
         let terminal_target = self.terminal_statement_target.take();
         let marked_initializer = self.renders_initializer_boundary(block);
         self.mark_initializer_line(block, false, code);
-        let discard_after_close = self.emit_open_block(stmts, value, terminal_target, code);
+        let discard_after_close = self.emit_open_block(
+            stmts,
+            value,
+            terminal_target,
+            delays_stack_normalization,
+            code,
+        );
         self.mark_initializer_line(block, true, code);
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
@@ -67,7 +84,14 @@ impl Emitter<'_> {
         // restores their complete JVM representation from these markers.
         let normalizes_inline_stack =
             self.ir.external_inline_expansions.contains(&block) && code.stack_height() != 0;
-        if normalizes_inline_stack {
+        let delays_stack_normalization = normalizes_inline_stack
+            && stmts.iter().any(|&statement| {
+                matches!(
+                    self.ir.debug_local_provenance(statement),
+                    Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
+                )
+            });
+        if normalizes_inline_stack && !delays_stack_normalization {
             code.inline_call_marker(true);
         }
         self.link_safe_call_chain(block, code);
@@ -75,7 +99,17 @@ impl Emitter<'_> {
         let saved = self.open_slot_scope();
         self.block_depth += 1;
         let mut dead = false;
+        let mut normalize_at_lambda_frame = delays_stack_normalization;
         for &statement in stmts {
+            if normalize_at_lambda_frame
+                && matches!(
+                    self.ir.debug_local_provenance(statement),
+                    Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
+                )
+            {
+                code.inline_call_marker(true);
+                normalize_at_lambda_frame = false;
+            }
             self.mark_statement_line(statement, code);
             // A statement nets zero on the operand stack (its value is stored/discarded). Reset the
             // tracked height to that baseline afterward: raw spliced control flow is opaque to the
@@ -174,6 +208,7 @@ impl Emitter<'_> {
         stmts: Vec<u32>,
         value: Option<u32>,
         terminal_target: Option<Label>,
+        normalize_at_lambda_frame: bool,
         code: &mut CodeBuilder,
     ) -> Option<u32> {
         let enclosing_statement_line = self.statement_line;
@@ -190,7 +225,17 @@ impl Emitter<'_> {
                 })
         });
         self.note_inlined_only_cells(&stmts, value);
+        let mut normalize_at_lambda_frame = normalize_at_lambda_frame;
         for (index, statement) in stmts.into_iter().enumerate() {
+            if normalize_at_lambda_frame
+                && matches!(
+                    self.ir.debug_local_provenance(statement),
+                    Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
+                )
+            {
+                code.inline_call_marker(true);
+                normalize_at_lambda_frame = false;
+            }
             self.mark_statement_line(statement, code);
             let base = code.stack_height();
             self.terminal_statement_target = (value.is_none() && Some(index) == last_statement)
