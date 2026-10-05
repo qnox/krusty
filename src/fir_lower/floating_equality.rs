@@ -6,7 +6,7 @@
 //! chooses its realization (kotlinc's JVM backend calls a typed `Intrinsics.areEqual`).
 
 use crate::fir::{FirBinaryOperation, FirExprId};
-use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic};
+use crate::ir::{Callee, ExprId, IrExpr, IrIntrinsic};
 use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure};
@@ -45,11 +45,6 @@ impl BodyLowering<'_> {
             return Ok(equal);
         }
         // Boolean negation, as a builtin `Boolean.not()` realizes it.
-        let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-        Ok(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs: equal,
-            rhs: false_value,
-        }))
+        Ok(self.ir.add_negation(equal))
     }
 }

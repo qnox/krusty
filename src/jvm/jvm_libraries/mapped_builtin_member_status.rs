@@ -6,8 +6,10 @@
 //! members are still provider-owned; core resolution receives only the normalized result.
 //! The checked-in policy mirrors the collection-facing subset of
 //! `JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES` and is verified against the supported Kotlin
-//! 2.4.0, 2.4.10 and 2.4.20 toolchains.
+//! 2.4.0, 2.4.10 and 2.4.20 toolchains. A mapped builtin whose scope joins its JVM class instead
+//! drops the joined-scope rows of `JvmBuiltInsSignatures.HIDDEN_METHOD_SIGNATURES`.
 
+use crate::jvm::names::same_mapped_virtual_name_of;
 use crate::libraries::LibraryMember;
 use crate::types::{type_name, TypeName};
 
@@ -15,6 +17,8 @@ const VISIBLE_METHODS_2_4: &str =
     include_str!("mapped_builtin_member_status/visible_methods_2_4.tsv");
 const DEPRECATED_HIDDEN_METHODS_2_4: &str =
     include_str!("mapped_builtin_member_status/deprecated_hidden_methods_2_4.tsv");
+const HIDDEN_METHODS_2_4: &str =
+    include_str!("mapped_builtin_member_status/hidden_methods_2_4.tsv");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MappedBuiltinMemberStatus {
@@ -40,6 +44,16 @@ struct PolicyMethod {
     descriptor: &'static str,
 }
 
+impl PolicyMethod {
+    /// The exact physical signature of `member`, decoded from `jvm_owner`, attached to `kotlin_face`.
+    fn matches(&self, kotlin_face: TypeName, jvm_owner: TypeName, member: &LibraryMember) -> bool {
+        self.kotlin_face == kotlin_face
+            && self.jvm_owner == jvm_owner
+            && self.physical_name == physical_name(member)
+            && self.descriptor == member.descriptor
+    }
+}
+
 fn visible_methods() -> &'static [PolicyMethod] {
     static METHODS: std::sync::OnceLock<Box<[PolicyMethod]>> = std::sync::OnceLock::new();
     METHODS.get_or_init(|| parse_methods(VISIBLE_METHODS_2_4))
@@ -48,6 +62,11 @@ fn visible_methods() -> &'static [PolicyMethod] {
 fn deprecated_hidden_methods() -> &'static [PolicyMethod] {
     static METHODS: std::sync::OnceLock<Box<[PolicyMethod]>> = std::sync::OnceLock::new();
     METHODS.get_or_init(|| parse_methods(DEPRECATED_HIDDEN_METHODS_2_4))
+}
+
+fn hidden_methods() -> &'static [PolicyMethod] {
+    static METHODS: std::sync::OnceLock<Box<[PolicyMethod]>> = std::sync::OnceLock::new();
+    METHODS.get_or_init(|| parse_methods(HIDDEN_METHODS_2_4))
 }
 
 fn parse_methods(input: &'static str) -> Box<[PolicyMethod]> {
@@ -90,16 +109,7 @@ pub(super) fn mapped_builtin_member_status(
     jvm_owner: TypeName,
     member: &LibraryMember,
 ) -> MappedBuiltinMemberStatus {
-    let physical_name = member
-        .physical_name
-        .as_deref()
-        .unwrap_or(member.name.as_str());
-    let matches = |entry: &PolicyMethod| {
-        entry.kotlin_face == kotlin_face
-            && entry.jvm_owner == jvm_owner
-            && entry.physical_name == physical_name
-            && entry.descriptor == member.descriptor
-    };
+    let matches = |entry: &PolicyMethod| entry.matches(kotlin_face, jvm_owner, member);
     if visible_methods().iter().any(matches) {
         MappedBuiltinMemberStatus::Visible
     } else if deprecated_hidden_methods().iter().any(matches) {
@@ -109,11 +119,56 @@ pub(super) fn mapped_builtin_member_status(
     }
 }
 
+/// Normalize the classfile members of a mapped Kotlin declaration whose scope joins its JVM class
+/// (`kotlin/Double`, `kotlin/Enum`, `kotlin/CharSequence`, ...).
+///
+/// Such a scope admits every physical member except the exact signatures of
+/// `JvmBuiltInsSignatures.HIDDEN_METHOD_SIGNATURES` (`Double.isNaN()`), so a call reaches the Kotlin
+/// declaration that replaces a hidden one. A physical method its Kotlin builtin entry restates is
+/// one declaration: the builtin's Kotlin-only facts win while the physical target stays the same.
+/// A Kotlin-authoritative collection scope uses [`mapped_builtin_member_status`] instead.
+pub(super) fn retain_joined_mapped_members(
+    kotlin_face: TypeName,
+    jvm_owner: TypeName,
+    members: &mut Vec<LibraryMember>,
+    builtin_members: &[LibraryMember],
+) {
+    members.retain(|member| {
+        !joined_mapped_builtin_member_is_hidden(kotlin_face, jvm_owner, member)
+            && !builtin_members.iter().any(|builtin| {
+                same_mapped_virtual_name_of(
+                    kotlin_face,
+                    physical_name(member),
+                    physical_name(builtin),
+                    &member.descriptor,
+                ) && member.descriptor == builtin.descriptor
+            })
+    });
+}
+
+fn physical_name(member: &LibraryMember) -> &str {
+    member
+        .physical_name
+        .as_deref()
+        .unwrap_or(member.name.as_str())
+}
+
+/// Whether kotlinc's JVM-builtins policy hides this exact physical signature from `kotlin_face`.
+fn joined_mapped_builtin_member_is_hidden(
+    kotlin_face: TypeName,
+    jvm_owner: TypeName,
+    member: &LibraryMember,
+) -> bool {
+    hidden_methods()
+        .iter()
+        .any(|entry| entry.matches(kotlin_face, jvm_owner, member))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        deprecated_hidden_methods, mapped_builtin_member_status, visible_methods,
-        MappedBuiltinMemberStatus,
+        deprecated_hidden_methods, hidden_methods, joined_mapped_builtin_member_is_hidden,
+        mapped_builtin_member_status, visible_methods, MappedBuiltinMemberStatus,
     };
     use crate::libraries::LibraryMember;
     use crate::types::{type_name, Ty};
@@ -288,5 +343,66 @@ mod tests {
             ),
             MappedBuiltinMemberStatus::Hidden
         );
+    }
+
+    #[test]
+    fn joined_scope_hides_exact_physical_signatures_only() {
+        let keys = hidden_methods()
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(hidden_methods().len(), 9);
+        assert_eq!(keys.len(), hidden_methods().len());
+
+        let hidden = |face: &str, owner: &str, name: &str, descriptor: &str| {
+            joined_mapped_builtin_member_is_hidden(
+                type_name(face),
+                type_name(owner),
+                &member(name, descriptor),
+            )
+        };
+        assert!(hidden("kotlin/Double", "java/lang/Double", "isNaN", "()Z"));
+        assert!(!hidden(
+            "kotlin/Double",
+            "java/lang/Double",
+            "isNaN",
+            "(D)Z"
+        ));
+        assert!(!hidden(
+            "kotlin/Double",
+            "java/lang/Double",
+            "doubleValue",
+            "()D"
+        ));
+        assert!(hidden(
+            "kotlin/Float",
+            "java/lang/Float",
+            "isInfinite",
+            "()Z"
+        ));
+        assert!(!hidden(
+            "kotlin/Float",
+            "java/lang/Double",
+            "isInfinite",
+            "()Z"
+        ));
+        assert!(hidden(
+            "kotlin/Char",
+            "java/lang/Character",
+            "charValue",
+            "()C"
+        ));
+        assert!(hidden(
+            "kotlin/CharSequence",
+            "java/lang/CharSequence",
+            "isEmpty",
+            "()Z"
+        ));
+        assert!(!hidden(
+            "kotlin/CharSequence",
+            "java/lang/CharSequence",
+            "chars",
+            "()Ljava/util/stream/IntStream;"
+        ));
     }
 }

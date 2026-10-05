@@ -408,6 +408,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.plain_updates.contains(&source) {
         ir.plain_updates.insert(target);
     }
+    if ir.negations.contains(&source) {
+        ir.negations.insert(target);
+    }
     if ir.transparent_loop_bodies.contains(&source) {
         ir.transparent_loop_bodies.insert(target);
     }

@@ -1,0 +1,16 @@
+# Joined-scope subset of Kotlin's
+# org.jetbrains.kotlin.builtins.jvm.JvmBuiltInsSignatures.HIDDEN_METHOD_SIGNATURES: the physical JDK
+# methods kotlinc removes from a mapped builtin whose scope still joins its JVM class's members.
+# The List and String rows need none: their Kotlin declaration already replaces the JVM scope.
+# Mirrors the Kotlin 2.4 `JvmBuiltInsSignatures` source.
+# This is checked-in policy data; it is not generated during the build.
+# kotlin source face<TAB>physical JVM owner<TAB>physical method name<TAB>descriptor
+kotlin/Boolean	java/lang/Boolean	booleanValue	()Z
+kotlin/Char	java/lang/Character	charValue	()C
+kotlin/Double	java/lang/Double	isInfinite	()Z
+kotlin/Double	java/lang/Double	isNaN	()Z
+kotlin/Float	java/lang/Float	isInfinite	()Z
+kotlin/Float	java/lang/Float	isNaN	()Z
+kotlin/Enum	java/lang/Enum	getDeclaringClass	()Ljava/lang/Class;
+kotlin/Enum	java/lang/Enum	finalize	()V
+kotlin/CharSequence	java/lang/CharSequence	isEmpty	()Z

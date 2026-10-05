@@ -52,6 +52,7 @@ impl Emitter<'_> {
         // emits NO branch — a spurious `ifeq end` to the method end leaves a branch target with no
         // stack-map frame. An always-taken branch becomes an unconditional `goto`.
         if let IrExpr::Const(IrConst::Boolean(b)) = *self.ir.expr(cond) {
+            self.mark_boolean_constant(cond, code);
             // Only emit the jump when the constant actually takes it. Final-bytecode analysis
             // discovers the target state from the emitted control-flow edge.
             if b == jump_when_true {
@@ -80,36 +81,11 @@ impl Emitter<'_> {
             self.bind(skip, code);
             return false;
         }
-        // Boolean equality against a literal is only polarity. Peel it before the general
-        // comparison path so `(a == b) == false` branches directly on `a != b`, and an intrinsic
-        // Boolean result is consumed by one `ifeq`/`ifne` rather than materialized and compared
-        // again. This is a JVM realization optimization over already-checked common IR.
-        if let IrExpr::PrimitiveBinOp { op, lhs, rhs } | IrExpr::Equality { op, lhs, rhs, .. } =
-            *self.ir.expr(cond)
-        {
-            if matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
-                let literal = match (self.ir.expr(lhs), self.ir.expr(rhs)) {
-                    (IrExpr::Const(IrConst::Boolean(value)), _)
-                        if self.value_ty(rhs) == Ty::Boolean =>
-                    {
-                        Some((*value, rhs))
-                    }
-                    (_, IrExpr::Const(IrConst::Boolean(value)))
-                        if self.value_ty(lhs) == Ty::Boolean =>
-                    {
-                        Some((*value, lhs))
-                    }
-                    _ => None,
-                };
-                if let Some((literal, operand)) = literal {
-                    let operand_truth = if op == IrBinOp::Eq {
-                        jump_when_true == literal
-                    } else {
-                        jump_when_true != literal
-                    };
-                    return self.emit_cond_branch(operand, target, operand_truth, code);
-                }
-            }
+        // A negation is only polarity: kotlinc's `Not` jumps on its operand with the opposite
+        // sense. A Boolean `==`/`!=`, a literal operand included, is an ordinary comparison below,
+        // which kotlinc's `BooleanComparison` materializes on both sides.
+        if let Some(operand) = self.ir.negated_operand(cond) {
+            return self.emit_cond_branch(operand, target, !jump_when_true, code);
         }
         // A non-null floating property in synthesized data-class `equals` uses the language's
         // data-class equality rule, whose JVM realization is `<Box>.compare(a, b) == 0`. Emit that

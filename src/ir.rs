@@ -60,6 +60,7 @@ pub(crate) use local_delegates::{
 };
 mod local_property_references;
 mod module_records;
+mod negations;
 mod null_checks;
 mod operators;
 mod overrides;
@@ -1938,6 +1939,8 @@ pub struct IrFile {
     /// source update has (kotlinc's `index = index + 1` in `WithIndexLoopHeader`). A target emits
     /// them as the plain arithmetic and store they are, never as a fused increment.
     pub plain_updates: std::collections::HashSet<ExprId>,
+    /// Boolean negations (kotlinc's `not`), spelled as `operand == false`; see `negations`.
+    pub negations: std::collections::HashSet<ExprId>,
     /// Pre-test loops whose body block is a transparent scope, as the body of a `for` loop kotlinc's
     /// `ForLoopsLowering` rebuilt as a `while` is (an `IrComposite`): the declarations it opens with
     /// stay in scope until the loop ends.

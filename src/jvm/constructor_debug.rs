@@ -6,6 +6,17 @@
 
 use crate::ir::{ExprId, IrClass, IrExpr, IrFile};
 
+/// The line of a primary constructor's own start, which its trailing `return` maps to
+/// (`setExtraLineNumberForVoidReturningFunction` marks a primary constructor's start offset). A
+/// declared parameter list starts the constructor on the class header; without one the
+/// constructor is the declaration itself and starts where its annotations do.
+pub(super) fn primary_constructor_line(ir: &IrFile, class: &IrClass) -> u32 {
+    if ir.ctor_close_lines.contains_key(&class.fq_name_id()) {
+        return class.decl_line;
+    }
+    class.primary_delegation_line().unwrap_or(0)
+}
+
 pub(super) struct PropertyStore {
     pub(super) expression: ExprId,
     pub(super) line: Option<u32>,

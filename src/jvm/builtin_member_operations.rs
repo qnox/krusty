@@ -25,13 +25,33 @@ pub(super) struct BuiltinMemberOperands<'a> {
     pub(super) result: Ty,
 }
 
+/// The common IR operation realizing one builtin member, with the role the replacement plays.
+pub(super) enum BuiltinMemberOperation {
+    /// An ordinary scalar value.
+    Value(IrExpr),
+    /// `Boolean.not()`: the negation of this Boolean operand, which the replacement must carry as
+    /// a recorded negation (see `IrFile::add_negation`), not as an equality with `false`.
+    Negation(ExprId),
+}
+
+impl BuiltinMemberOperation {
+    /// Replace the call node `destination` with this operation, committing the node and any
+    /// provenance its role carries together.
+    pub(super) fn commit(self, ir: &mut IrFile, destination: ExprId) {
+        match self {
+            Self::Value(value) => ir.exprs[destination as usize] = value,
+            Self::Negation(operand) => ir.replace_with_negation(destination, operand),
+        }
+    }
+}
+
 /// The common IR operation implementing `intrinsic` for these operands, or `None` when the
 /// intrinsic is not a scalar operation or the operands do not have its declared shape.
 pub(super) fn operation(
     ir: &mut IrFile,
     intrinsic: CompilerIntrinsic,
     operands: BuiltinMemberOperands<'_>,
-) -> Option<IrExpr> {
+) -> Option<BuiltinMemberOperation> {
     let BuiltinMemberOperands {
         receiver,
         receiver_ty,
@@ -55,7 +75,7 @@ pub(super) fn operation(
                 }
                 let lhs = coerce(ir, receiver, receiver_ty, operand);
                 let rhs = coerce(ir, *argument, parameter, operand);
-                return Some(IrExpr::Call {
+                return Some(BuiltinMemberOperation::Value(IrExpr::Call {
                     callee: Callee::Intrinsic {
                         operation: IrIntrinsic::PrimitiveCompare {
                             operand,
@@ -65,7 +85,7 @@ pub(super) fn operation(
                     },
                     dispatch_receiver: Some(lhs),
                     args: vec![rhs],
-                });
+                }));
             }
             let op = binary_operation(intrinsic)?;
             let (lhs_ty, rhs_ty) = primitive_binary_operands(intrinsic, parameter, result)?;
@@ -75,14 +95,14 @@ pub(super) fn operation(
             let rhs = coerce(ir, *argument, parameter, arithmetic(rhs_ty));
             let value = IrExpr::PrimitiveBinOp { op, lhs, rhs };
             if arithmetic(result) == result {
-                return Some(value);
+                return Some(BuiltinMemberOperation::Value(value));
             }
             let value = ir.add_expr(value);
-            Some(IrExpr::TypeOp {
+            Some(BuiltinMemberOperation::Value(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: value,
                 type_operand: result,
-            })
+            }))
         }
         _ => None,
     }
@@ -94,16 +114,11 @@ fn unary_operation(
     receiver: ExprId,
     receiver_ty: Ty,
     result: Ty,
-) -> Option<IrExpr> {
-    match intrinsic {
+) -> Option<BuiltinMemberOperation> {
+    let value = match intrinsic {
         CompilerIntrinsic::BooleanNot if receiver_ty == Ty::Boolean && result == Ty::Boolean => {
             let operand = coerce(ir, receiver, receiver_ty, Ty::Boolean);
-            let false_value = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-            Some(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: operand,
-                rhs: false_value,
-            })
+            return Some(BuiltinMemberOperation::Negation(operand));
         }
         CompilerIntrinsic::NumericConversion => {
             let operand = coerce(ir, receiver, receiver_ty, receiver_ty);
@@ -142,7 +157,8 @@ fn unary_operation(
             })
         }
         _ => None,
-    }
+    };
+    value.map(BuiltinMemberOperation::Value)
 }
 
 fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<IrBinOp> {
@@ -181,4 +197,72 @@ fn coerce(ir: &mut IrFile, value: ExprId, semantic: Ty, carrier: Ty) -> ExprId {
         arg: unboxed,
         type_operand: carrier,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_realized_boolean_not_replaces_its_call_with_a_recorded_negation() {
+        let mut ir = IrFile::default();
+        let receiver = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let call = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+        operation(
+            &mut ir,
+            CompilerIntrinsic::BooleanNot,
+            BuiltinMemberOperands {
+                receiver,
+                receiver_ty: Ty::Boolean,
+                arguments: &[],
+                parameters: &[],
+                result: Ty::Boolean,
+            },
+        )
+        .expect("`Boolean.not()` is a scalar operation")
+        .commit(&mut ir, call);
+
+        let operand = ir
+            .negated_operand(call)
+            .expect("the replaced call is a recorded negation");
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand: Ty::Boolean,
+        } = ir.expr(operand)
+        else {
+            panic!("the negation's operand is the receiver as a `Boolean`");
+        };
+        assert_eq!(*arg, receiver);
+        assert_eq!(ir.negations.len(), 1);
+    }
+
+    #[test]
+    fn a_realized_scalar_value_is_not_a_negation() {
+        let mut ir = IrFile::default();
+        let receiver = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let call = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        operation(
+            &mut ir,
+            CompilerIntrinsic::PrimitiveBitNot,
+            BuiltinMemberOperands {
+                receiver,
+                receiver_ty: Ty::Int,
+                arguments: &[],
+                parameters: &[],
+                result: Ty::Int,
+            },
+        )
+        .expect("`Int.inv()` is a scalar operation")
+        .commit(&mut ir, call);
+
+        assert!(matches!(
+            ir.expr(call),
+            IrExpr::PrimitiveBinOp {
+                op: IrBinOp::BitXor,
+                ..
+            }
+        ));
+        assert!(ir.negations.is_empty());
+    }
 }

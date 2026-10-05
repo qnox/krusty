@@ -376,12 +376,7 @@ impl BodyLowering<'_> {
                 let call = self
                     .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
                 if *negated {
-                    let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Eq,
-                        lhs: call,
-                        rhs: false_value,
-                    })
+                    self.ir.add_negation(call)
                 } else {
                     call
                 }
@@ -611,14 +606,7 @@ impl BodyLowering<'_> {
                         }
                     }
                     FirUnaryOperation::Identity => operand,
-                    FirUnaryOperation::BooleanNot => {
-                        let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Eq,
-                            lhs: operand,
-                            rhs: false_value,
-                        })
-                    }
+                    FirUnaryOperation::BooleanNot => self.ir.add_negation(operand),
                     FirUnaryOperation::Increment | FirUnaryOperation::Decrement => {
                         // kotlinc's `inc`/`dec` intrinsic adds a signed delta: `dec` is `+ -1`.
                         let result = expression.ty.get();
@@ -881,12 +869,7 @@ impl BodyLowering<'_> {
                 let lhs_null_result = if *operation == FirBinaryOperation::Equal {
                     rhs_null_comparison
                 } else {
-                    let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Eq,
-                        lhs: rhs_null_comparison,
-                        rhs: false_value,
-                    })
+                    self.ir.add_negation(rhs_null_comparison)
                 };
                 let result = self.ir.add_expr(IrExpr::When {
                     branches: vec![
