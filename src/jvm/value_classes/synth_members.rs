@@ -155,7 +155,7 @@ pub(super) fn synth_value_members(
         // Named from the declared accessor signature, exactly like every other value-class member:
         // `getX-impl`, or kotlinc's hash when that signature mentions a value class. The box
         // answers to the same signature under its entry name (`getX`, or that hash).
-        let (jvm_name, entry_name) = {
+        let (jvm_name, entry_name, declared, ret) = {
             let function = &ir.functions[accessor as usize];
             (
                 vc_member_impl_name(
@@ -172,6 +172,8 @@ pub(super) fn synth_value_members(
                     callable_under,
                     false,
                 ),
+                function.params.clone(),
+                function.ret,
             )
         };
         realized.accessors.insert(accessor, entry_name);
@@ -182,6 +184,11 @@ pub(super) fn synth_value_members(
             function.is_static = true;
             ir.classes[class_id as usize].properties[property_index].getter == Some(accessor)
         };
+        let member = Receiver {
+            rest: &declared,
+            ret,
+        };
+        member_signatures::record(ir, class_id, accessor, member);
         crate::jvm::method_parameters::prepend_value_class_receiver(ir, accessor, "arg0");
         let property = &mut ir.classes[class_id as usize].properties[property_index];
         if is_getter {

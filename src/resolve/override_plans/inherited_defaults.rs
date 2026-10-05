@@ -360,7 +360,10 @@ struct SurfaceAccessor {
 }
 
 struct DependencyRealization {
-    identity: ExternalCallableId,
+    /// Synthetic normalized providers used by focused frontend tests may expose an abstract
+    /// declaration without a linkable dependency identity. It still occupies an override slot,
+    /// but cannot contribute an inherited body.
+    identity: Option<ExternalCallableId>,
     realization: crate::libraries::MemberRealization,
     has_nonvirtual_realization: bool,
 }
@@ -370,14 +373,15 @@ impl SurfaceAccessor {
         let Some(dependency) = &self.dependency else {
             return Some(InheritedDefaultBody::Module);
         };
+        let identity = dependency.identity?;
         match (
             dependency.has_nonvirtual_realization,
             dependency.realization,
         ) {
-            (true, _) => Some(InheritedDefaultBody::DependencyHolder(dependency.identity)),
-            (false, crate::libraries::MemberRealization::Dispatch) if is_kotlin => Some(
-                InheritedDefaultBody::DependencyInterfaceMethod(dependency.identity),
-            ),
+            (true, _) => Some(InheritedDefaultBody::DependencyHolder(identity)),
+            (false, crate::libraries::MemberRealization::Dispatch) if is_kotlin => {
+                Some(InheritedDefaultBody::DependencyInterfaceMethod(identity))
+            }
             (false, crate::libraries::MemberRealization::Dispatch) => {
                 Some(InheritedDefaultBody::JavaDefaultMethod)
             }
@@ -656,9 +660,7 @@ fn dependency_surface(
 
 fn dependency_realization(callable: &LibraryCallable) -> DependencyRealization {
     DependencyRealization {
-        identity: callable
-            .external_identity
-            .expect("a dependency member has a stable external identity"),
+        identity: callable.external_identity,
         realization: callable.member_realization,
         has_nonvirtual_realization: callable.nonvirtual_realization.is_some(),
     }

@@ -161,6 +161,7 @@ pub(crate) fn inherited_default_bridges(
             target_ret: None,
             barrier_plan: None,
             special: false,
+            module_name_bridge: false,
             target_name: None,
             property_implementation: None,
         });
