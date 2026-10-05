@@ -496,33 +496,20 @@ fn emit_bridge(
                 return;
             }
             unbox_prim_from(cw, &mut code, cr, er);
-        } else if er.is_reference()
-            && cr.is_reference()
-            && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Void"
-            && crate::jvm::names::instanceof_internal_name(er) != "java/lang/Object"
-        {
-            // `Nothing?` has only the value `null`, but its concrete JVM descriptor is
-            // `java/lang/Void`. A bridge returning a narrower reference (for example a nullable
-            // value class box) must refine the verifier type before `areturn`. `Void` is already
-            // a subtype of the erased `Object` return, so that bridge returns it directly.
-            let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(er));
-            code.checkcast(ci);
-        } else if er.is_reference()
-            && !er.is_array()
-            && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Object"
-            && crate::jvm::names::instanceof_internal_name(er) != "java/lang/Object"
-        {
-            // Covariant generic DIAMOND: the inherited concrete getter returns the erased
-            // `Object` (`val x: T` in a generic base), but an interface in the hierarchy requires
-            // a NARROWER reference type (`override val x: String`). This bridge's declared return
-            // (`er`) is that narrower type, so the `Object` on the stack must be `checkcast` to it
-            // before `areturn` — otherwise the verifier rejects it ("Bad return type"). The usual
-            // direction (concrete is a SUBtype of erased) needs no cast; this is the inverse.
-            // Restricted to a plain object type (`Ty::Obj`): an array `er` would need a descriptor-
-            // form class ref, and that narrowing direction doesn't arise here.
-            let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(er));
-            code.checkcast(ci);
-        } // reference→reference (concrete is a subtype of erased): no cast needed
+        } else if er.is_reference() && cr.is_reference() {
+            // kotlinc's bridge casts the delegated result to the bridge's return type
+            // (`irCastIfNeeded`), and the JVM coercion emits that cast for every differing
+            // reference type but `Object`: a covariant override (`f(): String` over
+            // `f(): CharSequence`) casts up, an erased generic getter (`Object` under a
+            // `String` interface) and `Nothing?`'s `Void` cast down.
+            let erased = crate::jvm::names::instanceof_internal_name(er);
+            if erased != "java/lang/Object"
+                && erased != crate::jvm::names::instanceof_internal_name(cr)
+            {
+                let ci = cw.class_ref(&erased);
+                code.checkcast(ci);
+            }
+        }
     }
     emit_return(er, &mut code);
     finish_bridge(
