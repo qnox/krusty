@@ -237,7 +237,9 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             *lhs = map(*lhs);
             *rhs = map(*rhs);
         }
-        IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => *value = map(*value),
+        IrExpr::SetValue { value, .. }
+        | IrExpr::SetStatic { value, .. }
+        | IrExpr::SetFrameResult { value, .. } => *value = map(*value),
         IrExpr::SetField {
             receiver, value, ..
         }
@@ -351,6 +353,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(callable_reference_provenance);
     copy_map!(callable_reference_enclosures);
     copy_map!(checked_return_depths);
+    copy_map!(inline_return_frames);
     copy_map!(annotation_constructions);
     copy_map!(generated_secondary_constructor_calls);
     copy_map!(expr_lines);
@@ -550,6 +553,7 @@ fn copy_function_implementation_facts(
     copy_map!(fn_signature_offsets);
     copy_map!(fn_source_order);
     copy_map!(fn_continuation_ordinal);
+    copy_map!(fn_contracts);
     copy_set!(fn_debug_locals);
     copy_map!(lambda_own_params_from);
     copy_map!(lambda_enclosures);

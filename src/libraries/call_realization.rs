@@ -120,6 +120,7 @@ impl LibraryCallable {
         let parameter_plan = physical_parameter_plan::source_parameter_plan(params.len());
         LibraryCallable {
             external_identity: None,
+            annotations: Vec::new(),
             external_default_provider: None,
             external_property_identity: None,
             owner: owner.into(),

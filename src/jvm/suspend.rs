@@ -44,7 +44,7 @@ mod debug_metadata;
 mod emission_facts;
 pub use emission_facts::{ContinuationMetadata, ContinuationMetadataMap};
 pub(crate) use emission_facts::{
-    IntrinsicProbeContinuations, SuspendedResultReturn, SuspendedResultReturns,
+    IntrinsicProbeContinuations, ProbedContinuation, SuspendedResultReturn, SuspendedResultReturns,
 };
 use emission_facts::{MachineOutputs, MachineSubject};
 mod get_or_create;
@@ -68,6 +68,7 @@ pub(crate) use specialized_lambda_classes::SpecializedLambdaClasses;
 mod suspend_lambda;
 mod tail_forward;
 mod value_class_results;
+pub(crate) use value_class_results::completion_box;
 use value_class_results::{boxed_carrier, boxed_on_resume, resumed_carrier};
 mod value_liveness;
 mod value_try;
@@ -374,9 +375,9 @@ pub(crate) fn lower_suspend(
         // body's own locals exist. The conjunction is the whole gate: this claims only functions
         // that would otherwise be emitted with no continuation to pass.
         // A member's continuation re-enters the method on the receiver it kept, so the call it makes
-        // has to reach exactly this body: an OPEN method would re-dispatch to an override, and a
-        // private one is not callable from the continuation class. Those keep the diagnostic they
-        // have today.
+        // has to reach exactly this body: an overridable member's body moves to the static
+        // `$suspendImpl` the continuation calls, and a private one is not callable from the
+        // continuation class, so it keeps the diagnostic it has today.
         //
         // A function that ALSO has suspensions of its own is taken whole: one method has one
         // dispatch, so the two kinds cannot be split between the IR machine and this one. The IR
@@ -428,6 +429,11 @@ pub(crate) fn lower_suspend(
                     return false;
                 }
                 let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set);
+                crate::trace_compiler!(
+                    "suspend",
+                    "spliced value-try decline fid={fid} name={} declined={declined}",
+                    ir.functions[fid as usize].name
+                );
                 match declined {
                     true => Vec::new(),
                     false => cps::frame_suspensions(ir, b, &suspend_set),
@@ -527,12 +533,18 @@ pub(crate) fn lower_suspend(
             let b = body.expect("a spliced-inline suspension implies a body");
             let mut recorded = Vec::new();
             for &call in &spliced_suspensions {
+                let resumed_box = boxed_on_resume(ir, call, &suspend_set);
                 let cont = ir.add_expr(IrExpr::CurrentContinuation);
                 if !append_continuation(ir, call, cont, outputs.default_call_operands) {
                     return false;
                 }
-                recorded.push(cps::SplicedSuspension { call });
+                recorded.push(cps::SplicedSuspension { call, resumed_box });
             }
+            intrinsic_probes::bind_machine_continuation(
+                ir,
+                b,
+                outputs.intrinsic_probe_continuations,
+            );
             if !box_returns(ir, b) {
                 return false;
             }
@@ -1312,12 +1324,14 @@ fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Option<ExprId> {
 /// deliberately skipped; only their capture expressions still belong to the enclosing function.
 /// Whether emission may own this function's coroutine machine.
 ///
-/// A static function always may. An instance method may when the continuation can call it back and
-/// be sure of reaching this very body: `invokevirtual` on an OPEN method would land in an override,
-/// and a private method is not accessible from the continuation class at all.
+/// A static function always may, and so may a member whose body moves to its static
+/// `$suspendImpl`: an interface member with a body or an overridable class member, whose
+/// continuation re-enters that static. Any other instance method may when the continuation can
+/// call it back and be sure of reaching this very body: a private method is not accessible from
+/// the continuation class at all.
 fn machine_eligible(ir: &IrFile, fid: u32) -> bool {
     let function = &ir.functions[fid as usize];
-    if function.is_static {
+    if function.is_static || crate::jvm::suspend_impls::moves_to_suspend_impl(ir, fid) {
         return true;
     }
     let owner_is_interface = function.dispatch_receiver.is_some_and(|receiver| {

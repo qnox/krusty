@@ -62,6 +62,15 @@ pub(super) fn specialize_inline_copy(
     Some(())
 }
 
+/// A return an inline expansion leaves through: the `return` node, its value, and whether a nested
+/// lambda's template holds it.
+#[derive(Clone, Copy)]
+struct InlineReturn {
+    returned: ExprId,
+    value: Option<ExprId>,
+    nested: bool,
+}
+
 /// What one physical operand position of an inline expansion fills.
 enum InlineOperandRole {
     /// A receiver. It declares no value parameter, and kotlinc gives it a local of its own
@@ -651,7 +660,7 @@ impl BodyLowering<'_> {
         // and a break per return — so nothing is reserved or allocated until the shape is known.
         // Reserving first left a hole in the local numbering and a pair of unreachable arena nodes
         // behind every successful tail promotion, which shifts every later local identity.
-        let mut returns: Vec<(ExprId, Option<ExprId>)> = Vec::new();
+        let mut returns: Vec<InlineReturn> = Vec::new();
         // Copies whose `GetValue` of an inline parameter was replaced by that parameter's lambda.
         // A capture temporary initialized from one of these is the lambda, even though the
         // invocation still reads the temporary.
@@ -711,6 +720,19 @@ impl BodyLowering<'_> {
                 }
             }
             if protected.contains(&source) {
+                // A nested lambda's template keeps its own numbering, but a return it carries that
+                // its boundaries already moved to this declaration leaves this expansion too.
+                if let (IrExpr::Return(value), Some(0)) = (
+                    self.ir.expr(copy).clone(),
+                    self.ir.checked_return_depths.get(&copy).copied(),
+                ) {
+                    returns.push(InlineReturn {
+                        returned: copy,
+                        value,
+                        nested: true,
+                    });
+                    self.ir.checked_return_depths.remove(&copy);
+                }
                 continue;
             }
             if let IrExpr::GetValue(parameter) = self.ir.expr(source) {
@@ -737,7 +759,11 @@ impl BodyLowering<'_> {
                 _ => None,
             };
             if let Some(value) = returned {
-                returns.push((copy, value));
+                returns.push(InlineReturn {
+                    returned: copy,
+                    value,
+                    nested: false,
+                });
                 // This return has crossed its checked callable boundary and will be represented by
                 // the block that replaces it, in EITHER shape. The sparse depth fact belongs to the
                 // old `Return` node; leaving it on the replacement makes an enclosing inline-lambda
@@ -854,7 +880,12 @@ impl BodyLowering<'_> {
         // emits — it leaves it on the operand stack. The loop form costs an unnamed local, and when
         // the expansion crosses a suspension that local takes a continuation field kotlinc has no
         // counterpart for.
-        if let [(tail, value)] = returns[..] {
+        if let [InlineReturn {
+            returned: tail,
+            value,
+            nested: false,
+        }] = returns[..]
+        {
             if produce_sole_tail_return(self.ir, cloned_root, tail, value, close_line) {
                 let mut statements = operand_declarations;
                 statements.push(cloned_root);
@@ -875,11 +906,14 @@ impl BodyLowering<'_> {
             slot
         });
         let label = format!("$fir_inline${}_{}", target.raw(), self.next_temporary);
-        for (copy, value) in returns {
-            let exit = self.ir.add_expr(IrExpr::Break {
-                label: Some(label.clone()),
-            });
-            self.ir.exprs[copy as usize] = inline_return_exit(self.ir, result_slot, value, exit);
+        for found in returns {
+            self.ir.exprs[found.returned as usize] = super::inline_returns::frame_exit(
+                self.ir,
+                &label,
+                result_slot,
+                found.nested,
+                found.value,
+            );
         }
 
         let mut statements = operand_declarations;
@@ -887,12 +921,16 @@ impl BodyLowering<'_> {
             let initial = self
                 .ir
                 .add_expr(IrExpr::Const(IrConst::zero_for_value_type(result_ty)));
-            statements.push(self.ir.add_expr(IrExpr::Variable {
+            let declaration = self.ir.add_expr(IrExpr::Variable {
                 index: slot,
                 ty: stored_value_ty(result_ty),
                 init: Some(initial),
                 named: false,
-            }));
+            });
+            self.ir
+                .inline_return_frames
+                .insert(declaration, label.clone());
+            statements.push(declaration);
         }
         let fallthrough = self.ir.add_expr(IrExpr::Break {
             label: Some(label.clone()),
@@ -1338,6 +1376,7 @@ pub(super) fn specialize_typed_expression(
         | IrExpr::GetValue(_)
         | IrExpr::ForwardedSuperArgument { .. }
         | IrExpr::SetValue { .. }
+        | IrExpr::SetFrameResult { .. }
         | IrExpr::Return(_)
         | IrExpr::Block { .. }
         | IrExpr::When { .. }
@@ -1742,28 +1781,6 @@ fn specialize_checked_operation(
         | IrCheckedOperation::BackingFieldRead { .. }
         | IrCheckedOperation::BackingFieldWrite { .. } => {}
     }
-}
-
-/// The block that replaces one cloned `return` inside an expansion's exit loop.
-///
-/// A non-`Unit` result is stored and read after the loop. A `Unit` result has no slot, but
-/// `return expr` still evaluates `expr`: the call in `return f2(y)` is that expression.
-fn inline_return_exit(
-    ir: &mut crate::ir::IrFile,
-    result_slot: Option<u32>,
-    value: Option<ExprId>,
-    exit: ExprId,
-) -> IrExpr {
-    let mut stmts = Vec::new();
-    if let Some(value) = value {
-        if let Some(slot) = result_slot {
-            stmts.push(ir.add_expr(IrExpr::SetValue { var: slot, value }));
-        } else {
-            stmts.push(value);
-        }
-    }
-    stmts.push(exit);
-    IrExpr::Block { stmts, value: None }
 }
 
 /// Rewrite `root` to PRODUCE the value of its sole rewritten return, or leave it exactly as it was.

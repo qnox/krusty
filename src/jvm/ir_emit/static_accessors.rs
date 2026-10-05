@@ -55,6 +55,12 @@ pub(super) enum StaticAccessor {
     /// `access$set<X>$p(<owner>, value)` that writes the backing field, including when the
     /// property declares a setter.
     FieldSetter { class: u32, property: u32 },
+    /// `access$get<Companion>$p()` (or `…$p$s<hash>()` on a class other than `holder`), reading
+    /// `holder`'s `Companion` field that holds singleton `companion`.
+    CompanionInstance {
+        companion: TypeName,
+        holder: TypeName,
+    },
 }
 
 /// Every static owner's accessors, in first-use order.
@@ -62,11 +68,19 @@ pub(super) enum StaticAccessor {
 pub(super) struct StaticAccessorPlan {
     by_owner: HashMap<StaticOwner, Vec<StaticAccessor>>,
     protected: Vec<ProtectedMemberAccessBridge>,
+    /// The field each planned companion accessor reads, by (holder, companion), as the holder's
+    /// classifier record declares it.
+    companion_fields: HashMap<(TypeName, TypeName), Box<str>>,
 }
 
 impl StaticAccessorPlan {
     fn accessors_of(&self, owner: StaticOwner) -> &[StaticAccessor] {
         self.by_owner.get(&owner).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `owner` declares `accessor`, so a use site may call it.
+    pub(super) fn declares(&self, owner: StaticOwner, accessor: StaticAccessor) -> bool {
+        self.accessors_of(owner).contains(&accessor)
     }
 }
 
@@ -223,6 +237,8 @@ pub(super) fn plan(
     let private_member_bridges = env.run.private_member_access_bridges.borrow();
     let walk = Walk {
         ir,
+        classifiers: env.signature_symbols,
+        companion_fields: RefCell::default(),
         class_member_fids,
         property_realizations: env.property_realizations,
         protected_calls: &protected_calls,
@@ -302,6 +318,7 @@ pub(super) fn plan(
     uses.sort_by_key(|found| found.line);
     let mut plan = StaticAccessorPlan {
         protected: walk.protected.into_inner(),
+        companion_fields: walk.companion_fields.into_inner(),
         ..StaticAccessorPlan::default()
     };
     let mut seen = HashSet::new();
@@ -481,6 +498,9 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
 
 struct Walk<'a> {
     ir: &'a IrFile,
+    classifiers: &'a dyn crate::backend::BackendClassifierSource,
+    /// The field of each companion read routed through an accessor.
+    companion_fields: RefCell<HashMap<(TypeName, TypeName), Box<str>>>,
     class_member_fids: &'a HashSet<u32>,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     /// The protected member calls emitted outside the class that may make them, by call.
@@ -559,6 +579,26 @@ impl Walk<'_> {
                 uses.push(self.protected_use(line, bridge.clone()));
                 continue;
             }
+            if let Some(read) = super::companion_field::companion_field_read(
+                ir,
+                self.classifiers,
+                ir.expr(expression),
+            ) {
+                // A read with no access path is reported where the emitter meets it.
+                if let Ok(Some((owner, accessor))) =
+                    super::companion_field::companion_field_accessor(ir, context, &read)
+                {
+                    self.companion_fields
+                        .borrow_mut()
+                        .insert((read.holder, read.companion), read.field);
+                    uses.push(Use {
+                        line,
+                        owner: StaticOwner::Class(owner),
+                        accessor,
+                    });
+                }
+                continue;
+            }
             let Some((owner, accessor)) = self.target(expression) else {
                 continue;
             };
@@ -573,6 +613,8 @@ impl Walk<'_> {
                 | StaticAccessor::MemberSetter { .. }
                 | StaticAccessor::FieldGetter { .. }
                 | StaticAccessor::FieldSetter { .. } => context != owner,
+                // Placed by `companion_field_accessor`, which already decided it is needed.
+                StaticAccessor::CompanionInstance { .. } => true,
                 StaticAccessor::Protected(_) => true,
             };
             if needed {
@@ -725,6 +767,12 @@ pub(super) fn emit(
             StaticAccessor::FieldSetter { class, property } => {
                 accessor.field_setter(class, property, cw)
             }
+            StaticAccessor::CompanionInstance { companion, holder } => accessor.companion_instance(
+                companion,
+                holder,
+                &plan.companion_fields[&(holder, companion)],
+                cw,
+            ),
             StaticAccessor::Protected(index) => {
                 let bridge = &plan.protected[index as usize];
                 let owner = bridge.owner.render();
@@ -1102,6 +1150,34 @@ impl Accessor<'_> {
         let field = self.field(index, ty, cw);
         code.getstatic(field, slot_words(ty) as i32);
         emit_return(ty, &mut code);
+        code.ensure_locals(0);
+        code.link();
+        cw.add_method(self.flags, &name, &descriptor, &code);
+    }
+
+    /// `access$get<Companion>$p`: read `holder`'s `Companion` field.
+    fn companion_instance(
+        &self,
+        companion: TypeName,
+        holder: TypeName,
+        field: &str,
+        cw: &mut ClassWriter,
+    ) {
+        let StaticOwner::Class(owner) = self.owner else {
+            unreachable!("a companion field accessor is declared by a class");
+        };
+        let (name, descriptor) =
+            super::companion_field::companion_instance_accessor(owner, holder, companion, field);
+        reserve_signature(cw, &name, &descriptor);
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(self.declaration_line);
+        let field = cw.fieldref(
+            &holder.render(),
+            field,
+            &format!("L{};", companion.render()),
+        );
+        code.getstatic(field, 1);
+        code.areturn();
         code.ensure_locals(0);
         code.link();
         cw.add_method(self.flags, &name, &descriptor, &code);

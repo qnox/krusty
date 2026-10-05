@@ -533,3 +533,137 @@ fn class_lambda_metadata_matches_kotlinc() {
     }
     let _ = std::fs::remove_dir_all(work);
 }
+
+/// A lambda class declares kotlinc's typed `invoke` (`invoke(ILToken;)Ljava/lang/Integer;`, a
+/// `Unit` lambda's `invoke()V`) beside the erased `FunctionN.invoke` bridge, and its `@Metadata`
+/// names that method. An unbounded `T` erases the typed `invoke` to the interface slot itself, so
+/// there is no bridge. Each class's `invoke` methods and header must equal kotlinc's.
+const METADATA_SOURCE: &str = r#"
+class Token(val n: Int)
+fun plain(): Any = { x: Int, t: Token -> x + t.n }
+fun extension(): Any = fun String.(s: String?): Long = 42L
+fun <T : Comparable<T>> generic(): Any = { t: T -> t }
+fun capturing(base: Token): Any = { y: Int -> base.n + y }
+fun unitResult(): Any = { -> }
+fun nullable(): Any = { x: Int? -> x }
+fun <T> erased(): Any = { t: T -> t }
+"#;
+
+/// A class's `invoke` methods (access, descriptor, signature), its `@Metadata` integer elements
+/// (`mv`, `k`, `xi`), and its `d1`/`d2` payload.
+type InvokeShape = (
+    Vec<String>,
+    Option<Vec<(String, Vec<i32>)>>,
+    Option<(Vec<u8>, Vec<String>)>,
+);
+
+fn class_mode_metadata(
+    source_text: &str,
+    classes: &[&str],
+    compile: impl FnOnce(&Path, &Path),
+) -> Vec<InvokeShape> {
+    let work = common::scratch_dir().expect("allocate class-lambda metadata fixture");
+    let source = work.join("M.kt");
+    let output = work.join("out");
+    std::fs::create_dir_all(&output).expect("create output");
+    std::fs::write(&source, source_text).expect("write fixture");
+    compile(&source, &output);
+    let headers = classes
+        .iter()
+        .map(|class| {
+            let bytes = std::fs::read(output.join(format!("{class}.class")))
+                .unwrap_or_else(|_| panic!("{class} was not emitted"));
+            let invokes = common::member_table(&bytes)
+                .into_iter()
+                .filter(|member| member.contains(" invoke("))
+                .collect();
+            (
+                invokes,
+                common::kotlin_metadata::kotlin_metadata_ints(&bytes),
+                common::kotlin_metadata::raw_kotlin_metadata(&bytes),
+            )
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(work);
+    headers
+}
+
+/// Compile `source` with both compilers under `-Xlambdas=class` and compare the headers of the
+/// lambda `classes`.
+fn assert_class_lambda_invoke_matches_kotlinc(source: &str, classes: &[&str]) {
+    let reference = class_mode_metadata(source, classes, |source, output| {
+        let args = vec![
+            "-d".to_string(),
+            output.to_string_lossy().into_owned(),
+            "-nowarn".to_string(),
+            "-Xlambdas=class".to_string(),
+            source.to_string_lossy().into_owned(),
+        ];
+        let (code, stderr) =
+            common::kotlinc_compile(&args).expect("reference compiler unavailable");
+        assert_eq!(code, 0, "kotlinc rejected the metadata fixture: {stderr}");
+    });
+    let ours = class_mode_metadata(source, classes, |source, output| {
+        let stdlib = common::stdlib_jar();
+        let result = std::process::Command::new(common::krusty_binary())
+            .args(["-d", output.to_str().expect("UTF-8 output")])
+            .args(["-Xlambdas=class"])
+            .args(["-classpath", stdlib.to_str().expect("UTF-8 stdlib")])
+            .arg(source)
+            .output()
+            .expect("run krusty CLI");
+        assert!(
+            result.status.success(),
+            "krusty rejected the metadata fixture: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    });
+    for ((class, expected), emitted) in classes.iter().zip(&reference).zip(&ours) {
+        assert!(expected.1.is_some(), "kotlinc {class} carries no @Metadata");
+        assert_eq!(
+            emitted, expected,
+            "{class}: invoke or @Metadata differs from kotlinc"
+        );
+    }
+}
+
+#[test]
+fn class_lambda_typed_invoke_matches_kotlinc() {
+    assert_class_lambda_invoke_matches_kotlinc(
+        METADATA_SOURCE,
+        &[
+            "MKt$plain$1",
+            "MKt$extension$1",
+            "MKt$generic$1",
+            "MKt$capturing$1",
+            "MKt$unitResult$1",
+            "MKt$nullable$1",
+            "MKt$erased$1",
+        ],
+    );
+}
+
+/// A builder-inferred lambda's function type names a type parameter of the library function that
+/// inferred it (`buildSet`'s element), which is not in the lambda's scope. kotlinc approximates
+/// the declaration; the class must still be emitted with kotlinc's record.
+#[test]
+fn builder_inferred_class_lambda_metadata_matches_kotlinc() {
+    let source = r#"
+fun <R, C : MutableCollection<in R>> flatMapTo1(destination: C, transform: (List<String>) -> Iterable<R>) {}
+fun build(): Any = buildSet { flatMapTo1(this) { it } }
+"#;
+    assert_class_lambda_invoke_matches_kotlinc(source, &["MKt$build$1$1"]);
+}
+
+/// The lambda names the function's `T : Number`, which shadows the class's `T : CharSequence`.
+/// The record must carry the function's parameter, chosen by identity rather than by spelling.
+#[test]
+fn shadowed_type_parameter_class_lambda_metadata_matches_kotlinc() {
+    let source = r#"
+class Outer<T : CharSequence> {
+    fun <T : Number> inner(): Any = { x: T -> x }
+    fun outer(): Any = { x: T -> x }
+}
+"#;
+    assert_class_lambda_invoke_matches_kotlinc(source, &["Outer$inner$1", "Outer$outer$1"]);
+}

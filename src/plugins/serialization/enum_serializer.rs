@@ -1,8 +1,11 @@
 //! Construction of the runtime serializer factory call for an enum declaration.
 
 use super::{
-    class_ty, type_name, Callee, ClassId, ExprId, InlineKind, IrConst, IrExpr, IrFile, KtString, Ty,
+    class_ty, type_name, Callee, ClassId, ExprId, InlineKind, IrConst, IrExpr, IrFile, IrTypeOp,
+    KtString, Ty, SERIALIZABLE_FQ,
 };
+use crate::plugins::PluginContext;
+use crate::types::TypeName;
 
 const SERIAL_NAME_FQ: &str = "kotlinx/serialization/SerialName";
 const ANNOTATED_ENUM_SERIALIZER_DESCRIPTOR: &str = "(Ljava/lang/String;[Ljava/lang/Enum;[Ljava/lang/String;[[Ljava/lang/annotation/Annotation;[Ljava/lang/annotation/Annotation;)Lkotlinx/serialization/KSerializer;";
@@ -14,11 +17,78 @@ pub(super) fn factory_call(
     name: ExprId,
     enums: ExprId,
 ) -> ExprId {
+    let entry_serial_names = entry_serial_names(ir, class_id);
+    factory_call_with_names(ir, &entry_serial_names, name, enums)
+}
+
+/// The serializer kotlinc builds for an element whose type is a source enum WITHOUT a generated
+/// serializer (the enum is not `@Serializable`): the same runtime factory a `@Serializable` enum's
+/// accessor calls, constructed at the use site because there is no accessor to read it through.
+#[derive(Clone)]
+pub(in crate::plugins::serialization) struct PlainEnumSerializer {
+    classifier: TypeName,
+    serial_name: KtString,
+    entry_serial_names: Vec<Option<KtString>>,
+}
+
+/// Select [`PlainEnumSerializer`] for `classifier` when it is a same-file enum that is not
+/// `@Serializable`. A `@Serializable` enum reaches its own generated accessor instead; one whose
+/// accessor is missing is a broken generation state, not a plain enum, and stays underivable.
+pub(super) fn local_plain_enum_serializer(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    classifier: TypeName,
+) -> Option<PlainEnumSerializer> {
+    let class_id = ir
+        .classes
+        .iter()
+        .position(|class| class.fq_name_id() == classifier && class.is_enum)?
+        as ClassId;
+    if ctx.has_annotation(class_id, type_name(SERIALIZABLE_FQ)) {
+        return None;
+    }
+    Some(PlainEnumSerializer {
+        classifier,
+        serial_name: super::annotations::class_serial_name(ir, class_id),
+        entry_serial_names: entry_serial_names(ir, class_id),
+    })
+}
+
+/// `EnumsKt.create…EnumSerializer("<serial name>", E.values() as Array<Enum>, …)`.
+pub(super) fn emit_plain_enum_serializer(ir: &mut IrFile, plan: PlainEnumSerializer) -> ExprId {
+    let name = ir.add_expr(IrExpr::Const(IrConst::String(plan.serial_name)));
+    let enums = enum_values_array(ir, plan.classifier);
+    factory_call_with_names(ir, &plan.entry_serial_names, name, enums)
+}
+
+/// `E.values()` narrowed to the factory's `Array<Enum>`. The JVM would accept `[LE;` where
+/// `[Ljava/lang/Enum;` is expected (arrays are covariant), but kotlinc still narrows with an
+/// explicit `checkcast` — so emit one.
+pub(super) fn enum_values_array(ir: &mut IrFile, classifier: TypeName) -> ExprId {
+    let values = ir.add_expr(IrExpr::Call {
+        callee: Callee::Static {
+            owner: classifier,
+            name: "values".to_string(),
+            descriptor: format!("()[L{classifier};"),
+            inline: InlineKind::None,
+        },
+        dispatch_receiver: None,
+        args: vec![],
+    });
+    ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: values,
+        type_operand: Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Enum")]),
+    })
+}
+
+/// Each entry's `@SerialName`, in declaration order; `None` for an entry without one.
+fn entry_serial_names(ir: &IrFile, class_id: ClassId) -> Vec<Option<KtString>> {
     // An entry's `@SerialName` is the name the format reads and writes for that constant. It lives
     // on the entry's static FIELD (an enum entry has no property of its own). Compare the resolved
     // annotation identity: an unrelated same-simple-name annotation cannot change the wire format.
     let serial_name_annotation = type_name(SERIAL_NAME_FQ);
-    let entry_serial_names: Vec<Option<KtString>> = {
+    {
         let class = &ir.classes[class_id as usize];
         class
             .enum_entries
@@ -46,8 +116,15 @@ pub(super) fn factory_call(
                     })
             })
             .collect()
-    };
+    }
+}
 
+fn factory_call_with_names(
+    ir: &mut IrFile,
+    entry_serial_names: &[Option<KtString>],
+    name: ExprId,
+    enums: ExprId,
+) -> ExprId {
     // `createSimpleEnumSerializer` derives every name from the constant spelling. A serial name
     // selects `createAnnotatedEnumSerializer`, whose null name elements mean “use that spelling”.
     if entry_serial_names.iter().all(Option::is_none) {

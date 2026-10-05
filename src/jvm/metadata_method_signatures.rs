@@ -2,7 +2,8 @@
 //! `FirJvmSignatureSerializer.requiresFunctionSignature`. A reader rebuilds the descriptor of a
 //! function without one by mapping the class id of each declared type (extension receiver, value
 //! parameters, return) through `ClassMapperLite`; the signature is written exactly when that
-//! reconstruction is impossible or differs from the physical descriptor.
+//! reconstruction is impossible or differs from the physical descriptor. A property's backing
+//! field follows the same rule (`requiresSignature`) for its `JvmFieldSignature.desc`.
 
 use std::collections::HashSet;
 
@@ -68,6 +69,17 @@ fn lambda_invoke_return(ty: Ty) -> String {
         }
         other => super::names::type_descriptor(other),
     }
+}
+
+/// `requiresSignature` for a backing field: its descriptor is recorded exactly when a reader cannot
+/// rebuild it from the property type (`T`, `Int?`, a value class, `Array<String>`), or the field
+/// holds a delegate of another type.
+pub(super) fn requires_field_signature(
+    property: Ty,
+    physical: &str,
+    local_classifiers: &HashSet<TypeName>,
+) -> bool {
+    map_type_default(property, local_classifiers).as_deref() != Some(physical)
 }
 
 /// `mapTypeDefault`: the descriptor `ClassMapperLite` gives the type's class id, nullability

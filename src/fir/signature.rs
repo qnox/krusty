@@ -1532,10 +1532,13 @@ pub struct ResolvedModuleIndex {
     invisible_reference_suppressions: std::collections::HashSet<DeclarationId>,
     invisible_member_suppressions: std::collections::HashSet<DeclarationId>,
     optional_declaration_usage_suppressions: std::collections::HashSet<DeclarationId>,
+    /// The lexical policies each source's file annotations open, resolved once in Pass 1 from the
+    /// checked applications. Bounded Pass-2 units do not retain the file annotations' syntax.
+    file_lexical_policies: HashMap<SourceFileId, Box<[crate::lexical_policy::LexicalPolicy]>>,
     /// Resolved source annotation policies keyed by classifier identity. These are declaration
     /// header facts; no annotation syntax or source coordinate survives finalization.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
-    annotation_targets: HashMap<TypeName, crate::types::AnnotationTargets>,
+    annotation_targets: crate::types::DeclaredTargetPolicies,
     /// Stable resolved identity of every source classifier. Identity belongs to the declaration
     /// inventory and may be known before an ordinary body-local classifier's lexical parent header
     /// is checked in Pass 2.
@@ -1553,10 +1556,9 @@ pub struct ResolvedModuleIndex {
     /// are semantic declaration headers; target erasure and bridge materialization are absent.
     pub(super) property_overrides: HashMap<DeclarationId, Box<[super::ResolvedPropertyOverride]>>,
     pub(super) function_overrides: HashMap<DeclarationId, Box<[super::ResolvedFunctionOverride]>>,
-    /// Exact interface identities inherited through the direct superclass of each source
-    /// classifier. Pass 1 computes this while the semantic hierarchy provider is live; target
-    /// backends consume it instead of walking superclass declarations again.
-    pub(super) superclass_interfaces: HashMap<DeclarationId, Box<[TypeName]>>,
+    /// The interface defaults each source classifier inherits without overriding, selected while
+    /// the semantic hierarchy provider is live; target backends realize them without a walk.
+    pub(super) inherited_defaults: HashMap<DeclarationId, Box<[super::ResolvedInheritedDefault]>>,
     /// Non-default return-value statuses of module declarations, derived from the frozen edges.
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
     pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
@@ -1942,6 +1944,29 @@ impl ResolvedModuleIndex {
         self.invisible_reference_suppressions.contains(&declaration)
     }
 
+    pub(crate) fn publish_file_lexical_policies(
+        &mut self,
+        source: SourceFileId,
+        policies: Vec<crate::lexical_policy::LexicalPolicy>,
+    ) {
+        let previous = self
+            .file_lexical_policies
+            .insert(source, policies.into_boxed_slice());
+        assert!(
+            previous.is_none(),
+            "a source's file lexical policies are published once"
+        );
+    }
+
+    pub(crate) fn file_lexical_policies(
+        &self,
+        source: SourceFileId,
+    ) -> &[crate::lexical_policy::LexicalPolicy] {
+        self.file_lexical_policies
+            .get(&source)
+            .map_or(&[], |policies| &policies[..])
+    }
+
     pub(crate) fn declaration_suppresses_invisible_member(
         &self,
         declaration: DeclarationId,
@@ -1955,6 +1980,22 @@ impl ResolvedModuleIndex {
     ) -> bool {
         self.optional_declaration_usage_suppressions
             .contains(&declaration)
+    }
+
+    /// Restrict a modifier-less override to the visibility it inherits from the declarations it
+    /// overrides. Override edges — and with them the overridden declarations' visibilities — exist
+    /// only after signature finalization, so the header starts at the parser's `public` default and
+    /// is corrected here, before any body is checked against or lowered from it.
+    pub(crate) fn publish_inherited_visibility(
+        &mut self,
+        declaration: DeclarationId,
+        visibility: Visibility,
+    ) {
+        let header = self
+            .declaration_headers
+            .get_mut(&declaration)
+            .expect("inherited visibility requires a finalized declaration header");
+        header.visibility = visibility;
     }
 
     pub(crate) fn publish_visibility_suppression(
@@ -1984,7 +2025,6 @@ impl ResolvedModuleIndex {
         &mut self,
         classifier: TypeName,
         retention: crate::types::AnnotationRetention,
-        targets: Option<crate::types::AnnotationTargets>,
     ) {
         assert!(
             self.classifier_declarations.contains_key(&classifier),
@@ -1996,14 +2036,51 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "an annotation classifier may publish one retention policy"
         );
-        if let Some(targets) = targets {
-            assert!(
-                self.annotation_targets
-                    .insert(classifier, targets)
-                    .is_none(),
-                "an annotation classifier may publish one target policy"
-            );
-        }
+    }
+
+    /// A source annotation class's declared `@Retention`, published once the classifier-annotation
+    /// pass has checked the application and found it selects a `kotlin.annotation.AnnotationRetention`
+    /// entry. It replaces the default the header registered the class with.
+    pub(crate) fn publish_annotation_retention(
+        &mut self,
+        classifier: TypeName,
+        retention: crate::types::AnnotationRetention,
+    ) {
+        let registered = self
+            .annotation_retentions
+            .get_mut(&classifier)
+            .expect("a declared retention requires the classifier's registered annotation policy");
+        assert!(
+            *registered == crate::types::AnnotationRetention::Default
+                && retention != crate::types::AnnotationRetention::Default,
+            "an annotation classifier may publish one declared retention"
+        );
+        *registered = retention;
+    }
+
+    /// A source annotation class's `@Target` policy, published once the classifier-annotation pass
+    /// has checked the application: `valid` decides applicability, an invalid application only
+    /// supplies kotlinc's recovery for diagnostics (see [`crate::types::DeclaredTargetPolicies`]).
+    pub(crate) fn publish_annotation_targets(
+        &mut self,
+        classifier: TypeName,
+        targets: crate::types::AnnotationTargets,
+        valid: bool,
+    ) {
+        assert!(
+            self.annotation_retentions.contains_key(&classifier),
+            "annotation targets require the classifier's published annotation policy"
+        );
+        let published = if valid {
+            self.annotation_targets.publish_valid(classifier, targets)
+        } else {
+            self.annotation_targets
+                .publish_invalid_recovery(classifier, targets)
+        };
+        assert!(
+            published,
+            "an annotation classifier may publish one target policy"
+        );
     }
 
     pub(crate) fn annotation_retention(
@@ -2013,14 +2090,8 @@ impl ResolvedModuleIndex {
         self.annotation_retentions.get(&classifier).copied()
     }
 
-    pub(crate) fn annotation_targets(
-        &self,
-        classifier: TypeName,
-    ) -> crate::types::AnnotationTargets {
-        self.annotation_targets
-            .get(&classifier)
-            .copied()
-            .unwrap_or(crate::types::AnnotationTargets::DEFAULT)
+    pub(crate) fn annotation_targets(&self) -> &crate::types::DeclaredTargetPolicies {
+        &self.annotation_targets
     }
 
     pub fn classifier_header(
@@ -2042,6 +2113,28 @@ impl ResolvedModuleIndex {
             .get(&classifier)
             .copied()
             .flatten()
+    }
+
+    /// `declaration` and the classifiers that lexically contain it, nearest first.
+    ///
+    /// Non-classifier owners (a function containing a local class, for example) are traversed but
+    /// not returned. The result is declaration identity, not a classifier-name prefix: generated
+    /// local names do not encode lexical ownership.
+    pub fn classifier_and_outer_class_declarations(
+        &self,
+        declaration: DeclarationId,
+    ) -> Vec<DeclarationId> {
+        let mut classifiers = Vec::new();
+        let mut current = Some(declaration);
+        while let Some(owner) = current {
+            if self.classifier_identity(owner).is_some() {
+                classifiers.push(owner);
+            }
+            current = self
+                .declaration_header(owner)
+                .and_then(|header| header.owner);
+        }
+        classifiers
     }
 
     pub fn classifier_hierarchy(
@@ -3088,6 +3181,15 @@ impl ResolvedModuleIndex {
                 + self.invisible_member_suppressions.len()
                 + self.optional_declaration_usage_suppressions.len())
                 * std::mem::size_of::<DeclarationId>()
+            + self
+                .file_lexical_policies
+                .values()
+                .map(|policies| {
+                    std::mem::size_of::<SourceFileId>()
+                        + policies.len()
+                            * std::mem::size_of::<crate::lexical_policy::LexicalPolicy>()
+                })
+                .sum::<usize>()
             + self.classifiers.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ResolvedClassifierHeader>())
@@ -3128,12 +3230,13 @@ impl ResolvedModuleIndex {
                             .sum::<usize>()
                 })
                 .sum::<usize>()
-            + self.superclass_interfaces.len()
-                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<Box<[TypeName]>>())
             + self
-                .superclass_interfaces
+                .inherited_defaults
                 .values()
-                .map(|interfaces| interfaces.len() * std::mem::size_of::<TypeName>())
+                .map(|defaults| {
+                    std::mem::size_of::<DeclarationId>()
+                        + defaults.len() * std::mem::size_of::<super::ResolvedInheritedDefault>()
+                })
                 .sum::<usize>()
             + self
                 .classifiers
