@@ -239,7 +239,7 @@ impl Emitter<'_> {
     /// - `IrExpr::InvokeFunction` — a function value's `FunctionN.invoke`;
     /// - `IrExpr::EnumValueOf` — the member `E.valueOf` realization;
     /// - a property read or write whose accessor is a real method, not a field access;
-    /// - the intrinsics whose lowering IS a call: `PrimitiveCompare`'s `Integer.compare`,
+    /// - the intrinsics whose lowering IS a call: `PrimitiveCompare`'s `Intrinsics.compare`,
     ///   `String.get`'s `charAt`.
     ///
     /// Deliberately NOT dispatches: an array read or write, a field read or write, an arithmetic
