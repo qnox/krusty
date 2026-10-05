@@ -51,18 +51,16 @@ fn has_constant_value(body: &FirBody, expression: FirExprId) -> bool {
     };
     match &node.kind {
         FirExprKind::Constant(constant) => !matches!(constant, FirConstant::Null),
-        // `-x` is `x.unaryMinus()`; `+3` is the literal itself to kotlinc's parser.
+        // `-x` is `x.unaryMinus()`, a number operation over any constant.
         FirExprKind::Unary {
             operation: FirUnaryOperation::Negate,
             operand,
         } => has_constant_value(body, *operand),
+        // `+3` is a literal to kotlinc's parser; `+X` stays a `unaryPlus` call.
         FirExprKind::Unary {
             operation: FirUnaryOperation::Identity,
             operand,
-        } => matches!(
-            body.expr(*operand).map(|operand| &operand.kind),
-            Some(FirExprKind::Constant(constant)) if !matches!(constant, FirConstant::Null)
-        ),
+        } => is_literal(body, *operand),
         FirExprKind::ImplicitConversion { value, conversion } => match conversion.kind {
             // An explicit `toX()` call; unsigned conversions are extensions, not number conversions.
             FirConversionKind::NumericConversion { to } => {
@@ -85,14 +83,20 @@ fn has_constant_value(body: &FirBody, expression: FirExprId) -> bool {
     }
 }
 
+/// A literal as source wrote it, never the value of a constant declaration it reads.
+fn is_literal(body: &FirBody, expression: FirExprId) -> bool {
+    matches!(
+        body.expr(expression).map(|node| &node.kind),
+        Some(FirExprKind::Constant(constant)) if !matches!(constant, FirConstant::Null)
+    ) && !body.is_constant_read(expression)
+}
+
 /// kotlinc's parser merges `+` between string literals and templates into one concatenation;
-/// a `+` with any other operand stays a `plus` call. A `const val` read is already its value in
-/// checked FIR, so `"a" + S` is taken for a literal concatenation, which kotlinc does not merge.
+/// a `+` with any other operand, a `const val` read included, stays a `plus` call.
 fn is_string_concatenation_operand(body: &FirBody, expression: FirExprId) -> bool {
     match body.expr(expression).map(|node| &node.kind) {
-        Some(FirExprKind::Constant(FirConstant::String(_)) | FirExprKind::StringTemplate(_)) => {
-            true
-        }
+        Some(FirExprKind::Constant(FirConstant::String(_))) => is_literal(body, expression),
+        Some(FirExprKind::StringTemplate(_)) => true,
         Some(FirExprKind::Call(_)) => {
             string_plus_operands(body, expression).is_some_and(|(lhs, rhs)| {
                 is_string_concatenation_operand(body, lhs)

@@ -2440,8 +2440,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `toDouble`, `toChar`) or `unaryMinus` applied to a constant. `val x: Any = "s"`, `1 + 2` and
   `!true` have none, while `0.toDouble()` and `"$X"` do. Common lowering decides it once from the
   checked initializer (`fir_lower::metadata_constants`) for class and package properties alike.
-  Known gap: checked FIR already holds a `const val` read as its value, so `"a" + S` is taken for a
-  literal concatenation, which kotlinc does not merge. Tests: `tests/metadata_property_flags_e2e.rs`.
+  Checked FIR marks a constant that is the selected value of a `const val` or Java constant field
+  (`FirBody::is_constant_read`), because only literals fold in kotlinc's parser: `+3` and
+  `"a" + "b"` are constants, while `+X` and `"a" + S` stay `unaryPlus`/`plus` calls and record
+  none. `-X`, `"$S"` and the bare read `S` are constants. Tests: `tests/metadata_property_flags_e2e.rs`.
 - **Accessor and function records follow declaration identity, never a JVM name.** A property's
   `JvmPropertySignature` names only the accessors the property owns. A private property with
   default accessors has none, so `operator fun getValue(...)` beside `private val value` is a

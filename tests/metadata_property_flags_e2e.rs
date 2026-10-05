@@ -387,3 +387,29 @@ fn a_conversion_template_or_literal_concatenation_is_a_constant() {
     assert_identical("ConstantOperations", SRC, "app/Q");
     assert_identical("ConstantOperations", SRC, "app/ConstantOperationsKt");
 }
+
+/// kotlinc's parser folds only literals: `+3` and `"a" + "b"` are constants, while `+X` and
+/// `"a" + S` over `const val` reads stay `unaryPlus`/`plus` calls and record no constant.
+/// `-X`, `"$S"` and the bare read `S` are constants.
+#[test]
+fn a_constant_read_is_not_folded_like_a_literal() {
+    const SRC: &str = "package app\n\
+        \n\
+        const val X = 5\n\
+        const val S = \"s\"\n\
+        class R {\n\
+        \x20   val plusRead: Int = +X\n\
+        \x20   val plusLiteral: Int = +3\n\
+        \x20   val minusRead: Int = -X\n\
+        \x20   val joinedRead: String = \"a\" + S\n\
+        \x20   val readJoined: String = S + \"a\"\n\
+        \x20   val joinedLiteral: String = \"a\" + \"b\"\n\
+        \x20   val template: String = \"$S\"\n\
+        \x20   val read: String = S\n\
+        }\n\
+        val topPlusRead: Int = +X\n\
+        val topJoinedRead: String = \"a\" + S\n\
+        val topRead: String = S\n";
+    assert_identical("ConstantReads", SRC, "app/R");
+    assert_identical("ConstantReads", SRC, "app/ConstantReadsKt");
+}

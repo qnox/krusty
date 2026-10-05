@@ -514,9 +514,9 @@ in `NUMBER_CONVERSIONS` or `unaryMinus` whose dispatch receiver is constant. kot
 | --- | --- |
 | `val s: String = "s"`, `val u: UInt = 1u`, `val n: Int = -X` | yes |
 | `X.toLong()`, `(-3).toLong()`, `0.toDouble()`, `1.0.toInt()`, `65.toChar()` | yes |
-| `"$X"`, `"a${S}b"`, `"a" + "b" + "c"` | yes |
+| `"$X"`, `"a${S}b"`, `"a" + "b" + "c"`, `+3`, a bare `S` | yes |
 | `val a: Any = "t"`, `val c: CharSequence = "abcd"`, `val m: String? = "m"` | no |
-| `(1 + 2).toLong()`, `1 + 2`, `!true`, `"a" + 1`, `"a" + S`, `3u.toUInt()` | no |
+| `(1 + 2).toLong()`, `1 + 2`, `!true`, `"a" + 1`, `"a" + S`, `S + "a"`, `+X`, `3u.toUInt()` | no |
 
 ## Accessors, setter parameters and member list order
 
