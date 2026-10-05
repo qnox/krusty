@@ -7463,15 +7463,7 @@ impl<'a> Emitter<'a> {
                     self.ir, setter, owner,
                 ));
             }
-            let f = &self.ir.functions[setter as usize];
-            return Some(PropertyAccess::Accessor {
-                owner,
-                name: f.name.clone(),
-                descriptor: method_descriptor(&[jvm_declared_ty(&f.params[0])], Ty::Unit),
-                is_static: false,
-                is_interface: is_jvm_interface(class),
-                static_receiver: None,
-            });
+            return Some(self.declared_setter_access(class, owner, setter));
         }
         let field = property_access::declared_property_field(class, declared, name);
         let setter_name = declared

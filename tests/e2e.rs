@@ -2477,6 +2477,8 @@ mod value_class_member_order_e2e;
 mod value_class_nullable_widen_return_e2e;
 #[path = "value_class_param_generic_return_e2e.rs"]
 mod value_class_param_generic_return_e2e;
+#[path = "value_class_parameter_guards_e2e.rs"]
+mod value_class_parameter_guards_e2e;
 #[path = "value_class_private_init_e2e.rs"]
 mod value_class_private_init_e2e;
 #[path = "value_class_property_argument_e2e.rs"]

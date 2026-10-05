@@ -138,8 +138,19 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 return None;
             }
             let mut signature = String::from("(");
-            for (_, semantic) in &sc.named_params {
-                signature.push_str(&formatter.method_ty(semantic, super::Wildcards::Declared)?);
+            for ((_, semantic), carrier) in sc.named_params.iter().zip(&sc.params) {
+                // The JVM represents a value-class parameter by its carrier, which is the type the
+                // signature names; value-class lowering already selected it.
+                let written = if semantic
+                    .non_null()
+                    .obj_internal()
+                    .is_some_and(|name| ir.is_value_class_name(name))
+                {
+                    carrier
+                } else {
+                    semantic
+                };
+                signature.push_str(&formatter.method_ty(written, super::Wildcards::Declared)?);
             }
             signature.push_str(")V");
             // A `Signature` that spells the descriptor back carries nothing and kotlinc omits it —

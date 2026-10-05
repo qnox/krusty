@@ -175,7 +175,7 @@ pub(super) fn synth_value_members(
         let is_getter = {
             let function = &mut ir.functions[accessor as usize];
             function.name.clone_from(&jvm_name);
-            function.params.insert(0, u_ir);
+            super::parameter_guards::prepend_carrier(function, u_ir);
             function.is_static = true;
             ir.classes[class_id as usize].properties[property_index].getter == Some(accessor)
         };
@@ -217,7 +217,7 @@ pub(super) fn synth_value_members(
         };
         if let Some(name) = custom_impl {
             function.name = name.to_string();
-            function.params.insert(0, u_ir);
+            super::parameter_guards::prepend_carrier(function, u_ir);
             function.is_static = true;
             custom_carrier_functions.push(fid);
         }
@@ -359,6 +359,12 @@ pub(super) fn synth_value_members(
         stmts.push(ir.add_expr(IrExpr::Return(Some(arg))));
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
+        let declared = ir.classes[class_id as usize]
+            .ctor_args
+            .first()
+            .map(|parameter| parameter.check.is_some());
+        ir.functions[cfid as usize].param_checks =
+            super::parameter_guards::constructor_impl_contracts(declared);
         ir.jvm_value_class_representation_order.insert(cfid, 0);
         realized.constructor_impls.insert((internal_name, 0), cfid);
         ir.jvm_value_class_constructor_impls.insert(cfid, 0);
@@ -719,6 +725,10 @@ pub(super) fn synth_value_members(
             stmts.push(fall_through);
             let body = ir.add_expr(IrExpr::Block { stmts, value: None });
             let constructor = add_static(ir, "constructor-impl", sc.params.clone(), u_ir, body);
+            ir.functions[constructor as usize].param_checks =
+                super::parameter_guards::constructor_impl_contracts(
+                    sc.param_checks.iter().map(Option::is_some),
+                );
             if sc.lines.decl_line != 0 {
                 ir.fn_decl_lines.insert(constructor, sc.lines.decl_line);
             }

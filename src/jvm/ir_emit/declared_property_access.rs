@@ -6,6 +6,39 @@
 use super::*;
 
 impl Emitter<'_> {
+    /// The write through a setter declared in this compilation. A value class's computed setter is
+    /// realized as a static over the carrier (`setX-impl(carrier, value)`), so the write passes the
+    /// carrier as that static's receiver, exactly as a read through its getter does.
+    pub(super) fn declared_setter_access(
+        &self,
+        class: &crate::ir::IrClass,
+        owner: TypeName,
+        setter: u32,
+    ) -> crate::jvm::inline::PropertyAccess {
+        let f = &self.ir.functions[setter as usize];
+        let (descriptor, static_receiver) = if f.is_static {
+            (
+                ir_method_desc(&f.params, &f.ret),
+                (f.dispatch_receiver == Some(owner))
+                    .then(|| f.params.first().map(jvm_declared_ty))
+                    .flatten(),
+            )
+        } else {
+            (
+                method_descriptor(&[jvm_declared_ty(&f.params[0])], Ty::Unit),
+                None,
+            )
+        };
+        crate::jvm::inline::PropertyAccess::Accessor {
+            owner,
+            name: f.name.clone(),
+            descriptor,
+            is_static: f.is_static,
+            is_interface: is_jvm_interface(class),
+            static_receiver,
+        }
+    }
+
     /// How to read property `name` of a class THIS compilation declares — there is no class file to ask,
     /// the IR is the declaration. Inside the declaring class the private backing field is loaded directly,
     /// which is what kotlinc emits there; from outside, the read goes through the accessor. `None` when

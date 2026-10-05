@@ -27,6 +27,7 @@ mod mangled_calls;
 mod member_names;
 mod module_members;
 mod operand_nullness;
+mod parameter_guards;
 mod property_references;
 mod reference_returns;
 mod representation;
@@ -880,11 +881,7 @@ pub(crate) fn lower_value_classes(
                     .dispatch_receiver
                     .expect("a value-class member has a dispatch receiver");
                 let carrier = under.get(&owner).copied().unwrap_or(Ty::Error);
-                f.params.insert(0, carrier);
-                // The carrier is the receiver the box already checked, never a guarded parameter.
-                if !f.param_checks.is_empty() {
-                    f.param_checks.insert(0, None);
-                }
+                parameter_guards::prepend_carrier(f, carrier);
                 f.is_static = true;
                 lowered_value_members.insert(fid as u32);
                 // The former `this` and the new explicit carrier are both slot zero. Source value
@@ -1402,10 +1399,7 @@ pub(crate) fn lower_value_classes(
             // null, so kotlinc emits no check). A value class's own private `<init>` is reached only
             // from `box-impl` over an already-checked carrier and has none either. Then erase the param
             // type itself.
-            if own_value_class
-                || !is_ref(&erase(&a.ty, &under))
-                || vc_underlying_nullable(&a.ty, &under)
-            {
+            if own_value_class || !parameter_guards::carrier_keeps_guard(&a.ty, &under) {
                 a.check = None;
             }
             a.ty = erase(&a.ty, &under);
@@ -1433,6 +1427,7 @@ pub(crate) fn lower_value_classes(
             if !sc.synthetic && sc.params.iter().any(is_vc_ty) {
                 sc.vc_params = true;
             }
+            parameter_guards::retain_secondary_constructor_guards(sc, &under);
             for parameter in &mut sc.prefix_params {
                 *parameter = erase(parameter, &under);
             }

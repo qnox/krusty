@@ -13409,10 +13409,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     ledger in `tests/enum_secondary_constructor_e2e.rs` whose three facts are on three lines.
   - A source-reachable secondary constructor guards each non-null reference parameter with
     `Intrinsics.checkNotNullParameter` before its delegation and publishes the matching parameter
-    nullability annotations. Private, enum, sealed, value-class-carrier, and generated constructors
-    emit no such guards. The guard is a typed `IrParameterCheck` fact; the JVM quotes the already
-    recorded source parameter identity and `-Xno-param-assertions` removes the fact before debug
-    offsets are finalized.
+    nullability annotations. Private, enum, sealed, and generated constructors emit no such guards.
+    The guard is a typed `IrParameterCheck` fact; the JVM quotes the already recorded source
+    parameter identity and `-Xno-param-assertions` removes the fact before debug offsets are
+    finalized.
+  - **Value-class parameters keep the guard their carrier admits.** kotlinc's
+    `generateNonNullAssertions` guards a parameter of a function it does not treat as private or
+    synthetic when the parameter type with every value class unwrapped (`unboxInlineClass`) is
+    non-null and its JVM type is not primitive. Measured against kotlinc 2.4.20 with `javap -c -p`:
+    `S(val s: String)` guards `s` in `constructor-impl`, and a nested `O(val s: S)` or a
+    `G<T : Any>(val t: T)` guards too, while `W(val i: Int)`, `N(val s: String?)`, `O(val n: N)` and
+    `G<T>(val t: T)` do not; a `private constructor` guards nothing. A value class's secondary
+    constructor's `constructor-impl` guards its own parameters by the same rule (`x: S` yes,
+    `w: W`/`n: String?` no, a private one none). A static `-impl` member, a computed accessor
+    (`setP-<hash>(carrier, v)`), and the box's interface entry guard their declared parameters with
+    the declared names, never the carrier `$this`. A regular class's secondary constructor taking a
+    value class is `private` in the class file behind a public synthetic `DefaultConstructorMarker`
+    overload, but its declaration is public, so the private constructor guards each parameter
+    (`s: String`, `s: O` over `String`) and the marker overload none; its generic `Signature` names
+    the carrier, so `(String)` writes none. `box-impl`, `unbox-impl`, `equals-impl0`, the `$default`
+    stubs and a private member are synthetic or private and guard nothing. krusty records the
+    declared contracts over semantic types (`parameter_assertions`), and value-class lowering keeps
+    those its carriers admit (`value_classes::parameter_guards`). A write through such a computed
+    setter calls the static with the carrier first (`invokestatic setP-<hash>(carrier, v)`), as a
+    read through its getter does. Tests:
+    `tests/value_class_parameter_guards_e2e.rs`.
   - A declared secondary constructor retains its own complete debug tables. Its `LineNumberTable`
     starts on the delegation after the guard prologue, follows multiline delegation arguments and
     body statements, and returns to the declaration's closing line. Its `LocalVariableTable` keeps
