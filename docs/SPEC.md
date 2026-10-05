@@ -1549,7 +1549,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `-impl`/`box-impl` family. Those three generated members actualize between an `expect value
   class` and its `actual`: they are not source members, and a headerless pair of the same name
   is one declaration. `@JvmInline value class` keeps the unboxed inline ABI either way.
-  `tests/full_value_classes_e2e.rs`.
+  A final full value class stores each constructor property before the superclass constructor, so a
+  superclass `init` block and any member it calls (an abstract getter, `toString`) observe those
+  values. An abstract or sealed value class declares no constructor properties and does not
+  generate `equals`/`hashCode`/`toString`; a regular class that extends one keeps `Any`'s identity
+  members. `tests/full_value_classes_e2e.rs`.
 - `==` on `String` (Kotlin `==` = `.equals`, `===` = reference). Structural
   `==`/`!=` on reference operands compiles to `kotlin/jvm/internal/Intrinsics.areEqual(Object,Object)Z`
   — the exact helper kotlinc's JVM backend emits (`backend.jvm/.../intrinsics/Equals.kt`), so the

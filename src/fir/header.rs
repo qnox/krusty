@@ -1303,9 +1303,11 @@ fn extract_file_stub_inventory(
                 },
             ));
         }
-        // A `value class` gets the same structural trio as a data class. `componentN`/`copy` stay
-        // data-only. `@JvmInline` later suppresses these stubs and unboxes the class instead.
-        if class.is_data || class.value_modifier_span.is_some() {
+        // A final `value class` gets the same structural trio as a data class. `componentN`/`copy`
+        // stay data-only. An abstract or sealed value class has no constructor properties and does
+        // not generate the trio, so a regular subclass keeps `Any`'s identity members. `@JvmInline`
+        // later suppresses these stubs and unboxes the class instead.
+        if class.is_data || (class.value_modifier_span.is_some() && class.is_final()) {
             for (ordinal, (name, parameter_count)) in
                 [("toString", 0), ("hashCode", 0), ("equals", 1)]
                     .into_iter()

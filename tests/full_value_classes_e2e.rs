@@ -113,6 +113,79 @@ fun box(): String = \"OK\"
 }
 
 #[test]
+fn full_value_constructor_properties_are_visible_during_super_init() {
+    const SRC: &str = "\
+// LANGUAGE: +FullValueClasses
+val log = mutableListOf<String>()
+abstract value class Base {
+    abstract val i: Int
+    init { log.add(\"Base.init:i=$i\") }
+}
+value class Derived(override val i: Int, val f: Float) : Base() {
+    init { log.add(\"Derived.init:i=$i,f=$f\") }
+}
+abstract value class Abs(a: Int) {
+    init { log.add(\"this=\" + this.toString()) }
+}
+value class Child(val x: Int) : Abs(x * 3) {
+    override fun toString(): String = \"Child($x)\"
+}
+fun box(): String {
+    log.clear()
+    val d = Derived(42, 3.14f)
+    if (d.i != 42 || d.f != 3.14f) return \"fields\"
+    if (log != listOf(\"Base.init:i=42\", \"Derived.init:i=42,f=3.14\")) return log.toString()
+    log.clear()
+    val c = Child(5)
+    if (c.x != 5) return \"x\"
+    if (log != listOf(\"this=Child(5)\")) return log.toString()
+    return \"OK\"
+}
+";
+    common::expect_box_ok_with_stdlib(
+        SRC,
+        "full_value_constructor_properties_are_visible_during_super_init",
+    );
+}
+
+#[test]
+fn regular_subclass_of_abstract_value_class_uses_identity_equality() {
+    const SRC: &str = "\
+// LANGUAGE: +FullValueClasses
+abstract value class AbstractValue(p0: Int, p1: Int) {
+    abstract val p2: Int
+}
+class SimpleClass(p0: Int, val p1: Int) : AbstractValue(p0, p1) {
+    override val p2: Int get() = p1
+}
+fun box(): String {
+    val a = SimpleClass(1, 2)
+    val b = SimpleClass(1, 2)
+    if (a == b) return \"eq\"
+    if (a.hashCode() == b.hashCode()) return \"hash\"
+    if (a.toString() == b.toString()) return \"str\"
+    if (a.p2 != 2) return \"p2\"
+    return \"OK\"
+}
+";
+    common::expect_box_ok_with_stdlib(
+        SRC,
+        "regular_subclass_of_abstract_value_class_uses_identity_equality",
+    );
+    let classes = compile(
+        SRC,
+        "regular_subclass_of_abstract_value_class_uses_identity_equality",
+    );
+    let parent = parse_class(class_bytes(&classes, "AbstractValue")).expect("AbstractValue");
+    for absent in ["equals", "hashCode", "toString"] {
+        assert!(
+            parent.methods_named(absent).is_empty(),
+            "AbstractValue must not declare {absent}"
+        );
+    }
+}
+
+#[test]
 fn aliased_jvm_inline_annotation_stays_unboxed() {
     const SRC: &str = "\
 import kotlin.jvm.JvmInline as Inline
