@@ -7387,8 +7387,11 @@ impl<'a> Emitter<'a> {
             IrExpr::Block { stmts, value } => self.emit_statement_block(e, stmts, value, code),
             IrExpr::Return(value) => self.emit_return_node(e, value, code),
             IrExpr::Variable {
-                index, ty, init, ..
-            } => self.emit_local_variable(e, index, ty, init, code),
+                index,
+                ty,
+                init,
+                named,
+            } => self.emit_local_variable(e, index, ty, init, named, code),
             IrExpr::InlineFrameMarker => self.emit_inline_frame_marker(e, code),
             IrExpr::SetValue { var, value } => {
                 let Some(&(slot, jt)) = self.slots.get(&var) else {
