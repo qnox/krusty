@@ -834,7 +834,6 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::StartCoroutine
                 | crate::libraries::CompilerIntrinsic::CoroutineContext
                 | crate::libraries::CompilerIntrinsic::CoroutineSuspended
-                | crate::libraries::CompilerIntrinsic::SuspendCoroutine
                 | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
                 | crate::libraries::CompilerIntrinsic::EnumValues
                 | crate::libraries::CompilerIntrinsic::EnumName
