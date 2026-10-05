@@ -531,12 +531,8 @@ fn synthesize_equals(
                 Ty::Boolean,
             )
         };
-        let false_value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(false)));
-        let different = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs: equal,
-            rhs: false_value,
-        });
+        // kotlinc's `irNotEquals`: the negation of the field equality.
+        let different = ir.add_negation(equal);
         statements.push(return_guard(ir, different, false));
     }
 

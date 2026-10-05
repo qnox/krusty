@@ -30,6 +30,9 @@ pub enum SkipReason {
     CallArguments(String),
     /// A selected overridden call could not be joined to its checked dispatch classifier facts.
     MemberDispatch(crate::types::TypeName),
+    /// A lambda argument of an inline call carried no published parameter modifier and declared
+    /// type, so whether the call inlines it is unknown.
+    InlineParameters,
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -56,7 +59,7 @@ pub(crate) struct BackendPassFacts {
     bridge_adaptations: crate::jvm::bridge_adaptations::BridgeAdaptations,
     /// The bridges that take `FunctionN.invoke`'s packed argument array.
     function_argument_arrays: crate::jvm::function_argument_arrays::FunctionArgumentArrays,
-    /// The overrides whose primitive result is realized as its wrapper.
+    /// The overrides whose scalar JVM result is realized as its wrapper.
     override_results: crate::jvm::override_results::OverrideResults,
     /// Neutral-result guards on collection overrides whose descriptor needs no bridge.
     collection_method_entry_barriers: crate::jvm::collection_barriers::MethodEntryBarriers,
@@ -182,7 +185,7 @@ fn run_backend_passes_after_plugins(
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
-    crate::jvm::module_calls::realize_super_calls(ir, callables)
+    crate::jvm::module_calls::realize_super_calls(ir, callables, &mut facts.property_realizations)
         .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
@@ -220,13 +223,16 @@ fn run_backend_passes_after_plugins(
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
-    // A primitive override of a non-primitive declaration returns the wrapper; its bridges follow.
+    // A scalar result over a reference-returning overridden slot is the wrapper; its bridges follow.
     // A bridge to a value-class override asks which dependency classes are value classes.
     if !crate::jvm::value_classes::record_referenced_value_classes(ir, classifiers) {
         return Err(SkipReason::ValueClasses);
     }
-    facts.override_results =
-        crate::jvm::override_results::box_scalar_override_results(ir, callables)?;
+    facts.override_results = crate::jvm::override_results::box_scalar_override_results(
+        ir,
+        callables,
+        &facts.property_realizations,
+    )?;
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,
@@ -311,7 +317,15 @@ fn run_backend_passes_after_plugins(
     // Source lambda names are inputs to lifting. Fix them before reparenting so the lifted-name
     // pass can retain the final caller-qualified path and ordinal.
     crate::jvm::debug_local_names::realize_source_lambda_implementation_names(ir);
-    crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
+    crate::jvm::ir_emit::mark_must_inline_lambdas(ir).map_err(|missing| {
+        crate::trace_compiler!(
+            "splice",
+            "inline call {} published no parameter facts for lambda operand {}",
+            missing.call,
+            missing.parameter
+        );
+        SkipReason::InlineParameters
+    })?;
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
     crate::jvm::lifted_names::realize(ir, &facts.override_results);
@@ -981,6 +995,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             diags.error(crate::diag::Span::new(0, 0), detail);
             return;
         }
+        SkipReason::InlineParameters => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "internal error: an inline call's lambda argument has no published parameter modifier and declared type".to_string(),
+            );
+            return;
+        }
         SkipReason::MemberDispatch(classifier) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1000,6 +1021,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         SkipReason::DefaultCalls
         | SkipReason::SuperCalls
         | SkipReason::CallArguments(_)
+        | SkipReason::InlineParameters
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
         }
@@ -1348,6 +1370,7 @@ pub fn facade_package_metadata_from_ir(
                     | None => (true, declaration.mutable, None),
                 };
             let companion = declaration.is_companion_extension();
+            let field = property_field(ir, declaration);
             let accessor_parameters = declaration
                 .context_parameters
                 .iter()
@@ -1420,8 +1443,14 @@ pub fn facade_package_metadata_from_ir(
                 modifiers: declaration.modifiers,
                 setter_visibility: declaration.setter_visibility,
                 companion,
-                delegate_field: delegate_field(ir, declaration),
-                field_desc: erased_value_class_descriptor(ir, declaration),
+                field_name: field.as_ref().and_then(|(name, _)| name.clone()),
+                field_desc: field.map(|(_, descriptor)| descriptor).filter(|physical| {
+                    super::metadata_method_signatures::requires_field_signature(
+                        declaration.ty,
+                        physical,
+                        &Default::default(),
+                    )
+                }),
             }
         })
         .collect::<Vec<_>>();
@@ -1476,22 +1505,25 @@ fn erased_value_class_descriptor(
         .then(|| crate::jvm::names::type_descriptor(field.ty))
 }
 
-fn delegate_field(
+/// The facade field realizing a property, if any: a delegate's storage by its JVM name, or a
+/// backing field (named by the property), with its physical descriptor.
+fn property_field(
     ir: &crate::ir::IrFile,
     declaration: &crate::ir::IrPackageProperty,
-) -> Option<(String, String)> {
-    let Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
-        delegate: Some(storage),
-        ..
-    }) = ir.local_property_layouts.get(&declaration.property)
-    else {
-        return None;
+) -> Option<(Option<String>, String)> {
+    let (name, storage) = match ir.local_property_layouts.get(&declaration.property)? {
+        crate::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. } => (None, *storage),
+        crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+            delegate: Some(storage),
+            ..
+        } => (
+            Some(ir.static_field_jvm_name(*storage).to_string()),
+            *storage,
+        ),
+        _ => return None,
     };
-    let field = &ir.statics[*storage as usize];
-    Some((
-        ir.static_field_jvm_name(*storage).to_string(),
-        crate::jvm::names::type_descriptor(field.ty),
-    ))
+    let field = ir.statics.get(storage as usize)?;
+    Some((name, crate::jvm::names::type_descriptor(field.ty)))
 }
 
 /// The JVM descriptor of a package function realized from its declaration: context parameters,

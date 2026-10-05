@@ -116,6 +116,14 @@ impl Checker<'_> {
         if arguments.is_empty() {
             return false;
         }
+        // FIR cannot test a local classifier application whose target carries a type parameter
+        // owned outside that classifier's lexical class chain. A local class may capture a generic
+        // function's `T`, but its runtime class carries no testable `T`; an outer class's `T` is in
+        // the class chain and therefore is not rejected by this rule. Read both relations from the
+        // stable declaration index rather than inferring either one from a generated local name.
+        if self.local_classifier_has_external_type_parameter(subtype_class, arguments.as_ref()) {
+            return true;
+        }
         let source = self.fed_source();
         let check = |left: Ty, right: Ty| self.is_upcast(left, right);
         let Some(known) = crate::symbol_resolver::statically_known_subtype(
@@ -133,8 +141,53 @@ impl Checker<'_> {
     fn is_upcast(&self, candidate: Ty, target: Ty) -> bool {
         is_subtype(&TyCtx::new(), self, candidate, target)
     }
+
+    fn local_classifier_has_external_type_parameter(
+        &self,
+        classifier: crate::types::TypeName,
+        arguments: &[Ty],
+    ) -> bool {
+        let Some(index) = self.resolved_index else {
+            return false;
+        };
+        let Some(declaration) = index.classifier_declaration(classifier) else {
+            return false;
+        };
+        if !index
+            .declaration_header(declaration)
+            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS))
+        {
+            return false;
+        }
+        let class_chain = index.classifier_and_outer_class_declarations(declaration);
+        arguments.iter().copied().any(|argument| {
+            let Some(parameter_name) = direct_type_parameter(argument) else {
+                return false;
+            };
+            let Some(parameter) = index.type_parameter_by_semantic_name(parameter_name) else {
+                return false;
+            };
+            index
+                .type_parameter_owner(parameter)
+                .is_some_and(|owner| !class_chain.contains(&owner))
+        })
+    }
 }
 
 fn same_type_parameter(left: Ty, right: Ty) -> bool {
     matches!((left, right), (Ty::TyParam(a, _), Ty::TyParam(b, _)) if a == b)
+}
+
+fn direct_type_parameter(mut ty: Ty) -> Option<&'static str> {
+    loop {
+        ty = match ty {
+            Ty::TyParam(parameter, _) => return Some(parameter),
+            Ty::Nullable(inner)
+            | Ty::PlatformNullable(inner)
+            | Ty::DefinitelyNotNull(inner)
+            | Ty::InProjection(inner)
+            | Ty::OutProjection(inner) => *inner,
+            _ => return None,
+        };
+    }
 }

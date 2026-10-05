@@ -5,9 +5,10 @@
 //! overload selection, or source-spelling recovery.
 
 use crate::fir::{
-    DeclarationId, DeclarationKind, ResolvedDelegatedCall, ResolvedDelegatedCallTarget,
-    ResolvedDelegatedMember, ResolvedDelegatedModuleTarget, ResolvedFunctionOverrideTarget,
-    ResolvedInterfaceDelegateSource, ResolvedInterfaceDelegation, ResolvedModuleIndex,
+    DeclarationId, DeclarationKind, ResolvedDelegateCall, ResolvedDelegateMemberCalls,
+    ResolvedDelegatedCall, ResolvedDelegatedCallTarget, ResolvedDelegatedMember,
+    ResolvedDelegatedModuleTarget, ResolvedFunctionOverrideTarget, ResolvedInterfaceDelegateSource,
+    ResolvedInterfaceDelegation, ResolvedModuleIndex,
 };
 use crate::ir::{
     Callee, IrExpr, IrField, IrFile, IrFunction, IrNodeOrigin, IrProperty, IrTypeOp,
@@ -228,9 +229,18 @@ fn materialize_delegation(
         }
     }
 
-    for member in &delegation.members {
+    let delegate_calls = ir
+        .checked_interface_delegate_calls
+        .get(&(declaration, delegation_ordinal))
+        .cloned()
+        .filter(|calls| calls.len() == delegation.members.len())
+        .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
+    for (member, delegate_call) in delegation.members.iter().zip(delegate_calls.iter()) {
         match member {
             ResolvedDelegatedMember::Function(member) => {
+                let ResolvedDelegateMemberCalls::Function(delegate_call) = delegate_call else {
+                    return Err(FirFileLoweringFailure::MissingClassifier(declaration));
+                };
                 let name = member.name.to_string();
                 let params = member
                     .call
@@ -239,7 +249,7 @@ fn materialize_delegation(
                     .map(|parameter| parameter.get())
                     .collect::<Vec<_>>();
                 let delegate = delegate_field_read(ir, class, field);
-                let result = delegated_call(ir, &member.call, delegate)?;
+                let result = delegate_member_call(ir, delegate_call, delegate)?;
                 let function = add_forwarder(
                     ir,
                     class,
@@ -332,6 +342,13 @@ fn materialize_delegation(
                 }
             }
             ResolvedDelegatedMember::Property(property) => {
+                let ResolvedDelegateMemberCalls::Property {
+                    getter: delegate_getter,
+                    setter: delegate_setter,
+                } = delegate_call
+                else {
+                    return Err(FirFileLoweringFailure::MissingClassifier(declaration));
+                };
                 let name = property.name.to_string();
                 let ty = property.ty.get();
                 let context_params = property
@@ -365,7 +382,7 @@ fn materialize_delegation(
                 let mut getter_parameters = context_types.clone();
                 getter_parameters.extend(extension_receiver);
                 let delegate = delegate_field_read(ir, class, field);
-                let getter_call = delegated_call(ir, &property.getter, delegate)?;
+                let getter_call = delegate_member_call(ir, delegate_getter, delegate)?;
                 let getter = add_forwarder(
                     ir,
                     class,
@@ -374,12 +391,14 @@ fn materialize_delegation(
                     ty,
                     getter_call,
                 );
-                let setter = property
-                    .setter
+                if property.setter.is_some() != delegate_setter.is_some() {
+                    return Err(FirFileLoweringFailure::MissingClassifier(declaration));
+                }
+                let setter = delegate_setter
                     .as_ref()
                     .map(|setter| {
                         let delegate = delegate_field_read(ir, class, field);
-                        delegated_call(ir, setter, delegate).map(|call| {
+                        delegate_member_call(ir, setter, delegate).map(|call| {
                             let mut parameters = getter_parameters.clone();
                             parameters.push(ty);
                             add_forwarder(
@@ -542,6 +561,30 @@ fn parameter_initializer(
     Ok(store)
 }
 
+/// Publish the delegate-side calls a checked constructor body carries for its delegations.
+pub(super) fn record_delegate_calls(body: &crate::fir::FirBody, ir: &mut IrFile) {
+    for calls in body.interface_delegate_calls() {
+        ir.checked_interface_delegate_calls
+            .insert((calls.classifier, calls.delegation), calls.members.clone());
+    }
+}
+
+/// A forwarder's call on the delegate, checked as kotlinc's implicit not-null cast checks it.
+fn delegate_member_call(
+    ir: &mut IrFile,
+    call: &ResolvedDelegateCall,
+    receiver: u32,
+) -> Result<u32, FirFileLoweringFailure> {
+    let result = delegated_call(ir, &call.call, receiver)?;
+    Ok(match &call.result_check {
+        Some(name) => ir.add_expr(IrExpr::NotNullAssert {
+            operand: result,
+            check: crate::ir::NullCheck::Named(name.to_string()),
+        }),
+        None => result,
+    })
+}
+
 fn delegated_call(
     ir: &mut IrFile,
     call: &ResolvedDelegatedCall,
@@ -651,6 +694,11 @@ fn delegated_call(
         ResolvedDelegatedCallTarget::External(_) => {
             ir.ext_call_source_receiver
                 .insert(expression, call.receiver.get());
+            // The delegate is read from a field of its own static type, which the call dispatches
+            // through as a source call on that value does.
+            if let Some(class) = call.receiver.get().non_null().obj_internal() {
+                ir.dispatch_classes.insert(expression, class);
+            }
             if let Some(declared) = call.declared_result {
                 ir.call_declared_ret.insert(expression, declared.get());
             }
@@ -756,6 +804,13 @@ fn add_forwarder(
         value: None,
     });
     let parameter_count = params.len();
+    // A forwarder in a generic class signs the member as that class sees it: `class Impl<D>(b:
+    // Base<D>) : Base<D> by b` forwards `foo(TD;)TD;`, not its erasure.
+    let semantic = params
+        .iter()
+        .chain(std::iter::once(&ret))
+        .any(|ty| crate::types::ty_mentions_any_param(*ty))
+        .then(|| (params.clone(), ret));
     let function = ir.add_fun(IrFunction {
         name,
         params,
@@ -771,6 +826,9 @@ fn add_forwarder(
     // kotlinc's forwarder has no source line, yet it names its receiver and parameters.
     ir.fn_debug_locals.insert(function);
     ir.interface_delegation_forwarders.insert(function);
+    if let Some(semantic) = semantic {
+        ir.member_semantic_sigs.insert(function, semantic);
+    }
     function
 }
 

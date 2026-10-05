@@ -32,6 +32,18 @@ impl Parser<'_> {
 
     /// Consume one annotation and retain its complete classifier reference plus arguments. `None` for
     /// a use-site `@file:`/`@get:` target, which does not apply to the declaration/type parameter itself.
+    /// Keep a type-use annotation's non-empty argument list, keyed by the annotation's span.
+    pub(super) fn record_type_annotation_arguments(
+        &mut self,
+        annotation: Span,
+        arguments: Vec<ExprId>,
+    ) {
+        if !arguments.is_empty() {
+            let key = (annotation.lo, annotation.hi);
+            self.file.type_annotation_arguments.insert(key, arguments);
+        }
+    }
+
     pub(super) fn parse_annotation(&mut self) -> (Option<AnnotationRef>, Vec<ExprId>) {
         self.bump(); // '@'
                      // optional use-site target: `file:`, `get:`, `param:`, ...
@@ -62,13 +74,11 @@ impl Parser<'_> {
                 let (qname, annotation_span) = self.parse_annotation_reference();
                 let args = self.parse_annotation_args();
                 if !qname.is_empty() {
-                    self.file.file_annotations.push((
-                        AnnotationRef {
-                            name: qname,
-                            span: annotation_span,
-                        },
-                        args,
-                    ));
+                    let annotation = AnnotationRef {
+                        name: qname,
+                        span: annotation_span,
+                    };
+                    self.file.file_annotations.push((annotation, args));
                 }
                 if self.at(TokenKind::Comma) {
                     self.bump();
@@ -80,13 +90,11 @@ impl Parser<'_> {
         let (qname, annotation_span) = self.parse_annotation_reference();
         let args = self.parse_annotation_args();
         if target == "file" && !qname.is_empty() {
-            self.file.file_annotations.push((
-                AnnotationRef {
-                    name: qname.clone(),
-                    span: annotation_span,
-                },
-                args.clone(),
-            ));
+            let annotation = AnnotationRef {
+                name: qname.clone(),
+                span: annotation_span,
+            };
+            self.file.file_annotations.push((annotation, args.clone()));
         }
         if use_site || qname.is_empty() {
             (None, args)
@@ -225,7 +233,8 @@ impl Parser<'_> {
 
 /// The function flags a modifier list declares.
 pub(super) fn function_flags(modifiers: &[String]) -> crate::ast::FdFlags {
-    let mut flags = crate::ast::FdFlags::default();
+    let mut flags = crate::ast::FdFlags::default()
+        .with_has_visibility_modifier(has_visibility_modifier(modifiers));
     let mut is_final = false;
     let mut is_open = false;
     for modifier in modifiers {
@@ -264,6 +273,14 @@ pub(super) fn visibility_of(modifiers: &[String]) -> Visibility {
         .find(|m| matches!(m.as_str(), "private" | "protected" | "internal" | "public"))
         .map(|m| Visibility::from_modifier(m))
         .unwrap_or_default()
+}
+
+/// Whether the modifier list wrote a visibility keyword. An `override` with none keeps the
+/// overridden member's visibility rather than defaulting to `public`.
+pub(super) fn has_visibility_modifier(modifiers: &[String]) -> bool {
+    modifiers
+        .iter()
+        .any(|m| matches!(m.as_str(), "private" | "protected" | "internal" | "public"))
 }
 
 /// Return the source span of `modifier` when it was present in the parsed modifier set.

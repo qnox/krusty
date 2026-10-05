@@ -148,31 +148,53 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         spelling: &str,
         explicit_type_arguments: &[Ty],
-    ) -> Option<(Vec<String>, Ty)> {
-        let (_, formals, expansion) = self.signature_source_alias_expansion(scope, spelling)?;
-        if !explicit_type_arguments.is_empty() && explicit_type_arguments.len() != formals.len() {
-            return None;
-        }
-        let bindings = formals
-            .iter()
-            .cloned()
-            .zip(explicit_type_arguments.iter().copied())
-            .collect::<crate::symbol_resolver::GSigBinds>();
-        Some((
-            formals,
-            crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings),
-        ))
+    ) -> Option<AppliedSourceAlias> {
+        let (identity, formals, expansion) =
+            self.signature_source_alias_expansion(scope, spelling)?;
+        AppliedSourceAlias::apply(identity, formals, expansion, explicit_type_arguments)
     }
 
+    /// The result of a construction its spelling named: through a typealias, the alias applies to
+    /// the constructed type and its abbreviation is recorded on `origin`; otherwise the constructed
+    /// type stands as it is.
+    pub(super) fn named_construction_result(
+        &self,
+        scope: crate::fir::SignatureScope,
+        origin: crate::fir::OriginId,
+        alias: Option<AppliedSourceAlias>,
+        constructed: Ty,
+        argument: Option<Ty>,
+        expected: Option<crate::fir::ResolvedTy>,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let Some(alias) = alias else {
+            return crate::fir::ResolvedTy::new(constructed).map_err(|_| Self::failure());
+        };
+        self.record_alias_constructor_result(
+            origin,
+            self.apply_source_alias_constructor_result(
+                scope,
+                &alias,
+                constructed,
+                argument,
+                expected.map(crate::fir::ResolvedTy::get),
+            ),
+        )
+    }
+
+    /// The type a constructor call through `alias` produces, with the abbreviation it carries:
+    /// the alias applied to the arguments this call fixed for its formals.
     pub(super) fn apply_source_alias_constructor_result(
         &self,
         scope: crate::fir::SignatureScope,
-        formals: &[String],
-        expansion: Ty,
+        alias: &AppliedSourceAlias,
         underlying_result: Ty,
         argument: Option<Ty>,
         expected: Option<Ty>,
-    ) -> Option<crate::fir::ResolvedTy> {
+    ) -> Option<(
+        crate::fir::ResolvedTy,
+        Option<crate::fir::ResolvedTypeAbbreviation>,
+    )> {
+        let (formals, expansion) = (alias.formals.as_slice(), alias.expansion);
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
         let source = crate::symbol_source::CompositeSource::new(vec![
             &module as &dyn crate::symbol_source::SymbolSource,
@@ -202,10 +224,24 @@ impl ProductionSignatureSemantics<'_> {
         }) {
             return None;
         }
-        crate::fir::ResolvedTy::new(crate::symbol_resolver::ty_subst_keep_unbound(
+        let result = crate::fir::ResolvedTy::new(crate::symbol_resolver::ty_subst_keep_unbound(
             expansion, &bindings,
         ))
-        .ok()
+        .ok()?;
+        // Explicit arguments were applied to the expansion already; the call fixed the rest.
+        let arguments = if alias.explicit_arguments.is_empty() {
+            formals
+                .iter()
+                .map(|formal| bindings.get(formal).copied())
+                .collect::<Option<Box<[Ty]>>>()
+        } else {
+            Some(alias.explicit_arguments.clone().into_boxed_slice())
+        };
+        let abbreviation = arguments.map(|arguments| crate::fir::ResolvedTypeAbbreviation {
+            alias: alias.identity,
+            arguments,
+        });
+        Some((result, abbreviation))
     }
 
     pub(super) fn classifier_constructor_reference(
@@ -224,7 +260,7 @@ impl ProductionSignatureSemantics<'_> {
             expected.get(),
         );
         let (alias_formals, expansion) = match alias {
-            Some(alias) => alias,
+            Some(alias) => (alias.formals, alias.expansion),
             None => {
                 let classifier = self
                     .with_resolver(scope, |resolver| {
@@ -560,5 +596,74 @@ impl SignatureMemberSite<'_, '_> {
         ]);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         body(&oracle)
+    }
+}
+
+/// A typealias a call spelling names, applied to the call's explicit type arguments: its
+/// qualified identity, its formals, and its expansion with any omitted formals still open.
+#[derive(Debug)]
+pub(super) struct AppliedSourceAlias {
+    pub(super) identity: crate::types::TypeName,
+    pub(super) formals: Vec<String>,
+    pub(super) expansion: Ty,
+    /// The call's explicit type arguments, already applied to `expansion`; empty when omitted.
+    explicit_arguments: Vec<Ty>,
+}
+
+impl AppliedSourceAlias {
+    /// The alias a scope-tower selection carried, applied to the call's explicit type arguments.
+    pub(super) fn selected(
+        alias: Option<&crate::libraries::AliasExpansion>,
+        explicit_type_arguments: &[Ty],
+    ) -> Option<Self> {
+        let alias = alias?;
+        Self::apply(
+            alias.identity,
+            alias.formals.clone(),
+            alias.expansion,
+            explicit_type_arguments,
+        )
+    }
+
+    fn apply(
+        identity: crate::types::TypeName,
+        formals: Vec<String>,
+        expansion: Ty,
+        explicit_type_arguments: &[Ty],
+    ) -> Option<Self> {
+        if !explicit_type_arguments.is_empty() && explicit_type_arguments.len() != formals.len() {
+            return None;
+        }
+        let bindings = formals
+            .iter()
+            .cloned()
+            .zip(explicit_type_arguments.iter().copied())
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        Some(Self {
+            identity,
+            expansion: crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings),
+            explicit_arguments: explicit_type_arguments.to_vec(),
+            formals,
+        })
+    }
+}
+
+impl ProductionSignatureSemantics<'_> {
+    /// Publish a constructor call through a typealias: its type, with the abbreviation recorded
+    /// for the call so an inferred declaration result can carry it.
+    pub(super) fn record_alias_constructor_result(
+        &self,
+        origin: crate::fir::OriginId,
+        applied: Option<(
+            crate::fir::ResolvedTy,
+            Option<crate::fir::ResolvedTypeAbbreviation>,
+        )>,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let (result, abbreviation) = applied.ok_or_else(Self::failure)?;
+        if let Some(abbreviation) = abbreviation {
+            self.selected_calls
+                .record_abbreviation(origin, abbreviation);
+        }
+        Ok(result)
     }
 }

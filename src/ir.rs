@@ -60,6 +60,7 @@ pub(crate) use local_delegates::{
 };
 mod local_property_references;
 mod module_records;
+mod negations;
 mod null_checks;
 mod operators;
 mod overrides;
@@ -116,7 +117,7 @@ pub use module_records::{
 };
 pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
-pub use overrides::{is_kotlin_primitive, IrFunctionOverride, IrPropertyOverride};
+pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{
     IrEntryPoint, IrPackageFunction, IrPackageProperty, IrPackageTypeParameter, MainEntryParameters,
 };
@@ -506,6 +507,13 @@ pub enum IrExpr {
     /// `break` — exit the innermost enclosing loop, or the loop carrying `label` (`break@outer`).
     Break {
         label: Option<String>,
+    },
+    /// Store `value` as the result of the enclosing inline-return frame `frame`, from a lambda body
+    /// nested inside it. That body numbers its values separately, so it names the frame, never the
+    /// frame's result value. See [`IrFile::inline_return_frames`].
+    SetFrameResult {
+        frame: String,
+        value: ExprId,
     },
     /// `continue` — jump to the innermost enclosing loop's `update`/condition (or the labeled loop's).
     Continue {
@@ -1116,10 +1124,10 @@ pub struct IrClass {
     /// `valueOf(String)`. Each [`IrEnumEntry`] carries its name, lowered constructor args, and optional
     /// synthesized-subclass fq name.
     pub enum_entries: Vec<IrEnumEntry>,
-    /// `Some(user_field_types)` marks this class as a synthesized enum-entry subclass: it extends the
-    /// enum (`superclass`), has no own fields, and its constructor is `(String name, int ordinal,
-    /// <user_field_types>)V` delegating to the enum's `(String,int,<user>)V` constructor.
-    pub enum_entry_of: Option<Vec<Ty>>,
+    /// Marks this class as the subclass an enum constant with a body is an instance of. It extends
+    /// the enum (`superclass`), declares no constructor parameters of its own, and its primary
+    /// constructor's superclass call (`super_args`) carries the constant's arguments.
+    pub is_enum_entry: bool,
     /// `Some(..)` marks this class as a synthesized property-reference singleton: a `final class
     /// extends kotlin/jvm/internal/PropertyReference1Impl` (the `superclass`) with a `public static
     /// final INSTANCE`, a constructor `super(owner.class, name, signature, 0)`, and a `get(Object)
@@ -1254,7 +1262,7 @@ impl IrClass {
             super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
             is_enum: false,
             enum_entries: Vec::new(),
-            enum_entry_of: None,
+            is_enum_entry: false,
             prop_ref: None,
             func_ref: None,
             lambda: None,
@@ -1373,7 +1381,7 @@ impl IrClass {
             super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
             is_enum: flags.has(crate::fir::DeclarationFlags::ENUM),
             enum_entries: Vec::new(),
-            enum_entry_of: None,
+            is_enum_entry: false,
             prop_ref: None,
             func_ref: None,
             lambda: None,
@@ -1705,6 +1713,12 @@ pub struct IrFile {
     /// never searches the constructor IR for a matching field assignment.
     pub checked_interface_delegation_initializers:
         std::collections::HashSet<(crate::fir::DeclarationId, u32)>,
+    /// `(classifier declaration, interface-delegation ordinal)` to the calls its forwarders make on
+    /// the delegate value, published by the checked constructor body that evaluates it.
+    pub checked_interface_delegate_calls: std::collections::HashMap<
+        (crate::fir::DeclarationId, u32),
+        Box<[crate::fir::ResolvedDelegateMemberCalls]>,
+    >,
     /// Stable enum-entry declaration to its compiler-generated common-IR subclass. The entry keeps
     /// the enum classifier as its semantic receiver in FIR; this transient edge only owns where its
     /// declared methods/properties are physically attached in the active file.
@@ -1832,6 +1846,12 @@ pub struct IrFile {
     /// ordinary backend-neutral `IrExpr::Return`; inline expansion consumes/decrements this fact as
     /// lambda bodies cross lexical boundaries, so no source label or AST identity survives.
     pub checked_return_depths: std::collections::HashMap<ExprId, u32>,
+    /// The result declaration of each inline-return frame, by the frame's label. An inline
+    /// expansion's returns leave through `break` to that label after storing their value. A return
+    /// in the expansion's own body stores it by the declaration's value index; one in a lambda body
+    /// nested in it writes [`IrExpr::SetFrameResult`], which every renumbering of either body
+    /// leaves pointing at the same frame.
+    pub inline_return_frames: std::collections::HashMap<ExprId, String>,
     /// Sparse construction facts keyed by the ordinary [`IrExpr::New`] identity. Common lowering
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
     /// must realize annotation instances through a platform-specific implementation class.
@@ -1932,6 +1952,8 @@ pub struct IrFile {
     /// source update has (kotlinc's `index = index + 1` in `WithIndexLoopHeader`). A target emits
     /// them as the plain arithmetic and store they are, never as a fused increment.
     pub plain_updates: std::collections::HashSet<ExprId>,
+    /// Boolean negations (kotlinc's `not`), spelled as `operand == false`; see `negations`.
+    pub negations: std::collections::HashSet<ExprId>,
     /// Pre-test loops whose body block is a transparent scope, as the body of a `for` loop kotlinc's
     /// `ForLoopsLowering` rebuilt as a `while` is (an `IrComposite`): the declarations it opens with
     /// stay in scope until the loop ends.
@@ -1992,6 +2014,11 @@ pub struct IrFile {
     /// bounds), keyed by the class's fully-qualified name.
     pub class_declared_spellings:
         std::collections::HashMap<crate::types::TypeName, crate::spelling::DeclaredSpellings>,
+    /// Where a class's declared superclass stands in its source supertype list, keyed by the class's
+    /// fully-qualified name. `@Metadata` lists supertypes in source order (`class C : I, Base(), J`
+    /// writes `I, Base, J`), while [`IrClass::superclass`] keeps the superclass apart. Absent when
+    /// the superclass is written first or none is declared.
+    pub class_superclass_positions: std::collections::HashMap<crate::types::TypeName, u32>,
     /// The same, for a class PROPERTY, keyed by `(class fully-qualified name, property name)` —
     /// a property has no `FunId` to hang off.
     pub prop_declared_spellings: std::collections::HashMap<
@@ -2536,7 +2563,7 @@ impl IrTypeParameter {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IrTypeAlias {
     pub name: String,
     pub formals: Vec<String>,

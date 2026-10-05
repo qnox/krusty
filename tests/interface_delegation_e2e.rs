@@ -404,8 +404,6 @@ fn delegated_generic_property_accessors_match_kotlinc() {
     let Some(reference) = common::kotlinc_library(GENERIC_PROPERTY_SRC) else {
         return;
     };
-    // `Meter` is left out: kotlinc boxes a primitive result that overrides a type-parameter one
-    // (`getLevel()Integer`), which krusty does not do for any override yet.
     let accessors = |bytes: &[u8]| {
         krusty::jvm::classreader::parse_class(bytes)
             .expect("class parses")
@@ -415,12 +413,16 @@ fn delegated_generic_property_accessors_match_kotlinc() {
             .map(|method| (method.name, method.descriptor, method.access))
             .collect::<Vec<_>>()
     };
-    let (_, emitted) = classes
-        .iter()
-        .find(|(name, _)| name == "Crate")
-        .expect("krusty emits Crate");
-    let expected = std::fs::read(reference.join("Crate.class")).expect("kotlinc emits Crate");
-    assert_eq!(accessors(emitted), accessors(&expected));
+    // `Meter` forwards a primitive over a type parameter: kotlinc's forwarder returns the wrapper.
+    for class in ["Crate", "Meter"] {
+        let (_, emitted) = classes
+            .iter()
+            .find(|(name, _)| name == class)
+            .unwrap_or_else(|| panic!("krusty emits {class}"));
+        let expected = std::fs::read(reference.join(format!("{class}.class")))
+            .unwrap_or_else(|_| panic!("kotlinc emits {class}"));
+        assert_eq!(accessors(emitted), accessors(&expected), "{class}");
+    }
 }
 
 const PLATFORM_DEFAULT_SRC: &str = "class Table<K, V>(val map: MutableMap<K, V>) : MutableMap<K, V> by map\n\

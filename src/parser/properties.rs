@@ -19,6 +19,7 @@ impl Parser<'_> {
         );
         Self::mark_inline_accessors(&mut property, modifiers);
         property.visibility = visibility_of(modifiers);
+        property.has_visibility_modifier = has_visibility_modifier(modifiers);
         property.is_open = !modifiers.iter().any(|modifier| modifier == "final")
             && modifiers
                 .iter()
@@ -270,6 +271,7 @@ impl Parser<'_> {
             context_params,
             decl_line: 0,
             visibility: Visibility::Public,
+            has_visibility_modifier: false,
             type_params,
             type_param_bounds,
             reified_type_params,
