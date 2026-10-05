@@ -62016,7 +62016,10 @@ impl<'a> Checker<'a> {
             // prove the rest of the target.
             let function_shape = function_type_ref_shape(&ty)
                 .or_else(|| self.classifier_function_type_ref_shape(scope, &ty));
-            if !tt.contains_error() {
+            // A function-type target with an unresolved component still has its classifier, and
+            // kotlinc reports the erased test (rendering the component as `???`) in place of the
+            // unresolved reference.
+            if !tt.contains_error() || function_shape.is_some() {
                 let operand_ty = self.type_test_operand_ty(scope, operand, ot);
                 let reified_target = matches!(tt.non_null(), Ty::TyParam(..))
                     && scope.reified_tparam(&ty.name).is_some();
