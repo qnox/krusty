@@ -304,7 +304,13 @@ pub(super) fn emit_suspend_lambda_class(
     );
     emit_bridge(ir, &mut cw, &shape, lambda);
     // A lambda class is local to the scope it was written in.
-    let (d1, d2) = lambda_metadata(ir, lambda, &formatter);
+    let (d1, d2) = match lambda_metadata(ir, lambda, &formatter) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            env.run.set_emit_error(error);
+            return Vec::new();
+        }
+    };
     cw.set_kotlin_metadata(
         3,
         &opts.metadata_version(),
@@ -321,7 +327,7 @@ fn lambda_metadata(
     ir: &IrFile,
     lambda: &SuspendLambdaClass,
     formatter: &JvmSignatureFormatter<'_>,
-) -> (Vec<String>, Vec<String>) {
+) -> Result<(Vec<String>, Vec<String>), String> {
     let Ty::Fun(signature) = lambda.function_type.non_null() else {
         unreachable!("a suspend lambda has a function type")
     };
@@ -346,6 +352,8 @@ fn lambda_metadata(
     let approximate_intersection = |ty| formatter.declaration_approximation(ty);
     let (bytes, strings) = crate::metadata::lambda_function::build(
         &crate::metadata::lambda_function::LambdaFunction {
+            function_name: crate::metadata::lambda_function::function_name(lambda.form),
+            jvm_method: None,
             receiver,
             parameters: &parameters,
             result: signature.ret,
@@ -354,8 +362,8 @@ fn lambda_metadata(
             enum_entry_bodies: &enum_entry_bodies,
             intersection_approximation: &approximate_intersection,
         },
-    );
-    (crate::metadata::encoding::bytes_to_strings(&bytes), strings)
+    )?;
+    Ok((crate::metadata::encoding::bytes_to_strings(&bytes), strings))
 }
 
 /// `SuspendLambda` and the lambda's `FunctionN` over its parameters, its continuation and `Object`.

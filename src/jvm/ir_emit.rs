@@ -13,7 +13,7 @@ use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
 };
 use crate::jvm::classreader::{MethodCode, C};
-use crate::jvm::constructor_debug::property_line;
+use crate::jvm::constructor_debug::{primary_constructor_line, property_line};
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
     mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
@@ -40,6 +40,7 @@ mod bytecode_inline_call;
 mod call_operands;
 mod captured_storage;
 mod checked_facts;
+mod class_lambda_reflection;
 mod class_literals;
 mod class_pool_seed;
 mod companion_blocks;
@@ -49,6 +50,7 @@ mod constant_emission;
 mod constructor_accessors;
 mod constructor_defaults;
 mod constructor_initialization;
+mod constructor_signatures;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
 mod companion_field;
 mod copied_code;
@@ -157,6 +159,7 @@ use class_metadata::build_class_metadata;
 #[cfg(test)]
 use class_metadata::build_class_metadata_with_facts;
 mod constructor_delegation_arguments;
+mod primary_super_call;
 mod secondary_constructor;
 mod static_accessors;
 mod static_fields;
@@ -407,6 +410,9 @@ struct LambdaClassPlan {
     /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
     owner_is_interface: bool,
     identity: lambda_class_names::LambdaClassIdentity,
+    /// The generic signature and `@Metadata` kotlin-reflect reads for `toString()`. Absent for a
+    /// user SAM conversion and for a synthesized adapter that is not a source lambda.
+    reflection: Option<class_lambda_reflection::ClassLambdaReflection>,
 }
 
 impl EmitRun {
@@ -1896,7 +1902,14 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
     } else {
         "java/lang/Object"
     };
-    let mut cw = new_writer(&plan.internal, super_name, opts);
+    let signature = plan
+        .reflection
+        .as_ref()
+        .map(|reflection| reflection.signature.as_str());
+    let mut cw = new_writer_generic(&plan.internal, signature, super_name, opts);
+    if let Some(signature) = signature {
+        cw.set_signature(signature);
+    }
     cw.set_access(0x0030); // ACC_FINAL | ACC_SUPER
     cw.add_interface(&plan.iface);
     if plan.function_adapter {
@@ -2120,6 +2133,15 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         clinit.putstatic(field, 1);
         clinit.ret_void();
         cw.add_method(0x0008, "<clinit>", "()V", &clinit); // ACC_STATIC
+    }
+    if let Some(reflection) = &plan.reflection {
+        cw.set_kotlin_metadata(
+            3,
+            &opts.metadata_version(),
+            synthetic_class_xi(SYNTHETIC_LOCAL),
+            &reflection.d1,
+            &reflection.d2,
+        );
     }
     (plan.internal.clone(), cw.finish())
 }
@@ -2672,7 +2694,7 @@ fn emit_class(
                 format!("(Lkotlin/coroutines/Continuation<-L{fq_name};>;)V")
             }
         })
-        .or_else(|| class_ctor_generic_sig(&signature_formatter, ir, c, &fq_name));
+        .or_else(|| constructor_signatures::primary_constructor_signature(&signature_formatter, c));
     let value_param_ctor = ir.has_value_param_ctor(&fq_name);
     let ctor_access =
         method_access::primary_constructor_access(ir, c, is_continuation, value_param_ctor);
@@ -2991,45 +3013,7 @@ fn emit_class(
                 ctor_desc.clone(),
                 u16::try_from(debug_start).expect("a JVM method body fits in u16"),
             ));
-            for &statement in &c.super_arg_prelude {
-                e.emit(statement, &mut ctor);
-            }
-            // A base whose primary ctor takes a value-class param — or a SEALED base — has a PRIVATE
-            // primary. The checker records whether this exact selection is that primary; only then
-            // must a subclass `super(…)` reach it through the PUBLIC|SYNTHETIC
-            // `(…args, DefaultConstructorMarker)` accessor rather than the inaccessible declaration.
-            let (mut super_param_tys, super_accessor) = super_ctor_jvm_tys(e.ir, c, &superclass);
-            e.emit_constructor_delegation_arguments(
-                &c.super_args,
-                &c.super_ctor_params,
-                &[],
-                &mut ctor,
-            );
-            let super_defaults =
-                e.ir.super_constructor_default_arguments
-                    .get(&c.fq_name_id())
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-            if !super_defaults.is_empty() {
-                super_param_tys = jvm_tys(&c.super_ctor_params);
-                for mask in constructor_default_masks(super_defaults, c.super_ctor_params.len()) {
-                    ctor.push_int(mask, e.cw);
-                    super_param_tys.push(Ty::Int);
-                }
-                ctor.aconst_null();
-                super_param_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-            } else if super_accessor {
-                ctor.aconst_null();
-            }
-            let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-            let super_descriptor =
-                e.ir.external_super_constructors
-                    .get(&c.fq_name_id())
-                    .and_then(|target| target.descriptor.as_deref())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| method_descriptor(&super_param_tys, Ty::Unit));
-            let super_init = e.cw.methodref(&superclass, "<init>", &super_descriptor);
-            ctor.invokespecial(super_init, aw, 0);
+            ctor_lines.extend(e.emit_primary_super_call(c, &superclass, &mut ctor));
             e.this_uninitialized = false;
             // Interface delegation runs after `super(…)` and before constructor-property stores.
             // The delegate expression sees parameters, not the properties those parameters become.
@@ -3102,8 +3086,9 @@ fn emit_class(
             // The trailing `return` goes back on the class-declaration line, closing the ctor's table.
             if !ctor_lines.is_empty() {
                 // A closing `init` line still pending owns a `nop` before the return's line.
-                ctor.mark_line(c.decl_line);
-                ctor_lines.push((ctor.bytes.len() as u16, c.decl_line));
+                let line = primary_constructor_line(ir, c);
+                ctor.mark_line(line);
+                ctor_lines.push((ctor.bytes.len() as u16, line));
             }
             ctor.ret_void();
         }
@@ -3237,8 +3222,11 @@ fn emit_class(
     // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
     // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
     // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared
-    // visibility (a PROTECTED primary gets a protected convenience ctor).
-    if c.has_primary_ctor {
+    // visibility (a PROTECTED primary gets a protected convenience ctor). A declared constructor
+    // without value parameters already is that `<init>()`, so kotlinc's JvmDefaultConstructorLowering
+    // adds none beside it.
+    let declares_no_arg_ctor = c.secondary_ctors.iter().any(|sc| sc.params.is_empty());
+    if c.has_primary_ctor && !declares_no_arg_ctor {
         let param_tys = class_ctor_jvm_tys(c);
         let value_param_ctor = ir.has_value_param_ctor(&fq_name);
         let ctor_access = if is_continuation || c.is_anonymous_object {
@@ -3874,14 +3862,8 @@ fn emit_enum_class(
         .chain(all_param_tys.iter().copied())
         .collect();
     let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
-    // The generic signature omits the enum ABI prefix and retains only source parameters.
-    let ctor_sig = format!(
-        "({})V",
-        all_param_tys
-            .iter()
-            .map(|ty| type_descriptor(*ty))
-            .collect::<String>()
-    );
+    let ctor_sig = constructor_signatures::enum_constructor_signature(&signature_formatter, c)
+        .expect("an enum constructor always signs its source parameters");
     let ctor_parameters = if env.java_parameters {
         super::method_parameters::enum_constructor(c).to_vec()
     } else {
@@ -5893,82 +5875,6 @@ fn method_parameterized_sig(
     (s != ir_method_desc(params, ret)).then_some(s)
 }
 
-/// The primary constructor's generic `Signature` — bare type-parameter params (`(TT;)V`) and
-/// parameterized concrete params (`(Ljava/util/List<Ljava/lang/String;>;)V`), others erased; `None` when
-/// none need generics. Shared by the pool seeder and the attribute emitter so both produce one string.
-fn class_ctor_generic_sig(
-    formatter: &JvmSignatureFormatter<'_>,
-    ir: &IrFile,
-    c: &crate::ir::IrClass,
-    fq_name: &str,
-) -> Option<String> {
-    let param_tys = class_ctor_jvm_tys(c);
-    let ftp = ir.field_signatures(fq_name);
-    let is_field: Vec<bool> = if c.ctor_args.is_empty() {
-        vec![true; param_tys.len()]
-    } else {
-        c.ctor_args.iter().map(|a| a.is_field).collect()
-    };
-    let mut sig = String::from("(");
-    let mut any = false;
-    let mut field_i = 0usize;
-    for (i, t) in param_tys.iter().enumerate() {
-        let declared_ty = c.ctor_args.get(i).and_then(|argument| argument.declared_ty);
-        let declared_type_parameter = declared_ty.and_then(|ty| match ty {
-            Ty::TyParam(name, _) => Some(name),
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => match *inner {
-                Ty::TyParam(name, _) => Some(name),
-                _ => None,
-            },
-            _ => None,
-        });
-        if let Some(parameter) = declared_type_parameter {
-            sig.push_str(&format!(
-                "T{};",
-                crate::types::type_parameter_source_name(parameter)
-            ));
-            any = true;
-            if is_field.get(i).copied().unwrap_or(true) {
-                field_i += 1;
-            }
-            continue;
-        }
-        if let Some(parameterized) = declared_ty.and_then(|ty| {
-            // Constructor arguments are parameter positions even when they also declare a property.
-            parameterized_sig_at(formatter, &ty, Wildcards::Declared)
-        }) {
-            sig.push_str(&parameterized);
-            any = true;
-            if is_field.get(i).copied().unwrap_or(true) {
-                field_i += 1;
-            }
-            continue;
-        }
-        if is_field.get(i).copied().unwrap_or(true) {
-            let f = c.fields.get(field_i);
-            let fname = f.map(|f| f.name.as_str()).unwrap_or("");
-            if let Some((_, tp)) = ftp.and_then(|ftp| ftp.iter().find(|(fp, _)| fp == fname)) {
-                sig.push_str(&format!("T{tp};"));
-                any = true;
-            } else if let Some(ps) = f.and_then(|f| {
-                // A constructor parameter is a PARAMETER position, even though the same declaration
-                // also backs a field, whose own signature suppresses the wildcards.
-                parameterized_sig_at(formatter, &f.ty, Wildcards::Declared)
-            }) {
-                sig.push_str(&ps);
-                any = true;
-            } else {
-                sig.push_str(&type_descriptor(*t));
-            }
-            field_i += 1;
-        } else {
-            sig.push_str(&type_descriptor(*t));
-        }
-    }
-    sig.push_str(")V");
-    any.then_some(sig)
-}
-
 /// The shared `<T:bound…>` type-parameter DECLARATION section, or `""` when there are no own type
 /// parameters (e.g. a generic class's getter `getA()` → `()TA;` USES the class's `A` but declares none).
 /// `None` if any bound can't be represented.
@@ -7087,14 +6993,25 @@ impl<'a> Emitter<'a> {
             splice_desc,
             inline_only,
             allow_owner_bridge,
+            for_inline_copy,
         } = target;
         crate::trace_compiler!(
             "splice",
             "inline target {owner}.{name}{descriptor} splice_descriptor={splice_desc} args={}",
             args.len()
         );
-        let Some(body) = self.bodies.body(owner, name, descriptor) else {
-            crate::trace_compiler!("splice", "no body for {owner}.{name}{descriptor}");
+        // Only a callable suspend inline function's `$$forInline` copy is spliced: its `name` body
+        // is already the callee's own state machine. Without the copy the call declines (a
+        // must-inline one bails), never splicing that machine.
+        let for_inline;
+        let body_name = if for_inline_copy {
+            for_inline = format!("{name}$$forInline");
+            for_inline.as_str()
+        } else {
+            name
+        };
+        let Some(body) = self.bodies.body(owner, body_name, descriptor) else {
+            crate::trace_compiler!("splice", "no body for {owner}.{body_name}{descriptor}");
             return false;
         };
         // A body that references a PRIVATE member (its own facade's helper or backing field) runs
@@ -7224,8 +7141,11 @@ impl<'a> Emitter<'a> {
             IrExpr::Block { stmts, value } => self.emit_statement_block(e, stmts, value, code),
             IrExpr::Return(value) => self.emit_return_node(e, value, code),
             IrExpr::Variable {
-                index, ty, init, ..
-            } => self.emit_local_variable(e, index, ty, init, code),
+                index,
+                ty,
+                init,
+                named,
+            } => self.emit_local_variable(e, index, ty, init, named, code),
             IrExpr::InlineFrameMarker => self.emit_inline_frame_marker(e, code),
             IrExpr::SetValue { var, value } => {
                 let Some(&(slot, jt)) = self.slots.get(&var) else {
@@ -8573,20 +8493,6 @@ fn norm_nothing(t: Ty) -> Ty {
 }
 
 pub use crate::jvm::physical_type::ir_ty_to_jvm;
-
-fn super_ctor_jvm_tys(ir: &IrFile, c: &IrClass, superclass: &str) -> (Vec<Ty>, bool) {
-    let mut params = jvm_tys(&c.super_ctor_params);
-    let uses_accessor = (c.super_ctor.primary() && ir.has_value_param_ctor(superclass))
-        || constructor_accessors::reached_through_accessor(
-            c.super_ctor,
-            Some(c.fq_name_id()),
-            c.superclass,
-        );
-    if uses_accessor {
-        params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-    }
-    (params, uses_accessor)
-}
 
 /// The JVM element type of an array given its whole array type. `ir_ty_to_jvm` already maps
 /// `kotlin/Array<Int>` → `[Ljava/lang/Integer;` (boxed) and `kotlin/IntArray` → `[I` (primitive), so the
