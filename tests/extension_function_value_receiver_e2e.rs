@@ -155,15 +155,16 @@ fn an_inapplicable_function_value_leaves_the_tower_to_an_applicable_callable() {
          fun qualified(f: Scope.(Int) -> String) = O.f(\"x\")\n\
          fun expression(s: Scope, g: Scope.(Int) -> String) = s.g(\"x\")\n\
          fun safe(s: Scope?, g: Scope.(Int) -> String) = s?.g(\"x\")\n\
+         fun named(f: Scope.(String) -> String) = O.f(x = \"x\")\n\
          fun explicitTypeArguments(h: Scope.() -> String) = O.h<Int>()\n\
          fun applicable(f: Scope.(String) -> String) = O.f(\"x\")\n\
          fun box(): String {\n\
          \x20   val wrong: Scope.(Int) -> String = { \"wrong:$it\" }\n\
          \x20   val all = listOf(\n\
-         \x20       qualified(wrong), expression(O, wrong), safe(O, wrong),\n\
+         \x20       qualified(wrong), expression(O, wrong), safe(O, wrong), named { \"wrong:$it\" },\n\
          \x20       explicitTypeArguments { \"wrong\" }, applicable { \"value:$it\" },\n\
          \x20   ).joinToString()\n\
-         \x20   return if (all == \"member:x, top:x, top:x, generic-member, value:x\") \"OK\" else all\n\
+         \x20   return if (all == \"member:x, top:x, top:x, member:x, generic-member, value:x\") \"OK\" else all\n\
          }\n",
         "ext_fn_value_applicability",
     );
