@@ -742,10 +742,10 @@ impl<'a> CommonIrBodySink<'a> {
                         .classifier_header(declaration)
                         .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?
                         .classifier;
-                    if let Some(interfaces) = index.superclass_interfaces(declaration) {
+                    if let Some(defaults) = index.inherited_defaults(declaration) {
                         self.ir
-                            .superclass_interfaces
-                            .insert(classifier_identity, interfaces.to_vec());
+                            .inherited_defaults
+                            .insert(classifier_identity, defaults.to_vec());
                     }
                     // A local classifier may have a stable skeleton before an inferred member is
                     // checked. Refresh only the semantic override payload once Pass 2 marks both
@@ -817,13 +817,13 @@ impl<'a> CommonIrBodySink<'a> {
                     .is_none(),
                 "a source classifier may publish one applied hierarchy per IR file"
             );
-            if let Some(interfaces) = index.superclass_interfaces(declaration) {
+            if let Some(defaults) = index.inherited_defaults(declaration) {
                 assert!(
                     self.ir
-                        .superclass_interfaces
-                        .insert(classifier_identity, interfaces.to_vec())
+                        .inherited_defaults
+                        .insert(classifier_identity, defaults.to_vec())
                         .is_none(),
-                    "a source classifier may publish superclass interface facts once"
+                    "a source classifier may publish its inherited defaults once"
                 );
             }
             let property_overrides = lower_property_override_plans(index, declaration);

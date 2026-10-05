@@ -23,6 +23,18 @@ pub(crate) fn module_member_jvm_name(
     vc_mangle(base, params, ret, ir, false, is_suspend)
 }
 
+/// The static a value class realizes an inherited member's box entry with, which kotlinc's
+/// value-class lowering names like any member's replacement: the entry's own name when value-class
+/// mangling already gave it a hash (`takes-LzhfEcQ`), otherwise `name-impl`. `declared` is the
+/// member's name before mangling and `entry` its JVM name on the box.
+pub(crate) fn inherited_member_impl_name(declared: &str, entry: &str) -> String {
+    if entry == declared {
+        format!("{declared}-impl")
+    } else {
+        entry.to_string()
+    }
+}
+
 /// The type a declared parameter or result occupies in the member's JVM descriptor: a value class
 /// is its carrier, as the declaring file's value-class pass lowers it; any other type is unchanged.
 fn module_member_carrier(ir: &IrFile, ty: Ty) -> Ty {
@@ -93,82 +105,149 @@ fn dependency_source_physical_params<'a>(
 
 pub(crate) fn forwarded_member_types(
     ir: &IrFile,
-    member: &crate::backend::BackendMemberFact,
-    declared_in_module: bool,
+    callables: &crate::backend::CheckedBackendCallables,
+    default: &crate::fir::ResolvedInheritedDefault,
 ) -> ForwardedMemberTypes {
-    if declared_in_module {
-        let params: Vec<Ty> = member
-            .params
-            .iter()
-            .map(|ty| module_member_carrier(ir, *ty))
-            .collect();
-        let ret = module_member_carrier(ir, member.ret);
-        return ForwardedMemberTypes {
-            physical_params: params.clone(),
-            physical_ret: ret,
-            semantic_params: params,
-            semantic_ret: ret,
-        };
-    }
+    let shape = match &default.body {
+        crate::fir::InheritedDefaultBody::Module => {
+            // A function's descriptor erases a type-parameter parameter to its bound.
+            let function = matches!(default.name, crate::fir::InheritedMemberName::Function(_));
+            let ret = module_member_carrier(ir, default.result);
+            return ForwardedMemberTypes {
+                physical_params: default
+                    .parameters
+                    .iter()
+                    .map(|ty| match ty.ty_param_bound() {
+                        Some(bound) if function => bound.non_null(),
+                        _ => *ty,
+                    })
+                    .map(|ty| module_member_carrier(ir, ty))
+                    .collect(),
+                physical_ret: ret,
+                semantic_params: default
+                    .parameters
+                    .iter()
+                    .map(|ty| module_member_carrier(ir, *ty))
+                    .collect(),
+                semantic_ret: ret,
+            };
+        }
+        crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration)
+        | crate::fir::InheritedDefaultBody::DependencyHolder(declaration) => callables
+            .callable(*declaration)
+            .expect("an inherited dependency default has frozen backend facts"),
+        crate::fir::InheritedDefaultBody::JavaDefaultMethod => {
+            unreachable!("a Java default method has no Kotlin forwarder")
+        }
+    };
     let physical_params = dependency_source_physical_params(
-        &member.physical_params,
-        &member.params,
-        member.suspend(),
+        &shape.physical_params,
+        &default.parameters,
+        default.suspend,
     );
     ForwardedMemberTypes {
         physical_params: physical_params.to_vec(),
-        physical_ret: member.physical_ret,
-        semantic_params: member.params.to_vec(),
-        semantic_ret: member.ret,
+        physical_ret: shape.physical_ret,
+        semantic_params: default.parameters.to_vec(),
+        semantic_ret: default.result,
     }
+}
+
+/// The parameter and result types the classifier's own realization of an inherited member
+/// declares: [`forwarded_member_types`] where the applied supertype leaves a position as declared,
+/// and the substituted type where it does not (`f(value: String): String` for `I<String>`). A
+/// substituted result whose declaration erases to a reference keeps a reference: kotlinc boxes it
+/// (`Integer f(int)` for `I<Int>`) so it still overrides the declaration's erased result. A
+/// value-class substitute keeps the declared shape (a recorded gap: kotlinc writes a mangled typed
+/// forwarder).
+pub(crate) fn specialized_member_types(
+    ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
+    default: &crate::fir::ResolvedInheritedDefault,
+) -> ForwardedMemberTypes {
+    let declared = forwarded_member_types(ir, callables, default);
+    // A value-class substitute (`I<Z>`) keeps the declaration's erased shape: kotlinc's typed
+    // forwarder would take the mangled carrier signature, which this realization does not model.
+    let substitutes_value_class = default
+        .parameters
+        .iter()
+        .zip(default.applied_parameters.iter())
+        .chain(std::iter::once((&default.result, &default.applied_result)))
+        .filter(|(declared, applied)| declared != applied)
+        .any(|(_, applied)| {
+            applied
+                .non_null()
+                .obj_internal()
+                .is_some_and(|classifier| ir.is_value_class_name(classifier))
+        });
+    if substitutes_value_class {
+        return declared;
+    }
+    let module = matches!(default.body, crate::fir::InheritedDefaultBody::Module);
+    let semantic = |ty: Ty| {
+        if module {
+            module_member_carrier(ir, ty)
+        } else {
+            ty
+        }
+    };
+    let physical = |ty: Ty| match ty.ty_param_bound() {
+        Some(bound) => bound.non_null(),
+        None => ty,
+    };
+    let mut types = ForwardedMemberTypes {
+        physical_params: Vec::with_capacity(declared.physical_params.len()),
+        physical_ret: declared.physical_ret,
+        semantic_params: Vec::with_capacity(declared.semantic_params.len()),
+        semantic_ret: declared.semantic_ret,
+    };
+    for (index, (declared_ty, applied)) in default
+        .parameters
+        .iter()
+        .zip(default.applied_parameters.iter())
+        .enumerate()
+    {
+        if declared_ty == applied {
+            types.physical_params.push(declared.physical_params[index]);
+            types.semantic_params.push(declared.semantic_params[index]);
+        } else {
+            let applied = semantic(*applied);
+            types.physical_params.push(physical(applied));
+            types.semantic_params.push(applied);
+        }
+    }
+    if default.result != default.applied_result {
+        let applied = semantic(default.applied_result);
+        let erased = crate::jvm::method_descriptors::jvm_declared_ty(&declared.physical_ret);
+        let realized = physical(applied);
+        let boxed = (erased.is_reference()
+            && !crate::jvm::method_descriptors::jvm_declared_ty(&realized).is_reference())
+        .then(|| crate::jvm::jvm_class_map::wrapper_type_name(realized))
+        .flatten()
+        .map(Ty::obj_name);
+        types.physical_ret = boxed.unwrap_or(realized);
+        types.semantic_ret = boxed.unwrap_or(applied);
+    }
+    types
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{BackendMemberFact, BackendMemberName};
-
-    fn dependency_member(
-        physical_params: &[Ty],
-        params: &[Ty],
-        suspend: bool,
-    ) -> BackendMemberFact {
-        BackendMemberFact {
-            name: BackendMemberName::Declared("run".into()),
-            physical_name: None,
-            owner: Some(crate::types::type_name("fixture/Api")),
-            physical_params: physical_params.into(),
-            params: params.into(),
-            ret: Ty::Unit,
-            physical_ret: Ty::Unit,
-            descriptor: "".into(),
-            realization: crate::libraries::MemberRealization::Dispatch,
-            nonvirtual: None,
-            suspend,
-            abstract_member: false,
-            visibility: crate::types::Visibility::Public,
-            vararg: false,
-            parameter_identities: Box::new([]),
-        }
-    }
 
     #[test]
     fn a_suspend_dependency_keeps_its_source_carrier_and_drops_only_the_cps_tail() {
         let semantic = Ty::obj("fixture/Ticket");
         let continuation = Ty::obj("kotlin/coroutines/Continuation");
-        let member = dependency_member(&[Ty::Int, continuation], &[semantic], true);
+        let physical = [Ty::Int, continuation];
+        let source = dependency_source_physical_params(&physical, &[semantic], true);
 
-        let types = forwarded_member_types(&IrFile::default(), &member, false);
-
-        assert_eq!(types.physical_params, vec![Ty::Int]);
-        assert_eq!(types.semantic_params, vec![semantic]);
+        assert_eq!(source, &[Ty::Int]);
     }
 
     #[test]
     #[should_panic(expected = "publishes one source physical type per semantic parameter")]
     fn a_dependency_member_without_a_complete_physical_shape_is_rejected() {
-        let member = dependency_member(&[], &[Ty::Int], false);
-
-        forwarded_member_types(&IrFile::default(), &member, false);
+        dependency_source_physical_params(&[], &[Ty::Int], false);
     }
 }

@@ -1849,7 +1849,40 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a more specific interface override still forwards to that override
   (`class More : Specific, Inherits()` where `Specific` overrides `Base`). The forwarder is an
   `invokespecial` that must NAME a direct superinterface (the first declared one through which the
-  winning declaration is inherited; measured on the diamond). A sub-interface REPUBLISHES the surface for every inherited default it
+  winning declaration is inherited; measured on the diamond). Which members a class or interface
+  inherits this way is a Kotlin override decision, so the override-plan phase owns it: while the
+  providers are live it walks the classifier's interface closure (every interface before its
+  ancestors, siblings in written order), keeps the nearest declaration of each override slot (an
+  abstract redeclaration suppresses a farther body), drops the classifier's own declarations, the
+  slots a class member already implements and every interface the superclass reaches, and
+  publishes one `ResolvedInheritedDefault` per remaining non-private body — its declaring
+  interface, the direct superinterface it is inherited through, its parameters, identities and
+  result, and where its body lives (this module, a dependency's default method or holder, a Java
+  default). Common IR carries the records (`IrFile::inherited_defaults`); the JVM backend only maps
+  each to its forwarder, holder republication or value-class static, and never walks the hierarchy
+  (`src/fir/index_tests.rs::the_nearest_declaration_of_a_slot_wins_and_names_its_direct_superinterface`).
+  The record also carries the member as the classifier's applied supertype substitutes it
+  (`f(value: String): String` for `I<String>`), computed by the frontend from the common
+  classifier model. When that shape differs from the declaration's erasure, the class writes the
+  TYPED forwarder `String f(String)` (`ACC_BRIDGE`, generic `Signature` when it differs from the
+  descriptor) and, for a value class, the typed static `String f-impl(int, String)`; both call the
+  erased declaration and `checkcast` its result. The ordinary bridge pass adds the erased
+  `Object f(Object)` (`ACC_BRIDGE | ACC_SYNTHETIC`) delegating to the typed forwarder. A primitive
+  substitute (`I<Int>`) takes `int` parameters, boxed for the call, and keeps the boxed `Integer`
+  return. A `super` call that selects the declaration through a class holding the typed
+  forwarder names the TYPED entry (`invokespecial Shout.echo(String)String`), as kotlinc does: the
+  erased entry is a bridge that dispatches virtually back to the override and would recurse. The
+  record carries the selected function's identity for that lookup; a superclass's records are
+  rekeyed with every other class-keyed fact when a local classifier gets its JVM name. A provider's
+  property view of a function (`ClosedRange.isEmpty`, whose getter IS the function) is not a second
+  slot. Recorded gaps: a forwarder over the member's OWN type parameter (`fun <T> echo`) omits
+  kotlinc's `<T:...>` `Signature` (the record does not carry the member's type-parameter
+  declarations), and a value-class substitute (`I<Z>`) keeps the erased shape where kotlinc writes
+  a mangled typed forwarder
+  (`tests/jvm_default_mode_e2e.rs::a_specializing_supertype_types_the_inherited_default_like_kotlinc`,
+  `a_kotlinc_consumer_links_against_a_specialized_inherited_default`,
+  `specialized_inherited_defaults_run_in_every_shape`).
+  A sub-interface REPUBLISHES the surface for every inherited default it
   does not redeclare, even when it declares nothing itself; a member inherited from a
   `disable`-compiled dependency gets a holder forward straight to that dependency's holder (behind
   a `checkcast`, without `@Deprecated` or an `access$…$jd` bridge), exactly as measured. Kotlin-ness
@@ -1861,9 +1894,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   described ONLY by its `Property` metadata record — recording the accessor as a `Function` too
   made every kotlinc consumer report "inherited platform declarations clash" on each implementer;
   the accessor match is DESCRIPTOR-aware, so `fun getX(): Int` beside `val x: String` keeps its
-  `Function` record. Forwarder suppression against a class's own property accessors is keyed the
-  same way, on the accessors the class actually EMITS: a `val` never stands in for an inherited
-  `setX(I)V` (dropping that forwarder left the class abstract), and a same-name accessor with a
+  `Function` record. Forwarder suppression against a class's own property follows the override
+  slot, never an accessor spelling: a property never stands in for an inherited `setX(I)V`
+  function (dropping that forwarder left the class abstract), and a same-name accessor with a
   different return coexists with its forwarder, as kotlinc emits both.
   A `suspend` member's forwarders and republished surface use its CPS shape — a trailing
   `Continuation` parameter (`$completion`, `@NotNull`) and a `@Nullable Object` return — never the
@@ -2616,9 +2649,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   jvm-default `access$…$jd` bridge, and the `$DefaultImpls` forwarder — both the declared one and the
   surface a sub-interface republishes for an inherited default it does not redeclare. All of them now
   take the bit from the recorded vararg fact: `ir.fn_varargs` for a declared member (a suspend
-  member's trailing continuation keeps the bit off), `BackendMemberFact.vararg` for the republished
-  surface, computed at the provider boundary from the declaration's call shape — never inferred from
-  an array-typed last parameter. Tests: `tests/method_access_flags_e2e.rs`
+  member's trailing continuation keeps the bit off), `ResolvedInheritedDefault.vararg` for the
+  republished surface, which override planning records from the selected declaration's checked
+  parameter flags or its provider's call shape — never inferred from an array-typed last parameter. Tests: `tests/method_access_flags_e2e.rs`
   (`abstract_vararg_method_flags_match_kotlinc`, `abstract_vararg_members_run`).
 - Range expressions as **values**: `a..b` and `a..<b` are the only true range *operators* (parsed at a
   precedence tighter than infix functions, looser than additive). `a..b` over `Int`/`Long`/`Char`
@@ -9771,6 +9804,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/value_class_signature_e2e.rs` (every method of five value classes and their callers
   against kotlinc, in one file and with the value classes in a kotlinc-built dependency). Corpus:
   `inlineClasses/*Generic*` (`constructor-impl`), `inlineClasses/kt26103_*`.
+- **A value class implements an interface property through the same instance entries.**
+  kotlinc's `JvmInlineClassLowering` replaces a computed property's accessors exactly as it
+  replaces member functions: each is a static over the carrier named from the declared accessor
+  signature (`getB-impl`, `setB-impl`, or the value-class hash when that signature mentions a value
+  class: `getT-<hash>`, `setT2-<hash>`), and each accessor that overrides an interface accessor gets
+  an entry on the box under the name the signature answers to (`getB`, `getT-<hash>`), declared
+  right after its static. The entry takes the accessor's parameters less the carrier: the getter
+  none, a member-extension getter its receiver (`getC(String)`), a setter its value. A `var`
+  implementing a `val` adds a setter that overrides nothing, so it has no entry. An entry maps its
+  first line to the accessor's own header line when the accessor is written with a body on a line
+  of its own (`get() = …`, `set(value) { … }`), else to the property's line. A member-extension
+  entry's receiver is labeled after the entry's JVM name in its local-variable row and, under
+  `-java-parameters`, unflagged in `MethodParameters` (`$this$getC`, `$this$getE_u2d<hash>`), not
+  after the property as its static is (`$this$c`, mandated); a function entry likewise reflects
+  `$this$f_u2d<hash>`. The accessor statics are user declarations: their bodies take the
+  value-class boundary rewrites and return the carrier of a value-class result (`getT-<hash>`
+  returns `I`, not the box). The JVM backend derives property entries from the class's property
+  override edges with the function entries, in one pass. Not yet matched: kotlinc boxes the
+  result of a primitive accessor overriding a generic one (`getG()Ljava/lang/Integer;` for
+  `val g: T`), for a value class's static and entry as for any class. Tests:
+  `tests/value_class_property_entry_e2e.rs` (the box against kotlinc member for member, its exact
+  entries, and calls through the interface at run time),
+  `tests/java_parameters_attribute_e2e.rs` (`java_parameters_names_a_value_class_property_entries`).
 - **A `Nothing` override of a value-class member is reached through mangled bridges.** The
   supertype's accessor or function returning a value class is named with the value-class hash
   (`getP-<hash>`, `f-<hash>`), whether it spells the value class boxed (`X?`) or as its carrier
@@ -10171,10 +10227,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   republished forward of an inherited member does too. The JVM backend formats the entry from the
   static's recorded identities (an arity mismatch is an internal error), and the `$receiver`
   spelling from the extension-receiver role where the function is written on a holder or records a
-  holder receiver. Not yet matched: kotlinc lowers an interface default a value class inherits to
-  a `dflt-impl` static with an entry, where krusty writes a forward with no `MethodParameters`, and
-  orders an accessor's entry beside its static. Tests: `tests/java_parameters_attribute_e2e.rs`,
+  holder receiver. Tests: `tests/java_parameters_attribute_e2e.rs`,
   `tests/interface_default_method_e2e.rs`.
+- **An inherited interface default on a value class is a `-impl` static plus its forwarder.** A
+  class that inherits an interface default it does not override gets a compatibility forwarder
+  (`ACC_PUBLIC | ACC_BRIDGE`): under `enable` an `invokespecial` of the default through the first
+  direct superinterface it is inherited through; under `disable` an `invokestatic` of that same
+  superinterface's `$DefaultImpls` static, because every interface between the class and the
+  declaration republishes an inherited body on its own holder (`Left$DefaultImpls.f` checks its
+  parameters, `checkcast Base`, calls `Base$DefaultImpls.f`); `no-compatibility` writes none. The
+  forwarder's line is where the class declaration starts, annotations included, and under
+  `-java-parameters` it reflects the member's parameters unflagged (an extension receiver stays a
+  receiver; a suspend member ends with `$completion`). kotlinc's value-class lowering replaces each
+  such fake override of a value class with a static, exactly when it has a forwarder: `name-impl`,
+  or the forwarder's own name when value-class mangling renamed it (`tagged-P2Mlbr0`). It takes the
+  carrier `arg0` first, checks every `@NotNull` parameter but a continuation under its local name
+  (`$this$decorate` for an extension receiver), boxes the carrier and `invokevirtual`s the
+  forwarder; it maps no line, and reflects `arg0` synthetic and the extension receiver mandated.
+  The value class's forwarder `checkcast`s the box to the holder's interface under `disable`. Each
+  static precedes its forwarder, and the pairs follow the value class's own members and precede
+  its private constructor. A kotlinc consumer calls `Held.shared-impl`, so the static is the value
+  class's ABI. Reading or writing an inherited interface property through a value class boxes the
+  carrier for the interface accessor. A forwarder's parameter types are its declaration's: a
+  type parameter keeps its identity, so `<T> echo(t: T)` gets no `@NotNull` and no check. Not yet
+  matched: the generic `Signature` of every inherited-member forwarder and static (`<T> echo`,
+  `Continuation<? super Integer>`), and the specialized forwarder kotlinc writes for a member of a
+  substituted generic interface (`g(String)` plus an erased bridge over `G<String>`). Tests:
+  `tests/jvm_default_mode_e2e.rs` (`a_value_class_realizes_an_inherited_default_with_an_impl_static`
+  and its neighbours), `tests/java_parameters_attribute_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**
   `class Test(val x: S, val y: S = S("K"))` fills an omitted `y` in its synthetic
   `<init>(String, String, int, DefaultConstructorMarker)`. The default expression runs over the
@@ -11526,6 +11606,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   provide equally is `overload resolution ambiguity between candidates:`, followed by each
   candidate's header (`class Item : Any`), at the reference. Verified against kotlinc 2.4.20.
   (`tests/nested_type_parameter_bound_e2e.rs`.)
+- **A runtime type test must be fully checkable (FIR `isCastErased`).** `x is C<A>` and
+  `x !is C<A>` are accepted only when the operand's static type proves everything but `C`'s
+  classifier; otherwise the target is `cannot check for instance of erased type 'C<A>'.` at the
+  type. The rule is kotlinc's: a non-reified type-parameter target is erased unless the test is an
+  upcast or only checks a `T?` operand for null (`x is T` with `x: T?`, `T : Any`); nullability is
+  stripped from both sides; an upcast is never erased; otherwise `C`'s own type parameters are
+  unified through `C`'s supertypes with the operand's arguments (`findStaticallyKnownSubtype`,
+  each part of an intersection operand contributing; an unreached parameter stays itself and a
+  star stays a star) and the result must be a subtype of the target. Function types take part as
+  their `FunctionN`/`SuspendFunctionN` classifiers, so `suspend (Int) -> Int` is not proved to be a
+  `Function2<Int, Continuation<Int>, Any?>`. The operand's type is FIR's: the declared type of a
+  path that is not smart cast, otherwise the intersection of the declared type with every smart-cast
+  fact still in force (a nested `is` adds to an outer `as`), so after `f as Function2<…>` testing
+  `f is SuspendFunction1<Int, Any?>` is an upcast. The error renders function classifiers as
+  function types (`'suspend (Int) -> Any?'`) and a type parameter with its owner (`'T (of fun <T>
+  h)'`). A local target whose applied type carries a parameter owned outside the target's lexical
+  class chain is erased: a generic function's captured `T` is not testable, while an actual outer
+  class's `T` is not rejected by this rule. The check uses stable classifier and type-parameter
+  declaration owners, never generated local-name spelling. `as` casts report only kotlinc's
+  UNCHECKED_CAST warning, which krusty does not emit. On the JVM a smart-cast operand of
+  `instanceof` is tested unnarrowed (kotlinc's implicit cast writes no `checkcast` there), and
+  `KFunctionN`/`KSuspendFunctionN` is written in a generic `Signature` as its carrier
+  `KFunction<R>`. Verified against kotlinc 2.4.20.
+  (`tests/erased_type_check_e2e.rs`.)
 - **Opt-in requirements (`@RequiresOptIn`).** A declaration needs opt-in to each marker it is
   annotated with, a marker being an annotation class annotated `@RequiresOptIn`. A callable (local
   variables and parameters included) also needs the markers of the classifiers named in its

@@ -87,10 +87,7 @@ fn attach_interface_entry_debug_tables(
         // The entry is the declared member itself on the box, so its receiver local is named after
         // the entry's own (physical) name, as for any member extension.
         let name = if is_extension_receiver(bridge, index) {
-            Some(format!(
-                "$this${}",
-                crate::jvm::debug_local_names::escaped(&bridge.name)
-            ))
+            Some(crate::jvm::parameter_names::value_class_interface_entry_receiver(&bridge.name))
         } else {
             names.get(index + 1).cloned().flatten()
         };
@@ -651,6 +648,7 @@ impl EntryHeader {
                 ir,
                 member,
                 &jvm_function_params(ir, member),
+                &entry.name,
                 entry.erased_params.len(),
             )
         } else {
