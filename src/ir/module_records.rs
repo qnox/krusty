@@ -52,11 +52,10 @@ pub struct IrModuleCallable {
     pub annotations: Box<[IrHeaderAnnotation]>,
     /// Where the function lives when `owner` is absent.
     pub placement: IrStaticPlacement,
-    /// The declaration overrides one whose own result is not a Kotlin primitive, as the override
-    /// edges its classifier published say (see [`super::IrFunctionOverride::overrides_non_primitive_result`]).
-    /// A target that realizes such an override's primitive result differently realizes a call to it,
-    /// or an override of it, from this same fact in every file.
-    pub overrides_non_primitive_result: bool,
+    /// The own, unapplied results of the declarations this one overrides, as the override edges its
+    /// classifier published them. A target whose realization of an override's result depends on
+    /// the overridden results realizes a call to it, or an override of it, from these in every file.
+    pub overridden_results: Box<[Ty]>,
 }
 
 /// Exact current-module declaration selected for a member operation, plus the selected semantic

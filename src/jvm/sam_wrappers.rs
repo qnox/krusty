@@ -290,7 +290,7 @@ fn declare_wrapper(
     let method = forwarding_method(ir, class_id, name, target, function_arity, suspend_adapted);
     let class = &mut ir.classes[class_id as usize];
     class.methods.push(method);
-    let boxes_primitive_result = target.overrides_non_primitive_result && !target.suspend;
+    let boxes_primitive_result = crate::jvm::override_results::boxes_sam_result(target);
     if boxes_primitive_result {
         let erased_params = target
             .declared_parameters
@@ -298,7 +298,7 @@ fn declare_wrapper(
             .copied()
             .map(super::bridges::bridge_erasure)
             .collect::<Vec<_>>();
-        for &result in &target.overridden_non_primitive_results {
+        for result in crate::jvm::override_results::sam_results_boxed_over(target) {
             let erased_ret = super::bridges::bridge_erasure(result);
             if class.bridges.iter().any(|bridge| {
                 bridge.name == target.method
@@ -396,7 +396,7 @@ fn forwarding_method(
             ))
         })
         .collect();
-    let invoke_result = if target.overrides_non_primitive_result && !target.suspend {
+    let invoke_result = if crate::jvm::override_results::boxes_sam_result(target) {
         Ty::nullable(target.declared_result)
     } else {
         target.declared_result

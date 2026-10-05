@@ -4,20 +4,32 @@ use super::*;
 
 type VcDebugMethod = (String, String, Vec<(String, String, u16)>);
 
+/// What emitting the primary constructor recorded for its debug tables.
+#[derive(Default)]
+pub(super) struct PrimaryConstructorDebug<'a> {
+    /// The primary constructor method emission actually produced and the source-mapped body offset
+    /// it reached after any parameter guards. Neither the physical descriptor nor the bytecode
+    /// position may be reconstructed later from fields or semantic constructor arguments.
+    pub(super) method: Option<(&'a str, u16)>,
+    /// Extra ctor LineNumberTable entries (body-property initializers + the trailing `return`),
+    /// with their real pcs captured during emission. Empty ⇒ the ctor gets kotlinc's single entry.
+    pub(super) lines: &'a [(u16, u32)],
+    pub(super) init_locals: &'a [(u16, u16, u16, String, String)],
+}
+
 pub(super) fn attach_synth_debug_tables(
     ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
     param_assertions: bool,
-    // The primary constructor method emission actually produced and the source-mapped body offset
-    // it reached after any parameter guards. Neither the physical descriptor nor the bytecode
-    // position may be reconstructed later from fields or semantic constructor arguments.
-    primary_ctor_debug: Option<(&str, u16)>,
-    // Extra ctor LineNumberTable entries (body-property initializers + the trailing `return`), with
-    // their real pcs captured during emission. Empty ⇒ the ctor gets kotlinc's single entry.
-    ctor_lines: &[(u16, u32)],
-    init_locals: &[(u16, u16, u16, String, String)],
+    constructor: PrimaryConstructorDebug<'_>,
 ) {
+    let PrimaryConstructorDebug {
+        method: primary_ctor_debug,
+        lines: ctor_lines,
+        init_locals,
+    } = constructor;
     let line = c.decl_line;
     if line == 0 {
         return;
@@ -126,10 +138,19 @@ pub(super) fn attach_synth_debug_tables(
         // getter and setter independently: a `var` can declare one and retain the synthesized other.
         // The plugin-generated `descriptor` getter intentionally has NO line table, which this
         // class-level synthesis would otherwise overwrite with the declaration line.
-        let declared_property = c
+        let declared_index = c
             .properties
             .iter()
-            .find(|property| property.backing_field == Some(field_index as u32));
+            .position(|property| property.backing_field == Some(field_index as u32));
+        let declared_property = declared_index.map(|index| &c.properties[index]);
+        // A scalar getter result over a reference-returning overridden getter is the wrapper.
+        let getter_result = if declared_index
+            .is_some_and(|index| override_results.boxes_member_property(c.fq_name, index as u32))
+        {
+            Ty::nullable(f.ty)
+        } else {
+            f.ty
+        };
         // A CTOR-parameter property's accessors sit on the class-declaration line; a BODY property's
         // sit on its own `val`/`var` line.
         let pline = ir
@@ -142,7 +163,7 @@ pub(super) fn attach_synth_debug_tables(
         if declared_property.is_none_or(|property| property.getter.is_none()) {
             cw.set_method_debug(
                 &g,
-                &format!("(){}", desc(f.ty)),
+                &format!("(){}", desc(getter_result)),
                 Some((0, pline)),
                 &this_only,
             );

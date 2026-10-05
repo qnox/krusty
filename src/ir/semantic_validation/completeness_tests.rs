@@ -41,6 +41,7 @@ fn module_property(source: SourceFileId) -> IrModuleProperty {
         flags: Default::default(),
         placement: crate::ir::IrStaticPlacement::Package,
         compile_time_constant: None,
+        overridden_types: Box::new([]),
     }
 }
 

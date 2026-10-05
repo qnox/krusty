@@ -309,8 +309,12 @@ impl Emitter<'_> {
             } => {
                 let declared_ret = ty_from_descriptor_ret(&descriptor);
                 let widened_ret = ty_from_descriptor_ret(&realization.descriptor);
-                let narrow = (declared_ret != widened_ret && declared_ret.is_reference())
-                    .then_some(declared_ret);
+                // A boxed getter (`getSize()Integer`) realized through a scalar slot
+                // (`Collection.size()I`) reads the scalar itself: there is nothing to narrow.
+                let narrow = (declared_ret != widened_ret
+                    && declared_ret.is_reference()
+                    && widened_ret.is_reference())
+                .then_some(declared_ret);
                 (
                     PropertyAccess::Accessor {
                         owner,

@@ -49,6 +49,9 @@ pub(crate) enum PropertyRealization {
 #[derive(Default)]
 pub(crate) struct PropertyRealizations {
     entries: HashMap<ExprId, PropertyRealization>,
+    /// The current-module property whose getter a realized `super` call invokes. The realized
+    /// call keeps only its physical spelling, so its property identity is carried here.
+    super_getters: HashMap<ExprId, PropertyId>,
 }
 
 impl PropertyRealizations {
@@ -64,5 +67,16 @@ impl PropertyRealizations {
 
     pub(crate) fn get(&self, expression: ExprId) -> Option<&PropertyRealization> {
         self.entries.get(&expression)
+    }
+
+    pub(crate) fn record_super_getter(&mut self, call: ExprId, property: PropertyId) {
+        self.super_getters.insert(call, property);
+    }
+
+    /// The realized `super` getter calls, each with the property whose getter it invokes.
+    pub(crate) fn super_getters(&self) -> impl Iterator<Item = (ExprId, PropertyId)> + '_ {
+        self.super_getters
+            .iter()
+            .map(|(&call, &property)| (call, property))
     }
 }

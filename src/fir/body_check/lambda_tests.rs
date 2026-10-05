@@ -650,10 +650,10 @@ fn sam_argument_retains_the_selected_interface_method_shape() {
     assert!(!sam.nullable);
 }
 
-/// The selected method's slot carries the declarations it overrides: a primitive result over a
-/// non-primitive one is published on the conversion, and a primitive result over nothing is not.
+/// The selected method's slot carries the own results of the declarations it overrides, as
+/// declared: the frontend publishes them on the conversion and classifies none of them.
 #[test]
-fn sam_argument_records_a_primitive_result_over_a_non_primitive_one() {
+fn sam_argument_records_the_overridden_results() {
     let overrides = |source: &str| {
         let (body, _) = checked_function_body(source, "make");
         let FirExprKind::Call(call) = &body.expr(root_expression(&body)).expect("call").kind else {
@@ -672,13 +672,10 @@ fn sam_argument_records_a_primitive_result_over_a_non_primitive_one() {
         };
         let sam = body.sam_conversion(sam).expect("body-local SAM target");
         assert_eq!(sam.result.get(), Ty::Int);
-        (
-            sam.overrides_non_primitive_result,
-            sam.overridden_non_primitive_results
-                .iter()
-                .map(|result| result.get())
-                .collect::<Vec<_>>(),
-        )
+        sam.overridden_results
+            .iter()
+            .map(|result| result.get())
+            .collect::<Vec<_>>()
     };
     assert_eq!(
         overrides(
@@ -687,7 +684,7 @@ fn sam_argument_records_a_primitive_result_over_a_non_primitive_one() {
          fun consume(child: Child): Int = 0\n\
          fun make(): Int = consume { 1 }\n",
         ),
-        (true, vec![Ty::obj("kotlin/Any")])
+        vec![Ty::obj("kotlin/Any")]
     );
     assert_eq!(
         overrides(
@@ -695,17 +692,13 @@ fn sam_argument_records_a_primitive_result_over_a_non_primitive_one() {
          fun consume(child: Child): Int = 0\n\
          fun make(): Int = consume { 1 }\n",
         ),
-        (false, Vec::new())
+        Vec::<Ty>::new()
     );
-    let (generic, results) = overrides(
+    let results = overrides(
         "interface Echo<T> { fun echo(x: T): T }\n\
          fun interface Count : Echo<Int> { override fun echo(x: Int): Int }\n\
          fun consume(count: Count): Int = 0\n\
          fun make(): Int = consume { it }\n",
-    );
-    assert!(
-        generic,
-        "a type parameter specialized to Int is still a non-primitive override"
     );
     assert!(
         results.len() == 1 && results[0].is_ty_param(),
