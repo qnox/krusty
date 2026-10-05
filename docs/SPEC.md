@@ -2514,7 +2514,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reader derives descriptors by mapping class NAMES through a flat table and an array's descriptor
   depends on its type argument. The specialized primitive arrays (`IntArray` → `[I`) are in that
   table and record nothing, so `vararg xs: Int` records no descriptor while `vararg xs: Payload`
-  does. The rule keys off the array, not off `vararg`. Tests:
+  does. The rule keys off the array, not off `vararg`. A reference `vararg` records `Array<out E>` on package and member
+  functions, constructors and a `vararg val` constructor property alike. Tests:
   `tests/metadata_array_signature_e2e.rs` (byte-identity vs kotlinc 2.4.10); table in
   `docs/METADATA_NOTES.md`.
 - **A backing field's descriptor is recorded only when a reader cannot rebuild it.** kotlinc's
