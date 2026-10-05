@@ -5,7 +5,7 @@ use super::{
     constructor_default_masks, instance_field_jvm_name, jvm_tys, load, method_descriptor,
     slot_words, type_descriptor, ClassWriter, CodeBuilder, EmitEnv, Emitter,
 };
-use crate::ir::{IrClass, IrConstructorTarget, IrFile, IrSecondaryCtor};
+use crate::ir::{IrClass, IrConstructorTarget, IrCtorParameterProvenance, IrFile, IrSecondaryCtor};
 use crate::jvm::method_parameters::OwnerConstructorPrefix;
 use crate::jvm::private_static_access::StaticOwner;
 use crate::types::Ty;
@@ -68,6 +68,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         let owner_prefix_words: u16 = owner_prefix_tys.iter().map(|ty| slot_words(*ty)).sum();
         let method_parameters = if env.java_parameters {
             crate::jvm::method_parameters::secondary_constructor(
+                ir,
                 c,
                 sc,
                 self.owner_prefix,
@@ -288,6 +289,14 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     if parameter >= sc.prefix_params.len() as u32 {
                         continue;
                     }
+                    // An inner class's enclosing-instance store carries the constructor's own line;
+                    // a local class's captured values are stored without one.
+                    let encloses = c.ctor_args.get(parameter as usize).is_some_and(|argument| {
+                        argument.provenance == IrCtorParameterProvenance::EnclosingInstance
+                    });
+                    if encloses && !generated && sc.lines.decl_line != 0 {
+                        sctor.mark_line(sc.lines.decl_line);
+                    }
                     let parameter = parameter as usize + owner_prefix_tys.len();
                     let ty = sc_param_tys[parameter];
                     let slot = 1 + sc_param_tys[..parameter]
@@ -443,6 +452,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         if !generated {
             sctor.add_local_entry(0, None, 0, "this", &format!("L{fq_name};"));
             let names = crate::jvm::method_parameters::secondary_constructor_identities(
+                ir,
                 c,
                 sc,
                 self.owner_prefix,
@@ -549,7 +559,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         }
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).
-        if !sc.annotations.is_empty() {
+        if !sc.annotations.retains_none() {
             cw.set_method_annotations("<init>", &sc_desc, &sc.annotations);
             if sc.annotations.deprecated() {
                 cw.mark_method_deprecated("<init>", &sc_desc);
@@ -601,6 +611,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         if sc.vc_params && !c.is_sealed {
             let parameter_identities =
                 crate::jvm::method_parameters::secondary_constructor_identities(
+                    ir,
                     c,
                     sc,
                     self.owner_prefix,

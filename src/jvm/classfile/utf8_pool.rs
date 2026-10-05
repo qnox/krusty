@@ -62,10 +62,14 @@ impl super::ConstPool {
     /// kotlinc emits an `InnerClasses` entry for a nested class only when it appears as a class
     /// constant (a `new`/`checkcast`/owner ref), not merely inside a descriptor string.
     pub(super) fn has_class(&self, internal_name: &str) -> bool {
+        self.class_index(internal_name).is_some()
+    }
+
+    /// The index of the `CONSTANT_Class` for `internal_name`, if the pool holds one.
+    pub(super) fn class_index(&self, internal_name: &str) -> Option<u16> {
         let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal_name);
-        self.utf8_index
-            .get(mapped)
-            .is_some_and(|utf8| self.dedup.contains_key(&super::Const::Class(utf8)))
+        let utf8 = self.utf8_index.get(mapped)?;
+        self.dedup.get(&super::Const::Class(utf8)).copied()
     }
 }
 

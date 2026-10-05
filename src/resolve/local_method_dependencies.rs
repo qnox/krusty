@@ -787,6 +787,10 @@ impl Checker<'_> {
             return LocalMethodDemand::Complete(None);
         };
 
+        crate::trace_compiler!(
+            "resolve",
+            "force local method dependency declaration={declaration:?}",
+        );
         let saved_body = self.take_body_state();
         let saved_this_labels =
             std::mem::replace(&mut self.this_labels, dependency.this_labels.clone());

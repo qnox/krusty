@@ -25,6 +25,21 @@ impl ClassWriter {
         utf8
     }
 
+    /// Intern the exact descriptor of a class-literal annotation value. Reference-array literals
+    /// also contribute their component classifier to `InnerClasses`; primitive arrays have no
+    /// classifier entry to record.
+    fn record_annotation_class_literal(&mut self, ty: crate::types::Ty) -> u16 {
+        let descriptor = crate::jvm::names::type_descriptor(ty);
+        let component = descriptor.trim_start_matches('[');
+        if let Some(internal) = component
+            .strip_prefix('L')
+            .and_then(|name| name.strip_suffix(';'))
+        {
+            self.annotation_class_refs.insert(internal.to_owned());
+        }
+        self.cp.utf8(&descriptor)
+    }
+
     pub(super) fn ev_int(&mut self, out: &mut Vec<u8>, v: i32) {
         out.push(b'I');
         let idx = self.cp.integer(v);
@@ -136,10 +151,9 @@ impl ClassWriter {
                 let ni = self.cp.utf8(name);
                 u2(out, ni);
             }
-            AnnoValue::Class(internal) => {
+            AnnoValue::Class(ty) => {
                 out.push(b'c');
-                let mapped = crate::jvm::jvm_class_map::to_jvm_type_name(*internal);
-                let ci = self.record_annotation_class(mapped);
+                let ci = self.record_annotation_class_literal(*ty);
                 u2(out, ci);
             }
             AnnoValue::Annotation(a) => {
@@ -153,6 +167,31 @@ impl ClassWriter {
                     self.ev_value(out, it);
                 }
             }
+        }
+    }
+
+    /// Give the most recently added method, an annotation element, its declaration default.
+    pub fn set_last_method_annotation_default(&mut self, value: &crate::ir::AnnoValue) {
+        let mut encoded = Vec::new();
+        self.ev_value(&mut encoded, value);
+        if let Some(method) = self.methods.last_mut() {
+            method.annotation_default = Some(ElementDefault::Value(encoded));
+        }
+    }
+
+    /// Record that a Java source header's annotation element declares a default the header parser
+    /// does not evaluate.
+    pub(crate) fn mark_unevaluated_annotation_default(&mut self, name: &str, desc: &str) {
+        let (Some(name), Some(desc)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc))
+        else {
+            return;
+        };
+        if let Some(method) = self
+            .methods
+            .iter_mut()
+            .find(|method| method.name == name && method.desc == desc)
+        {
+            method.annotation_default = Some(ElementDefault::Unevaluated);
         }
     }
 
@@ -217,7 +256,7 @@ fn annotation_values_record_physical_enum_class_and_nested_descriptors() {
             ),
             (
                 "token".to_string(),
-                AnnoValue::Class(crate::types::type_name("sample/anno6044/Token")),
+                AnnoValue::Class(crate::types::Ty::obj("sample/anno6044/Token")),
             ),
             (
                 "nested".to_string(),
@@ -295,6 +334,31 @@ fn distinct_annotation_writers_keep_only_writer_local_text() {
         } else {
             drop(right);
             drop(left);
+        }
+    }
+}
+
+/// The default an annotation element method declares, as the attribute that records it.
+pub(super) enum ElementDefault {
+    /// The encoded `element_value` of a JVMS `AnnotationDefault` attribute.
+    Value(Vec<u8>),
+    /// A Java source header's default with no evaluated value: an empty attribute that says only
+    /// that the element may be omitted.
+    Unevaluated,
+}
+
+impl ElementDefault {
+    pub(super) fn attribute_name(&self) -> &'static str {
+        match self {
+            Self::Value(_) => "AnnotationDefault",
+            Self::Unevaluated => crate::jvm::classreader::UNEVALUATED_ANNOTATION_DEFAULT,
+        }
+    }
+
+    pub(super) fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Value(bytes) => bytes,
+            Self::Unevaluated => &[],
         }
     }
 }

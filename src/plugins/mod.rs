@@ -149,7 +149,42 @@ pub struct FrontendPropertyFacts {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrontendPluginDiagnostic {
     pub span: crate::diag::Span,
-    pub message: &'static str,
+    pub message: String,
+}
+
+/// A source classifier as a plugin sees it when one of its annotations names a CLASS the plugin
+/// constructs on the classifier's behalf (`@Serializable(with = X::class)`): its resolved
+/// annotations with their entry spans, its checked applications, and the declaration facts of every
+/// source class named by a class-valued argument. The plugin selects and validates the constructor
+/// from these facts alone; it never resolves a spelling or scans a class itself.
+pub struct FrontendNamedClassContext<'a> {
+    /// Resolved annotation identities with the span of each source annotation entry (`@` included).
+    pub annotations: &'a [(TypeName, crate::diag::Span)],
+    /// The checked applications of those annotations, with their folded named arguments.
+    pub applied_annotations: &'a [crate::types::ResolvedAnnotation],
+    /// The classifier's own type-parameter count.
+    pub type_parameter_count: usize,
+    pub named_classes: &'a [FrontendNamedClass],
+}
+
+/// A source class named by a class-valued annotation argument.
+pub struct FrontendNamedClass {
+    pub classifier: TypeName,
+    /// The class as a diagnostic names it without type arguments: `X<*, *>`.
+    pub display_name: String,
+    /// Primary-constructor value parameters in declaration order: source name and declared type.
+    pub primary_constructor: Vec<(String, Ty)>,
+    /// Each declared supertype with its type arguments as diagnostics render them, the class's
+    /// own formals named by their owner (`T (of class X<T>)`).
+    pub supertype_arguments: Vec<(TypeName, Vec<String>)>,
+}
+
+/// The constructor a plugin selected for a named class: the class, and the operand ordinal of the
+/// generated caller passed to each primary-constructor parameter, in parameter order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontendNamedClassConstruction {
+    pub classifier: TypeName,
+    pub operands: Box<[u32]>,
 }
 
 /// Applied annotations keyed by `ClassId`, plus target services required by native plugins.
@@ -306,7 +341,7 @@ impl PluginContext {
             .and_then(|annotation| annotation.values.first())
             .map(|(_, value)| value)?;
         match value {
-            crate::ir::AnnoValue::Class(classifier) => Some(*classifier),
+            crate::ir::AnnoValue::Class(ty) => ty.kotlin_class_internal(),
             _ => None,
         }
     }
@@ -324,7 +359,7 @@ impl PluginContext {
             .and_then(|annotation| annotation.values.first())
             .map(|(_, value)| value)?;
         match value {
-            crate::ir::AnnoValue::Class(classifier) => Some(*classifier),
+            crate::ir::AnnoValue::Class(ty) => ty.kotlin_class_internal(),
             _ => None,
         }
     }
@@ -411,7 +446,7 @@ impl PluginContext {
 
 fn annotation_value_mentions_class(value: &crate::ir::AnnoValue, canonical_type: TypeName) -> bool {
     match value {
-        crate::ir::AnnoValue::Class(classifier) => *classifier == canonical_type,
+        crate::ir::AnnoValue::Class(ty) => ty.kotlin_class_internal() == Some(canonical_type),
         crate::ir::AnnoValue::Annotation(annotation) => annotation
             .values
             .iter()
@@ -467,6 +502,17 @@ pub trait IrPlugin {
         _ctx: &FrontendClassCheckContext<'_>,
         _diagnostics: &mut Vec<FrontendPluginDiagnostic>,
     ) {
+    }
+
+    /// Select the primary constructor through which the plugin's generated code constructs a class
+    /// one of the classifier's annotations names, reporting a constructor that breaks the plugin's
+    /// contract instead. Runs once per source classifier, while its declarations are live.
+    fn select_named_class_constructor(
+        &self,
+        _ctx: &FrontendNamedClassContext<'_>,
+        _diagnostics: &mut Vec<FrontendPluginDiagnostic>,
+    ) -> Option<FrontendNamedClassConstruction> {
+        None
     }
 
     /// Add interfaces or superclasses to existing classes.
@@ -656,13 +702,25 @@ fn external_serializers(
                     .iter()
                     .filter(|(name, _)| name == "with")
                     .find_map(|(_, value)| match value {
-                        crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
+                        crate::types::AnnotationValue::Class(serializer) => {
+                            serializer.kotlin_class_internal()
+                        }
                         _ => None,
                     })
             });
             let mut serializer = match (custom, application) {
                 (Some(custom), _) if classifiers.classifier_is_object(custom) == Some(true) => {
                     serialization::ExternalSerializer::Singleton(custom)
+                }
+                // A serializer CLASS is reached through the classifier's generated companion
+                // `serializer(…)`, which constructs it; the accessor check below confirms the
+                // provider published that exact accessor.
+                (Some(custom), _) if classifiers.classifier_is_object(custom) == Some(false) => {
+                    let mut declaration = classifiers.classifier_declaration(classifier)?;
+                    if declaration.companion.is_none() {
+                        declaration.companion = classifiers.serialization_companion(classifier);
+                    }
+                    serialization::custom_class_serializer(&declaration)?
                 }
                 (Some(_), _) => return None,
                 // What the declaration's compilation generated depends on its kind; a classifier
@@ -818,6 +876,23 @@ impl PluginHost {
         for plugin in &self.plugins {
             plugin.publish_frontend_generated_classifiers(ctx, classifiers);
         }
+    }
+
+    /// The first plugin selection of a named class's constructor, with every plugin's diagnostics.
+    pub fn select_named_class_constructor(
+        &self,
+        ctx: &FrontendNamedClassContext<'_>,
+    ) -> (
+        Option<FrontendNamedClassConstruction>,
+        Vec<FrontendPluginDiagnostic>,
+    ) {
+        let mut diagnostics = Vec::new();
+        let mut selected = None;
+        for plugin in &self.plugins {
+            let selection = plugin.select_named_class_constructor(ctx, &mut diagnostics);
+            selected = selected.or(selection);
+        }
+        (selected, diagnostics)
     }
 
     pub fn check_frontend_class(
@@ -1060,9 +1135,9 @@ mod tests {
             "kotlinx/serialization/UseContextualSerialization",
             vec![(
                 "forClasses".to_string(),
-                crate::ir::AnnoValue::Array(vec![crate::ir::AnnoValue::Class(
-                    crate::types::type_name("demo/External"),
-                )]),
+                crate::ir::AnnoValue::Array(vec![crate::ir::AnnoValue::Class(Ty::obj(
+                    "demo/External",
+                ))]),
             )],
         )]);
 
@@ -1127,7 +1202,7 @@ mod tests {
                     annotation: crate::types::type_name(serialization::SERIALIZABLE_FQ),
                     arguments: vec![(
                         "with".to_owned(),
-                        crate::types::AnnotationValue::Class(serializer),
+                        crate::types::AnnotationValue::Class(Ty::obj_name(serializer)),
                     )],
                     facts: Default::default(),
                 }],

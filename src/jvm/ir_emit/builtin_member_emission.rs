@@ -14,6 +14,12 @@ impl Emitter<'_> {
         match operation {
             crate::ir::IrIntrinsic::ArraySize => {
                 self.emit_value(receiver, code);
+                // `Array<T>.size` receives `[Ljava/lang/Object;`. kotlinc coerces the receiver to
+                // that type, which casts an array of arrays, whose dimensions differ.
+                if type_descriptor(self.value_ty(receiver)).starts_with("[[") {
+                    let object_array = self.cw.class_ref("[Ljava/lang/Object;");
+                    code.checkcast(object_array);
+                }
                 code.arraylength();
             }
             crate::ir::IrIntrinsic::StringGet | crate::ir::IrIntrinsic::StringLength => {

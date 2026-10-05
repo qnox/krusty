@@ -66,7 +66,6 @@ pub enum CompilerIntrinsic {
     /// `@InlineOnly` suspend property whose private throwing accessor is never invoked directly.
     CoroutineContext,
     CoroutineSuspended,
-    SuspendCoroutine,
     SuspendCoroutineUninterceptedOrReturn,
     EnumValues,
     EnumValueOf,
@@ -95,6 +94,10 @@ pub enum CompilerIntrinsic {
     RangeUntil,
     ProgressionStep,
     ProgressionReversed,
+    /// `withIndex()` over an array, an `Iterable`, a `CharSequence` or a `Sequence`. A `for` loop
+    /// destructuring the `IndexedValue` it yields iterates the receiver and counts the index itself
+    /// (kotlinc's `WithIndexHandler`). Anywhere else it is an ordinary call.
+    WithIndex,
     /// The stdlib's unsigned comparison over the carrier of an unsigned value class
     /// (`uintCompare(Int, Int): Int`, `ulongCompare(Long, Long): Int`). kotlinc's counted loops
     /// call it to order unsigned bounds; a source call of it is an ordinary call.
