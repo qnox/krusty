@@ -279,6 +279,7 @@ impl Parser<'_> {
             annotation_args,
             context_params,
             decl_line: 0,
+            accessor_lines: crate::ast::AccessorLines::default(),
             visibility: Visibility::Public,
             has_visibility_modifier: false,
             type_params,
