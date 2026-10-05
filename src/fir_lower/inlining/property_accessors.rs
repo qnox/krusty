@@ -14,8 +14,8 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::super::{FirFileLoweringFailure, InlineAccessorFailure as InlineFail};
 use super::{
-    inline_return_exit, mark_subtree, produce_sole_tail_return, rebase_values,
-    specialize_inline_copy, value_indices,
+    mark_subtree, produce_sole_tail_return, rebase_values, specialize_inline_copy, value_indices,
+    InlineReturn,
 };
 
 /// Splice `inline` property accessors at the uses the checker recorded.
@@ -224,6 +224,19 @@ fn expand_inline_accessor(
             .ok_or_else(|| failure(accessor, InlineFail::MissingCopy))?;
         carry_nested_splice(ir, source, copy, &bindings);
         if protected.contains(&source) {
+            // A nested lambda's template keeps its own numbering, but a return it carries that its
+            // boundaries already moved to this accessor leaves this expansion too.
+            if let (IrExpr::Return(value), Some(0)) = (
+                ir.expr(copy).clone(),
+                ir.checked_return_depths.get(&copy).copied(),
+            ) {
+                returns.push(InlineReturn {
+                    returned: copy,
+                    value,
+                    nested: true,
+                });
+                ir.checked_return_depths.remove(&copy);
+            }
             continue;
         }
         if rebase_values(
@@ -237,7 +250,11 @@ fn expand_inline_accessor(
             return Err(failure(accessor, InlineFail::ValueRebase));
         }
         if let IrExpr::Return(value) = ir.expr(copy).clone() {
-            returns.push((copy, value));
+            returns.push(InlineReturn {
+                returned: copy,
+                value,
+                nested: false,
+            });
             ir.checked_return_depths.remove(&copy);
         }
     }
@@ -319,7 +336,7 @@ enum ExpandedAccessor {
 fn finish_accessor_expansion(
     ir: &mut crate::ir::IrFile,
     cloned_root: ExprId,
-    returns: &[(ExprId, Option<ExprId>)],
+    returns: &[InlineReturn],
     result_ty: Ty,
     setter: bool,
     close_line: Option<u32>,
@@ -332,7 +349,12 @@ fn finish_accessor_expansion(
             ExpandedAccessor::Value(cloned_root)
         });
     }
-    if let [(tail, value)] = *returns {
+    if let [InlineReturn {
+        returned: tail,
+        value,
+        nested: false,
+    }] = *returns
+    {
         if tail == cloned_root {
             let produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
             return Ok(ExpandedAccessor::Value(produced));
@@ -349,21 +371,26 @@ fn finish_accessor_expansion(
         .then(|| allocate_temporary(next_temporary))
         .transpose()?;
     let label = format!("$fir_inline_prop${cloned_root}");
-    for &(copy, value) in returns {
-        let exit = ir.add_expr(IrExpr::Break {
-            label: Some(label.clone()),
-        });
-        ir.exprs[copy as usize] = inline_return_exit(ir, result_slot, value, exit);
+    for found in returns {
+        ir.exprs[found.returned as usize] = super::super::inline_returns::frame_exit(
+            ir,
+            &label,
+            result_slot,
+            found.nested,
+            found.value,
+        );
     }
     let mut statements = Vec::new();
     if let Some(slot) = result_slot {
         let initial = ir.add_expr(IrExpr::Const(IrConst::zero_for_value_type(result_ty)));
-        statements.push(ir.add_expr(IrExpr::Variable {
+        let declaration = ir.add_expr(IrExpr::Variable {
             index: slot,
             ty: stored_value_ty(result_ty),
             init: Some(initial),
             named: false,
-        }));
+        });
+        ir.inline_return_frames.insert(declaration, label.clone());
+        statements.push(declaration);
     }
     let fallthrough = ir.add_expr(IrExpr::Break {
         label: Some(label.clone()),

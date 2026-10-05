@@ -165,18 +165,24 @@ pub(super) fn route(
 
     // The lambda value is a fresh instance with no completion. Its type is the class's: a
     // consumer that needs its `FunctionN` casts it, one that takes `Any` does not.
-    let mut arguments = site.captures.clone();
-    arguments.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
-    ir.exprs[site.node as usize] = IrExpr::New {
-        internal,
-        args: arguments,
-        ctor_params: None,
-        ctor_desc: None,
-        external_target: None,
-        defaults: Box::new([]),
-        default_prefix_count: 0,
-    };
-    ir.logical_types.insert(site.node, Ty::obj_name(internal));
+    // A copy in an enclosing inline-lambda template builds it from that template's captures.
+    for node in std::iter::once(site.node).chain(site.template_copies.iter().copied()) {
+        let IrExpr::Lambda { captures, .. } = &ir.exprs[node as usize] else {
+            unreachable!("a suspend lambda site builds a lambda value");
+        };
+        let mut arguments = captures.clone();
+        arguments.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
+        ir.exprs[node as usize] = IrExpr::New {
+            internal,
+            args: arguments,
+            ctor_params: None,
+            ctor_desc: None,
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        };
+        ir.logical_types.insert(node, Ty::obj_name(internal));
+    }
 
     let mut declared_spill_fields: Vec<(String, usize)> = Vec::new();
     for field in parameters

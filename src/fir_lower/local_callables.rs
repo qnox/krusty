@@ -1255,38 +1255,39 @@ struct NestedCallableBodies {
 
 /// Build the value-producing form consumed by declaration-defined inline expansion. Unlike a
 /// callable method body, this form has no synthetic return: source returns remain control-flow
-/// nodes, while an implicit result remains the block value at the call site.
+/// nodes, while an implicit result remains the block value at the call site. The form carries its
+/// checked value type like every lowered expression, so a backend placing it never reconstructs the
+/// type from the callable's physical result.
 fn inline_callable_body(
     ir: &mut crate::ir::IrFile,
     roots: &[ExprId],
     result: Ty,
     implicit_return: bool,
 ) -> ExprId {
-    if !implicit_return {
-        return ir.add_expr(IrExpr::Block {
+    if !implicit_return || result == Ty::Unit {
+        let value = implicit_return.then(|| ir.add_expr(IrExpr::UnitInstance));
+        let block = ir.add_expr(IrExpr::Block {
             stmts: roots.to_vec(),
-            value: None,
+            value,
         });
-    }
-    if result == Ty::Unit {
-        let unit = ir.add_expr(IrExpr::UnitInstance);
-        return ir.add_expr(IrExpr::Block {
-            stmts: roots.to_vec(),
-            value: Some(unit),
-        });
+        ir.logical_types.insert(block, Ty::Unit);
+        return block;
     }
     let mut statements = roots.to_vec();
     let value = statements
         .pop()
         .expect("checked implicit non-Unit body has a result expression");
     if statements.is_empty() {
-        value
-    } else {
-        ir.add_expr(IrExpr::Block {
-            stmts: statements,
-            value: Some(value),
-        })
+        return value;
     }
+    let block = ir.add_expr(IrExpr::Block {
+        stmts: statements,
+        value: Some(value),
+    });
+    if let Some(&ty) = ir.logical_types.get(&value) {
+        ir.logical_types.insert(block, ty);
+    }
+    block
 }
 
 /// Where a declaration parameter sits among the logical parameters.

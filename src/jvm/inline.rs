@@ -23,7 +23,7 @@ mod local_compaction;
 mod scalar_adapters;
 mod splice_result;
 use continuation_flow::caller_continuation_reachable;
-pub(super) use frame_layout::spliced_frame;
+pub(super) use frame_layout::{spliced_frame, SplicedFrame};
 use local_compaction::LocalCompaction;
 use scalar_adapters::{boxing_call_primitive, host_unboxing, is_target_boxing, leading_unboxing};
 pub use splice_result::SpliceResult;

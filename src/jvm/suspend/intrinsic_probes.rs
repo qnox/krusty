@@ -18,7 +18,12 @@ pub(super) fn bind_current_continuation(
     slot: u32,
     continuations: &mut super::IntrinsicProbeContinuations,
 ) {
-    bind_probed_continuations(ir, root, slot, continuations);
+    bind_probed_continuations(
+        ir,
+        root,
+        super::ProbedContinuation::Value(slot),
+        continuations,
+    );
     super::realize_coroutine_context(ir, root, IrExpr::GetValue(slot));
     super::rewrite_subtree(ir, root, &mut |node| {
         if matches!(node, IrExpr::CurrentContinuation) {
@@ -27,11 +32,22 @@ pub(super) fn bind_current_continuation(
     });
 }
 
-/// Record `slot` as the continuation of every unintercepted intrinsic point reachable from `root`.
+/// Bind every unintercepted intrinsic point in `root`, a body whose machine emission owns, to that
+/// machine's continuation. The block reads it as the same `CurrentContinuation` emission resolves.
+pub(super) fn bind_machine_continuation(
+    ir: &IrFile,
+    root: ExprId,
+    continuations: &mut super::IntrinsicProbeContinuations,
+) {
+    bind_probed_continuations(ir, root, super::ProbedContinuation::Machine, continuations);
+}
+
+/// Record `continuation` as the one every unintercepted intrinsic point reachable from `root`
+/// probes.
 fn bind_probed_continuations(
     ir: &IrFile,
     root: ExprId,
-    slot: u32,
+    continuation: super::ProbedContinuation,
     continuations: &mut super::IntrinsicProbeContinuations,
 ) {
     let mut seen = HashSet::new();
@@ -41,7 +57,7 @@ fn bind_probed_continuations(
             continue;
         }
         if ir.is_unintercepted_suspension(expression) {
-            continuations.insert(expression, slot);
+            continuations.insert(expression, continuation);
         }
         for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }

@@ -19,6 +19,7 @@
 
 use super::super::is_suspension_point;
 use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile};
+use crate::jvm::placed_lambda_captures::is_placed_capture;
 use crate::libraries::InlineKind;
 use std::collections::HashSet;
 
@@ -54,10 +55,7 @@ pub(crate) fn spliced_inline_suspensions(
     body: ExprId,
     suspend_set: &HashSet<u32>,
 ) -> Vec<ExprId> {
-    let mut found = Vec::new();
-    let mut seen = HashSet::new();
-    walk_frame(ir, body, suspend_set, false, &mut seen, &mut found);
-    found
+    SuspensionSearch::new(ir, suspend_set, false).run(body, false)
 }
 
 /// EVERY suspension this frame runs, in encounter order: its own, and those inside the spliced
@@ -70,19 +68,7 @@ pub(crate) fn frame_suspensions(
     body: ExprId,
     suspend_set: &HashSet<u32>,
 ) -> Vec<ExprId> {
-    let mut found = Vec::new();
-    let mut seen = HashSet::new();
-    walk(
-        ir,
-        body,
-        suspend_set,
-        true,
-        false,
-        true,
-        &mut seen,
-        &mut found,
-    );
-    found
+    SuspensionSearch::new(ir, suspend_set, true).run(body, true)
 }
 
 /// Whether a non-local return in a body that will be spliced crosses a `finally` boundary.
@@ -106,8 +92,13 @@ pub(crate) fn spliced_return_crosses_finally(ir: &IrFile, body: ExprId) -> bool 
                 inline_body,
                 ..
             } => {
-                for &capture in captures {
-                    stack.push((capture, inlined, false, crosses_finally));
+                for (position, &capture) in captures.iter().enumerate() {
+                    // A placed capture runs wherever the spliced body invokes it, which may be
+                    // inside a `try` of that body: count every finalizer the body holds.
+                    let placed = spliceable && is_placed_capture(ir, at, position);
+                    let crosses = crosses_finally
+                        || (placed && inline_body.is_some_and(|inner| holds_a_finally(ir, inner)));
+                    stack.push((capture, inlined, placed, crosses));
                 }
                 if let (true, Some(&inner)) = (spliceable, inline_body.as_ref()) {
                     stack.push((inner, true, false, crosses_finally));
@@ -195,6 +186,28 @@ pub(crate) fn suspends_in_a_value_try(
     false
 }
 
+/// Whether `body` holds a `try` with a `finally`, closure boundaries included.
+fn holds_a_finally(ir: &IrFile, body: ExprId) -> bool {
+    let mut stack = vec![body];
+    let mut seen = HashSet::new();
+    while let Some(at) = stack.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        if matches!(
+            &ir.exprs[at as usize],
+            IrExpr::Try {
+                finally: Some(_),
+                ..
+            }
+        ) {
+            return true;
+        }
+        for_each_child(&ir.exprs, at, &mut |child| stack.push(child));
+    }
+    false
+}
+
 /// The expression a block yields, or the expression itself when it is not a block.
 fn tail_value(ir: &IrFile, body: ExprId) -> Option<ExprId> {
     match &ir.exprs[body as usize] {
@@ -273,23 +286,13 @@ fn collect(
             }
             return;
         }
-        let mut found = Vec::new();
-        let mut inner = HashSet::new();
-        walk(
-            ir,
-            *inline_body,
-            suspend_set,
-            true,
-            false,
-            false,
-            &mut inner,
-            &mut found,
-        );
+        let found = SuspensionSearch::new(ir, suspend_set, false).run(*inline_body, true);
         if !found.is_empty() && !out.contains(impl_fn) {
             out.push(*impl_fn);
         }
-        for &capture in captures {
-            collect(ir, capture, suspend_set, false, seen, out);
+        for (position, &capture) in captures.iter().enumerate() {
+            let placed = is_placed_capture(ir, expression, position);
+            collect(ir, capture, suspend_set, placed, seen, out);
         }
         collect(ir, *inline_body, suspend_set, false, seen, out);
         return;
@@ -305,86 +308,77 @@ fn collect(
     }
 }
 
-/// `inlined` records whether this expression is already inside some lambda's `inline_body`; only
-/// then does a suspension count, because only then is it invisible to the IR machine.
-fn walk_frame(
-    ir: &IrFile,
-    expression: ExprId,
-    suspend_set: &HashSet<u32>,
-    inlined: bool,
-    seen: &mut HashSet<ExprId>,
-    found: &mut Vec<ExprId>,
-) {
-    walk(
-        ir,
-        expression,
-        suspend_set,
-        inlined,
-        false,
-        false,
-        seen,
-        found,
-    );
+/// One search for the suspensions a frame runs: what it counts, and what it has found so far.
+struct SuspensionSearch<'a> {
+    ir: &'a IrFile,
+    suspend_set: &'a HashSet<u32>,
+    /// Record the suspensions this frame runs directly as well, not only the ones the IR machine
+    /// cannot see.
+    every: bool,
+    seen: HashSet<ExprId>,
+    found: Vec<ExprId>,
 }
 
-/// `inlined`: this expression already sits inside a body that runs in this frame. `spliceable`: it
-/// is an operand of an inline call, so a lambda here has its body spliced rather than realized as a
-/// closure. `every`: record the suspensions this frame runs directly as well, not only the ones the
-/// IR machine cannot see.
-#[allow(clippy::too_many_arguments)]
-fn walk(
-    ir: &IrFile,
-    expression: ExprId,
-    suspend_set: &HashSet<u32>,
-    inlined: bool,
-    spliceable: bool,
-    every: bool,
-    seen: &mut HashSet<ExprId>,
-    found: &mut Vec<ExprId>,
-) {
-    if !seen.insert(expression) {
-        return;
-    }
-    if (inlined || every) && is_suspension_point(ir, expression, suspend_set) {
-        found.push(expression);
-    }
-    if let IrExpr::Lambda {
-        captures,
-        inline_body,
-        ..
-    } = &ir.exprs[expression as usize]
-    {
-        // The captures are evaluated by THIS frame, whatever the lambda is.
-        for &capture in captures {
-            walk(ir, capture, suspend_set, inlined, false, every, seen, found);
-        }
-        // A spliced body runs in this frame; a real closure's does not — and only the operand of an
-        // inline call is spliced, however the lowering filled `inline_body` in.
-        if let (true, Some(&body)) = (spliceable, inline_body.as_ref()) {
-            walk(ir, body, suspend_set, true, false, every, seen, found);
-        }
-        return;
-    }
-    // A CALL decides this for its own operands; anything else — a coercion, a block, an argument
-    // wrapper — passes the answer through, since the lambda it holds is still the operand of
-    // whatever call encloses it.
-    let operands_are_spliceable = match &ir.exprs[expression as usize] {
-        IrExpr::Call { .. } => calls_an_inline_function(ir, expression),
-        _ => spliceable,
-    };
-    let mut children = Vec::new();
-    for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
-    for child in children {
-        walk(
+impl<'a> SuspensionSearch<'a> {
+    fn new(ir: &'a IrFile, suspend_set: &'a HashSet<u32>, every: bool) -> Self {
+        Self {
             ir,
-            child,
             suspend_set,
-            inlined,
-            operands_are_spliceable,
             every,
-            seen,
-            found,
-        );
+            seen: HashSet::new(),
+            found: Vec::new(),
+        }
+    }
+
+    /// The suspensions found from `body`, which is itself spliced when `inlined`.
+    fn run(mut self, body: ExprId, inlined: bool) -> Vec<ExprId> {
+        self.walk(body, inlined, false);
+        self.found
+    }
+
+    /// `inlined`: this expression already sits inside a body that runs in this frame; only then
+    /// does a suspension count, unless `every` holds, because only then is it invisible to the IR
+    /// machine. `spliceable`: it is an operand of an inline call, so a lambda here has its body
+    /// spliced rather than realized as a closure.
+    fn walk(&mut self, expression: ExprId, inlined: bool, spliceable: bool) {
+        let ir = self.ir;
+        if !self.seen.insert(expression) {
+            return;
+        }
+        if (inlined || self.every) && is_suspension_point(ir, expression, self.suspend_set) {
+            self.found.push(expression);
+        }
+        if let IrExpr::Lambda {
+            captures,
+            inline_body,
+            ..
+        } = &ir.exprs[expression as usize]
+        {
+            // The captures are evaluated by THIS frame, whatever the lambda is. A literal lambda the
+            // spliced body only invokes is placed at each invocation, so its body runs here too.
+            for (position, &capture) in captures.iter().enumerate() {
+                let placed = spliceable && is_placed_capture(ir, expression, position);
+                self.walk(capture, inlined, placed);
+            }
+            // A spliced body runs in this frame; a real closure's does not — and only the operand of
+            // an inline call is spliced, however the lowering filled `inline_body` in.
+            if let (true, Some(&body)) = (spliceable, inline_body.as_ref()) {
+                self.walk(body, true, false);
+            }
+            return;
+        }
+        // A CALL decides this for its own operands; anything else — a coercion, a block, an
+        // argument wrapper — passes the answer through, since the lambda it holds is still the
+        // operand of whatever call encloses it.
+        let operands_are_spliceable = match &ir.exprs[expression as usize] {
+            IrExpr::Call { .. } => calls_an_inline_function(ir, expression),
+            _ => spliceable,
+        };
+        let mut children = Vec::new();
+        for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+        for child in children {
+            self.walk(child, inlined, operands_are_spliceable);
+        }
     }
 }
 

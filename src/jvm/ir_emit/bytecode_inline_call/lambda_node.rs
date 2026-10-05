@@ -104,10 +104,15 @@ struct LiteralLambda {
     parameter_types: Vec<Ty>,
     /// How each parameter crosses the `Object` of `invoke` (`invokeMethodParameters`).
     parameter_coercions: Vec<InvokeCoercion>,
+    /// The checked type of the body's value.
+    result_semantic: Ty,
 }
 
 impl Emitter<'_> {
-    fn literal_lambda(&self, argument: u32) -> (LiteralLambda, usize) {
+    /// The literal lambda `argument` and its source arity, every type read from the checked IR. An
+    /// error names the checked fact the literal lacks; the implementation method never stands in
+    /// for it.
+    fn literal_lambda(&self, argument: u32) -> Result<(LiteralLambda, usize), &'static str> {
         let IrExpr::Lambda {
             impl_fn,
             arity,
@@ -124,14 +129,23 @@ impl Emitter<'_> {
         let arity = usize::from(arity);
         let semantic = match self.ir.logical_types.get(&argument).map(|ty| ty.non_null()) {
             Some(Ty::Fun(signature)) if signature.params.len() == arity => signature.params.clone(),
-            _ => physical_parameters.to_vec(),
+            _ => {
+                return Err(
+                    "a placed lambda has no checked function type with each argument's type",
+                )
+            }
         };
+        let result_semantic = *self
+            .ir
+            .logical_types
+            .get(&inline_body)
+            .ok_or("a placed lambda's body has no checked result type")?;
         let (parameter_types, parameter_coercions) = physical_parameters
             .iter()
             .zip(semantic.iter().chain(std::iter::repeat(&Ty::Error)))
             .map(|(&physical, &semantic)| self.inline_parameter(semantic, physical))
             .unzip();
-        (
+        Ok((
             LiteralLambda {
                 impl_fn,
                 captures,
@@ -139,38 +153,42 @@ impl Emitter<'_> {
                 capture_types: capture_types.to_vec(),
                 parameter_types,
                 parameter_coercions,
+                result_semantic,
             },
             arity,
-        )
+        ))
     }
 
     /// Why the call passing the literal lambda `argument` takes the splice route, if it must: the
     /// lambda shapes the MethodInliner port does not own yet. Decided from the checked IR before
     /// anything of the call is emitted.
-    pub(super) fn lambda_splice_reason(&mut self, argument: u32) -> Option<SpliceReason> {
-        let (lambda, arity) = self.literal_lambda(argument);
+    pub(super) fn lambda_splice_reason(
+        &mut self,
+        argument: u32,
+    ) -> Result<Option<SpliceReason>, &'static str> {
+        let (lambda, arity) = self.literal_lambda(argument)?;
         // A suspension in the lambda needs the splice's state-machine markers until the coroutine
         // transformer runs on inlined bytecode; a suspend lambda's `Continuation` parameter is the
         // one its arity does not count.
         if self.suspends_within(lambda.inline_body) || lambda.parameter_types.len() != arity {
-            return Some(SpliceReason::SuspendingLambda);
+            return Ok(Some(SpliceReason::SuspendingLambda));
         }
         if leaves_by_non_local_jump(self.ir, lambda.inline_body) {
-            return Some(SpliceReason::NonLocalJump);
+            return Ok(Some(SpliceReason::NonLocalJump));
         }
         if lambda
             .parameter_coercions
             .iter()
             .any(|coercion| matches!(coercion, InvokeCoercion::Unported))
         {
-            return Some(SpliceReason::ValueClassAdapter);
+            return Ok(Some(SpliceReason::ValueClassAdapter));
         }
         let declared_result = self.ir.functions[lambda.impl_fn as usize].ret;
-        let result_semantic = self.lambda_result_semantic(&lambda);
+        let result_semantic = lambda.result_semantic;
         if declared_result.is_jvm_scalar()
             && semantic_scalar_adapter(result_semantic, declared_result) != declared_result
         {
-            return Some(SpliceReason::ValueClassAdapter);
+            return Ok(Some(SpliceReason::ValueClassAdapter));
         }
         let frame = lambda_frame(&lambda.capture_types, &lambda.parameter_types);
         let result = self.inline_body_result_ty(lambda.inline_body, &frame.slots);
@@ -178,9 +196,9 @@ impl Emitter<'_> {
             self.invoke_coercion(result_semantic, result),
             InvokeCoercion::Unported
         ) {
-            return Some(SpliceReason::ValueClassAdapter);
+            return Ok(Some(SpliceReason::ValueClassAdapter));
         }
-        None
+        Ok(None)
     }
 
     /// What a lambda's inline body carries its parameter of Kotlin type `semantic` as, which the
@@ -201,10 +219,8 @@ impl Emitter<'_> {
                 !semantic.is_nullable()
                     && crate::jvm::names::same_type_descriptor(physical, Ty::obj_name(class))
             })
-            .and_then(|class| {
-                crate::jvm::value_classes::boxed_value_class_underlying(self.ir, class)
-            });
-        let carrier = unboxed.map_or(physical, |underlying| ir_ty_to_jvm(&underlying));
+            .and_then(|class| crate::jvm::value_classes::boxed_value_class_carrier(self.ir, class));
+        let carrier = unboxed.map_or(physical, |carrier| ir_ty_to_jvm(&carrier));
         (carrier, self.invoke_coercion(semantic, carrier))
     }
 
@@ -282,10 +298,10 @@ impl Emitter<'_> {
         if !self.is_value_class_ty(&semantic) {
             return None;
         }
-        let underlying = crate::jvm::value_classes::boxed_value_class_underlying(self.ir, class)?;
+        let unboxed = crate::jvm::value_classes::boxed_value_class_carrier(self.ir, class)?;
         let carried = type_descriptor(carrier);
         (carried != type_descriptor(Ty::obj_name(class))
-            && carried == type_descriptor(ir_ty_to_jvm(&underlying)))
+            && carried == type_descriptor(ir_ty_to_jvm(&unboxed)))
         .then(|| class.render())
     }
 
@@ -318,8 +334,11 @@ impl Emitter<'_> {
 
     /// The literal lambda `argument` as route planning sees it before compiling it: its parameters,
     /// captured values and names, with a body that only returns; and the caller values it captures.
-    pub(super) fn lambda_shape(&self, argument: u32) -> (inliner::Lambda, Vec<(u32, Ty)>) {
-        let (lambda, _) = self.literal_lambda(argument);
+    pub(super) fn lambda_shape(
+        &self,
+        argument: u32,
+    ) -> Result<(inliner::Lambda, Vec<(u32, Ty)>), &'static str> {
+        let (lambda, _) = self.literal_lambda(argument)?;
         let parameter_types: Vec<String> = lambda
             .parameter_types
             .iter()
@@ -362,7 +381,7 @@ impl Emitter<'_> {
             .copied()
             .zip(lambda.capture_types.iter().copied())
             .collect();
-        (shape, captures)
+        Ok((shape, captures))
     }
 
     /// Whether the literal lambda `argument`'s body reaches a declaration only its own class may: a
@@ -370,8 +389,11 @@ impl Emitter<'_> {
     /// nested lambda (which may be materialized as a private method). Inlined into a regenerated
     /// object, kotlinc reaches those through synthetic accessors, which the port does not generate
     /// yet.
-    pub(super) fn lambda_reaches_private_members(&self, argument: u32) -> bool {
-        let (lambda, _) = self.literal_lambda(argument);
+    pub(super) fn lambda_reaches_private_members(
+        &self,
+        argument: u32,
+    ) -> Result<bool, &'static str> {
+        let (lambda, _) = self.literal_lambda(argument)?;
         let mut pending = vec![lambda.inline_body];
         let mut seen = HashSet::new();
         while let Some(expression) = pending.pop() {
@@ -402,18 +424,21 @@ impl Emitter<'_> {
                 _ => false,
             };
             if private {
-                return true;
+                return Ok(true);
             }
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
         }
-        false
+        Ok(false)
     }
 
     /// Whether every value the lambda `argument` captures is a caller local the inlined body can
     /// read as it is: kotlinc binds a capture to the caller's slot only without a cast.
-    pub(super) fn lambda_captures_caller_locals(&self, argument: u32) -> bool {
-        let (lambda, _) = self.literal_lambda(argument);
-        lambda
+    pub(super) fn lambda_captures_caller_locals(
+        &self,
+        argument: u32,
+    ) -> Result<bool, &'static str> {
+        let (lambda, _) = self.literal_lambda(argument)?;
+        Ok(lambda
             .captures
             .iter()
             .zip(&lambda.capture_types)
@@ -426,15 +451,7 @@ impl Emitter<'_> {
                             ..
                         }
                     )
-            })
-    }
-
-    fn lambda_result_semantic(&self, lambda: &LiteralLambda) -> Ty {
-        self.ir
-            .logical_types
-            .get(&lambda.inline_body)
-            .copied()
-            .unwrap_or(self.ir.functions[lambda.impl_fn as usize].ret)
+            }))
     }
 
     /// Compile the literal lambda `argument` of a call to the inline function `callee`, which route
@@ -445,13 +462,13 @@ impl Emitter<'_> {
         argument: u32,
         callee: &str,
     ) -> Result<LambdaArgument, &'static str> {
-        let (lambda, _) = self.literal_lambda(argument);
+        let (lambda, _) = self.literal_lambda(argument)?;
         let value_class_parameters = lambda
             .parameter_coercions
             .iter()
             .map(InvokeCoercion::value_class)
             .collect();
-        let result_semantic = self.lambda_result_semantic(&lambda);
+        let result_semantic = lambda.result_semantic;
         let LiteralLambda {
             impl_fn,
             captures,
@@ -469,6 +486,10 @@ impl Emitter<'_> {
         // The lambda's node is a method of its own: its body's locals are laid out in a frame of
         // their own, above its parameters, captures and marker.
         let caller_frame = std::mem::take(&mut self.frame);
+        // Its body is the method's outermost scope: the locals declared directly in it stay open
+        // to the method's end, as a function's own locals do, and only nested blocks close theirs.
+        let caller_depth = std::mem::replace(&mut self.block_depth, 0);
+        let caller_locals = std::mem::take(&mut self.open_locals);
         let states_before = self.machine_next_ordinal;
         self.frame.reserve_through(args_size + 1);
         let mut scratch = CodeBuilder::new(args_size);
@@ -478,6 +499,8 @@ impl Emitter<'_> {
             .map_err(|_| "an inline lambda's code is too long")?;
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
         self.frame = caller_frame;
+        self.block_depth = caller_depth;
+        let body_locals = std::mem::replace(&mut self.open_locals, caller_locals);
         if self.machine_next_ordinal != states_before {
             return Err("a lambda planned for the inliner started a suspension");
         }
@@ -514,8 +537,9 @@ impl Emitter<'_> {
                 descriptor.to_string()
             }
         };
-        // kotlinc closes the marker and the parameters at the end of the lambda's method, after its
-        // return and after the body's own locals.
+        // kotlinc closes the outermost scope at the end of the lambda's method, after its return:
+        // the marker it declared first, then the body's own locals in declaration order, then the
+        // parameters. A nested block's locals closed earlier, where the block ended.
         if self.record_locals {
             let end = u16::try_from(scratch.bytes.len())
                 .map_err(|_| "an inline lambda's code is too long")?;
@@ -529,6 +553,10 @@ impl Emitter<'_> {
                 &marker,
                 "I",
             );
+            for local in body_locals {
+                let length = end.saturating_sub(local.start);
+                local.record(Some(length), &mut scratch);
+            }
             let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
             for (index, &ty) in parameter_types.iter().enumerate() {
                 let name = identities
@@ -627,7 +655,7 @@ impl Emitter<'_> {
         }
         let mut pending = vec![root];
         while let Some(expression) = pending.pop() {
-            if self.machine_suspensions.contains(&expression) {
+            if self.machine_suspensions.contains_key(&expression) {
                 return true;
             }
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));

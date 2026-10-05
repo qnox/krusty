@@ -126,6 +126,7 @@ impl Emitter<'_> {
             entered.unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand))
         };
         self.slots.insert(index, (slot, slot_ty));
+        self.open_inline_return_frame(declaration, slot, slot_ty);
         // A `lateinit` declaration emits no store, but its lexical debug lifetime still starts here.
         self.open_declared_local(declaration, slot, slot_ty, code);
     }

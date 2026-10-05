@@ -24,6 +24,12 @@ pub(super) fn unboxed_carrier(result: Option<IrValueClassSuspendResult>) -> Opti
     }
 }
 
+/// The value class and carrier of suspend function `function`, when it returns the carrier where it
+/// does not suspend: its continuation completes with the box.
+pub(crate) fn completion_box(ir: &IrFile, function: u32) -> Option<(TypeName, Ty)> {
+    unboxed_carrier(ir.value_class_suspend_returns.get(&function).copied())
+}
+
 /// The value class and carrier of a suspend call whose callee's continuation completes with the box:
 /// a callee that returns the carrier, in this module or a dependency (a `$default` stub included).
 /// A call to a generic callee is recorded as receiving the box on either path, which its call-site

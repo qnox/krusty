@@ -16,6 +16,10 @@ pub(crate) struct SplicedSuspension {
     /// resolves to the `$completion` parameter while discovering and to the machine's own
     /// continuation local while emitting.
     pub call: ExprId,
+    /// The value class whose box a resumption of this call delivers, with the carrier the call
+    /// returns where it does not suspend. The resumed path unboxes it, so both paths join holding
+    /// the carrier.
+    pub resumed_box: Option<(crate::types::TypeName, crate::types::Ty)>,
 }
 
 /// A suspension point of a function whose machine kotlinc's transformer builds from its bytecode.

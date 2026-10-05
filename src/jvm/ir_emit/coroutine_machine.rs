@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use crate::jvm::classfile::{CodeBuilder, VerifType};
-use crate::jvm::ir_emit::{ir_ty_to_jvm, slot_words, Emitter};
-use crate::types::Ty;
+use crate::jvm::ir_emit::{ir_ty_to_jvm, load, slot_words, store, Emitter};
+use crate::types::{Ty, TypeName};
 
 /// Where the machine keeps its own state. Reserved above the parameters and below the body's own
 /// locals, so a frame built from the emitter's slot view describes them without being told to.
@@ -540,6 +540,9 @@ pub(super) struct ContinuationClass<'a> {
     pub(super) receiver: Option<&'a str>,
     /// `Some(name)` when re-entry goes through a synthetic static on the owner.
     pub(super) bridge: Option<&'a str>,
+    /// The value class whose carrier the re-entered method returns where it does not suspend; the
+    /// completion takes the value as its box.
+    pub(super) completion_box: Option<(TypeName, Ty)>,
 }
 
 pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
@@ -553,6 +556,7 @@ pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
         source_file,
         receiver,
         bridge,
+        completion_box,
     } = spec;
     use crate::jvm::classfile::{ClassWriter, CodeBuilder, ACC_FINAL, ACC_PUBLIC};
     let mut cw = ClassWriter::new(internal, CONTINUATION_IMPL);
@@ -650,7 +654,34 @@ pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
             invoke.invokestatic(reference, words, 1);
         }
     }
+    if let Some((value_class, carrier)) = completion_box {
+        // `COROUTINE_SUSPENDED` goes back as it is; any other result is the carrier, boxed.
+        let resumed = invoke.new_label();
+        invoke.dup();
+        let suspended = cw.methodref(
+            "kotlin/coroutines/intrinsics/IntrinsicsKt",
+            "getCOROUTINE_SUSPENDED",
+            "()Ljava/lang/Object;",
+        );
+        invoke.invokestatic(suspended, 0, 1);
+        invoke.if_acmpne(resumed);
+        invoke.areturn();
+        invoke.bind(resumed);
+        let physical = ir_ty_to_jvm(&carrier.non_null());
+        if let Some(internal) = physical.obj_internal() {
+            let class = cw.class_ref(&internal.render());
+            invoke.checkcast(class);
+        }
+        super::value_class_adapters::emit_value_class_box_adapter(
+            &mut cw,
+            &mut invoke,
+            value_class,
+            physical,
+            carrier.is_nullable(),
+        );
+    }
     invoke.areturn();
+    invoke.link_local_branches();
     cw.add_method(
         ACC_PUBLIC | ACC_FINAL,
         "invokeSuspend",
@@ -701,16 +732,29 @@ fn push_zero_descriptor(
     }
 }
 
+/// The value class whose box a suspension's resumption delivers, with the carrier the call returns
+/// where it does not suspend.
+pub(super) type ResumedBox = Option<(TypeName, Ty)>;
+
+/// A suspension [`Emitter::machine_before`] opened: its position in the machine, and the value
+/// class box its resumption delivers.
+pub(super) struct OpenSuspension {
+    ordinal: usize,
+    resumed_box: ResumedBox,
+}
+
 impl Emitter<'_> {
     /// Open a suspension this emission's machine owns, if `e` is one.
     ///
     /// Both the value and the discarding path go through this: a suspension whose result is thrown
     /// away — `api.stop(id)` as a statement — is a state of the machine like any other, and one
     /// that never spilled would resume into a frame the dispatch cannot produce.
-    pub(super) fn machine_before(&mut self, e: u32, code: &mut CodeBuilder) -> Option<usize> {
-        if !self.machine_suspensions.contains(&e) {
-            return None;
-        }
+    pub(super) fn machine_before(
+        &mut self,
+        e: u32,
+        code: &mut CodeBuilder,
+    ) -> Option<OpenSuspension> {
+        let &resumed_box = self.machine_suspensions.get(&e)?;
         let ordinal = self.machine_next_ordinal;
         self.machine_next_ordinal += 1;
         match self.machine.is_some() {
@@ -728,13 +772,132 @@ impl Emitter<'_> {
                 }
             }
         }
-        Some(ordinal)
+        Some(OpenSuspension {
+            ordinal,
+            resumed_box,
+        })
     }
 
     /// Close a suspension opened by [`Self::machine_before`].
-    pub(super) fn machine_after(&mut self, suspension: Option<usize>, code: &mut CodeBuilder) {
-        if let (Some(ordinal), true) = (suspension, self.machine.is_some()) {
-            self.emit_machine_check(ordinal, code);
+    pub(super) fn machine_after(
+        &mut self,
+        suspension: Option<OpenSuspension>,
+        code: &mut CodeBuilder,
+    ) {
+        if let (Some(suspension), true) = (suspension, self.machine.is_some()) {
+            self.emit_machine_check(suspension.ordinal, suspension.resumed_box, code);
+        }
+    }
+
+    /// Unbox the value class box a resumption delivers to the carrier a call that did not suspend
+    /// returns, so that the resumed path joins the direct one holding the same value.
+    pub(super) fn unbox_resumed_value(&mut self, resumed_box: ResumedBox, code: &mut CodeBuilder) {
+        if let Some((value_class, carrier)) = resumed_box {
+            super::value_class_adapters::emit_value_class_unbox_adapter(
+                self.cw,
+                code,
+                value_class,
+                ir_ty_to_jvm(&carrier.non_null()),
+                carrier.is_nullable(),
+            );
+        }
+    }
+
+    /// Spill the locals that must survive suspension `ordinal`, and record which state to resume in.
+    ///
+    /// Emitted BEFORE the call's operands, which is also where the dependency's own stack prefix
+    /// still sits: this block empties that prefix into locals, so the operands are pushed onto a
+    /// clean stack and the call's own emission needs to know nothing about any of it.
+    pub(super) fn emit_machine_spills(&mut self, ordinal: usize, code: &mut CodeBuilder) {
+        let Some(machine) = self.machine.clone() else {
+            return;
+        };
+        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
+            return;
+        };
+        // What the dependency left on the stack under this call goes into locals first — top value
+        // into the last slot — so the call's own operands are pushed onto an empty stack and nothing
+        // is lost to the `areturn` a suspension leaves through.
+        for &(slot, ty) in suspension.prefix.iter().rev() {
+            store(ir_ty_to_jvm(&ty), slot, code);
+        }
+        for (slot, ty, field, descriptor) in suspension_fields(suspension) {
+            code.aload(machine.slots.continuation);
+            load(ir_ty_to_jvm(&ty), slot, code);
+            let reference = self.cw.fieldref(&machine.internal, &field, descriptor);
+            code.putfield(reference, slot_words(ir_ty_to_jvm(&ty)) as i32);
+        }
+        code.aload(machine.slots.continuation);
+        code.push_int(ordinal as i32 + 1, self.cw);
+        let label = self.cw.fieldref(&machine.internal, "label", "I");
+        code.putfield(label, 1);
+    }
+
+    /// The `COROUTINE_SUSPENDED` check that follows a suspension's call, and the state the dispatch
+    /// re-enters at.
+    ///
+    /// The call's result is on the stack. If the callee suspended, this frame returns that sentinel
+    /// and the machine is re-entered later at the marked position, which restores the spilled locals
+    /// and pushes the resumed value instead. Both paths join with one value on the stack, so
+    /// whatever consumes the call cannot tell which one ran.
+    pub(super) fn emit_machine_check(
+        &mut self,
+        ordinal: usize,
+        resumed: ResumedBox,
+        code: &mut CodeBuilder,
+    ) {
+        let Some(machine) = self.machine.clone() else {
+            return;
+        };
+        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
+            return;
+        };
+        let join = code.new_label();
+        code.dup();
+        code.aload(machine.slots.suspended);
+        code.if_acmpne(join);
+        code.aload(machine.slots.suspended);
+        code.areturn();
+        // The resume point: where the dispatch's restore block re-enters, with the spills restored
+        // and nothing on the stack. A resumption that failed is rethrown HERE, inside the body —
+        // inside any `try` the body wraps around the suspension, which is the only place a `catch`
+        // there can see the callee's exception — and a successful one pushes its value and falls
+        // into the join. kotlinc lays its state out at this same position, for the same reason.
+        //
+        // The `areturn` above ended the stream and nothing in this builder branches here, so the
+        // position is declared an external arrival. The marker names it for the enclosing method,
+        // which owns both the label the restore block jumps to and the frame — one recorded in this
+        // builder would be merged with the host's locals when the body is relocated, claiming locals
+        // the dispatch cannot produce.
+        let resume = code.new_label();
+        code.bind_external_target(resume);
+        code.set_stack_height(0);
+        if let Ok(marker) = u16::try_from(ordinal) {
+            code.coroutine_marker(crate::jvm::classfile::CoroutineMarker::Resume, marker);
+        }
+        let throw_on_failure =
+            self.cw
+                .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
+        code.aload(machine.slots.result);
+        code.invokestatic(throw_on_failure, 1, 0);
+        code.aload(machine.slots.result);
+        self.unbox_resumed_value(resumed, code);
+        // Where the two paths meet: the call that did not suspend, and the resume point above, both
+        // with the call's result on the stack.
+        code.bind(join);
+        if let Ok(marker) = u16::try_from(ordinal) {
+            code.coroutine_marker(crate::jvm::classfile::CoroutineMarker::Join, marker);
+        }
+        // Both paths meet here holding only the call's result, so the dependency's own values go
+        // back on the stack AFTER the join — once, for the two of them. The code the splice wrapped
+        // around this one then finds exactly what it pushed, with the result on top.
+        if !suspension.prefix.is_empty() {
+            let result = machine.slots.result;
+            code.astore(result);
+            for &(slot, ty) in &suspension.prefix {
+                load(ir_ty_to_jvm(&ty), slot, code);
+            }
+            code.aload(result);
         }
     }
 }

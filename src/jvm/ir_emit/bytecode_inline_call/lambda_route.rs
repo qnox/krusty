@@ -83,7 +83,7 @@ impl Emitter<'_> {
             )? {
                 continue;
             }
-            if let Some(reason) = self.lambda_splice_reason(argument) {
+            if let Some(reason) = self.lambda_splice_reason(argument)? {
                 return splice(reason);
             }
             lambda_arguments.push(argument);
@@ -107,20 +107,18 @@ impl Emitter<'_> {
         if supplies.contains(&Supply::InPlace) {
             return splice(SpliceReason::InPlaceArguments);
         }
-        if !lambda_arguments
-            .iter()
-            .all(|&argument| self.lambda_captures_caller_locals(argument))
-        {
-            return splice(SpliceReason::CaptureOutsideFrame);
+        for &argument in &lambda_arguments {
+            if !self.lambda_captures_caller_locals(argument)? {
+                return splice(SpliceReason::CaptureOutsideFrame);
+            }
         }
         // Whether the call's objects regenerate is settled before any code is emitted: the body is
         // inlined once with each lambda's shape in place of its body, and nothing of it is kept.
         if inliner::constructs_anonymous_object(&callee, &self.bodies) {
-            if lambda_arguments
-                .iter()
-                .any(|&argument| self.lambda_reaches_private_members(argument))
-            {
-                return splice(SpliceReason::PrivateMemberInObject);
+            for &argument in &lambda_arguments {
+                if self.lambda_reaches_private_members(argument)? {
+                    return splice(SpliceReason::PrivateMemberInObject);
+                }
             }
             let mut lambdas = Vec::new();
             let mut captured = Vec::new();
@@ -129,7 +127,7 @@ impl Emitter<'_> {
                 if !lambda_arguments.contains(&argument) {
                     continue;
                 }
-                let (mut lambda, captures) = self.lambda_shape(argument);
+                let (mut lambda, captures) = self.lambda_shape(argument)?;
                 let start = captured.len();
                 for (capture, ty) in captures {
                     captured.push(Parameter {

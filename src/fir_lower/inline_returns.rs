@@ -10,37 +10,84 @@ use crate::ir::{ExprId, IrConst, IrExpr, IrFile};
 use crate::types::Ty;
 
 /// Return nodes remain ordinary common IR in a materialized callable. This sparse checked fact is
-/// consumed when its private inline-template copy crosses the callable boundary. Nested callable
-/// bodies are independent templates, so only their capture operands belong to this traversal.
+/// consumed when its private inline-template copy crosses the callable boundary. A nested lambda's
+/// inline template is spliced inside this body wherever it is inlined, so a return it still carries
+/// (one its own boundary already moved a frame nearer) crosses this boundary too; its separately
+/// materialized implementation is not part of this body.
 pub(super) fn reachable_checked_returns(ir: &IrFile, root: ExprId) -> Vec<(ExprId, u32)> {
-    fn visit(
-        ir: &IrFile,
-        expression: ExprId,
-        seen: &mut std::collections::HashSet<ExprId>,
-        out: &mut Vec<(ExprId, u32)>,
-    ) {
+    returns_by_body(ir, root)
+        .into_iter()
+        .map(|found| (found.returned, found.depth))
+        .collect()
+}
+
+/// A checked return reachable from a callable's body, and whether a nested lambda body holds it.
+pub(super) struct ReachableReturn {
+    pub(super) returned: ExprId,
+    pub(super) depth: u32,
+    /// The return sits in the template of a lambda nested in the body, which numbers its values
+    /// separately: it cannot name the body's values.
+    pub(super) nested: bool,
+}
+
+/// [`reachable_checked_returns`], with whether each return sits in a nested lambda's template.
+pub(super) fn returns_by_body(ir: &IrFile, root: ExprId) -> Vec<ReachableReturn> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![(root, false)];
+    while let Some((expression, nested)) = pending.pop() {
         if !seen.insert(expression) {
-            return;
+            continue;
         }
         if let Some(depth) = ir.checked_return_depths.get(&expression).copied() {
-            out.push((expression, depth));
+            out.push(ReachableReturn {
+                returned: expression,
+                depth,
+                nested,
+            });
         }
-        if let IrExpr::Lambda { captures, .. } = ir.expr(expression) {
-            for &capture in captures {
-                visit(ir, capture, seen, out);
-            }
-            return;
+        if let IrExpr::Lambda {
+            captures,
+            inline_body,
+            ..
+        } = ir.expr(expression)
+        {
+            pending.extend(captures.iter().map(|&capture| (capture, nested)));
+            pending.extend(inline_body.map(|body| (body, true)));
+            continue;
         }
-        let mut children = Vec::new();
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
-        for child in children {
-            visit(ir, child, seen, out);
-        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+            pending.push((child, nested))
+        });
     }
-
-    let mut out = Vec::new();
-    visit(ir, root, &mut std::collections::HashSet::new(), &mut out);
     out
+}
+
+/// The statements that leave inline-return frame `label` with `value`: store it as the frame's
+/// result, then `break`. A return in the frame's own body stores by the result's value index; one
+/// in a nested lambda's template names the frame instead. With no result, the value still runs.
+pub(super) fn frame_exit(
+    ir: &mut IrFile,
+    label: &str,
+    result: Option<u32>,
+    nested: bool,
+    value: Option<ExprId>,
+) -> IrExpr {
+    let mut stmts = Vec::new();
+    if let Some(value) = value {
+        stmts.push(match (result, nested) {
+            (Some(var), false) => ir.add_expr(IrExpr::SetValue { var, value }),
+            (Some(_), true) => ir.add_expr(IrExpr::SetFrameResult {
+                frame: label.to_string(),
+                value,
+            }),
+            (None, _) => value,
+        });
+    }
+    stmts.push(ir.add_expr(IrExpr::Break {
+        label: Some(label.to_string()),
+    }));
+    IrExpr::Block { stmts, value: None }
 }
 
 /// Prepare the value-producing template for one inline-callable boundary. Local returns become a
@@ -54,11 +101,12 @@ pub(super) fn prepare_inline_template(
     value_needed: bool,
     next_temporary: &mut u32,
 ) -> Option<ExprId> {
-    let returns = reachable_checked_returns(ir, root);
-    let owns_returns = returns.iter().any(|(_, depth)| *depth == 0);
-    for &(returned, depth) in &returns {
-        if depth > 0 {
-            ir.checked_return_depths.insert(returned, depth - 1);
+    let returns = returns_by_body(ir, root);
+    let owns_returns = returns.iter().any(|found| found.depth == 0);
+    for found in &returns {
+        if found.depth > 0 {
+            ir.checked_return_depths
+                .insert(found.returned, found.depth - 1);
         }
     }
     if !owns_returns {
@@ -73,40 +121,29 @@ pub(super) fn prepare_inline_template(
             .expect("too many FIR temporaries");
         slot
     });
-    for (returned, depth) in returns {
-        if depth != 0 {
+    for found in returns {
+        if found.depth != 0 {
             continue;
         }
-        ir.checked_return_depths.remove(&returned);
-        let IrExpr::Return(value) = ir.expr(returned).clone() else {
+        ir.checked_return_depths.remove(&found.returned);
+        let IrExpr::Return(value) = ir.expr(found.returned).clone() else {
             return None;
         };
-        let mut statements = Vec::new();
-        if let Some(value) = value {
-            if let Some(slot) = result_slot {
-                statements.push(ir.add_expr(IrExpr::SetValue { var: slot, value }));
-            } else {
-                statements.push(value);
-            }
-        }
-        statements.push(ir.add_expr(IrExpr::Break {
-            label: Some(label.clone()),
-        }));
-        ir.exprs[returned as usize] = IrExpr::Block {
-            stmts: statements,
-            value: None,
-        };
+        ir.exprs[found.returned as usize] =
+            frame_exit(ir, &label, result_slot, found.nested, value);
     }
 
     let mut frame_statements = Vec::new();
     if let Some(slot) = result_slot {
         let initial = ir.add_expr(IrExpr::Const(IrConst::zero_for_value_type(result)));
-        frame_statements.push(ir.add_expr(IrExpr::Variable {
+        let declaration = ir.add_expr(IrExpr::Variable {
             index: slot,
             ty: result,
             init: Some(initial),
             named: false,
-        }));
+        });
+        ir.inline_return_frames.insert(declaration, label.clone());
+        frame_statements.push(declaration);
     }
     let mut body_statements = if let Some(slot) = result_slot {
         vec![ir.add_expr(IrExpr::SetValue {
@@ -136,10 +173,17 @@ pub(super) fn prepare_inline_template(
         None if value_needed => Some(ir.add_expr(IrExpr::UnitInstance)),
         None => None,
     };
-    Some(ir.add_expr(IrExpr::Block {
+    let frame = ir.add_expr(IrExpr::Block {
         stmts: frame_statements,
         value,
-    }))
+    });
+    let frame_type = if result_slot.is_some() {
+        result
+    } else {
+        Ty::Unit
+    };
+    ir.logical_types.insert(frame, frame_type);
+    Some(frame)
 }
 
 /// Lambda implementation methods return language `Unit` through a value carrier. Make every
