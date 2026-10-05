@@ -36,6 +36,7 @@ mod access_control;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
+mod annotation_argument_constness;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 mod dependency_annotation_defaults;
@@ -55,6 +56,7 @@ pub(crate) use actualization_names::actualization_type_bindings;
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
 pub(crate) use checked_annotation_publication::publish_checked_classifier_annotations;
 pub(crate) use checked_constant_publication::publish_checked_compile_time_constants;
+pub(crate) use lexical_policies::publish_file_lexical_policies;
 pub(crate) use type_use_annotation_publication::publish_checked_type_use_annotations;
 mod call_constraints;
 mod call_diagnostics;
@@ -115,9 +117,11 @@ mod invoke_selection;
 mod lambda_call_shapes;
 mod property_read_selection;
 use lambda_call_shapes::UntypedLambdaCall;
+use lexical_policies::LexicalPolicy;
 mod lambda_expectation;
 mod lambda_returns;
 mod lexical_bindings;
+mod lexical_policies;
 mod local_callable_reference_selection;
 mod local_capture_dependencies;
 mod local_class_scope;
@@ -128,6 +132,7 @@ mod member_extension_selection;
 mod member_overload_clash;
 mod named_class_constructors;
 mod operator_calls;
+mod opt_in_usage;
 use operator_calls::{range_operator, ResolvedInRangeComparison};
 mod overload_diagnostics;
 mod override_plans;
@@ -16035,11 +16040,13 @@ impl<'a> Checker<'a> {
             crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
         if fitted.iter().any(|(_, index, ..)| {
             !overloads[*index]
+                .callable
                 .annotations
                 .contains(&low_priority_annotation)
         }) {
             fitted.retain(|(_, index, ..)| {
                 !overloads[*index]
+                    .callable
                     .annotations
                     .contains(&low_priority_annotation)
             });
@@ -22891,9 +22898,9 @@ impl<'a> Checker<'a> {
                             Some(CallableCandidateSelection::Selected(selected))
                             | Some(CallableCandidateSelection::MissingContext(selected)) => {
                                 selected.scope_rung.is_import()
-                                    && !selected.annotations.contains(&crate::types::type_name(
-                                        "kotlin/internal/HidesMembers",
-                                    ))
+                                    && !selected.callable.annotations.contains(
+                                        &crate::types::type_name("kotlin/internal/HidesMembers"),
+                                    )
                             }
                             Some(CallableCandidateSelection::Ambiguous(candidates)) => candidates
                                 .iter()
@@ -23662,14 +23669,9 @@ impl<'a> Checker<'a> {
     }
 
     fn stmt(&mut self, scope: &CheckerScope<'_>, s: StmtId) {
-        let suppression_depth = self.active_statement_suppressions.len();
-        if let Some(suppressions) = self.file.statement_suppressions.get(&s) {
-            self.active_statement_suppressions
-                .extend(suppressions.iter().cloned());
-        }
+        let policy_depth = self.push_statement_policies(scope, s);
         self.stmt_inner(scope, s);
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(policy_depth);
     }
 
     fn stmt_inner(&mut self, scope: &CheckerScope<'_>, s: StmtId) {
@@ -23808,6 +23810,7 @@ impl<'a> Checker<'a> {
                 // executable code — skip type-checking it and mark the statement for the lowerer to
                 // drop, instead of resolving the DSL members as if they were real calls.
                 if self.is_contract_call(scope, e) {
+                    self.expr_statement(scope, e);
                     self.stmt_lowers.insert(s, StmtLowering::Erased);
                 } else {
                     let result = self.expr_statement(scope, e);
@@ -25125,7 +25128,7 @@ impl<'a> Checker<'a> {
         self.local_function_receivers
             .extend(f.receiver.as_ref().map(|receiver| receiver.span));
         let suppression_depth =
-            self.push_declaration_suppressions(scope, &f.annotations, &f.annotation_args);
+            self.push_declaration_policies(scope, &f.annotations, &f.annotation_args);
         for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
             self.check_annotation_application(scope, annotation, arguments);
         }
@@ -25647,8 +25650,7 @@ impl<'a> Checker<'a> {
                 receiver,
             })),
         );
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(suppression_depth);
         self.lambda_returns.leave_function(enclosing_return_frame);
     }
 }
@@ -35855,7 +35857,9 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         when_subject_numeric_equalities: HashMap::new(),
         resolved_type_tys: HashMap::new(),
         unresolved_type_segments: HashMap::new(),
-        active_statement_suppressions: Vec::new(),
+        active_lexical_policies: Vec::new(),
+        lexical_policy_facts: HashMap::new(),
+        command_line_opt_ins: std::cell::OnceCell::new(),
         resolved_type_bounds: HashMap::new(),
         resolved_declaration_types: HashMap::new(),
         resolved_declaration_type_parameters: HashMap::new(),
@@ -36013,7 +36017,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
     if resolved_index.is_none() {
         let (annotations, arguments): (Vec<_>, Vec<_>) =
             file.file_annotations.iter().cloned().unzip();
-        checker.push_declaration_suppressions(&CheckerScope::root(), &annotations, &arguments);
+        checker.push_declaration_policies(&CheckerScope::root(), &annotations, &arguments);
     }
     checker
 }
@@ -37046,8 +37050,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         // annotation's AST arguments, so seed the same lexical policy from that stable fact. A
         // declaration-local suppression still travels in the active unit AST; requiring every
         // selected body here prevents one such declaration from widening its siblings.
-        c.active_statement_suppressions
-            .push("INVISIBLE_REFERENCE".to_string());
+        c.active_lexical_policies
+            .push(LexicalPolicy::Suppress("INVISIBLE_REFERENCE".to_string()));
     }
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
@@ -37057,8 +37061,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 })
             })
     }) {
-        c.active_statement_suppressions
-            .push("INVISIBLE_MEMBER".to_string());
+        c.active_lexical_policies
+            .push(LexicalPolicy::Suppress("INVISIBLE_MEMBER".to_string()));
     }
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
@@ -37068,8 +37072,9 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 })
             })
     }) {
-        c.active_statement_suppressions
-            .push("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE".to_string());
+        c.active_lexical_policies.push(LexicalPolicy::Suppress(
+            "OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE".to_string(),
+        ));
     }
     // Entry point: the file scope is the root of every chain (see `scope`).
     let root = CheckerScope::root();
@@ -37089,6 +37094,15 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         for (annotation, arguments) in applications {
             c.check_annotation_application(scope, &annotation, &arguments);
         }
+    }
+    if let Some(index) = resolved_index {
+        // Every checking unit of a source opens the file annotations' policies that Pass 1
+        // resolved once for it, whether or not this unit still holds the annotations' syntax.
+        let policies = index
+            .file_lexical_policies(crate::fir::SourceFileId::from_raw(file_index))
+            .to_vec();
+        c.push_file_policies(&policies);
+        c.report_unresolved_command_line_opt_ins();
     }
 
     // The streaming path already published contracts as stable, semantically resolved Pass-1
@@ -37186,7 +37200,9 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         match file.decl(d) {
             Decl::Fun(f) => c.check_top_level_fun(scope, f, d),
             Decl::Class(cl) => {
+                let policy_depth = c.push_classifier_owner_policies(scope, d);
                 c.check_class(scope, cl, d);
+                c.active_lexical_policies.truncate(policy_depth);
             }
             Decl::Property(p) => {
                 c.check_property(scope, p, d);
@@ -38463,8 +38479,14 @@ struct Checker<'a> {
     when_subject_numeric_equalities: HashMap<ExprId, when_flow::WhenSubjectNumericEquality>,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
     unresolved_type_segments: HashMap<(u32, u32), crate::symbol_resolver::ClassifierMiss>,
-    /// Transient diagnostic directives inherited from annotated enclosing statements.
-    active_statement_suppressions: Vec<String>,
+    /// Lexical policies (`@Suppress`, opt-in acceptance) inherited from annotated enclosing
+    /// declarations, statements and expressions.
+    active_lexical_policies: Vec<LexicalPolicy>,
+    /// Each annotation application's policies, keyed by the application's span, resolved once
+    /// from its checked application.
+    lexical_policy_facts: HashMap<(u32, u32), std::rc::Rc<[LexicalPolicy]>>,
+    /// The markers `-opt-in` names, resolved once from their fully qualified spellings.
+    command_line_opt_ins: std::cell::OnceCell<Vec<TypeName>>,
     resolved_type_bounds: HashMap<(u32, u32), (Ty, bool)>,
     resolved_declaration_types: HashMap<(u32, u32), Ty>,
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
@@ -42957,7 +42979,7 @@ impl<'a> Checker<'a> {
         // a vararg loses only after element specificity, as a tie-break among equal shapes.
         let hides_members = crate::types::type_name("kotlin/internal/HidesMembers");
         let tower_rank = |candidate: &SelectedCallable| {
-            if candidate.is_extension() && candidate.annotations.contains(&hides_members) {
+            if candidate.is_extension() && candidate.callable.annotations.contains(&hides_members) {
                 (0_u8, 0_u32, candidate.receiver_rank)
             } else if candidate.kind == crate::libraries::FnKind::Member {
                 (1_u8, 0_u32, candidate.receiver_rank)
@@ -42982,10 +43004,16 @@ impl<'a> Checker<'a> {
         let low_priority_annotation =
             crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
         if applicable.iter().any(|(_, _, _, _, _, candidate, _, _)| {
-            !candidate.annotations.contains(&low_priority_annotation)
+            !candidate
+                .callable
+                .annotations
+                .contains(&low_priority_annotation)
         }) {
             applicable.retain(|(_, _, _, _, _, candidate, _, _)| {
-                !candidate.annotations.contains(&low_priority_annotation)
+                !candidate
+                    .callable
+                    .annotations
+                    .contains(&low_priority_annotation)
             });
         }
         let has_context = applicable
@@ -45334,7 +45362,10 @@ impl<'a> Checker<'a> {
         } = selected;
         self.reject_non_public_api_from_public_inline(
             call,
-            Self::is_public_api_for_inline_access(selected.visibility, &selected.annotations),
+            Self::is_public_api_for_inline_access(
+                selected.visibility,
+                &selected.callable.annotations,
+            ),
             selected.flags.inline,
         );
         let mut ret = selected.callable.ret;
@@ -49500,6 +49531,9 @@ impl<'a> Checker<'a> {
         if resolved != Ty::Error && !r.is_import() {
             self.resolved_type_tys
                 .insert((r.span.lo, r.span.hi), resolved);
+            if !scope.tparam_contains(&r.name) {
+                self.check_type_reference_opt_in(r, resolved);
+            }
         }
         resolved
     }
@@ -51916,8 +51950,7 @@ impl<'a> Checker<'a> {
         self.leave_block_body(block);
         self.lambda_returns.leave_function(enclosing_return_frame);
         self.retire_type_parameter_owners(&owned_type_parameters);
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(suppression_depth);
     }
 
     /// Check an instance method: the class properties are visible (implicit `this`), then the
@@ -52059,7 +52092,7 @@ impl<'a> Checker<'a> {
             .as_ref()
             .is_none_or(|selected| selected.contains(&p.span));
         let suppression_depth =
-            self.push_declaration_suppressions(scope, &p.annotations, &p.annotation_args);
+            self.push_declaration_policies(scope, &p.annotations, &p.annotation_args);
         // An extension property's own generic type parameters (`val <T> Array<T>.length: Int`)
         // scope over its receiver, declared type, and accessor bodies — bind them (erased) so
         // `T` resolves rather than reading as an unresolved reference.
@@ -52381,8 +52414,7 @@ impl<'a> Checker<'a> {
             );
         }
         self.leave_block_body(block);
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(suppression_depth);
     }
 
     fn report_property_inference_failure(
@@ -52807,7 +52839,7 @@ impl<'a> Checker<'a> {
         // bodies. Keep the class's suppression rung active until this entire recursive class walk
         // completes; member-specific suppressions nest inside it.
         let class_suppression_depth =
-            self.push_declaration_suppressions(scope, &cl.annotations, &cl.annotation_args);
+            self.push_declaration_policies(scope, &cl.annotations, &cl.annotation_args);
         if self.fragment.is_classifier_annotations() {
             for (annotation, arguments) in cl.annotations.iter().zip(&cl.annotation_args) {
                 if self
@@ -52837,7 +52869,7 @@ impl<'a> Checker<'a> {
                 }
             }
             self.diags.diags.truncate(diagnostics_before_methods);
-            self.active_statement_suppressions
+            self.active_lexical_policies
                 .truncate(class_suppression_depth);
             return;
         }
@@ -52946,6 +52978,7 @@ impl<'a> Checker<'a> {
         // declaration applications below belong to the passes that retain their arguments.
         if !self.fragment.is_type_use_annotations() {
             self.check_classifier_own_annotations(scope, cl, current_owner);
+            self.check_supertype_opt_in(cl, current_owner);
             for entry in &cl.enum_entries {
                 self.check_annotation_applications_in_declaration_scope(
                     scope,
@@ -53573,7 +53606,7 @@ impl<'a> Checker<'a> {
                 if current_owner.is_some() {
                     self.lexical_class_context.remove(0);
                 }
-                self.active_statement_suppressions
+                self.active_lexical_policies
                     .truncate(class_suppression_depth);
                 return;
             }
@@ -53696,7 +53729,7 @@ impl<'a> Checker<'a> {
                     } else {
                         property_scope
                     };
-                    let property_suppression_depth = self.push_declaration_suppressions(
+                    let property_suppression_depth = self.push_declaration_policies(
                         property_scope,
                         &property.annotations,
                         &property.annotation_args,
@@ -53752,7 +53785,7 @@ impl<'a> Checker<'a> {
                         })
                         .filter(|ty| *ty != Ty::Error)
                         .map(inferred_declaration_ty);
-                    self.active_statement_suppressions
+                    self.active_lexical_policies
                         .truncate(property_suppression_depth);
                     crate::trace_compiler!(
                         "signature",
@@ -53860,7 +53893,7 @@ impl<'a> Checker<'a> {
                     if !selected {
                         continue;
                     }
-                    let property_suppression_depth = self.push_declaration_suppressions(
+                    let property_suppression_depth = self.push_declaration_policies(
                         field_scope,
                         &property.annotations,
                         &property.annotation_args,
@@ -53908,7 +53941,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    self.active_statement_suppressions
+                    self.active_lexical_policies
                         .truncate(property_suppression_depth);
                 }
             }
@@ -54662,7 +54695,7 @@ impl<'a> Checker<'a> {
                 // Not yet collected: this run cannot determine the type it was asked for, so it
                 // declines and the declaration is resolved again after collection finishes.
                 self.inference_incomplete = true;
-                self.active_statement_suppressions
+                self.active_lexical_policies
                     .truncate(class_suppression_depth);
                 return;
             }
@@ -54874,7 +54907,7 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 let constructor_suppression_depth =
-                    self.push_declaration_suppressions(scope, &sc.annotations, &sc.annotation_args);
+                    self.push_declaration_policies(scope, &sc.annotations, &sc.annotation_args);
                 let semantic_params = &secondary_params[sc_index];
                 // Dispatch properties and constructor parameters are different scope-tower rungs.
                 // A same-named parameter shadows an unqualified property read, but must not erase the
@@ -54903,7 +54936,7 @@ impl<'a> Checker<'a> {
                     );
                 });
                 if self.signature_defaults_only && !default_owned_class {
-                    self.active_statement_suppressions
+                    self.active_lexical_policies
                         .truncate(constructor_suppression_depth);
                     continue;
                 }
@@ -55010,7 +55043,7 @@ impl<'a> Checker<'a> {
                         c.expr_statement(scope, body);
                     });
                 }
-                self.active_statement_suppressions
+                self.active_lexical_policies
                     .truncate(constructor_suppression_depth);
             }
             if !self.signature_defaults_only || default_owned_class {
@@ -55023,9 +55056,9 @@ impl<'a> Checker<'a> {
             // for a subclass or a typed `companion object : A()`). Mirrors `check_fun`'s param-default
             // pass so a function-typed parameter's lambda default types concretely.
             if check_primary_constructor {
-                let constructor_suppression_depth = self.active_statement_suppressions.len();
+                let constructor_suppression_depth = self.active_lexical_policies.len();
                 if let Some(annotations) = cl.primary_ctor_annotations.as_deref() {
-                    self.push_declaration_suppressions(
+                    self.push_declaration_policies(
                         scope,
                         annotations,
                         &cl.primary_ctor_annotation_args,
@@ -55042,7 +55075,7 @@ impl<'a> Checker<'a> {
                         &source_primary_params,
                     );
                 });
-                self.active_statement_suppressions
+                self.active_lexical_policies
                     .truncate(constructor_suppression_depth);
             }
             // A signature-owned default declared by a local classifier must be checked from the
@@ -55388,11 +55421,8 @@ impl<'a> Checker<'a> {
                     if !selected_property {
                         continue;
                     }
-                    let property_suppression_depth = self.push_declaration_suppressions(
-                        scope,
-                        &bp.annotations,
-                        &bp.annotation_args,
-                    );
+                    let property_suppression_depth =
+                        self.push_declaration_policies(scope, &bp.annotations, &bp.annotation_args);
                     let check_ordinary_property_body = self
                         .selected_body_declarations
                         .as_ref()
@@ -55828,7 +55858,7 @@ impl<'a> Checker<'a> {
                     }
                     self.this_extension_receiver = dispatch_extension_receiver;
                     self.symbolic_signature_inference = outer_symbolic_signature_inference;
-                    self.active_statement_suppressions
+                    self.active_lexical_policies
                         .truncate(property_suppression_depth);
                 }
                 for step in &cl.init_order {
@@ -56037,7 +56067,7 @@ impl<'a> Checker<'a> {
         if current_owner.is_some() {
             self.lexical_class_context.remove(0);
         }
-        self.active_statement_suppressions
+        self.active_lexical_policies
             .truncate(class_suppression_depth);
     }
 
@@ -56408,8 +56438,7 @@ impl<'a> Checker<'a> {
         self.leave_public_api_inline(public_api_inline);
         self.lambda_returns.leave_function(enclosing_return_frame);
         self.retire_type_parameter_owners(&owned_type_parameters);
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
+        self.active_lexical_policies.truncate(suppression_depth);
     }
 
     fn obj_name_is_subtype(&self, sub: TypeName, sup: TypeName) -> bool {
@@ -58755,9 +58784,12 @@ impl<'a> Checker<'a> {
         // runs low (see [`crate::wide_stack`]).
         self.expectation_frames
             .push(conditional_branch::ExpectationFrame::new(e, declared));
+        let policy_depth = self.push_expression_policies(scope, e);
         let t = crate::wide_stack::on_wide_stack(|| {
             self.expr_inner(scope, e, expected, value_required)
         });
+        self.check_expression_opt_in(scope, e);
+        self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
         self.expr_depth -= 1;
         // A statement is done: a probe verdict no closed re-check superseded is authoritative.
@@ -60536,7 +60568,10 @@ impl<'a> Checker<'a> {
                     crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
                 candidates.push((
                     score.rank,
-                    function.annotations.contains(&low_priority_annotation),
+                    function
+                        .callable
+                        .annotations
+                        .contains(&low_priority_annotation),
                     signature,
                     bindings,
                 ));
@@ -71241,18 +71276,6 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn suppresses_diagnostic(&self, name: &str) -> bool {
-        self.active_statement_suppressions
-            .iter()
-            .rev()
-            .any(|suppressed| suppressed == name)
-    }
-
-    fn visibility_access_suppressed(&self) -> bool {
-        self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-            || self.suppresses_diagnostic("INVISIBLE_MEMBER")
-    }
-
     /// Resolve one annotation classifier in the active lexical type scope without performing its
     /// accessibility check. This staged identity lookup is required to establish declaration
     /// suppressions before the ordinary annotation application check validates internal annotation
@@ -71273,44 +71296,6 @@ impl<'a> Checker<'a> {
             .get(&(annotation.span.lo, annotation.span.hi))
             .map(|applied| applied.internal)
             .or_else(|| self.select_classifier(scope, &annotation.name).found())
-    }
-
-    fn push_declaration_suppressions(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        annotations: &[AnnotationRef],
-        arguments: &[Vec<ExprId>],
-    ) -> usize {
-        let depth = self.active_statement_suppressions.len();
-        for (annotation, arguments) in annotations.iter().zip(arguments) {
-            if !self
-                .annotation_identity_in_scope(scope, annotation)
-                .is_some_and(|identity| identity == type_name("kotlin/Suppress"))
-            {
-                continue;
-            }
-            self.active_statement_suppressions.extend(
-                arguments
-                    .iter()
-                    .filter_map(|argument| self.file.const_string_value(*argument))
-                    .map(|value| value.to_lossy()),
-            );
-        }
-        depth
-    }
-
-    fn check_annotation_applications_in_declaration_scope(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        annotations: &[AnnotationRef],
-        arguments: &[Vec<ExprId>],
-    ) {
-        let suppression_depth = self.push_declaration_suppressions(scope, annotations, arguments);
-        for (annotation, arguments) in annotations.iter().zip(arguments) {
-            self.check_annotation_application(scope, annotation, arguments);
-        }
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
     }
 
     /// Check the annotation-bearing portion of a function declaration on its already-established

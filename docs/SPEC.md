@@ -11298,6 +11298,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   provide equally is `overload resolution ambiguity between candidates:`, followed by each
   candidate's header (`class Item : Any`), at the reference. Verified against kotlinc 2.4.20.
   (`tests/nested_type_parameter_bound_e2e.rs`.)
+- **Opt-in requirements (`@RequiresOptIn`).** A declaration needs opt-in to each marker it is
+  annotated with, a marker being an annotation class annotated `@RequiresOptIn`. A callable (local
+  variables and parameters included) also needs the markers of the classifiers named in its
+  declared return, receiver and parameter types, type arguments included; a classifier needs those
+  of its outer classes, and a constructor those of its class. A use reports at the callee or member
+  name, a qualifier at its start, a type reference at its span and a supertype at its reference;
+  a call's written or inferred type arguments report at the callee. The use is accepted when the
+  marker or `@OptIn(Marker::class)` annotates an enclosing declaration, statement or expression,
+  the file (`@file:OptIn`), or the compiler gets `-opt-in=Marker` (a test writes
+  `// OPT_IN: Marker`), whose fully qualified name binds from the root package to the marker's
+  identity (`-opt-in=Outer.Nested` names a nested marker). A name that binds to nothing warns once
+  per compilation, without a location: `opt-in requirement marker 'X' is unresolved. Make sure it's
+  present in the module dependencies.` A vararg element type also carries its array type's
+  markers (`vararg x: UByte` needs `ExperimentalUnsignedTypes`). `@Suppress("OPT_IN_USAGE_ERROR")` and
+  `OPT_IN_USAGE` silence the report. The message is `this declaration needs opt-in. Its usage must be marked
+  with '@M' or '@OptIn(M::class)'` (`should` for a `WARNING`-level marker, which warns), or the
+  marker's `message` with its first letter lowercased. As in kotlinc, warnings are not printed when
+  the compilation has errors. Uses through a type alias are not checked yet. An annotation's
+  policies (the marker it is, the markers an `@OptIn` names, the names a `@Suppress` holds) come
+  from its checked application: the class literals resolve as expressions in the annotated
+  element's scope, so an import alias names its marker, and a local or property that shares the
+  marker package's name wins the root (`p.M::class` is then `unresolved reference 'M' on receiver of
+  type …` plus `annotation argument must be a compile-time constant.`, and accepts nothing). They
+  hold for the element's own annotations too, whatever their order. A class-literal argument that
+  does not fold is reported on the argument: `annotation argument must be a compile-time constant.`
+  when its receiver failed to resolve, `annotation argument must be class literal (T::class).` when
+  its receiver is a value (`tests/annotation_emission_e2e.rs`). File annotations' policies are
+  resolved once per source and reach every checking unit. Verified against kotlinc 2.4.20.
+  (`tests/opt_in_usage_e2e.rs`.)
 
 - **An abstract member's metadata and nullability match a concrete one's, without the field.** An
   abstract property has no backing field, so kotlinc writes no field entry in its
