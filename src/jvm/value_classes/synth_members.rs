@@ -14,17 +14,28 @@ mod member_signatures;
 /// signature pass that follows does not lower them a second time.
 #[derive(Default)]
 pub(super) struct SynthesizedValueMembers {
-    /// Instance entries synthesized while creating carrier implementations. They already have
-    /// their final instance ABI and must not be lowered again as user value-class members.
-    pub(super) instance_entries: HashSet<u32>,
-    /// Computed property accessors realized as static implementations over the carrier. Their
-    /// JVM name was chosen from the declared accessor signature; the carrier parameter they gained
-    /// here is not part of that signature and must not be hashed into the name again.
-    pub(super) accessors: HashSet<u32>,
+    /// Computed property accessors realized as static implementations over the carrier, with the
+    /// name the box answers to for each. Both names were chosen from the declared accessor
+    /// signature; the carrier parameter they gained here is not part of that signature and must
+    /// not be hashed into either name again.
+    pub(super) accessors: HashMap<u32, String>,
     /// The static `constructor-impl` realizing each source constructor, by its class and its
     /// [`crate::ir::IrConstructorTarget::ordinal`], so a construction reaches the exact overload
     /// its checked selection named.
     pub(super) constructor_impls: HashMap<(TypeName, u32), u32>,
+}
+
+impl SynthesizedValueMembers {
+    /// Every user value-class declaration realized as a static over the carrier: the `lowered`
+    /// member functions and the computed property accessors. Their bodies, returns, interface
+    /// entries and bridge targets follow that one realized ABI alike.
+    pub(super) fn static_members(&self, lowered: &HashSet<u32>) -> HashSet<u32> {
+        lowered
+            .iter()
+            .chain(self.accessors.keys())
+            .copied()
+            .collect()
+    }
 }
 
 /// A declaration written in a value class's constructor or `init` block (a local class, a lambda's
@@ -76,7 +87,7 @@ pub(super) fn record_renamed_functions(
     ir.value_class_renamed_functions.extend(
         renamed
             .iter()
-            .chain(&realized.accessors)
+            .chain(realized.accessors.keys())
             .chain(realized.constructor_impls.values()),
     );
 }
@@ -122,116 +133,59 @@ pub(super) fn synth_value_members(
         .iter()
         .enumerate()
         .filter(|(_, property)| property.backing_field.is_none())
-        .map(|(index, property)| {
-            (
-                index,
-                property.getter,
-                property.setter,
-                property.name.clone(),
-                property.is_open,
-            )
+        .flat_map(|(index, property)| {
+            [
+                property
+                    .getter
+                    .map(|getter| (index, getter, property_getter_name(&property.name))),
+                property.setter.map(|setter| {
+                    (
+                        index,
+                        setter,
+                        crate::names::property_setter_name(&property.name),
+                    )
+                }),
+            ]
         })
+        .flatten()
         .collect::<Vec<_>>();
-    for (property_index, getter, setter, property_name, overrides_supertype) in computed_accessors {
-        if let Some(getter) = getter {
-            let source_name = property_getter_name(&property_name);
-            // Named from the declared accessor signature, exactly like every other value-class
-            // member: `getX-impl`, or kotlinc's hash when that signature mentions a value class.
-            let jvm_name = {
-                let function = &ir.functions[getter as usize];
+    for (property_index, accessor, source_name) in computed_accessors {
+        // Named from the declared accessor signature, exactly like every other value-class member:
+        // `getX-impl`, or kotlinc's hash when that signature mentions a value class. The box
+        // answers to the same signature under its entry name (`getX`, or that hash).
+        let (jvm_name, entry_name) = {
+            let function = &ir.functions[accessor as usize];
+            (
                 vc_member_impl_name(
                     &source_name,
                     &function.params,
                     &function.ret,
                     callable_under,
                     false,
-                )
-            };
-            realized.accessors.insert(getter);
-            let (declared, ret) = {
-                let function = &mut ir.functions[getter as usize];
-                let declared = function.params.clone();
-                function.name.clone_from(&jvm_name);
-                function.params.insert(0, u_ir);
-                function.is_static = true;
-                (declared, function.ret)
-            };
-            let member = Receiver {
-                rest: &declared,
-                ret,
-            };
-            member_signatures::record(ir, class_id, getter, member);
-            crate::jvm::method_parameters::prepend_value_class_receiver(ir, getter, "arg0");
-            ir.classes[class_id as usize].properties[property_index].getter_jvm_name =
-                Some(jvm_name.clone());
-            // The static `getX-impl(U)` is how an unboxed value calls its accessor. If the property
-            // overrides a supertype declaration, the BOX must additionally implement the ordinary
-            // virtual `getX()` entry point. Delegate from that instance method to the same implementation;
-            // bridge derivation has already established the override, so no hierarchy lookup occurs here.
-            if overrides_supertype {
-                let this = ir.add_expr(IrExpr::GetValue(0));
-                let carrier = ir.add_expr(IrExpr::GetField {
-                    receiver: this,
-                    class: class_id,
-                    index: 0,
-                });
-                let call = ir.add_expr(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner: internal_name,
-                        name: jvm_name,
-                        descriptor: format!("({}){}", desc(&u_ir), desc(&ret)),
-                        inline: crate::libraries::InlineKind::None,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![carrier],
-                });
-                let returned = ir.add_expr(IrExpr::Return(Some(call)));
-                let body = ir.add_expr(IrExpr::Block {
-                    stmts: vec![returned],
-                    value: None,
-                });
-                let fid = ir.add_fun(crate::ir::IrFunction {
-                    name: source_name,
-                    params: vec![],
-                    ret,
-                    body: Some(body),
-                    is_static: false,
-                    dispatch_receiver: Some(internal_name),
-                    param_checks: vec![],
-                });
-                ir.classes[class_id as usize].methods.push(fid);
-                realized.instance_entries.insert(fid);
-                ir.open_methods.insert(fid);
-            }
-        }
-        if let Some(setter) = setter {
-            let jvm_name = {
-                let function = &ir.functions[setter as usize];
-                vc_member_impl_name(
-                    &crate::names::property_setter_name(&property_name),
+                ),
+                vc_member_entry_name(
+                    &source_name,
                     &function.params,
                     &function.ret,
                     callable_under,
                     false,
-                )
-            };
-            realized.accessors.insert(setter);
-            let (declared, ret) = {
-                let function = &mut ir.functions[setter as usize];
-                let declared = function.params.clone();
-                function.name.clone_from(&jvm_name);
-                function.params.insert(0, u_ir);
-                function.is_static = true;
-                (declared, function.ret)
-            };
-            let member = Receiver {
-                rest: &declared,
-                ret,
-            };
-            member_signatures::record(ir, class_id, setter, member);
-            crate::jvm::method_parameters::prepend_value_class_receiver(ir, setter, "arg0");
-            ir.classes[class_id as usize].properties[property_index].setter_jvm_name =
-                Some(jvm_name);
+                ),
+            )
+        };
+        realized.accessors.insert(accessor, entry_name);
+        let is_getter = {
+            let function = &mut ir.functions[accessor as usize];
+            function.name.clone_from(&jvm_name);
+            function.params.insert(0, u_ir);
+            function.is_static = true;
+            ir.classes[class_id as usize].properties[property_index].getter == Some(accessor)
+        };
+        crate::jvm::method_parameters::prepend_value_class_receiver(ir, accessor, "arg0");
+        let property = &mut ir.classes[class_id as usize].properties[property_index];
+        if is_getter {
+            property.getter_jvm_name = Some(jvm_name);
+        } else {
+            property.setter_jvm_name = Some(jvm_name);
         }
     }
 

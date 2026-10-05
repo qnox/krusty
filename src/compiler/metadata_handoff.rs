@@ -144,14 +144,18 @@ pub(super) fn accept_active_debug_metadata(
         // included. Only it does — a body property's initializer store stays on its own `val` line,
         // measured against kotlinc — so the start line is accepted from that arm alone.
         let constructor_parameter = active.constructor_parameter(file, declaration);
-        let property_line = active
-            .property(file, declaration)
+        let body_property = active.property(file, declaration);
+        let property_line = body_property
             .map(|property| property.decl_line)
             .or_else(|| constructor_parameter.map(|property| property.decl_line));
+        let accessor_lines = body_property.map(|property| property.accessor_lines);
         if let Some(line) = property_line.filter(|line| *line != 0) {
             if let Some(property) = index.property_for_declaration(declaration) {
                 if let Some(property) = ir.checked_properties.get_mut(&property) {
                     property.decl_line = line;
+                    let accessor_lines = accessor_lines.unwrap_or_default();
+                    property.getter_decl_line = accessor_lines.getter;
+                    property.setter_decl_line = accessor_lines.setter;
                     property.decl_start_line = constructor_parameter
                         .map(|parameter| parameter.decl_start_line)
                         .unwrap_or(0);

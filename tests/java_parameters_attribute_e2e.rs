@@ -525,6 +525,40 @@ fn java_parameters_names_a_value_class_boxed_members() {
     );
 }
 
+/// A value class's interface entries for property accessors reflect like a function's: a setter
+/// entry names its value, and a member-extension entry keeps its receiver unflagged, labeled after
+/// the entry's own JVM name with its non-identifier characters escaped (`$this$getC`,
+/// `$this$getE_u2d<hash>`, `$this$f_u2d<hash>`), never after the property (`$this$c`) as the static
+/// names it. krusty wrote no setter entry and no member-extension getter entry, and labeled a
+/// mangled function entry's receiver after the source name.
+#[test]
+fn java_parameters_names_a_value_class_property_entries() {
+    assert_parameter_parity(
+        "JavaParametersPropertyEntries",
+        "package demo\n\
+         @JvmInline value class Tag(val n: Int)\n\
+         interface Shape {\n\
+         \x20 var b: Int\n\
+         \x20 val String.c: Int\n\
+         \x20 var t: Tag\n\
+         \x20 val String.e: Tag\n\
+         \x20 fun String.f(w: Tag): Int\n\
+         }\n\
+         @JvmInline value class Box(val x: Int) : Shape {\n\
+         \x20 override var b: Int\n\
+         \x20\x20 get() = x\n\
+         \x20\x20 set(value) { }\n\
+         \x20 override val String.c: Int get() = x\n\
+         \x20 override var t: Tag\n\
+         \x20\x20 get() = Tag(x)\n\
+         \x20\x20 set(v) { }\n\
+         \x20 override val String.e: Tag get() = Tag(x)\n\
+         \x20 override fun String.f(w: Tag): Int = x\n\
+         }\n",
+        &["demo/Box"],
+    );
+}
+
 /// kotlinc writes an interface member's body on `DefaultImpls` as a static that takes the
 /// interface instance as `$this`, synthetic, and the extension receiver as an ordinary parameter
 /// `$receiver`, flagged mandated like every receiver a static moves; so do the forward a
