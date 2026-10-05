@@ -7458,6 +7458,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `resolve::integer_constants::tests::division_by_zero_adapts_to_long_without_a_folded_value`,
   `tests/integer_literal_branch_join_e2e.rs::division_by_zero_int_constant_throws_after_adapting_to_long`,
   `tests/classpath_jdk_static_e2e.rs::non_literal_int_does_not_match_long_parameter`.
+- **An elvis over a safe call keeps its own null check.** fir2ir builds `a?.f() ?: b` as an elvis
+  `when` over a temporary holding the safe call's (nullable) value, so kotlinc emits the safe call's
+  `ifnull` to the shared null path and then the elvis's own `dup; ifnonnull`, whatever `f()`'s
+  declared type. Only the bytecode null-check analysis (`RedundantNullCheckMethodTransformer`)
+  removes the elvis's check, where it proves the value non-null (a `new`, a string constant).
+  Common lowering therefore never fuses the two guards on the selector's type. Test:
+  `tests/elvis_over_safe_call_e2e.rs`.
+
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
   expected type still adapts an integer-constant branch to the non-null primitive of the other
   branches when every such constant fits: `if (flag) current() - start else 0` is `Long`,
