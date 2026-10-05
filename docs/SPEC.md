@@ -12346,6 +12346,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so a jump the constant folder removes shares their output line instead of remaining as its own
   `nop`. Tests: `tests/comparison_jump_line_e2e.rs`, `tests/constant_conditions_e2e.rs`.
 
+- **A null-cast message spells the root package `<root>`.** kotlinc's `TypeOperatorLowering`
+  writes `null cannot be cast to non-null type ${type.render()}`, and the IR renderer writes a
+  declaration's package with `FqName.toString()`, which is `<root>` for the root package. So every
+  root-package classifier in the target, its type arguments, and the owner of a type parameter
+  (`T of <root>.FileKt.generic`, `T of <root>.Holder`) carry the `<root>.` prefix, exactly as the
+  inliner's reified cast already did. The native runtime message keeps its unprefixed spelling.
+  Tests: `tests/root_package_cast_message_e2e.rs`, `tests/unboxing_coercion_e2e.rs`.
+
 - **An exhaustive `when`'s implicit `else` throws on the `when`'s line.** fir2ir adds
   `else -> throw NoWhenBranchMatchedException()` to an exhaustive `when` without an `else`, at the
   `when`'s own offsets, and kotlinc's `visitThrow` marks that line on the `new`. The JVM writes the
