@@ -9087,6 +9087,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **`@Serializable(with = S::class)` on a property's TYPE ARGUMENT selects that argument's
+  serializer.** `val items: List<@Serializable(with = S::class) Item>` serializes each element with
+  `S` whatever serializer `Item` has, including none: kotlinc builds
+  `ArrayListSerializer(S.INSTANCE)` for an `object` `S` and `new S()` for a class, each narrowed to
+  `KSerializer`, `.nullable` around a nullable element, at any depth (`Map<String, List<@… X>>`),
+  inside the same `$childSerializers` cache an unannotated collection uses. The parser kept the
+  annotation and discarded its argument list, so the element looked for `Item`'s own serializer and
+  the backend declined the file. There is one frontend-owned record of these applications: the
+  property's checked declared spelling (`Spelled`, carried to the IR as
+  `IrFile::prop_declared_spellings`), the same tree whose checked type-use annotations the
+  property's `@Metadata` encodes. The parser keeps an argument-bearing type annotation's arguments
+  in `File::type_annotation_arguments`, the checker folds them when it publishes checked type-use
+  annotations, and the serialization plugin reads the checked `@Serializable(with = …)` through
+  `PluginContext::property_declared_type`, walking `Spelled::args` in step with the checked type's
+  arguments. Neither the checker nor common IR keeps a second, serialization-only copy. On the
+  declared type itself (`val v: @Serializable(with = S::class) Item`) the annotation is the
+  property's own serializer, without the property-annotation marker kotlinc reserves for a
+  property-level one. A serializer this compilation does not declare is read through `INSTANCE`
+  only when the provider confirms an `object`; this also fixes a property-level
+  `@Serializable(with = DependencyObject::class)`, which was constructed through the object's
+  private constructor. Below a typealias application the spelling already describes the EXPANDED
+  type: a use-site argument's annotations sit at the expansion position the alias substitutes it
+  into (`Swapped<@A Item, String>` with `typealias Swapped<V, K> = Map<K, V>` annotates the map's
+  value), and an annotation the alias's right-hand side writes on its root
+  (`typealias Coded = @Serializable(with = S::class) Item`) is the serializer of every `Coded`
+  occurrence, as kotlinc honours both. A serializer class named on a type argument is built with
+  its no-argument constructor; a classpath serializer class there, or a declared one without that
+  constructor, stays an explicit unsupported element. Known gap: kotlinc caches a CLASS
+  serializer named for a whole property (property-level or on the declared type itself) in
+  `$childSerializers`, where krusty constructs it at each use; the behaviour is identical.
+  Tests: `tests/type_argument_serializer_e2e.rs` (object, class, nullable, nested, declared-type
+  and typealias shapes and a dependency's object under both compilers; the cache factories and the
+  generated `$serializer` against kotlinc's bytes, with and without typealiases).
 - **A computed property default is an optional element's default too.** A defaulted property is
   written only when the encoder asks for defaults or the value differs from the default:
   `shouldEncodeElementDefault(desc, i) || self.x != <default>`. Only a CONSTANT default was compared,

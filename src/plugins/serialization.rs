@@ -14,6 +14,7 @@
 mod cached_serializer;
 mod constructed_standard_serializers;
 mod custom_serializer_class;
+mod declared_serializer;
 mod descriptor_element;
 mod deserialization_constructor;
 mod deserialize_body;
@@ -31,6 +32,7 @@ mod serial_elements;
 mod serialize_body;
 mod synthesized_accessor;
 mod transient_initializer;
+mod type_argument_serializers;
 mod type_parameter_serializers;
 mod value_class_types;
 
@@ -47,6 +49,7 @@ use crate::plugins::{
 use crate::types::{type_name, Ty, TypeName};
 
 use constructed_standard_serializers::constructed_standard_serializer;
+use declared_serializer::build_field_serializer_instance;
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
 use element_serializer::element_serializer_expr;
@@ -63,6 +66,7 @@ use serial_elements::{SerialElements, SerializedProperties};
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
 use std::sync::Mutex;
+pub(super) use type_argument_serializers::named_serializers;
 use type_parameter_serializers::TypeParameterSerializers;
 use value_class_types::{inline_prim_methods, value_class_underlying};
 
@@ -75,8 +79,8 @@ mod annotations;
 mod signatures;
 
 use annotations::{
-    custom_serializer_of, field_serializer_of, generated_serializer_annotations,
-    property_is_contextual, serial_name_of, type_is_contextual,
+    custom_serializer_of, declared_serializer_of, field_serializer_of,
+    generated_serializer_annotations, property_is_contextual, serial_name_of, type_is_contextual,
 };
 use signatures::generated_serializer_signature;
 
@@ -751,26 +755,6 @@ fn kserializer_of(arg: Ty) -> Ty {
 
 fn is_nullable(ty: &Ty) -> bool {
     ty.is_nullable()
-}
-
-/// An instance of an explicit element serializer `X` (from `@Serializable(with = X::class)` on a
-/// property): an `object` serializer is its `INSTANCE`; a class serializer is `new X()` (no-arg ctor,
-/// as user-defined property serializers in the corpus have). Mirrors `add_custom_serializer_accessor`
-/// but for the no-arg class case.
-fn build_field_serializer_instance(ir: &mut IrFile, classifier: TypeName) -> ExprId {
-    if let Some(oid) = ir
-        .classes
-        .iter()
-        .position(|c| c.fq_name_id() == classifier && c.is_object)
-    {
-        ir.add_expr(IrExpr::StaticInstance {
-            owner: oid as u32,
-            ty: oid as u32,
-            field: "INSTANCE",
-        })
-    } else {
-        ir.new_external(&classifier.render(), "()V", vec![])
-    }
 }
 
 /// Wrap an element serializer in `.nullable` (`BuiltinSerializersKt.getNullable(s)`), the way kotlinc

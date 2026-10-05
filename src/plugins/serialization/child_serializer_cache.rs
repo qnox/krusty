@@ -12,13 +12,13 @@
 //! classes may hold collections of each other — so the cache cannot be built while the loop that
 //! creates those classes is still running.
 use super::{
-    class_ty,
+    class_ty, declared_serializer_of,
     element_serializer::{
         child_cache_element_plan, emit_cached_element_serializer, ElementSerializerPlan,
         UnderivableChildCacheElement,
     },
-    field_serializer_of, kserializer_of, property_is_contextual, type_name, Callee, ClassId,
-    ExprId, InlineKind, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp, PluginContext, Ty, TypeName,
+    kserializer_of, property_is_contextual, type_name, Callee, ClassId, ExprId, InlineKind,
+    IrConst, IrExpr, IrFile, IrFunction, IrTypeOp, PluginContext, Ty, TypeName,
 };
 
 /// One slot of the `Lazy[]` cache: a `Lazy<KSerializer<Any>>`, nullable because a property whose
@@ -221,11 +221,18 @@ pub(super) fn add_child_serializer_cache(
             .iter()
             .map(|(name, ty)| {
                 if property_is_contextual(ctx, ir, class_id, name)
-                    || field_serializer_of(ctx, ir, class_id, name).is_some()
+                    || declared_serializer_of(ctx, ir, class_id, name).is_some()
                 {
                     return Ok(None);
                 }
-                child_cache_element_plan(ir, ctx, ty)
+                child_cache_element_plan(
+                    ir,
+                    ctx,
+                    ty,
+                    &super::type_argument_serializers::declared_type_spelling(
+                        ctx, ir, class_id, name,
+                    ),
+                )
             })
             .collect();
 
@@ -491,11 +498,11 @@ impl ChildSerializersBody<'_> {
                     // `@Contextual` / file-level `@UseContextualSerialization` property.
                     inst
                 } else if let Some(internal) =
-                    field_serializer_of(ctx, ir, declaring_class, &fields[i].0)
+                    declared_serializer_of(ctx, ir, declaring_class, &fields[i].0)
                 {
                     // Explicit per-property serializer: `new X()` (or `X.INSTANCE`),
                     // wrapped `.nullable` for a nullable property.
-                    let base = super::build_field_serializer_instance(ir, internal);
+                    let base = super::build_field_serializer_instance(ir, ctx, internal);
                     if super::is_nullable(&serializer_field_types[i]) {
                         super::wrap_nullable_serializer(ir, base)
                     } else {
@@ -506,6 +513,12 @@ impl ChildSerializersBody<'_> {
                     ctx,
                     &serializer_field_types[i],
                     type_parameter_serializers,
+                    &super::type_argument_serializers::declared_type_spelling(
+                        ctx,
+                        ir,
+                        declaring_class,
+                        &fields[i].0,
+                    ),
                 )
                 .map(|base| {
                     // A NULLABLE property's element serializer is the base one wrapped
