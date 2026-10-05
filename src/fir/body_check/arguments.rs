@@ -809,6 +809,29 @@ impl BodyFirChecker<'_> {
         }
     }
 
+    /// An extension call's explicit `receiver`, converted as the argument of the receiver
+    /// parameter it is. Besides a smart cast of its own value, a Java value the checker committed
+    /// to a receiver type that rejects `null` is guarded (`System.getProperty(key).ext()` checks
+    /// `getProperty(...)`).
+    pub(super) fn explicit_extension_receiver(
+        &mut self,
+        call: ExprId,
+        receiver: ExprId,
+        parameter: Ty,
+    ) -> Result<FirReceiver, BodyCheckFailure> {
+        let mut checked = self.explicit_receiver(receiver)?;
+        if checked.conversion.is_none() && self.info.platform_narrowings.contains_key(&receiver) {
+            let span = self
+                .file
+                .expr_span(receiver)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+            let target = self.resolved_type(span, parameter)?;
+            let cause = self.expression_origin(call)?;
+            checked.conversion = self.platform_producer_conversion(receiver, cause, target);
+        }
+        Ok(checked)
+    }
+
     fn platform_producer_conversion(
         &mut self,
         source: ExprId,
