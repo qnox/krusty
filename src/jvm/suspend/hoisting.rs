@@ -1681,10 +1681,7 @@ mod tests {
             let suspension = ir.add_expr(IrExpr::UnitInstance);
             ir.intrinsic_suspension_points.insert(
                 suspension,
-                IrIntrinsicSuspensionPoint {
-                    result: Ty::String,
-                    kind: IrIntrinsicSuspensionKind::Safe,
-                },
+                IrIntrinsicSuspensionPoint { result: Ty::String },
             );
             ir.add_expr(IrExpr::EnumValueOf {
                 classifier: type_name("example/Level"),
