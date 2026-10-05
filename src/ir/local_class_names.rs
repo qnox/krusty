@@ -379,6 +379,9 @@ fn remap_expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>
             if let Some(adaptation) = &mut reference.adaptation {
                 reference_adaptation(adaptation, names);
             }
+            if let Some(owner) = &mut reference.reflection_owner {
+                name(owner, names);
+            }
         }
         IrExpr::ClassConst {
             internal: Some(classifier),
@@ -510,6 +513,25 @@ fn remap_expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>
         | IrExpr::LateinitCheck { .. }
         | IrExpr::Throw { .. }
         | IrExpr::ForwardedSuperArgument { .. } => {}
+    }
+}
+
+fn remap_expression_class_ids(expression: &mut IrExpr, classes: &HashMap<ClassId, ClassId>) {
+    let remap = |class: &mut ClassId| {
+        if let Some(mapped) = classes.get(class).copied() {
+            *class = mapped;
+        }
+    };
+    match expression {
+        IrExpr::GetField { class, .. }
+        | IrExpr::LateinitInitialized { class, .. }
+        | IrExpr::SetField { class, .. }
+        | IrExpr::MethodCall { class, .. } => remap(class),
+        IrExpr::StaticInstance { owner, ty, .. } => {
+            remap(owner);
+            remap(ty);
+        }
+        _ => {}
     }
 }
 
@@ -1387,6 +1409,16 @@ impl super::IrFile {
         if names.is_empty() {
             return;
         }
+        let class_ids = self
+            .classes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, class)| {
+                let target = names.get(&class.fq_name).copied()?;
+                let target = self.class_id_by_name(target)?;
+                Some((index as ClassId, target))
+            })
+            .collect::<HashMap<_, _>>();
         let lambda_sites = self
             .exprs
             .iter()
@@ -1436,6 +1468,7 @@ impl super::IrFile {
                 }
             }
             remap_expression(&mut self.exprs[expression as usize], names);
+            remap_expression_class_ids(&mut self.exprs[expression as usize], &class_ids);
             let mut children = Vec::new();
             super::for_each_child(&self.exprs, expression, &mut |child| children.push(child));
             pending.extend(children);

@@ -289,7 +289,7 @@ fn specialized_class(
     }
     let uses_reified =
         class_uses_binding(ir, source, expansion.reified_bindings, &mut HashSet::new());
-    let lambdas = inline_lambda_arguments(ir, source, order)?;
+    let lambdas = inline_lambda_arguments(ir, source, order);
     if !uses_reified && lambdas.is_empty() {
         return Ok(None);
     }
@@ -1135,35 +1135,26 @@ fn inline_lambda_arguments(
     ir: &crate::ir::IrFile,
     class: ClassId,
     construction: ExprId,
-) -> Result<Vec<InlineLambdaArgument>, super::super::FirLoweringFailure> {
-    let class_name = ir.classes[class as usize].fq_name;
+) -> Vec<InlineLambdaArgument> {
     let IrExpr::New { args, .. } = ir.expr(construction) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
-    let args = args.clone();
-    let ctor_args = ir.classes[class as usize].ctor_args.clone();
-    if args.len() != ctor_args.len() {
-        let captures_lambda = ctor_args.iter().enumerate().any(|(index, argument)| {
-            argument.provenance == crate::ir::IrCtorParameterProvenance::Capture
-                && args
-                    .get(index)
-                    .is_some_and(|arg| inline_lambda(ir, *arg).is_some())
-        });
-        if captures_lambda {
-            return Err(malformed(class_name));
-        }
-        return Ok(Vec::new());
-    }
     let mut found = Vec::new();
-    for (index, argument) in ctor_args.iter().enumerate() {
+    for (index, argument) in ir.classes[class as usize].ctor_args.iter().enumerate() {
         if argument.provenance != crate::ir::IrCtorParameterProvenance::Capture {
             continue;
         }
-        let Some((impl_fn, inline_body, capture_count)) = inline_lambda(ir, args[index]) else {
+        // Local capture prefixes are finalized independently on the declaration and construction.
+        // Consume only pairs both sides already publish; exact constructor arity is checked after
+        // lowering has completed those lists, not while this streamed inline copy is being taken.
+        let Some(actual) = args.get(index).copied() else {
+            continue;
+        };
+        let Some((impl_fn, inline_body, capture_count)) = inline_lambda(ir, actual) else {
             continue;
         };
         let Some(field) = argument.field_index else {
-            return Err(malformed(class_name));
+            continue;
         };
         found.push(InlineLambdaArgument {
             parameter: index,
@@ -1173,7 +1164,7 @@ fn inline_lambda_arguments(
             capture_count,
         });
     }
-    Ok(found)
+    found
 }
 
 fn inline_lambda(ir: &crate::ir::IrFile, expression: ExprId) -> Option<(u32, ExprId, usize)> {

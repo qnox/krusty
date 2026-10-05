@@ -109,6 +109,7 @@ mod inner_constructor_calls;
 use inner_constructor_calls::BoundInnerConstruction;
 mod inspection_analysis;
 mod integer_constants;
+mod interface_delegate_calls;
 mod interface_delegation;
 mod invoke_selection;
 mod lambda_call_shapes;
@@ -10032,6 +10033,9 @@ pub struct TypeInfo {
     /// SEMANTIC narrowing only; which expression shapes carry a runtime guard, and what its failure
     /// says, is lowering's decision (a call result names its callee, a plain value read has no name).
     pub platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
+    /// The calls each interface delegation's forwarders make on the delegate value, keyed by that
+    /// value; see [`interface_delegate_calls`].
+    pub interface_delegate_calls: HashMap<ExprId, Box<[crate::fir::ResolvedDelegateMemberCalls]>>,
     /// Extension callables the checker resolved for a SYNTHESIZED call that has no source-call `ExprId` —
     /// a destructuring `componentN`, a `for`-loop `iterator`, a `+=` `plusAssign` — keyed by the receiver
     /// expression's `ExprId` (the destructured value / iterable / assignment target) and the operator
@@ -36249,6 +36253,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_library_default_literals: HashMap::new(),
         resolved_whole_array_vararg_args: std::collections::HashSet::new(),
         platform_narrowings: HashMap::new(),
+        interface_delegate_calls: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
         delegate_getvalue_targets: HashMap::new(),
         delegate_setvalue_targets: HashMap::new(),
@@ -37664,6 +37669,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_library_default_literals,
         resolved_whole_array_vararg_args,
         platform_narrowings,
+        interface_delegate_calls,
         synthetic_ext_calls,
         delegate_getvalue_targets,
         delegate_setvalue_targets,
@@ -38015,6 +38021,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_library_default_literals,
         resolved_whole_array_vararg_args,
         platform_narrowings,
+        interface_delegate_calls,
         synthetic_ext_calls,
         delegate_getvalue_targets,
         delegate_setvalue_targets,
@@ -38972,6 +38979,8 @@ struct Checker<'a> {
     resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     /// See [`TypeInfo::platform_narrowings`].
     platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
+    /// See [`TypeInfo::interface_delegate_calls`].
+    interface_delegate_calls: HashMap<ExprId, Box<[crate::fir::ResolvedDelegateMemberCalls]>>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
     delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     delegate_setvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
@@ -40420,6 +40429,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn reject_member_extension_reference(&mut self, expression: ExprId, name: &str) -> Ty {
+        self.diags.error(
+            self.member_name_span(expression, name),
+            format!(
+                "'{name}' is a member and an extension at the same time. References to such elements are prohibited."
+            ),
+        );
+        Ty::Error
+    }
+
     fn record_extension_ref(
         &mut self,
         expression: ExprId,
@@ -40431,6 +40450,10 @@ impl<'a> Checker<'a> {
         type_arguments: Vec<Ty>,
         expected: Option<&'static crate::types::FnSig>,
     ) -> Ty {
+        if function.kind == crate::libraries::FnKind::Extension && function.source_member.is_some()
+        {
+            return self.reject_member_extension_reference(expression, name);
+        }
         if !type_arguments.is_empty() {
             self.resolved_call_type_args
                 .insert(expression, type_arguments.into_iter().map(Some).collect());
@@ -43979,6 +44002,9 @@ impl<'a> Checker<'a> {
         type_arguments: Vec<Ty>,
         expected: &'static crate::types::FnSig,
     ) -> Ty {
+        if member.is_member_extension() {
+            return self.reject_member_extension_reference(expression, &member.name);
+        }
         if !type_arguments.is_empty() {
             self.resolved_call_type_args
                 .insert(expression, type_arguments.into_iter().map(Some).collect());
@@ -44048,6 +44074,9 @@ impl<'a> Checker<'a> {
         receiver: Ty,
         mut member: crate::libraries::LibraryMember,
     ) -> Option<Ty> {
+        if member.is_member_extension() {
+            return Some(self.reject_member_extension_reference(expression, &member.name));
+        }
         self.apply_checked_source_callable_result(receiver, &mut member);
         if member.ret == Ty::Nothing {
             return None;
@@ -55515,53 +55544,8 @@ impl<'a> Checker<'a> {
                     } else {
                         scope
                     };
-                    let interfaces = if self.active_declarations.is_some() {
-                        self.active_declarations.zip(self.resolved_index).and_then(
-                            |(active, index)| {
-                                active
-                                    .canonical_classifier_declaration(d, index)
-                                    .and_then(|declaration| index.classifier_header(declaration))
-                                    .map(|header| {
-                                        header
-                                            .interface_delegations
-                                            .iter()
-                                            .map(|delegation| delegation.interface.get())
-                                            .collect::<Vec<_>>()
-                                    })
-                            },
-                        )
-                    } else {
-                        current_owner
-                            .and_then(|owner| {
-                                self.module
-                                    .legacy_symbols()
-                                    .and_then(|symbols| symbols.class_by_type_name(owner))
-                            })
-                            .map(|class| class.delegated_interfaces.clone())
-                    };
-                    let finalized_delegation_interfaces = match interfaces {
-                        Some(interfaces) if interfaces.len() == cl.interface_delegations.len() => {
-                            interfaces
-                        }
-                        Some(interfaces) => {
-                            self.diags.error(
-                                cl.span,
-                                format!(
-                                    "internal error: finalized interface-delegation count {} does not match source count {}",
-                                    interfaces.len(),
-                                    cl.interface_delegations.len(),
-                                ),
-                            );
-                            Vec::new()
-                        }
-                        None => {
-                            self.diags.error(
-                                cl.span,
-                                "internal error: interface delegation has no finalized classifier header",
-                            );
-                            Vec::new()
-                        }
-                    };
+                    let finalized_delegation_interfaces =
+                        self.finalized_delegation_interfaces(d, current_owner, cl);
                     for (delegation_index, delegation) in
                         cl.interface_delegations.iter().enumerate()
                     {
@@ -55590,6 +55574,12 @@ impl<'a> Checker<'a> {
                                 actual,
                                 self.span(delegation.value),
                                 "interface delegation",
+                            );
+                            self.record_delegate_calls(
+                                d,
+                                delegation_index,
+                                delegation.value,
+                                actual,
                             );
                         }
                     }
