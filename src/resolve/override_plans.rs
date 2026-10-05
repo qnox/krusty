@@ -7,6 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 mod inherited_status;
+mod published_recheck;
+
+pub(super) use published_recheck::published_function_override_matches;
 
 use super::SymbolTable;
 use crate::fir::{
@@ -608,6 +611,7 @@ fn publish_inherited_interface_function_plans(
                     overridden_return_value_status: applied.flags.return_value_status,
                     overridden_operator: applied.flags.operator,
                     overridden_infix: applied.flags.infix,
+                    overridden_visibility: applied.visibility,
                     suspend: implementation.flags.suspend,
                     has_kotlin_superclass_override: false,
                     depth: supertype.depth,
@@ -720,6 +724,7 @@ fn publish_inherited_interface_property_plans(
                     implementation_receiver: None,
                     implementation_mutable: implementation.setter.is_some(),
                     overridden_return_value_status: applied.return_value_status,
+                    overridden_visibility: applied.visibility,
                     has_kotlin_superclass_override: false,
                     depth: supertype.depth,
                 });
@@ -891,6 +896,7 @@ fn append_property_override_edges(
                 overridden_mutable: applied.setter.is_some(),
                 implementation_mutable,
                 overridden_return_value_status: applied.return_value_status,
+                overridden_visibility: applied.visibility,
                 has_kotlin_superclass_override: false,
                 depth: supertype.depth,
             });
@@ -1172,6 +1178,7 @@ fn append_function_override_edges(
                 overridden_return_value_status: applied.flags.return_value_status,
                 overridden_operator: applied.flags.operator,
                 overridden_infix: applied.flags.infix,
+                overridden_visibility: applied.visibility,
                 suspend: implementation.suspend,
                 has_kotlin_superclass_override: false,
                 depth: supertype.depth,
@@ -1547,6 +1554,20 @@ pub(crate) fn publish_checked_local_override_plans(
     // A local classifier's plan is published once, by the first body that checks it (a default
     // argument's object is checked for each function that carries the default); its statuses go
     // with that first publication.
+    crate::trace_compiler!(
+        "override",
+        "local override plans classifiers={:?} plans={:?}",
+        classifiers,
+        plans
+            .iter()
+            .map(|(classifier, properties, functions)| (
+                classifier,
+                properties.len(),
+                functions.len(),
+                index.has_function_override_plan(*classifier),
+            ))
+            .collect::<Vec<_>>(),
+    );
     let unpublished = plans
         .iter()
         .map(|(classifier, properties, functions)| {
@@ -1565,7 +1586,9 @@ pub(crate) fn publish_checked_local_override_plans(
             )
         })
         .collect::<Vec<_>>();
-    publish_inherited_statuses(index, &unpublished);
+    // A local classifier's members are projected from the FIR headers the visibility publication
+    // just corrected; there is no module symbol table copy to follow.
+    let _ = publish_inherited_statuses(index, &unpublished);
 
     for (classifier, properties, functions) in plans {
         if !index.has_property_override_plan(classifier) {
@@ -1584,7 +1607,7 @@ fn publish_inherited_statuses(
         Vec<ResolvedPropertyOverride>,
         Vec<ResolvedFunctionOverride>,
     )],
-) {
+) -> Vec<(crate::fir::DeclarationId, Visibility)> {
     let classifiers = plans
         .iter()
         .map(
@@ -1595,7 +1618,75 @@ fn publish_inherited_statuses(
             },
         )
         .collect::<Vec<_>>();
-    inherited_status::publish_inherited_statuses(index, &classifiers);
+    inherited_status::publish_inherited_statuses(index, &classifiers)
+}
+
+/// Record an override's inherited visibility on the module's projected member signatures, so Pass
+/// 2 access checks and call routing see the same visibility the FIR header (and with it every
+/// backend) now records. Streamed local members have no projected signatures; their providers read
+/// the corrected header directly.
+fn publish_inherited_visibilities_to_symbols(
+    table: &mut SymbolTable,
+    inherited: &[(crate::fir::DeclarationId, Visibility)],
+) {
+    if inherited.is_empty() {
+        return;
+    }
+    let inherited: HashMap<crate::fir::DeclarationId, Visibility> =
+        inherited.iter().copied().collect();
+    table.begin_module_mutation();
+    for class in table.classes.values_mut() {
+        for overloads in class.methods.values_mut() {
+            for signature in overloads.iter_mut() {
+                if let Some(visibility) = signature
+                    .stable_declaration
+                    .and_then(|declaration| inherited.get(&declaration))
+                {
+                    signature.visibility = *visibility;
+                }
+            }
+        }
+        for overloads in class.member_ext_funs.values_mut() {
+            for member in overloads.iter_mut() {
+                if let Some(visibility) = member
+                    .signature
+                    .stable_declaration
+                    .and_then(|declaration| inherited.get(&declaration))
+                {
+                    member.signature.visibility = *visibility;
+                }
+            }
+        }
+        for property in class.declared_props.values_mut() {
+            if let Some(visibility) = property
+                .stable_declaration
+                .and_then(|declaration| inherited.get(&declaration))
+            {
+                property.visibility = *visibility;
+            }
+        }
+        for overloads in class.contextual_props.values_mut() {
+            for property in overloads.iter_mut() {
+                if let Some(visibility) = property
+                    .stable_declaration
+                    .and_then(|declaration| inherited.get(&declaration))
+                {
+                    property.visibility = *visibility;
+                }
+            }
+        }
+        for overloads in class.member_ext_props.values_mut() {
+            for property in overloads.iter_mut() {
+                if let Some(visibility) = property
+                    .stable_declaration
+                    .and_then(|declaration| inherited.get(&declaration))
+                {
+                    property.visibility = *visibility;
+                }
+            }
+        }
+    }
+    table.finish_module_mutation();
 }
 
 /// Freeze every override edge before publishing an inherited default. Declaration and classifier
@@ -1800,7 +1891,7 @@ fn publish_inherited_function_defaults(
     }
 }
 
-pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &SymbolTable) {
+pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mut SymbolTable) {
     let (plans, preorders, superclass_interfaces) = {
         let module = ModuleSymbols::new(table);
         let source =
@@ -1864,7 +1955,8 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &Sy
     for (classifier, interfaces) in superclass_interfaces {
         index.publish_superclass_interfaces(classifier, interfaces);
     }
-    publish_inherited_statuses(index, &plans);
+    let inherited = publish_inherited_statuses(index, &plans);
+    publish_inherited_visibilities_to_symbols(table, &inherited);
     for (classifier, properties, functions) in plans {
         index.publish_property_overrides(classifier, properties);
         index.publish_function_overrides(classifier, functions);

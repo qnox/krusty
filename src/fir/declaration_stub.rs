@@ -90,6 +90,9 @@ impl DeclarationFlags {
     /// resolves exactly like a written companion extension; a target places it among the
     /// classifier's static members instead of the file's top-level declarations.
     pub const COMPANION_BLOCK_MEMBER: u64 = 1 << 38;
+    /// The declaration wrote a visibility modifier. An `override` with none keeps the overridden
+    /// member's visibility rather than defaulting to `public`.
+    pub const HAS_VISIBILITY_MODIFIER: u64 = 1 << 39;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

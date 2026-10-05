@@ -54097,6 +54097,21 @@ impl<'a> Checker<'a> {
                             })
                         });
                     }
+                    // A body group may be checked again after publishing a local classifier's
+                    // inherited visibility. Its frozen override plan is then authoritative: do
+                    // not try to rediscover the same edge from the transient local scope, whose
+                    // providers were consumed by the first traversal. Bind this parser method to
+                    // its stable declaration and consume the exact recorded implementation edge.
+                    if !overrides_super {
+                        overrides_super = self
+                            .resolved_index
+                            .zip(self.active_declarations)
+                            .is_some_and(|(index, active)| {
+                                override_plans::published_function_override_matches(
+                                    index, active, self.file, internal, m,
+                                )
+                            });
+                    }
                     if !is_any_member(m) && !overrides_super {
                         self.diags.error(
                             m.override_span
@@ -67888,16 +67903,17 @@ impl<'a> Checker<'a> {
         {
             if matches!(
                 selected.member.visibility,
-                Visibility::PackagePrivate | Visibility::Protected
+                Visibility::Internal | Visibility::PackagePrivate | Visibility::Protected
             ) {
-                let visibility = if selected.member.visibility == Visibility::Protected {
-                    "protected"
-                } else {
-                    "package-private"
+                let visibility = match selected.member.visibility {
+                    Visibility::Internal => "internal",
+                    Visibility::PackagePrivate => "package-private",
+                    Visibility::Protected => "protected",
+                    Visibility::Private | Visibility::Public => unreachable!(),
                 };
                 self.diags.error(
                     self.call_callee_name_span(call),
-                    Self::callable_access_message(
+                    self.callable_access_message(
                         false,
                         &selected.member.name,
                         &selected.member.params,
@@ -67910,7 +67926,7 @@ impl<'a> Checker<'a> {
             } else {
                 let visibility = match selected.member.visibility {
                     Visibility::Private => "private",
-                    Visibility::Internal => "internal",
+                    Visibility::Internal => unreachable!(),
                     Visibility::Public => "public",
                     Visibility::Protected | Visibility::PackagePrivate => unreachable!(),
                 };
@@ -71342,6 +71358,7 @@ impl<'a> Checker<'a> {
     }
 
     fn callable_access_message(
+        &self,
         is_static: bool,
         name: &str,
         params: &[Ty],
@@ -71352,10 +71369,22 @@ impl<'a> Checker<'a> {
     ) -> String {
         let static_prefix = if is_static { "static " } else { "" };
         let params = Self::access_parameter_display(params, param_names);
+        let container = self
+            .resolved_index
+            .and_then(|index| {
+                index
+                    .classifier_declaration(owner)
+                    .map(|declaration| (index, declaration))
+            })
+            .and_then(|(index, declaration)| index.declaration_header(declaration))
+            .filter(|header| header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS))
+            .map_or_else(
+                || format!("'{}'", Self::access_owner_display(owner)),
+                |_| "file".to_string(),
+            );
         format!(
-            "cannot access '{static_prefix}fun {name}({params}): {}': it is {visibility} in '{}'.",
+            "cannot access '{static_prefix}fun {name}({params}): {}': it is {visibility} in {container}.",
             ret.source_name(),
-            Self::access_owner_display(owner),
         )
     }
 
@@ -71404,7 +71433,7 @@ impl<'a> Checker<'a> {
         }
         self.diags.error(
             self.call_callee_name_span(call),
-            Self::callable_access_message(
+            self.callable_access_message(
                 true,
                 name,
                 &selected.semantic_params(),

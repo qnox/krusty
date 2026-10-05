@@ -1141,7 +1141,7 @@ fn dependency_internal_member_is_not_visible() {
     };
     assert_eq!(
         diagnostics,
-        ["cannot access 'hidden': it is internal in 'fixtures/PublicApi'"]
+        ["cannot access 'fun hidden(): String': it is internal in 'fixtures.PublicApi'."]
     );
 }
 
