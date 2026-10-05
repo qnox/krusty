@@ -1242,12 +1242,30 @@ fun box(): String = Registry.value()\n";
         .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
         .collect();
 
-    let reference = common::classes_against_kotlinc_source_set(
-        &[("Common.kt", COMMON), ("Platform.kt", PLATFORM)],
-        1,
-    );
+    let reference_root = common::scratch_dir().expect("allocate reference source-set directory");
+    let reference_output = reference_root.join("classes");
+    let common_path = reference_root.join("Common.kt");
+    let platform_path = reference_root.join("Platform.kt");
+    fs::write(&common_path, COMMON).expect("write common reference source");
+    fs::write(&platform_path, PLATFORM).expect("write platform reference source");
+    let arguments = vec![
+        "-d".to_string(),
+        reference_output.to_string_lossy().into_owned(),
+        "-Xmulti-platform".to_string(),
+        format!("-Xcommon-sources={}", common_path.to_string_lossy()),
+        common_path.to_string_lossy().into_owned(),
+        platform_path.to_string_lossy().into_owned(),
+    ];
+    let (reference_status, reference_diagnostics) =
+        common::kotlinc_compile(&arguments).expect("reference compiler is provisioned");
     assert_eq!(
-        compare_class_sets(&classes, &reference.reference),
+        reference_status, 0,
+        "kotlinc rejected the folded source-set fixture: {reference_diagnostics}"
+    );
+    let reference = read_class_tree(&reference_output).expect("read reference classes");
+    let _ = fs::remove_dir_all(reference_root);
+    assert_eq!(
+        compare_class_sets(&classes, &reference),
         Ok(()),
         "the module-harness output must be byte-identical to kotlinc"
     );
