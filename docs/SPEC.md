@@ -2907,6 +2907,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constraint. With `class B<T> { var p: Int }` and `var B<String>.p`, `build { this.p = 1 }` writes
   the member and does not fix `T = String`. Test: `tests/builder_inference_receivers_e2e.rs`
   (`a_member_write_on_the_builder_receiver_ignores_a_shadowed_extension`).
+- **A member extension solves only its own type parameters.** Inside
+  `produce { onSend.send("x") }`, with `fun <E> produce(block: Channel<E>.() -> Unit)`,
+  `val onSend: Clause<E, Channel<E>>` and a member extension `fun <P, Q> Clause<P, Q>.send(param: P)`
+  of a dispatch receiver, kotlinc's PCLA solves `P` and `Q` for the nested call and passes the
+  argument's `String <: E` to the postponed `produce` call, which infers `E = String`. krusty's
+  member-extension instantiation unified each slot again after applying the receiver's solution
+  (`P := E`), and that applied unification bound the foreign variable `E := String` inside the
+  candidate. The parameter then read `String`, the argument check constrained nothing, and
+  `produce` kept `E` unsolved; a suspend lambda class built from that call named a type parameter
+  it never declared (KT-47744, a member operator `invoke` inside an inline `select`). Member
+  extension instantiation (`unify_member_extension_slot` in `src/resolve.rs`) now keeps a solution
+  only for the callee's own method formals, so the parameter stays `E` and the argument check
+  records the constraint in the postponed frame, like a top-level extension. Known gap: the
+  implicit-return-type engine does not yet report a member extension's argument constraints to
+  the postponed call, so `fun f() = produce { onSend.send("x") }` inside the dispatch receiver's
+  class still infers `Channel<Any?>`. Test: `tests/builder_inference_receivers_e2e.rs`
+  (`a_member_extension_argument_infers_the_builder_variable`); box: `inference/pcla/issues/kt47744.kt`.
 - **A local class member's lambda reads the class's captured builder receiver.** In
   `build outerBuild@ { class L { fun m() { build innerBuild@ { this@outerBuild.f(x) } } } }`
   (KT-49160) the member's checked body resolves `this@outerBuild` to the receiver the local class
