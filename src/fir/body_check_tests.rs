@@ -2066,7 +2066,7 @@ fun box(): String {
     assert_eq!(runtime_targets.len(), 6);
     assert!(matches!(
         runtime_targets[0],
-        Ty::Obj(name, _) if name.matches("kotlin/reflect/KSuspendFunction1")
+        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
     ));
     assert!(matches!(
         runtime_targets[1],
@@ -2074,7 +2074,7 @@ fun box(): String {
     ));
     assert!(matches!(
         runtime_targets[2],
-        Ty::Obj(name, _) if name.matches("kotlin/reflect/KSuspendFunction1")
+        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
     ));
     assert!(matches!(
         runtime_targets[3],

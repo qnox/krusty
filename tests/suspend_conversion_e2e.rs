@@ -154,7 +154,7 @@ fn bound_reference_converts_to_a_nullable_suspend_parameter() {
 #[test]
 fn suspend_function_checks_keep_stable_proof_across_unrelated_casts_like_kotlinc() {
     common::expect_box_same_as_kotlinc(
-        r#"import kotlin.coroutines.Continuation
+        r#"import kotlin.coroutines.*
 import kotlin.reflect.KFunction2
 import kotlin.reflect.KSuspendFunction1
 
