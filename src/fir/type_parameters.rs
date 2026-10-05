@@ -183,6 +183,16 @@ impl ResolvedModuleIndex {
         self.type_parameter_headers.get(parameter.raw() as usize)
     }
 
+    /// The stable declaration that owns `parameter`.
+    ///
+    /// Type-parameter source spelling is deliberately absent from this relation: two declarations
+    /// may both write `T`, while local-class erasure and lexical substitution need the exact owner.
+    pub fn type_parameter_owner(&self, parameter: TypeParameterId) -> Option<DeclarationId> {
+        self.type_parameter_owners
+            .get(parameter.raw() as usize)
+            .map(|(declaration, _)| *declaration)
+    }
+
     /// A classifier's own type parameters, in order, each as the type its declarations refer to it
     /// by: its semantic identity over its first upper bound.
     pub fn own_type_parameter_types(&self, classifier: DeclarationId) -> Option<Box<[Ty]>> {

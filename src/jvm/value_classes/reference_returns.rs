@@ -25,7 +25,8 @@ pub(super) struct ReferenceReturns<'a> {
     /// Value-class members; those not lowered to static carrier functions are synthesized wrappers
     /// whose bodies run on the box and keep their own returns.
     pub(super) value_members: &'a HashSet<u32>,
-    pub(super) lowered_value_members: &'a HashSet<u32>,
+    /// The value-class members realized as statics over the carrier.
+    pub(super) static_members: &'a HashSet<u32>,
 }
 
 /// The transitive semantic supertypes of every value class known to this compilation. The backend
@@ -38,7 +39,7 @@ pub(super) fn value_class_reference_supertypes(
     let mut pending = value_classes
         .keys()
         .filter_map(|classifier| classifiers.classifier(*classifier))
-        .flat_map(|facts| facts.supertypes.iter().copied().collect::<Vec<_>>())
+        .flat_map(|facts| facts.supertypes.to_vec())
         .collect::<Vec<_>>();
     let mut supertypes = HashSet::new();
     while let Some(classifier) = pending.pop() {
@@ -72,7 +73,7 @@ pub(super) fn record_reference_returns(
             continue;
         };
         if returns.value_members.contains(&(fid as u32))
-            && !returns.lowered_value_members.contains(&(fid as u32))
+            && !returns.static_members.contains(&(fid as u32))
         {
             continue;
         }
