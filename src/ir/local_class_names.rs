@@ -471,7 +471,7 @@ fn remap_expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>
             sam.result = ty(sam.result, names);
             tys(&mut sam.declared_parameters, names);
             sam.declared_result = ty(sam.declared_result, names);
-            tys(&mut sam.overridden_non_primitive_results, names);
+            tys(&mut sam.overridden_results, names);
         }
         IrExpr::Try {
             catches, result, ..
@@ -1903,6 +1903,7 @@ mod tests {
                 result_type: resolved(source_ty),
                 suspend_conversion: false,
             })),
+            reflection_owner: Some(source),
         });
         remap_expression(&mut callable, &names);
         let IrExpr::CallableReference(callable) = callable else {
@@ -1911,6 +1912,7 @@ mod tests {
         assert_eq!(callable.function_type, target_ty);
         assert_eq!(callable.declaration_parameters.as_ref(), &[target_ty]);
         assert_eq!(callable.declaration_result, target_ty);
+        assert_eq!(callable.reflection_owner, Some(target));
         let adaptation = callable.adaptation.expect("adaptation retained");
         assert_eq!(adaptation.parameter_types[0].get(), target_ty);
         assert_eq!(adaptation.result_type.get(), target_ty);
@@ -1931,8 +1933,7 @@ mod tests {
                 has_receiver: false,
                 suspend: false,
                 source_suspend: false,
-                overrides_non_primitive_result: true,
-                overridden_non_primitive_results: vec![source_ty],
+                overridden_results: vec![source_ty],
                 function_adapter: false,
                 wraps_function_value: false,
                 nullable: false,
@@ -1946,7 +1947,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(sam.classifier, target);
-        assert_eq!(sam.overridden_non_primitive_results, vec![target_ty]);
+        assert_eq!(sam.overridden_results, vec![target_ty]);
 
         let runtime = || IrRuntimeFunction {
             function: crate::fir::ExternalCallableId::from_raw(1),
