@@ -15,10 +15,12 @@ use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
 
 mod call_arguments;
+mod resolved_types;
 mod selections;
 pub use call_arguments::{ResolvedSigCallArgument, SigCallArgument, SigCallArgumentProbe};
 pub use classifier_headers::ResolvedClassifierHeader;
 pub(crate) use classifier_headers::{superclass_slot, DeclaredSuperclass};
+pub use resolved_types::*;
 pub use selections::*;
 mod classifier_headers;
 mod declaration_metadata;
@@ -618,40 +620,6 @@ impl SignatureGraph {
     }
 }
 
-/// A type proven suitable for publication. The field is private: pending/error types cannot be
-/// manufactured by users of the resolved module index.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResolvedTy(Ty);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UnpublishableType {
-    Pending,
-    Error,
-}
-
-impl ResolvedTy {
-    pub fn new(ty: Ty) -> Result<Self, UnpublishableType> {
-        let ty = ty.canonical_semantic();
-        if ty.mentions_pending() {
-            Err(UnpublishableType::Pending)
-        } else if ty.mentions_error() {
-            Err(UnpublishableType::Error)
-        } else {
-            Ok(Self(ty))
-        }
-    }
-
-    pub const fn get(self) -> Ty {
-        self.0
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedSignature {
-    pub parameters: Box<[ResolvedTy]>,
-    pub result: ResolvedTy,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResolvedMemberCall {
     /// A selected local inferred callable may not have a publishable result until its compact body
@@ -711,23 +679,6 @@ pub trait ExplicitHeaderSemantics {
         source: SourceFileId,
         context: &HeaderResolutionContext<'_>,
     ) -> Result<(), DiagnosticId>;
-}
-
-impl ResolvedSignature {
-    pub fn new(
-        parameters: impl IntoIterator<Item = Ty>,
-        result: Ty,
-    ) -> Result<Self, UnpublishableType> {
-        let parameters = parameters
-            .into_iter()
-            .map(ResolvedTy::new)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
-        Ok(Self {
-            parameters,
-            result: ResolvedTy::new(result)?,
-        })
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1113,6 +1064,13 @@ pub trait SignatureSemantics {
         _condition: bool,
     ) -> bool {
         false
+    }
+
+    /// The typealias the call selected at `origin` constructed through (`StringBuilder()` via
+    /// `kotlin.text.StringBuilder`), recorded when that call was selected. A semantics that keeps
+    /// no selection state reports none.
+    fn call_result_abbreviation(&self, _origin: OriginId) -> Option<ResolvedTypeAbbreviation> {
+        None
     }
 
     fn substitute(
@@ -1574,6 +1532,9 @@ pub struct ResolvedModuleIndex {
     invisible_reference_suppressions: std::collections::HashSet<DeclarationId>,
     invisible_member_suppressions: std::collections::HashSet<DeclarationId>,
     optional_declaration_usage_suppressions: std::collections::HashSet<DeclarationId>,
+    /// The lexical policies each source's file annotations open, resolved once in Pass 1 from the
+    /// checked applications. Bounded Pass-2 units do not retain the file annotations' syntax.
+    file_lexical_policies: HashMap<SourceFileId, Box<[crate::lexical_policy::LexicalPolicy]>>,
     /// Resolved source annotation policies keyed by classifier identity. These are declaration
     /// header facts; no annotation syntax or source coordinate survives finalization.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
@@ -1691,7 +1652,7 @@ pub struct ResolvedAppliedClassifier {
 /// One source type-alias declaration after Pass-1 name/type resolution. The alias is declaration
 /// metadata rather than executable syntax: its expansion is pending-free, and its spelling sidecar
 /// exists only so a backend can serialize Kotlin's abbreviated type faithfully.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedTypeAliasHeader {
     pub declaration: DeclarationId,
     pub identity: TypeName,
@@ -1984,6 +1945,29 @@ impl ResolvedModuleIndex {
         self.invisible_reference_suppressions.contains(&declaration)
     }
 
+    pub(crate) fn publish_file_lexical_policies(
+        &mut self,
+        source: SourceFileId,
+        policies: Vec<crate::lexical_policy::LexicalPolicy>,
+    ) {
+        let previous = self
+            .file_lexical_policies
+            .insert(source, policies.into_boxed_slice());
+        assert!(
+            previous.is_none(),
+            "a source's file lexical policies are published once"
+        );
+    }
+
+    pub(crate) fn file_lexical_policies(
+        &self,
+        source: SourceFileId,
+    ) -> &[crate::lexical_policy::LexicalPolicy] {
+        self.file_lexical_policies
+            .get(&source)
+            .map_or(&[], |policies| &policies[..])
+    }
+
     pub(crate) fn declaration_suppresses_invisible_member(
         &self,
         declaration: DeclarationId,
@@ -1997,6 +1981,22 @@ impl ResolvedModuleIndex {
     ) -> bool {
         self.optional_declaration_usage_suppressions
             .contains(&declaration)
+    }
+
+    /// Restrict a modifier-less override to the visibility it inherits from the declarations it
+    /// overrides. Override edges — and with them the overridden declarations' visibilities — exist
+    /// only after signature finalization, so the header starts at the parser's `public` default and
+    /// is corrected here, before any body is checked against or lowered from it.
+    pub(crate) fn publish_inherited_visibility(
+        &mut self,
+        declaration: DeclarationId,
+        visibility: Visibility,
+    ) {
+        let header = self
+            .declaration_headers
+            .get_mut(&declaration)
+            .expect("inherited visibility requires a finalized declaration header");
+        header.visibility = visibility;
     }
 
     pub(crate) fn publish_visibility_suppression(
@@ -2604,6 +2604,17 @@ impl ResolvedModuleIndex {
         self.signatures.get(&declaration)
     }
 
+    /// Every published signature whose inferred result carries a typealias abbreviation.
+    pub fn result_abbreviations(
+        &self,
+    ) -> impl Iterator<Item = (DeclarationId, &ResolvedTypeAbbreviation)> {
+        self.signatures
+            .iter()
+            .filter_map(|(&declaration, signature)| {
+                Some((declaration, signature.result_abbreviation.as_ref()?))
+            })
+    }
+
     /// Publish one fully resolved non-local signature at the Pass-1 boundary. The constructor is
     /// the only way legacy migration adapters can enter this index, so `Pending` and `Error` are
     /// rejected before checked FIR or lowering can observe them.
@@ -3134,6 +3145,15 @@ impl ResolvedModuleIndex {
                 + self.invisible_member_suppressions.len()
                 + self.optional_declaration_usage_suppressions.len())
                 * std::mem::size_of::<DeclarationId>()
+            + self
+                .file_lexical_policies
+                .values()
+                .map(|policies| {
+                    std::mem::size_of::<SourceFileId>()
+                        + policies.len()
+                            * std::mem::size_of::<crate::lexical_policy::LexicalPolicy>()
+                })
+                .sum::<usize>()
             + self.classifiers.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ResolvedClassifierHeader>())

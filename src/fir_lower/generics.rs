@@ -104,6 +104,17 @@ pub(super) fn named_type_parameters(
     parameters
 }
 
+pub(super) fn type_parameters_by_identity(
+    index: &ResolvedModuleIndex,
+    parameters: &[TypeParameterId],
+) -> Vec<IrTypeParameter> {
+    parameters
+        .iter()
+        .copied()
+        .map(|parameter| type_parameter(index, parameter))
+        .collect()
+}
+
 fn type_parameter(index: &ResolvedModuleIndex, parameter: TypeParameterId) -> IrTypeParameter {
     let header = index
         .type_parameter_header(parameter)

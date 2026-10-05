@@ -36,6 +36,9 @@ struct Parameter {
 /// A captured value's field.
 struct Capture {
     field: Field,
+    /// The semantic captured type, retained independently from the field's physical descriptor so
+    /// its generic `Signature` never has to be recovered from a parallel class-field table.
+    semantic: Ty,
 }
 
 /// The facts every member of the class is written from.
@@ -91,6 +94,7 @@ impl Shape {
                 .iter()
                 .map(|capture| Capture {
                     field: field(capture.field),
+                    semantic: capture.ty,
                 })
                 .collect(),
             arity: u8::try_from(parameters.len() + 1)
@@ -258,8 +262,18 @@ pub(super) fn emit_suspend_lambda_class(
             cw.add_field_late(access, &field.name, &field.descriptor, None, None);
         }
     }
-    for Capture { field } in &shape.captures {
-        cw.add_field_late(0x1010, &field.name, &field.descriptor, None, None);
+    // A captured value's field carries its type's generic `Signature`, as a shared cell's
+    // `Ref$ObjectRef<T>` does.
+    for Capture { field, semantic } in &shape.captures {
+        let signature = parameterized_sig(&formatter, semantic);
+        cw.add_field_late_sig(
+            0x1010,
+            &field.name,
+            &field.descriptor,
+            signature.as_deref(),
+            None,
+            None,
+        );
     }
 
     emit_constructor(
@@ -304,7 +318,13 @@ pub(super) fn emit_suspend_lambda_class(
     );
     emit_bridge(ir, &mut cw, &shape, lambda);
     // A lambda class is local to the scope it was written in.
-    let (d1, d2) = lambda_metadata(ir, lambda, &formatter);
+    let (d1, d2) = match lambda_metadata(ir, lambda, &formatter) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            env.run.set_emit_error(error);
+            return Vec::new();
+        }
+    };
     cw.set_kotlin_metadata(
         3,
         &opts.metadata_version(),
@@ -321,8 +341,12 @@ fn lambda_metadata(
     ir: &IrFile,
     lambda: &SuspendLambdaClass,
     formatter: &JvmSignatureFormatter<'_>,
-) -> (Vec<String>, Vec<String>) {
-    let Ty::Fun(signature) = lambda.function_type.non_null() else {
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let function_type = super::class_lambda_reflection::approximate_unpublished_type_parameters(
+        lambda.function_type,
+        &lambda.type_parameters,
+    );
+    let Ty::Fun(signature) = function_type.non_null() else {
         unreachable!("a suspend lambda has a function type")
     };
     let own = &signature.params[signature.context_count..];
@@ -346,6 +370,8 @@ fn lambda_metadata(
     let approximate_intersection = |ty| formatter.declaration_approximation(ty);
     let (bytes, strings) = crate::metadata::lambda_function::build(
         &crate::metadata::lambda_function::LambdaFunction {
+            function_name: crate::metadata::lambda_function::function_name(lambda.form),
+            jvm_method: None,
             receiver,
             parameters: &parameters,
             result: signature.ret,
@@ -354,8 +380,8 @@ fn lambda_metadata(
             enum_entry_bodies: &enum_entry_bodies,
             intersection_approximation: &approximate_intersection,
         },
-    );
-    (crate::metadata::encoding::bytes_to_strings(&bytes), strings)
+    )?;
+    Ok((crate::metadata::encoding::bytes_to_strings(&bytes), strings))
 }
 
 /// `SuspendLambda` and the lambda's `FunctionN` over its parameters, its continuation and `Object`.
@@ -403,7 +429,7 @@ fn emit_constructor(
     let completion = 1 + shape.capture_words();
     let mut code = CodeBuilder::new(completion + 1);
     let mut slot = 1u16;
-    for Capture { field } in &shape.captures {
+    for Capture { field, .. } in &shape.captures {
         code.aload(0);
         load(field.ty, slot, &mut code);
         let reference = cw.fieldref(&shape.class, &field.name, &field.descriptor);
@@ -454,7 +480,7 @@ fn construct_copy(cw: &mut ClassWriter, code: &mut CodeBuilder, shape: &Shape, c
     let class = cw.class_ref(&shape.class);
     code.new_obj(class);
     code.dup();
-    for Capture { field } in &shape.captures {
+    for Capture { field, .. } in &shape.captures {
         code.aload(0);
         let reference = cw.fieldref(&shape.class, &field.name, &field.descriptor);
         code.getfield(reference, slot_words(field.ty) as i32);

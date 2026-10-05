@@ -154,3 +154,134 @@ fn a_selected_extension_write_on_the_builder_receiver_infers_the_variable() {
         "BuilderSelectedExtensionWriteRun",
     );
 }
+
+const MEMBER_EXTENSION_ARGUMENT: &str = r#"interface Clause<in P, out Q> {
+    fun offer(param: P): Q
+}
+
+class Channel<E> {
+    val items = mutableListOf<E>()
+    val onSend: Clause<E, Channel<E>> = object : Clause<E, Channel<E>> {
+        override fun offer(param: E): Channel<E> {
+            items += param
+            return this@Channel
+        }
+    }
+}
+
+fun <E> produce(block: Channel<E>.() -> Unit): Channel<E> {
+    val channel = Channel<E>()
+    channel.block()
+    return channel
+}
+
+class Host {
+    fun <P, Q> Clause<P, Q>.send(param: P): Q = offer(param)
+
+    fun sentLength(): Int {
+        val channel = produce { onSend.send("direct") }
+        return channel.items.single().length
+    }
+}
+
+fun box(): String = if (Host().sentLength() == 6) "OK" else "fail"
+"#;
+
+/// A member extension whose extension receiver mentions the builder variable (`onSend`'s
+/// `Clause<E, Channel<E>>`) solves only its own type parameters from the call: its argument then
+/// constrains the enclosing `produce` call's `E` instead of fixing `E` inside the nested
+/// candidate, so `produce` infers `Channel<String>` and `.length` resolves.
+#[test]
+fn a_member_extension_argument_infers_the_builder_variable() {
+    common::assert_classes_identical_to_kotlinc(
+        "BuilderMemberExtensionArgument",
+        MEMBER_EXTENSION_ARGUMENT,
+        &["Host", "BuilderMemberExtensionArgumentKt"],
+    );
+    common::expect_box_same_as_kotlinc(
+        MEMBER_EXTENSION_ARGUMENT,
+        "BuilderMemberExtensionArgumentRun",
+    );
+}
+
+const SUSPEND_MEMBER_EXTENSION_ARGUMENT: &str = r#"import kotlin.coroutines.Continuation
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.startCoroutine
+
+class Completion<T>(private val sink: (T) -> Unit) : Continuation<T> {
+    override val context: CoroutineContext get() = EmptyCoroutineContext
+    override fun resumeWith(result: Result<T>) = sink(result.getOrThrow())
+}
+
+interface Clause<in P, out Q> {
+    fun offer(param: P): Q
+}
+
+class Channel<E> {
+    val items = mutableListOf<E>()
+    val onSend: Clause<E, Channel<E>> = object : Clause<E, Channel<E>> {
+        override fun offer(param: E): Channel<E> {
+            items += param
+            return this@Channel
+        }
+    }
+}
+
+fun <E> produce(block: suspend Channel<E>.() -> Unit): Channel<E> {
+    val channel = Channel<E>()
+    block.startCoroutine(channel, Completion {})
+    return channel
+}
+
+class Selector<R> {
+    var result: R? = null
+
+    operator fun <P, Q> Clause<P, Q>.invoke(param: P, block: suspend (Q) -> R) {
+        block.startCoroutine(offer(param), Completion { result = it })
+    }
+}
+
+inline fun <R> select(crossinline builder: Selector<R>.() -> Unit): R {
+    val selector = Selector<R>()
+    selector.builder()
+    @Suppress("UNCHECKED_CAST")
+    return selector.result as R
+}
+
+class Host {
+    fun <P, Q> Clause<P, Q>.send(param: P): Q = offer(param)
+
+    fun sentLength(): Int {
+        val channel = produce { onSend.send("direct") }
+        return channel.items.single().length
+    }
+}
+
+fun box(): String {
+    val selected = produce { select<Unit> { onSend("O") { } } }
+    return selected.items.single() + if (Host().sentLength() == 6) "K" else "fail"
+}
+"#;
+
+/// KT-47744's shape: the member operator `invoke` of an inline builder's receiver
+/// (`Selector.invoke`) and a dispatch-receiver member extension (`Host.send`), each called inside a
+/// suspend builder lambda. Both infer `E = String`, so each suspend lambda class publishes kotlinc's
+/// generic signature and `@Metadata` instead of naming a type parameter it never declared.
+#[test]
+fn a_member_extension_argument_infers_a_suspend_builder_variable() {
+    for class in [
+        "BuilderSuspendMemberExtensionKt$box$selected$1$1$1",
+        "Host$sentLength$channel$1",
+    ] {
+        common::assert_class_matches_kotlinc(
+            "BuilderSuspendMemberExtension",
+            SUSPEND_MEMBER_EXTENSION_ARGUMENT,
+            class,
+        );
+    }
+    common::expect_box_same_as_kotlinc(
+        SUSPEND_MEMBER_EXTENSION_ARGUMENT,
+        "BuilderSuspendMemberExtensionRun",
+    );
+}

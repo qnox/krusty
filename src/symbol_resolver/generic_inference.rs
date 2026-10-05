@@ -512,6 +512,9 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             }
             let projected = match actual {
                 Ty::Obj(actual_name, _) if name == actual_name => Some(actual),
+                Ty::Fun(_) => {
+                    source.and_then(|source| supertype_with_classifier(source, actual, name))
+                }
                 Ty::Obj(_, _) => flexible_upper
                     .filter(|upper| {
                         upper
@@ -1091,6 +1094,9 @@ pub(super) fn unify_inferred_ty_impl(
             let actual = actual.non_null();
             let projected = match actual {
                 Ty::Obj(actual_name, _) if name == actual_name => Some(actual),
+                Ty::Fun(_) => {
+                    source.and_then(|source| supertype_with_classifier(source, actual, name))
+                }
                 Ty::Obj(_, _) => flexible_upper
                     .filter(|upper| {
                         upper
