@@ -9891,13 +9891,31 @@ pub struct ResolvedExtensionCall {
     pub receiver: Ty,
     /// Logical value parameters only; the extension receiver is carried separately.
     pub params: Vec<Ty>,
-    /// In-scope values selected for the declaration's leading context parameters.
-    pub context_args: Vec<ResolvedContextArgument>,
+    /// One entry per leading context parameter. `Some` is the in-scope value selection chose;
+    /// `None` is a context parameter explicitly named at the call site. Keeping the alignment is
+    /// what lets every later consumer address declaration parameters without reconstructing it.
+    pub context_args: Vec<Option<ResolvedContextArgument>>,
     pub source: Option<(u32, u32)>,
     pub stable_declaration: Option<crate::fir::DeclarationId>,
     pub vararg: bool,
     pub vararg_index: Option<usize>,
     pub param_default_values: Vec<Option<CtorDefaultValue>>,
+}
+
+/// The declaration and call-site facts that construct one source-origin extension target.
+/// Selection produces these as one contract; keeping them named prevents receiver, context,
+/// vararg and linkage fields from being coupled by positional helper arguments.
+struct ResolvedSourceExtensionCall {
+    callable: crate::libraries::LibraryCallable,
+    receiver: Ty,
+    params: Vec<Ty>,
+    context_args: Vec<Option<ResolvedContextArgument>>,
+    ret: Ty,
+    source: Option<(u32, u32)>,
+    stable_declaration: Option<crate::fir::DeclarationId>,
+    vararg: bool,
+    vararg_index: Option<usize>,
+    param_default_values: Vec<Option<CtorDefaultValue>>,
 }
 
 /// Exact enum entry selected by frontend lookup. Current-module entries carry their stable
@@ -9942,18 +9960,19 @@ impl ResolvedExtensionCall {
         }
     }
 
-    fn source(
-        mut callable: crate::libraries::LibraryCallable,
-        receiver: Ty,
-        params: Vec<Ty>,
-        context_args: Vec<ResolvedContextArgument>,
-        ret: Ty,
-        source: Option<(u32, u32)>,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        vararg: bool,
-        vararg_index: Option<usize>,
-        param_default_values: Vec<Option<CtorDefaultValue>>,
-    ) -> Self {
+    fn source(selected: ResolvedSourceExtensionCall) -> Self {
+        let ResolvedSourceExtensionCall {
+            mut callable,
+            receiver,
+            params,
+            context_args,
+            ret,
+            source,
+            stable_declaration,
+            vararg,
+            vararg_index,
+            param_default_values,
+        } = selected;
         callable.ret = ret;
         Self {
             callable,
@@ -10024,31 +10043,8 @@ impl ResolvedCall {
         Self::Extension(Box::new(ResolvedExtensionCall::library(callable)))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn source_extension(
-        callable: crate::libraries::LibraryCallable,
-        receiver: Ty,
-        params: Vec<Ty>,
-        context_args: Vec<ResolvedContextArgument>,
-        ret: Ty,
-        source: Option<(u32, u32)>,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        vararg: bool,
-        vararg_index: Option<usize>,
-        param_default_values: Vec<Option<CtorDefaultValue>>,
-    ) -> Self {
-        Self::Extension(Box::new(ResolvedExtensionCall::source(
-            callable,
-            receiver,
-            params,
-            context_args,
-            ret,
-            source,
-            stable_declaration,
-            vararg,
-            vararg_index,
-            param_default_values,
-        )))
+    fn source_extension(selected: ResolvedSourceExtensionCall) -> Self {
+        Self::Extension(Box::new(ResolvedExtensionCall::source(selected)))
     }
 
     pub fn ret(&self) -> Ty {
@@ -10724,10 +10720,10 @@ impl TypeInfo {
             _ => None,
         }
     }
-    /// The in-scope values the checker selected for the leading context parameters of the library
-    /// EXTENSION at call `e`. Paired with [`Self::resolved_extension`]: that path emits the physical
-    /// `(contexts…, receiver, values…)` argument list and cannot re-derive the context sources.
-    pub fn resolved_extension_context_args(&self, e: ExprId) -> &[ResolvedContextArgument] {
+    /// The aligned context arguments of the library extension at call `e`: `Some` for an in-scope
+    /// value selection chose, `None` for a context parameter explicitly named at the call site.
+    /// Paired with [`Self::resolved_extension`], so lowering never re-derives either source or slot.
+    pub fn resolved_extension_context_args(&self, e: ExprId) -> &[Option<ResolvedContextArgument>] {
         match self.resolved_calls.get(&e) {
             Some(ResolvedCall::Extension(c)) if matches!(c.callable.origin, Origin::Library) => {
                 &c.context_args
@@ -39247,7 +39243,7 @@ impl<'a> Checker<'a> {
         selected: &crate::libraries::FunctionInfo,
         receiver: Ty,
         ret: Ty,
-        context_args: Vec<ResolvedContextArgument>,
+        context_args: Vec<Option<ResolvedContextArgument>>,
         param_default_values: Vec<Option<CtorDefaultValue>>,
     ) -> ResolvedCall {
         self.resolved_source_extension_call_with_params(
@@ -39266,29 +39262,29 @@ impl<'a> Checker<'a> {
         receiver: Ty,
         value_params: Vec<Ty>,
         ret: Ty,
-        context_args: Vec<ResolvedContextArgument>,
+        context_args: Vec<Option<ResolvedContextArgument>>,
         param_default_values: Vec<Option<CtorDefaultValue>>,
     ) -> ResolvedCall {
         let callable = selected.callable.clone();
-        ResolvedCall::source_extension(
+        ResolvedCall::source_extension(ResolvedSourceExtensionCall {
             callable,
             receiver,
-            value_params,
+            params: value_params,
             context_args,
             ret,
-            selected.source_key,
-            selected.stable_declaration,
-            selected.call_sig.vararg,
-            selected.call_sig.vararg_index.and_then(|index| {
+            source: selected.source_key,
+            stable_declaration: selected.stable_declaration,
+            vararg: selected.call_sig.vararg,
+            vararg_index: selected.call_sig.vararg_index.and_then(|index| {
                 index
                     .checked_sub(selected.context_count)
                     .filter(|index| *index < selected.callable.params.len())
             }),
-            param_default_values
+            param_default_values: param_default_values
                 .get(selected.context_count..)
                 .unwrap_or_default()
                 .to_vec(),
-        )
+        })
     }
 
     /// Take the checker state that belongs to the BODY currently being checked, leaving the checker
@@ -61089,22 +61085,22 @@ impl<'a> Checker<'a> {
                 } else {
                     let mut callable = selected.callable.clone();
                     callable.ret = ret;
-                    ResolvedCall::source_extension(
+                    ResolvedCall::source_extension(ResolvedSourceExtensionCall {
                         callable,
-                        at,
+                        receiver: at,
                         params,
-                        context_args,
+                        context_args: context_args.into_iter().map(Some).collect(),
                         ret,
-                        selected.source_key,
-                        selected.stable_declaration,
-                        vararg.is_some(),
-                        vararg,
-                        selected
+                        source: selected.source_key,
+                        stable_declaration: selected.stable_declaration,
+                        vararg: vararg.is_some(),
+                        vararg_index: vararg,
+                        param_default_values: selected
                             .default_values
                             .get(selected.context_count..)
                             .unwrap_or_default()
                             .to_vec(),
-                    )
+                    })
                 };
                 self.mark_source_call(e, selected.source_key);
                 self.resolved_calls.insert(e, target);
@@ -66851,12 +66847,9 @@ impl<'a> Checker<'a> {
             return Some(Ty::Error);
         }
         self.mark_selected_inline_lambdas(e, selected.flags.inline, &shape.call_sig);
-        let context_args = shape
-            .context_sources
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        self.mark_context_extension_receiver_used(scope, e, &context_args);
+        let context_args = shape.context_sources;
+        let implicit_context_args = context_args.iter().flatten().cloned().collect::<Vec<_>>();
+        self.mark_context_extension_receiver_used(scope, e, &implicit_context_args);
         let selected_receiver = selected.receiver.unwrap_or(rt);
         let receiver_expression = crate::ast::explicit_call_receiver(self.file, e);
         if let Some(receiver_expression) = receiver_expression {
@@ -68129,16 +68122,18 @@ impl<'a> Checker<'a> {
             return Err(());
         }
         Ok(Some(ResolvedCall::source_extension(
-            callable,
-            recv,
-            params,
-            context_args,
-            ret,
-            selected.source_key,
-            selected.stable_declaration,
-            false,
-            None,
-            Vec::new(),
+            ResolvedSourceExtensionCall {
+                callable,
+                receiver: recv,
+                params,
+                context_args: context_args.into_iter().map(Some).collect(),
+                ret,
+                source: selected.source_key,
+                stable_declaration: selected.stable_declaration,
+                vararg: false,
+                vararg_index: None,
+                param_default_values: Vec::new(),
+            },
         )))
     }
 

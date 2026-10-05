@@ -22,7 +22,9 @@ fn selected_context_arguments(
         ResolvedCall::TopLevel(selected) => {
             selected.context_args.iter().map(Option::as_ref).collect()
         }
-        ResolvedCall::Extension(selected) => selected.context_args.iter().map(Some).collect(),
+        ResolvedCall::Extension(selected) => {
+            selected.context_args.iter().map(Option::as_ref).collect()
+        }
         ResolvedCall::MemberExtension { context_args, .. } => {
             context_args.iter().map(Option::as_ref).collect()
         }

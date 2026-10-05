@@ -167,8 +167,30 @@ fun reordered(a: Any?, b: Any?): Int = if (second(second = a, first = b)) a.leng
 fun box(): String = if (reordered("OK", 1) == 2) "OK" else "FAIL"
 "#;
 
+const EXPLICIT_EXTENSION_CONTEXT: &str = r#"
+// LANGUAGE: +ContextParameters +ExplicitContextArguments
+@file:OptIn(kotlin.contracts.ExperimentalContracts::class)
+import kotlin.contracts.*
+
+context(first: Any?, second: Any?)
+fun String.firstIsString(): Boolean {
+    contract { returns(true) implies (first is String) }
+    return first is String
+}
+
+fun explicitFirst(a: Any?, b: Any?): Int = with(b) {
+    if ("receiver".firstIsString(first = a)) a.length else 0
+}
+
+fun box(): String = if (explicitFirst("OK", 1) == 2) "OK" else "FAIL"
+"#;
+
 #[test]
 fn a_conclusion_narrows_the_argument_mapped_to_its_parameter() {
     byte_identical("MappedArguments", MAPPED_ARGUMENTS, "MappedArgumentsKt");
     common::assert_accepted_like_kotlinc(REORDERED_ARGUMENTS);
+    assert_eq!(
+        common::expect_box_run_with_stdlib(EXPLICIT_EXTENSION_CONTEXT, "ExplicitExtensionContext"),
+        "OK"
+    );
 }

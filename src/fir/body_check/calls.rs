@@ -745,7 +745,7 @@ impl BodyFirChecker<'_> {
             expression,
             arguments,
             &parameters,
-            extension.context_args.iter().map(Some),
+            extension.context_args.iter().map(Option::as_ref),
             extension.vararg_index,
         )?;
         Ok(FirExprKind::Call(FirCall {
@@ -1001,7 +1001,7 @@ impl BodyFirChecker<'_> {
                     target,
                     substitutions,
                     true,
-                    selected.context_args.iter().cloned().map(Some).collect(),
+                    selected.context_args.clone(),
                     selected.vararg_index,
                     parameters,
                 ))
@@ -1200,7 +1200,7 @@ impl BodyFirChecker<'_> {
                     context_parameters,
                     value_parameters: parameters,
                     vararg_index: selected.vararg_index,
-                    context_arguments: selected.context_args.iter().cloned().map(Some).collect(),
+                    context_arguments: selected.context_args.clone(),
                 })
             }
             Some(ResolvedCall::MemberExtension {
