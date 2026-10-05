@@ -12346,6 +12346,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so a jump the constant folder removes shares their output line instead of remaining as its own
   `nop`. Tests: `tests/comparison_jump_line_e2e.rs`, `tests/constant_conditions_e2e.rs`.
 
+- **A `$default` constructor's header precedes its body's constants.** ASM's `visitMethod` interns
+  a method's name and descriptor when the method begins, so the synthetic
+  `<init>(…, int, DefaultConstructorMarker)` descriptor is interned before the `Methodref` of the
+  constructor its body delegates to, for a primary and a secondary constructor alike. Test:
+  `tests/default_constructor_header_pool_e2e.rs`.
+
 - **An explicit primitive `equals` calls `Object.equals`.** A builtin scalar's declared
   `equals(Any?)` (`Int`, `Short`, `Char`, `Boolean`, `Double`, …) is the `PrimitiveEquals`
   intrinsic. kotlinc's `ExplicitEquals` boxes both operands and calls
