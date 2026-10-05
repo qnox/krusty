@@ -71648,7 +71648,7 @@ impl<'a> Checker<'a> {
         result_constraint: CallResultConstraint,
     ) -> Option<InstantiatedMemberExtension> {
         let args = call.args;
-        let deferred_type_variables = self.active_postponed_type_variables(scope);
+        let deferred_type_variables = self.active_postponed_type_variables();
         instantiate_member_extension_with(
             MemberExtensionProbes {
                 explicit_context_arguments: self.file.explicit_context_arguments,
@@ -71694,7 +71694,7 @@ impl<'a> Checker<'a> {
         let receivers =
             member_extension_selection::ordinary_dispatch_first(scope, receivers.to_vec());
         let args = call.args;
-        let deferred_type_variables = self.active_postponed_type_variables(scope);
+        let deferred_type_variables = self.active_postponed_type_variables();
         member_extension_function_with(
             &self.fed_source(),
             self,
