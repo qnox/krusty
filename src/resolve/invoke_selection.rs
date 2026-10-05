@@ -1379,6 +1379,12 @@ impl Checker<'_> {
                 self.expect_call_arg(scope, *p, args[i], actual);
             }
         }
+        // A bare local call selects the receiver value and its function signature together. Publish
+        // that committed semantic type on the callee expression; checked FIR consumes the same
+        // decision instead of recovering from an earlier placeholder or re-reading storage type.
+        if matches!(semantic_receiver_ty, Ty::Fun(_)) {
+            self.set(receiver, semantic_receiver_ty);
+        }
         self.expr_lowers.insert(
             call,
             ExprLowering::Invoke {
