@@ -620,7 +620,10 @@ fn assert_class_lambda_invoke_matches_kotlinc(source: &str, classes: &[&str]) {
     });
     for ((class, expected), emitted) in classes.iter().zip(&reference).zip(&ours) {
         assert!(expected.1.is_some(), "kotlinc {class} carries no @Metadata");
-        assert_eq!(emitted, expected, "{class}: invoke or @Metadata differs from kotlinc");
+        assert_eq!(
+            emitted, expected,
+            "{class}: invoke or @Metadata differs from kotlinc"
+        );
     }
 }
 

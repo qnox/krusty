@@ -4,8 +4,8 @@
 //! Without it, reflection falls back to the raw `FunctionN` interface. The record names the
 //! class's typed `invoke`, which the class declares beside the erased `FunctionN.invoke` bridge.
 
-use crate::ir::type_reflection::LambdaClassProvenance;
 use crate::ir::type_reflection::type_parameters_named_by;
+use crate::ir::type_reflection::LambdaClassProvenance;
 use crate::ir::{IrFile, IrParameterRole, IrTypeParameter};
 use crate::types::Ty;
 
@@ -231,7 +231,11 @@ fn approximate_type_parameters(ty: Ty, names: &[&str]) -> Ty {
     match ty {
         Ty::TyParam(name, bound) if names.contains(&name) => approximate(*bound),
         Ty::Fun(signature) => Ty::fun_with_shape(
-            signature.params.iter().map(|&parameter| approximate(parameter)).collect(),
+            signature
+                .params
+                .iter()
+                .map(|&parameter| approximate(parameter))
+                .collect(),
             approximate(signature.ret),
             signature.context_count,
             signature.has_receiver,
@@ -239,7 +243,10 @@ fn approximate_type_parameters(ty: Ty, names: &[&str]) -> Ty {
         ),
         Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
-            &arguments.iter().map(|&argument| approximate(argument)).collect::<Vec<_>>(),
+            &arguments
+                .iter()
+                .map(|&argument| approximate(argument))
+                .collect::<Vec<_>>(),
         ),
         Ty::Nullable(inner) => Ty::nullable(approximate(*inner)),
         Ty::DefinitelyNotNull(inner) => approximate(*inner).non_null(),
@@ -247,7 +254,10 @@ fn approximate_type_parameters(ty: Ty, names: &[&str]) -> Ty {
         Ty::InProjection(inner) => Ty::in_projection(approximate(*inner)),
         Ty::OutProjection(inner) => Ty::out_projection(approximate(*inner)),
         Ty::Intersection(parts) => Ty::intersection(
-            &parts.iter().map(|&part| approximate(part)).collect::<Vec<_>>(),
+            &parts
+                .iter()
+                .map(|&part| approximate(part))
+                .collect::<Vec<_>>(),
         ),
         _ => ty,
     }
