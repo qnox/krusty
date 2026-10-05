@@ -479,19 +479,22 @@ fn build_ctor(
         }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
                                                     // A `vararg` records `Array<out E>`, like the package-function writer.
-        let recorded = if shape.vararg_index == Some(i) {
-            crate::metadata::vararg_recorded_type(*pty)
+        let element_spelling = shape
+            .param_spellings
+            .get(i)
+            .unwrap_or(crate::spelling::Spelled::NONE);
+        let (recorded, recorded_spelling) = if shape.vararg_index == Some(i) {
+            crate::metadata::vararg_recorded_declaration(*pty, element_spelling)
         } else {
-            *pty
+            (*pty, element_spelling.clone())
         };
         let ty = type_pb_tp(
             st,
             recorded,
-            shape.param_tparams.get(i).copied().flatten(),
-            shape
-                .param_spellings
-                .get(i)
-                .unwrap_or(crate::spelling::Spelled::NONE),
+            (shape.vararg_index != Some(i))
+                .then(|| shape.param_tparams.get(i).copied().flatten())
+                .flatten(),
+            &recorded_spelling,
             type_parameters,
         );
         vp.field_message(3, &ty); // ValueParameter.type = 3
@@ -502,14 +505,11 @@ fn build_ctor(
                 .array_elem()
                 .or_else(|| pty.type_args().first().copied());
             if let Some(elem) = elem {
-                let et = type_pb_declared(
+                let et = type_pb_tp(
                     st,
                     elem,
-                    shape
-                        .param_spellings
-                        .get(i)
-                        .unwrap_or(crate::spelling::Spelled::NONE)
-                        .arg(0),
+                    shape.param_tparams.get(i).copied().flatten(),
+                    element_spelling,
                     type_parameters,
                 );
                 vp.field_message(4, &et); // ValueParameter.vararg_element_type = 4
@@ -1303,10 +1303,7 @@ pub fn build_class(
             // A `vararg` parameter is SPELLED as its element but RECORDED as the array; see the
             // package-function writer for why the spelling is lifted rather than applied.
             let (declared_ty, declared_spelling) = if m.vararg_index == Some(i) {
-                (
-                    crate::metadata::vararg_recorded_type(*pty),
-                    m.spellings.param(i).as_array_element(),
-                )
+                crate::metadata::vararg_recorded_declaration(*pty, m.spellings.param(i))
             } else {
                 (*pty, m.spellings.param(i).clone())
             };
