@@ -2517,6 +2517,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   does. The rule keys off the array, not off `vararg`. Tests:
   `tests/metadata_array_signature_e2e.rs` (byte-identity vs kotlinc 2.4.10); table in
   `docs/METADATA_NOTES.md`.
+- **A backing field's descriptor is recorded only when a reader cannot rebuild it.** kotlinc's
+  `requiresSignature` maps the property type's class id through `ClassMapperLite` and writes
+  `JvmFieldSignature.desc` exactly when the physical field descriptor differs, which covers a
+  type-parameter field even when it has no accessors, a boxed nullable primitive, a value class's
+  carrier, a reference array and a delegate field. One rule serves class, companion and facade
+  properties. Tests: `tests/metadata_field_signature_e2e.rs`.
 - **A class records only the supertypes source DECLARED.** An undeclared `kotlin/Any` is never a
   `Class.supertype`, generic or not — even though a generic class's JVM `Signature` attribute must
   materialize that superclass position, so the recorded generic signature krusty reuses for the

@@ -1397,6 +1397,8 @@ mod metadata_enum_entry_classes_e2e;
 mod metadata_enum_supertypes_e2e;
 #[path = "metadata_field_presence_e2e.rs"]
 mod metadata_field_presence_e2e;
+#[path = "metadata_field_signature_e2e.rs"]
+mod metadata_field_signature_e2e;
 #[path = "metadata_function_flags_e2e.rs"]
 mod metadata_function_flags_e2e;
 #[path = "metadata_inline_parameter_modifiers_e2e.rs"]
