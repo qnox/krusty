@@ -505,8 +505,17 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         spelling: &str,
     ) -> Option<(crate::types::TypeName, Vec<String>, Ty)> {
+        // A dotted spelling is one qualified path. The winning provider record carries the alias
+        // template; the classifier facet alone is only the target (`Function1` for
+        // `(Int) -> String`) and would drop the expansion's arguments.
         if spelling.contains('.') || spelling.contains('/') {
-            return None;
+            return self
+                .with_resolver(scope, |resolver| {
+                    resolver
+                        .qualified_type_alias_expansion(spelling)
+                        .map(|alias| (alias.identity, alias.formals, alias.expansion))
+                })
+                .ok();
         }
         let imports = self.function_import_scope(scope.source).ok()?;
         let expansion = |identity: crate::types::TypeName| {

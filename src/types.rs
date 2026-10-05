@@ -11,9 +11,8 @@ mod substitute;
 mod type_parameter_identity;
 
 pub(crate) use substitute::{
-    projection_conflict_count, ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_all,
-    ty_subst_applied_arguments, ty_subst_applied_lookup, ty_subst_keep_unbound,
-    ty_with_param_bounds,
+    ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_all, ty_subst_applied_arguments,
+    ty_subst_applied_lookup, ty_subst_keep_unbound, ty_with_param_bounds,
 };
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};

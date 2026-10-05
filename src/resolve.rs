@@ -37,6 +37,7 @@ mod access_control;
 mod actualization_names;
 mod alias_constructor_application;
 mod alias_projection;
+use alias_projection::{conflicting_use_site_spans, AppliedAlias};
 mod annotation_applications;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
@@ -9387,14 +9388,9 @@ pub(crate) fn spelling_of_ref_with(
     spellings: &HashMap<Span, TypeRef>,
     resolve_argument: &mut dyn FnMut(&TypeRef) -> Ty,
 ) -> Spelled {
-    // Two ways a reference can name an alias, and they are mutually exclusive:
-    //
-    //  * a SAME-FILE alias was already rewritten to its target by the parse seam, which parked the
-    //    original spelling in `File::alias_spellings` — `r.name` now names the target;
-    //  * an alias declared in a sibling file or on the classpath is never rewritten, so `r.name`
-    //    still spells it and only name resolution can say so.
-    //
-    // An import path names a declaration rather than using the type, and gets no abbreviation.
+    // The use stays written. Name resolution selects the alias; the parse seam does not rewrite
+    // the reference. An import path names a declaration rather than using the type, and gets no
+    // abbreviation.
     let spelled = spellings.get(&r.span).unwrap_or(r);
     // A type parameter shadows any same-named alias, and is never itself one.
     if tparams.contains(&spelled.name) {
@@ -9409,9 +9405,9 @@ pub(crate) fn spelling_of_ref_with(
     // order for the encoder to consume positionally. A SUSPEND function type's tail is the CPS
     // `Continuation`/`Any?` pair instead of the return, so its return spelling has no slot.
     //
-    // This is tested on the SPELLED node, not the resolved one: `typealias Handler<T> = (T) ->
-    // String` leaves an arrow type behind after the parse seam expands it, and the alias the
-    // source actually wrote is exactly what must survive that.
+    // This is tested on the SPELLED node. An alias right-hand side and a written function type are
+    // arrow syntax. A use of `typealias Handler<T> = (T) -> String` still spells `Handler` and
+    // takes the alias path below.
     if !spelled.fun_params.is_empty() || spelled.name == "<fun>" {
         let mut args: Vec<Spelled> = spelled
             .fun_params
@@ -9631,6 +9627,37 @@ fn type_argument_of_ref(
     projected_typeref_argument(argument, ty, Ty::nullable(Ty::obj("kotlin/Any")))
 }
 
+/// Apply a function-type alias template when the spelling has no classifier binding.
+///
+/// Class-target aliases are folded into the name map and take the classifier path.
+/// `typealias Listener = (String) -> Unit` has nothing to fold, but signature collection has
+/// already recorded its expansion under this spelling.
+fn function_alias_expansion_use(
+    r: &TypeRef,
+    classes: &ClassNames,
+    tparams: &TParams,
+    diags: &mut DiagSink,
+) -> Option<Ty> {
+    if r.is_import() {
+        return None;
+    }
+    let alias = classes.alias_expansion(&r.name)?;
+    let args: Vec<Ty> = r
+        .targs
+        .iter()
+        .map(|argument| type_argument_of_ref(argument, classes, tparams, diags))
+        .collect();
+    Some(apply_alias_expansion(
+        classes,
+        &r.name,
+        alias.target,
+        &args,
+        false,
+        r.span,
+        diags,
+    ))
+}
+
 fn ty_of_ref_with(
     r: &TypeRef,
     classes: &ClassNames,
@@ -9728,6 +9755,14 @@ fn ty_of_ref_with(
                 diags,
             )
         }
+    } else if let Some(expanded) =
+        (!matches!(failed_binding, Some(ClassifierBindingError::Ambiguous(_)),))
+            .then(|| function_alias_expansion_use(r, classes, tparams, diags))
+            .flatten()
+    {
+        // A function-type alias has no classifier, so the name map cannot fold it onto a class.
+        // The template seeded for this spelling still substitutes the use's arguments.
+        expanded
     } else {
         match failed_binding {
             Some(ClassifierBindingError::Ambiguous(_)) => {
@@ -36062,8 +36097,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         signature_defaults_only: false,
         fragment: SourceFragmentMode::Complete,
         expr_types: vec![Ty::Error; file.expr_arena.len()],
-        type_ref_depth: 0,
-        alias_projection_conflict: false,
         #[cfg(feature = "trace")]
         expr_visits: vec![0; file.expr_arena.len()],
         #[cfg(feature = "trace")]
@@ -38638,13 +38671,6 @@ struct Checker<'a> {
     /// table has no notion of position, so the engine records the rejected read at its source span.
     demand_rejects: Option<&'a dyn Fn(&str, Span) -> bool>,
     expr_types: Vec<Ty>,
-    /// How many [`Self::type_ref_ty`] frames are active. An alias application reports a projection
-    /// conflict only from one of those frames, so a later constructor or import reuse of the same
-    /// expansion does not diagnose it again.
-    type_ref_depth: u32,
-    /// The active [`Self::type_ref_ty`] frame composed opposite declaration-site and use-site
-    /// projections. A nested reference reports its own conflict and restores this flag first.
-    alias_projection_conflict: bool,
     /// Trace-only duplicate-traversal detector. This is deliberately not a semantic cache: normal
     /// builds contain no field or branch, and trace builds report the caller bug to remove.
     #[cfg(feature = "trace")]
@@ -49659,39 +49685,23 @@ impl<'a> Checker<'a> {
 
     /// Resolve a syntactic type without erasing source nullability.
     fn type_ref_ty(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
-        let saved_conflict = self.alias_projection_conflict;
-        self.alias_projection_conflict = false;
-        self.type_ref_depth += 1;
-        let resolved = self.type_ref_ty_resolved(scope, r);
-        let introduced = self.alias_projection_conflict;
-        self.type_ref_depth -= 1;
-        self.alias_projection_conflict = saved_conflict;
-        if introduced {
-            self.diags.error(
-                r.span,
-                format!(
-                    "conflicting projection in type alias expansion in intermediate type '{}'.",
-                    resolved.source_name()
-                ),
-            );
-        }
+        let (resolved, conflicts) = self.type_ref_ty_resolved(scope, r);
+        // Nullability on the written use is part of the intermediate type kotlinc quotes. The
+        // conflict spans belong to this application; nested alias arguments already reported theirs.
+        self.report_alias_projection_conflicts(&conflicts, resolved);
         resolved
     }
 
-    fn type_ref_ty_resolved(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
-        // Same-file aliases are rewritten to their target syntax before checking. The written
-        // spelling is what carries use-site variance; composing it here restores `List<out T>`
-        // and reports an opposite projection on that application.
-        if let Some(spelled) = self.rewritten_alias_spelling(r) {
-            if let Some(resolved) = self.scoped_source_alias_ty(scope, &spelled) {
-                return self.publish_type_ref(scope, &spelled, resolved, None);
-            }
-        }
+    fn type_ref_ty_resolved(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> (Ty, Vec<Span>) {
+        let mut conflicts = Vec::new();
         let mut unresolved_segment = None;
         let scoped = if scope.tparam_contains(&r.name) {
             Some(scope.tparam_bound(&r.name))
         } else if scope.type_alias(&r.name).is_some() {
-            self.scoped_source_alias_ty(scope, r)
+            self.scoped_source_alias_ty(scope, r).map(|applied| {
+                conflicts = applied.conflicts;
+                applied.ty
+            })
         } else if function_type_ref_shape(r).is_some() {
             // A function type is a structural type node, not a classifier named `<fun>`. Resolve
             // its components before entering classifier lookup so an unresolved parameter is
@@ -49715,14 +49725,16 @@ impl<'a> Checker<'a> {
                         Some(if r.is_import() {
                             alias.expansion
                         } else {
-                            self.alias_application_ty(
+                            let applied = self.alias_application_ty(
                                 scope,
                                 alias.formals,
                                 alias.expansion,
                                 &r.name,
                                 &r.targs,
                                 r.span,
-                            )
+                            );
+                            conflicts = applied.conflicts;
+                            applied.ty
                         })
                     } else {
                         typeref_classifier(r, Some(internal))
@@ -49737,7 +49749,10 @@ impl<'a> Checker<'a> {
                     unresolved_segment = failed_segment;
                     // Primitive/function aliases have no classifier facet, so no classifier was
                     // selected above. Resolve that sole alias binding through the normal type path.
-                    self.scoped_source_alias_ty(scope, r)
+                    self.scoped_source_alias_ty(scope, r).map(|applied| {
+                        conflicts = applied.conflicts;
+                        applied.ty
+                    })
                 }
             }
         };
@@ -49756,12 +49771,16 @@ impl<'a> Checker<'a> {
             CheckerModuleSymbols::Streamed(_) => None,
         } {
             Ty::from_name(&primitive_alias).unwrap_or(Ty::Error)
-        } else if let Some(t) = self.scoped_source_alias_ty(scope, r) {
-            t
+        } else if let Some(applied) = self.scoped_source_alias_ty(scope, r) {
+            conflicts = applied.conflicts;
+            applied.ty
         } else {
             Ty::Error
         };
-        self.publish_type_ref(scope, r, base, unresolved_segment)
+        (
+            self.publish_type_ref(scope, r, base, unresolved_segment),
+            conflicts,
+        )
     }
 
     /// Resolve and publish one body-local typealias on the classifier namespace rung where it is
@@ -50046,13 +50065,22 @@ impl<'a> Checker<'a> {
     /// Resolve a reference to a scoped source `typealias` (see
     /// [`Self::scoped_source_alias_identity`]) by substituting the use's type arguments into the
     /// collected expansion. Same-file and cross-file spellings use this one semantic operation.
-    fn scoped_source_alias_ty(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Option<Ty> {
+    fn scoped_source_alias_ty(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        r: &TypeRef,
+    ) -> Option<AppliedAlias> {
         // A detached import `import pkg.Owner.Alias` selects the alias declaration; it is not an
         // application of a generic alias with an empty argument list. Preserve the declaration-
         // owned expansion only long enough to validate the import. Ordinary uses of the imported
         // spelling still enter below and must provide or infer their own arguments.
         if r.is_import() {
-            return self.scoped_source_alias_target(scope, &r.name);
+            return self
+                .scoped_source_alias_target(scope, &r.name)
+                .map(|ty| AppliedAlias {
+                    ty,
+                    conflicts: Vec::new(),
+                });
         }
         if let Some(alias) = scope.type_alias(&r.name) {
             return Some(self.alias_application_ty(
@@ -50133,9 +50161,12 @@ impl<'a> Checker<'a> {
         display_name: &str,
         arguments: &[TypeRef],
         span: Span,
-    ) -> Ty {
+    ) -> AppliedAlias {
         let Some((formals, expansion)) = self.source_alias_expansion(identity) else {
-            return Ty::Error;
+            return AppliedAlias {
+                ty: Ty::Error,
+                conflicts: Vec::new(),
+            };
         };
         self.alias_application_ty(scope, formals, expansion, display_name, arguments, span)
     }
@@ -50148,7 +50179,7 @@ impl<'a> Checker<'a> {
         display_name: &str,
         arguments: &[TypeRef],
         span: Span,
-    ) -> Ty {
+    ) -> AppliedAlias {
         if formals.len() != arguments.len() {
             self.diags.error(
                 span,
@@ -50159,10 +50190,16 @@ impl<'a> Checker<'a> {
                     arguments.len()
                 ),
             );
-            return Ty::Error;
+            return AppliedAlias {
+                ty: Ty::Error,
+                conflicts: Vec::new(),
+            };
         }
         if formals.is_empty() {
-            return expansion;
+            return AppliedAlias {
+                ty: expansion,
+                conflicts: Vec::new(),
+            };
         }
         // Use-site projections ride the substituted argument exactly as on a classifier use
         // (`projected_typeref_argument`): `P<out T>` must reach the expansion as an out-projection
@@ -50183,12 +50220,16 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
         let bindings = formals
-            .into_iter()
+            .iter()
+            .cloned()
             .zip(args.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
         let resolved = crate::symbol_resolver::ty_subst(expansion, &bindings);
-        self.note_introduced_projection_conflict(&args, resolved);
-        resolved
+        let conflicts = conflicting_use_site_spans(&formals, arguments, expansion, &bindings);
+        AppliedAlias {
+            ty: resolved,
+            conflicts,
+        }
     }
 
     /// True if `t` names a `@JvmInline value class`, independent of which symbol provider owns it.
@@ -50216,33 +50257,9 @@ impl<'a> Checker<'a> {
 
     /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
     fn type_ref_ty_silent(&self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
-        if let Some(resolved) = self.silent_rewritten_alias_ty(scope, r) {
-            return resolved;
-        }
         let lexical_alias = scope.type_alias(&r.name).and_then(|alias| {
             (alias.formals.len() == r.targs.len()).then(|| {
-                let arguments = r
-                    .targs
-                    .iter()
-                    .map(|argument| {
-                        let resolved = if argument.is_star_projection() {
-                            Ty::Error
-                        } else {
-                            self.type_ref_ty_silent(scope, argument)
-                        };
-                        projected_typeref_argument(
-                            argument,
-                            resolved,
-                            Ty::nullable(Ty::obj("kotlin/Any")),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let bindings = alias
-                    .formals
-                    .into_iter()
-                    .zip(arguments)
-                    .collect::<crate::symbol_resolver::GSigBinds>();
-                crate::symbol_resolver::ty_subst(alias.expansion, &bindings)
+                self.silent_alias_substitution(scope, &alias.formals, alias.expansion, &r.targs)
             })
         });
         let base = if let Some(alias) = lexical_alias {
@@ -50253,10 +50270,16 @@ impl<'a> Checker<'a> {
             typeref_leaf(r, &mut |nested| self.type_ref_ty_silent(scope, nested))
                 .unwrap_or(Ty::Error)
         } else {
-            let internal = self.select_classifier(scope, &r.name);
-            if internal == InheritedNestedClassifier::Ambiguous {
+            let (selection, _, selected_alias) = self.select_classifier_binding(scope, &r.name);
+            if let Some(alias) = selected_alias.filter(|_| !r.is_import()) {
+                if alias.formals.len() == r.targs.len() {
+                    self.silent_alias_substitution(scope, &alias.formals, alias.expansion, &r.targs)
+                } else {
+                    Ty::Error
+                }
+            } else if selection == InheritedNestedClassifier::Ambiguous {
                 Ty::Error
-            } else if let Some(internal) = typeref_classifier(r, internal.found()) {
+            } else if let Some(internal) = typeref_classifier(r, selection.found()) {
                 if r.targs.is_empty() {
                     Ty::obj_name(internal)
                 } else {

@@ -13,40 +13,63 @@ enum ClassifierPathPrefix {
     Classifier(TypeName),
 }
 
+/// A completed classifier path and the typealias declaration on its final segment, when that
+/// segment's provider record is an alias whose target is the selected classifier.
+struct CompletedClassifierPath {
+    classifier: TypeName,
+    alias: Option<crate::libraries::AliasExpansion>,
+}
+
+fn alias_on_selected_classifier(
+    classifier: TypeName,
+    declaration: Option<&crate::libraries::ClassifierDeclaration>,
+) -> Option<crate::libraries::AliasExpansion> {
+    let Some(crate::libraries::ClassifierDeclaration::TypeAlias(binding)) = declaration else {
+        return None;
+    };
+    (binding.target == classifier).then(|| binding.clone())
+}
+
 impl SymbolResolver<'_> {
     fn advance_classifier_path(
         &self,
         mut prefix: ClassifierPathPrefix,
         segments: &[&str],
-    ) -> Result<TypeName, (usize, String)> {
+    ) -> Result<CompletedClassifierPath, (usize, String)> {
+        let mut alias = None;
         for (index, segment) in segments.iter().enumerate() {
-            prefix = match prefix {
+            let (classifier, declaration) = match prefix {
                 ClassifierPathPrefix::Package(package) => {
                     let symbols = self.src.symbols(SymbolNamespace::Package(package), segment);
                     if let Some(classifier) = symbols.classifier_name {
-                        ClassifierPathPrefix::Classifier(classifier)
+                        (classifier, symbols.classifier_declaration.clone())
                     } else if self.src.package_exists(package, segment) {
-                        ClassifierPathPrefix::Package(crate::types::type_name_child(
+                        alias = None;
+                        prefix = ClassifierPathPrefix::Package(crate::types::type_name_child(
                             package, segment,
-                        ))
+                        ));
+                        continue;
                     } else {
                         return Err((index + 1, (*segment).to_string()));
                     }
                 }
                 ClassifierPathPrefix::Classifier(owner) => {
-                    let Some(classifier) = self
+                    let symbols = self
                         .src
-                        .symbols(SymbolNamespace::Classifier(owner), segment)
-                        .classifier_name
-                    else {
+                        .symbols(SymbolNamespace::Classifier(owner), segment);
+                    let Some(classifier) = symbols.classifier_name else {
                         return Err((index + 1, (*segment).to_string()));
                     };
-                    ClassifierPathPrefix::Classifier(classifier)
+                    (classifier, symbols.classifier_declaration.clone())
                 }
             };
+            alias = alias_on_selected_classifier(classifier, declaration.as_ref());
+            prefix = ClassifierPathPrefix::Classifier(classifier);
         }
         match prefix {
-            ClassifierPathPrefix::Classifier(classifier) => Ok(classifier),
+            ClassifierPathPrefix::Classifier(classifier) => {
+                Ok(CompletedClassifierPath { classifier, alias })
+            }
             ClassifierPathPrefix::Package(_) => Err((
                 segments.len(),
                 segments.last().copied().unwrap_or_default().to_string(),
@@ -96,7 +119,7 @@ impl SymbolResolver<'_> {
                     ClassifierPathPrefix::Classifier(classifier),
                     &segments[1..],
                 ) {
-                    Ok(classifier) => return (CandidateSelection::Selected(classifier), None),
+                    Ok(path) => return (CandidateSelection::Selected(path.classifier), None),
                     Err((_, segment)) => return (CandidateSelection::None, Some(segment)),
                 }
             }
@@ -110,7 +133,7 @@ impl SymbolResolver<'_> {
                 ClassifierPathPrefix::Package(crate::types::type_name_child(TypeName::ROOT, first)),
                 &segments[1..],
             ) {
-                Ok(classifier) => return (CandidateSelection::Selected(classifier), None),
+                Ok(path) => return (CandidateSelection::Selected(path.classifier), None),
                 Err((_, segment)) => {
                     let segment = if !segment.is_empty() {
                         segment
@@ -131,6 +154,35 @@ impl SymbolResolver<'_> {
         &self,
         spelling: &str,
     ) -> (CandidateSelection<TypeName>, Option<String>) {
+        let (selection, failed) = self.qualified_type_path_in_scope(spelling);
+        (
+            match selection {
+                CandidateSelection::Selected(path) => CandidateSelection::Selected(path.classifier),
+                CandidateSelection::Ambiguous => CandidateSelection::Ambiguous,
+                CandidateSelection::None => CandidateSelection::None,
+            },
+            failed,
+        )
+    }
+
+    /// The typealias on the same winning type path as
+    /// [`Self::qualified_type_classifier_binding_in_scope`]. An ordinary classifier completion
+    /// returns `None`; the caller then builds that classifier. A disputed alias on one classifier
+    /// is also `None`, so a later phase does not apply one provider's template to another's class.
+    pub(crate) fn qualified_type_alias_expansion(
+        &self,
+        spelling: &str,
+    ) -> Option<crate::libraries::AliasExpansion> {
+        match self.qualified_type_path_in_scope(spelling).0 {
+            CandidateSelection::Selected(path) => path.alias,
+            CandidateSelection::Ambiguous | CandidateSelection::None => None,
+        }
+    }
+
+    fn qualified_type_path_in_scope(
+        &self,
+        spelling: &str,
+    ) -> (CandidateSelection<CompletedClassifierPath>, Option<String>) {
         let segments = spelling
             .split(['.', '/'])
             .filter(|segment| !segment.is_empty())
@@ -140,17 +192,13 @@ impl SymbolResolver<'_> {
         };
         let mut failure = None;
         let mut consider = |candidates: &[TypeName]| {
-            let mut completed = Vec::new();
+            let mut completed: Vec<CompletedClassifierPath> = Vec::new();
             for &candidate in candidates {
                 match self.advance_classifier_path(
                     ClassifierPathPrefix::Classifier(candidate),
                     &segments[1..],
                 ) {
-                    Ok(classifier) => {
-                        if !completed.contains(&classifier) {
-                            completed.push(classifier);
-                        }
-                    }
+                    Ok(path) => record_completed_path(&mut completed, path),
                     Err(miss) => {
                         if failure.as_ref().is_none_or(|(depth, _)| miss.0 > *depth) {
                             failure = Some(miss);
@@ -158,13 +206,13 @@ impl SymbolResolver<'_> {
                     }
                 }
             }
-            match completed.as_slice() {
-                [] => None,
-                [classifier] => Some(CandidateSelection::Selected(*classifier)),
+            match completed.len() {
+                0 => None,
+                1 => completed.pop().map(CandidateSelection::Selected),
                 _ => Some(CandidateSelection::Ambiguous),
             }
         };
-        let selected = |selection: CandidateSelection<TypeName>| match selection {
+        let selected = |selection: CandidateSelection<CompletedClassifierPath>| match selection {
             CandidateSelection::Selected(_) => (selection, None),
             CandidateSelection::Ambiguous => {
                 (CandidateSelection::Ambiguous, Some(first.to_string()))
@@ -207,7 +255,7 @@ impl SymbolResolver<'_> {
                 ClassifierPathPrefix::Package(crate::types::type_name_child(TypeName::ROOT, first)),
                 &segments[1..],
             ) {
-                Ok(classifier) => return (CandidateSelection::Selected(classifier), None),
+                Ok(path) => return (CandidateSelection::Selected(path), None),
                 Err(mut package_failure) => {
                     if package_failure.1.is_empty() {
                         package_failure.1 = first.to_string();
@@ -228,4 +276,22 @@ impl SymbolResolver<'_> {
                 .or_else(|| Some(first.to_string())),
         )
     }
+}
+
+/// Keep one completion per classifier. Two providers that normalize to the same classifier but
+/// disagree about its alias template leave no template: applying either one would hide the clash.
+fn record_completed_path(
+    completed: &mut Vec<CompletedClassifierPath>,
+    path: CompletedClassifierPath,
+) {
+    if let Some(existing) = completed
+        .iter_mut()
+        .find(|candidate| candidate.classifier == path.classifier)
+    {
+        if existing.alias != path.alias {
+            existing.alias = None;
+        }
+        return;
+    }
+    completed.push(path);
 }

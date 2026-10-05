@@ -343,6 +343,12 @@ pub(in crate::resolve) fn source_type_universe(
             } else {
                 collect_file_type_names(&files[file_index], &mut names);
             }
+            // A function-type alias target is not a classifier use. Its component names (`List` in
+            // `typealias F = (List<String>) -> Unit`) still have to be import-resolved before the
+            // template is typed, because the use site keeps the alias spelling.
+            for (_, _, target) in &file_type_aliases[file_index] {
+                collect_typeref_names(target, &mut names);
+            }
             names.extend(imap.keys().cloned());
             for name in names {
                 // `collect_file_type_names` deliberately combines ordinary `TypeRef` spellings with
@@ -532,6 +538,8 @@ pub(in crate::resolve) fn source_type_universe(
     for file_index in 0..source_packages.len() {
         let alias_package = &source_packages[file_index];
         for (alias, _, target) in &file_type_aliases[file_index] {
+            // A function-type alias has no classifier to fold into this map. Its template is
+            // recorded by `seed_source_function_alias_expansions` after each file's names exist.
             if target.name == "<fun>" || target.name.is_empty() {
                 continue;
             }
@@ -567,7 +575,7 @@ pub(in crate::resolve) fn source_type_universe(
     }
     expand_type_aliases(&mut class_names, &alias_map);
     let class_names = class_names.into_shared();
-    let file_class_names: Vec<ClassNames> = imports_by_file
+    let mut file_class_names: Vec<ClassNames> = imports_by_file
         .into_iter()
         .map(|(imports, expansions, unresolved, ambiguous)| {
             let mut names = class_names.clone();
@@ -589,6 +597,13 @@ pub(in crate::resolve) fn source_type_universe(
             names
         })
         .collect();
+    seed_source_function_alias_expansions(
+        &mut file_class_names,
+        &file_type_aliases,
+        &source_packages,
+        &source_package_ids,
+        &source_imports,
+    );
     SourceTypeUniverse {
         file_type_aliases,
         source_packages,
@@ -599,6 +614,245 @@ pub(in crate::resolve) fn source_type_universe(
         user_defined,
         user_base_classes,
     }
+}
+
+/// Aliases visible while a function-type template is typed and then published.
+struct FunctionAliasModule<'a> {
+    file_type_aliases: &'a [Vec<(String, Vec<String>, TypeRef)>],
+    source_packages: &'a [String],
+    source_package_ids: &'a [TypeName],
+    source_imports: &'a [Vec<CompactSourceImport>],
+}
+
+enum FunctionAliasSeed {
+    Ready(crate::libraries::AliasExpansion),
+    /// The target names another alias that is not seeded yet.
+    Wait,
+    /// A classifier or primitive alias; the name map already carries it.
+    Skip,
+}
+
+/// Record function-type alias templates before signature collection types uses.
+///
+/// Pass-1 types a signature before `source_alias_expansions` exists. A class-target alias folds
+/// into the name map; `typealias Listener = (String) -> Unit` has no classifier to fold, so the
+/// use would otherwise be an unresolved reference. The template is typed from the declaring file's
+/// names and then published under the spellings that file, its package, and its imports can see.
+fn seed_source_function_alias_expansions(
+    file_class_names: &mut [ClassNames],
+    file_type_aliases: &[Vec<(String, Vec<String>, TypeRef)>],
+    source_packages: &[String],
+    source_package_ids: &[TypeName],
+    source_imports: &[Vec<CompactSourceImport>],
+) {
+    let module = FunctionAliasModule {
+        file_type_aliases,
+        source_packages,
+        source_package_ids,
+        source_imports,
+    };
+    let mut seeded: Vec<Vec<Option<crate::libraries::AliasExpansion>>> = file_type_aliases
+        .iter()
+        .map(|aliases| vec![None; aliases.len()])
+        .collect();
+    let mut skipped: Vec<Vec<bool>> = file_type_aliases
+        .iter()
+        .map(|aliases| vec![false; aliases.len()])
+        .collect();
+    loop {
+        let mut progressed = false;
+        for file_index in 0..file_type_aliases.len() {
+            let mut names = file_class_names[file_index].clone();
+            module.install_visible(&mut names, file_index, &seeded);
+            for alias_index in 0..file_type_aliases[file_index].len() {
+                if seeded[file_index][alias_index].is_some() || skipped[file_index][alias_index] {
+                    continue;
+                }
+                let (alias, formals, target) = &file_type_aliases[file_index][alias_index];
+                let waits =
+                    module.target_waits_for_alias(file_index, &target.name, &seeded, &skipped);
+                match function_alias_expansion(
+                    &names,
+                    alias,
+                    formals,
+                    target,
+                    source_package_ids[file_index],
+                    waits,
+                ) {
+                    FunctionAliasSeed::Ready(expansion) => {
+                        names.insert_alias_expansion(alias.clone(), expansion.clone());
+                        if !source_packages[file_index].is_empty() {
+                            names.insert_alias_expansion(
+                                format!("{}.{alias}", source_packages[file_index]),
+                                expansion.clone(),
+                            );
+                        }
+                        seeded[file_index][alias_index] = Some(expansion);
+                        progressed = true;
+                    }
+                    FunctionAliasSeed::Skip => skipped[file_index][alias_index] = true,
+                    FunctionAliasSeed::Wait => {}
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    for file_index in 0..file_class_names.len() {
+        module.install_visible(&mut file_class_names[file_index], file_index, &seeded);
+    }
+}
+
+impl FunctionAliasModule<'_> {
+    fn target_waits_for_alias(
+        &self,
+        file_index: usize,
+        target_name: &str,
+        seeded: &[Vec<Option<crate::libraries::AliasExpansion>>],
+        skipped: &[Vec<bool>],
+    ) -> bool {
+        let package = &self.source_packages[file_index];
+        self.file_type_aliases
+            .iter()
+            .enumerate()
+            .any(|(decl_file, aliases)| {
+                aliases.iter().enumerate().any(|(index, (name, _, _))| {
+                    if seeded[decl_file][index].is_some() || skipped[decl_file][index] {
+                        return false;
+                    }
+                    let qualified = if self.source_packages[decl_file].is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}.{name}", self.source_packages[decl_file])
+                    };
+                    target_name == qualified
+                        || (self.source_packages[decl_file] == *package && target_name == name)
+                })
+            })
+    }
+
+    /// Star imports, then the file's own package, then explicit imports. A later binding wins,
+    /// matching the classifier precedence already used for this name universe. Qualified spellings
+    /// are absolute and stay available from every file.
+    fn install_visible(
+        &self,
+        names: &mut ClassNames,
+        file_index: usize,
+        seeded: &[Vec<Option<crate::libraries::AliasExpansion>>],
+    ) {
+        let mut spellings = Vec::new();
+        for import in self.source_imports[file_index]
+            .iter()
+            .filter(|import| import.wildcard)
+        {
+            self.push_package_aliases(&mut spellings, &import.path, false, seeded);
+        }
+        self.push_package_aliases(
+            &mut spellings,
+            &self.source_packages[file_index],
+            true,
+            seeded,
+        );
+        for import in self.source_imports[file_index]
+            .iter()
+            .filter(|import| !import.wildcard)
+        {
+            let imported = super::super::source_package::identity(Some(import.path.as_str()));
+            for (decl_file, aliases) in self.file_type_aliases.iter().enumerate() {
+                for (index, (name, _, _)) in aliases.iter().enumerate() {
+                    if crate::types::type_name_child(self.source_package_ids[decl_file], name)
+                        != imported
+                    {
+                        continue;
+                    }
+                    if let Some(expansion) = &seeded[decl_file][index] {
+                        spellings.push((import.visible_name.clone(), expansion.clone()));
+                    }
+                }
+            }
+        }
+        for (decl_file, aliases) in self.file_type_aliases.iter().enumerate() {
+            if self.source_packages[decl_file].is_empty() {
+                continue;
+            }
+            for (index, (name, _, _)) in aliases.iter().enumerate() {
+                if let Some(expansion) = &seeded[decl_file][index] {
+                    spellings.push((
+                        format!("{}.{name}", self.source_packages[decl_file]),
+                        expansion.clone(),
+                    ));
+                }
+            }
+        }
+        for (spelling, expansion) in spellings {
+            names.insert_alias_expansion(spelling, expansion);
+        }
+    }
+
+    fn push_package_aliases(
+        &self,
+        spellings: &mut Vec<(String, crate::libraries::AliasExpansion)>,
+        package: &str,
+        qualified: bool,
+        seeded: &[Vec<Option<crate::libraries::AliasExpansion>>],
+    ) {
+        for (decl_file, aliases) in self.file_type_aliases.iter().enumerate() {
+            if self.source_packages[decl_file] != package {
+                continue;
+            }
+            for (index, (name, _, _)) in aliases.iter().enumerate() {
+                let Some(expansion) = &seeded[decl_file][index] else {
+                    continue;
+                };
+                spellings.push((name.clone(), expansion.clone()));
+                if qualified && !package.is_empty() {
+                    spellings.push((format!("{package}.{name}"), expansion.clone()));
+                }
+            }
+        }
+    }
+}
+
+fn function_alias_expansion(
+    names: &ClassNames,
+    alias: &str,
+    formals: &[String],
+    target: &TypeRef,
+    package: TypeName,
+    target_may_be_pending_alias: bool,
+) -> FunctionAliasSeed {
+    let function_syntax = target.name == "<fun>" || !target.fun_params.is_empty();
+    let chained = names.alias_expansion(&target.name).is_some();
+    if !function_syntax && !chained && names.get_class(&target.name).is_some() {
+        return FunctionAliasSeed::Skip;
+    }
+    if !function_syntax && !chained && !target_may_be_pending_alias {
+        return FunctionAliasSeed::Skip;
+    }
+    let mut diags = DiagSink::new();
+    let symbolic = TParams::symbolic_from_decl_with(formals, &[], &|_| None);
+    let expansion = ty_of_ref(target, names, &symbolic, &mut diags);
+    if expansion == Ty::Error || expansion.contains_error() {
+        return if function_syntax || chained || target_may_be_pending_alias {
+            FunctionAliasSeed::Wait
+        } else {
+            FunctionAliasSeed::Skip
+        };
+    }
+    if !matches!(expansion.non_null(), Ty::Fun(_)) {
+        return FunctionAliasSeed::Skip;
+    }
+    let Some(target_classifier) = crate::libraries::type_alias_target_classifier(expansion) else {
+        return FunctionAliasSeed::Skip;
+    };
+    FunctionAliasSeed::Ready(crate::libraries::AliasExpansion {
+        identity: crate::types::type_name_child(package, alias),
+        target: target_classifier,
+        formals: formals.to_vec(),
+        expansion,
+        expansion_spelling: Spelled::default(),
+    })
 }
 
 #[cfg(test)]

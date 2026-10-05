@@ -47,8 +47,8 @@ fn a_typealias_keeps_variance_on_its_parameters() {
 
 #[test]
 fn an_opposite_typealias_projection_is_rejected() {
-    // The conflict is reported on the application that composed it. A nullable use keeps `?`
-    // inside the type quotes; a nested alias does not add the outer use's `?`.
+    // Each opposite use-site keyword is its own diagnostic, in source order, quoting the
+    // expansion of that application (a nullable use keeps `?` inside the type quotes).
     let source = r#"
         class Box<T>
         typealias OutAlias<T> = Box<out T>
@@ -58,7 +58,21 @@ fn an_opposite_typealias_projection_is_rejected() {
         val b: InAlias<out String>? = null
         val x: Wrap<OutAlias<in String>>? = null
     "#;
-    common::assert_messages_match_kotlinc(source);
+    common::assert_errors_match_kotlinc(&[("Main.kt", source)], &[]);
+}
+
+#[test]
+fn a_nearer_classifier_shadows_a_typealias() {
+    let source = r#"
+        class Target<T>
+        typealias Pick<T> = Target<out T>
+
+        fun use() {
+            class Pick<T>
+            val x: Pick<String>? = null
+        }
+    "#;
+    common::assert_accepted_like_kotlinc(source);
 }
 
 #[test]

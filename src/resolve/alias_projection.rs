@@ -1,28 +1,26 @@
-//! Projection conflicts introduced by applying a typealias.
+//! Projection conflicts introduced by one typealias application.
 //!
-//! The parser keeps a use's original spelling and rewrites the reference to the alias target.
-//! Variance is not composed in that rewrite. The resolved expansion flattens a same-direction
-//! projection, keeps a star, and nests an opposite one. Only the conflict that this application
-//! introduced is reported.
+//! The parser leaves a use written as the source spelled it. Classifier selection returns the
+//! alias that won that use, and this module composes the use-site arguments with that alias's
+//! template. A conflict is the use-site projection that this application itself composed with the
+//! opposite declaration-site projection; it is not inferred by scanning the finished type.
+
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::TypeRef;
-use crate::diag::DiagnosticIdentity;
+use crate::diag::{DiagnosticIdentity, Span};
 use crate::types::Ty;
 
-use super::{
-    definitely_non_null_ty, inaccessible_classifier_message, projected_typeref_argument, Checker,
-    CheckerScope,
-};
+use super::{definitely_non_null_ty, inaccessible_classifier_message, Checker, CheckerScope};
+
+/// One alias template applied to the arguments of a single use.
+pub(super) struct AppliedAlias {
+    pub(super) ty: Ty,
+    pub(super) conflicts: Vec<Span>,
+}
 
 impl Checker<'_> {
-    /// The pre-expansion spelling of a reference the parser rewrote to a different alias target.
-    pub(super) fn rewritten_alias_spelling(&self, reference: &TypeRef) -> Option<TypeRef> {
-        let spelled = self.file.alias_spellings.get(&reference.span)?;
-        (spelled.name != reference.name).then(|| spelled.clone())
-    }
-
-    /// Apply source nullability and record the resolved type. `syntax` is the written reference
-    /// when a same-file alias was rewritten, so a `?` on the alias is not applied twice.
+    /// Apply source nullability and record the resolved type.
     pub(super) fn publish_type_ref(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -60,75 +58,28 @@ impl Checker<'_> {
         resolved
     }
 
-    /// Resolve a parser-rewritten alias without diagnostics. Speculative reads use this so a
-    /// conflict stays on the authoritative type-reference path.
-    pub(super) fn silent_rewritten_alias_ty(
-        &self,
-        scope: &CheckerScope<'_>,
-        reference: &TypeRef,
-    ) -> Option<Ty> {
-        let spelled = self.rewritten_alias_spelling(reference)?;
-        let resolved = self.silent_alias_application(scope, &spelled)?;
-        Some(apply_written_type_modifiers(&spelled, resolved))
-    }
-
-    /// Record that `resolved` contains an opposite projection this application composed, rather
-    /// than one already present in a substituted argument.
-    pub(super) fn note_introduced_projection_conflict(&mut self, arguments: &[Ty], resolved: Ty) {
-        if self.type_ref_depth == 0 {
+    pub(super) fn report_alias_projection_conflicts(&mut self, conflicts: &[Span], ty: Ty) {
+        if conflicts.is_empty() || ty == Ty::Error {
             return;
         }
-        let argument_conflicts = arguments
-            .iter()
-            .copied()
-            .map(crate::types::projection_conflict_count)
-            .sum::<usize>();
-        if crate::types::projection_conflict_count(resolved) > argument_conflicts {
-            self.alias_projection_conflict = true;
+        let message = format!(
+            "conflicting projection in type alias expansion in intermediate type '{}'.",
+            ty.source_name()
+        );
+        for span in conflicts {
+            self.diags.error(*span, message.clone());
         }
     }
 
-    fn silent_alias_application(
+    pub(super) fn silent_alias_substitution(
         &self,
         scope: &CheckerScope<'_>,
-        reference: &TypeRef,
-    ) -> Option<Ty> {
-        if reference.is_import() {
-            return self.scoped_source_alias_target(scope, &reference.name);
-        }
-        if let Some(alias) = scope.type_alias(&reference.name) {
-            return self.silent_substitute_alias(
-                scope,
-                alias.formals,
-                alias.expansion,
-                &reference.targs,
-            );
-        }
-        if let Some(alias) = self.qualified_body_local_type_alias(scope, &reference.name) {
-            return self.silent_substitute_alias(
-                scope,
-                alias.formals,
-                alias.expansion,
-                &reference.targs,
-            );
-        }
-        let identity = self.scoped_source_alias_identity(scope, &reference.name)?;
-        let (formals, expansion) = self.source_alias_expansion(identity)?;
-        self.silent_substitute_alias(scope, formals, expansion, &reference.targs)
-    }
-
-    fn silent_substitute_alias(
-        &self,
-        scope: &CheckerScope<'_>,
-        formals: Vec<String>,
+        formals: &[String],
         expansion: Ty,
         arguments: &[TypeRef],
-    ) -> Option<Ty> {
-        if formals.len() != arguments.len() {
-            return None;
-        }
+    ) -> Ty {
         if formals.is_empty() {
-            return Some(expansion);
+            return expansion;
         }
         let arguments = arguments
             .iter()
@@ -138,15 +89,125 @@ impl Checker<'_> {
                 } else {
                     self.type_ref_ty_silent(scope, argument)
                 };
-                projected_typeref_argument(argument, resolved, Ty::nullable(Ty::obj("kotlin/Any")))
+                super::projected_typeref_argument(
+                    argument,
+                    resolved,
+                    Ty::nullable(Ty::obj("kotlin/Any")),
+                )
             })
             .collect::<Vec<_>>();
         let bindings = formals
-            .into_iter()
+            .iter()
+            .cloned()
             .zip(arguments)
             .collect::<crate::symbol_resolver::GSigBinds>();
-        Some(crate::symbol_resolver::ty_subst(expansion, &bindings))
+        crate::symbol_resolver::ty_subst(expansion, &bindings)
     }
+}
+
+/// Use-site arguments whose projection this template composed with the opposite direction.
+///
+/// The span is the `in` or `out` keyword of that argument. Arguments are returned in source order,
+/// once each, even when the formal occurs in several template positions.
+pub(super) fn conflicting_use_site_spans(
+    formals: &[String],
+    arguments: &[TypeRef],
+    expansion: Ty,
+    bindings: &HashMap<String, Ty>,
+) -> Vec<Span> {
+    let mut conflicting = HashSet::new();
+    note_template_conflicts(expansion, bindings, &mut conflicting);
+    formals
+        .iter()
+        .zip(arguments)
+        .filter_map(|(formal, argument)| {
+            conflicting
+                .contains(formal)
+                .then(|| use_site_projection_span(argument))
+                .flatten()
+        })
+        .collect()
+}
+
+fn note_template_conflicts(
+    template: Ty,
+    bindings: &HashMap<String, Ty>,
+    conflicting: &mut HashSet<String>,
+) {
+    match template {
+        Ty::OutProjection(inner) => {
+            if matches!(
+                crate::symbol_resolver::ty_subst(*inner, bindings),
+                Ty::InProjection(_)
+            ) {
+                if let Some(formal) = projected_formal(*inner) {
+                    if bindings.contains_key(&formal) {
+                        conflicting.insert(formal);
+                    }
+                }
+            }
+            note_template_conflicts(*inner, bindings, conflicting);
+        }
+        Ty::InProjection(inner) => {
+            if matches!(
+                crate::symbol_resolver::ty_subst(*inner, bindings),
+                Ty::OutProjection(_)
+            ) {
+                if let Some(formal) = projected_formal(*inner) {
+                    if bindings.contains_key(&formal) {
+                        conflicting.insert(formal);
+                    }
+                }
+            }
+            note_template_conflicts(*inner, bindings, conflicting);
+        }
+        Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::DefinitelyNotNull(inner)
+        | Ty::StarProjection(inner) => note_template_conflicts(*inner, bindings, conflicting),
+        Ty::Obj(_, arguments) => {
+            for argument in arguments {
+                note_template_conflicts(*argument, bindings, conflicting);
+            }
+        }
+        Ty::Fun(signature) => {
+            for parameter in &signature.params {
+                note_template_conflicts(*parameter, bindings, conflicting);
+            }
+            note_template_conflicts(signature.ret, bindings, conflicting);
+        }
+        Ty::Intersection(parts) => {
+            for part in parts {
+                note_template_conflicts(*part, bindings, conflicting);
+            }
+        }
+        Ty::TyParam(_, bound) => note_template_conflicts(*bound, bindings, conflicting),
+        Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => {}
+    }
+}
+
+fn projected_formal(inner: Ty) -> Option<String> {
+    match inner {
+        Ty::TyParam(name, _) => Some(name.to_string()),
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) | Ty::DefinitelyNotNull(inner) => {
+            projected_formal(*inner)
+        }
+        _ => None,
+    }
+}
+
+fn use_site_projection_span(argument: &TypeRef) -> Option<Span> {
+    let prefix = if argument.in_projection() {
+        3
+    } else if argument.out_projection() {
+        4
+    } else {
+        return None;
+    };
+    Some(Span::new(
+        argument.span.lo.saturating_sub(prefix),
+        argument.span.hi,
+    ))
 }
 
 fn apply_written_type_modifiers(syntax: &TypeRef, base: Ty) -> Ty {

@@ -329,10 +329,8 @@ fn a_qualified_alias_emits_a_loadable_class() {
 }
 
 /// A qualified spelling of a FUNCTION-TYPE alias (`app.Handler` where `typealias Handler = (Int) ->
-/// String`). Such an alias has no classifier at all, so resolving the dotted spelling as a
-/// qualified classifier could only fail — it was reported `unresolved reference 'app.Handler'`,
-/// rejecting valid Kotlin. Expanding it at the parse seam, where every alias is known by shape
-/// rather than by target class, is what makes both alias kinds behave alike.
+/// String`). The provider normalizes the classifier facet to `Function1`; the selected alias
+/// template is still `(Int) -> String`, and metadata records both that expansion and the abbreviation.
 #[test]
 fn a_qualified_function_type_alias_resolves() {
     const SRC: &str = "package app\n\
@@ -343,12 +341,8 @@ fn a_qualified_function_type_alias_resolves() {
     assert_identical("Qfun", SRC, "app/QfunKt");
 }
 
-/// The qualified spelling has three independent routes to a target, and each resolves it in a
-/// different place: a SAME-FILE alias is expanded at the parse seam, a SAME-MODULE alias in another
-/// file is expanded through the module's alias map, and a CLASSPATH alias goes through the
-/// dependency's own index. This locks the third — a consumer naming a dependency's alias by its
-/// fully qualified spelling — and does it at runtime, because a descriptor naming a class that is
-/// never emitted only fails at load time.
+/// A consumer naming a dependency's alias by its fully qualified spelling resolves to the alias's
+/// target. A descriptor naming a class that is never emitted only fails at load time.
 #[test]
 fn a_qualified_classpath_alias_resolves_to_its_target() {
     const LIB: &str = "package dep\n\

@@ -18,41 +18,6 @@ fn compose_out_projection(inner: Ty) -> Ty {
     }
 }
 
-/// How many direct opposite-projection pairs `ty` contains. `out (in X)` and `in (out X)` are one
-/// conflict each; a star or a same-direction projection is not. Nullable wrappers are not flattened.
-pub(crate) fn projection_conflict_count(ty: Ty) -> usize {
-    match ty {
-        Ty::InProjection(inner) => {
-            usize::from(matches!(*inner, Ty::OutProjection(_))) + projection_conflict_count(*inner)
-        }
-        Ty::OutProjection(inner) => {
-            usize::from(matches!(*inner, Ty::InProjection(_))) + projection_conflict_count(*inner)
-        }
-        Ty::StarProjection(inner)
-        | Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::DefinitelyNotNull(inner)
-        | Ty::TyParam(_, inner) => projection_conflict_count(*inner),
-        Ty::Obj(_, arguments) => arguments
-            .iter()
-            .map(|argument| projection_conflict_count(*argument))
-            .sum(),
-        Ty::Fun(signature) => {
-            signature
-                .params
-                .iter()
-                .map(|parameter| projection_conflict_count(*parameter))
-                .sum::<usize>()
-                + projection_conflict_count(signature.ret)
-        }
-        Ty::Intersection(parts) => parts
-            .iter()
-            .map(|part| projection_conflict_count(*part))
-            .sum(),
-        Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => 0,
-    }
-}
-
 /// Substitute semantic type parameters throughout one type shape. This belongs to the type model:
 /// providers, overload selection, checking, and lowering all consume the same transformation.
 fn substitute_type_parameters<F>(
