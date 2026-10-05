@@ -14,6 +14,11 @@ pub(super) struct InlineStaticTarget<'a> {
     pub(super) inline_only: bool,
     /// Whether the fetched body may belong to another class than `owner` (a bridge to it).
     pub(super) allow_owner_bridge: bool,
+    /// Whether the checked call selected a callable `suspend` inline declaration. kotlinc compiles
+    /// its `name` as the callee's own state machine and keeps the body to inline, suspension markers
+    /// and all, in a private `name$$forInline` copy. A must-inline one (`@InlineOnly`, reified) is
+    /// never called, so its only body stays untransformed.
+    pub(super) for_inline_copy: bool,
 }
 
 pub(super) fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {

@@ -328,6 +328,12 @@ impl CodeBuilder {
         }
     }
 
+    /// Whether the line in effect was forgotten after an inlined body ([`Self::forget_line`]), so
+    /// the next mark of any line, the same one included, is written.
+    pub(crate) fn line_forgotten(&self) -> bool {
+        self.pending_lines.forgotten
+    }
+
     /// The line in effect at the current offset, if any mark has been recorded.
     pub fn current_line(&self) -> Option<u16> {
         self.line_marks.last().map(|&(_, line)| line)

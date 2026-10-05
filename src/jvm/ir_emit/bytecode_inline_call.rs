@@ -122,6 +122,8 @@ impl Emitter<'_> {
             inline,
             reified,
         } = request;
+        let for_inline_copy =
+            self.ir.suspend_calls.contains_key(&call_expression) && !inline.must_inline();
         if let Some(recv) = dispatch_receiver {
             let recv_desc = type_descriptor(self.value_ty(recv));
             let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
@@ -141,6 +143,7 @@ impl Emitter<'_> {
                     inline,
                 ),
                 allow_owner_bridge: true,
+                for_inline_copy,
             };
             self.try_inline_static_as(call_expression, target, &all, 1, code, reified)
         } else {
@@ -162,6 +165,7 @@ impl Emitter<'_> {
                     inline,
                 ),
                 allow_owner_bridge: inline.must_inline() || has_lambda_arg,
+                for_inline_copy,
             };
             self.try_inline_static_as(call_expression, target, args, 0, code, reified)
         }
