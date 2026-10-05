@@ -1653,7 +1653,7 @@ impl super::Emitter<'_> {
                                 self.run,
                             );
                             match super::lambda_metadata::class_mode_lambda_metadata(
-                                self.ir, e, *impl_fn, n_cap, &formatter,
+                                self.ir, e, *impl_fn, n_cap, lam_tys, impl_ret, &formatter,
                             ) {
                                 Ok(metadata) => Some(metadata),
                                 Err(error) => {

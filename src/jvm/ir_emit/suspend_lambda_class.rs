@@ -220,9 +220,11 @@ pub(super) fn emit_suspend_lambda_class(
     // A lambda class is local to the scope it was written in.
     let (d1, d2) = super::lambda_metadata::lambda_function_metadata(
         ir,
+        lambda.invoke_suspend,
         lambda.function_type,
         &lambda.metadata_names,
         &lambda.type_parameters,
+        None,
         &formatter,
     );
     cw.set_kotlin_metadata(

@@ -1877,7 +1877,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A `-Xlambdas=class` lambda class carries the lambda's function in its `@Metadata`.** kotlinc
   writes a `k=3` header with LOCAL visibility whose `d1` is one `Function` named `<anonymous>`
   (`<no name provided>` for an anonymous function): its receiver, value parameters, result and the
-  type parameters they name, as a suspend lambda's class records it. A lambda's `toString()` reads it
+  type parameters they name, as a suspend lambda's class records it. The class declares kotlinc's
+  typed `invoke` over the lambda's own parameters (`invoke(ILToken;)Ljava/lang/Integer;`: a scalar
+  result is boxed, a `Unit` one is `void`), and the erased `FunctionN.invoke` is a bridge to it; the
+  record names that method, with its descriptor whenever a reader could not rebuild it from the
+  declared types (`requiresFunctionSignature`). A big-arity lambda has only the packed bridge. A lambda's `toString()` reads it
   through kotlin-reflect (`(kotlin.Int) -> kotlin.Int`); without it the class's own name is printed.
   kotlinc writes the same header on a `-Xsam-conversions=class` fun-interface lambda (`SKt$f$1
   implements H`, `d2` ending in the SAM method `h`); krusty does not yet. The box harness honors `// LAMBDAS: CLASS`

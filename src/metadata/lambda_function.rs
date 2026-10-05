@@ -13,8 +13,10 @@ use crate::metadata::type_encoder::{
 };
 use crate::types::{Ty, TypeName};
 
-/// kotlinc's name for a lambda's function.
+/// kotlinc's name for a lambda literal's function.
 const ANONYMOUS: &str = "<anonymous>";
+/// kotlinc's name for an anonymous function's (`fun(x: Int) = …`).
+const NO_NAME_PROVIDED: &str = "<no name provided>";
 
 /// `Function.flags` of a lambda: final, `LOCAL` visibility (5), nothing else. kotlinc records a
 /// suspend lambda's function without `IS_SUSPEND`.
@@ -23,6 +25,8 @@ const LAMBDA_FLAGS: u64 = 5 << 1;
 /// A lambda's function as its class's metadata describes it. kotlinc records no context
 /// parameters for a lambda.
 pub(crate) struct LambdaFunction<'a> {
+    /// Whether the lambda was written as an anonymous function rather than a lambda literal.
+    pub anonymous_function: bool,
     pub receiver: Option<Ty>,
     /// Each value parameter's metadata name and type, in order.
     pub parameters: &'a [(&'a str, Ty)],
@@ -35,6 +39,9 @@ pub(crate) struct LambdaFunction<'a> {
     pub enum_entry_bodies: &'a HashSet<TypeName>,
     /// Checked declaration approximation for a non-denotable intersection in this signature.
     pub intersection_approximation: &'a dyn Fn(Ty) -> Option<Ty>,
+    /// The `JvmMethodSignature` of the class's typed `invoke`: its name, and its descriptor when a
+    /// reader cannot rebuild it from the declared types.
+    pub jvm_signature: Option<(&'a str, Option<&'a str>)>,
 }
 
 /// `d1` (before its string packing) and `d2` for a lambda class.
@@ -87,7 +94,11 @@ pub(crate) fn build(lambda: &LambdaFunction<'_>) -> (Vec<u8>, Vec<String>) {
 
     let mut function = Pb::new();
     // Interned in the order kotlinc's serializer visits them.
-    function.field_varint(2, strings.local(ANONYMOUS) as u64); // Function.name = 2
+    let name = match lambda.anonymous_function {
+        true => NO_NAME_PROVIDED,
+        false => ANONYMOUS,
+    };
+    function.field_varint(2, strings.local(name) as u64); // Function.name = 2
     let result = encode(&mut strings, lambda.result);
     function.field_message(3, &result); // Function.return_type = 3
     for (id, parameter) in own.iter().enumerate() {
@@ -118,6 +129,14 @@ pub(crate) fn build(lambda: &LambdaFunction<'_>) -> (Vec<u8>, Vec<String>) {
         function.repeated_message(6, &parameter); // Function.value_parameter = 6
     }
     function.field_varint(9, LAMBDA_FLAGS); // Function.flags = 9
+    if let Some((name, descriptor)) = lambda.jvm_signature {
+        let mut signature = Pb::new();
+        signature.field_varint(1, strings.local(name) as u64); // JvmMethodSignature.name = 1
+        if let Some(descriptor) = descriptor {
+            signature.field_varint(2, strings.local(descriptor) as u64); // .desc = 2
+        }
+        function.field_message(100, &signature); // JvmProtoBuf.methodSignature = 100
+    }
     let types = strings.serialize_types();
     // The same framing as every other payload: a leading 0x00, the delimited string-table types,
     // then the message.

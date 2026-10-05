@@ -404,8 +404,8 @@ struct LambdaClassPlan {
     /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
     owner_is_interface: bool,
     identity: lambda_class_names::LambdaClassIdentity,
-    /// `d1` and `d2` of the class's `@Metadata`: the lambda's function, for a Kotlin function type.
-    metadata: Option<(Vec<String>, Vec<String>)>,
+    /// The class's `@Metadata` and typed `invoke`, for a Kotlin function type.
+    metadata: Option<lambda_metadata::LambdaClassMetadata>,
 }
 
 impl EmitRun {
@@ -1958,6 +1958,22 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         .get(plan.captures.len()..)
         .unwrap_or(&[])
         .to_vec();
+    // A Kotlin lambda's class declares kotlinc's typed `invoke` over the lambda's own parameters,
+    // which its metadata names; the erased `FunctionN.invoke` is a bridge to it.
+    let typed_invoke = plan
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.typed_invoke.as_deref());
+    if let Some(typed_desc) = typed_invoke {
+        emit_typed_lambda_invoke(
+            &mut cw,
+            plan,
+            &field_descs,
+            &own_params,
+            impl_ret,
+            typed_desc,
+        );
+    }
     let mut invoke_locals: u16 = 1;
     let mut arg_slots = Vec::new();
     for param in &sam_params {
@@ -1965,7 +1981,15 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         invoke_locals += if *param == "J" || *param == "D" { 2 } else { 1 };
     }
     let mut invoke = CodeBuilder::new(invoke_locals);
-    for (index, ty) in plan.captures.iter().enumerate() {
+    if typed_invoke.is_some() {
+        invoke.aload(0);
+    }
+    for (index, ty) in plan
+        .captures
+        .iter()
+        .enumerate()
+        .filter(|_| typed_invoke.is_none())
+    {
         invoke.aload(0);
         let field = cw.fieldref(
             &plan.internal,
@@ -2027,6 +2051,21 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
             }
         }
     }
+    if let Some(typed_desc) = typed_invoke {
+        let own_words: i32 = own_params.iter().map(|t| slot_words(*t) as i32).sum();
+        let typed = cw.methodref(&plan.internal, "invoke", typed_desc);
+        if typed_desc.ends_with(")V") {
+            invoke.invokevirtual(typed, own_words, 0);
+            let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+            invoke.getstatic(unit, 1);
+        } else {
+            invoke.invokevirtual(typed, own_words, 1);
+        }
+        invoke.areturn();
+        // ACC_PUBLIC | ACC_BRIDGE | ACC_SYNTHETIC: the erased slot of the typed `invoke`.
+        cw.add_method(0x1041, &plan.sam_method, &plan.sam_desc, &invoke);
+        return finish_lambda_class(cw, plan, &field_descs, opts);
+    }
     let impl_words: i32 = impl_params.iter().map(|t| slot_words(*t) as i32).sum();
     let impl_ref = if plan.owner_is_interface {
         cw.interface_methodref(&plan.impl_owner, &plan.impl_name, &plan.impl_desc)
@@ -2051,7 +2090,17 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
     }
     // ACC_PUBLIC | ACC_FINAL: the interface slot, implemented once.
     cw.add_method(0x0011, &plan.sam_method, &plan.sam_desc, &invoke);
+    finish_lambda_class(cw, plan, &field_descs, opts)
+}
 
+/// The members after `invoke`: a fun-interface adapter's delegate and equality, the singleton
+/// `INSTANCE`, and the class's `@Metadata`.
+fn finish_lambda_class(
+    mut cw: ClassWriter,
+    plan: &LambdaClassPlan,
+    field_descs: &[String],
+    opts: &EmitOptions,
+) -> (String, Vec<u8>) {
     if plan.function_adapter {
         assert_eq!(
             plan.captures.len(),
@@ -2126,17 +2175,72 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         clinit.ret_void();
         cw.add_method(0x0008, "<clinit>", "()V", &clinit); // ACC_STATIC
     }
-    if let Some((d1, d2)) = &plan.metadata {
+    if let Some(metadata) = &plan.metadata {
         // A lambda class is local to the scope it was written in.
         cw.set_kotlin_metadata(
             3,
             &opts.metadata_version(),
             metadata_policy::synthetic_class_xi(metadata_policy::SYNTHETIC_LOCAL),
-            d1,
-            d2,
+            &metadata.d1,
+            &metadata.d2,
         );
     }
     (plan.internal.clone(), cw.finish())
+}
+
+/// kotlinc's typed `invoke(own parameters…)`: the captures read from the class's fields and the
+/// arguments passed to the lambda's implementation method, whose scalar result is boxed.
+fn emit_typed_lambda_invoke(
+    cw: &mut ClassWriter,
+    plan: &LambdaClassPlan,
+    field_descs: &[String],
+    own_params: &[Ty],
+    impl_ret: Ty,
+    typed_desc: &str,
+) {
+    let own_words: u16 = own_params.iter().map(|ty| slot_words(*ty)).sum();
+    let mut code = CodeBuilder::new(1 + own_words);
+    for (index, ty) in plan.captures.iter().enumerate() {
+        code.aload(0);
+        let field = cw.fieldref(
+            &plan.internal,
+            &format!("$captured${index}"),
+            &field_descs[index],
+        );
+        code.getfield(field, slot_words(*ty) as i32);
+    }
+    let mut slot = 1u16;
+    for ty in own_params {
+        load_slot(&mut code, slot, *ty);
+        slot += slot_words(*ty);
+    }
+    let impl_words: i32 = plan
+        .captures
+        .iter()
+        .chain(own_params)
+        .map(|ty| slot_words(*ty) as i32)
+        .sum();
+    let impl_ref = if plan.owner_is_interface {
+        cw.interface_methodref(&plan.impl_owner, &plan.impl_name, &plan.impl_desc)
+    } else {
+        cw.methodref(&plan.impl_owner, &plan.impl_name, &plan.impl_desc)
+    };
+    code.invokestatic(impl_ref, impl_words, slot_words(impl_ret) as i32);
+    if typed_desc.ends_with(")V") {
+        // The implementation of a `Unit` lambda may return the `Unit` value itself.
+        match slot_words(impl_ret) {
+            1 => code.pop(),
+            2 => code.pop2(),
+            _ => {}
+        }
+        code.ret_void();
+    } else {
+        if !descriptor_is_reference(&type_descriptor(impl_ret)) {
+            box_prim_free(cw, &mut code, impl_ret);
+        }
+        code.areturn();
+    }
+    cw.add_method(0x0011, "invoke", typed_desc, &code); // ACC_PUBLIC | ACC_FINAL
 }
 
 /// Take the lambda classes recorded while emitting the class just finished, and write them.
