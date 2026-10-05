@@ -154,6 +154,33 @@ impl ProductionSignatureSemantics<'_> {
         AppliedSourceAlias::apply(identity, formals, expansion, explicit_type_arguments)
     }
 
+    /// The result of a construction its spelling named: through a typealias, the alias applies to
+    /// the constructed type and its abbreviation is recorded on `origin`; otherwise the constructed
+    /// type stands as it is.
+    pub(super) fn named_construction_result(
+        &self,
+        scope: crate::fir::SignatureScope,
+        origin: crate::fir::OriginId,
+        alias: Option<AppliedSourceAlias>,
+        constructed: Ty,
+        argument: Option<Ty>,
+        expected: Option<crate::fir::ResolvedTy>,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let Some(alias) = alias else {
+            return crate::fir::ResolvedTy::new(constructed).map_err(|_| Self::failure());
+        };
+        self.record_alias_constructor_result(
+            origin,
+            self.apply_source_alias_constructor_result(
+                scope,
+                &alias,
+                constructed,
+                argument,
+                expected.map(crate::fir::ResolvedTy::get),
+            ),
+        )
+    }
+
     /// The type a constructor call through `alias` produces, with the abbreviation it carries:
     /// the alias applied to the arguments this call fixed for its formals.
     pub(super) fn apply_source_alias_constructor_result(
