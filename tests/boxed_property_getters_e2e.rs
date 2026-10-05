@@ -57,6 +57,22 @@ fn a_boxed_property_getter_runs() {
     );
 }
 
+const TWO_SLOTS: &str = "open class Sized<T> { open var size: T = 56 as T }
+interface Counted { var size: Int }
+open class Both : Counted, Sized<Int>()
+open class Own : Both() { override var size: Int = 117 }
+";
+
+/// An override over both an `Int` slot and a type parameter's slot keeps one bridge per slot: the
+/// boxed getter bridges to `getSize()I` and to `getSize()Object`, and the setter, whose own
+/// descriptor already matches the `Int` slot, bridges only to `setSize(Object)`.
+#[test]
+fn a_boxed_getter_over_two_slots_bridges_to_each_like_kotlinc() {
+    let sources = [("TwoSlots.kt", TWO_SLOTS)];
+    let pair = common::ModuleClassPair::compile(&sources, "Own");
+    assert!(pair.krusty == pair.kotlinc, "Own differs from kotlinc");
+}
+
 const LIBRARY: &str = "package lib
 interface Gauge<T> { val level: T }
 open class Meter : Gauge<Int> { override val level: Int = 3 }

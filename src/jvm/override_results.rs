@@ -164,6 +164,23 @@ impl OverrideResults {
     /// its place: a member call through the class, a `super` call, a member call of a declaration
     /// in another file, or the static member a value-class call was realized as.
     pub(crate) fn boxed_call_result(&self, ir: &IrFile, expression: ExprId) -> Option<Ty> {
+        let boxed = self.declared_boxed_call_result(ir, expression)?;
+        // A call realized through an overridden dependency slot takes that slot's descriptor:
+        // `Collection.size()I` for an `override val size: Int` returns the scalar itself.
+        match ir.jvm_overridden_call_realizations.get(&expression) {
+            Some(realization)
+                if realization
+                    .descriptor
+                    .rsplit_once(')')
+                    .is_some_and(|(_, result)| result.len() == 1) =>
+            {
+                None
+            }
+            _ => Some(boxed),
+        }
+    }
+
+    fn declared_boxed_call_result(&self, ir: &IrFile, expression: ExprId) -> Option<Ty> {
         match ir.expr(expression) {
             IrExpr::MethodCall { class, index, .. } => {
                 let function = ir.classes[*class as usize].methods[*index as usize];

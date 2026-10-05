@@ -9247,6 +9247,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   backend records the boxed properties in `jvm::override_results`, a cross-file declaration's
   module record carries the overridden types (`IrModuleProperty::overridden_types`), and a kotlinc-compiled
   dependency getter already declared with the wrapper is overridden with the same descriptor.
+  An override over several slots bridges to each slot whose descriptor differs: `override var
+  size: Int` over both `var size: Int` and `Sized<T>.size: T` has `getSize()Integer` with bridges
+  `getSize()I` and `getSize()Object`, while its setter `setSize(I)` already matches the `Int` slot
+  and bridges only to `setSize(Object)`. A read realized through a dependency's scalar slot
+  (`Collection.size()I` for `override val size: Int`) takes that slot's result and neither narrows
+  nor unboxes it.
   Tests: `tests/boxed_property_getters_e2e.rs`.
 - **A lambda `LambdaMetafactory` cannot adapt compiles to a class, as kotlinc's does.** kotlinc's
   `LambdaMetafactoryArguments` rejects a lambda whose function type takes or returns a value class

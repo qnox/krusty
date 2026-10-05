@@ -588,10 +588,17 @@ fn push_property_bridge(
         own(edge.implementation_getter),
         own(edge.implementation_setter),
     );
-    let has_getter = ir.classes[cid]
-        .bridges
-        .iter()
-        .any(|b| b.name == getter_name && b.erased_params.is_empty());
+    // A boxed getter can need one bridge per overridden slot (`getSize()I` for an `Int` slot and
+    // `getSize()Object` for a type parameter's), so a recorded bridge covers this one only when its
+    // descriptor is the same.
+    let has_getter = ir.classes[cid].bridges.iter().any(|b| {
+        b.name == getter_name
+            && b.erased_params.is_empty()
+            && crate::jvm::names::same_type_descriptor(
+                bridge_erasure(b.erased_ret),
+                bridge_erasure(getter_results.declared),
+            )
+    });
     if !has_getter {
         let target_name = (getter_name != getter_target).then_some(getter_target);
         let special = getter_name != property_getter_name(&edge.name);
@@ -616,11 +623,20 @@ fn push_property_bridge(
     if !(edge.overridden_mutable && edge.implementation_mutable) {
         return;
     }
+    // The setter keeps the declared types: over a slot whose getter only differs by the boxed
+    // result, the setter's descriptor is already the implementation's own.
+    let setter_param = bridge_erasure(edge.declared_type);
     let sname = property_setter_name(&edge.name);
-    let has_setter = ir.classes[cid]
-        .bridges
-        .iter()
-        .any(|b| b.name == sname && b.erased_params.len() == 1);
+    let has_setter =
+        crate::jvm::names::same_type_descriptor(setter_param, edge.implementation_type)
+            || ir.classes[cid].bridges.iter().any(|b| {
+                b.name == sname
+                    && b.erased_params.len() == 1
+                    && crate::jvm::names::same_type_descriptor(
+                        bridge_erasure(b.erased_params[0]),
+                        setter_param,
+                    )
+            });
     if !has_setter {
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertySetter,
