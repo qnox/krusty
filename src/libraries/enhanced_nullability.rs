@@ -90,6 +90,18 @@ impl TypeEnhancement {
         )
     }
 
+    /// Qualifiers contributed by independent overridden declarations at the same indexed type
+    /// positions. A position is enhanced when any exact override fixes it not-null.
+    pub fn union(&self, other: &TypeEnhancement) -> Self {
+        let count = self.arguments.len().max(other.arguments.len());
+        TypeEnhancement::new(
+            self.head || other.head,
+            (0..count)
+                .map(|index| self.argument(index).union(other.argument(index)))
+                .collect(),
+        )
+    }
+
     /// Substitute the type parameters of the `declared` type this layout describes:
     /// `binding(name)` is the layout of the type argument the parameter `name` is bound to, or
     /// `None` when it is not bound. A substituted parameter keeps its own mark and gains its
@@ -284,6 +296,19 @@ mod tests {
         assert_eq!(
             set.meet(&TypeEnhancement::new(false, vec![marked()])),
             TypeEnhancement::new(false, vec![marked()])
+        );
+    }
+
+    #[test]
+    fn independent_override_qualifiers_are_unioned_by_type_position() {
+        let left = TypeEnhancement::new(true, vec![marked(), TypeEnhancement::NONE]);
+        let right = TypeEnhancement::new(false, vec![TypeEnhancement::NONE, marked()]);
+        let expected = TypeEnhancement::new(true, vec![marked(), marked()]);
+        assert_eq!(left.union(&right), expected);
+        assert_eq!(
+            right.union(&left),
+            expected,
+            "supertype order is irrelevant"
         );
     }
 }

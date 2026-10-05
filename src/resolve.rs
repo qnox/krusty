@@ -163,7 +163,7 @@ use source_fragment::SourceFragmentMode;
 mod scope;
 mod selected_argument_commitment;
 use selected_argument_commitment::{
-    indexed_operator_argument_parameters, indexed_operator_argument_slots,
+    indexed_operator_argument_parameters, indexed_operator_argument_slots, SelectedArgumentBinding,
     SelectedArgumentCommitment,
 };
 mod signature_collection;
@@ -10027,8 +10027,15 @@ pub enum ResolvedConstructor {
         primary: bool,
         /// Already-selected implicit values for the constructor's leading context parameters.
         context_args: Vec<ResolvedContextArgument>,
+        /// Declaration-owned parameter shapes before classifier type-argument substitution.
+        /// Value enhancement consumes these with `argument_bindings`; it never reconstructs the
+        /// constructor mapping from source syntax.
+        declaration_params: Vec<Ty>,
         params: Vec<Ty>,
         argument_slots: Vec<usize>,
+        /// Exact written-argument mapping selected by the frontend, including whether an argument
+        /// is one expanded vararg element or the complete vararg array.
+        argument_bindings: Vec<SelectedArgumentBinding>,
         argument_types: Vec<Ty>,
         omitted: Vec<usize>,
         vararg: Option<usize>,
@@ -17324,6 +17331,24 @@ impl<'a> Checker<'a> {
                 .map(|shapes| shapes.iter().copied().map(|shape| (shape, false)).collect()),
             ResolvedCtorDelegationTarget::Super { .. } => None,
         };
+        let argument_names = self.file.call_arg_names.get(&call.0);
+        let argument_bindings = args
+            .iter()
+            .zip(&selected.argument_slots)
+            .enumerate()
+            .map(|(source, (&argument, &parameter))| {
+                let whole_array = selected.vararg == Some(parameter)
+                    && (self.file.is_spread_arg(argument)
+                        || argument_names
+                            .and_then(|names| names.get(source))
+                            .is_some_and(Option::is_some));
+                SelectedArgumentBinding {
+                    argument,
+                    parameter,
+                    vararg_element: selected.vararg == Some(parameter) && !whole_array,
+                }
+            })
+            .collect::<Vec<_>>();
         let inferred = if parameter_shapes
             .as_ref()
             .is_some_and(|shapes| shapes.len() == declared_params.len())
@@ -17334,24 +17359,19 @@ impl<'a> Checker<'a> {
                 // array shape. Present that source-order semantic view to the same classifier
                 // inference engine used by ordinary constructor parameters; the declaration and
                 // provider origin do not otherwise affect inference.
-                let argument_names = self.file.call_arg_names.get(&call.0);
                 let mut source_shapes = Vec::with_capacity(args.len());
                 let mut source_actuals = arg_tys.to_vec();
                 let mut whole_array_varargs = Vec::with_capacity(args.len());
-                for (source, (&argument, &slot)) in
-                    args.iter().zip(&selected.argument_slots).enumerate()
-                {
+                for (source, binding) in argument_bindings.iter().enumerate() {
+                    let argument = binding.argument;
+                    let slot = binding.parameter;
                     let (mut shape, definitely_non_null) = parameter_shapes
                         .as_deref()
                         .and_then(|shapes| shapes.get(slot))
                         .copied()
                         .unwrap_or((selected.argument_types[source], false));
-                    let whole_array = slot == vararg
-                        && (self.file.is_spread_arg(argument)
-                            || argument_names
-                                .and_then(|names| names.get(source))
-                                .is_some_and(Option::is_some));
-                    if slot == vararg && !whole_array {
+                    let whole_array = slot == vararg && !binding.vararg_element;
+                    if binding.vararg_element {
                         shape = shape.array_read_elem().unwrap_or(shape);
                     } else if whole_array
                         && self.file.is_spread_arg(argument)
@@ -17481,8 +17501,15 @@ impl<'a> Checker<'a> {
                 outer: None,
                 primary,
                 context_args: selected.context_args,
+                declaration_params: parameter_shapes
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|(shape, _)| *shape)
+                    .collect(),
                 params,
                 argument_slots: selected.argument_slots,
+                argument_bindings,
                 argument_types: selected.argument_types,
                 omitted: selected.omitted,
                 vararg: selected.vararg,
@@ -24099,17 +24126,17 @@ impl<'a> Checker<'a> {
         // signature may spell a receiver as its first ordinary parameter (`Foo::Inner`), while the
         // target type spells the same value as `Foo.() -> Inner`. Invocation must consume the binding's
         // type, not reopen the initializer and silently undo that adaptation.
-        if let Some(function_type) = declared
+        let flow_identity = if let Some(function_type) = declared
             .filter(|ty| matches!(ty, Ty::Fun(_)))
             .or_else(|| self.callable_reference_types.get(&init).copied())
             .or_else(|| matches!(bound_ty, Ty::Fun(_)).then_some(bound_ty))
         {
-            self.declare_callable_reference(scope, &name, bound_ty, is_var, function_type);
+            self.declare_callable_reference(scope, &name, bound_ty, is_var, function_type)
         } else {
-            self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance);
-        }
+            self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance)
+        };
         if declared.is_none() {
-            self.record_enhanced_local(scope, &name, init);
+            self.record_enhanced_local(flow_identity, init);
         }
         if let Some(origin) = safe_call_origin {
             self.attach_safe_call_origin(scope, &name, origin);
@@ -25121,8 +25148,8 @@ impl<'a> Checker<'a> {
         {
             let body_scope = scope.child(ScopeKind::Block);
             let scope = &body_scope;
-            self.declare(scope, &name, elem, false);
-            self.record_enhanced_loop_variable(scope, &name, iterable);
+            let flow_identity = self.declare(scope, &name, elem, false);
+            self.record_enhanced_loop_variable(flow_identity, iterable);
             self.check_loop_body(scope, body, &label);
         }
     }
@@ -46408,14 +46435,14 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn declare(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty, is_var: bool) {
+    fn declare(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty, is_var: bool) -> u32 {
         self.declare_with_origin(
             scope,
             name,
             ty,
             is_var,
             ValueBindingDeclaration::ordinary(ReceiverFnValueOrigin::Local, ErrorProvenance::None),
-        );
+        )
     }
 
     fn declare_context_parameter(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty) {
@@ -46435,14 +46462,14 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         error_provenance: ErrorProvenance,
-    ) {
+    ) -> u32 {
         self.declare_with_origin(
             scope,
             name,
             ty,
             is_var,
             ValueBindingDeclaration::ordinary(ReceiverFnValueOrigin::Local, error_provenance),
-        );
+        )
     }
 
     fn declare_callable_reference(
@@ -46452,7 +46479,7 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         function_type: Ty,
-    ) {
+    ) -> u32 {
         let lexical_capture_identity = Some(self.allocate_lexical_capture_identity());
         let flow_identity = self.allocate_flow_identity();
         scope.rebind(
@@ -46474,6 +46501,7 @@ impl<'a> Checker<'a> {
                 safe_call_origin: None,
             }),
         );
+        flow_identity
     }
 
     fn declare_dispatch_property(
@@ -46992,7 +47020,7 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         declaration: ValueBindingDeclaration,
-    ) {
+    ) -> u32 {
         let ValueBindingDeclaration {
             origin,
             error_provenance,
@@ -47031,6 +47059,7 @@ impl<'a> Checker<'a> {
                 safe_call_origin: None,
             }),
         );
+        flow_identity
     }
 
     fn allocate_flow_identity(&mut self) -> u32 {
@@ -55987,8 +56016,10 @@ impl<'a> Checker<'a> {
                         outer: None,
                         primary,
                         context_args: selected.context_args,
+                        declaration_params: selected.target.params().to_vec(),
                         params: selected.target.params().to_vec(),
                         argument_slots: selected.argument_slots,
+                        argument_bindings: Vec::new(),
                         argument_types: selected.argument_types,
                         omitted: selected.omitted,
                         vararg: selected.vararg,

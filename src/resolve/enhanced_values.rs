@@ -10,13 +10,11 @@
 //! `next()` returns that `E`. A local whose type is inferred from such a value keeps the marks of
 //! its type arguments, not of its head.
 //!
-//! The marks are read from the checked call graph after the fact, so they never take part in
-//! typing; [`super::platform_value_narrowing`] consumes them to decide kotlinc's implicit not-null
-//! casts.
+//! The marks are read from selected call identities and their committed source-argument mappings
+//! after typing, so they never take part in selection or inference;
+//! [`super::platform_value_narrowing`] consumes them to decide kotlinc's implicit not-null casts.
 
-use super::{
-    Checker, CheckerScope, Local, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
-};
+use super::{Checker, Local, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor};
 use crate::ast::{Expr, ExprId};
 use crate::libraries::{GenericSig, ResultEnhancement, TypeEnhancement};
 use crate::types::{Ty, TypeName};
@@ -32,40 +30,21 @@ pub(super) struct EnhancedLocals {
     reads: HashMap<ExprId, TypeEnhancement>,
 }
 
-/// The parts of a call that a callable's type parameters are inferred from: the explicit
-/// receiver, and the value arguments in declaration order.
-struct CallInputs {
-    receiver: Option<ExprId>,
-    arguments: Vec<ExprId>,
-}
-
 impl Checker<'_> {
-    /// Record the marks the local `name`, just declared without a type, takes from its
+    /// Record the marks the local, just declared without a type, takes from its
     /// `initializer`.
-    pub(super) fn record_enhanced_local(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        initializer: ExprId,
-    ) {
+    pub(super) fn record_enhanced_local(&mut self, flow_identity: u32, initializer: ExprId) {
         let marks = self.value_enhancement(initializer).declared();
         if marks.is_none() {
             return;
         }
-        if let Some(local) = self.lookup(scope, name) {
-            self.enhanced_locals
-                .declarations
-                .insert(local.flow_identity, marks);
-        }
+        self.enhanced_locals
+            .declarations
+            .insert(flow_identity, marks);
     }
 
-    /// Record the marks the variable `name` of a loop over `iterable` takes from the elements.
-    pub(super) fn record_enhanced_loop_variable(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        iterable: ExprId,
-    ) {
+    /// Record the marks the loop variable takes from the elements of `iterable`.
+    pub(super) fn record_enhanced_loop_variable(&mut self, flow_identity: u32, iterable: ExprId) {
         let Some(protocol) = self.iterator_protocols.get(&iterable) else {
             return;
         };
@@ -73,11 +52,9 @@ impl Checker<'_> {
         if marks.is_none() {
             return;
         }
-        if let Some(local) = self.lookup(scope, name) {
-            self.enhanced_locals
-                .declarations
-                .insert(local.flow_identity, marks);
-        }
+        self.enhanced_locals
+            .declarations
+            .insert(flow_identity, marks);
     }
 
     /// Record that `read` reads `local` at its declared type.
@@ -111,27 +88,17 @@ impl Checker<'_> {
         let Some(call) = self.resolved_calls.get(&e) else {
             return TypeEnhancement::NONE;
         };
-        let inputs = self.call_inputs(e);
-        let receiver = inputs.receiver.map(|receiver| {
+        let receiver = self.call_receiver(e).map(|receiver| {
             (
                 self.expr_types[receiver.0 as usize],
                 self.value_enhancement(receiver),
             )
         });
-        let arguments = inputs
-            .arguments
-            .iter()
-            .map(|&argument| {
-                (
-                    self.expr_types[argument.0 as usize],
-                    self.value_enhancement(argument),
-                )
-            })
-            .collect::<Vec<_>>();
         let explicit_type_arguments = self.file.call_type_args.contains_key(&e.0);
-        let named_arguments = self.file.call_arg_names.contains_key(&e.0);
-        let inferred = !explicit_type_arguments && !named_arguments;
-        self.call_result_enhancement(call, receiver, inferred.then_some(&arguments[..]))
+        let arguments = (!explicit_type_arguments)
+            .then(|| self.resolved_call_arg_slots.get(&e))
+            .flatten();
+        self.call_result_enhancement(call, receiver, arguments)
     }
 
     /// The marks of the object the constructor call `e` creates: its classifier's type arguments
@@ -146,29 +113,50 @@ impl Checker<'_> {
             ResolvedConstructor::Plain { member, .. }
             | ResolvedConstructor::PlainSlots { member, .. } => member,
             ResolvedConstructor::Synthetic { ctor, .. } => &ctor.declaration,
-            ResolvedConstructor::Source { .. } => return TypeEnhancement::NONE,
+            ResolvedConstructor::Source {
+                owner,
+                declaration_params,
+                argument_bindings,
+                ..
+            } => {
+                if self.file.call_type_args.contains_key(&e.0) {
+                    return TypeEnhancement::NONE;
+                }
+                let Some(classifier) = self.resolver().classifier(*owner) else {
+                    return TypeEnhancement::NONE;
+                };
+                let formals = classifier.type_params();
+                let mut bindings = HashMap::new();
+                bind_type_parameters(
+                    self,
+                    formals,
+                    declaration_params,
+                    None,
+                    argument_bindings,
+                    &mut bindings,
+                );
+                let argument_count = self.expr_types[e.0 as usize].type_args().len();
+                return TypeEnhancement::new(
+                    false,
+                    formals
+                        .iter()
+                        .take(argument_count)
+                        .map(|name| bindings.get(name).cloned().unwrap_or_default())
+                        .collect(),
+                );
+            }
         };
         let Some(signature) = member.generic_sig.as_ref() else {
             return TypeEnhancement::NONE;
         };
-        if self.file.call_type_args.contains_key(&e.0)
-            || self.file.call_arg_names.contains_key(&e.0)
-        {
+        if self.file.call_type_args.contains_key(&e.0) {
             return TypeEnhancement::NONE;
         }
-        let arguments = self
-            .call_inputs(e)
-            .arguments
-            .iter()
-            .map(|&argument| {
-                (
-                    self.expr_types[argument.0 as usize],
-                    self.value_enhancement(argument),
-                )
-            })
-            .collect::<Vec<_>>();
+        let Some(arguments) = self.resolved_call_arg_slots.get(&e) else {
+            return TypeEnhancement::NONE;
+        };
         let mut bindings = HashMap::new();
-        bind_callable_parameters(self, signature, None, &arguments, &mut bindings);
+        bind_callable_parameters(self, signature, None, arguments, &mut bindings);
         TypeEnhancement::NONE.substitute(signature.ret, &|name| bindings.get(name).cloned())
     }
 
@@ -178,7 +166,7 @@ impl Checker<'_> {
         &self,
         call: &ResolvedCall,
         receiver: Option<(Ty, TypeEnhancement)>,
-        arguments: Option<&[(Ty, TypeEnhancement)]>,
+        arguments: Option<&super::SelectedArgumentCommitment>,
     ) -> TypeEnhancement {
         let not_null = |enhancement| enhancement == ResultEnhancement::NotNull;
         let (signature, result, enhanced, receiver_parameter) = match call {
@@ -244,28 +232,15 @@ impl Checker<'_> {
         marks.substitute(declared, &|name| bindings.get(name).cloned())
     }
 
-    /// The source receiver and value arguments of the call or property read `e`.
-    fn call_inputs(&self, e: ExprId) -> CallInputs {
+    /// The explicit source receiver of the selected call or property read `e`.
+    fn call_receiver(&self, e: ExprId) -> Option<ExprId> {
         match self.file.expr(e) {
-            Expr::Call { callee, args } => CallInputs {
-                receiver: match self.file.expr(*callee) {
-                    Expr::Member { receiver, .. } => Some(*receiver),
-                    _ => None,
-                },
-                arguments: args.clone(),
+            Expr::Call { callee, .. } => match self.file.expr(*callee) {
+                Expr::Member { receiver, .. } => Some(*receiver),
+                _ => None,
             },
-            Expr::SafeCall { receiver, args, .. } => CallInputs {
-                receiver: Some(*receiver),
-                arguments: args.clone().unwrap_or_default(),
-            },
-            Expr::Member { receiver, .. } => CallInputs {
-                receiver: Some(*receiver),
-                arguments: Vec::new(),
-            },
-            _ => CallInputs {
-                receiver: None,
-                arguments: Vec::new(),
-            },
+            Expr::SafeCall { receiver, .. } | Expr::Member { receiver, .. } => Some(*receiver),
+            _ => None,
         }
     }
 
@@ -351,34 +326,48 @@ fn bind_callable_parameters(
     checker: &Checker<'_>,
     signature: &GenericSig,
     receiver: Option<&(Ty, TypeEnhancement)>,
-    arguments: &[(Ty, TypeEnhancement)],
+    arguments: &super::SelectedArgumentCommitment,
     bindings: &mut HashMap<String, TypeEnhancement>,
 ) {
-    if signature.formals.is_empty() {
+    bind_type_parameters(
+        checker,
+        &signature.formals,
+        &signature.params,
+        receiver
+            .zip(signature.receiver.as_ref())
+            .map(|(actual, declared)| (*declared, actual)),
+        &arguments.argument_bindings,
+        bindings,
+    );
+}
+
+fn bind_type_parameters(
+    checker: &Checker<'_>,
+    formals: &[String],
+    parameters: &[Ty],
+    receiver: Option<(Ty, &(Ty, TypeEnhancement))>,
+    arguments: &[super::SelectedArgumentBinding],
+    bindings: &mut HashMap<String, TypeEnhancement>,
+) {
+    if formals.is_empty() {
         return;
     }
     let mut constraints: HashMap<String, Vec<TypeEnhancement>> = HashMap::new();
-    if let (Some(declared), Some((actual, marks))) = (signature.receiver, receiver) {
-        constrain(
-            checker,
-            signature,
-            declared,
-            *actual,
-            marks,
-            &mut constraints,
-        );
+    if let Some((declared, (actual, marks))) = receiver {
+        constrain(checker, formals, declared, *actual, marks, &mut constraints);
     }
-    if signature.params.len() == arguments.len() {
-        for (&declared, (actual, marks)) in signature.params.iter().zip(arguments) {
-            constrain(
-                checker,
-                signature,
-                declared,
-                *actual,
-                marks,
-                &mut constraints,
-            );
-        }
+    for binding in arguments {
+        let Some(&parameter) = parameters.get(binding.parameter) else {
+            continue;
+        };
+        let declared = if binding.vararg_element {
+            parameter.array_read_elem().unwrap_or(parameter)
+        } else {
+            parameter
+        };
+        let actual = checker.expr_types[binding.argument.0 as usize];
+        let marks = checker.value_enhancement(binding.argument);
+        constrain(checker, formals, declared, actual, &marks, &mut constraints);
     }
     for (name, marks) in constraints {
         let met = marks
@@ -395,14 +384,14 @@ fn bind_callable_parameters(
 /// occurring in the `declared` parameter type it is passed to.
 fn constrain(
     checker: &Checker<'_>,
-    signature: &GenericSig,
+    formals: &[String],
     declared: Ty,
     actual: Ty,
     marks: &TypeEnhancement,
     constraints: &mut HashMap<String, Vec<TypeEnhancement>>,
 ) {
     match declared {
-        Ty::TyParam(name, _) if signature.formals.iter().any(|formal| formal == name) => {
+        Ty::TyParam(name, _) if formals.iter().any(|formal| formal == name) => {
             constraints
                 .entry(name.to_string())
                 .or_default()
@@ -413,7 +402,7 @@ fn constrain(
         | Ty::DefinitelyNotNull(inner)
         | Ty::InProjection(inner)
         | Ty::OutProjection(inner) => {
-            constrain(checker, signature, *inner, actual, marks, constraints);
+            constrain(checker, formals, *inner, actual, marks, constraints);
         }
         Ty::Obj(class, declared_arguments) if !declared_arguments.is_empty() => {
             let actual = match actual.non_null() {
@@ -428,7 +417,7 @@ fn constrain(
             {
                 constrain(
                     checker,
-                    signature,
+                    formals,
                     declared,
                     actual,
                     view_marks.argument(index),

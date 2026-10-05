@@ -2391,7 +2391,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   to a parameter of type `T` (a generic constructor's `Box(value: T)`, an extension's `other: B`) is not
   guarded. krusty carries the marks beside the semantic type as a `TypeEnhancement` layout
   (`src/libraries/enhanced_nullability.rs`) recorded on the selected declaration, and derives a value's
-  marks from the checked call graph (`src/resolve/enhanced_values.rs`). Not yet modeled: marks through a
+  marks from selected call identities and their committed source-argument mappings
+  (`src/resolve/enhanced_values.rs`), including reordered named arguments, omitted defaults, and
+  expanded or whole-array varargs. Not yet modeled: marks through a
   lambda's inferred result and through an expected type that itself carries the attribute.
   Tests: `tests/enhanced_type_argument_null_check_e2e.rs` (per-method differential vs kotlinc and a
   run).

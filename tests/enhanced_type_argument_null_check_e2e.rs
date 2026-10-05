@@ -21,6 +21,10 @@ fun <T> Iterable<T>.firstOf(): T = iterator().next()
 
 fun <T> pick(first: T, second: T): T = first
 
+fun <T> withDefault(value: T, ignored: Int = 0): T = value
+
+fun <T> firstVararg(vararg values: T): T = values[0]
+
 fun <A, B> A.pairedWith(other: B): String = "" + this + other
 
 class Box<T>(val value: T) {
@@ -79,6 +83,22 @@ fun pickedMarked(map: HashMap<String, String>): Int {
     return keys.size
 }
 
+fun pickedNamed(map: HashMap<String, String>): Int {
+    val keys = pick(second = map.keys, first = map.keys)
+    return keys.size
+}
+
+fun defaulted(map: HashMap<String, String>): Int = withDefault(map.keys).size
+
+fun oneVararg(map: HashMap<String, String>): Int = firstVararg(map.keys).size
+
+fun manyVararg(map: HashMap<String, String>): Int = firstVararg(map.keys, map.keys).size
+
+fun wholeVararg(map: HashMap<String, String>): Int {
+    val values = arrayOf(map.keys)
+    return firstVararg(values = values).size
+}
+
 fun boxed(map: HashMap<String, Any>): Any = Box(map.values.firstOf())
 
 fun paired(map: HashMap<String, String>): String = "K".pairedWith(map.keys.firstOf())
@@ -127,10 +147,11 @@ fun box(): String {
     val result = firstKey(map) + firstEntry(map).value + firstValue(counts) + nextKey(map) +
         nextElement(set) + element(list) + inferredKeys(map) + inferredEntries(map) +
         declaredEntries(map) + loopKey(map) + loopValue(map) + pickedMixed(map, set) +
-        pickedMarked(map) + (boxed(values) as Box<*>).get() + paired(map) +
+        pickedMarked(map) + pickedNamed(map) + defaulted(map) + oneVararg(map) +
+        manyVararg(map) + wholeVararg(map) + (boxed(values) as Box<*>).get() + paired(map) +
         boxedValue(values) + branchKey(map, true) + whenKey(map, true) + variableKey(map) +
         treeValue(tree) + nestedElement(nested) + text(IllegalStateException(), false)
-    return if (result == "OK2OOO1OOOK11KKOKOOOKO") "OK" else result
+    return if (result == "OK2OOO1OOOK1111111KKOKOOOKO") "OK" else result
 }
 "#;
 
@@ -152,6 +173,11 @@ fn values_derived_from_enhanced_java_results_are_checked_like_kotlinc() {
         "loopValue",
         "pickedMixed",
         "pickedMarked",
+        "pickedNamed",
+        "defaulted",
+        "oneVararg",
+        "manyVararg",
+        "wholeVararg",
         "boxed",
         "paired",
         "boxedValue",

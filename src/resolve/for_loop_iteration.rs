@@ -216,12 +216,12 @@ impl Checker<'_> {
         let iterator = self.call_result_enhancement(
             &target.iterator,
             Some((iterable_ty, iterable_marks)),
-            Some(&[]),
+            None,
         );
         let element = self.call_result_enhancement(
             &target.next,
             Some((target.iter_ty, iterator.clone())),
-            Some(&[]),
+            None,
         );
         target.enhancement = ProtocolEnhancement { iterator, element };
         let elem = target.elem_ty;

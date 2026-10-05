@@ -114,20 +114,31 @@ pub(super) fn enhance_overriding_flexible_results(
         ) {
             continue;
         }
-        let Some(fixing) = declarations
+        let overridden = declarations
             .iter()
-            .filter(|inherited| {
-                overrides(source, implementation, inherited)
-                    && result_qualifier(inherited) == Some(NullabilityQualifier::NotNull)
-            })
-            .min_by_key(|inherited| inherited.receiver_rank)
-        else {
+            .filter(|inherited| overrides(source, implementation, inherited))
+            .collect::<Vec<_>>();
+        if !overridden
+            .iter()
+            .any(|inherited| result_qualifier(inherited) == Some(NullabilityQualifier::NotNull))
+        {
             continue;
-        };
+        }
         // The marks follow the declared results' shapes, so read both before any substitution. A
         // mapped builtin's declaration takes the builtin's rigid result without the attribute.
         let marks = if enhancement == ResultEnhancement::NotNull {
-            enhance_from_overridden(declared_result(implementation), declared_result(fixing)).1
+            overridden
+                .iter()
+                .map(|inherited| {
+                    enhance_from_overridden(
+                        declared_result(implementation),
+                        declared_result(inherited),
+                    )
+                    .1
+                })
+                .fold(crate::libraries::TypeEnhancement::NONE, |marks, next| {
+                    marks.union(&next)
+                })
         } else {
             crate::libraries::TypeEnhancement::NONE
         };
