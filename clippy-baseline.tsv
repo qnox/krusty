@@ -59,7 +59,6 @@
 1	src/jvm/classfile/stack_maps.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/jvm/classpath/inline_plan_cache.rs	large size difference between variants: the entire enum is at least 344 bytes
 1	src/jvm/inline/invoke_receiver.rs	this OR pattern can be rewritten using a range: help: try: `0xbc..=0xbe`
-1	src/jvm/ir_emit/bridge_emission.rs	this function has too many arguments (8/7)
 1	src/jvm/ir_emit/type_operation_emission.rs	this function has too many arguments (9/7)
 1	src/jvm/jvm_libraries.rs	unnecessarily eager cloning of iterator items
 1	src/jvm/jvm_libraries.rs	using `Option.and_then(|x| Some(y))`, which is more succinctly expressed as `map(|x| y)`
