@@ -2650,7 +2650,6 @@ pub struct StreamedHeaderModule {
     /// survives the active source parse.
     pub(super) detached_types: Vec<(SourceFileId, HeaderTypeId)>,
     annotation_strings: HeaderAnnotationStringArena,
-    annotation_policies: HeaderAnnotationPolicyArena,
     visibility_suppressions: HeaderVisibilitySuppressionArena,
     type_use_annotations: HeaderTypeUseAnnotationArena,
     /// Read freely; append through [`StreamedHeaderModule::push_stub`] so the identity index below
@@ -2893,7 +2892,6 @@ impl StreamedHeaderModule {
             + self.syntax.storage_payload_bytes()
             + self.detached_types.len() * std::mem::size_of::<(SourceFileId, HeaderTypeId)>()
             + self.annotation_strings.storage_payload_bytes()
-            + self.annotation_policies.storage_payload_bytes()
             + self.visibility_suppressions.storage_payload_bytes()
             + self.type_use_annotations.storage_payload_bytes()
             + self.stubs.len() * std::mem::size_of::<DeclarationStub>()
@@ -2908,13 +2906,6 @@ impl StreamedHeaderModule {
             + self.excluded.len() * std::mem::size_of::<DeclarationId>()
     }
 
-    pub(crate) fn annotation_policy_applications(
-        &self,
-        declaration: DeclarationId,
-    ) -> &[HeaderAnnotationPolicyApplication] {
-        self.annotation_policies.applications(declaration)
-    }
-
     /// Constant string arguments attached to one declaration annotation. Pass 1 copies the values
     /// while the bounded expression arena is live; signature consumers resolve the annotation at
     /// the same declaration-local ordinal before interpreting them. No parser `ExprId` or source
@@ -2926,13 +2917,6 @@ impl StreamedHeaderModule {
     ) -> &[Box<str>] {
         self.annotation_strings
             .arguments(declaration, annotation_ordinal)
-    }
-
-    pub(crate) fn annotation_policy_arguments(
-        &self,
-        range: HeaderAnnotationArgumentRange,
-    ) -> &[LookupNameId] {
-        self.annotation_policies.arguments(range)
     }
 
     pub(crate) fn file_visibility_suppressions(
@@ -3007,88 +2991,6 @@ impl StreamedHeaderModule {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct HeaderAnnotationArgumentRange {
-    start: u32,
-    len: u32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HeaderAnnotationPolicyApplication {
-    pub annotation: Span,
-    pub arguments: HeaderAnnotationArgumentRange,
-}
-
-/// Bounded declaration metadata needed to interpret an annotation class's own `@Retention` and
-/// `@Target` applications after its expression arena is gone. Only terminal enum-entry spellings
-/// are copied; arbitrary annotation expressions remain ordinary checked body work.
-#[derive(Default)]
-struct HeaderAnnotationPolicyArena {
-    applications: std::collections::HashMap<DeclarationId, Vec<HeaderAnnotationPolicyApplication>>,
-    arguments: Vec<LookupNameId>,
-}
-
-impl HeaderAnnotationPolicyArena {
-    fn add_class(
-        &mut self,
-        declaration: DeclarationId,
-        class: &ClassDecl,
-        file: &File,
-        names: &mut LookupNames,
-    ) {
-        let mut applications = Vec::with_capacity(class.annotations.len());
-        for (annotation, source_arguments) in class.annotations.iter().zip(&class.annotation_args) {
-            let start = next_id(self.arguments.len(), "annotation policy arguments");
-            for &source_argument in source_arguments {
-                let entries = match file.expr(source_argument) {
-                    Expr::AnnotationArrayLiteral(elements) => elements.as_slice(),
-                    Expr::Call { args, .. } => args.as_slice(),
-                    _ => std::slice::from_ref(&source_argument),
-                };
-                for &entry in entries {
-                    if let Expr::Member { name, .. } = file.expr(entry) {
-                        self.arguments.push(names.intern(name));
-                    }
-                }
-            }
-            let end = next_id(self.arguments.len(), "annotation policy arguments");
-            applications.push(HeaderAnnotationPolicyApplication {
-                annotation: annotation.span,
-                arguments: HeaderAnnotationArgumentRange {
-                    start,
-                    len: end - start,
-                },
-            });
-        }
-        if !applications.is_empty() {
-            self.applications.insert(declaration, applications);
-        }
-    }
-
-    fn applications(&self, declaration: DeclarationId) -> &[HeaderAnnotationPolicyApplication] {
-        self.applications
-            .get(&declaration)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
-    fn arguments(&self, range: HeaderAnnotationArgumentRange) -> &[LookupNameId] {
-        let start = range.start as usize;
-        &self.arguments[start..start + range.len as usize]
-    }
-
-    fn storage_payload_bytes(&self) -> usize {
-        self.arguments.len() * std::mem::size_of::<LookupNameId>()
-            + self
-                .applications
-                .values()
-                .map(|applications| {
-                    applications.len() * std::mem::size_of::<HeaderAnnotationPolicyApplication>()
-                })
-                .sum::<usize>()
-    }
-}
-
 /// Parse sources one at a time, expose each transient AST only for compact pass-1 extraction, and
 /// drop it before parsing the next source. The callback cannot take ownership of the `File`; the
 /// returned module is structurally AST-free.
@@ -3153,7 +3055,6 @@ pub struct HeaderInventoryBuilder {
     syntax: HeaderSyntaxArena,
     detached_types: Vec<(SourceFileId, HeaderTypeId)>,
     annotation_strings: HeaderAnnotationStringArena,
-    annotation_policies: HeaderAnnotationPolicyArena,
     visibility_suppressions: HeaderVisibilitySuppressionArena,
     type_use_annotations: HeaderTypeUseAnnotationArena,
     stubs: Vec<DeclarationStub>,
@@ -3285,8 +3186,6 @@ impl HeaderInventoryBuilder {
                         &class.annotations,
                         &class.annotation_args,
                     );
-                    self.annotation_policies
-                        .add_class(stable, class, file, &mut self.lookup_names);
                 }
                 Decl::Property(property) => {
                     self.annotation_strings.add(
@@ -3317,7 +3216,6 @@ impl HeaderInventoryBuilder {
             syntax: self.syntax,
             detached_types: self.detached_types,
             annotation_strings: self.annotation_strings,
-            annotation_policies: self.annotation_policies,
             visibility_suppressions: self.visibility_suppressions,
             type_use_annotations: self.type_use_annotations,
             stubs: self.stubs,
