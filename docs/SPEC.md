@@ -12503,6 +12503,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lambda's carrier is, instead of casting it to its function type. Test:
   `tests/reference_carrier_cast_e2e.rs`.
 
+- **An enum's property fields and getters carry their generic `Signature`.** kotlinc gives an
+  enum constructor property's field the same field `Signature` an ordinary class's has
+  (`Lkotlin/jvm/functions/Function1<Ljava/lang/Integer;Ljava/lang/Integer;>;`), and interns each
+  getter's `Signature` at its method visit, right after the getter's descriptor and before its
+  nullability annotation. The constructor's own `Signature` is written over its source parameters
+  only. Test: `tests/enum_constructor_signature_e2e.rs`.
+
 - **A primary constructor's `super(…)` delegation carries its operands' lines and returns to the
   declaration's start.** fir2ir builds a primary constructor's delegating call at the class
   declaration's start, annotations included (`IrClass::primary_delegation_line`), and a secondary
