@@ -316,7 +316,16 @@ pub(super) fn build_class_metadata_with_facts(
                         .cloned()
                         .unwrap_or_default(),
                     name: property.name.clone(),
-                    ty: property.ty,
+                    // A `vararg val` constructor property has the parameter's `Array<out E>` type.
+                    ty: if c.ctor_args.iter().any(|arg| {
+                        arg.is_vararg
+                            && arg.field_index.is_some()
+                            && arg.field_index == property.backing_field
+                    }) {
+                        crate::metadata::vararg_recorded_type(property.ty)
+                    } else {
+                        property.ty
+                    },
                     context_params: property.context_params.clone(),
                     is_var: property.is_var,
                     visibility,

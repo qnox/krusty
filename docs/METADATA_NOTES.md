@@ -497,7 +497,8 @@ The recorded `ValueParameter.type` of a `vararg` is `Array<out E>`, not the inva
 checker carries — the array's `Argument.projection` is `1` (OUT). The element travels separately and
 UNPROJECTED as `ValueParameter.vararg_element_type` (f4). `metadata::vararg_recorded_type` applies
 the projection at the encode seam only, so nothing upstream of metadata sees a type source never
-wrote. A primitive specialized array has no type argument and is recorded unchanged.
+wrote. Package functions, member functions, constructors (annotation classes included) and a
+`vararg val` constructor property all record the projected array. A primitive specialized array has no type argument and is recorded unchanged.
 
 ## Accessors, setter parameters and member list order
 

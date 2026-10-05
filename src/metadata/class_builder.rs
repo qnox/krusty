@@ -478,9 +478,15 @@ fn build_ctor(
             vp.field_varint(1, flags);
         }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
+                                                    // A `vararg` records `Array<out E>`, like the package-function writer.
+        let recorded = if shape.vararg_index == Some(i) {
+            crate::metadata::vararg_recorded_type(*pty)
+        } else {
+            *pty
+        };
         let ty = type_pb_tp(
             st,
-            *pty,
+            recorded,
             shape.param_tparams.get(i).copied().flatten(),
             shape
                 .param_spellings
@@ -1296,14 +1302,17 @@ pub fn build_class(
             vp.field_varint(2, st.local(pname) as u64);
             // A `vararg` parameter is SPELLED as its element but RECORDED as the array; see the
             // package-function writer for why the spelling is lifted rather than applied.
-            let declared_spelling = if m.vararg_index == Some(i) {
-                m.spellings.param(i).as_array_element()
+            let (declared_ty, declared_spelling) = if m.vararg_index == Some(i) {
+                (
+                    crate::metadata::vararg_recorded_type(*pty),
+                    m.spellings.param(i).as_array_element(),
+                )
             } else {
-                m.spellings.param(i).clone()
+                (*pty, m.spellings.param(i).clone())
             };
             let ty = crate::metadata::type_encoder::encode_declared_type(
                 st,
-                *pty,
+                declared_ty,
                 &declared_spelling,
                 &function_type_parameters,
             )
