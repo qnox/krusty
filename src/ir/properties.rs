@@ -225,4 +225,7 @@ pub struct IrModuleProperty {
     pub compile_time_constant: Option<IrConst>,
     /// Where the property lives when `owner` is absent.
     pub placement: IrStaticPlacement,
+    /// The own, unapplied types of the properties this one overrides, as the override edges its
+    /// classifier published them (see [`super::IrModuleCallable::overridden_results`]).
+    pub overridden_types: Box<[Ty]>,
 }

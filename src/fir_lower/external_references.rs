@@ -9,6 +9,11 @@ use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure};
 
+pub(super) struct CheckedExternalReference {
+    pub(super) ty: Ty,
+    pub(super) reflection_owner: Option<crate::types::TypeName>,
+}
+
 impl BodyLowering<'_> {
     /// A dependency callable reference is an ordinary [`IrExpr::CallableReference`]: a generated
     /// adapter calls the provider-selected declaration, and the target backend chooses its carrier
@@ -21,7 +26,7 @@ impl BodyLowering<'_> {
         extension_receiver: Option<FirReceiver>,
         substitutions: &[crate::fir::FirTypeSubstitution],
         adaptation: Option<&FirReferenceAdaptation>,
-        reference_ty: Ty,
+        reference: CheckedExternalReference,
     ) -> Result<ExprId, FirLoweringFailure> {
         let FirCallableReferenceTarget::External {
             declaration,
@@ -38,6 +43,10 @@ impl BodyLowering<'_> {
         else {
             unreachable!("module references stay on the module materializer")
         };
+        let CheckedExternalReference {
+            ty: reference_ty,
+            reflection_owner,
+        } = reference;
         let Ty::Fun(reference) = reference_ty.non_null() else {
             return Err(FirLoweringFailure::UnsupportedExternalCallableReference(
                 declaration,
@@ -250,6 +259,7 @@ impl BodyLowering<'_> {
                 declaration_result: result.get(),
                 declaration_suspend,
                 adaptation: adaptation.cloned().map(Box::new),
+                reflection_owner,
             })))
     }
 }

@@ -2,7 +2,8 @@
 
 use super::*;
 
-/// Add one public abstract declaration and apply its generic signature and source annotations.
+/// Add one abstract declaration with the member's own visibility and apply its generic signature
+/// and source annotations.
 pub(super) fn add_abstract(
     ir: &IrFile,
     cw: &mut ClassWriter,
@@ -14,7 +15,7 @@ pub(super) fn add_abstract(
     let declaration = &ir.functions[function as usize];
     let descriptor = declared_method_desc(ir, override_results, function);
     cw.add_abstract_method_sig(
-        0x0001 | 0x0400,
+        method_access::abstract_method_access(ir, function),
         &declaration.name,
         &descriptor,
         declared_method_signature(formatter, ir, override_results, function).as_deref(),
@@ -30,6 +31,13 @@ pub(super) fn add_abstract(
         cw.set_method_parameters(&declaration.name, &descriptor, &parameters);
     }
     emit_recorded(ir, cw, function, &declaration.name, &descriptor);
+    // An abstract method still carries kotlinc's nullability annotations, in an interface, an
+    // abstract class and an enum alike.
+    let (result, params) =
+        crate::jvm::abstract_method_nullability::annotations(ir, function, declaration);
+    if result.is_some() || params.iter().any(Option::is_some) {
+        cw.set_method_nullability(&declaration.name, &descriptor, result, &params);
+    }
     descriptor
 }
 

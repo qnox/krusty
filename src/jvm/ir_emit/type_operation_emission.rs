@@ -62,17 +62,26 @@ impl Emitter<'_> {
                 let source = self.emit_consumed_operand(arg, code);
                 (source, source)
             }
-            IrTypeOp::ImplicitCoercion => {
-                match reference_target
-                    .then(|| self.emit_boxed_call_reference(arg, code))
-                    .flatten()
-                {
-                    Some(wrapper) => (wrapper, wrapper),
-                    None => {
-                        let arg = self.unboxed_reference_source(arg, type_operand);
-                        self.emit_type_op_operand(arg, code)
+            // A reference target reads an erased result narrowed to a scalar as the callee returned
+            // it: kotlinc coerces the `Object` slot straight to the consumer and never unboxes it.
+            IrTypeOp::ImplicitCoercion if reference_target => {
+                match self.erased_scalar_result(arg) {
+                    Some((call, slot)) => {
+                        self.emit_value(call, code);
+                        (slot, slot)
                     }
+                    None => match self.emit_boxed_call_reference(arg, code) {
+                        Some(wrapper) => (wrapper, wrapper),
+                        None => {
+                            let arg = self.unboxed_reference_source(arg, type_operand);
+                            self.emit_type_op_operand(arg, code)
+                        }
+                    },
                 }
+            }
+            IrTypeOp::ImplicitCoercion => {
+                let arg = self.unboxed_reference_source(arg, type_operand);
+                self.emit_type_op_operand(arg, code)
             }
             _ => self.emit_type_op_operand(arg, code),
         };
@@ -398,18 +407,9 @@ impl Emitter<'_> {
     }
 
     /// A cast target as kotlinc's IR renderer spells it in
-    /// `null cannot be cast to non-null type …`.
+    /// `null cannot be cast to non-null type …`, where a class in the root package reads
+    /// `<root>.Token`.
     fn rendered_cast_target(&self, ty: Ty) -> String {
-        self.rendered_cast_type(ty, false)
-    }
-
-    /// A reified cast target as kotlinc's inliner spells it in the same message, where a class in
-    /// the root package reads `<root>.Token`.
-    pub(super) fn rendered_inlined_cast_target(&self, ty: Ty) -> String {
-        self.rendered_cast_type(ty, true)
-    }
-
-    fn rendered_cast_type(&self, ty: Ty, qualify_root_classifier: bool) -> String {
         self.ir.rendered_cast_target(
             ty,
             &|function| {
@@ -419,8 +419,13 @@ impl Emitter<'_> {
                         .unwrap_or_else(|| crate::types::type_name(&self.facade)),
                 )
             },
-            qualify_root_classifier,
+            true,
         )
+    }
+
+    /// A reified cast target the inliner substitutes renders through the same IR renderer.
+    pub(super) fn rendered_inlined_cast_target(&self, ty: Ty) -> String {
+        self.rendered_cast_target(ty)
     }
 
     fn emit_implicit_coercion(

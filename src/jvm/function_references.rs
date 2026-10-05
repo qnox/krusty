@@ -290,6 +290,7 @@ fn realize_adapter_reference(
             ..
         }
     );
+    let inherited_owner = reference.reflection_owner;
     let (owner_class, name, top_level, reflection_signature) = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(target) => {
             let declaration = ir
@@ -303,7 +304,12 @@ fn realize_adapter_reference(
                 (crate::ir::IrStaticPlacement::CompanionBlock { declaring_class }, _) => {
                     (Some(declaring_class), false)
                 }
-                (crate::ir::IrStaticPlacement::Package, Some(owner)) => (Some(owner), false),
+                (crate::ir::IrStaticPlacement::Package, Some(owner)) => {
+                    // `A::foo` names the member on A even when the declaration lives on a supertype.
+                    // kotlin-reflect substitutes the return type from that owner (`test.A?`), not
+                    // from the declaring class (`T?`). `H<A>::foo` still names H.
+                    (Some(inherited_owner.unwrap_or(owner)), false)
+                }
                 (crate::ir::IrStaticPlacement::Package, None) => (
                     Some(
                         super::module_calls::facade_for(declaration.source, facades.stems)
@@ -499,29 +505,26 @@ fn realize_adapter_reference(
         },
         _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
     };
-    let carrier = install_carrier(ir, expression, carrier, reference.function_type);
+    let carrier = install_carrier(ir, expression, carrier, internal);
     if let Some(parameters) = declared_parameters {
         ir.construction_declared_params.insert(carrier, parameters);
     }
     Ok(())
 }
 
-/// Replace the reference expression with its carrier, cast to the reference's function type.
-/// kotlinc's `FunctionReferenceLowering` hands the carrier to its use site through that implicit
-/// cast, which the JVM writes as a `checkcast` to the `FunctionN` interface.
-/// Replace `expression` with `carrier` cast to its function type; the carrier's new id.
+/// Replace the reference expression with its carrier. kotlinc's `FunctionReferenceLowering` hands
+/// the carrier to its use site through an implicit cast, which writes no instruction: the value
+/// keeps its class's type, and a consumer that needs its `FunctionN`, `KFunction` or other function
+/// type casts it there, as a lambda class's consumer does.
 fn install_carrier(
     ir: &mut IrFile,
     expression: usize,
     carrier: IrExpr,
-    function_type: Ty,
+    class: crate::types::TypeName,
 ) -> ExprId {
-    let carrier = ir.add_expr(carrier);
-    ir.exprs[expression] = IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::Cast,
-        arg: carrier,
-        type_operand: function_type.non_null(),
-    };
+    ir.exprs[expression] = carrier;
+    let carrier = ExprId::try_from(expression).expect("an expression id fits its index");
+    ir.logical_types.insert(carrier, Ty::obj_name(class));
     carrier
 }
 
@@ -891,6 +894,7 @@ mod tests {
             declaration_result: signature.ret,
             declaration_suspend,
             adaptation: None,
+            reflection_owner: None,
         };
         own_invoke_realizable(&ir, &reference)
     }

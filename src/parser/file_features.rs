@@ -26,4 +26,5 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.eager_lambda_analysis = features.has("EagerLambdaAnalysis");
     file.lambda_implementation_uses_inferred_result =
         features.language_version() < crate::language_version::LanguageVersion::V2_4;
+    file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }

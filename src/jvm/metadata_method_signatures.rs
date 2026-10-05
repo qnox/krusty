@@ -2,7 +2,8 @@
 //! `FirJvmSignatureSerializer.requiresFunctionSignature`. A reader rebuilds the descriptor of a
 //! function without one by mapping the class id of each declared type (extension receiver, value
 //! parameters, return) through `ClassMapperLite`; the signature is written exactly when that
-//! reconstruction is impossible or differs from the physical descriptor.
+//! reconstruction is impossible or differs from the physical descriptor. A property's backing
+//! field follows the same rule (`requiresSignature`) for its `JvmFieldSignature.desc`.
 
 use std::collections::HashSet;
 
@@ -34,14 +35,69 @@ pub(super) fn requires_function_signature(
     derived != physical
 }
 
+/// The `invoke` a non-suspend lambda class declares beside the erased `FunctionN` bridge.
+///
+/// Parameters keep their JVM types, primitives included. A signed primitive result is boxed; `Unit`
+/// stays `void`, and every other result uses its JVM descriptor.
+pub(super) fn lambda_invoke_descriptor(
+    receiver: Option<Ty>,
+    parameters: &[Ty],
+    result: Ty,
+) -> String {
+    let mut descriptor = String::from("(");
+    for ty in receiver.into_iter().chain(parameters.iter().copied()) {
+        descriptor.push_str(&super::names::type_descriptor(ty));
+    }
+    descriptor.push(')');
+    descriptor.push_str(&lambda_invoke_return(result));
+    descriptor
+}
+
+fn lambda_invoke_return(ty: Ty) -> String {
+    match ty {
+        Ty::Int
+        | Ty::Byte
+        | Ty::Short
+        | Ty::Long
+        | Ty::Float
+        | Ty::Double
+        | Ty::Boolean
+        | Ty::Char => {
+            let wrapper = super::jvm_class_map::wrapper_internal(ty)
+                .expect("a signed primitive has a JVM wrapper");
+            format!("L{wrapper};")
+        }
+        other => super::names::type_descriptor(other),
+    }
+}
+
+/// `requiresSignature` for a backing field: its descriptor is recorded exactly when a reader cannot
+/// rebuild it from the property type (`T`, `Int?`, a value class, `Array<String>`), or the field
+/// holds a delegate of another type.
+pub(super) fn requires_field_signature(
+    property: Ty,
+    physical: &str,
+    local_classifiers: &HashSet<TypeName>,
+) -> bool {
+    map_type_default(property, local_classifiers).as_deref() != Some(physical)
+}
+
 /// `mapTypeDefault`: the descriptor `ClassMapperLite` gives the type's class id, nullability
 /// ignored, or `None` for a type with no class id (a type parameter) or a local one.
 fn map_type_default(ty: Ty, local_classifiers: &HashSet<TypeName>) -> Option<String> {
-    Some(match ty.non_null() {
+    let ty = ty.non_null();
+    Some(match ty {
         Ty::Obj(classifier, _) if local_classifiers.contains(&classifier) => return None,
         Ty::Obj(classifier, _) => super::jvm_class_map::class_mapper_lite_descriptor(classifier),
         Ty::Unit => "V".to_owned(),
         Ty::Nothing => super::jvm_class_map::class_mapper_lite_nothing_descriptor(),
+        // `T & Any` is still the type parameter. A class tightened the same way keeps its class id.
+        Ty::DefinitelyNotNull(inner) => {
+            return match *inner {
+                Ty::TyParam(..) => None,
+                other => map_type_default(other, local_classifiers),
+            };
+        }
         // FIR's class id of a function type is its kind and arity, receiver and context included.
         Ty::Fun(signature) => super::jvm_class_map::class_mapper_lite_function_descriptor(
             signature.params.len(),
@@ -81,6 +137,39 @@ mod tests {
             "(Ljava/lang/Integer;)V",
             &none
         ));
+        assert!(requires_function_signature(
+            None,
+            [Ty::String],
+            Ty::Long,
+            "(Ljava/lang/String;)Ljava/lang/Long;",
+            &none
+        ));
+        assert!(!requires_function_signature(
+            Some(Ty::Int),
+            [],
+            Ty::Unit,
+            "(I)V",
+            &none
+        ));
+        assert!(!requires_function_signature(
+            None,
+            [],
+            Ty::String,
+            "()Ljava/lang/String;",
+            &none
+        ));
+        assert_eq!(
+            lambda_invoke_descriptor(None, &[Ty::String], Ty::Long),
+            "(Ljava/lang/String;)Ljava/lang/Long;"
+        );
+        assert_eq!(
+            lambda_invoke_descriptor(Some(Ty::Int), &[], Ty::Unit),
+            "(I)V"
+        );
+        assert_eq!(
+            lambda_invoke_descriptor(None, &[], Ty::Int),
+            "()Ljava/lang/Integer;"
+        );
         let reflective = Ty::obj_args("kotlin/reflect/KSuspendFunction0", &[Ty::Unit]);
         assert!(requires_function_signature(
             Some(reflective),

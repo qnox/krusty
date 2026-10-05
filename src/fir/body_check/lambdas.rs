@@ -64,6 +64,11 @@ impl BodyFirChecker<'_> {
             .file
             .expr_span(expression)
             .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let type_parameters = source_lambda_type_parameters(
+            self.index,
+            DeclarationId::from_raw(self.body.owner().raw()),
+            self.info.semantic_ty(expression),
+        );
         let callable = self.body.allocate_local_callable();
         let owner = self.body.owner();
         let target_origin = self.origins.source(self.source, span);
@@ -317,7 +322,41 @@ impl BodyFirChecker<'_> {
         nested.body.push_root(statement);
         Ok(FirExprKind::Lambda {
             callable,
+            type_parameters,
             body: Box::new(nested.body),
         })
     }
+}
+
+/// The declarations `function_type` names, then those their bounds name, in first-use order.
+///
+/// A name that is not a type parameter of this declaration or one of its owners is an inference
+/// variable. It is not published. Lowering consumes these identities and does not recover them
+/// by scanning type text.
+fn source_lambda_type_parameters(
+    index: &ResolvedModuleIndex,
+    owner: DeclarationId,
+    function_type: Ty,
+) -> Box<[crate::fir::TypeParameterId]> {
+    let mut names = Vec::new();
+    crate::ir::type_reflection::type_parameters_named_by(function_type, &mut names);
+    let mut parameters = Vec::new();
+    let mut cursor = 0;
+    while let Some(&name) = names.get(cursor) {
+        cursor += 1;
+        let Some(identity) = index.type_parameter_in_declaration_scope(owner, name) else {
+            continue;
+        };
+        if parameters.contains(&identity) {
+            continue;
+        }
+        parameters.push(identity);
+        let header = index
+            .type_parameter_header(identity)
+            .expect("a resolved type parameter retains its header");
+        for bound in &header.bounds {
+            crate::ir::type_reflection::type_parameters_named_by(bound.ty.get(), &mut names);
+        }
+    }
+    parameters.into_boxed_slice()
 }

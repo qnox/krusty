@@ -356,9 +356,10 @@ fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -
                 out.field_varint(1, 6);
                 out.field_fixed64(4, value.to_bits());
             }
+            // `int_value` is a `sint64` for every integral kind, a boolean included.
             IrConst::Boolean(value) => {
                 out.field_varint(1, 7);
-                out.field_varint(2, u64::from(*value));
+                out.field_varint(2, zigzag_i64(i64::from(*value)));
             }
             IrConst::String(value) => {
                 out.field_varint(1, 8);
@@ -551,14 +552,7 @@ fn function_pb(
         } else {
             (*pty, f.spellings.param(i).clone())
         };
-        let mut ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
-        if f.no_infer_params.get(i).copied().unwrap_or(false) {
-            let annotation = crate::metadata::type_encoder::encode_annotation(
-                st,
-                crate::types::type_name("kotlin/internal/NoInfer"),
-            );
-            ty.field_message(100, &annotation);
-        }
+        let ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
         vp.field_message(3, &ty); // ValueParameter.type = 3
                                   // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
                                   // kotlinc's declared type stays the array.
@@ -693,9 +687,13 @@ pub struct PropMeta {
     pub setter_visibility: crate::types::Visibility,
     /// Companion-associated (`companion val C.name`) — sets `Property.flags` bit 19.
     pub companion: bool,
-    /// A delegated property's `(name, descriptor)` of the static field holding its delegate, which
-    /// kotlinc records explicitly after the accessors' signatures.
-    pub delegate_field: Option<(String, String)>,
+    /// A delegated property's name for the static field holding its delegate, which kotlinc
+    /// records explicitly after the accessors' signatures.
+    pub field_name: Option<String>,
+    /// The field's descriptor, when a reader cannot rebuild it by mapping the property type's class
+    /// id (kotlinc's `requiresSignature`): a value class's carrier (`UInt` stored as `I`), a boxed
+    /// `Int?`, a reference array, or a delegate.
+    pub field_desc: Option<String>,
 }
 
 /// A source typealias declaration in package or classifier metadata.
@@ -963,16 +961,18 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
         (getter, setter)
     };
     let mut jvm = Pb::new();
-    // A delegated property names its delegate field explicitly, interned after the accessors.
-    // Otherwise `field` (empty → derived) only when a backing field EXISTS: a computed or extension
-    // property has none, and kotlinc omits the entry rather than recording an empty one.
-    if let Some((name, descriptor)) = &m.delegate_field {
+    // `field` only when a field EXISTS (a delegate's storage included): a computed or extension
+    // property has none, and kotlinc omits the entry rather than recording an empty one. Its
+    // strings intern after the accessors'.
+    if m.has_backing_field || m.field_name.is_some() {
         let mut field = Pb::new();
-        field.field_varint(1, st.local(name) as u64); // JvmFieldSignature.name = 1
-        field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
+        if let Some(name) = &m.field_name {
+            field.field_varint(1, st.local(name) as u64); // JvmFieldSignature.name = 1
+        }
+        if let Some(descriptor) = &m.field_desc {
+            field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
+        }
         jvm.field_message(1, &field);
-    } else if m.has_backing_field {
-        jvm.field_message(1, &Pb::new());
     }
     if let Some(getter) = &getter {
         jvm.field_message(3, getter);
@@ -1185,7 +1185,8 @@ mod tests {
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
+                field_name: None,
+                field_desc: None,
                 decl_order: 0,
             }
         }
@@ -1240,7 +1241,8 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
+                field_name: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1298,7 +1300,8 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
+                field_name: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1355,7 +1358,8 @@ mod tests {
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
+                field_name: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1405,7 +1409,8 @@ mod tests {
                 },
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
-                delegate_field: None,
+                field_name: None,
+                field_desc: None,
                 decl_order: 0,
             }],
             &[],
