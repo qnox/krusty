@@ -2633,6 +2633,8 @@ mod when_classpath_java_enum_e2e;
 mod when_lambda_branch_e2e;
 #[path = "when_multiple_else_check_e2e.rs"]
 mod when_multiple_else_check_e2e;
+#[path = "when_no_branch_matched_line_e2e.rs"]
+mod when_no_branch_matched_line_e2e;
 #[path = "when_nothing_arm_e2e.rs"]
 mod when_nothing_arm_e2e;
 #[path = "when_null_guard_smartcast_e2e.rs"]

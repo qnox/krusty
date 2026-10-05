@@ -12346,6 +12346,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so a jump the constant folder removes shares their output line instead of remaining as its own
   `nop`. Tests: `tests/comparison_jump_line_e2e.rs`, `tests/constant_conditions_e2e.rs`.
 
+- **An exhaustive `when`'s implicit `else` throws on the `when`'s line.** fir2ir adds
+  `else -> throw NoWhenBranchMatchedException()` to an exhaustive `when` without an `else`, at the
+  `when`'s own offsets, and kotlinc's `visitThrow` marks that line on the `new`. The JVM writes the
+  same throw for such a `when` and marks the `when`'s source line before it, so the exception's
+  frame does not stay on the last branch's line. Test: `tests/when_no_branch_matched_line_e2e.rs`.
+
 - **A subject `when`'s type-test and range conditions read the subject at their own line.**
   fir2ir builds every condition's read of `tmp_subject` at that condition's offsets, so each
   `is T` / `in r` condition reads the subject afresh with the condition's source line rather than
