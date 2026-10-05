@@ -205,8 +205,23 @@ pub(super) fn emit_annotation_impl_class(
         if let Some(defaults) = ir.class_ctor_defaults(&fq) {
             let param_tys: Vec<Ty> = members.iter().map(|(_, jt)| *jt).collect();
             // An annotation class's members carry no declaration annotations of their own.
-            constructor_defaults::emit_ctor_default_stub(
-                ir, &fq, c.fq_name, facade, &param_tys, defaults, false, &mut cw, env,
+            constructor_defaults::emit_ctor_default_stub_with_prefix(
+                ir,
+                constructor_defaults::ConstructorDefaultStub {
+                    owner: &fq,
+                    owner_identity: c.fq_name,
+                    facade,
+                    physical_prefix: &[],
+                    logical_prefix_count: 0,
+                    real_params: &param_tys,
+                    defaults,
+                    secondary_lines: None,
+                    target_uses_marker_accessor: false,
+                    deprecated: false,
+                    access: 0x1001,
+                },
+                &mut cw,
+                env,
             );
         }
     }

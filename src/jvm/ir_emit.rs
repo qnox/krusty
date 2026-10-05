@@ -3167,26 +3167,28 @@ fn emit_class(
                 .expect("constructor default prefix exceeds its defaults");
             constructor_defaults::emit_ctor_default_stub_with_prefix(
                 ir,
-                &fq_name,
-                c.fq_name,
-                facade,
-                prefix_params,
-                prefix_count,
-                source_params,
-                source_defaults,
-                None,
-                value_param_ctor || c.is_sealed,
-                c.primary_ctor_annotations.deprecated(),
-                // A declared private primary's overload is package-private, the way kotlinc gives
-                // any private constructor's; a sealed class's is its public way in.
-                if ir.ctor_visibilities.get(&c.fq_name_id())
-                    == Some(&crate::types::Visibility::Private)
-                    && !c.is_sealed
-                    && !value_param_ctor
-                {
-                    0x1000
-                } else {
-                    0x1001
+                constructor_defaults::ConstructorDefaultStub {
+                    owner: &fq_name,
+                    owner_identity: c.fq_name,
+                    facade,
+                    physical_prefix: prefix_params,
+                    logical_prefix_count: prefix_count,
+                    real_params: source_params,
+                    defaults: source_defaults,
+                    secondary_lines: None,
+                    target_uses_marker_accessor: value_param_ctor || c.is_sealed,
+                    deprecated: c.primary_ctor_annotations.deprecated(),
+                    // A declared private primary's overload is package-private, the way kotlinc
+                    // gives any private constructor's; a sealed class's is its public way in.
+                    access: if ir.ctor_visibilities.get(&c.fq_name_id())
+                        == Some(&crate::types::Visibility::Private)
+                        && !c.is_sealed
+                        && !value_param_ctor
+                    {
+                        0x1000
+                    } else {
+                        0x1001
+                    },
                 },
                 &mut cw,
                 env,
@@ -4110,17 +4112,19 @@ fn emit_enum_class(
     {
         constructor_defaults::emit_ctor_default_stub_with_prefix(
             ir,
-            &fq,
-            c.fq_name,
-            facade,
-            &[Ty::String, Ty::Int],
-            0,
-            &all_param_tys,
-            defaults,
-            None,
-            false,
-            false,
-            ACC_SYNTHETIC,
+            constructor_defaults::ConstructorDefaultStub {
+                owner: &fq,
+                owner_identity: c.fq_name,
+                facade,
+                physical_prefix: &[Ty::String, Ty::Int],
+                logical_prefix_count: 0,
+                real_params: &all_param_tys,
+                defaults,
+                secondary_lines: None,
+                target_uses_marker_accessor: false,
+                deprecated: false,
+                access: ACC_SYNTHETIC,
+            },
             &mut cw,
             env,
         );
