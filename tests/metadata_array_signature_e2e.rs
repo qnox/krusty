@@ -158,6 +158,25 @@ fn a_member_and_constructor_vararg_record_a_projected_array() {
     assert_identical("MemberVarargProjection", SRC, "app/Holder");
 }
 
+/// The synthetic array keeps the element's source spelling below it, and a class type parameter
+/// stays an indexed type argument rather than replacing the recorded array type.
+#[test]
+fn constructor_varargs_preserve_alias_and_type_parameter_elements() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Payload\n\
+        typealias Cargo = Payload\n\
+        class Aliased(vararg val items: Cargo) {\n\
+        \x20   constructor(marker: Boolean, vararg names: Cargo) : this()\n\
+        \x20   fun take(vararg cargo: Cargo): Int = cargo.size\n\
+        }\n\
+        class Generic<T>(vararg val items: T) {\n\
+        \x20   fun <U> take(vararg values: U): Int = values.size\n\
+        }\n";
+    assert_identical("ConstructorVarargAlias", SRC, "app/Aliased");
+    assert_identical("ConstructorVarargTypeParameter", SRC, "app/Generic");
+}
+
 #[test]
 fn an_annotation_class_vararg_records_a_projected_array() {
     const SRC: &str = "package app\n\

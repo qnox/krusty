@@ -306,26 +306,32 @@ pub(super) fn build_class_metadata_with_facts(
             let delegate = property
                 .delegate_field
                 .and_then(|i| c.fields.get(i as usize));
+            let mut spellings = ir
+                .prop_declared_spellings
+                .get(&(c.fq_name_id(), property.name.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let constructor_vararg = c.ctor_args.iter().any(|arg| {
+                arg.is_vararg
+                    && arg.field_index.is_some()
+                    && arg.field_index == property.backing_field
+            });
+            let ty = if constructor_vararg {
+                let recorded =
+                    crate::metadata::vararg_recorded_declaration(property.ty, &spellings.ret);
+                spellings.ret = recorded.1;
+                recorded.0
+            } else {
+                property.ty
+            };
             (
                 property.source_order,
                 PropMeta {
                     return_value_status: property.return_value_status,
-                    spellings: ir
-                        .prop_declared_spellings
-                        .get(&(c.fq_name_id(), property.name.clone()))
-                        .cloned()
-                        .unwrap_or_default(),
+                    spellings,
                     name: property.name.clone(),
                     // A `vararg val` constructor property has the parameter's `Array<out E>` type.
-                    ty: if c.ctor_args.iter().any(|arg| {
-                        arg.is_vararg
-                            && arg.field_index.is_some()
-                            && arg.field_index == property.backing_field
-                    }) {
-                        crate::metadata::vararg_recorded_type(property.ty)
-                    } else {
-                        property.ty
-                    },
+                    ty,
                     context_params: property.context_params.clone(),
                     is_var: property.is_var,
                     visibility,
