@@ -572,9 +572,9 @@ fn push_member_extension_accessor_bridges(
     }
 }
 
-/// The `get<X>()` bridge (and, for a `var` override, the `set<X>()` one). A bridge already recorded under
-/// the accessor's name wins — the first supertype in the walk is the nearest one. Each delegates to
-/// the implementation's own accessor function when this class declares it.
+/// The `get<X>()` bridge (and, for a `var` override, the `set<X>()` one). A bridge already recorded
+/// under the accessor's name and descriptor wins — the first supertype in the walk is the nearest
+/// one. Each delegates to the implementation's own accessor function when this class declares it.
 fn push_property_bridge(
     ir: &mut IrFile,
     cid: usize,
