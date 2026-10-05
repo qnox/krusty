@@ -2,9 +2,11 @@
 
 use super::*;
 
-/// `static final` plus the companion object's own visibility, as kotlinc writes the outer class's
-/// `Companion` field: a `private companion object` keeps its field private, a protected one
-/// protected. An interface field is always public.
+/// `static final` plus the companion object's visibility, as kotlinc writes the outer class's
+/// `Companion` field: a `private companion object` keeps its field private. kotlinc also keeps a
+/// protected one's field protected, but reads it from a class outside the hierarchy through a
+/// `$s<hash>` accessor on the subclass that grants access; until that accessor is ported, the
+/// field stays public so those reads link. An interface field is always public.
 pub(super) fn companion_field_access(ir: &IrFile, class: &IrClass, companion: TypeName) -> u16 {
     const STATIC_FINAL: u16 = 0x0018;
     if class.is_interface {
@@ -13,7 +15,6 @@ pub(super) fn companion_field_access(ir: &IrFile, class: &IrClass, companion: Ty
     STATIC_FINAL
         | match ir.class_visibilities.get(&companion) {
             Some(crate::types::Visibility::Private) => 0x0002,
-            Some(crate::types::Visibility::Protected) => 0x0004,
             _ => 0x0001,
         }
 }

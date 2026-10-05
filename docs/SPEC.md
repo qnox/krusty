@@ -11037,9 +11037,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Private members of a companion object.** Kotlin's `private` is lexical, so a declaration that
   is private inside a companion object is visible from everything in the companion's containing
   class: a `private data class` nested in a `private companion object` is constructed and read from
-  the outer class's methods. A `private` or `protected` companion keeps that visibility on the outer
-  class's `Companion` field (`private static final`), as kotlinc writes it; an interface's field
-  stays public. Every other JVM class that reads a private `Companion` field (a nested or inner
+  the outer class's methods. A `private` companion keeps that visibility on the outer class's
+  `Companion` field (`private static final`), as kotlinc writes it; an interface's field stays
+  public. kotlinc also writes a `protected` companion's field protected and reads it from outside
+  the hierarchy through a `$s<hash>` accessor on the subclass that grants access; that accessor is
+  not ported yet, so krusty keeps such a field public. Every other JVM class that reads a private `Companion` field (a nested or inner
   class, an object expression, the companion's own methods) calls the outer class's synthetic
   `public static final access$getCompanion$p()` instead, appended with the outer class's other
   accessors in first-use order; the outer class's own code and its indy lambdas read the field

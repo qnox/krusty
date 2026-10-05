@@ -2,8 +2,8 @@
 //!
 //! Kotlin's private visibility is lexical: a declaration that is private inside a companion object
 //! is visible everywhere in the companion's containing class, so a private class nested in a private
-//! companion can be constructed and read from the outer class's own methods. A private or protected
-//! companion also keeps that visibility on the outer class's `Companion` field.
+//! companion can be constructed and read from the outer class's own methods. A private companion also
+//! keeps that visibility on the outer class's `Companion` field.
 //!
 //! DIFFERENTIAL: the same source goes through the provisioned kotlinc and through krusty, and each
 //! class file is compared byte for byte.
@@ -51,16 +51,11 @@ class PrivateHolder {
         private fun twice(value: Int) = value * 2
     }
 }
-open class ProtectedHolder {
-    protected companion object
-}
 "#;
 
 #[test]
 fn the_companion_field_keeps_the_companion_visibility() {
-    for class in ["PrivateHolder", "ProtectedHolder"] {
-        byte_identical("companion_visibilities", COMPANION_VISIBILITIES, class);
-    }
+    byte_identical("companion_visibilities", COMPANION_VISIBILITIES, "PrivateHolder");
 }
 
 /// Every other JVM class that reads a private companion (a nested or inner class, an object
