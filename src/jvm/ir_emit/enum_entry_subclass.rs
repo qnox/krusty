@@ -42,7 +42,16 @@ pub(super) fn emit_enum_entry_subclass(
     // kotlinc visits the name, descriptor and signature before the body's constants.
     cw.reserve_method_name("<init>");
     cw.reserve_descriptor(&ctor_desc);
-    cw.reserve_descriptor(ENTRY_CONSTRUCTOR_SIGNATURE);
+    // Its only parameters are the enum's synthetic `(name, ordinal)` prefix, so the generic
+    // `Signature` has no source parameters.
+    let ctor_signature = super::constructor_signatures::enum_entry_constructor_signature(
+        &signature_formatter,
+        &[],
+        &[],
+    );
+    if let Some(signature) = &ctor_signature {
+        cw.reserve_descriptor(signature);
+    }
     let mut ctor = CodeBuilder::new(1 + prefix_words);
     let ctor_max = {
         let mut e = Emitter::new(
@@ -115,13 +124,6 @@ pub(super) fn emit_enum_entry_subclass(
     ctor.ret_void();
     ctor.ensure_locals(ctor_max);
     ctor.link();
-    // Its only parameters are the enum's synthetic `(name, ordinal)` prefix, so the generic
-    // `Signature` has no source parameters.
-    let ctor_signature = super::constructor_signatures::enum_entry_constructor_signature(
-        &signature_formatter,
-        &[],
-        &[],
-    );
     cw.add_method_sig(
         0x0000,
         "<init>",
