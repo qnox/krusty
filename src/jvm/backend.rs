@@ -1370,6 +1370,7 @@ pub fn facade_package_metadata_from_ir(
                     | None => (true, declaration.mutable, None),
                 };
             let companion = declaration.is_companion_extension();
+            let field = property_field(ir, declaration);
             let accessor_parameters = declaration
                 .context_parameters
                 .iter()
@@ -1442,8 +1443,14 @@ pub fn facade_package_metadata_from_ir(
                 modifiers: declaration.modifiers,
                 setter_visibility: declaration.setter_visibility,
                 companion,
-                delegate_field: delegate_field(ir, declaration),
-                field_desc: erased_value_class_descriptor(ir, declaration),
+                field_name: field.as_ref().and_then(|(name, _)| name.clone()),
+                field_desc: field.map(|(_, descriptor)| descriptor).filter(|physical| {
+                    super::metadata_method_signatures::requires_field_signature(
+                        declaration.ty,
+                        physical,
+                        &Default::default(),
+                    )
+                }),
             }
         })
         .collect::<Vec<_>>();
@@ -1498,22 +1505,25 @@ fn erased_value_class_descriptor(
         .then(|| crate::jvm::names::type_descriptor(field.ty))
 }
 
-fn delegate_field(
+/// The facade field realizing a property, if any: a delegate's storage by its JVM name, or a
+/// backing field (named by the property), with its physical descriptor.
+fn property_field(
     ir: &crate::ir::IrFile,
     declaration: &crate::ir::IrPackageProperty,
-) -> Option<(String, String)> {
-    let Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
-        delegate: Some(storage),
-        ..
-    }) = ir.local_property_layouts.get(&declaration.property)
-    else {
-        return None;
+) -> Option<(Option<String>, String)> {
+    let (name, storage) = match ir.local_property_layouts.get(&declaration.property)? {
+        crate::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. } => (None, *storage),
+        crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+            delegate: Some(storage),
+            ..
+        } => (
+            Some(ir.static_field_jvm_name(*storage).to_string()),
+            *storage,
+        ),
+        _ => return None,
     };
-    let field = &ir.statics[*storage as usize];
-    Some((
-        ir.static_field_jvm_name(*storage).to_string(),
-        crate::jvm::names::type_descriptor(field.ty),
-    ))
+    let field = ir.statics.get(storage as usize)?;
+    Some((name, crate::jvm::names::type_descriptor(field.ty)))
 }
 
 /// The JVM descriptor of a package function realized from its declaration: context parameters,
