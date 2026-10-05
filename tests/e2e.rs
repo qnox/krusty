@@ -492,9 +492,13 @@ mod constant_pool_order_e2e;
 mod construction_argument_labels_e2e;
 #[path = "construction_default_arg_e2e.rs"]
 mod construction_default_arg_e2e;
+#[path = "constructor_argument_specificity_e2e.rs"]
+mod constructor_argument_specificity_e2e;
 mod constructor_continuation_e2e;
 #[path = "constructor_initialization_order_e2e.rs"]
 mod constructor_initialization_order_e2e;
+#[path = "constructor_signature_e2e.rs"]
+mod constructor_signature_e2e;
 #[path = "consumer_materialized_result_e2e.rs"]
 mod consumer_materialized_result_e2e;
 #[path = "context_and_loop_wording_e2e.rs"]
@@ -595,6 +599,8 @@ mod definitely_non_null_type_e2e;
 mod delegate_by_lazy_e2e;
 #[path = "delegate_initializer_constraint_e2e.rs"]
 mod delegate_initializer_constraint_e2e;
+#[path = "delegate_member_call_e2e.rs"]
+mod delegate_member_call_e2e;
 #[path = "delegate_scalar_boundary_e2e.rs"]
 mod delegate_scalar_boundary_e2e;
 #[path = "delegated_local_prop_e2e.rs"]
@@ -605,6 +611,8 @@ mod delegated_member_prop_e2e;
 mod delegated_prop_e2e;
 #[path = "delegated_properties_array_e2e.rs"]
 mod delegated_properties_array_e2e;
+#[path = "delegation_forwarder_signature_e2e.rs"]
+mod delegation_forwarder_signature_e2e;
 #[path = "dep_resolution.rs"]
 mod dep_resolution;
 #[path = "dependency_override_signature_e2e.rs"]
@@ -1367,6 +1375,8 @@ mod metadata_reader_e2e;
 mod metadata_return_types;
 #[path = "metadata_return_value_status_e2e.rs"]
 mod metadata_return_value_status_e2e;
+#[path = "metadata_supertype_order_e2e.rs"]
+mod metadata_supertype_order_e2e;
 #[path = "metadata_synthetic_classes_e2e.rs"]
 mod metadata_synthetic_classes_e2e;
 #[path = "metadata_type_reference_e2e.rs"]
@@ -2399,6 +2409,8 @@ mod type_parameter_bound_erasure_e2e;
 mod type_parameter_invoke_e2e;
 #[path = "type_parameter_nullability_e2e.rs"]
 mod type_parameter_nullability_e2e;
+#[path = "type_use_annotation_metadata_e2e.rs"]
+mod type_use_annotation_metadata_e2e;
 #[path = "typealias_abbreviated_type_e2e.rs"]
 mod typealias_abbreviated_type_e2e;
 #[path = "typealias_constructor_inference_e2e.rs"]

@@ -8,10 +8,6 @@ use super::bridge_emission::emit_bridges;
 use super::frame_map::FrameKey;
 use super::*;
 
-/// The `Signature` of an entry subclass's constructor: its only parameters are the enum's name
-/// and ordinal, which a constructor `Signature` leaves out.
-const ENTRY_CONSTRUCTOR_SIGNATURE: &str = "()V";
-
 /// Emit a synthesized enum-entry subclass (`Enum$ENTRY extends Enum`) for an entry with a body: a
 /// package-private `final` class with one constructor `(String name, int ordinal)V` that evaluates
 /// the constant's arguments and calls the enum's constructor with them, plus the entry's overriding
@@ -119,14 +115,19 @@ pub(super) fn emit_enum_entry_subclass(
     ctor.ret_void();
     ctor.ensure_locals(ctor_max);
     ctor.link();
-    // As on the enum's own constructor, the generic `Signature` leaves out the `(String, int)`
-    // prefix, so it is `()V`.
+    // Its only parameters are the enum's synthetic `(name, ordinal)` prefix, so the generic
+    // `Signature` has no source parameters.
+    let ctor_signature = super::constructor_signatures::enum_entry_constructor_signature(
+        &signature_formatter,
+        &[],
+        &[],
+    );
     cw.add_method_sig(
         0x0000,
         "<init>",
         &ctor_desc,
         &ctor,
-        Some(ENTRY_CONSTRUCTOR_SIGNATURE),
+        ctor_signature.as_deref(),
     );
     // The constructor maps to its entry's line and lists the receiver and the enum prefix.
     let locals = [

@@ -41,17 +41,6 @@ impl Checker<'_> {
         crate::libraries::FunctionInfo,
         crate::fir::ResolvedFunctionOverrideTarget,
     )> {
-        let implementation_formals = implementation
-            .generic_sig
-            .as_ref()
-            .map(|signature| signature.formals.as_slice())
-            .unwrap_or_default();
-        let implementation_bounds = implementation
-            .generic_sig
-            .as_ref()
-            .map(|signature| signature.formal_bounds.as_slice())
-            .unwrap_or_default();
-        let implementation_parameters = implementation.semantic_params();
         let source = self.fed_source();
         let matches_override = |candidate: &crate::libraries::FunctionInfo| {
             if candidate.kind != implementation.kind
@@ -60,39 +49,7 @@ impl Checker<'_> {
             {
                 return false;
             }
-            let candidate_formals = candidate
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.formals.as_slice())
-                .unwrap_or_default();
-            let candidate_bounds = candidate
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.formal_bounds.as_slice())
-                .unwrap_or_default();
-            crate::symbol_resolver::override_input_shapes_match(
-                &source,
-                crate::symbol_resolver::OverrideInputShape {
-                    params: &candidate.semantic_params(),
-                    receiver: candidate
-                        .semantic_receiver()
-                        .filter(|_| candidate.is_extension()),
-                    formals: candidate_formals,
-                    formal_bounds: candidate_bounds,
-                    context_count: candidate.context_count,
-                    suspend: candidate.flags.suspend,
-                },
-                crate::symbol_resolver::OverrideInputShape {
-                    params: &implementation_parameters,
-                    receiver: implementation
-                        .semantic_receiver()
-                        .filter(|_| implementation.is_extension()),
-                    formals: implementation_formals,
-                    formal_bounds: implementation_bounds,
-                    context_count: implementation.context_count,
-                    suspend: implementation.flags.suspend,
-                },
-            )
+            crate::symbol_resolver::function_input_shapes_match(&source, candidate, implementation)
         };
         let identity = |candidate: &crate::libraries::FunctionInfo| {
             if let Some(provider) = candidate.callable.external_default_provider {

@@ -40,6 +40,7 @@ mod bytecode_inline_call;
 mod call_operands;
 mod captured_storage;
 mod checked_facts;
+mod class_lambda_reflection;
 mod class_literals;
 mod class_pool_seed;
 mod companion_blocks;
@@ -49,6 +50,7 @@ mod constant_emission;
 mod constructor_accessors;
 mod constructor_defaults;
 mod constructor_initialization;
+mod constructor_signatures;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
 mod companion_field;
 mod copied_code;
@@ -407,6 +409,9 @@ struct LambdaClassPlan {
     /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
     owner_is_interface: bool,
     identity: lambda_class_names::LambdaClassIdentity,
+    /// The generic signature and `@Metadata` kotlin-reflect reads for `toString()`. Absent for a
+    /// user SAM conversion and for a synthesized adapter that is not a source lambda.
+    reflection: Option<class_lambda_reflection::ClassLambdaReflection>,
 }
 
 impl EmitRun {
@@ -1896,7 +1901,14 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
     } else {
         "java/lang/Object"
     };
-    let mut cw = new_writer(&plan.internal, super_name, opts);
+    let signature = plan
+        .reflection
+        .as_ref()
+        .map(|reflection| reflection.signature.as_str());
+    let mut cw = new_writer_generic(&plan.internal, signature, super_name, opts);
+    if let Some(signature) = signature {
+        cw.set_signature(signature);
+    }
     cw.set_access(0x0030); // ACC_FINAL | ACC_SUPER
     cw.add_interface(&plan.iface);
     if plan.function_adapter {
@@ -2120,6 +2132,15 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         clinit.putstatic(field, 1);
         clinit.ret_void();
         cw.add_method(0x0008, "<clinit>", "()V", &clinit); // ACC_STATIC
+    }
+    if let Some(reflection) = &plan.reflection {
+        cw.set_kotlin_metadata(
+            3,
+            &opts.metadata_version(),
+            synthetic_class_xi(SYNTHETIC_LOCAL),
+            &reflection.d1,
+            &reflection.d2,
+        );
     }
     (plan.internal.clone(), cw.finish())
 }
@@ -2672,7 +2693,7 @@ fn emit_class(
                 format!("(Lkotlin/coroutines/Continuation<-L{fq_name};>;)V")
             }
         })
-        .or_else(|| class_ctor_generic_sig(&signature_formatter, ir, c, &fq_name));
+        .or_else(|| constructor_signatures::primary_constructor_signature(&signature_formatter, c));
     let value_param_ctor = ir.has_value_param_ctor(&fq_name);
     let ctor_access =
         method_access::primary_constructor_access(ir, c, is_continuation, value_param_ctor);
@@ -3239,8 +3260,11 @@ fn emit_class(
     // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
     // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
     // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared
-    // visibility (a PROTECTED primary gets a protected convenience ctor).
-    if c.has_primary_ctor {
+    // visibility (a PROTECTED primary gets a protected convenience ctor). A declared constructor
+    // without value parameters already is that `<init>()`, so kotlinc's JvmDefaultConstructorLowering
+    // adds none beside it.
+    let declares_no_arg_ctor = c.secondary_ctors.iter().any(|sc| sc.params.is_empty());
+    if c.has_primary_ctor && !declares_no_arg_ctor {
         let param_tys = class_ctor_jvm_tys(c);
         let value_param_ctor = ir.has_value_param_ctor(&fq_name);
         let ctor_access = if is_continuation || c.is_anonymous_object {
@@ -3742,10 +3766,13 @@ fn emit_interface_class(
             &mut cw,
             c.fq_name,
             c.decl_line,
-            &f.name,
-            &physical_params,
-            &parameter_names,
-            jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+            JdAccessBridgeMember {
+                name: &f.name,
+                param_tys: &physical_params,
+                parameter_names: &parameter_names,
+                ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+                varargs: method_access::varargs_access(ir, fid),
+            },
         );
     }
     if enable_compat {
@@ -3869,14 +3896,8 @@ fn emit_enum_class(
         .chain(all_param_tys.iter().copied())
         .collect();
     let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
-    // The generic signature omits the enum ABI prefix and retains only source parameters.
-    let ctor_sig = format!(
-        "({})V",
-        all_param_tys
-            .iter()
-            .map(|ty| type_descriptor(*ty))
-            .collect::<String>()
-    );
+    let ctor_sig = constructor_signatures::enum_constructor_signature(&signature_formatter, c)
+        .expect("an enum constructor always signs its source parameters");
     let ctor_parameters = if env.java_parameters {
         super::method_parameters::enum_constructor(c).to_vec()
     } else {
@@ -5024,6 +5045,16 @@ fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
         .collect()
 }
 
+/// The member shape carried through an `access$<name>$jd` bridge. The vararg bit is a recorded
+/// declaration fact, not inferred from an array descriptor.
+pub(super) struct JdAccessBridgeMember<'a> {
+    pub(super) name: &'a str,
+    pub(super) param_tys: &'a [Ty],
+    pub(super) parameter_names: &'a [Option<String>],
+    pub(super) ret: Ty,
+    pub(super) varargs: u16,
+}
+
 /// The `access$<name>$jd` bridge kotlinc puts on an `enable`-mode interface for each of its
 /// non-private default methods: a `public static synthetic` whose body makes the NON-VIRTUAL call
 /// (`invokespecial` on the interface's own method) that the `$DefaultImpls` forward and legacy
@@ -5033,11 +5064,15 @@ fn emit_jd_access_bridge(
     cw: &mut ClassWriter,
     interface: crate::types::TypeName,
     decl_line: u32,
-    member_name: &str,
-    param_tys: &[Ty],
-    parameter_names: &[Option<String>],
-    ret: Ty,
+    member: JdAccessBridgeMember<'_>,
 ) {
+    let JdAccessBridgeMember {
+        name: member_name,
+        param_tys,
+        parameter_names,
+        ret,
+        varargs,
+    } = member;
     assert_eq!(
         parameter_names.len(),
         param_tys.len(),
@@ -5065,7 +5100,11 @@ fn emit_jd_access_bridge(
     let target = cw.interface_methodref(&fq, member_name, &member_desc);
     code.invokespecial(target, argument_words as i32, slot_words(ret) as i32);
     emit_return(ret, &mut code);
-    finish_code::<0x1009>(cw, &name, &bridge_desc, &mut code, argument_words); // PUBLIC | STATIC | SYNTHETIC
+    code.ensure_locals(argument_words);
+    code.link();
+    // PUBLIC | STATIC | SYNTHETIC, plus the selected member's own ACC_VARARGS when its last
+    // physical parameter is the declared vararg.
+    cw.add_method_sig(0x1009 | varargs, &name, &bridge_desc, &code, None);
     let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
     let mut slot = 1u16;
     for (index, parameter) in param_tys.iter().enumerate() {
@@ -5870,82 +5909,6 @@ fn method_parameterized_sig(
     s.push(')');
     s.push_str(&formatter.method_ty(ret, Wildcards::Suppressed)?);
     (s != ir_method_desc(params, ret)).then_some(s)
-}
-
-/// The primary constructor's generic `Signature` — bare type-parameter params (`(TT;)V`) and
-/// parameterized concrete params (`(Ljava/util/List<Ljava/lang/String;>;)V`), others erased; `None` when
-/// none need generics. Shared by the pool seeder and the attribute emitter so both produce one string.
-fn class_ctor_generic_sig(
-    formatter: &JvmSignatureFormatter<'_>,
-    ir: &IrFile,
-    c: &crate::ir::IrClass,
-    fq_name: &str,
-) -> Option<String> {
-    let param_tys = class_ctor_jvm_tys(c);
-    let ftp = ir.field_signatures(fq_name);
-    let is_field: Vec<bool> = if c.ctor_args.is_empty() {
-        vec![true; param_tys.len()]
-    } else {
-        c.ctor_args.iter().map(|a| a.is_field).collect()
-    };
-    let mut sig = String::from("(");
-    let mut any = false;
-    let mut field_i = 0usize;
-    for (i, t) in param_tys.iter().enumerate() {
-        let declared_ty = c.ctor_args.get(i).and_then(|argument| argument.declared_ty);
-        let declared_type_parameter = declared_ty.and_then(|ty| match ty {
-            Ty::TyParam(name, _) => Some(name),
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => match *inner {
-                Ty::TyParam(name, _) => Some(name),
-                _ => None,
-            },
-            _ => None,
-        });
-        if let Some(parameter) = declared_type_parameter {
-            sig.push_str(&format!(
-                "T{};",
-                crate::types::type_parameter_source_name(parameter)
-            ));
-            any = true;
-            if is_field.get(i).copied().unwrap_or(true) {
-                field_i += 1;
-            }
-            continue;
-        }
-        if let Some(parameterized) = declared_ty.and_then(|ty| {
-            // Constructor arguments are parameter positions even when they also declare a property.
-            parameterized_sig_at(formatter, &ty, Wildcards::Declared)
-        }) {
-            sig.push_str(&parameterized);
-            any = true;
-            if is_field.get(i).copied().unwrap_or(true) {
-                field_i += 1;
-            }
-            continue;
-        }
-        if is_field.get(i).copied().unwrap_or(true) {
-            let f = c.fields.get(field_i);
-            let fname = f.map(|f| f.name.as_str()).unwrap_or("");
-            if let Some((_, tp)) = ftp.and_then(|ftp| ftp.iter().find(|(fp, _)| fp == fname)) {
-                sig.push_str(&format!("T{tp};"));
-                any = true;
-            } else if let Some(ps) = f.and_then(|f| {
-                // A constructor parameter is a PARAMETER position, even though the same declaration
-                // also backs a field, whose own signature suppresses the wildcards.
-                parameterized_sig_at(formatter, &f.ty, Wildcards::Declared)
-            }) {
-                sig.push_str(&ps);
-                any = true;
-            } else {
-                sig.push_str(&type_descriptor(*t));
-            }
-            field_i += 1;
-        } else {
-            sig.push_str(&type_descriptor(*t));
-        }
-    }
-    sig.push_str(")V");
-    any.then_some(sig)
 }
 
 /// The shared `<T:bound…>` type-parameter DECLARATION section, or `""` when there are no own type

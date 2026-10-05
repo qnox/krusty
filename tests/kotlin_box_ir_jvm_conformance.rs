@@ -318,14 +318,23 @@ fn compile_source(
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 
-/// `-Xsam-conversions` for a box file. `// SAM_CONVERSIONS: CLASS` selects the shared Java wrapper;
-/// anything else keeps kotlinc's default `indy`. Lambda literals stay on `-Xlambdas=indy`.
+/// `-Xlambdas` and `-Xsam-conversions` for a box file. `// LAMBDAS: CLASS` and
+/// `// SAM_CONVERSIONS: CLASS` select the class strategy; anything else keeps kotlinc's default
+/// `indy`.
 fn box_lambda_modes<'a>(
     sources: impl IntoIterator<Item = &'a str>,
 ) -> krusty::jvm::ir_emit::LambdaModes {
+    let sources = sources.into_iter().collect::<Vec<_>>();
     let mut modes = krusty::jvm::ir_emit::LambdaModes::default();
+    modes.lambdas = sources
+        .iter()
+        .copied()
+        .map(krusty::conformance::lambda_mode)
+        .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
+        .unwrap_or_default();
     modes.sam_conversions = sources
-        .into_iter()
+        .iter()
+        .copied()
         .map(krusty::conformance::sam_conversion_mode)
         .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
         .unwrap_or_default();
@@ -1206,6 +1215,75 @@ fn a_single_file_marker_compiles_under_its_declared_stem() {
     .expect("a named Kotlin block is a complete compilation unit");
 
     assert_eq!(find_box_class(&classes).as_deref(), Some("DeclaredKt"));
+}
+
+/// The repository-owned regression for folded common sources must enter through the same
+/// `// MODULE:` path as the box corpus. That path alone turns `ModuleUnit.common_file_count` into
+/// the dependency-first `SourceInput::common()` prefix.
+#[test]
+fn folded_common_optional_expectation_uses_module_harness() {
+    const COMMON: &str = "package folded\n\
+class Registry {\n\
+    companion object {\n\
+        @kotlin.js.JsStatic\n\
+        fun value(): String = \"OK\"\n\
+    }\n\
+}\n";
+    const PLATFORM: &str = "package folded\n\
+fun box(): String = Registry.value()\n";
+    let source = format!(
+        "// WITH_STDLIB\n\
+         // LANGUAGE: +MultiPlatformProjects\n\
+         // MODULE: common\n\
+         // FILE: Common.kt\n\
+         {COMMON}\
+         // MODULE: platform()()(common)\n\
+         // FILE: Platform.kt\n\
+         {PLATFORM}"
+    );
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = common::classpath_jars_for(&source);
+    let classes = compile_module_test(&source, &classpath, Some(jdk.as_path()), &|_| {})
+        .expect("the folded common source compiles through the module harness");
+    let classes: Vec<_> = classes
+        .into_iter()
+        .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
+        .collect();
+
+    let reference_root = common::scratch_dir().expect("allocate reference source-set directory");
+    let reference_output = reference_root.join("classes");
+    let common_path = reference_root.join("Common.kt");
+    let platform_path = reference_root.join("Platform.kt");
+    fs::write(&common_path, COMMON).expect("write common reference source");
+    fs::write(&platform_path, PLATFORM).expect("write platform reference source");
+    let arguments = vec![
+        "-d".to_string(),
+        reference_output.to_string_lossy().into_owned(),
+        "-Xmulti-platform".to_string(),
+        format!("-Xcommon-sources={}", common_path.to_string_lossy()),
+        common_path.to_string_lossy().into_owned(),
+        platform_path.to_string_lossy().into_owned(),
+    ];
+    let (reference_status, reference_diagnostics) =
+        common::kotlinc_compile(&arguments).expect("reference compiler is provisioned");
+    assert_eq!(
+        reference_status, 0,
+        "kotlinc rejected the folded source-set fixture: {reference_diagnostics}"
+    );
+    let reference = read_class_tree(&reference_output).expect("read reference classes");
+    let _ = fs::remove_dir_all(reference_root);
+    assert_eq!(
+        compare_class_sets(&classes, &reference),
+        Ok(()),
+        "the module-harness output must be byte-identical to kotlinc"
+    );
+
+    let box_class = find_box_class(&classes).expect("the platform source emits box()");
+    assert_eq!(
+        common::run_box(&classes, &box_class, std::slice::from_ref(&stdlib)),
+        Some("OK".to_string())
+    );
 }
 
 #[test]
