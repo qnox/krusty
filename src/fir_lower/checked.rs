@@ -964,16 +964,10 @@ impl BodyLowering<'_> {
     ) -> Result<ExprId, FirLoweringFailure> {
         let (target, parameter_types, mut arguments) =
             self.constructor_target_and_arguments(call)?;
-        let reordered = arguments
-            .iter()
-            .map(|argument| match argument {
-                IrCheckedArgument::Expression { parameter, .. }
-                | IrCheckedArgument::Default { parameter }
-                | IrCheckedArgument::Vararg { parameter, .. } => *parameter,
-            })
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|pair| pair[0] > pair[1]);
+        // Like a call's, only supplied operands evaluated out of parameter order are held in
+        // temporaries; an omitted default is filled by the callee and orders nothing.
+        let reordered =
+            !super::source_calls::argument_boundaries::follow_parameter_order(&arguments, None);
         let mut prelude = Vec::new();
         if reordered {
             for argument in &mut arguments {
