@@ -45,13 +45,12 @@ fn only_the_declaring_function_gets_a_default_stub() {
     fs::create_dir_all(&kotlinc_dir).unwrap();
     let source = base.join("Overrides.kt");
     fs::write(&source, SOURCE).unwrap();
-    let Some((code, stderr)) = common::kotlinc_compile(&[
+    let (code, stderr) = common::kotlinc_compile(&[
         source.to_string_lossy().to_string(),
         "-d".to_string(),
         kotlinc_dir.to_string_lossy().to_string(),
-    ]) else {
-        return; // toolchain not provisioned
-    };
+    ])
+    .expect("reference kotlinc is provisioned");
     assert_eq!(code, 0, "kotlinc rejected the fixture: {stderr}");
     let classes = common::compile_in_process(
         SOURCE,
