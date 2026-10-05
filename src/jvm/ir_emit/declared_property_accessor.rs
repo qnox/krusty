@@ -9,6 +9,7 @@ pub(super) struct AccessorOwner<'a> {
     pub(super) fq_name: &'a str,
     pub(super) formatter: &'a JvmSignatureFormatter<'a>,
     pub(super) param_assertions: bool,
+    pub(super) override_results: &'a crate::jvm::override_results::OverrideResults,
 }
 
 /// Emit `property`'s synthesized accessor on `side`, unless the class declares that accessor itself.
@@ -24,6 +25,7 @@ pub(super) fn emit(
         fq_name,
         formatter,
         param_assertions,
+        override_results,
     } = *owner;
     // `@JvmField` IS the declaration's realization: the field is the property's public face and
     // kotlinc emits no accessor beside it. Synthesizing one here would advertise a method the
@@ -51,6 +53,18 @@ pub(super) fn emit(
     let field_desc = type_descriptor(field_jt);
     let accessor_jt = declared_property_accessor_jvm(ir, property, field);
     let accessor_desc = type_descriptor(accessor_jt);
+    // A scalar getter result over a reference-returning overridden getter is the wrapper; the
+    // setter keeps taking the scalar (see `jvm::override_results`).
+    let boxed_getter = c
+        .properties
+        .iter()
+        .position(|declared| std::ptr::eq(declared, property))
+        .is_some_and(|index| override_results.boxes_member_property(c.fq_name, index as u32));
+    let getter_jt = if boxed_getter {
+        jvm_declared_ty(&Ty::nullable(property.ty))
+    } else {
+        accessor_jt
+    };
     // Only an `open`/`override` PROPERTY's accessor is overridable — a plain `val` on an open
     // class keeps its FINAL accessor (kotlinc: `open class Engine(val name: String)` emits
     // `public final getName()`); Kotlin rejects overriding a non-open property, so the flag is
@@ -66,12 +80,12 @@ pub(super) fn emit(
             function.name == name && ir_method_desc(&function.params, &function.ret) == descriptor
         })
     };
-    let getter_desc = format!("(){accessor_desc}");
+    let getter_desc = format!("(){}", type_descriptor(getter_jt));
     if matches!(side, PropertyAccessorSide::Getter) && !occupied(&getter, &getter_desc) {
         // Visit the method header before constructing its code. This is especially observable for a
         // setter guard (`<set-?>`) and for a generic accessor Signature.
         let sig = &signatures.getter;
-        let getter_ann = (accessor_jt.is_reference() && field.type_param.is_none()).then(|| {
+        let getter_ann = (getter_jt.is_reference() && field.type_param.is_none()).then(|| {
             if property.ty.is_nullable() {
                 "Lorg/jetbrains/annotations/Nullable;"
             } else {
@@ -113,13 +127,18 @@ pub(super) fn emit(
             // field value on the stack.
             g.bind(lbl);
         }
-        emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, accessor_jt);
-        emit_return(accessor_jt, &mut g);
+        emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, getter_jt);
+        emit_return(getter_jt, &mut g);
         g.ensure_locals(1);
         g.link();
         let access = default_accessor_access(property.visibility, overridable);
         cw.add_method_sig(access, &getter, &getter_desc, &g, sig.as_deref());
         super::function_annotations::emit_declared(cw, annotations, &getter, &getter_desc);
+        // The class-wide pass annotates accessors by their backing field's type, which a boxed
+        // getter result does not have.
+        if boxed_getter {
+            cw.set_method_nullability(&getter, &getter_desc, getter_ann, &[]);
+        }
         seed_accessor_locals(c, fq_name, cw);
     }
     if matches!(side, PropertyAccessorSide::Setter) && property.is_var {
@@ -190,6 +209,97 @@ pub(super) fn emit(
             cw.add_method_sig(access, &setter, &setter_desc, &st, sig.as_deref());
             super::function_annotations::emit_declared(cw, annotations, &setter, &setter_desc);
             seed_accessor_locals(c, fq_name, cw);
+        }
+    }
+}
+
+/// JVM type exposed by a synthesized property accessor. The value-class pass stamps the exact
+/// mangled getter only when this property's own type uses its erased field carrier. Consume that
+/// decision directly; emission must not repeat classifier/value-class lookup. An explicit backing
+/// field with a narrower type does not otherwise change the property's public descriptor.
+pub(super) fn declared_property_accessor_jvm(
+    _ir: &IrFile,
+    property: &crate::ir::IrProperty,
+    field: &crate::ir::IrField,
+) -> Ty {
+    if property.getter_jvm_name.is_some() {
+        jvm_declared_ty(&field.ty)
+    } else {
+        jvm_declared_ty(&stored_value_ty(property.ty))
+    }
+}
+
+/// Adapt the physical backing-field value already on the stack to the property's declared return.
+/// Resolution has already chosen both types; this is only their JVM representation boundary.
+pub(super) fn emit_backing_field_read_adaptation(
+    ir: &IrFile,
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    property: &crate::ir::IrProperty,
+    field_jvm: Ty,
+    accessor_jvm: Ty,
+) {
+    if field_jvm == accessor_jvm {
+        return;
+    }
+    if field_jvm.is_reference() && accessor_jvm.is_jvm_scalar() {
+        unbox_prim_from(cw, code, field_jvm, accessor_jvm);
+    } else if accessor_jvm.is_reference() {
+        if let Some(storage) = property
+            .storage_ty
+            .and_then(|ty| ty.non_null().obj_internal())
+        {
+            if crate::jvm::value_classes::is_boxed_value_class(ir, storage)
+                && field_jvm.is_jvm_scalar()
+            {
+                emit_box_impl(ir, cw, &Ty::obj_name(storage), code);
+                return;
+            }
+        }
+        if field_jvm.is_jvm_scalar() {
+            box_prim_free(cw, code, field_jvm);
+        } else {
+            let internal = crate::jvm::names::instanceof_internal_name(accessor_jvm);
+            if internal != "java/lang/Object" {
+                let class = cw.class_ref(&internal);
+                code.checkcast(class);
+            }
+        }
+    }
+}
+
+/// Adapt a synthesized setter's declared argument to the physical backing-field representation.
+pub(super) fn emit_backing_field_write_adaptation(
+    ir: &IrFile,
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    property: &crate::ir::IrProperty,
+    accessor_jvm: Ty,
+    field_jvm: Ty,
+) {
+    if accessor_jvm == field_jvm {
+        return;
+    }
+    if accessor_jvm.is_reference() && field_jvm.is_jvm_scalar() {
+        if let Some(storage) = property
+            .storage_ty
+            .and_then(|ty| ty.non_null().obj_internal())
+        {
+            if crate::jvm::value_classes::is_boxed_value_class(ir, storage) {
+                let class = cw.class_ref(&storage.render());
+                code.checkcast(class);
+                emit_unbox_impl(ir, cw, &Ty::obj_name(storage), code);
+                return;
+            }
+        }
+        unbox_prim_from(cw, code, accessor_jvm, field_jvm);
+    } else if accessor_jvm.is_jvm_scalar() && field_jvm.is_reference() {
+        box_prim_free(cw, code, accessor_jvm);
+    } else if accessor_jvm.is_reference() && field_jvm.is_reference() {
+        let internal = crate::jvm::names::instanceof_internal_name(field_jvm);
+        if internal != "java/lang/Object" {
+            let class = cw.class_ref(&internal);
+            code.checkcast(class);
         }
     }
 }

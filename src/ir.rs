@@ -116,7 +116,7 @@ pub use module_records::{
 };
 pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
-pub use overrides::{is_kotlin_primitive, IrFunctionOverride, IrPropertyOverride};
+pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{
     IrEntryPoint, IrPackageFunction, IrPackageProperty, IrPackageTypeParameter, MainEntryParameters,
 };
@@ -1705,6 +1705,12 @@ pub struct IrFile {
     /// never searches the constructor IR for a matching field assignment.
     pub checked_interface_delegation_initializers:
         std::collections::HashSet<(crate::fir::DeclarationId, u32)>,
+    /// `(classifier declaration, interface-delegation ordinal)` to the calls its forwarders make on
+    /// the delegate value, published by the checked constructor body that evaluates it.
+    pub checked_interface_delegate_calls: std::collections::HashMap<
+        (crate::fir::DeclarationId, u32),
+        Box<[crate::fir::ResolvedDelegateMemberCalls]>,
+    >,
     /// Stable enum-entry declaration to its compiler-generated common-IR subclass. The entry keeps
     /// the enum classifier as its semantic receiver in FIR; this transient edge only owns where its
     /// declared methods/properties are physically attached in the active file.
@@ -1992,6 +1998,11 @@ pub struct IrFile {
     /// bounds), keyed by the class's fully-qualified name.
     pub class_declared_spellings:
         std::collections::HashMap<crate::types::TypeName, crate::spelling::DeclaredSpellings>,
+    /// Where a class's declared superclass stands in its source supertype list, keyed by the class's
+    /// fully-qualified name. `@Metadata` lists supertypes in source order (`class C : I, Base(), J`
+    /// writes `I, Base, J`), while [`IrClass::superclass`] keeps the superclass apart. Absent when
+    /// the superclass is written first or none is declared.
+    pub class_superclass_positions: std::collections::HashMap<crate::types::TypeName, u32>,
     /// The same, for a class PROPERTY, keyed by `(class fully-qualified name, property name)` —
     /// a property has no `FunId` to hang off.
     pub prop_declared_spellings: std::collections::HashMap<

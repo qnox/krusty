@@ -32,6 +32,8 @@ mod common {
 mod abstract_instantiation_check_e2e;
 #[path = "abstract_member_check_e2e.rs"]
 mod abstract_member_check_e2e;
+#[path = "abstract_member_shape_e2e.rs"]
+mod abstract_member_shape_e2e;
 #[path = "abstract_modifier_consistency_e2e.rs"]
 mod abstract_modifier_consistency_e2e;
 #[path = "adapted_callable_reference_equality_e2e.rs"]
@@ -118,6 +120,8 @@ mod box_runtime_reflect_e2e;
 mod boxed_array_construction_e2e;
 #[path = "boxed_override_results_e2e.rs"]
 mod boxed_override_results_e2e;
+#[path = "boxed_property_getters_e2e.rs"]
+mod boxed_property_getters_e2e;
 #[path = "bracket_lambda_param_e2e.rs"]
 mod bracket_lambda_param_e2e;
 #[path = "branch_soft_keyword_name_e2e.rs"]
@@ -591,6 +595,8 @@ mod definitely_non_null_type_e2e;
 mod delegate_by_lazy_e2e;
 #[path = "delegate_initializer_constraint_e2e.rs"]
 mod delegate_initializer_constraint_e2e;
+#[path = "delegate_member_call_e2e.rs"]
+mod delegate_member_call_e2e;
 #[path = "delegate_scalar_boundary_e2e.rs"]
 mod delegate_scalar_boundary_e2e;
 #[path = "delegated_local_prop_e2e.rs"]
@@ -995,6 +1001,8 @@ mod inheritance_e2e;
 mod inherited_interface_default_e2e;
 #[path = "inherited_member_owner_e2e.rs"]
 mod inherited_member_owner_e2e;
+#[path = "inherited_reference_owner_e2e.rs"]
+mod inherited_reference_owner_e2e;
 #[path = "init_block_lines_e2e.rs"]
 mod init_block_lines_e2e;
 #[path = "inline_call_operand_spill_e2e.rs"]
@@ -1359,6 +1367,8 @@ mod metadata_reader_e2e;
 mod metadata_return_types;
 #[path = "metadata_return_value_status_e2e.rs"]
 mod metadata_return_value_status_e2e;
+#[path = "metadata_supertype_order_e2e.rs"]
+mod metadata_supertype_order_e2e;
 #[path = "metadata_synthetic_classes_e2e.rs"]
 mod metadata_synthetic_classes_e2e;
 #[path = "metadata_type_reference_e2e.rs"]

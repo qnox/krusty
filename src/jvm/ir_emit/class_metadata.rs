@@ -323,34 +323,40 @@ pub(super) fn build_class_metadata_with_facts(
                 .backing_field
                 .and_then(|index| c.fields.get(index as usize).map(|field| (index, field)));
             let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
+            // A getter's descriptor is its physical one: a scalar getter result over a reference-returning overridden
+            // property returns the wrapper (see `jvm::override_results`).
+            let physical_getter = |fid: u32| {
+                let function = &ir.functions[fid as usize];
+                (
+                    function.name.clone(),
+                    ir_method_desc(&function.params, &override_results.physical_result(ir, fid)),
+                )
+            };
             let ordinary_getter = property
                 .getter
-                .and_then(|fid| ir.functions.get(fid as usize))
-                .map(|function| {
-                    (
-                        function.name.clone(),
-                        ir_method_desc(&function.params, &function.ret),
-                    )
-                })
+                .filter(|&fid| (fid as usize) < ir.functions.len())
+                .map(physical_getter)
                 .or_else(|| {
                     c.methods
                         .iter()
-                        .map(|fid| &ir.functions[*fid as usize])
-                        .find(|function| function.name == default_getter)
-                        .map(|function| {
-                            (
-                                function.name.clone(),
-                                ir_method_desc(&function.params, &function.ret),
-                            )
-                        })
+                        .copied()
+                        .find(|&fid| ir.functions[fid as usize].name == default_getter)
+                        .map(physical_getter)
                 })
                 .or_else(|| {
                     backing.and_then(|(_, field)| {
                         // `@JvmField` suppresses the accessor pair entirely, so there is no
                         // synthesized getter to derive from the backing field — kotlinc records the
                         // field alone.
+                        let boxed = override_results
+                            .boxes_member_property(c.fq_name, property_index as u32);
+                        let result = if boxed {
+                            Ty::nullable(property.ty)
+                        } else {
+                            field.ty
+                        };
                         (!visibility.is_private() && !is_jvm_field(c, &property.name))
-                            .then(|| (default_getter, format!("(){}", desc(field.ty))))
+                            .then(|| (default_getter, format!("(){}", desc(result))))
                     })
                 });
             let getter = if c.is_annotation {
@@ -1282,7 +1288,6 @@ pub(super) fn build_class_metadata_with_facts(
             (!property.visibility.is_public_api()).then_some(property.ty),
         )
     });
-    // Metadata lists the declared superclass before interfaces.
     let superclass = c.superclass;
     let any = crate::types::wk::any();
     let mut supertypes = ir
@@ -1316,7 +1321,18 @@ pub(super) fn build_class_metadata_with_facts(
         .get(&c.fq_name_id())
         .cloned()
         .unwrap_or_default();
-    let supertype_spellings = class_spellings.supertype_spellings(has_declared_superclass);
+    let mut supertype_spellings = class_spellings.supertype_spellings(has_declared_superclass);
+    // Both lists lead with the superclass; `@Metadata` lists it where the source wrote it.
+    let superclass_position = ir.class_superclass_positions.get(&c.fq_name_id());
+    if let Some(position) = superclass_position.filter(|_| has_declared_superclass) {
+        let position = *position as usize;
+        // An interface without a spelling has no entry yet; it must not shift the superclass's.
+        if supertype_spellings.len() <= position {
+            supertype_spellings.resize(position + 1, crate::spelling::Spelled::default());
+        }
+        supertypes[..=position].rotate_left(1);
+        supertype_spellings[..=position].rotate_left(1);
+    }
     let secondary_ctor_shapes =
         super::super::constructor_metadata::secondary_constructor_shapes(ir, c);
     let secondary_ctor_metas: Vec<crate::metadata::class_builder::CtorMeta> = secondary_ctor_shapes

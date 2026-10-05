@@ -34,7 +34,14 @@ impl Emitter<'_> {
         // A property that DECLARES an accessor (computed, delegated, or `field`-using) is always read
         // through it — the accessor is user code, and a direct field load would skip it. Only a plain
         // backing-field property may be read directly, and only from inside the declaring class.
-        let declared = class.properties.iter().find(|p| p.name == name);
+        let declared_index = class.properties.iter().position(|p| p.name == name);
+        let declared = declared_index.map(|index| &class.properties[index]);
+        // A scalar getter result over a reference-returning overridden getter is the wrapper;
+        // the read unboxes it (see `jvm::override_results`).
+        let boxed_getter = declared_index.is_some_and(|index| {
+            self.override_results
+                .boxes_member_property(owner, index as u32)
+        });
         let direct_field = self.direct_field_access(class, declared, false);
         if let Some(getter) = declared.and_then(|p| p.getter) {
             let f = &self.ir.functions[getter as usize];
@@ -54,7 +61,10 @@ impl Emitter<'_> {
                 descriptor: if class.is_annotation {
                     annotation_member_descriptor(&f.params, f.ret)
                 } else {
-                    ir_method_desc(&f.params, &f.ret)
+                    ir_method_desc(
+                        &f.params,
+                        &self.override_results.physical_result(self.ir, getter),
+                    )
                 },
                 is_static: f.is_static,
                 is_interface: interface,
@@ -81,7 +91,7 @@ impl Emitter<'_> {
         // A value-class-typed property's accessor is `@JvmName`-mangled (`getId-<hash>`), so match the
         // mangled spelling too — the alternative is falling through to a private backing field, which is
         // an `IllegalAccessError` from anywhere but the declaring class.
-        let accessor = class.methods.iter().find_map(|&fid| {
+        let accessor = class.methods.iter().copied().find(|&fid| {
             let f = &self.ir.functions[fid as usize];
             let named = f.name == accessor_name
                 || f.name
@@ -89,13 +99,17 @@ impl Emitter<'_> {
                     .is_some_and(|rest| rest.starts_with('-'));
             let getter_shape = f.params.is_empty()
                 || (f.is_static && f.name.ends_with("-impl") && f.params.len() == 1);
-            (named && getter_shape).then_some(f)
+            named && getter_shape
         });
-        if let Some(accessor) = accessor.filter(|_| !direct_field || field.is_none()) {
+        if let Some(function) = accessor.filter(|_| !direct_field || field.is_none()) {
+            let accessor = &self.ir.functions[function as usize];
             return Some(PropertyAccess::Accessor {
                 owner,
                 name: accessor.name.clone(),
-                descriptor: ir_method_desc(&accessor.params, &accessor.ret),
+                descriptor: ir_method_desc(
+                    &accessor.params,
+                    &self.override_results.physical_result(self.ir, function),
+                ),
                 is_static: accessor.is_static,
                 is_interface: interface,
                 static_receiver: (accessor.is_static && accessor.dispatch_receiver == Some(owner))
@@ -127,6 +141,8 @@ impl Emitter<'_> {
                 name: accessor_name,
                 descriptor: if class.is_annotation {
                     annotation_member_descriptor(&[], ty)
+                } else if boxed_getter {
+                    ir_method_desc(&[], &Ty::nullable(ty))
                 } else {
                     ir_method_desc(&[], &stored_value_ty(ty))
                 },
@@ -139,7 +155,13 @@ impl Emitter<'_> {
         // accessor — the one synthesized for this declaration, which carries no IR method of its own.
         if !direct_field {
             let return_ty = declared
-                .map(|property| declared_property_accessor_jvm(self.ir, property, field))
+                .map(|property| {
+                    if boxed_getter {
+                        jvm_declared_ty(&Ty::nullable(property.ty))
+                    } else {
+                        declared_property_accessor_jvm(self.ir, property, field)
+                    }
+                })
                 .unwrap_or_else(|| jvm_declared_ty(&field.ty));
             let return_ty = if class.is_annotation {
                 crate::jvm::annotation_kclass::annotation_member_jvm_type(return_ty)
