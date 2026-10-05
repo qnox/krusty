@@ -31,3 +31,50 @@ fn operands_before_a_suspending_argument_stay_on_the_stack_like_kotlinc() {
         ],
     );
 }
+
+const CONSTRUCTED_SOURCE: &str = r#"class Pair(val first: Int, val second: Int)
+
+suspend fun next(): Int = 2
+
+suspend fun make(): Pair = Pair(1, next())
+"#;
+
+#[test]
+fn a_constructor_keeps_its_operands_across_a_suspending_argument_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "SuspendConstructedOperands",
+        CONSTRUCTED_SOURCE,
+        &[
+            "SuspendConstructedOperandsKt",
+            "SuspendConstructedOperandsKt$make$1",
+        ],
+    );
+}
+
+/// A generic suspend callee hands its value-class result over as the box. Passed straight to a
+/// value-class constructor, that box is unboxed once, at the resumed call.
+const WRAPPED_SOURCE: &str = r#"@JvmInline
+value class Inner(val x: Int)
+
+@JvmInline
+value class Outer(val inner: Inner)
+
+object Source {
+    @Suppress("UNCHECKED_CAST")
+    suspend fun <T> resumed(value: Any?): T = value as T
+}
+
+suspend fun wrapped(value: Any?): Int = Outer(Source.resumed(value)).inner.x
+"#;
+
+#[test]
+fn a_resumed_value_class_argument_is_unboxed_once_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "SuspendWrappedOperand",
+        WRAPPED_SOURCE,
+        &[
+            "SuspendWrappedOperandKt",
+            "SuspendWrappedOperandKt$wrapped$1",
+        ],
+    );
+}

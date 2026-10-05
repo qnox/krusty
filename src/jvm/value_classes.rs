@@ -1841,12 +1841,22 @@ pub(crate) fn lower_value_classes(
                 let Target::UnboxedX(value_class) = target(parameter, &under) else {
                     continue;
                 };
-                if repr_ctx.is_boxed_vc(argument, value_class)
-                    && !value_member_constructor_ops
-                        .iter()
-                        .any(|(existing, _)| *existing == argument)
-                {
-                    value_member_constructor_ops.push((argument, BoxOp::Unbox(value_class)));
+                if !repr_ctx.is_boxed_vc(argument, value_class) {
+                    continue;
+                }
+                // Unbox where each path produces the box, as every other parameter boundary does
+                // (`record_value_boundary`): a block over a call handing over its box (a resumed
+                // generic suspend result) is unboxed at that call, and only once.
+                let mut tails = Vec::new();
+                crate::ir::value_tails(&ir.exprs, argument, &mut tails);
+                for tail in tails {
+                    if repr_ctx.is_boxed_vc(tail, value_class)
+                        && !value_member_constructor_ops
+                            .iter()
+                            .any(|(existing, _)| *existing == tail)
+                    {
+                        value_member_constructor_ops.push((tail, BoxOp::Unbox(value_class)));
+                    }
                 }
             }
         }

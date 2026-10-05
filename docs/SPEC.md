@@ -620,8 +620,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   suspension and reloads it under the resumed result (`aload; swap`), and `tail` is pushed after
   it. Common lowering therefore keeps an ordered call's operands direct whether or not one of them
   suspends; the JVM backend decides what cannot stay on the stack (`spills_operand_prefix` for the
-  IR state machine, whose hoisting keeps the order above). Tests:
-  `tests/suspend_argument_operands_e2e.rs`, `tests/suspend_arg_order_e2e.rs`.
+  IR state machine, whose hoisting keeps the order above). A constructor's arguments follow the
+  same rule. A value-class argument handed over as its box by a resumed generic call (`Outer(
+  resumed())`) is unboxed once, at that call: the value-class constructor boundary unboxes each
+  value tail of its argument, as every other parameter boundary does, rather than the coercion
+  block over it as well (`jvm/value_classes.rs`). Tests: `tests/suspend_argument_operands_e2e.rs`,
+  `tests/suspend_arg_order_e2e.rs`,
+  `fir_lower/tests.rs::suspending_call_operand_stays_a_direct_constructor_argument`.
 - **`suspend fun` — an INTRINSIC suspension point needs no operand temps.** A
   `suspendCoroutineUninterceptedOrReturn { c -> … }` recorded in `ir.intrinsic_suspension_points` is an
   inlined BLOCK, not a call: it has no operands to move ahead of the spill, and its body runs after the

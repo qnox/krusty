@@ -1084,7 +1084,7 @@ fn positional_member_call_keeps_its_receiver_direct() {
 }
 
 #[test]
-fn suspending_call_operand_is_materialized_before_outer_construction() {
+fn suspending_call_operand_stays_a_direct_constructor_argument() {
     let ir = lower_single_source(
         "class Pair(val first: Int, val second: Int)\n\
          suspend fun next(): Int = 2\n\
@@ -1109,25 +1109,40 @@ fn suspending_call_operand_is_materialized_before_outer_construction() {
             )
         })
         .expect("checked suspend call") as u32;
-    let slot = ir
-        .exprs
-        .iter()
-        .find_map(|expression| match expression {
+    // kotlinc keeps `1` on the stack across the suspension (its FixStack saves and restores it),
+    // so the suspending operand is passed in place rather than through a temporary.
+    assert!(
+        !ir.exprs.iter().any(|expression| matches!(
+            expression,
             IrExpr::Variable {
-                index,
                 init: Some(initializer),
                 named: false,
                 ..
-            } if *initializer == call => Some(*index),
+            } if *initializer == call
+        )),
+        "a suspending operand must not be materialized into a temporary"
+    );
+    let constructions = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::New { internal, args, .. } if *internal == crate::types::type_name("Pair") => {
+                Some(args.clone())
+            }
             _ => None,
         })
-        .expect("suspending operand must be materialized before its outer construction");
-    assert!(ir.exprs.iter().any(|expression| matches!(
-        expression,
-        IrExpr::New { internal, args, .. }
-            if internal.render() == "Pair"
-                && args.iter().any(|argument| matches!(ir.expr(*argument), IrExpr::GetValue(value) if *value == slot))
-    )));
+        .collect::<Vec<_>>();
+    assert_eq!(constructions.len(), 1, "one Pair construction");
+    let arguments = &constructions[0];
+    assert_eq!(arguments.len(), 2);
+    assert!(matches!(
+        ir.expr(arguments[0]),
+        IrExpr::Const(crate::ir::IrConst::Int(1))
+    ));
+    assert_eq!(
+        arguments[1], call,
+        "the suspend call is the second argument itself"
+    );
 }
 
 #[test]
