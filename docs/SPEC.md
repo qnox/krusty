@@ -578,7 +578,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::suspend_operand_write_to_a_locally_dead_scratch_runs`).
 - **`suspend fun` — hoisting a suspension out of a call/template operand list preserves left-to-right
   evaluation.** Kotlin evaluates a call's receiver and arguments (and a string template's parts)
-  strictly left to right; kotlinc spills every operand of a call with a suspending operand.
+  strictly left to right; kotlinc saves the operands already on the stack before a suspending operand.
   `hoist_expr` used to rewrite only the SUSPENSION to a preceding temp, so `f(g(), susp())` became
   `val t = susp(); f(g(), t)` — running `g()` AFTER the suspension. `hoist_operands_in_order` now
   binds every runtime-read/evaluated operand that precedes a later suspending operand to a prelude temp
@@ -614,6 +614,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Ordering pinned by box runs against a real suspension (`yield()`), including the snapshot temp
   surviving the spill, the pre-mutation `var` read, the `!!`-throws-before-suspension case, and an
   effectful operand between two suspensions (`tests/suspend_arg_order_e2e.rs`, all ten shapes).
+- **A suspending argument leaves the call's other operands on the operand stack.** kotlinc lowers
+  `join(first, other(), tail)` with no temporaries: `first` is pushed, the coroutine
+  transformer's FixStack saves it into a local above every slot of the method around the
+  suspension and reloads it under the resumed result (`aload; swap`), and `tail` is pushed after
+  it. Common lowering therefore keeps an ordered call's operands direct whether or not one of them
+  suspends; the JVM backend decides what cannot stay on the stack (`spills_operand_prefix` for the
+  IR state machine, whose hoisting keeps the order above). Tests:
+  `tests/suspend_argument_operands_e2e.rs`, `tests/suspend_arg_order_e2e.rs`.
 - **`suspend fun` — an INTRINSIC suspension point needs no operand temps.** A
   `suspendCoroutineUninterceptedOrReturn { c -> … }` recorded in `ir.intrinsic_suspension_points` is an
   inlined BLOCK, not a call: it has no operands to move ahead of the spill, and its body runs after the
