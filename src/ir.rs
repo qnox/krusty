@@ -2418,6 +2418,10 @@ pub struct IrFile {
     /// Exact provider-selected language-member roles retained on their call expressions. This is
     /// declaration identity data, not a spelling-based backend lookup.
     pub semantic_call_roles: std::collections::HashMap<ExprId, crate::types::SemanticCallRole>,
+    /// Current-module functions that play a language role through the declaration they override
+    /// (an override of `Any.toString`), as the frontend's override resolution published them.
+    pub callable_semantic_roles:
+        std::collections::HashMap<crate::fir::CallableId, crate::types::SemanticCallRole>,
     /// Member call or property access `ExprId` → the classifier its dispatch receiver statically
     /// has, after smart casts: the class the member was selected through, whether this module or a
     /// dependency declares it. A type-parameter receiver records nothing. What a target names for

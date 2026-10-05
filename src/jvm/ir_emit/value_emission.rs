@@ -744,9 +744,13 @@ impl super::Emitter<'_> {
                         };
                         self.emit_value(receiver, code);
                         self.emit_value(*argument, code);
+                        // kotlinc's `CompareTo` intrinsic: the int category and `long` go through
+                        // `Intrinsics.compare`, `Boolean` and the floating types through their
+                        // wrappers.
                         let (owner, descriptor) = match *operand {
-                            Ty::Int => ("java/lang/Integer", "(II)I"),
-                            Ty::Long => ("java/lang/Long", "(JJ)I"),
+                            Ty::Boolean => ("java/lang/Boolean", "(ZZ)I"),
+                            Ty::Int => ("kotlin/jvm/internal/Intrinsics", "(II)I"),
+                            Ty::Long => ("kotlin/jvm/internal/Intrinsics", "(JJ)I"),
                             Ty::Float => ("java/lang/Float", "(FF)I"),
                             Ty::Double => ("java/lang/Double", "(DD)I"),
                             _ => unreachable!(
