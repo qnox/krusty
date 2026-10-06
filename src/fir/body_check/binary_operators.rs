@@ -25,8 +25,7 @@ impl BodyFirChecker<'_> {
     /// Build one already-resolved source binary expression.
     ///
     /// The resolver owns operator selection. This stage preserves its selected callable or
-    /// primitive operation, except for kotlinc's pre-resolution folding of a `+` tree made only
-    /// from string literals/templates into one string-template expression.
+    /// primitive operation.
     pub(super) fn checked_binary_source_expression(
         &mut self,
         expression: ExprId,
@@ -34,17 +33,6 @@ impl BodyFirChecker<'_> {
         lhs: ExprId,
         rhs: ExprId,
     ) -> Result<FirExprKind, BodyCheckFailure> {
-        let string_parts = (source_operation == BinOp::Add)
-            .then(|| super::string_literal_concatenation::leaves(self.file, expression))
-            .flatten();
-        if let Some(parts) = string_parts {
-            let parts = parts
-                .into_iter()
-                .map(|part| self.expression(part))
-                .collect::<Result<Vec<_>, _>>()?;
-            return Ok(FirExprKind::StringTemplate(parts.into_boxed_slice()));
-        }
-
         let selected_name = match source_operation {
             BinOp::Add => Some("plus"),
             BinOp::Sub => Some("minus"),

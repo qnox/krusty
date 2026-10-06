@@ -2643,6 +2643,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type-parameter field even when it has no accessors, a boxed nullable primitive, a value class's
   carrier, a reference array and a delegate field. One rule serves class, companion and facade
   properties. Tests: `tests/metadata_field_signature_e2e.rs`.
+- **`HAS_CONSTANT` follows kotlinc's serializer exactly.** A `val` records it when its declared
+  type could be a `const val` type (a non-null built-in scalar or `String`; a platform `String!`
+  qualifies) and its initializer passes `FirToConstantValueChecker`: a literal, a string template
+  or concatenation of
+  string literals over constants, a `const val` or provider-published Java final-field read, or a
+  number conversion (`toByte` … `toDouble`, `toChar`) or `unaryMinus` applied to a constant.
+  `val x: Any = "s"`, `1 + 2` and
+  `!true` have none, while `0.toDouble()` and `"$X"` do. Common lowering decides it once from the
+  checked initializer (`fir_lower::metadata_constants`) for class and package properties alike.
+  Checked FIR marks a constant that is the selected value of a `const val` or Java constant field
+  (`FirBody::is_constant_read`); an ordinary Java final field carries the same semantic read fact
+  on its selected property target. Only literals fold in kotlinc's parser: `+3` and
+  `"a" + "b"` are constants, while `+X` and `"a" + S` stay `unaryPlus`/`plus` calls and record
+  none. `-X`, `"$S"` and the bare read `S` are constants. Tests: `tests/metadata_property_flags_e2e.rs`.
 - **A class records only the supertypes source DECLARED.** An undeclared `kotlin/Any` is never a
   `Class.supertype`, generic or not — even though a generic class's JVM `Signature` attribute must
   materialize that superclass position, so the recorded generic signature krusty reuses for the

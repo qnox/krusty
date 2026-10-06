@@ -109,20 +109,7 @@ impl BodyLowering<'_> {
             _ if folded.is_some() => {
                 let folded = folded.expect("guarded by the arm");
                 let constant = lower_constant(&folded.value, expression.ty.get(), origin)?;
-                let constant = self.ir.add_expr(IrExpr::Const(constant));
-                // A signed literal (`-3`) is still a literal to kotlinc's frontend, which parses
-                // it as one; only a value computed by an operation loses the literal's facts.
-                let signed_literal = matches!(
-                    &expression.kind,
-                    FirExprKind::Unary {
-                        operation: FirUnaryOperation::Negate | FirUnaryOperation::Identity,
-                        operand,
-                    } if matches!(self.body.expr(*operand).map(|operand| &operand.kind), Some(FirExprKind::Constant(_)))
-                );
-                if !signed_literal {
-                    self.ir.folded_constants.insert(constant);
-                }
-                constant
+                self.ir.add_expr(IrExpr::Const(constant))
             }
             FirExprKind::Constant(constant) => {
                 let constant = lower_constant(constant, expression.ty.get(), origin)?;
@@ -1470,13 +1457,6 @@ impl BodyLowering<'_> {
             }
         }
         self.record_expression_origins(first_generated, lowered, origin);
-        if super::constant_folding::metadata_constant_expression(
-            self.body,
-            self.index,
-            expression_id,
-        ) {
-            self.ir.metadata_constants.insert(lowered);
-        }
         self.set_expression_state(expression_id, LoweringState::Lowered(lowered));
         Ok(lowered)
     }

@@ -74,7 +74,6 @@ mod reference_tests;
 mod references;
 mod returns;
 mod safe_index;
-mod string_literal_concatenation;
 #[cfg(test)]
 mod test_support;
 mod try_expressions;

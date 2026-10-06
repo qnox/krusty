@@ -419,24 +419,8 @@ pub(super) fn build_class_metadata_with_facts(
                     context_params: property.context_params.clone(),
                     is_var: property.is_var,
                     visibility,
-                    // A HOISTED companion property still records a (derived) backing field — the field
-                    // exists, on the outer class — and a literal-initialized `val` keeps kotlinc's
-                    // HAS_CONSTANT flag exactly like an instance-field one.
-                    has_constant: (backing.is_some_and(|(index, field)| {
-                        field.is_final() && index >= c.ctor_param_count
-                    }) && property.ty.can_be_used_for_const_val()
-                        && property
-                            .initializer
-                            .is_some_and(|init| static_fields::literal_initializer(ir, init)))
-                        || static_fields::hoisted_static_for(ir, c, property_index).is_some_and(
-                            |s| {
-                                !s.is_var
-                                    && s.ty.can_be_used_for_const_val()
-                                    && s.init.is_some_and(|init| {
-                                        static_fields::literal_initializer(ir, init)
-                                    })
-                            },
-                        ),
+                    // The checked initializer decides it; a hoisted companion property keeps it too.
+                    has_constant: property.has_constant_initializer,
                     is_const: false,
                     modifiers: property.modifiers,
                     setter_visibility: property.setter_visibility,
