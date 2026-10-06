@@ -3562,26 +3562,30 @@ pub fn method_code_diffs_against_kotlinc(
 /// a different question from the one a splice test is asking. `invokedynamic` is not a call of
 /// `callee`: its bootstrap name is not the function the splice removed.
 #[allow(dead_code)]
-pub fn class_calls_method(bytes: &[u8], callee: &str) -> Option<bool> {
-    let bodies = krusty::jvm::classreader::ClassBodies::parse(std::sync::Arc::new(bytes.to_vec()))?;
+pub fn class_calls_method(bytes: &[u8], callee: &str) -> bool {
+    let bodies = krusty::jvm::classreader::ClassBodies::parse(std::sync::Arc::new(bytes.to_vec()))
+        .expect("class under call inspection parses");
     let methods = bodies
         .coded_methods()
         .map(|(name, descriptor)| (name.to_string(), descriptor.to_string()))
         .collect::<Vec<_>>();
     for (name, descriptor) in methods {
-        let code = bodies.method_code(&name, &descriptor)?;
-        let instructions = krusty::jvm::inline::disassemble(&code.code)?;
+        let code = bodies
+            .method_code(&name, &descriptor)
+            .unwrap_or_else(|| panic!("coded method {name}{descriptor} has no readable body"));
+        let instructions = krusty::jvm::inline::disassemble(&code.code)
+            .unwrap_or_else(|| panic!("coded method {name}{descriptor} does not disassemble"));
         for instruction in &instructions {
             if let Some((_, method, _, _)) =
                 krusty::jvm::inline::invoked_method(instruction, &code.source_cp)
             {
                 if method == callee {
-                    return Some(true);
+                    return true;
                 }
             }
         }
     }
-    Some(false)
+    false
 }
 
 #[cfg(test)]

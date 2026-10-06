@@ -45,12 +45,10 @@ fn user_inline_functions_are_spliced_not_called() {
         .1;
     for callee in ["triple", "atLeast", "applyIt"] {
         // A CALL, not the name: a spliced body still carries `$i$f$<callee>` in its debug table.
-        if let Some(called) = common::class_calls_method(main_class, callee) {
-            assert!(
-                !called,
-                "MainKt still calls `{callee}` — the inline fn was called, not spliced"
-            );
-        }
+        assert!(
+            !common::class_calls_method(main_class, callee),
+            "MainKt still calls `{callee}` — the inline fn was called, not spliced"
+        );
     }
 
     // 4. The spliced bytecode verifies and computes the right result (persistent box JVM). The inline
@@ -105,12 +103,10 @@ fn typed_bodies_are_spliced() {
         .expect("no MainTypedKt")
         .1;
     for callee in ["dscale", "lsum", "fbump", "widen"] {
-        if let Some(called) = common::class_calls_method(main_class, callee) {
-            assert!(
-                !called,
-                "MainTypedKt still calls `{callee}` — spliced, not called"
-            );
-        }
+        assert!(
+            !common::class_calls_method(main_class, callee),
+            "MainTypedKt still calls `{callee}` — spliced, not called"
+        );
     }
 
     let Some(out) = common::run_box(&classes, "MainTypedKt", &[stdlib_path]) else {
@@ -136,8 +132,8 @@ fn an_invoke_of_the_callee_is_a_call() {
         "fun callee(): Int = 1\nfun box(): Int = callee()\n",
         "InvokeCall",
     );
-    assert_eq!(common::class_calls_method(&bytes, "callee"), Some(true));
-    assert_eq!(common::class_calls_method(&bytes, "box"), Some(false));
+    assert!(common::class_calls_method(&bytes, "callee"));
+    assert!(!common::class_calls_method(&bytes, "box"));
 }
 
 #[test]
@@ -146,5 +142,5 @@ fn a_local_named_like_a_function_is_not_a_call() {
         "fun box(): Int {\n    val callee = 1\n    return callee\n}\n",
         "LocalName",
     );
-    assert_eq!(common::class_calls_method(&bytes, "callee"), Some(false));
+    assert!(!common::class_calls_method(&bytes, "callee"));
 }
