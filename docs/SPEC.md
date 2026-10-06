@@ -2626,12 +2626,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/try_catch_expr_nullable_merge_e2e.rs`, `tests/try_catch_expr_generic_merge_e2e.rs`). A `finally` block is inlined (like kotlinc)
   at each exit: the normal fall-through, the end of each catch, and a synthetic catch-all (any
   throwable) covering the body + catch handlers that runs the `finally` then re-throws. A `try` whose
-  body/catch performs a `return`/`break`/`continue` out of the `try` (which must run `finally` first) is
-  skipped. **Nested `try`/`catch` is supported** (a `try` in another `try`'s body or catch — verified
-  end-to-end), **except when a `finally` is involved in the nesting**: a `finally` is inlined at every
-  exit of its protected region, so when it sits inside (or wraps) another `try` the duplicated code lands
-  in overlapping exception ranges and trips a verify error — so a nesting that involves any `finally` is
-  rejected (skip), never miscompiled (`NestedTry` in `tests/feature_box_e2e.rs`).
+  body/catch performs a `return`/`break`/`continue` out of the `try` runs the required finalizer copies
+  before the transfer. Nested `try`/`catch`/`finally` is supported. A transferred finalizer copy lies
+  outside every protected region the transfer left, while an enclosing region still guards it; this
+  prevents a throw from the copy from re-entering an inner catch or running the same finalizer again
+  (`tests/finally_gap_ranges_e2e.rs`). A `finally` may itself contain a `try`/`catch`, and nested
+  finalizers run innermost first (`tests/nested_try_finally_e2e.rs`,
+  `tests/try_debug_lines_e2e.rs`).
+- **An `inline` function brackets each `finally` copy with `InlineMarker.finallyStart` and
+  `finallyEnd`.** The argument is how many `finally` bodies are open, counting the copy being
+  emitted, so the first is `1` and a `finally` inside a `finally` is `2`. The calls stay in the
+  inline function's own method. A function that is not `inline` emits the same copies without them.
+  Test: `tests/inline_finally_marker_e2e.rs`.
 - `as T` to a non-null reference type throws on `null`: `Intrinsics.checkNotNull(value, "null cannot be
   cast to non-null type <kotlin-name>")` then `checkcast` — matching kotlinc. The same null-check
   applies to a DEFINITELY-NON-NULL type-parameter target `as (T & Any)` — even on an unbounded
@@ -5819,6 +5825,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `InnerClasses` remain the separately owned enclosure-realization contract.
   Frontend tests assert the exact declaration-to-provenance mapping. End-to-end JVM tests assert the
   complete emitted class set against kotlinc rather than inspecting parser-generated names.
+- **A callable reference passed to an inline function parameter is inlined as its invocation.**
+  The adapter is a non-suspend function whose body returns one value. Its leading parameters are
+  the reference's captures followed by its bound receiver, and the remaining parameters are the
+  invocation; the referenced declaration's kind is not part of that contract. `values.map(::Holder)`,
+  `values.map(::makeHolder)`, `applyEach(name, ::makeHolder)`, and `applyEach(name, box::label)`
+  place that returned call at each invoke and emit neither the reference class nor the adapter.
+  The inline marker is named after the class the reference would have been
+  (`$i$a$-map-…$names$1`, `$i$a$-applyEach-…$unbound$1`), and each invocation parameter local is
+  `p0`, `p1`, ….   The spliced call keeps the reference expression's source line, so the
+  frame-closing `nop` returns to the inlined call. Classpath splices such as `let` and `reduce`
+  place that same recorded template. A safe-call receiver duplicated onto the stack stays the
+  caller's value: the spliced body reads its own parameters, then the selector consumes the
+  receiver. `value?.let(::id)` and `value?.let(""::extId)` therefore return that value. A
+  reference whose function type returns `Unit` keeps the invocation as an effect of that
+  returned value (`listOf(...).forEach(b::addFoo)` still calls `addFoo`). A reference whose
+  receiver contains another reference (`create2(create("D")::test)::test`) keeps its own class
+  name for that marker. The receiver and captures of a spliced reference run at that argument,
+  before the next one (`create("C")::test` runs `create` before a later `create("F")`). A
+  copy the inlined body evaluates, such as an object that captures the reference and invokes
+  it, stays a carrier. A reference stored in a variable stays a carrier, including beside
+  another spliced use. A bound reference whose adapter is not that single return stays a
+  carrier. A reified extension reference passed to `let` places the recorded call. Test:
+  `tests/inline_constructor_reference_e2e.rs`.
 - **A `fun interface` constructor reference is a `FunInterfaceConstructorReference`.** `::Action`
   for `fun interface Action` is not a lambda and not a `FunctionReferenceImpl`. The carrier extends
   `kotlin.jvm.internal.FunInterfaceConstructorReference` and its constructor passes `Action.class`.

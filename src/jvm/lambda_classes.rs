@@ -197,7 +197,7 @@ fn inline_template_copies(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> 
 }
 
 /// The bodies and initializers emission writes, each the root of one value namespace.
-fn emitted_roots(ir: &IrFile, every_emitted_root: bool) -> Vec<ExprId> {
+pub(super) fn emitted_roots(ir: &IrFile, every_emitted_root: bool) -> Vec<ExprId> {
     let mut roots = Vec::new();
     for (function, declaration) in ir.functions.iter().enumerate() {
         roots.extend(declaration.body);
