@@ -79,10 +79,21 @@ pub enum PluginSynthesizedOperand {
 #[derive(Clone, Debug)]
 pub struct FrontendResolvedSingletonCall {
     pub receiver: TypeName,
-    pub selected: crate::symbol_resolver::ResolvedMember,
+    pub selected: FrontendSelectedMemberCall,
     pub type_arguments: Vec<Option<Ty>>,
     pub type_argument_bounds: Vec<Vec<Ty>>,
     pub argument_parameters: Vec<u32>,
+}
+
+/// The closed semantic result of ordinary member-call selection that a plugin-composed operand
+/// needs. This contract owns no candidate or resolver state: core projects the selected receiver,
+/// declaration, specialized result, and suspension fact before the plugin sees it.
+#[derive(Clone, Debug)]
+pub struct FrontendSelectedMemberCall {
+    pub receiver: Ty,
+    pub member: crate::libraries::LibraryMember,
+    pub ret: Ty,
+    pub suspend: bool,
 }
 
 /// The sole semantic query available while a plugin composes a source-less call. Implementations

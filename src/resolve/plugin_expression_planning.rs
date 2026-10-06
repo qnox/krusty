@@ -210,7 +210,12 @@ impl crate::plugins::FrontendCallResolver for Checker<'_> {
         let receiver = receiver.kotlin_class_internal()?;
         Some(crate::plugins::FrontendResolvedSingletonCall {
             receiver,
-            selected: call,
+            selected: crate::plugins::FrontendSelectedMemberCall {
+                receiver: call.receiver,
+                member: call.member,
+                ret: call.ret,
+                suspend: call.suspend,
+            },
             type_arguments,
             type_argument_bounds,
             argument_parameters,
