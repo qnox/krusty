@@ -894,7 +894,7 @@ mod tests {
         let parameters = TypeParameters::new(&ir, "AKt");
         let mut out = Vec::new();
         assert_eq!(
-            generate(intersection, &parameters, &mut out),
+            generate(intersection, &parameters, false, &mut out),
             Err(TypeOfError::Undescribable(intersection))
         );
     }
