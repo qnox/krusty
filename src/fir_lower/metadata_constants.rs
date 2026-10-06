@@ -90,11 +90,10 @@ fn property_has_constant_value(
             ..
         } => *metadata_constant_read,
         crate::fir::FirPropertyTarget::Module { property, .. } => {
-            index.property(*property).is_some_and(|header| {
-                index.compile_time_constant(header.declaration).is_some()
-                    || index
-                        .declaration_header(header.declaration)
-                        .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::CONST))
+            index.property(*property).is_some_and(|property| {
+                index
+                    .declaration_header(property.declaration)
+                    .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::CONST))
             })
         }
     }
