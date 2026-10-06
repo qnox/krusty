@@ -87,6 +87,7 @@ pub(super) fn merge_metadata_const(
         is_const: true,
         implicit_integer_coercion: false,
         compile_time_constant: Some(constant),
+        constant_value_field: false,
         visibility: metadata.visibility,
         owner: field.owner,
         receiver_rank: 0,

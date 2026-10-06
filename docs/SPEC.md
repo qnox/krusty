@@ -867,8 +867,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Every plain top-level property now gets a record mirroring kotlinc's observed encoding (verified
   by decoding kotlinc 2.4.0 output; matrix in `docs/METADATA_NOTES.md`): `flags` (f11, elided at
   the 518 wire default) composed from visibility bits, `IS_VAR|HAS_SETTER`, `IS_CONST|HAS_CONSTANT`
-  for `const val`, `HAS_CONSTANT` for a `val` with a compile-time-constant initializer (never for a
-  `var`), `IS_LATEINIT`; `getter_flags`/`setter_flags` (f7/f8) only for CUSTOM accessor bodies
+  for `const val`, `HAS_CONSTANT` for an immutable property whose type can be a `const val` (a
+  primitive, `String`, or an unsigned type; a platform `String!` qualifies and `String?` does not)
+  when the initializer has a constant value: a non-null literal, a `+` chain of string literals and
+  templates whose parts do, a numeric conversion or unary plus/minus of such a value, or a read of
+  a `const` property or a Java `val` field (final, no Kotlin metadata, no `ConstantValue`). A
+  folded `1 + 2`, an ordinary `plus` such as `constString + "b"` or `File.separator + "z"`, and
+  every `var` do not. Proven by
+  `tests/classpath_top_level_property_e2e.rs::constant_initializer_metadata_matches_kotlinc`.
+  `IS_LATEINIT`; `getter_flags`/`setter_flags` (f7/f8) only for CUSTOM accessor bodies
   (visibility | `isNotDefault`); a custom setter's value parameter (f6); and a
   `JvmPropertySignature` naming exactly the accessors the emitter really produces — none for
   `const` (inlined) or `private` (direct field access; the synthetic `access$…$p` bridges are not

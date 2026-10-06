@@ -1146,6 +1146,8 @@ impl BodyLowering<'_> {
                 result,
                 extension_receiver_parameter,
                 dispatch,
+
+                constant_value_field: _,
             } => {
                 let arguments = context_arguments
                     .iter()
@@ -1225,6 +1227,8 @@ impl BodyLowering<'_> {
                 result,
                 extension_receiver_parameter,
                 dispatch,
+
+                constant_value_field: _,
             } => {
                 let parameter = u32::try_from(
                     parameters

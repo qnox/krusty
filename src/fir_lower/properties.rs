@@ -2056,13 +2056,18 @@ pub(super) fn accept_property_body(
     if let Some(exit) = setter_exit {
         ir.record_accessor_body_exit(value, exit);
     }
+    let property_type = index
+        .signature(property_declaration)
+        .map(|signature| signature.result.get());
     let has_constant_initializer = anchor.kind == DeclarationKind::Property
         && anchor.owner.is_none()
         && index
             .property(property_id)
             .is_some_and(|property| !property.mutable)
-        && !ir.folded_constants.contains(&value)
-        && super::constant_folding::is_metadata_constant(ir.expr(value));
+        && property_type.is_some_and(|ty| ty.can_be_used_for_const_val())
+        && (ir.metadata_constants.contains(&value)
+            || (!ir.folded_constants.contains(&value)
+                && super::constant_folding::is_metadata_constant(ir.expr(value))));
     let companion_block_member = index
         .declaration_header(property_declaration)
         .is_some_and(|header| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER));

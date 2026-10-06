@@ -716,6 +716,8 @@ fn external_property_function_reference_is_materialized_without_lookup() {
             result: resolved(Ty::Int),
             extension_receiver_parameter: None,
             dispatch: crate::fir::FirPropertyDispatch::Ordinary,
+
+            constant_value_field: false,
         }),
         setter: None,
         extension_receiver: false,
@@ -812,6 +814,8 @@ fn external_member_extension_property_uses_published_receiver_coordinate() {
                 result: resolved(Ty::String),
                 extension_receiver_parameter: Some(0),
                 dispatch: crate::fir::FirPropertyDispatch::Ordinary,
+
+                constant_value_field: false,
             },
             dispatch_receiver: Some(FirReceiver {
                 value: dispatch,
@@ -881,6 +885,8 @@ fn external_super_property_dispatch_survives_common_lowering() {
                     owner,
                     interface: false,
                 },
+
+                constant_value_field: false,
             },
             dispatch_receiver: Some(FirReceiver {
                 value: receiver,

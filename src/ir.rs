@@ -1975,9 +1975,14 @@ pub struct IrFile {
     /// rather than the checked cast a written `as` needs.
     pub written_casts: std::collections::HashSet<ExprId>,
     /// Constants that are the value of an operation over constants (`1 + 2`), folded like kotlinc's
-    /// `ConstEvaluationLowering`, rather than a literal the source wrote. Kotlin metadata's
-    /// `HAS_CONSTANT` describes only a literal initializer, so a backend must not read it from these.
+    /// `ConstEvaluationLowering`, rather than a literal the source wrote. A backend must not treat
+    /// one of these as a source literal. Metadata `HAS_CONSTANT` is [`Self::metadata_constants`].
     pub folded_constants: std::collections::HashSet<ExprId>,
+    /// Initializers whose checked shape has a constant value for Kotlin metadata `HAS_CONSTANT`:
+    /// a non-null literal, a string concatenation of constant parts, a numeric conversion or unary
+    /// plus/minus of a constant, or a read of a `const` property or a Java `val` field. A folded
+    /// `1 + 2` is absent even though it is a constant.
+    pub metadata_constants: std::collections::HashSet<ExprId>,
     /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.

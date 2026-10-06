@@ -1470,6 +1470,13 @@ impl BodyLowering<'_> {
             }
         }
         self.record_expression_origins(first_generated, lowered, origin);
+        if super::constant_folding::metadata_constant_expression(
+            self.body,
+            self.index,
+            expression_id,
+        ) {
+            self.ir.metadata_constants.insert(lowered);
+        }
         self.set_expression_state(expression_id, LoweringState::Lowered(lowered));
         Ok(lowered)
     }

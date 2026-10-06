@@ -3154,6 +3154,8 @@ struct PropertyReadMemberSelection {
     accessor: Option<Box<crate::libraries::LibraryCallable>>,
     /// Provider-chosen field, Kotlin accessor, or Java accessor. The platform null-check names it.
     producer: crate::libraries::PropertyProducer,
+    /// The selected declaration is a Java `val` field. See [`crate::libraries::PropertyInfo::constant_value_field`].
+    constant_value_field: bool,
     context_access: Option<Box<ResolvedPropertyAccess>>,
     compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
     compile_time_constant: Option<crate::libraries::LibraryConst>,
@@ -10911,6 +10913,8 @@ pub enum ExprLowering {
         singleton_dispatch: Option<SingletonValue>,
         owner: TypeName,
         name: String,
+        /// Java `val` field. A `const val` read is inlined before this record is built.
+        constant_value_field: bool,
     },
     /// A property selected on a classifier value rather than an instance or companion. The selected
     /// declaration carries its optional physical getter; absence means the property is valid Kotlin
@@ -10962,6 +10966,8 @@ pub enum ExprLowering {
         /// compiled into the declaring class whose receiver's static type is exactly that
         /// class. A nested class keeps the field's type but calls the getter, so this stays false.
         owner_storage: bool,
+        /// Java `val` field. See [`crate::libraries::PropertyInfo::constant_value_field`].
+        constant_value_field: bool,
     },
     /// A property-read `recv.name` resolved to an extension property. The complete selected property
     /// is retained for every provider; origin affects only local/cross-file/library linkage.
@@ -13306,6 +13312,7 @@ impl<'a> Checker<'a> {
                         getter: None,
                         accessor: None,
                         producer: crate::libraries::PropertyProducer::KotlinAccessor,
+                        constant_value_field: false,
                         context_access: None,
                         compiler_intrinsic: None,
                         compile_time_constant: None,
@@ -13410,6 +13417,9 @@ impl<'a> Checker<'a> {
                             crate::libraries::PropertyProducer::KotlinAccessor,
                             |property| property.producer,
                         ),
+                        constant_value_field: selected_property
+                            .as_ref()
+                            .is_some_and(|property| property.constant_value_field),
                         context_access,
                         compiler_intrinsic: selected_property
                             .as_ref()
@@ -14013,6 +14023,7 @@ impl<'a> Checker<'a> {
                     getter,
                     accessor,
                     producer,
+                    constant_value_field,
                     context_access,
                     compiler_intrinsic,
                     compile_time_constant,
@@ -14046,6 +14057,7 @@ impl<'a> Checker<'a> {
                         context_access,
                         compiler_intrinsic,
                         owner_storage: false,
+                        constant_value_field,
                     },
                 );
                 if let Some(getter) = getter {
@@ -14359,6 +14371,7 @@ impl<'a> Checker<'a> {
                     ),
                     owner: property.owner,
                     name: property.name,
+                    constant_value_field: property.constant_value_field,
                 },
             );
         }
@@ -15257,6 +15270,7 @@ impl<'a> Checker<'a> {
                 singleton_dispatch: None,
                 owner: property.property.owner,
                 name: name.to_string(),
+                constant_value_field: false,
             }
         } else {
             ExprLowering::TopLevelPropertyGet(property)
@@ -29070,6 +29084,7 @@ fun box(): String {
                             is_const: false,
                             implicit_integer_coercion: false,
                             compile_time_constant: None,
+                            constant_value_field: false,
                             visibility: Visibility::Public,
                             owner: foo,
                             receiver_rank: 0,

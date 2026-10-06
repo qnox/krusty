@@ -1891,6 +1891,26 @@ impl Ty {
         matches!(self, Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong)
     }
 
+    /// Whether a property of this type may carry metadata `HAS_CONSTANT`.
+    ///
+    /// kotlinc's `canBeUsedForConstVal`: the platform lower bound is a primitive, `String`, or an
+    /// unsigned type. A nullable `String?` does not qualify; a platform `String!` does.
+    pub fn can_be_used_for_const_val(self) -> bool {
+        let ty = self.platform_lower_bound().canonical_semantic();
+        matches!(
+            ty,
+            Ty::Boolean
+                | Ty::Byte
+                | Ty::Short
+                | Ty::Int
+                | Ty::Long
+                | Ty::Char
+                | Ty::Float
+                | Ty::Double
+                | Ty::String
+        ) || ty.is_unsigned()
+    }
+
     /// The zero-extension mask an unsigned value needs when it leaves its own representation, or
     /// `None` when the representation already spans the whole operation width (`UInt` = `int`,
     /// `ULong` = `long`). `UByte`/`UShort` live in a `byte`/`short`, which the JVM SIGN-extends on

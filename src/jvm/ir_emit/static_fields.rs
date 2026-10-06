@@ -30,10 +30,14 @@ pub(super) fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool
     )
 }
 
-/// Whether `init` is a literal the source wrote, the only initializer Kotlin metadata's
-/// `HAS_CONSTANT` describes: a value folded from an operation over constants is not one.
+/// Whether `init` is an initializer Kotlin metadata's `HAS_CONSTANT` describes.
+///
+/// A source literal qualifies. So does a checked constant value that folding does not treat as a
+/// source literal: a string concatenation of constant parts, a numeric conversion, or a Java `val`
+/// field. A folded `1 + 2` is a constant and is absent from both sets.
 pub(super) fn literal_initializer(ir: &IrFile, init: crate::ir::ExprId) -> bool {
-    const_value_idx_peek(ir, init) && !ir.folded_constants.contains(&init)
+    ir.metadata_constants.contains(&init)
+        || (const_value_idx_peek(ir, init) && !ir.folded_constants.contains(&init))
 }
 
 /// The initializer `<clinit>` runs for static `s`: its source initializer, unless a `const val`

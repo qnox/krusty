@@ -1331,6 +1331,8 @@ impl BodyFirChecker<'_> {
             result: resolved(callable.ret)?,
             extension_receiver_parameter: None,
             dispatch: crate::fir::FirPropertyDispatch::Ordinary,
+
+            constant_value_field: false,
         })
     }
 

@@ -48,6 +48,8 @@ pub enum FirPropertyTarget {
         /// Parameter slot occupied by the extension receiver when this accessor belongs to a
         /// member-extension property. Ordinary members and top-level extensions use `None`.
         extension_receiver_parameter: Option<u32>,
+        /// The declaration is a Java `val` field, including one with no `ConstantValue` attribute.
+        constant_value_field: bool,
         dispatch: FirPropertyDispatch,
     },
 }
