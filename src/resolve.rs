@@ -2011,8 +2011,12 @@ pub struct ClassSig {
     pub generic_property_shapes: HashMap<String, Ty>,
     /// For a `@JvmInline value class X(val v: U)` — the sole underlying property's `(name, type U)`.
     /// A value-class value is represented unboxed as `U`; `X` carries static `box-impl`/`unbox-impl`/
-    /// `constructor-impl` members for boxed contexts. `None` for an ordinary class.
+    /// `constructor-impl` members for boxed contexts. `None` for an ordinary class and for a boxed
+    /// `value class` enabled by `FullValueClasses`.
     pub value_field: Option<(String, Ty)>,
+    /// Boxed `value class` (`+FullValueClasses`, no `@JvmInline`): structural `equals`/`hashCode`/
+    /// `toString`, no `componentN`/`copy`, and no unboxed carrier.
+    pub full_value: bool,
     /// For a generic higher-order method (`fun <R> map(f: (T) -> R): R`), the un-erased declared shape
     /// needed to substitute the receiver's type arguments into the lambda parameter types and infer the
     /// method's own type parameters from the lambda body. Keyed by method name; only methods whose
@@ -2127,6 +2131,7 @@ impl ClassSig {
             nullable_tparam_props: HashMap::new(),
             generic_property_shapes: HashMap::new(),
             value_field: None,
+            full_value: false,
             generic_methods: HashMap::new(),
         }
     }
@@ -25666,11 +25671,15 @@ mod tests {
     #[test]
     fn value_class_constructor_keeps_its_semantic_array_parameter() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "value class UIntArray(private val storage: IntArray) { val size get() = storage.size }",
+        let jvm_annotations = parse_file(
+            "package kotlin.jvm\nannotation class JvmInline",
             &mut diagnostics,
         );
-        let symbols = collect_signatures(&[file], &mut diagnostics);
+        let file = parse_file(
+            "@JvmInline value class UIntArray(private val storage: IntArray) { val size get() = storage.size }",
+            &mut diagnostics,
+        );
+        let symbols = collect_signatures(&[jvm_annotations, file], &mut diagnostics);
 
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         let class = symbols
@@ -26469,12 +26478,15 @@ val result = object { fun value(): String = captured }
         let mut diagnostics = DiagSink::new();
         let kotlin_annotations = parse_file(
             "package kotlin\n\
-             annotation class Suppress(vararg val names: String)\n\
-             annotation class JvmInline",
+             annotation class Suppress(vararg val names: String)",
             &mut diagnostics,
         );
         let exact_annotation = parse_file(
             "package kotlin.internal\nannotation class Exact",
+            &mut diagnostics,
+        );
+        let jvm_annotations = parse_file(
+            "package kotlin.jvm\nannotation class JvmInline",
             &mut diagnostics,
         );
         let file = if detected_features {
@@ -26482,9 +26494,9 @@ val result = object { fun value(): String = captured }
         } else {
             parse_file(src, &mut diagnostics)
         };
-        let files = vec![kotlin_annotations, exact_annotation, file];
+        let files = vec![kotlin_annotations, exact_annotation, jvm_annotations, file];
         let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[2], &mut symbols, &mut diagnostics);
+        let info = check_file(&files[3], &mut symbols, &mut diagnostics);
         let errors = diagnostics
             .diags
             .iter()
@@ -27244,7 +27256,7 @@ class Calls {
     suspend fun consume(): Int = memberIdentity(memberProduce())
 }
 
-@JvmInline value class Token(val value: Int)
+@kotlin.jvm.JvmInline value class Token(val value: Int)
 class ValueCalls {
     suspend fun <T> produce(): T = null as T
     suspend fun <T> identity(value: T): T = value
@@ -27253,7 +27265,7 @@ class ValueCalls {
     suspend fun consume(): Token = identity(wrap(forward(produce())))
 }
 
-@JvmInline value class AnyToken(val value: Any)
+@kotlin.jvm.JvmInline value class AnyToken(val value: Any)
 class AnyValueCalls {
     suspend fun <T> produce(): T = null as T
     suspend fun <T> identity(value: T): T = value
@@ -47101,6 +47113,7 @@ impl<'a> Checker<'a> {
         secondary: usize,
         primary_params: &[Ty],
         secondary_params: &[Vec<Ty>],
+        supports_default_abi: bool,
     ) -> Vec<CtorDelegationCandidate> {
         let mut candidates = Vec::new();
         let context_count = class
@@ -47133,7 +47146,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg)
                     .map(|ordinal| ordinal + context_count),
-                supports_default_abi: !class.is_value,
+                supports_default_abi,
                 low_priority: class
                     .primary_ctor_annotations
                     .as_ref()
@@ -47193,7 +47206,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg)
                     .map(|ordinal| ordinal + secondary_context_count),
-                supports_default_abi: !class.is_value,
+                supports_default_abi,
                 low_priority: self.has_low_priority_annotation(scope, &constructor.annotations),
                 parameter_constraints: params
                     .iter()
@@ -54393,6 +54406,23 @@ impl<'a> Checker<'a> {
                             sc_index,
                             &primary_params,
                             &secondary_params,
+                            // An unboxed value class has no ordinary `$default` constructor. A boxed
+                            // full value class does, so `this(x)` may omit a parameter that has one.
+                            !cl.is_value
+                                || current_owner.is_some_and(|owner| {
+                                    c.resolved_index.is_some_and(|index| {
+                                        index
+                                            .classifier_declaration(owner)
+                                            .and_then(|declaration| {
+                                                index.declaration_header(declaration)
+                                            })
+                                            .is_some_and(|header| {
+                                                header
+                                                    .flags
+                                                    .has(crate::fir::DeclarationFlags::FULL_VALUE)
+                                            })
+                                    })
+                                }),
                         );
                         c.select_ctor_delegation(
                             delegation_scope,

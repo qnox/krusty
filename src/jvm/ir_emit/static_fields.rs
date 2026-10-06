@@ -991,7 +991,7 @@ impl Emitter<'_> {
         if self.diverges(init) {
             return;
         }
-        let physical = jvm_declared_ty(&field.ty);
+        let physical = jvm_value_ty(&field.ty);
         self.adapt_physical_operand_for(init, self.value_ty(init), physical, code);
         // Static storage is identified by its place in the file's static table.
         let reference = self.cw.fieldref(
