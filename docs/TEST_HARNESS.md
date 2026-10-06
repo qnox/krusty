@@ -147,8 +147,9 @@ the manifests and `tests/box_ratchet.rs` are deleted.
 A pull request is judged against its own base, so two that each match the lists can still disagree
 with them once both land: one fixes a file the other's list still names, or their changes interact.
 The `ci` workflow also runs on `merge_group`, so with master's merge queue (or "require branches to
-be up to date") on and the `conformance` checks required, every merge is checked on the combined
-commit before master moves. A branch that falls behind merges master in and re-blesses.
+be up to date") on and the `ci-and-conformance` check required (see "Required Check"), every merge
+is checked on the combined commit before master moves. A branch that falls behind merges master in
+and re-blesses.
 
 The manifests only shrink. The required `ci` job runs `scripts/check-box-lists.sh` before building
 and fails a pull request that adds an entry to either manifest compared with its merge base,
@@ -208,6 +209,78 @@ defaults to 295 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEO
 
 Do not use `--release` for tests. The release build cycle takes longer than it saves at runtime, and
 `run-tests.sh --release` is rejected intentionally.
+
+## Required Check
+
+The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
+It needs `ci` and the whole `conformance` matrix, where every supported Kotlin version lane runs the
+box suite and then the non-box suite. The job is scheduled with `if: always()`, because a required
+check that is skipped counts as passing, and it fails unless both results are `success`. A failed,
+skipped, or cancelled dependency therefore fails it, including a failed `build-conformance-bin` or
+`versions` job that skips the whole matrix. Its name stays the same when the version manifest
+changes. It runs on pull requests, merge groups, and master pushes. The master `release` job keeps
+its own, broader `needs` list (KLIB semantics, the Gradle matrix, and release builds), which this
+check does not cover.
+
+The `master` ruleset (id `19534763`) requires `ci` until the maintainer switches it. Switch only
+after the job has landed on master and reported success there, so the required context is one
+GitHub has actually reported:
+
+1. Find the latest master push run and confirm its head is the merged commit:
+
+   ```sh
+   gh run list --repo qnox/krusty --workflow ci.yml --branch master --event push --limit 1 \
+     --json databaseId,headSha,status,conclusion
+   ```
+
+2. Confirm that commit reported the aggregate as a successful GitHub Actions check (app id
+   `15368`):
+
+   ```sh
+   gh api repos/qnox/krusty/commits/<headSha>/check-runs \
+     --jq '.check_runs[] | select(.name == "ci-and-conformance") | {name, conclusion, app: .app.id}'
+   ```
+
+3. Read the current required checks. Before the switch this prints
+   `[{"context":"ci","integration_id":15368}]`:
+
+   ```sh
+   gh api repos/qnox/krusty/rulesets/19534763 \
+     --jq '.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks'
+   ```
+
+4. Replace `ci` with `ci-and-conformance`, either in Settings → Rules → Rulesets → `master` →
+   "Require status checks to pass" (pick the GitHub Actions source), or through the API, which
+   keeps every other rule as it is:
+
+   ```sh
+   gh api repos/qnox/krusty/rulesets/19534763 \
+     | jq '{name, target, enforcement, conditions, bypass_actors: (.bypass_actors // []),
+            rules: (.rules | map(if .type == "required_status_checks"
+              then .parameters.required_status_checks =
+                [{"context": "ci-and-conformance", "integration_id": 15368}]
+              else . end))}' \
+     | gh api -X PUT repos/qnox/krusty/rulesets/19534763 --input -
+   ```
+
+5. Repeat step 3. It must print `[{"context":"ci-and-conformance","integration_id":15368}]`, and an
+   open pull request then lists `ci-and-conformance` as required.
+
+The conformance badge changes only when a master `release` job publishes. To verify a publication,
+confirm that run's `release` job succeeded, render its max-version report locally, and compare the
+result with the Gist's `krusty-conformance.json`:
+
+```sh
+gh run view <run-id> --repo qnox/krusty --json jobs \
+  --jq '.jobs[] | select(.name == "release") | {conclusion, steps: [.steps[] | {name, conclusion}]}'
+gh run download <run-id> --repo qnox/krusty -n "pct-$(just max-version)" -D target/pct
+just conformance-badge target/pct/pct.txt
+curl -fsSL https://gist.githubusercontent.com/qnox/dec8149bc4f43b203d6cc9adc14f2026/raw/krusty-conformance.json
+```
+
+The `label`, `message`, and `color` in `docs/badges/conformance.json` must match the Gist's. A
+`release` job that skipped its publish steps (an older master commit, or no `CONFORMANCE_GIST_ID`)
+left the badge unchanged.
 
 ## Focused Runs
 

@@ -2,7 +2,8 @@ name: ci
 
 # Build the conformance test binary once. Every supported Kotlin-version lane runs both its box
 # corpus and every other active test in that binary. Publish only after the combined matrix passes
-# and every version matches its exact box fail/not-applicable manifests.
+# and every version matches its exact box fail/not-applicable manifests. `ci-and-conformance` is the
+# one required check over `ci` and that whole matrix.
 # `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
 # match the lists on their own base and still disagree with them once both are on master.
 on:
@@ -299,6 +300,28 @@ jobs:
           name: pct-${{ matrix.version }}
           path: pct.txt
           if-no-files-found: error
+
+  # The one check a ruleset requires: its context does not change with the Kotlin version matrix.
+  # A required check that is skipped counts as passing, so this job is always scheduled and fails
+  # itself unless `ci` and the whole matrix (one result over every lane) succeeded. A failed
+  # `build-conformance-bin` or `versions` skips the matrix, which fails it here too.
+  ci-and-conformance:
+    name: ci-and-conformance
+    needs: [ci, conformance]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: require ci and every conformance lane to succeed
+        env:
+          CI_RESULT: ${{ needs.ci.result }}
+          CONFORMANCE_RESULT: ${{ needs.conformance.result }}
+        run: |
+          echo "ci: $CI_RESULT"
+          echo "conformance: $CONFORMANCE_RESULT"
+          if [ "$CI_RESULT" != success ] || [ "$CONFORMANCE_RESULT" != success ]; then
+            echo "ci and every conformance lane must succeed" >&2
+            exit 1
+          fi
 
   # Build the release bytes once. The compatibility matrix below consumes this Maven repository;
   # it never rebuilds the plugin from the checkout.

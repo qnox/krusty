@@ -228,6 +228,8 @@ mod chained_plus_element_join_e2e;
 mod char_literal_diagnostics_e2e;
 #[path = "checker_operator_methods_e2e.rs"]
 mod checker_operator_methods_e2e;
+#[path = "ci_required_check_e2e.rs"]
+mod ci_required_check_e2e;
 #[path = "class_annotation_attributes_e2e.rs"]
 mod class_annotation_attributes_e2e;
 #[path = "class_body_e2e.rs"]
