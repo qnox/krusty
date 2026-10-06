@@ -3453,14 +3453,11 @@ pub fn byte_diff_against_kotlinc_cp_target(
     )))
 }
 
-/// Compare ONE method's instruction sequence against the reference compiler's, with the
-/// dependencies in `lib` (none when empty) built by the reference compiler.
+/// Compile `src` with kotlinc and krusty and require `class` to be the same bytes.
 ///
-/// Whole-class identity also covers the constant pool, the debug tables and `SourceDebugExtension`,
-/// which diverge for reasons of their own; this instrument answers the narrower question a splice
-/// or coroutine change is actually about — whether the emitted code is the same instructions in the
-/// same order, naming the same members, over the same local slots. Pool indices are normalized away
-/// because two pools interned in different orders describe the same references.
+/// `method` is named in the failure text. The pass condition is the class file, so a match does
+/// not disassemble anything. Dependencies in `lib` (none when empty) are built by the reference
+/// compiler.
 #[allow(dead_code)]
 pub fn method_code_diff_against_kotlinc(
     name: &str,
@@ -3472,9 +3469,9 @@ pub fn method_code_diff_against_kotlinc(
     method_code_diffs_against_kotlinc(name, lib, src, class, &[method])?.pop()
 }
 
-/// [`method_code_diff_against_kotlinc`] for several methods of one compiled class. The dependency,
-/// source module, and both class files are built once; each requested method still produces its own
-/// exact instruction/local-table result and diagnostic.
+/// [`method_code_diff_against_kotlinc`] for several members of one class. The dependency and both
+/// class files are built once. A byte match passes every member without disassembly. A mismatch
+/// fails every member with that class-file difference.
 pub fn method_code_diffs_against_kotlinc(
     name: &str,
     lib: &[(&str, &str)],
@@ -3515,21 +3512,43 @@ pub fn method_code_diffs_against_kotlinc(
         std::fs::create_dir_all(parent).ok()?;
     }
     std::fs::write(&krusty_path, krusty_bytes).ok()?;
+    let reference_bytes = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
 
-    let results = methods
-        .iter()
-        .map(|method| {
-            let reference = disassembled_method(&kref, class, method)?;
-            let actual = disassembled_method(&kout, class, method)?;
-            Some(if reference == actual {
-                Ok(())
-            } else {
+    let results = if reference_bytes == *krusty_bytes {
+        methods.iter().map(|_| Ok(())).collect()
+    } else {
+        let offset = reference_bytes
+            .iter()
+            .zip(krusty_bytes.iter())
+            .position(|(left, right)| left != right)
+            .unwrap_or_else(|| reference_bytes.len().min(krusty_bytes.len()));
+        let window = |bytes: &[u8]| {
+            let start = offset.saturating_sub(8);
+            let end = offset.saturating_add(8).min(bytes.len());
+            format!("{:02x?}", &bytes[start..end])
+        };
+        let listing = |dir: &Path| {
+            let classpath = dir.to_string_lossy();
+            let binary_name = class.replace('/', ".");
+            javap(&["-p", "-c", "-l", "-cp", classpath.as_ref(), &binary_name])
+                .unwrap_or_else(|| "(javap unavailable)".to_string())
+        };
+        let reference = listing(&kref);
+        let actual = listing(&kout);
+        methods
+            .iter()
+            .map(|method| {
                 Err(format!(
-                    "{name}/{class}.{method}: instruction sequences differ\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}"
+                    "{name}/{class}: bytes differ at offset {offset} (kotlinc {} B, krusty {} B)\n\
+                     kotlinc {}\nkrusty  {}\n{method}\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}",
+                    reference_bytes.len(),
+                    krusty_bytes.len(),
+                    window(&reference_bytes),
+                    window(krusty_bytes)
                 ))
             })
-        })
-        .collect::<Option<Vec<_>>>()?;
+            .collect()
+    };
     let _ = std::fs::remove_dir_all(&dir);
     Some(results)
 }
@@ -3563,68 +3582,6 @@ pub fn class_calls_method(bytes: &[u8], callee: &str) -> Option<bool> {
         }
     }
     Some(false)
-}
-
-/// One method's instructions and its `LocalVariableTable`, with constant-pool indices normalized
-/// away and the entry each one names kept (`invokestatic # // Method Boxing.boxInt:(I)…`), so a
-/// call to a different member is a difference.
-///
-/// The `LineNumberTable` is deliberately excluded: a spliced body's line numbers are output lines
-/// that only a `SourceDebugExtension` gives meaning to, and krusty does not emit one yet
-/// (`docs/JVM_INLINE_BEFORE_CPS.md` a5/a6). Including it would fail for a reason this instrument is
-/// not measuring.
-#[allow(dead_code)]
-fn disassembled_method(dir: &Path, class: &str, method: &str) -> Option<String> {
-    // The listing is the comparison and, when the methods differ, the failure text. It comes from
-    // the pooled runner, not a new `javap` process.
-    let classpath = dir.to_string_lossy();
-    let binary_name = class.replace('/', ".");
-    let text = javap(&["-p", "-c", "-l", "-cp", classpath.as_ref(), &binary_name])?;
-    let mut body = String::new();
-    let mut inside = false;
-    let mut skipping_lines = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(method) && trimmed.contains('(') {
-            inside = true;
-            continue;
-        }
-        if inside {
-            if trimmed.is_empty() {
-                break;
-            }
-            if trimmed == "Code:" {
-                continue;
-            }
-            if trimmed == "LineNumberTable:" {
-                skipping_lines = true;
-                continue;
-            }
-            if trimmed == "LocalVariableTable:" {
-                skipping_lines = false;
-                body.push_str("LocalVariableTable\n");
-                continue;
-            }
-            if skipping_lines {
-                continue;
-            }
-            // `12: invokestatic  #23    // Method one:(I)I` → `12: invokestatic #`
-            let mut parts = trimmed.splitn(2, "//");
-            let code = parts.next().unwrap_or(trimmed).trim();
-            let normalized = code
-                .split_whitespace()
-                .map(|token| if token.starts_with('#') { "#" } else { token })
-                .collect::<Vec<_>>()
-                .join(" ");
-            body.push_str(normalized.trim_end_matches(','));
-            if let Some(reference) = parts.next() {
-                body.push_str(" // ");
-                body.push_str(reference.trim());
-            }
-            body.push('\n');
-        }
-    }
-    (!body.is_empty()).then_some(body)
 }
 
 #[cfg(test)]

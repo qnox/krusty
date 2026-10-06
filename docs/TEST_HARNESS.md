@@ -226,11 +226,12 @@ and Java drivers use persistent `BoxRunner` and `JavaRunner` JVMs; `javac` runs 
 source to compile that helper, then in-process. The conformance box runner is a separate persistent
 JVM per test thread, also compiled once.
 
-`javap` is not a process on that path. Disassembly goes through `JavaRunner`'s in-process tool. A
-well-formedness check reads the class file and disassembles only when that read fails, so the
-listing explains the failure. Method-code comparisons still disassemble on a match: the normalized
-listing is the oracle, and it comes from the pooled tool rather than a new JVM. The survey's
-reference acceptance oracle starts a kotlinc process per case; it is not part of `just ci`.
+`javap` is not a process on that path. Disassembly goes through `JavaRunner`'s in-process tool, and
+only to explain a failure. The oracle for a class is byte-for-byte equality with kotlinc's class
+file. A well-formedness check reads the class file and disassembles when that read fails. A
+method-code comparison passes when the class files are identical and disassembles them only when
+they are not. The survey's reference acceptance oracle starts a kotlinc process per case; it is not
+part of `just ci`.
 
 The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
 seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard
