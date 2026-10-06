@@ -59,8 +59,7 @@ fn one_alias_parameter_can_fill_several_target_arguments() {
     "#;
 
     assert_eq!(
-        common::expect_box_run_with_stdlib(SOURCE, "RepeatedAliasArgument")
-            .expect("one alias formal must expand into both target arguments"),
+        common::expect_box_run_with_stdlib(SOURCE, "RepeatedAliasArgument"),
         "OK"
     );
 }
