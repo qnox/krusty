@@ -292,37 +292,18 @@ fn selector_reads_temporary_once_as_receiver(
                 ..
             } => expression = *arg,
             IrExpr::Call {
-                callee,
                 dispatch_receiver,
                 args,
+                ..
             } => {
-                let receiver = dispatch_receiver.as_ref().copied().or_else(|| {
-                    let position = ir
-                        .static_extension_receivers
-                        .get(&expression)
-                        .copied()
-                        .map(|position| position as usize)
-                        .or_else(|| {
-                            let function = match callee {
-                                crate::ir::Callee::Local(function)
-                                | crate::ir::Callee::LocalDefault(function) => Some(*function),
-                                crate::ir::Callee::LocalWithDefaults { function, .. }
-                                | crate::ir::Callee::ClassStatic { function, .. }
-                                | crate::ir::Callee::ClassStaticWithDefaults { function, .. }
-                                | crate::ir::Callee::ClassStaticDefault { function, .. } => {
-                                    Some(*function)
-                                }
-                                _ => None,
-                            }?;
-                            ir.extension_receiver_fns.contains(&function).then(|| {
-                                ir.fn_context_counts
-                                    .get(&function)
-                                    .copied()
-                                    .unwrap_or_default()
-                            })
-                        })?;
-                    args.get(position).copied()
-                });
+                let receiver = match dispatch_receiver {
+                    Some(receiver) => Some(*receiver),
+                    None => {
+                        let position =
+                            ir.static_extension_receivers.get(&expression).copied()? as usize;
+                        args.get(position).copied()
+                    }
+                };
                 return receiver.is_some_and(|receiver| reads_temporary(ir, receiver, temporary));
             }
             IrExpr::PropertyRead {
