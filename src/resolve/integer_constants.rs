@@ -508,6 +508,33 @@ mod tests {
     }
 
     #[test]
+    fn overflowing_int_constant_in_a_long_conditional_stays_int() {
+        let source = "fun returned(flag: Boolean): Long = if (flag) 2147483647 + 1 else 0\n";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        let sums = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| match expression {
+                Expr::Binary { op: BinOp::Add, .. } => Some(ExprId(index as u32)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sums.len(), 1);
+        assert_eq!(info.expr_types[sums[0].0 as usize], Ty::Int);
+        assert_eq!(
+            info.selected_numeric_conversions.get(&sums[0]),
+            Some(&Ty::Long)
+        );
+    }
+
+    #[test]
     fn division_by_zero_adapts_to_long_without_a_folded_value() {
         let source = "const val lost: Long = 1 / 0\n\
                       const val kept: Long = 1 / 1\n\
