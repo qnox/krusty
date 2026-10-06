@@ -79,6 +79,9 @@ mod value_class_facts;
 mod when_facts;
 
 pub use crate::enclosing_declarations::EnclosingDeclaration;
+/// A declared type's checked source spelling, which the IR carries per declaration
+/// ([`IrFile::prop_declared_spellings`]) as part of its contract with backends and plugins.
+pub use crate::spelling::Spelled;
 pub use crate::types::EqualityMode;
 pub use annotations::{
     AccessorAnnotations, AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations,
@@ -100,7 +103,10 @@ pub use constructors::{
     IrCapturedReceiver, IrConstructorCapture, IrCtorParameterProvenance,
     IrJvmValueClassSecondaryCtor,
 };
-pub use constructors::{IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction};
+pub use constructors::{
+    IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction,
+    IrCustomSerializerConstructorTarget,
+};
 pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
@@ -1069,8 +1075,8 @@ pub struct IrClass {
     /// Explicit `(constructor parameter index, field index)` stores that must run before the superclass
     /// constructor. This is semantic constructor-order metadata: the JVM backend must not infer it from
     /// a synthetic field spelling or assume the target is a leading property field. Language-level inner
-    /// classes, the values a local class or anonymous object captures, and generated state machines
-    /// each require such a store.
+    /// classes, the values a local class or anonymous object captures, generated state machines, and
+    /// the constructor properties of a full value class each require such a store.
     pub pre_super_param_fields: Vec<(u32, u32)>,
     /// `true` when `init_body` already stores the primary-constructor `val`/`var` params (and inner
     /// `this$0`) to their fields — the desugared form. The JVM backend then must NOT auto-store them (it
@@ -1599,6 +1605,9 @@ pub struct IrExternalFrameLine {
 pub struct IrFile {
     pub package: Option<String>,
     pub source_line_count: u32,
+    /// Finalized source-language decision for recursive non-reified `typeOf` bounds. The JVM
+    /// realizes this checked per-file fact; it does not select the policy itself.
+    pub(crate) recursive_type_of: bool,
     /// Checked file-level annotation applications. These are declaration metadata, not syntax;
     /// backend plugins consume their folded values without retaining or reopening the source AST.
     pub file_annotations: DeclarationAnnotations,
@@ -1658,6 +1667,10 @@ pub struct IrFile {
     /// `@Serializable(with = …)` names a serializer class, keyed by that classifier.
     pub custom_serializer_constructions:
         std::collections::HashMap<TypeName, IrCustomSerializerConstruction>,
+    /// Frontend-selected primary constructors for serializer classes named on checked type
+    /// occurrences, keyed by serializer identity and the annotated type's semantic argument count.
+    pub type_use_serializer_constructions:
+        std::collections::HashMap<(TypeName, u32), IrCustomSerializerConstruction>,
     /// Exact semantic property-override edges copied from stable FIR. A target backend may erase
     /// these types and materialize representation bridges, but it must not search declarations.
     pub property_overrides: std::collections::HashMap<TypeName, Vec<IrPropertyOverride>>,
@@ -2031,10 +2044,11 @@ pub struct IrFile {
     /// writes `I, Base, J`), while [`IrClass::superclass`] keeps the superclass apart. Absent when
     /// the superclass is written first or none is declared.
     pub class_superclass_positions: std::collections::HashMap<crate::types::TypeName, u32>,
-    /// The same, for a class PROPERTY, keyed by `(class fully-qualified name, property name)` —
-    /// a property has no `FunId` to hang off.
+    /// The same, for a class PROPERTY, keyed by `(class fully-qualified name, stable declaration
+    /// order)`. Source spelling is metadata payload, not declaration identity: an ordinary property
+    /// and one or more member-extension properties may legally share a name.
     pub prop_declared_spellings: std::collections::HashMap<
-        (crate::types::TypeName, String),
+        (crate::types::TypeName, u32),
         crate::spelling::DeclaredSpellings,
     >,
     /// Function ids realizing an extension receiver among their physical parameters. Metadata and JVM

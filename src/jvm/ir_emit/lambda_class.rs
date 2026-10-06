@@ -50,7 +50,7 @@ pub(super) fn emit_lambda_class(
         .map(|(index, field)| Capture {
             names: crate::jvm::capture_names::lambda_class_capture(ir, lambda, index)
                 .expect("every field of a lambda class stores one of its captures"),
-            ty: jvm_declared_ty(&field.ty),
+            ty: jvm_value_ty(&field.ty),
             descriptor: ir_type_desc(&field.ty),
             signature: parameterized_sig(&formatter, &field.ty),
             parameter_signature: parameterized_sig_at(&formatter, &field.ty, Wildcards::Declared),

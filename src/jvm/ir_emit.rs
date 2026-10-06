@@ -197,7 +197,7 @@ pub(super) use declaration_types::class_ctor_jvm_tys;
 pub(super) use declaration_types::function_descriptor;
 use declaration_types::ir_method_desc;
 pub(crate) use declaration_types::jvm_tys;
-use declaration_types::{field_jvm_tys, jvm_declared_ty, signature_function_params};
+use declaration_types::{field_jvm_tys, jvm_declared_ty, jvm_value_ty, signature_function_params};
 use declaration_types::{
     ir_type_desc, jvm_function_params, jvm_is_erased_top, local_variable_desc,
 };
@@ -2806,7 +2806,7 @@ fn emit_class(
             .or(field.type_param.as_deref());
         let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter).field;
         let physical_name = instance_field_jvm_name(ir, c, field);
-        let field_desc = ir_type_desc(ty);
+        let field_desc = type_descriptor(jvm_value_ty(ty));
         // Coroutine continuation fields are compiler-generated storage rather than Kotlin
         // properties, so they are visited eagerly and receive no nullability annotation. Declared
         // properties, a data class's included, use the later field-table visit: their methods
@@ -3113,7 +3113,7 @@ fn emit_class(
             for (slot, (argument, identity)) in (1u16..).zip(c.ctor_args.iter().zip(&identities)) {
                 let name = crate::jvm::parameter_names::local_variable(identity, "<init>")
                     .expect("a continuation constructor parameter has a JVM local name");
-                ctor_locals.push((name, ir_type_desc(&argument.ty), slot));
+                ctor_locals.push((name, local_variable_desc(argument.ty), slot));
             }
             cw.set_method_debug("<init>", &ctor_desc, None, &ctor_locals);
         }
@@ -6679,7 +6679,7 @@ impl<'a> Emitter<'a> {
             return Some(PropertyAccess::Accessor {
                 owner,
                 name: setter_name,
-                descriptor: method_descriptor(&[jvm_declared_ty(&field.ty)], Ty::Unit),
+                descriptor: method_descriptor(&[jvm_value_ty(&field.ty)], Ty::Unit),
                 is_static: false,
                 is_interface: is_jvm_interface(class),
                 static_receiver: None,
@@ -6688,7 +6688,7 @@ impl<'a> Emitter<'a> {
         Some(PropertyAccess::Field {
             owner,
             name: instance_field_jvm_name(self.ir, class, field),
-            descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
+            descriptor: type_descriptor(jvm_value_ty(&field.ty)),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
             is_static: static_storage(self.ir, class),
         })
@@ -7125,17 +7125,19 @@ impl<'a> Emitter<'a> {
                 .unwrap_or(Ty::Error),
             IrExpr::EnclosingInstance { outer, .. } => instance_representation(self.ir, *outer),
             IrExpr::GetField { class, index, .. } => {
-                ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].ty)
+                // A field is a value slot. `Unit`, including a type parameter that erases to it,
+                // is the `kotlin.Unit` reference the `getfield` just pushed — not `void`.
+                jvm_value_ty(&self.ir.classes[*class as usize].fields[*index as usize].ty)
             }
             IrExpr::PropertyRead { ty, .. } => {
                 // A read keeps its LOGICAL type in the IR; a value-class property's accessor returns
                 // the carrier, which the value-class pass records beside it. The stack holds that.
                 if let Some(physical) = self.ir.physical_types.get(&e) {
-                    return ir_ty_to_jvm(physical);
+                    return jvm_value_ty(physical);
                 }
                 // A property read always yields a stored value. `Unit` therefore occupies the
                 // `kotlin/Unit` reference slot; only a function's control-flow return uses `V`.
-                ir_ty_to_jvm(&stored_value_ty(*ty))
+                jvm_value_ty(&stored_value_ty(*ty))
             }
             // A write is a statement: it leaves nothing on the stack, so nothing is discarded after it.
             IrExpr::PropertyWrite { .. } => Ty::Unit,
