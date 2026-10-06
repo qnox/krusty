@@ -86,6 +86,17 @@ pub(super) fn reference_invoke_bridge_parameter(ordinal: u16, continuation: bool
     format!("p{}", ordinal + 1)
 }
 
+/// The local created when an inline callable-reference invocation binds one adapter parameter.
+/// Constructing the common identity here keeps the JVM spelling in the one projection boundary.
+pub(super) fn inline_callable_reference_parameter(ordinal: u32) -> String {
+    let identity = IrParameterIdentity::generated(
+        IrGeneratedParameterRole::ReferenceInvokeValue { ordinal },
+        None,
+    );
+    local_variable(&identity, "")
+        .expect("an inline callable-reference parameter has a generated JVM name")
+}
+
 /// `LocalVariableTable` names of a suspend lambda class's generated `member`, formatted from the
 /// parameter identities its realization recorded and checked against `physical_parameters`: a
 /// captured value or receiver as its constructor parameter is spelled (`$receiver` where kotlinc's

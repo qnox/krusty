@@ -177,6 +177,9 @@ pub struct IrCheckedSubstitution {
     /// not runtime reification operations.
     pub reified: bool,
     pub value: Ty,
+    /// Runtime classifier selected for a reified operation. See
+    /// [`crate::fir::FirTypeSubstitution::reified_runtime`].
+    pub reified_runtime: Ty,
     pub additional_bounds: Vec<Ty>,
 }
 
@@ -2073,6 +2076,14 @@ pub struct IrFile {
     /// target callee handle, this fact survives provider realization and is available even when a
     /// public inline call legally remains as a non-inlined fallback.
     pub inline_call_sites: std::collections::HashSet<ExprId>,
+    /// Callable-reference expressions consumed as inline arguments. This is the checked argument
+    /// edge itself, recorded while argument mapping still owns the decision; backends must not
+    /// rediscover consumption by scanning expression parents or adapter bodies.
+    pub(crate) inline_callable_reference_arguments: std::collections::HashSet<ExprId>,
+    /// Adapter body root -> the exact value returned by that adapter. Callable-reference lowering
+    /// records this while constructing the body, before wrapping it in `return`/`block`; consumers
+    /// never inspect the generated body shape to recover the invocation template.
+    pub(crate) callable_reference_adapter_results: std::collections::HashMap<ExprId, ExprId>,
     /// Complete evaluation regions for semantically inline calls, including any source-order
     /// operand prelude and any consumed inline-body template. This target-neutral fact survives
     /// provider realization and structural expansion, so backends need not reconstruct an inline
@@ -2525,6 +2536,11 @@ pub struct IrFile {
     /// BOXED there — the value-class pass reads this to type such a slot as the boxed value class (so
     /// `it.getOrThrow()` unboxes it), without the lowerer probing value-class-ness itself.
     pub lambda_own_params_from: std::collections::HashMap<u32, u32>,
+    /// Lambda implementation id → the body's own inferred result when the selected language
+    /// level keeps that type as the implementation signature (before 2.4). Absence at current
+    /// levels is the checked decision to use the caller-facing result. A backend consumes this
+    /// semantic fact without receiving a second language-version switch.
+    pub lambda_inferred_results: std::collections::HashMap<FunId, Ty>,
     /// Lifted-lambda function id → the DECLARED parameter types and return type of the user
     /// `fun interface` method the lambda was SAM-converted to. Absent for a plain `FunctionN` lambda,
     /// whose `invoke` slots are all generic. The distinction only matters to a target that erases

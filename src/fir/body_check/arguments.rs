@@ -448,10 +448,15 @@ impl BodyFirChecker<'_> {
                     .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
                 physical_parameter,
             )?;
-            return Ok(FirCallArgument::Expression {
+            return Ok(FirCallArgument::Vararg {
                 parameter: parameter_id,
-                value,
-                conversion: self.selected_value_conversion(argument, value, target, cause)?,
+                origin: cause,
+                elements: vec![FirVarargElement {
+                    value,
+                    spread: true,
+                    conversion: self.selected_value_conversion(argument, value, target, cause)?,
+                }]
+                .into_boxed_slice(),
             });
         }
         let expected = if self.file.is_spread_arg(argument) {
@@ -838,8 +843,29 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         target: ResolvedTy,
     ) -> Option<FirConversion> {
-        let message = self.platform_narrowing_message(source)?;
-        Some(self.platform_narrowing_conversion(Some(message), cause, target))
+        // Reordered named arguments make the call a composite expression: their values are
+        // evaluated in source order into temporaries before the invocation. The check still
+        // exists, but cannot name that composite producer, so kotlinc uses `checkNotNull(Object)`.
+        let message = if self.call_reorders_arguments(source) {
+            None
+        } else {
+            Some(self.platform_narrowing_message(source)?)
+        };
+        Some(self.platform_narrowing_conversion(message, cause, target))
+    }
+
+    fn call_reorders_arguments(&self, source: ExprId) -> bool {
+        matches!(self.file.expr(source), Expr::Call { .. })
+            && self
+                .info
+                .resolved_call_arg_slots
+                .get(&source)
+                .is_some_and(|commitment| {
+                    commitment
+                        .argument_bindings
+                        .windows(2)
+                        .any(|pair| pair[0].parameter > pair[1].parameter)
+                })
     }
 
     fn platform_narrowing_conversion(
@@ -1045,6 +1071,16 @@ impl BodyFirChecker<'_> {
             FirConversionKind::CoerceToUnit
         } else if target_ty.accepts_numeric(actual_ty) {
             FirConversionKind::NumericWidening { to: target }
+        } else if matches!(
+            actual_ty.non_null(),
+            Ty::Intersection(parts) if parts
+                .iter()
+                .any(|part| part.non_null() == target_ty.non_null())
+        ) {
+            // Resolution has selected the declaration on one exact constituent of a semantic
+            // intersection. Preserve the source value and publish the selected dispatch view as
+            // an explicit checked conversion; lowering must not rediscover the member owner.
+            FirConversionKind::SmartCast { to: target }
         } else if target_ty.is_nullable() || (!actual_ty.is_reference() && target_ty.is_reference())
         {
             FirConversionKind::NullabilityWidening { to: target }

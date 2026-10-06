@@ -200,9 +200,10 @@ fn delegate_property_calls(
         extension_receiver: None,
         property_type,
     };
-    let result_check = (matches!(property_type, Ty::PlatformNullable(_))
-        && expected_type_rejects_null(forwarded.ty.get()))
-    .then(|| {
+    // A Java read is flexible, or enhanced from the builtin property it realizes.
+    let unchecked = matches!(property_type, Ty::PlatformNullable(_))
+        || getter.getter.enhanced_result.marks.head();
+    let result_check = (unchecked && expected_type_rejects_null(forwarded.ty.get())).then(|| {
         getter
             .producer
             .platform_check_name(&getter.name, Some(getter.getter.name.as_str()))

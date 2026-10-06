@@ -702,11 +702,16 @@ impl BodyFirChecker<'_> {
                     .contains(argument)
                 {
                     let target = self.resolved_type(span, parameter_ty)?;
-                    return Ok(FirCallArgument::Expression {
+                    return Ok(FirCallArgument::Vararg {
                         parameter,
-                        value,
-                        conversion: self
-                            .selected_value_conversion(*argument, value, target, cause)?,
+                        origin: cause,
+                        elements: vec![FirVarargElement {
+                            value,
+                            spread: true,
+                            conversion: self
+                                .selected_value_conversion(*argument, value, target, cause)?,
+                        }]
+                        .into_boxed_slice(),
                     });
                 }
                 let expected = if self.file.is_spread_arg(*argument) {
@@ -897,15 +902,18 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::MissingStableCallTarget,
                     ));
                 };
+                let reified = header.flags.is_reified();
+                let value = ResolvedTy::new(value).map_err(|error| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnpublishableType(error),
+                    )
+                })?;
                 Ok(FirTypeSubstitution {
                     parameter: parameter.into(),
-                    reified: header.flags.is_reified(),
-                    value: ResolvedTy::new(value).map_err(|error| {
-                        self.failure(
-                            self.file.expr_span(expression),
-                            BodyCheckFailureKind::UnpublishableType(error),
-                        )
-                    })?,
+                    reified,
+                    value,
+                    reified_runtime: self.reified_substitution_runtime(reified, value),
                     additional_bounds: Box::new([]),
                 })
             })
