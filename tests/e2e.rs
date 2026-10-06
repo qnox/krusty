@@ -731,6 +731,8 @@ mod empty_loop_body_e2e;
 mod engine_declaration_types_e2e;
 #[path = "enhanced_result_null_check_e2e.rs"]
 mod enhanced_result_null_check_e2e;
+#[path = "enhanced_type_argument_null_check_e2e.rs"]
+mod enhanced_type_argument_null_check_e2e;
 #[path = "enum_body_property_e2e.rs"]
 mod enum_body_property_e2e;
 #[path = "enum_class_signature_e2e.rs"]

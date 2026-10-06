@@ -6,6 +6,7 @@
 use crate::ast::{ExprId, StmtId};
 use crate::diag::Span;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
+use crate::libraries::TypeEnhancement;
 use crate::symbol_source::SymbolSource;
 use crate::types::{wk, Ty};
 use std::collections::HashMap;
@@ -102,6 +103,14 @@ impl super::TypeInfo {
     }
 }
 
+/// Where a loop's `iterator()` and `next()` results carry kotlinc's `EnhancedNullability`, as their
+/// declared results substitute the iterable's marks (`hashMap.entries` iterates marked entries).
+#[derive(Clone, Debug, Default)]
+pub struct ProtocolEnhancement {
+    pub iterator: TypeEnhancement,
+    pub element: TypeEnhancement,
+}
+
 /// A stdlib function a counted loop calls on its own, selected from the provider's declarations.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeFunction {
@@ -181,6 +190,7 @@ impl Checker<'_> {
             next: Box::new(next),
             iter_ty,
             elem_ty,
+            enhancement: ProtocolEnhancement::default(),
         }))
     }
 
@@ -192,7 +202,7 @@ impl Checker<'_> {
         iterable_ty: Ty,
     ) -> Result<Option<Ty>, ()> {
         let diagnose = statement.is_some();
-        let Some(target) = self.iterator_protocol_target(
+        let Some(mut target) = self.iterator_protocol_target(
             scope,
             statement,
             iterable_ty,
@@ -202,6 +212,18 @@ impl Checker<'_> {
         else {
             return Ok(None);
         };
+        let iterable_marks = self.value_enhancement(iterable);
+        let iterator = self.call_result_enhancement(
+            &target.iterator,
+            Some((iterable_ty, iterable_marks)),
+            None,
+        );
+        let element = self.call_result_enhancement(
+            &target.next,
+            Some((target.iter_ty, iterator.clone())),
+            None,
+        );
+        target.enhancement = ProtocolEnhancement { iterator, element };
         let elem = target.elem_ty;
         self.iterator_protocols.insert(iterable, target);
         Ok(Some(elem))

@@ -4,6 +4,8 @@
 //! overrides `Map.keys`, whose JVM realization is named `keySet`. kotlinc's Java scope shows each
 //! such method as the builtin property it overrides, read through the property's getter
 //! (`<get-keys>`), so the provider normalizes it into a [`PropertyInfo`] on the declaring class.
+//! The Java result is enhanced from the builtin property's declared type, which also marks the
+//! positions it fixes not-null ([`crate::libraries::enhance_from_overridden`]).
 
 use super::*;
 
@@ -52,11 +54,13 @@ impl JvmLibraries {
             .as_ref()
             .map(|signature| signature.ret)
             .unwrap_or_else(|| function.ret.apply(getter.ret));
-        let ty = match mapped_property.and_then(|mapping| self.overridden_property_type(mapping)) {
-            Some(overridden) => enhance_type_arguments(ty, overridden),
-            None => ty,
-        };
+        let (ty, marks) =
+            match mapped_property.and_then(|mapping| self.overridden_property_type(mapping)) {
+                Some(overridden) => crate::libraries::enhance_from_overridden(ty, overridden),
+                None => (ty, crate::libraries::TypeEnhancement::NONE),
+            };
         getter.ret = ty;
+        getter.enhanced_result.marks = marks;
         Some(PropertyInfo {
             return_value_status: function.flags.return_value_status,
             name: name.to_string(),
@@ -103,63 +107,5 @@ impl JvmLibraries {
             })?
             .generic_sig
             .map(|signature| signature.ret)
-    }
-}
-
-/// kotlinc enhances an overriding Java result's type ARGUMENTS from the overridden declaration
-/// (`AbstractSignatureParts.computeIndexedQualifiers`): an argument the builtin property fixes as a
-/// not-null class type (`MutableMap.MutableEntry<K, V>` in `MutableSet<…>`) makes the Java
-/// argument (`Map.Entry<K, V>!`) rigid, and a type-parameter argument carries no qualifier and
-/// stays flexible. The head keeps the Java result's flexibility: an enhanced property read is not
-/// modeled, and the flexible head is guarded wherever kotlinc guards the enhanced one.
-fn enhance_type_arguments(java: Ty, overridden: Ty) -> Ty {
-    match java {
-        Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(enhance_type_arguments(*inner, overridden))
-        }
-        Ty::Obj(owner, arguments) => {
-            let fixed = overridden.non_null().type_args();
-            if fixed.len() != arguments.len() {
-                return java;
-            }
-            let enhanced = arguments
-                .iter()
-                .zip(fixed)
-                .map(|(&argument, &fixed)| match (argument, fixed) {
-                    (Ty::PlatformNullable(inner), Ty::Obj(..)) => {
-                        enhance_type_arguments(*inner, fixed)
-                    }
-                    (Ty::Obj(..) | Ty::PlatformNullable(_), _) => {
-                        enhance_type_arguments(argument, fixed)
-                    }
-                    _ => argument,
-                })
-                .collect::<Vec<_>>();
-            Ty::obj_args_name(owner, &enhanced)
-        }
-        _ => java,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::enhance_type_arguments;
-    use crate::types::Ty;
-
-    #[test]
-    fn a_class_argument_the_builtin_fixes_not_null_becomes_rigid() {
-        let any = Ty::nullable(Ty::obj("kotlin/Any"));
-        let entry = |key: Ty, value: Ty| {
-            Ty::obj_args("kotlin/collections/MutableMap.MutableEntry", &[key, value])
-        };
-        let set = |element: Ty| Ty::obj_args("kotlin/collections/MutableSet", &[element]);
-        let flexible = Ty::platform_nullable(Ty::String);
-        let java = Ty::platform_nullable(set(Ty::platform_nullable(entry(flexible, flexible))));
-        let overridden = set(entry(Ty::ty_param("K", any), Ty::ty_param("V", any)));
-        assert_eq!(
-            enhance_type_arguments(java, overridden),
-            Ty::platform_nullable(set(entry(flexible, flexible))),
-            "the entry is rigid, its type-parameter arguments and the head stay flexible"
-        );
     }
 }

@@ -214,6 +214,10 @@ fn specialize_declared_callables(
             }
             PropKind::TopLevel => {}
         }
+        property
+            .getter
+            .enhanced_result
+            .specialize(receiver.kotlin_class_internal(), property.ty);
         property.ty = specialize_member_type(source, property.ty, &bindings, TypePosition::Out);
         specialize_callable(source, &mut property.getter, &bindings);
         property.getter.ret = property.ty;
@@ -277,6 +281,10 @@ pub(crate) fn specialize_member_function(
         .generic_sig
         .as_ref()
         .map_or(function.callable.ret, |signature| signature.ret);
+    function
+        .callable
+        .enhanced_result
+        .specialize(receiver.kotlin_class_internal(), declared_result);
     if let Ty::PlatformNullable(rigid) = declared_result {
         result_enhancement::publish_flexible_result(
             &mut function.call_sig.result_enhancement,

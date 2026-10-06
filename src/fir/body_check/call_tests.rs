@@ -3748,7 +3748,7 @@ fn omitted_source_call_vararg_is_an_explicit_empty_pack() {
 }
 
 #[test]
-fn named_whole_array_vararg_is_not_repacked() {
+fn named_whole_array_vararg_is_one_spread_array() {
     let (body, _) = checked_function_body(
         "fun join(vararg values: String): Int = 0\n\
          fun read(values: Array<String>): Int = join(values = values)\n",
@@ -3763,7 +3763,11 @@ fn named_whole_array_vararg_is_not_repacked() {
     };
     assert!(matches!(
         call.arguments.as_ref(),
-        [FirCallArgument::Expression { parameter: 0, .. }]
+        [FirCallArgument::Vararg {
+            parameter: 0,
+            elements,
+            ..
+        }] if matches!(elements.as_ref(), [element] if element.spread)
     ));
 }
 
