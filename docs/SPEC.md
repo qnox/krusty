@@ -2597,12 +2597,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/try_catch_expr_nullable_merge_e2e.rs`, `tests/try_catch_expr_generic_merge_e2e.rs`). A `finally` block is inlined (like kotlinc)
   at each exit: the normal fall-through, the end of each catch, and a synthetic catch-all (any
   throwable) covering the body + catch handlers that runs the `finally` then re-throws. A `try` whose
-  body/catch performs a `return`/`break`/`continue` out of the `try` (which must run `finally` first) is
-  skipped. **Nested `try`/`catch` is supported** (a `try` in another `try`'s body or catch — verified
-  end-to-end), **except when a `finally` is involved in the nesting**: a `finally` is inlined at every
-  exit of its protected region, so when it sits inside (or wraps) another `try` the duplicated code lands
-  in overlapping exception ranges and trips a verify error — so a nesting that involves any `finally` is
-  rejected (skip), never miscompiled (`NestedTry` in `tests/feature_box_e2e.rs`).
+  body/catch performs a `return`/`break`/`continue` out of the `try` runs the required finalizer copies
+  before the transfer. Nested `try`/`catch`/`finally` is supported. A transferred finalizer copy lies
+  outside every protected region the transfer left, while an enclosing region still guards it; this
+  prevents a throw from the copy from re-entering an inner catch or running the same finalizer again
+  (`tests/finally_gap_ranges_e2e.rs`). A `finally` may itself contain a `try`/`catch`, and nested
+  finalizers run innermost first (`tests/nested_try_finally_e2e.rs`,
+  `tests/try_debug_lines_e2e.rs`).
 - **An `inline` function brackets each `finally` copy with `InlineMarker.finallyStart` and
   `finallyEnd`.** The argument is how many `finally` bodies are open, counting the copy being
   emitted, so the first is `1` and a `finally` inside a `finally` is `2`. The calls stay in the
