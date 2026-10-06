@@ -99,6 +99,46 @@ fn a_bridge_takes_a_function_types_parameter_names() {
     );
 }
 
+/// A Java method publishes no parameter name. The erased bridge still names each parameter
+/// `p0`, `p1` in its `LocalVariableTable`, with the erased descriptor.
+#[test]
+fn a_java_bridge_names_an_unnamed_parameter_positionally() {
+    let src = "import java.nio.file.FileVisitResult\n\
+         import java.nio.file.FileVisitor\n\
+         import java.nio.file.Path\n\
+         import java.nio.file.SimpleFileVisitor\n\
+         import java.nio.file.attribute.BasicFileAttributes\n\
+         \n\
+         fun visitor(fallback: FileVisitResult): FileVisitor<Path> =\n\
+         \x20   object : SimpleFileVisitor<Path>() {\n\
+         \x20       override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult = fallback\n\
+         \x20       override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult = fallback\n\
+         \x20   }\n";
+    let built = common::compare_with_kotlinc_plugin_jdk(
+        "JavaBridgeLocals",
+        src,
+        "JavaBridgeLocalsKt$visitor$1",
+        "21",
+        &[],
+    )
+    .expect("reference kotlinc is provisioned");
+    for member in [
+        "public java.nio.file.FileVisitResult visitFile(java.lang.Object, java.nio.file.attribute.BasicFileAttributes);",
+        "public java.nio.file.FileVisitResult preVisitDirectory(java.lang.Object, java.nio.file.attribute.BasicFileAttributes);",
+    ] {
+        let reference = local_variables(&built.reference, member);
+        assert!(
+            reference.iter().any(|row| row.contains(" p0 ")),
+            "kotlinc names the erased Java parameter p0: {reference:?}"
+        );
+        assert_eq!(
+            local_variables(&built.krusty, member),
+            reference,
+            "{member}"
+        );
+    }
+}
+
 #[test]
 fn bridges_named_after_the_overridden_declaration_run() {
     common::expect_box_same_as_kotlinc(SRC, "BridgeParameterNames");

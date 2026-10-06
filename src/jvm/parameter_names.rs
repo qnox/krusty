@@ -686,6 +686,29 @@ pub(super) fn resolved_local_variable(
     }
 }
 
+/// Local-variable spellings of a bridge. A named overridden parameter keeps that declaration's
+/// spelling. An unnamed parameter — a Java binary declaration publishes none — is kotlinc's
+/// positional `pN` in this table only. The ordinal is the recorded identity, not a descriptor
+/// reconstruction, and it does not become a source or reflection name.
+pub(super) fn bridge_local_variables(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    semantic_types: &[crate::types::Ty],
+    function_name: &str,
+) -> Vec<Option<String>> {
+    resolved_local_variables(identities, semantic_types, function_name)
+        .into_iter()
+        .zip(identities)
+        .map(|(name, identity)| {
+            name.or_else(|| match identity {
+                crate::fir::ResolvedParameterIdentity::Unnamed { ordinal } => {
+                    Some(format!("p{ordinal}"))
+                }
+                _ => None,
+            })
+        })
+        .collect()
+}
+
 /// Local-variable spellings for a provider-published parameter list. Anonymous context labels are
 /// derived from the declaration's semantic types, never from erased bridge descriptors.
 pub(super) fn resolved_local_variables(
