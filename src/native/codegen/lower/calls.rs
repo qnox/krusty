@@ -21,12 +21,15 @@ impl BodyLowering<'_, '_, '_> {
         if dispatch_receiver.is_some() {
             return Err(format!("a cross-file call with a receiver (`{symbol}`)"));
         }
-        self.initialize_defining_file(target)?;
         let id = self.file.import(&symbol, params, ret)?;
         let arguments = self.arguments(args, params)?;
         if self.terminated {
             return Ok(None);
         }
+        // Kotlin evaluates every operand before the invocation itself triggers initialization of
+        // the declaring file. Running the initializer before `arguments` would reverse observable
+        // side effects (and exception priority) between an argument and a top-level initializer.
+        self.initialize_defining_file(target)?;
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
