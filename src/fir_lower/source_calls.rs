@@ -2030,12 +2030,7 @@ pub(super) fn inline_argument_template(
             arity,
             ..
         } => {
-            return Some((
-                *impl_fn,
-                captures.clone(),
-                *inline_body,
-                usize::from(*arity),
-            ));
+            return Some((impl_fn, captures, inline_body, usize::from(arity)));
         }
         IrExpr::Lambda {
             impl_fn,
@@ -2043,12 +2038,10 @@ pub(super) fn inline_argument_template(
             inline_body: None,
             arity,
             ..
-        } if ir.lambda_class_provenance(*impl_fn)
+        } if ir.lambda_class_provenance(impl_fn)
             == Some(crate::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter) =>
         {
-            let impl_fn = *impl_fn;
-            let arity = usize::from(*arity);
-            let captures = captures.clone();
+            let arity = usize::from(arity);
             let (inline_body, body_arity) = constructor_reference_inline_value(ir, impl_fn)?;
             if body_arity != arity + captures.len() {
                 return None;
