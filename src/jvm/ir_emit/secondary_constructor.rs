@@ -165,6 +165,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         let sec_max;
         let mut sec_diverges = false;
         let body_locals;
+        let mut recorded_inline_entries;
         {
             let mut e = Emitter::new(
                 ir,
@@ -426,6 +427,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             }
             sec_max = e.frame.max();
             body_locals = std::mem::take(&mut e.open_locals);
+            recorded_inline_entries = e.recorded_inline_entries;
         }
         if !sec_diverges {
             sctor.ret_void();
@@ -433,7 +435,8 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         // Body locals precede `this` and the parameters in kotlinc's table, as in a method, and
         // stay in scope through the return.
         for local in body_locals {
-            local.record(None, &mut sctor);
+            let inline = local.record(None, &mut sctor, recorded_inline_entries);
+            recorded_inline_entries += usize::from(inline);
         }
         if !generated {
             sctor.add_local_entry(0, None, 0, "this", &format!("L{fq_name};"));
