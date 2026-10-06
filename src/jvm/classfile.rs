@@ -928,8 +928,12 @@ impl ClassWriter {
     }
 
     /// Queue user annotations on a class. Semantic retention chooses the physical class-file
-    /// attribute here, once, for every class kind.
+    /// attribute here, once, for every class kind. `@kotlin.Deprecated` on the classifier also
+    /// stamps the zero-length JVM `Deprecated` attribute; its name interns after `SourceFile`.
     pub fn set_class_annotations(&mut self, annotations: &crate::ir::DeclarationAnnotations) {
+        if annotations.deprecated() {
+            self.set_deprecated();
+        }
         let (visible, invisible) = self.encode_declaration_annotations(annotations);
         self.runtime_annotations.extend(visible);
         self.invisible_annotations.extend(invisible);

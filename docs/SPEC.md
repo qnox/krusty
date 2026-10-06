@@ -8965,6 +8965,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/context_function_type_e2e.rs::a_receiver_function_value_without_context_does_not_hide_an_applicable_callable`,
   `tests/context_function_type_e2e.rs::a_lone_receiver_function_value_reports_its_missing_context`.
 
+- **`receiver.f(args)` invokes a value `f` of extension function type at the VALUE's tower level.**
+  The call is `f.invoke(receiver, args)`, and kotlinc ranks that candidate by the level that
+  declared `f`, not by the receiver. With an expression receiver the order is: members of the
+  receiver; then each local scope innermost first, where local extension functions precede a
+  same-level function value; then the implicit receivers' member extensions and their
+  extension-function-typed properties; then top-level extension functions; then top-level
+  properties. So a parameter `f: Scope.() -> R` beats both `fun Scope.f()` at top level and a
+  member extension of the enclosing class, while a member `f()` of the receiver still wins.
+  An object or companion NAMED by its classifier (`TheScope.f()`, `Holder.Companion.f()`) is
+  kotlinc's `QualifierValue` group, ranked after every other group: any applicable function value
+  — local, property, or top level — beats even a member of that singleton, whereas
+  `val s = TheScope; s.f()` picks the member. Krusty previously had no function-value rung on the
+  qualified-singleton path (`unresolved reference 'block'` for
+  `suspend fun <R> scope(block: suspend Scope.() -> R): R = TheScope.block()`) and on the
+  expression path tried function values only after every extension function, silently selecting
+  the extension.
+  Tests: `tests/extension_function_value_receiver_e2e.rs`.
+
 - **A flow narrowing does not survive a loop that writes its subject.** A straight-line proof is a
   proof about ONE edge, and a loop has a back edge: a body that reassigns `x` reaches its own start
   with whatever that assignment left. So the writes a loop performs anywhere inside it — including
@@ -14902,6 +14920,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (byte-identical to kotlinc), `…::primary_constructor_annotation_arguments_reach_metadata`,
   `…::primary_constructor_annotation_reaches_the_no_arg_convenience_ctor`,
   `…::deprecated_primary_constructor_marks_its_default_overload`.
+  A classifier annotated with `@kotlin.Deprecated` at any level, including `HIDDEN`, carries the
+  same zero-length JVM `Deprecated` attribute beside the runtime annotation. That covers a class, an
+  interface, an enum, and an annotation class. The attribute name interns after `SourceFile` and
+  before `RuntimeVisibleAnnotations`.
+  Test: `tests/annotation_emission_e2e.rs::deprecated_classifier_carries_the_jvm_deprecated_attribute`.
   Like the property annotations above, these are RECORDED but NOT diagnosed by the checker — krusty's
   annotation constant folder is narrower than kotlinc's, and reporting from a newly added check would
   reject sources that compile today.
