@@ -413,7 +413,7 @@ pub(super) fn realize(
                     .copied()
                     .ok_or(target)?;
                 let result = super::builtin_member_operations::unsigned_bitwise_result(
-                    callable.owner,
+                    callable.physical_owner,
                     intrinsic,
                 )
                 .unwrap_or(semantic_ret);
