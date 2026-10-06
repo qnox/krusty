@@ -20,7 +20,9 @@ fn provisioned(artifact: &str) -> PathBuf {
     })
 }
 
-fn runtime_jars() -> Vec<PathBuf> {
+/// The stdlib plus the pinned kotlinx.serialization core and json runtimes every differential here
+/// compiles and runs against.
+pub(super) fn runtime_jars() -> Vec<PathBuf> {
     static JARS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     JARS.get_or_init(|| {
         vec![

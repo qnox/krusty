@@ -13,10 +13,38 @@ use crate::types::{Ty, TypeName};
 
 use super::SymbolTable;
 
+#[derive(Clone, Copy)]
 pub(super) struct ClassifierAnnotationInputs<'a> {
     pub(super) resolved_index: Option<&'a crate::fir::ResolvedModuleIndex>,
     pub(super) pass_one_symbols: Option<&'a SymbolTable>,
     pub(super) libraries: &'a dyn SemanticPlatform,
+}
+
+/// Every classifier a selected call names. A call can name a classpath type in an
+/// inferred/explicit type argument, parameter, receiver, or result. Walk each semantic type
+/// recursively so `Container<Dependency>` makes both identities available without a
+/// classpath-wide scan.
+pub(super) fn named_classifiers(calls: &[FrontendSelectedCall]) -> HashSet<TypeName> {
+    let mut named = HashSet::new();
+    let mut pending = calls
+        .iter()
+        .flat_map(|call| {
+            call.type_arguments
+                .iter()
+                .flatten()
+                .copied()
+                .chain(call.params.iter().copied())
+                .chain(std::iter::once(call.ret))
+                .chain(call.explicit_receiver.map(|(_, ty)| ty))
+        })
+        .collect::<Vec<Ty>>();
+    while let Some(ty) = pending.pop() {
+        if let Some(classifier) = ty.kotlin_class_internal() {
+            named.insert(classifier);
+        }
+        pending.extend(ty.type_args().iter().copied());
+    }
+    named
 }
 
 pub(super) fn classifier_annotations_for_calls(
@@ -48,30 +76,7 @@ pub(super) fn classifier_annotations_for_calls(
             .collect()
     };
 
-    // A selected call can name a classpath type in an inferred/explicit type argument, parameter,
-    // receiver, or result. Walk each semantic type recursively so `Container<Dependency>` makes
-    // both identities available without a classpath-wide scan.
-    let mut named = HashSet::new();
-    let mut pending = calls
-        .iter()
-        .flat_map(|call| {
-            call.type_arguments
-                .iter()
-                .flatten()
-                .copied()
-                .chain(call.params.iter().copied())
-                .chain(std::iter::once(call.ret))
-                .chain(call.explicit_receiver.map(|(_, ty)| ty))
-        })
-        .collect::<Vec<Ty>>();
-    while let Some(ty) = pending.pop() {
-        if let Some(classifier) = ty.kotlin_class_internal() {
-            named.insert(classifier);
-        }
-        pending.extend(ty.type_args().iter().copied());
-    }
-
-    for classifier in named {
+    for classifier in named_classifiers(calls) {
         let std::collections::hash_map::Entry::Vacant(entry) = annotations.entry(classifier) else {
             continue;
         };

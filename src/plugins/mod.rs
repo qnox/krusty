@@ -44,6 +44,69 @@ pub struct PluginExpressionPlan {
     /// Checker-selected source operands in target-parameter order with their selected parameter
     /// types. Lowering evaluates/coerces exactly this list and performs no argument remapping.
     pub operands: Vec<(crate::ast::ExprId, Ty)>,
+    /// Operands the plugin composes from frontend-selected declarations rather than from source
+    /// syntax. They follow `operands`, in order.
+    pub synthesized: Vec<PluginSynthesizedOperand>,
+}
+
+/// A value a plugin plan composes without source syntax. Every callable it names was selected in
+/// the frontend from a declaration's full semantic signature, so lowering realizes the exact
+/// declaration and no later phase looks a member up by name.
+#[derive(Clone, Debug)]
+pub enum PluginSynthesizedOperand {
+    /// A checker-selected call on a singleton receiver. The complete ordinary member-call result
+    /// crosses this boundary; FIR publication must not reconstruct any target fact from the name.
+    SingletonCall {
+        call: FrontendResolvedSingletonCall,
+        arguments: Vec<PluginSynthesizedOperand>,
+    },
+    /// A nested plugin operation over synthesized operands, specialized by the named plugin.
+    Operation {
+        plugin: &'static str,
+        operation: &'static str,
+        data: Vec<TypeName>,
+        types: Vec<Ty>,
+        result: Ty,
+        operands: Vec<PluginSynthesizedOperand>,
+    },
+}
+
+/// One ordinary member call selected by the frontend for a plugin-composed expression.
+///
+/// The receiver, declaration, specialized signature, capabilities, generic substitutions, and
+/// positional argument mapping are all the result of the normal resolver/checker path. A plugin may
+/// recognize the selected declaration's semantic shape, but cannot enumerate or choose candidates.
+#[derive(Clone, Debug)]
+pub struct FrontendResolvedSingletonCall {
+    pub receiver: TypeName,
+    pub selected: FrontendSelectedMemberCall,
+    pub type_arguments: Vec<Option<Ty>>,
+    pub type_argument_bounds: Vec<Vec<Ty>>,
+    pub argument_parameters: Vec<u32>,
+}
+
+/// The closed semantic result of ordinary member-call selection that a plugin-composed operand
+/// needs. This contract owns no candidate or resolver state: core projects the selected receiver,
+/// declaration, specialized result, and suspension fact before the plugin sees it.
+#[derive(Clone, Debug)]
+pub struct FrontendSelectedMemberCall {
+    pub receiver: Ty,
+    pub member: crate::libraries::LibraryMember,
+    pub ret: Ty,
+    pub suspend: bool,
+}
+
+/// The sole semantic query available while a plugin composes a source-less call. Implementations
+/// route it through ordinary member candidate collection, overload selection, generic inference,
+/// argument mapping, and access checking.
+pub trait FrontendCallResolver {
+    fn resolve_singleton_member_call(
+        &self,
+        classifier: TypeName,
+        name: &str,
+        arguments: &[Ty],
+        expected_result: Ty,
+    ) -> Option<FrontendResolvedSingletonCall>;
 }
 
 /// One already-selected call projected into the plugin contract. Declaration identity, overload,
@@ -68,18 +131,37 @@ pub struct FrontendSelectedCall {
     pub argument_slots: Vec<Option<crate::ast::ExprId>>,
 }
 
-/// Read-only, resolver-independent inputs for post-resolution plugin planning.
-pub struct FrontendExpressionContext {
+/// Read-only inputs for post-resolution plugin planning. Source calls and annotations are already
+/// bound; the narrow resolver capability can only select an ordinary singleton member call whose
+/// receiver, name, argument types, and expected result the plugin supplies.
+pub struct FrontendExpressionContext<'a> {
     pub calls: Vec<FrontendSelectedCall>,
     /// Qualified annotation identities for source and dependency classifiers named by these calls.
     pub classifier_annotations: HashMap<TypeName, Vec<TypeName>>,
+    /// Absent only in isolated plugin-unit tests that do not compose calls.
+    pub call_resolver: Option<&'a dyn FrontendCallResolver>,
 }
 
-impl FrontendExpressionContext {
+impl FrontendExpressionContext<'_> {
     pub fn has_classifier_annotation(&self, classifier: TypeName, annotation: TypeName) -> bool {
         self.classifier_annotations
             .get(&classifier)
             .is_some_and(|annotations| annotations.contains(&annotation))
+    }
+
+    pub fn resolve_singleton_member_call(
+        &self,
+        classifier: TypeName,
+        name: &str,
+        arguments: &[Ty],
+        expected_result: Ty,
+    ) -> Option<FrontendResolvedSingletonCall> {
+        self.call_resolver?.resolve_singleton_member_call(
+            classifier,
+            name,
+            arguments,
+            expected_result,
+        )
     }
 }
 
@@ -538,7 +620,7 @@ pub trait IrPlugin {
     /// resolver and must never change the type checker's result.
     fn plan_frontend_expressions(
         &self,
-        _ctx: &FrontendExpressionContext,
+        _ctx: &FrontendExpressionContext<'_>,
         _plans: &mut Vec<(crate::ast::ExprId, PluginExpressionPlan)>,
     ) {
     }
@@ -888,6 +970,7 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
         let crate::ir::IrExpr::PluginPlaceholder {
             plugin: "serialization",
             data,
+            types,
             ..
         } = expression
         else {
@@ -898,6 +981,9 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
                 external.push(classifier);
             }
         }
+        // A planned operation's type operands are what it needs a serializer FOR: the frontend
+        // plans `element<JsonElement>("v")` with `JsonElement` here, and nowhere else names it.
+        candidates.extend(types.iter().copied());
     }
     while let Some(ty) = candidates.pop() {
         // A type argument carries its own element serializer (`List<Inner>` needs `Inner`'s).
@@ -992,7 +1078,7 @@ impl PluginHost {
 
     pub fn plan_frontend_expressions(
         &self,
-        ctx: &FrontendExpressionContext,
+        ctx: &FrontendExpressionContext<'_>,
     ) -> Vec<(crate::ast::ExprId, PluginExpressionPlan)> {
         let mut plans = Vec::new();
         for plugin in &self.plugins {
@@ -1261,6 +1347,31 @@ mod tests {
                 "kotlinx/serialization/json/JsonElement"
             )),
             "a reified type argument must be a candidate: {candidates:?}"
+        );
+    }
+
+    /// The frontend plans `element<JsonElement>("v")` as a plugin operation whose TYPE operand is
+    /// the element type; no reified substitution and no name payload carries it. It, and the type
+    /// arguments inside it, must still reach the classifier-fact lookup.
+    #[test]
+    fn a_planned_operation_type_is_an_external_classifier_candidate() {
+        let mut ir = IrFile::default();
+        ir.add_expr(crate::ir::IrExpr::PluginPlaceholder {
+            plugin: "serialization",
+            kind: "descriptorElementDefaultBoth",
+            exprs: Vec::new(),
+            data: Vec::new(),
+            types: vec![Ty::obj_args(
+                "kotlin/collections/List",
+                &[Ty::obj("kotlinx/serialization/json/JsonElement")],
+            )],
+        });
+        let candidates: Vec<crate::types::TypeName> = external_classifier_candidates(&ir).collect();
+        assert!(
+            candidates.contains(&crate::types::type_name(
+                "kotlinx/serialization/json/JsonElement"
+            )),
+            "a planned operation's type operand must be a candidate: {candidates:?}"
         );
     }
 

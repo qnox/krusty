@@ -3394,6 +3394,8 @@ pub(crate) fn install_streamed_plugin_declarations(
                     visibility: crate::types::Visibility::Public,
                     flags: DeclarationFlags::default()
                         .with(DeclarationFlags::COMPANION, true)
+                        // A companion object is a singleton, generated or written.
+                        .with(DeclarationFlags::SINGLETON, true)
                         .with(DeclarationFlags::FINAL, true)
                         .with(DeclarationFlags::COMPILER_GENERATED, true),
                 });
