@@ -3530,6 +3530,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a target spelled without type arguments (`as Sm`) takes them from the path's declared supertype
   (`Opt<T>` to `Sm<T>`); an explicit application is the proven type as written. Test:
   `tests/this_smartcast_e2e.rs`; box: `inference/pcla/issues/kt57707.kt`.
+- **A cast of a suspend callable to its continuation-passing function keeps both types.**
+  `ref as Function2<Int, Continuation<Int>, Any?>` on `ref: suspend (Int) -> Int` types the cast
+  expression as that ordinary function and makes the same carrier the stable path's read
+  projection, so a later `ref(1, c)` uses the cast-proven invoke. That call publishes the carrier
+  on the callee expression; checked FIR then invokes the selected signature instead of the
+  declaration's storage type. The original suspend value stays
+  an intersection constituent: a later `is SuspendFunction` / `is KSuspendFunction`, and a use that
+  expects the suspend type, see that constituent rather than only the carrier. A non-null cast of a
+  nullable suspend value removes nullability from the carrier and from the retained suspend
+  constituent. The continuation shape is not a Kotlin subtype, so neither constituent replaces the
+  other. The proof that a constituent is a suspend function is that function value, or the local's
+  recorded callable-reference signature — not a classifier's `operator invoke`. Test:
+  `tests/suspend_callable_cast_e2e.rs`; corpus:
+  `coroutines/functionReference_Function_SuspendFunction_casts.kt`.
 - **A local `var` smart-casts like a `val`** when no already-created capturing closure can mutate it
   (`tests/var_smartcast_e2e.rs`). Straight-line assignments replace the flow type. Inline-spliced
   lambdas follow the same ordered flow; a lambda declared later does not invalidate an earlier proof.
@@ -10803,7 +10817,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `x is SuspendFunction0<*>` (and a reified `x is T` once `T` is `suspend () -> R`) is
   `instanceof kotlin/coroutines/jvm/internal/SuspendFunction` conjoined with
   `isFunctionOfArity(x, N+1)`. A source `is` of the function-type spelling itself stays rejected
-  as an erased type, the same way `is (Int) -> Int` is. `x as SuspendFunctionN` is only the
+  as an erased type, the same way `is (Int) -> Int` is. An `as` to an unrelated function
+  classifier replaces the later read with that classifier's signature, and the binding keeps the
+  type it was declared with. `Foo::bar as KFunction2` and `suspend { x: Int -> x } as Function2`
+  therefore still prove `is KSuspendFunction1`, `is SuspendFunction1`, and `is Function2` with
+  concrete arguments: each is the always-true check kotlinc accepts. A mutable binding does not
+  retain its initializer's callable-reference proof after reassignment.
+  (`src/fir/body_check_tests.rs`,
+  `a_suspend_reference_keeps_its_type_after_an_unrelated_function_cast`, and
+  `tests/suspend_conversion_e2e.rs`.)
+  `x as SuspendFunctionN` is only the
   `checkcast` to `Function{N+1}`; the marker test stays on `is` and on `as?`. A reference to a
   suspend function keeps that suspend function type even with no expected function type, including
   a local `::suspendLocal`: its carrier implements `Function{N+1}` and
