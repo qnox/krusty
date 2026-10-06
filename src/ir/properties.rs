@@ -78,6 +78,9 @@ pub struct IrCheckedProperty {
 #[derive(Clone, Debug)]
 pub struct MemberExtProp {
     pub name: String,
+    /// Stable source declaration order. This identifies the property for declaration-owned facts
+    /// such as its checked type spelling; `name` is metadata payload and may be shared by overloads.
+    pub source_order: u32,
     /// Declared extension receiver (`Int` in `val Int.doubled`).
     pub receiver: crate::types::Ty,
     /// Declared property type.

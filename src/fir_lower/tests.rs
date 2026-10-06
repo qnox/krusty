@@ -1107,8 +1107,10 @@ fn suspending_call_operand_stays_a_direct_constructor_argument() {
 #[test]
 fn same_file_named_call_spills_in_source_order_before_parameter_reordering() {
     let ir = lower_single_source(
-        "fun selected(left: Int, right: Int): Int = left\n\
-         fun caller(): Int = selected(right = 2, left = 1)\n",
+        "fun one(): Int = 1\n\
+         fun two(): Int = 2\n\
+         fun selected(left: Int, right: Int): Int = left\n\
+         fun caller(): Int = selected(right = two(), left = one())\n",
         "NamedCalls",
     );
     let selected = ir
@@ -1147,13 +1149,16 @@ fn same_file_named_call_spills_in_source_order_before_parameter_reordering() {
                 init: Some(initializer),
                 ..
             } => match ir.expr(*initializer) {
-                IrExpr::Const(IrConst::Int(value)) => *value,
+                IrExpr::Call {
+                    callee: crate::ir::Callee::Local(target),
+                    ..
+                } => ir.functions[*target as usize].name.as_str(),
                 other => panic!("unexpected named argument initializer: {other:?}"),
             },
             other => panic!("unexpected named argument spill: {other:?}"),
         })
         .collect::<Vec<_>>();
-    assert_eq!(initializers, [2, 1]);
+    assert_eq!(initializers, ["two", "one"]);
     let IrExpr::Block {
         value: Some(call), ..
     } = ir.expr(wrapper)
@@ -2314,10 +2319,65 @@ fn enclosing_receiver_path_lowers_from_stable_classifier_edges() {
 }
 
 #[test]
+fn named_call_passes_constants_and_vals_in_place_when_reordered() {
+    let ir = lower_single_source(
+        "fun one(): Int = 1\n\
+         fun selected(left: Int, middle: Int, right: Int): Int = left\n\
+         fun caller(fixed: Int): Int = selected(right = 2, middle = fixed, left = one())\n",
+        "NamedConstants",
+    );
+    let selected = ir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    let (statements, call) = ir
+        .exprs
+        .iter()
+        .find_map(|expression| {
+            let IrExpr::Block {
+                stmts,
+                value: Some(call),
+            } = expression
+            else {
+                return None;
+            };
+            matches!(
+                ir.expr(*call),
+                IrExpr::Call {
+                    callee: crate::ir::Callee::Local(target),
+                    ..
+                } if *target == selected
+            )
+            .then_some((stmts.clone(), *call))
+        })
+        .expect("named call normalization block");
+    let [spill] = statements.as_slice() else {
+        panic!("expected only the call operand to be stored: {statements:?}");
+    };
+    assert!(matches!(
+        ir.expr(*spill),
+        IrExpr::Variable { init: Some(initializer), .. }
+            if matches!(ir.expr(*initializer), IrExpr::Call { .. })
+    ));
+    let IrExpr::Call { args, .. } = ir.expr(call) else {
+        unreachable!()
+    };
+    let [left, middle, right] = args.as_slice() else {
+        panic!("expected three arguments: {args:?}");
+    };
+    assert!(matches!(ir.expr(*left), IrExpr::GetValue(_)));
+    assert!(matches!(ir.expr(*middle), IrExpr::GetValue(_)));
+    assert!(matches!(ir.expr(*right), IrExpr::Const(IrConst::Int(2))));
+}
+
+#[test]
 fn consuming_sink_keeps_primary_and_secondary_constructor_semantics() {
     let ir = lower_single_source(
-        "class Built(val number: Int, val text: String = \"default\") {\n\
-             constructor(flag: Boolean = true) : this(text = \"chosen\", number = 1) { flag }\n\
+        "fun chosen(): String = \"chosen\"\n\
+         fun one(): Int = 1\n\
+         class Built(val number: Int, val text: String = \"default\") {\n\
+             constructor(flag: Boolean = true) : this(text = chosen(), number = one()) { flag }\n\
          }\n",
         "Built",
     );
