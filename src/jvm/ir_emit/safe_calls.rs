@@ -298,11 +298,11 @@ fn selector_reads_temporary_once_as_receiver(
             } => {
                 let receiver = match dispatch_receiver {
                     Some(receiver) => Some(*receiver),
-                    None => {
-                        let position =
-                            ir.static_extension_receivers.get(&expression).copied()? as usize;
-                        args.get(position).copied()
-                    }
+                    None => ir
+                        .static_extension_receivers
+                        .get(&expression)
+                        .copied()
+                        .and_then(|position| args.get(position as usize).copied()),
                 };
                 return receiver.is_some_and(|receiver| reads_temporary(ir, receiver, temporary));
             }
