@@ -96,7 +96,9 @@ pub(super) fn operation(
             let value = IrExpr::PrimitiveBinOp { op, lhs, rhs };
             if arithmetic(result) == result {
                 return Some(BuiltinMemberOperation::Value(unsigned_value(
-                    ir, result, value,
+                    ir,
+                    unsigned_rebuild(receiver_ty, result),
+                    value,
                 )));
             }
             let value = ir.add_expr(value);
@@ -161,7 +163,7 @@ fn unary_operation(
             }));
             Some(unsigned_value(
                 ir,
-                result,
+                unsigned_rebuild(receiver_ty, result),
                 IrExpr::PrimitiveBinOp {
                     op: IrBinOp::BitXor,
                     lhs: operand,
@@ -172,6 +174,17 @@ fn unary_operation(
         _ => None,
     };
     value.map(BuiltinMemberOperation::Value)
+}
+
+/// The unsigned type a bitwise member rebuilds, when the receiver is `UInt` or `ULong` and the
+/// call result is that type or the carrier it has already been erased to. A signed receiver keeps
+/// `result`, so `Int.inv()` stays a bare `ixor`.
+fn unsigned_rebuild(receiver_ty: Ty, result: Ty) -> Ty {
+    match receiver_ty {
+        Ty::UInt if matches!(result, Ty::UInt | Ty::Int) => Ty::UInt,
+        Ty::ULong if matches!(result, Ty::ULong | Ty::Long) => Ty::ULong,
+        _ => result,
+    }
 }
 
 /// `UInt` and `ULong` bitwise results are the carrier opcode plus `constructor-impl`. A signed
@@ -347,6 +360,30 @@ mod tests {
                 op: IrBinOp::Ushr,
                 ..
             }
+        ));
+
+        // A call site may already have erased the unsigned result to its carrier. The receiver
+        // still names the value class, and the carrier is rebuilt the same way.
+        let erased = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        operation(
+            &mut ir,
+            CompilerIntrinsic::PrimitiveBitAnd,
+            BuiltinMemberOperands {
+                receiver,
+                receiver_ty: Ty::UInt,
+                arguments: &[argument],
+                parameters: &[Ty::Int],
+                result: Ty::Int,
+            },
+        )
+        .expect("`UInt.and` is a scalar operation")
+        .commit(&mut ir, erased);
+        assert!(matches!(
+            ir.expr(erased),
+            IrExpr::Call {
+                callee: Callee::Static { name, descriptor, .. },
+                ..
+            } if name == "constructor-impl" && descriptor == "(I)I"
         ));
 
         let long_receiver = ir.add_expr(IrExpr::Const(IrConst::Long(1)));
