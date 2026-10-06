@@ -150,15 +150,22 @@ impl Emitter<'_> {
         let Some(plan) = duplicated_safe_call(self, stmts, value) else {
             return false;
         };
-        let saved_line = self.statement_line;
-        self.emit_value(plan.init, code);
+        self.mark_statement_line(plan.declaration, code);
+        let source = self.emit_consumed_operand(plan.init, code);
         if self.diverges(plan.init) {
-            self.statement_line = saved_line;
             return true;
         }
+        let semantic = self
+            .ir
+            .logical_types
+            .get(&plan.init)
+            .copied()
+            .unwrap_or(source);
+        self.adapt_physical_operand(source, semantic, Some(plan.semantic_ty), plan.slot_ty, code);
         code.dup();
         let null_path = code.new_label();
         let end = code.new_label();
+        self.mark_statement_line(plan.guard, code);
         code.ifnull(null_path);
         self.stack_resident_value = Some(plan.temporary);
         let selector_diverges = if discarded {
@@ -183,14 +190,17 @@ impl Emitter<'_> {
             self.emit_value(plan.null_result, code);
         }
         self.bind(end, code);
-        self.statement_line = saved_line;
         true
     }
 }
 
 struct DuplicatedSafeCall {
+    declaration: u32,
     temporary: u32,
     init: u32,
+    semantic_ty: Ty,
+    slot_ty: Ty,
+    guard: u32,
     selector: u32,
     null_result: u32,
 }
@@ -205,6 +215,7 @@ fn duplicated_safe_call(
     };
     let IrExpr::Variable {
         index: temporary,
+        ty: semantic_ty,
         init: Some(init),
         named: false,
         ..
@@ -214,10 +225,12 @@ fn duplicated_safe_call(
     };
     let temporary = *temporary;
     let init = *init;
-    let receiver_ty = emitter.value_ty(init);
+    let semantic_ty = *semantic_ty;
+    let slot_ty =
+        super::local_variable_representation::slot_type(emitter.ir, *variable, semantic_ty);
     // `ifnull` consumes a reference. A nullable primitive is unboxed before the
     // selector, so its one-word value is an `int` and keeps the temporary.
-    if super::slot_words(receiver_ty) != 1 || receiver_ty.is_jvm_scalar() {
+    if super::slot_words(slot_ty) != 1 || slot_ty.is_jvm_scalar() {
         return None;
     }
     let guard = value?;
@@ -236,8 +249,12 @@ fn duplicated_safe_call(
     }
     selector_reads_temporary_once_as_receiver(emitter.ir, *selector, temporary).then_some(
         DuplicatedSafeCall {
+            declaration: *variable,
             temporary,
             init,
+            semantic_ty,
+            slot_ty,
+            guard,
             selector: *selector,
             null_result: *null_result,
         },
@@ -275,9 +292,34 @@ fn selector_reads_temporary_once_as_receiver(
                 ..
             } => expression = *arg,
             IrExpr::Call {
-                dispatch_receiver: Some(receiver),
-                ..
-            } => return reads_temporary(ir, *receiver, temporary),
+                callee,
+                dispatch_receiver,
+                args,
+            } => {
+                let receiver = dispatch_receiver.as_ref().copied().or_else(|| {
+                    let position = ir
+                        .static_extension_receivers
+                        .get(&expression)
+                        .copied()
+                        .map(|position| position as usize)
+                        .or_else(|| {
+                            let function = match callee {
+                                crate::ir::Callee::Local(function)
+                                | crate::ir::Callee::LocalDefault(function) => Some(*function),
+                                crate::ir::Callee::LocalWithDefaults { function, .. }
+                                | crate::ir::Callee::ClassStatic { function, .. }
+                                | crate::ir::Callee::ClassStaticWithDefaults { function, .. }
+                                | crate::ir::Callee::ClassStaticDefault { function, .. } => {
+                                    Some(*function)
+                                }
+                                _ => None,
+                            }?;
+                            ir.extension_receiver_fns.contains(&function).then_some(0)
+                        })?;
+                    args.get(position).copied()
+                });
+                return receiver.is_some_and(|receiver| reads_temporary(ir, receiver, temporary));
+            }
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
                 ..

@@ -26,14 +26,22 @@ impl Emitter<'_> {
             return;
         }
         self.link_safe_call_chain(block, code);
-        if self.try_emit_duplicated_safe_call(&stmts, value, true, code) {
-            return;
-        }
+        let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
         let marked_initializer = self.renders_initializer_boundary(block);
         self.mark_initializer_line(block, false, code);
-        self.emit_open_block(stmts, value, terminal_target, code);
+        // The optimized safe call still owns an ordinary lexical block. Enter its depth before
+        // asking for the fast path so nested selector emission, local ranges, and frames observe
+        // the same lifecycle as `emit_open_block`.
+        self.block_depth += 1;
+        if self.try_emit_duplicated_safe_call(&stmts, value, true, code) {
+            self.terminal_statement_target = None;
+            self.statement_line = enclosing_statement_line;
+        } else {
+            self.block_depth -= 1;
+            self.emit_open_block(stmts, value, terminal_target, code);
+        }
         self.mark_initializer_line(block, true, code);
         if !self.ir.callable_scopes.contains(&block) {
             self.close_scope_locals(code, marked_initializer);
@@ -54,32 +62,31 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         self.link_safe_call_chain(block, code);
-        if self.try_emit_duplicated_safe_call(stmts, value, false, code) {
-            return;
-        }
         let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         self.block_depth += 1;
         let mut dead = false;
-        for &statement in stmts {
-            self.mark_statement_line(statement, code);
-            // A statement nets zero on the operand stack (its value is stored/discarded). Reset the
-            // tracked height to that baseline afterward: raw spliced control flow is opaque to the
-            // builder's linear counter and can leave `cur_stack` drifted above the real,
-            // verified-balanced height. Later emission still relies on accurate physical stack
-            // accounting even though final-body analysis owns verifier frames.
-            let base = code.stack_height();
-            self.emit(statement, code);
-            if self.discarding_diverges(statement) {
-                dead = true;
-                break;
+        if !self.try_emit_duplicated_safe_call(stmts, value, false, code) {
+            for &statement in stmts {
+                self.mark_statement_line(statement, code);
+                // A statement nets zero on the operand stack (its value is stored/discarded). Reset the
+                // tracked height to that baseline afterward: raw spliced control flow is opaque to the
+                // builder's linear counter and can leave `cur_stack` drifted above the real,
+                // verified-balanced height. Later emission still relies on accurate physical stack
+                // accounting even though final-body analysis owns verifier frames.
+                let base = code.stack_height();
+                self.emit(statement, code);
+                if self.discarding_diverges(statement) {
+                    dead = true;
+                    break;
+                }
+                code.set_stack(base.max(0) as u16);
             }
-            code.set_stack(base.max(0) as u16);
-        }
-        if !dead {
-            if let Some(value) = value {
-                self.mark_statement_line(value, code);
-                self.emit_value(value, code);
+            if !dead {
+                if let Some(value) = value {
+                    self.mark_statement_line(value, code);
+                    self.emit_value(value, code);
+                }
             }
         }
         // A callable's own scope is its body. A value-returning lambda keeps those locals

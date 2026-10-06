@@ -18,12 +18,17 @@ class Host {\n\
     val n: Int = 1\n\
     fun read(): Int = n\n\
 }\n\
+fun Host.extension(x: Int) { take(x) }\n\
+@JvmInline value class Token(val text: String)\n\
+fun <T> identity(value: T): T = value\n\
 fun closeReceiver(host: Host?) { host?.close() }\n\
 fun closeCall() { make()?.close() }\n\
 fun make(): Host? = null\n\
 fun discardRead(host: Host?) { host?.read() }\n\
 fun withArg(host: Host?, x: Int) { host?.take(x) }\n\
+fun withExtension(host: Host?, x: Int) { host?.extension(x) }\n\
 fun readProp(host: Host?): Int? = host?.n\n\
+fun genericValue(token: Token?): String? = identity(token)?.text\n\
 ";
 
 #[test]
@@ -73,5 +78,25 @@ fn a_safe_property_read_duplicates_its_receiver() {
         SRC,
         "SafeCallDupKt",
         "public static final java.lang.Integer readProp(",
+    );
+}
+
+#[test]
+fn a_safe_extension_call_duplicates_its_checked_receiver_operand() {
+    expect_method_matches(
+        "SafeCallDup",
+        SRC,
+        "SafeCallDupKt",
+        "public static final void withExtension(",
+    );
+}
+
+#[test]
+fn an_erased_generic_value_class_receiver_crosses_the_temporary_representation_boundary() {
+    expect_method_matches(
+        "SafeCallDup",
+        SRC,
+        "SafeCallDupKt",
+        "public static final java.lang.String genericValue-",
     );
 }
