@@ -199,7 +199,7 @@ impl<'a> Layout<'a> {
         let orphaned: Vec<bool> = (0..count)
             .map(|index| owned[index] && kept[index] && !rewritten_reach[index] && !leading[index])
             .collect();
-        let anchored = orphan_anchors(read, &by_method, &orphaned);
+        let anchored = orphan_anchors(read, relaid, &by_method, &orphaned);
         if unnamed == Unnamed::Kept {
             let unowned: Vec<u16> = (1..count)
                 .filter(|&index| read.entries[index].is_some() && !owned[index])
@@ -310,12 +310,12 @@ impl<'a> Layout<'a> {
 }
 
 /// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten
-/// code no longer names, first named (in kotlinc's visit order) by the code of a method emitted
-/// as it was, is placed before the first entry that code names for the first time with or after
-/// it, or right after the last entry that method names when none follows. An entry some other
-/// slot names first stays where it is.
+/// code no longer names, first named (in kotlinc's visit order) by later code, a later header, or
+/// a class attribute, is placed before the first entry that visit names for the first time with or
+/// after it, or right after the last entry that visit names when none follows.
 fn orphan_anchors(
     read: &ClassSlots,
+    relaid: &[RelaidMethod],
     by_method: &HashMap<usize, usize>,
     orphaned: &[bool],
 ) -> Vec<Option<usize>> {
@@ -325,6 +325,25 @@ fn orphan_anchors(
         return anchored;
     }
     let mut seen = vec![false; count];
+    let mut owner = vec![None; count];
+    for method in relaid {
+        for index in method.added.clone().chain(method.interned.clone()) {
+            if let Some(entry_owner) = owner.get_mut(usize::from(index)) {
+                *entry_owner = Some(method.index);
+            }
+        }
+    }
+    let code_starts: HashMap<usize, usize> = read
+        .visit_order()
+        .enumerate()
+        .filter_map(|(position, slot)| match slot.holder {
+            Holder::Code(method, _) => Some((method, position)),
+            _ => None,
+        })
+        .fold(HashMap::new(), |mut starts, (method, position)| {
+            starts.entry(method).or_insert(position);
+            starts
+        });
     let mut method = None;
     // The last entry the current method names: its header, then its code.
     let mut named_max = 0;
@@ -338,13 +357,31 @@ fn orphan_anchors(
             }
         }
     };
-    for slot in read.visit_order() {
+    for (position, slot) in read.visit_order().enumerate() {
         let code = match slot.holder {
             Holder::Code(at, _) if !by_method.contains_key(&at) => Some(at),
             _ => None,
         };
         let reached = reached_from(read, slot.index);
         let Some(at) = code else {
+            // A rewrite-owned entry whose first remaining use comes after that method's code is
+            // interned at that later visit, not at the position of the removed instruction. This
+            // includes an `InnerClasses` row retaining a holder class that CapturedVars removed.
+            pending.extend(reached.iter().copied().filter(|&index| {
+                orphaned[index]
+                    && !seen[index]
+                    && owner[index]
+                        .and_then(|method| code_starts.get(&method).copied())
+                        .is_some_and(|code_start| position > code_start)
+            }));
+            if let Some(fresh) = reached
+                .iter()
+                .copied()
+                .filter(|&index| !seen[index] && !orphaned[index])
+                .min()
+            {
+                settle(&mut pending, fresh, &mut anchored);
+            }
             for &index in &reached {
                 seen[index] = true;
                 if !orphaned[index] && slot.holder == Holder::Class {

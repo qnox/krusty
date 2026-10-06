@@ -71,6 +71,34 @@ fn a_cast_a_rewrite_removes_leaves_no_entry_behind() {
 }
 
 #[test]
+fn a_removed_holder_class_moves_to_its_inner_classes_row() {
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    writer.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+        inner: "pkg/Ref$LongRef".to_string(),
+        outer: Some("pkg/Ref".to_string()),
+        name: Some("LongRef".to_string()),
+        access: ACC_PUBLIC | ACC_STATIC,
+    });
+    let desc = "(Lpkg/Ref$LongRef;)Ljava/lang/Object;";
+    writer.reserve_method_pool("f", desc, None, &[]);
+    add_static(&mut writer, "f", desc, |code, writer| {
+        code.aload(0);
+        code.checkcast(writer.class_ref("pkg/Ref$LongRef"));
+        code.areturn();
+    });
+    let entries = pool(&writer.finish());
+    let position = |entry: &str| {
+        entries
+            .iter()
+            .position(|candidate| candidate == entry)
+            .unwrap_or_else(|| panic!("{entry} in {entries:?}"))
+    };
+    assert!(position("Code") < position("Class pkg/Ref$LongRef"));
+    assert!(position("Class pkg/Ref$LongRef") < position("Class pkg/Ref"));
+    assert!(position("Class pkg/Ref") < position("LongRef"));
+}
+
+#[test]
 fn a_constant_only_later_code_still_names_moves_to_that_code() {
     // `fun f(s: String): Any = s as String` interned `java/lang/String` for a cast its rewrite
     // removes; `g` names the class between its casts to `B` and `C`, which is where ASM interns it.
