@@ -2075,7 +2075,7 @@ fn qualified_alias_of_body_local_class_remains_pass_two_lexical_state() {
 #[test]
 fn compact_constructor_completion_preserves_integer_literal_bound_adaptation() {
     let source = "// LANGUAGE: +GenericInlineClassParameter\n\
-                  @JvmInline\n\
+                  @kotlin.jvm.JvmInline\n\
                   value class Bound<T : Long>(val value: T)\n\
                   val inferred = Bound(0)\n\
                   fun accept(value: Bound<Long>): Long = value.value\n\

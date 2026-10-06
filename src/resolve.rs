@@ -27242,7 +27242,7 @@ class Calls {
     suspend fun consume(): Int = memberIdentity(memberProduce())
 }
 
-@JvmInline value class Token(val value: Int)
+@kotlin.jvm.JvmInline value class Token(val value: Int)
 class ValueCalls {
     suspend fun <T> produce(): T = null as T
     suspend fun <T> identity(value: T): T = value
@@ -27251,7 +27251,7 @@ class ValueCalls {
     suspend fun consume(): Token = identity(wrap(forward(produce())))
 }
 
-@JvmInline value class AnyToken(val value: Any)
+@kotlin.jvm.JvmInline value class AnyToken(val value: Any)
 class AnyValueCalls {
     suspend fun <T> produce(): T = null as T
     suspend fun <T> identity(value: T): T = value
