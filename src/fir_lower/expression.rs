@@ -1606,24 +1606,11 @@ impl BodyLowering<'_> {
         let conversion_origin = conversion.origin;
         Ok(match conversion.kind {
             FirConversionKind::NumericWidening { to }
-            | FirConversionKind::NumericConversion { to } => {
-                let target = to.get();
-                // A conditional adapted to `Long` widens on each branch, before the join. One
-                // conversion after the join leaves `if (hasMore) 0x80 else 0` as `int` values plus
-                // `i2l`, while kotlinc's branches are already `long` constants.
-                let distributed = (target.canonical_semantic().non_null() == Ty::Long)
-                    .then(|| self.distribute_long_coercion(expression))
-                    .flatten();
-                if let Some(distributed) = distributed {
-                    distributed
-                } else {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: expression,
-                        type_operand: target,
-                    })
-                }
-            }
+            | FirConversionKind::NumericConversion { to } => self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: expression,
+                type_operand: to.get(),
+            }),
             FirConversionKind::NullabilityWidening { .. }
                 if source_type == crate::types::Ty::Unit =>
             {

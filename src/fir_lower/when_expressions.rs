@@ -10,7 +10,7 @@
 use crate::fir::{
     FirExprId, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality, ResolvedTy,
 };
-use crate::ir::{ExprId, IrBinOp, IrConst, IrExpr, IrTypeOp};
+use crate::ir::{ExprId, IrBinOp, IrExpr, IrTypeOp};
 use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure, LoweringState};
@@ -169,71 +169,4 @@ impl BodyLowering<'_> {
             type_operand: target.get(),
         })
     }
-
-    /// Push a `Long` numeric conversion into a conditional or a constant, so the join already has
-    /// `long` values. An `Int` constant becomes the sign-extended `Long` constant; other operands
-    /// keep an explicit coercion. Arithmetic inside a branch is already evaluated, so an
-    /// overflowing `Int` addition still wraps before this widening.
-    pub(super) fn distribute_long_coercion(&mut self, expression: ExprId) -> Option<ExprId> {
-        match self.ir.expr(expression).clone() {
-            IrExpr::Const(IrConst::Int(value)) => {
-                let widened = self
-                    .ir
-                    .add_expr(IrExpr::Const(IrConst::Long(i64::from(value))));
-                self.ir.logical_types.insert(widened, Ty::Long);
-                Some(widened)
-            }
-            IrExpr::When { branches } => {
-                let branches = branches
-                    .into_iter()
-                    .map(|(condition, result)| (condition, self.long_coerced_operand(result)))
-                    .collect();
-                self.ir.exprs[expression as usize] = IrExpr::When { branches };
-                if self
-                    .ir
-                    .whens
-                    .exhaustive
-                    .get(&expression)
-                    .is_some_and(is_narrow_signed_integer)
-                {
-                    self.ir.whens.exhaustive.insert(expression, Ty::Long);
-                }
-                self.ir.logical_types.insert(expression, Ty::Long);
-                Some(expression)
-            }
-            IrExpr::Block {
-                stmts,
-                value: Some(value),
-            } => {
-                let value = self.long_coerced_operand(value);
-                self.ir.exprs[expression as usize] = IrExpr::Block {
-                    stmts,
-                    value: Some(value),
-                };
-                self.ir.logical_types.insert(expression, Ty::Long);
-                Some(expression)
-            }
-            _ => None,
-        }
-    }
-
-    fn long_coerced_operand(&mut self, expression: ExprId) -> ExprId {
-        self.distribute_long_coercion(expression)
-            .unwrap_or_else(|| {
-                let coerced = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: expression,
-                    type_operand: Ty::Long,
-                });
-                self.ir.logical_types.insert(coerced, Ty::Long);
-                coerced
-            })
-    }
-}
-
-fn is_narrow_signed_integer(ty: &Ty) -> bool {
-    matches!(
-        ty.canonical_semantic().non_null(),
-        Ty::Byte | Ty::Short | Ty::Int | Ty::Char
-    )
 }

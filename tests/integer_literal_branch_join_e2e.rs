@@ -406,7 +406,10 @@ fun returned(flag: Boolean): Long = if (flag) 2147483647 + 1 else 0\n\
     ) {
         None => panic!("reference kotlinc is provisioned"),
         Some(results) => {
-            let failures = results.into_iter().filter_map(Result::err).collect::<Vec<_>>();
+            let failures = results
+                .into_iter()
+                .filter_map(Result::err)
+                .collect::<Vec<_>>();
             assert!(failures.is_empty(), "{}", failures.join("\n"));
         }
     }
