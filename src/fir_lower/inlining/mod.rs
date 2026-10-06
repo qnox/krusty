@@ -513,6 +513,7 @@ impl BodyLowering<'_> {
         }
         let mut operand_declarations = Vec::new();
         let mut defaulted = Vec::new();
+        let mut staging_failed = false;
         let operand_slots = plans
             .into_iter()
             .zip(operands.iter())
@@ -520,7 +521,23 @@ impl BodyLowering<'_> {
             .enumerate()
             .map(
                 |(index, ((plan, operand), (specialized_ty, declared_ty)))| match plan {
-                    InlineOperandPlan::Splice => None,
+                    InlineOperandPlan::Splice => {
+                        // A spliced reference is not a value, but its receiver and captures are
+                        // ordinary argument expressions: they run here, before the next argument,
+                        // and the body reads the values.
+                        if let Some(operand) = *operand {
+                            if self
+                                .stage_spliced_reference_operands(
+                                    operand,
+                                    &mut operand_declarations,
+                                )
+                                .is_none()
+                            {
+                                staging_failed = true;
+                            }
+                        }
+                        None
+                    }
                     InlineOperandPlan::Reuse(slot) => Some(slot),
                     InlineOperandPlan::Default => {
                         let slot = self.allocate_temporary();
@@ -554,6 +571,9 @@ impl BodyLowering<'_> {
                 },
             )
             .collect::<Vec<_>>();
+        if staging_failed {
+            return None;
+        }
         let mut inline_lambdas = inline_lambdas.to_vec();
         // A copied lambda is a value. Leaving it in this table would replace every read with a
         // fresh copy of the literal, so `x === x` would compare two objects.
@@ -747,10 +767,8 @@ impl BodyLowering<'_> {
                     // the call site's expression: the spliced invocation keeps that line, and the
                     // frame-closing nop can then return to the inlined call.
                     if matches!(self.ir.expr(lambda), IrExpr::CallableReference(_)) {
-                        // The copy is the splice's view of the argument, not a second value. It
-                        // shares the argument's adapter, so leaving it unmarked would keep a
-                        // carrier for that adapter and drop the inline marker's class name.
-                        self.ir.inline_callable_reference_arguments.insert(copy);
+                        // A copy that an invocation splices is marked there. A copy the body
+                        // evaluates (an object capturing the reference) stays a carrier.
                         match self.ir.expr_source_lines.get(&lambda).copied() {
                             Some(line) => {
                                 self.ir.expr_source_lines.insert(copy, line);
@@ -1014,6 +1032,55 @@ impl BodyLowering<'_> {
         expression
     }
 
+    /// Evaluate a spliced callable reference's receiver and captures before the inline body.
+    ///
+    /// The reference itself is not a value: the body invokes it. The expressions that build it
+    /// are still arguments of the call, so they run in that argument's place and the reference
+    /// reads the stored values. A local read has already run.
+    fn stage_spliced_reference_operands(
+        &mut self,
+        reference: ExprId,
+        declarations: &mut Vec<ExprId>,
+    ) -> Option<()> {
+        let IrExpr::CallableReference(mut callable) = self.ir.expr(reference).clone() else {
+            return Some(());
+        };
+        let mut operands = Vec::new();
+        if let Some(receiver) = callable.bound_receiver {
+            operands.push(receiver);
+        }
+        operands.extend(callable.captures.iter().copied());
+        if operands.is_empty() {
+            return Some(());
+        }
+        let mut staged = Vec::with_capacity(operands.len());
+        for value in operands {
+            if matches!(self.ir.expr(value), IrExpr::GetValue(_)) {
+                staged.push(value);
+                continue;
+            }
+            let ty = self.ir.logical_types.get(&value).copied()?;
+            let slot = self.allocate_temporary();
+            let declaration = self.ir.add_expr(IrExpr::Variable {
+                index: slot,
+                ty: stored_value_ty(ty),
+                init: Some(value),
+                named: false,
+            });
+            declarations.push(declaration);
+            let read = self.ir.add_expr(IrExpr::GetValue(slot));
+            self.ir.logical_types.insert(read, ty);
+            staged.push(read);
+        }
+        let bound = usize::from(callable.bound_receiver.is_some());
+        if bound == 1 {
+            callable.bound_receiver = Some(staged[0]);
+        }
+        callable.captures = staged[bound..].to_vec();
+        self.ir.exprs[reference as usize] = IrExpr::CallableReference(callable);
+        Some(())
+    }
+
     /// Record an inline-depth frame boundary named `callee`, live to the end of the block that
     /// declares it. It is not a value: the JVM debug boundary materializes the slot, the zero
     /// store, and the spelling.
@@ -1052,6 +1119,9 @@ impl BodyLowering<'_> {
             IrExpr::CallableReference(_) => {
                 let (impl_fn, captures, inline_body, _) =
                     super::source_calls::inline_argument_template(self.ir, func)?;
+                // This node stays a callable reference after the invocation is replaced. It is
+                // not a value: a carrier for it would keep the adapter off the inline marker.
+                self.ir.inline_callable_reference_arguments.insert(func);
                 (impl_fn, captures, inline_body, true)
             }
             _ => return None,
