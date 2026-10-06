@@ -351,7 +351,12 @@ kt_ref demo_box(void);
 "
     );
     let object = objects(&artifacts)[0];
-    assert_eq!(dynamic_text_symbols(object), vec!["demo_box".to_string()]);
+    // `box` selects the executable entry mode, whose runtime ABI has always exported
+    // `kt_program_entry`. The rejected backticked declaration contributes no dynamic symbol.
+    assert_eq!(
+        dynamic_text_symbols(object),
+        vec!["demo_box".to_string(), "kt_program_entry".to_string()]
+    );
     assert!(
         hidden_text_symbols(object)
             .iter()
