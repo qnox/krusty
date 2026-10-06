@@ -434,7 +434,7 @@ fn streamed_headers_preserve_compact_package_and_import_scopes() {
 }
 
 #[test]
-fn compact_header_types_own_same_file_alias_source_spellings_by_type_identity() {
+fn compact_header_types_retain_same_file_alias_uses_until_resolution() {
     let inputs = [SourceInput::kotlin(
         "package app\nclass Payload\ntypealias Cargo = Payload\nfun make(value: Cargo): Cargo = value",
     )];
@@ -467,19 +467,16 @@ fn compact_header_types_own_same_file_alias_source_spellings_by_type_identity() 
     };
     let parameter = module.syntax.parameters(parameters)[0].ty;
     for ty in [parameter, result] {
-        let expanded = module
+        let written = module
             .syntax
             .transient_type_ref(ty, &module.lookup_names)
-            .expect("expanded compact type");
-        assert_eq!(expanded.name, "Payload");
-        let spellings = module
+            .expect("written compact type");
+        assert_eq!(written.name, "Cargo");
+        assert!(module
             .syntax
             .transient_source_spellings(ty, &module.lookup_names)
-            .expect("source spelling projection");
-        assert_eq!(
-            spellings.get(&expanded.span).map(|ty| ty.name.as_str()),
-            Some("Cargo")
-        );
+            .expect("source spelling projection")
+            .is_empty());
     }
 }
 

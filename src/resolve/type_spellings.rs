@@ -44,14 +44,10 @@ pub(crate) fn spelling_of_ref_with(
     spellings: crate::spelling::SourceSpellings<'_>,
     resolve_argument: &mut dyn FnMut(&TypeRef) -> Ty,
 ) -> Spelled {
-    // Two ways a reference can name an alias, and they are mutually exclusive:
-    //
-    //  * a SAME-FILE alias was already rewritten to its target by the parse seam, which parked the
-    //    original spelling in `File::alias_spellings` — `r.name` now names the target;
-    //  * an alias declared in a sibling file or on the classpath is never rewritten, so `r.name`
-    //    still spells it and only name resolution can say so.
-    //
-    // An import path names a declaration rather than using the type, and gets no abbreviation.
+    // A source use stays written until name resolution selects its alias. A spelling parked in
+    // `File::alias_spellings` comes only from a later declaration-template rewrite and preserves
+    // that template's original abbreviation. An import path names a declaration rather than using
+    // the type, and gets no abbreviation.
     let spelled = spellings.aliases.get(&r.span).unwrap_or(r);
     let annotations = spellings.annotations.at(r.span.lo).to_vec();
     // A type parameter shadows any same-named alias, and is never itself one.
@@ -69,9 +65,9 @@ pub(crate) fn spelling_of_ref_with(
     // A SUSPEND function type's tail is the CPS
     // `Continuation`/`Any?` pair instead of the return, so its return spelling has no slot.
     //
-    // This is tested on the SPELLED node, not the resolved one: `typealias Handler<T> = (T) ->
-    // String` leaves an arrow type behind after the parse seam expands it, and the alias the
-    // source actually wrote is exactly what must survive that.
+    // This is tested on the SPELLED node, not the resolved one: an alias right-hand side and a
+    // written function type use arrow syntax, while a use of `typealias Handler<T> = (T) -> String`
+    // still spells `Handler` and takes the alias path below.
     if !spelled.fun_params.is_empty() || spelled.name == "<fun>" {
         let mut args: Vec<Spelled> = spelled
             .fun_params

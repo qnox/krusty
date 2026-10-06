@@ -86,14 +86,16 @@ impl Checker<'_> {
                 .unwrap_or_default();
             return crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings);
         }
-        self.alias_application_ty(
+        let applied = self.alias_application_ty(
             scope,
             formals.to_vec(),
             expansion,
             name,
             &arguments,
             self.call_callee_name_span(call),
-        )
+        );
+        self.report_alias_projection_conflicts(&applied.conflicts, applied.ty);
+        applied.ty
     }
 
     /// The facet of an alias constructor application that constructor selection may treat as
