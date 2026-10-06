@@ -97,7 +97,23 @@ pub(crate) fn reparent_lambda_impls(ir: &mut IrFile) {
         .into_iter()
         .collect::<HashSet<_>>();
 
-    for class_id in 0..ir.classes.len() {
+    let constructed = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::New { internal, .. } => Some(*internal),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut classes = (0..ir.classes.len()).collect::<Vec<_>>();
+    // A copied expression DAG can remain reachable from both its consumed template class and the
+    // class that actually emits the copy. The standalone helper belongs to the emitting class. A
+    // generated template with no remaining construction must not claim it first: coroutine
+    // emission may elide that class and leave the live method handle dangling. Preserve source
+    // order within each group so ordinary ownership remains deterministic.
+    classes.sort_by_key(|&class| !constructed.contains(&ir.classes[class].fq_name_id()));
+
+    for class_id in classes {
         let class = &ir.classes[class_id];
         let mut roots = Vec::new();
         for &function in &class.methods {
@@ -289,6 +305,54 @@ mod tests {
             vec![method, implementation]
         );
         assert_eq!(ir.class_method_owners[&implementation], vec![class_id]);
+    }
+
+    #[test]
+    fn a_constructed_copy_claims_a_helper_before_an_unconstructed_template() {
+        let mut ir = IrFile::default();
+        let unit = ir.add_expr(IrExpr::UnitInstance);
+        let implementation = ir.add_fun(function("lambda", unit, None));
+        source_lambda(&mut ir, implementation);
+        let lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: None,
+        });
+
+        let template_name = crate::types::type_name("sample/Template");
+        let template_method = ir.add_fun(function("run", lambda, Some(template_name)));
+        let mut template = crate::plugins::synthetic_class("sample/Template");
+        template.methods.push(template_method);
+        let template_id = ir.add_class(template);
+        ir.note_class_method(template_id, template_method);
+
+        let copy_name = crate::types::type_name("sample/Copy");
+        let copy_method = ir.add_fun(function("run", lambda, Some(copy_name)));
+        let mut copy = crate::plugins::synthetic_class("sample/Copy");
+        copy.methods.push(copy_method);
+        let copy_id = ir.add_class(copy);
+        ir.note_class_method(copy_id, copy_method);
+        ir.add_expr(IrExpr::New {
+            internal: copy_name,
+            args: Vec::new(),
+            ctor_params: None,
+            ctor_desc: None,
+            external_target: None,
+        });
+
+        reparent_lambda_impls(&mut ir);
+
+        assert_eq!(
+            ir.classes[template_id as usize].methods,
+            vec![template_method]
+        );
+        assert_eq!(
+            ir.classes[copy_id as usize].methods,
+            vec![copy_method, implementation]
+        );
+        assert_eq!(ir.class_method_owners[&implementation], vec![copy_id]);
     }
 
     #[test]
