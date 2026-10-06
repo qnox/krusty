@@ -88,6 +88,11 @@ fun pickedNamed(map: HashMap<String, String>): Int {
     return keys.size
 }
 
+fun pickedNamedInOrder(map: HashMap<String, String>): Int {
+    val keys = pick(first = map.keys, second = map.keys)
+    return keys.size
+}
+
 fun defaulted(map: HashMap<String, String>): Int = withDefault(map.keys).size
 
 fun oneVararg(map: HashMap<String, String>): Int = firstVararg(map.keys).size
@@ -174,6 +179,7 @@ fn values_derived_from_enhanced_java_results_are_checked_like_kotlinc() {
         "pickedMixed",
         "pickedMarked",
         "pickedNamed",
+        "pickedNamedInOrder",
         "defaulted",
         "oneVararg",
         "manyVararg",
