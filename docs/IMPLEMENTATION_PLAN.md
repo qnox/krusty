@@ -4484,7 +4484,11 @@ each one lowering more and declining less:
   callable identity, so the defining file and a caller in another file of the module name the same
   symbol without seeing each other's lowering. `Callee::Module`, and a `CrossFile` edge that still
   carries that id, imports it and calls it directly. The module's objects are linked together.
-  A file that is not the entry does not run its top-level initializers; that order is not guessed.
+  Every file exports `kt_fileinit_<source file id>`, which runs that file's top-level initializers
+  at most once. The entry calls its own before `main` or `box`. A cross-file call calls the
+  defining file's before the function, so a property defined there has its value even when that
+  file is not the entry. The flag is set before the initializers run: a re-entrant use sees the
+  default and does not recurse.
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host

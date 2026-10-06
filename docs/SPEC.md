@@ -11740,6 +11740,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_exceptions_e2e.rs` (`a_throwing_object_initializer_leaves_no_instance_behind`,
   `a_throwing_enum_constant_leaves_no_constants_behind`,
   `a_throwing_top_level_initializer_stops_before_the_entry`).
+- **Native: a file's top-level initializers run once, including from another file.** Each source
+  file exports one initializer. The entry calls its own before `main` or `box`. A call to a
+  top-level function defined in another file of the module calls that file's initializer first, so
+  a property declared there has its value even when that file is not the entry. The initializer
+  runs at most once: a second call, from the entry or from another file, is a return. The
+  once-only flag is set before the initializers run, so an initializer that reaches back into its
+  own file sees the property defaults and does not recurse. A property initializer that increments
+  a `var` and is then read through two calls still reports the one increment.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`a_top_level_property_in_another_file_is_initialized_before_the_call`,
+  `a_file_initializer_runs_once_however_many_calls_arrive`).
 
 - **`-Xwarning-level=<NAME>:<SEVERITY>` configures a typed diagnostic identity.** The accepted
   severities are kotlinc's exact, case-sensitive `error`, `warning`, and `disabled` spellings.

@@ -11,23 +11,46 @@ impl BodyLowering<'_, '_, '_> {
     /// `module_function_symbol` and a direct call. The defining file exports that same symbol.
     fn module_call(
         &mut self,
-        symbol: &str,
+        target: crate::fir::CallableId,
         params: &[Ty],
         ret: Ty,
         dispatch_receiver: Option<u32>,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
+        let symbol = super::super::super::symbols::module_function_symbol(target);
         if dispatch_receiver.is_some() {
             return Err(format!("a cross-file call with a receiver (`{symbol}`)"));
         }
-        let id = self.file.import(symbol, params, ret)?;
+        let id = self.file.import(&symbol, params, ret)?;
         let arguments = self.arguments(args, params)?;
         if self.terminated {
             return Ok(None);
         }
+        // Kotlin evaluates every operand before the invocation itself triggers initialization of
+        // the declaring file. Running the initializer before `arguments` would reverse observable
+        // side effects (and exception priority) between an argument and a top-level initializer.
+        self.initialize_defining_file(target)?;
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
+    }
+
+    /// Run the defining file's top-level initializers before using anything it exports.
+    fn initialize_defining_file(
+        &mut self,
+        target: crate::fir::CallableId,
+    ) -> Result<(), Unsupported> {
+        let Some(record) = self.file.ir.referenced_module_callables.get(&target) else {
+            return Err("a cross-file call with no recorded source file".to_string());
+        };
+        let init = super::super::super::symbols::file_init_symbol(record.source.source);
+        let id = self.file.import(&init, &[], Ty::Unit)?;
+        if self.terminated {
+            return Ok(());
+        }
+        let func_ref = self.func_ref(id);
+        self.emit_call(func_ref, &[])?;
+        Ok(())
     }
 
     pub(super) fn call(
@@ -572,13 +595,7 @@ impl BodyLowering<'_, '_, '_> {
                 params,
                 ret,
                 ..
-            } => self.module_call(
-                &super::super::super::symbols::module_function_symbol(*target),
-                params,
-                *ret,
-                dispatch_receiver,
-                args,
-            ),
+            } => self.module_call(*target, params, *ret, dispatch_receiver, args),
             // A JVM realization may already have rewritten the same edge. The callable id is still
             // the symbol; the facade name is not.
             Callee::CrossFile {
@@ -587,13 +604,7 @@ impl BodyLowering<'_, '_, '_> {
                 ret,
                 module_default_call: false,
                 ..
-            } => self.module_call(
-                &super::super::super::symbols::module_function_symbol(*target),
-                params,
-                *ret,
-                dispatch_receiver,
-                args,
-            ),
+            } => self.module_call(*target, params, *ret, dispatch_receiver, args),
             other => Err(format!("a {} call", callee_kind(other))),
         }
     }

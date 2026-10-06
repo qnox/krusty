@@ -11,10 +11,8 @@
 //! **Where the initializers run.** On the JVM they run in `<clinit>`, when the facade class is
 //! first touched. A program touches the facade by calling its `main`, so running them at process
 //! start — in declaration order, before the entry function — is observationally the same thing for
-//! a program whose entry lives in the file that declares them. A call into another file does not
-//! run that file's initializers: each file's initializer runs only from the entry it itself
-//! defines, and a file that is not the entry defines none. Cross-file initialization order is a
-//! separate question and is not guessed at here.
+//! a program whose entry lives in the file that declares them, and when another file first calls
+//! into this one. Both go through `kt_fileinit_<source>`, which runs the initializers at most once.
 //!
 //! **The collector has to be told.** A freestanding program cannot find its own data section, so a
 //! reference-typed slot is registered with `kt_gc_add_global_root` — and registered BEFORE the
@@ -143,6 +141,74 @@ impl<'a> FileLowering<'a> {
             Ok(())
         })?;
         Ok(Some(id))
+    }
+
+    /// `kt_fileinit_<source>`: this file's top-level initializers, run at most once.
+    ///
+    /// The entry calls it before `main` or `box`. A call into this file from another file calls it
+    /// first, so a property defined here has its value even when this file is not the entry. The
+    /// flag is set before the initializers run: a property initializer that reaches back into this
+    /// file sees the default, which is what Kotlin does, and does not recurse.
+    pub(super) fn define_file_init(
+        &mut self,
+        source: crate::fir::SourceFileId,
+        statics: Option<FuncId>,
+    ) -> Result<FuncId, Unsupported> {
+        let void = Signature::new(CallConv::SystemV);
+        let symbol = super::super::super::symbols::file_init_symbol(source);
+        let id = self
+            .module
+            .declare_function(&symbol, Linkage::Export, &void)
+            .map_err(|error| format!("declaring `{symbol}` ({error})"))?;
+        let flag_name = format!("kt_fileinit_done_{}", source.raw());
+        let flag = self
+            .module
+            .declare_data(&flag_name, Linkage::Local, true, false)
+            .map_err(|error| format!("declaring `{flag_name}` ({error})"))?;
+        let mut description = DataDescription::new();
+        description.define(Box::new([0u8]));
+        description.set_align(1);
+        self.module
+            .define_data(flag, &description)
+            .map_err(|error| format!("defining `{flag_name}` ({error})"))?;
+
+        let frontend_config = self.module.target_config();
+        let mut context = self.module.make_context();
+        context.func.signature = void;
+        let mut builder_context = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+            let head = builder.create_block();
+            let run = builder.create_block();
+            let done = builder.create_block();
+            builder.switch_to_block(head);
+            let global = self.module.declare_data_in_func(flag, builder.func);
+            // A Cranelift value belongs to the block that defines it. The flag's address is a
+            // global, so each block that touches the flag recomputes the pointer.
+            let pointer = builder.ins().symbol_value(types::I64, global);
+            let state = builder.ins().load(types::I8, trusted(), pointer, 0);
+            let already = builder.ins().icmp_imm_u(IntCC::NotEqual, state, 0);
+            builder.ins().brif(already, done, &[], run, &[]);
+            builder.seal_block(head);
+            builder.switch_to_block(run);
+            let pointer = builder.ins().symbol_value(types::I64, global);
+            let one = builder.ins().iconst(types::I8, 1);
+            builder.ins().store(trusted(), one, pointer, 0);
+            if let Some(statics) = statics {
+                let statics_ref = self.module.declare_func_in_func(statics, builder.func);
+                builder.ins().call(statics_ref, &[]);
+            }
+            builder.ins().jump(done, &[]);
+            builder.seal_block(run);
+            builder.switch_to_block(done);
+            builder.ins().return_(&[]);
+            builder.seal_block(done);
+            builder.finalize(frontend_config);
+        }
+        self.module
+            .define_function(id, &mut context)
+            .map_err(|error| format!("defining `{symbol}` ({error})"))?;
+        Ok(id)
     }
 }
 
