@@ -2682,11 +2682,8 @@ pub struct ClassNames {
     alias_expansions: HashMap<TypeName, crate::libraries::AliasExpansion>,
     /// Qualified identity of a SOURCE `typealias` reachable under this spelling.
     ///
-    /// A classpath alias keeps its identity inside its [`AliasExpansion`](crate::libraries::AliasExpansion);
-    /// a source alias has no template here, because [`expand_type_aliases`] folds its target
-    /// straight into the name map and the spelling then resolves exactly like the target class.
-    /// That is right for every semantic purpose and wrong for exactly one: `@Metadata` records the
-    /// SPELLING as `Type.abbreviated_type`, so the alias identity needs its own edge to survive.
+    /// Source aliases also have a template during Pass 1. The separate identity edge survives after
+    /// the temporary name universe is released so metadata can record `Type.abbreviated_type`.
     source_alias_identities: HashMap<String, TypeName>,
     /// First segment that failed while binding a source spelling in this file.
     unresolved_segments: HashMap<String, String>,
@@ -2710,7 +2707,7 @@ impl ClassNames {
         }
     }
 
-    /// Record a classpath alias's expansion template under the spelling that names it.
+    /// Record an alias expansion under a spelling whose ordinary scope lookup selected it.
     pub fn insert_alias_expansion(
         &mut self,
         spelling: String,
@@ -2720,7 +2717,7 @@ impl ClassNames {
         self.alias_expansions.insert(expansion.identity, expansion);
     }
 
-    /// The expansion template for a spelling, if it names a classpath alias.
+    /// The expansion template for a spelling, if it names an alias.
     pub fn alias_expansion(&self, name: &str) -> Option<&crate::libraries::AliasExpansion> {
         self.alias_bindings
             .get(name)

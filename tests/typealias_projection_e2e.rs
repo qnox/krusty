@@ -46,6 +46,26 @@ fn a_typealias_keeps_variance_on_its_parameters() {
 }
 
 #[test]
+fn one_alias_parameter_can_fill_several_target_arguments() {
+    const SOURCE: &str = r#"
+        interface ValueShape<V>
+        interface SelectedShape<V> : ValueShape<V>
+        open class Cell<V, S : ValueShape<V>>
+        typealias SelectedCell<V> = Cell<V, out SelectedShape<V>>
+
+        data class Holder<P>(val value: SelectedCell<P>)
+
+        fun box(): String = "OK"
+    "#;
+
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SOURCE, "RepeatedAliasArgument")
+            .expect("one alias formal must expand into both target arguments"),
+        "OK"
+    );
+}
+
+#[test]
 fn an_opposite_typealias_projection_is_rejected() {
     // Each opposite use-site keyword is its own diagnostic, in source order, quoting the
     // expansion of that application (a nullable use keeps `?` inside the type quotes).
