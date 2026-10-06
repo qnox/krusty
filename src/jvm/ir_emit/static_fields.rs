@@ -166,6 +166,16 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         e.emit_static_initializer_store(facade, index, init, &mut code);
     }
     code.ret_void();
+    // `<clinit>` normally keeps only its declaration-owned entries, not incidental marks from a
+    // nested initializer expression. A classpath inline call is different: its mapped callee lines
+    // and caller-line restoration are part of kotlinc's public debug surface. Keep only marks that
+    // the inliner explicitly tagged, then merge them with the curated property entries.
+    clinit_lines.extend(
+        code.inlined_line_marks()
+            .map(|(pc, line)| (pc, u32::from(line))),
+    );
+    clinit_lines.sort_by_key(|&(pc, _)| pc);
+    clinit_lines.dedup();
     finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.frame.max());
     if !clinit_lines.is_empty() {
         e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
