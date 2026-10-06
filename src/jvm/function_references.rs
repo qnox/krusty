@@ -415,14 +415,6 @@ fn realize_adapter_reference(
         reflection_result = Ty::obj("kotlin/Any");
     }
     let internal = reference_class_name(ir, facades.current, expression, "function");
-    if let Some(adapter) = ir
-        .callable_reference_inline_templates
-        .get(&(expression as u32))
-        .map(|template| template.adapter)
-    {
-        // The inlined copy uses the name of the carrier it replaces for debug-frame markers.
-        ir.lambda_class_names.insert(adapter, internal);
-    }
     let mut class = IrClass::synthetic(internal);
     class.enclosure = reference_enclosure(ir, expression);
     class.superclass = type_name(if fun_interface_constructor {
@@ -518,39 +510,6 @@ fn realize_adapter_reference(
         ir.construction_declared_params.insert(carrier, parameters);
     }
     Ok(())
-}
-
-/// Retain an independently owned invocation template before carrier realization is allowed to
-/// reshape the reference's adapter into the carrier's instance `invoke`. The copy is inline-only:
-/// a failed external splice evaluates the ordinary carrier and never emits this helper.
-fn preserve_inline_template(ir: &mut IrFile, expression: ExprId) -> Option<()> {
-    if ir
-        .callable_reference_inline_templates
-        .contains_key(&expression)
-    {
-        return Some(());
-    }
-    let (adapter, captures, returned, arity, function_type) =
-        ir.callable_reference_inline_template(expression)?;
-    let mut function = ir.functions.get(adapter as usize)?.clone();
-    let body = function.body?;
-    let (body, copies) = crate::ir::clone_expression_dag(ir, body);
-    let returned = *copies.get(&returned)?;
-    function.body = Some(body);
-    let adapter =
-        crate::ir::clone_class_method(ir, adapter, function, &std::collections::HashMap::new());
-    ir.inline_only_fns.insert(adapter);
-    ir.callable_reference_inline_templates.insert(
-        expression,
-        crate::ir::IrCallableReferenceInlineTemplate {
-            adapter,
-            captures,
-            returned,
-            arity,
-            function_type,
-        },
-    );
-    Some(())
 }
 
 /// Replace the reference expression with its carrier. kotlinc's `FunctionReferenceLowering` hands
@@ -827,10 +786,10 @@ pub(super) fn realize(
     callables: &crate::backend::CheckedBackendCallables,
     facades: Facades<'_>,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
-    // Preserve a private template for each reference that may be placed by the dependency bytecode
-    // inliner. This is eligibility, not consumption: carrier realization proceeds normally, and
-    // the discovery emit later removes only carriers that no emitted path actually evaluates.
-    let mut template_candidates = std::collections::HashSet::new();
+    // Join each dependency inline call with the exact selected declaration while its argument
+    // vector is still semantic. This publishes consumption once; carrier planning below does not
+    // scan expression parents or infer inline-parameter roles from syntax.
+    let mut consumed_references = Vec::new();
     for raw in 0..ir.exprs.len() {
         let call = raw as u32;
         let IrExpr::Call {
@@ -858,14 +817,16 @@ pub(super) fn realize(
                     .is_some_and(|modifier| {
                         *modifier != crate::types::InlineParameterModifier::Noinline
                     });
-            if inline && matches!(ir.expr(argument), IrExpr::CallableReference(_)) {
-                template_candidates.insert(argument);
+            if inline
+                && matches!(ir.expr(argument), IrExpr::CallableReference(_))
+                && ir.callable_reference_inline_template(argument).is_some()
+            {
+                consumed_references.push(argument);
             }
         }
     }
-    for expression in template_candidates {
-        let _ = preserve_inline_template(ir, expression);
-    }
+    ir.inline_callable_reference_arguments
+        .extend(consumed_references);
     let adapter_owners = ir
         .classes
         .iter()

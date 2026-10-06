@@ -213,16 +213,6 @@ impl super::Emitter<'_> {
                 defaults: default_parameters,
                 default_prefix_count,
             } => {
-                if self
-                    .ir
-                    .class_id_by_name(*internal)
-                    .is_some_and(|class| self.ir.classes[class as usize].func_ref.is_some())
-                {
-                    self.run
-                        .used_function_reference_classes
-                        .borrow_mut()
-                        .insert(*internal);
-                }
                 let args = args.clone();
                 if self.emit_nullable_sam_wrapper_new(e, *internal, &args, code) {
                     return;
@@ -1427,12 +1417,6 @@ impl super::Emitter<'_> {
                 code.getstatic(f, 1);
             }
             IrExpr::StaticInstance { owner, ty, field } => {
-                if self.ir.classes[*owner as usize].func_ref.is_some() {
-                    self.run
-                        .used_function_reference_classes
-                        .borrow_mut()
-                        .insert(self.ir.classes[*owner as usize].fq_name);
-                }
                 let owner_fq = self.ir.classes[*owner as usize].fq_name();
                 let ty_fq = self.ir.classes[*ty as usize].fq_name();
                 let f = self.cw.fieldref(&owner_fq, field, &format!("L{ty_fq};"));
