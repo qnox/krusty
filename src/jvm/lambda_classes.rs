@@ -11,11 +11,12 @@
 //! member's lambda captures its static's carrier (`$arg0`) rather than the instance (`this$0`). A lambda that captures nothing
 //! is a singleton read from its `INSTANCE` field.
 //!
-//! The conflict taken so far is a value class whose declared underlying type is neither nullable
-//! nor primitive, as a parameter or the result: the factory cannot box such a value, and it knows
-//! nothing of the mangled name its specialized method takes. The class is realized before the
-//! lambda gets a lifted name, since kotlinc numbers only the lambdas it lifts, and before the
-//! value-class pass, which erases `invoke` and completes its bridge.
+//! The conflicts taken so far: a value class whose declared underlying type is neither nullable
+//! nor primitive, as a parameter or the result (the factory cannot box such a value, and it knows
+//! nothing of the mangled name its specialized method takes); and, before language level 2.4, a
+//! `Nothing`/`Nothing?` parameter or inferred result, which maps to `Void` and has no adaptee at all. The class is realized
+//! before the lambda gets a lifted name, since kotlinc numbers only the lambdas it lifts, and
+//! before the value-class pass, which erases `invoke` and completes its bridge.
 
 use crate::ir::{ClassId, ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole};
 use crate::types::{Ty, TypeName};
@@ -333,7 +334,8 @@ pub(super) fn realize(
                             .params
                             .iter()
                             .chain([&signature.ret])
-                            .any(|&ty| factory_conflict(ir, classifiers, ty)))))
+                            .any(|&ty| factory_conflict(ir, classifiers, ty))
+                        && !nothing_conflict(ir, fid, signature))))
         {
             continue;
         }
@@ -498,6 +500,61 @@ fn factory_conflict(
         .is_some_and(|underlying| !admits_null(underlying) && !is_primitive(underlying))
 }
 
+/// Whether the lambda's implementation has a `Nothing`/`Nothing?` type the pre-2.4 factory cannot adapt
+/// (kotlinc's `computeParameterTypeAdaptationConstraint`: `adapteeType.isNothing() ||
+/// adapteeType.isNullableNothing()` → CONFLICT). A parameter type comes from the selected function
+/// type, but the specialized invoke's RESULT is the body's own inferred type: `{ null }` selected
+/// as `(Any?) -> Any?` still returns `Nothing?`, which maps to `Void` and has no adaptee.
+///
+/// Only a source lambda lowered through `checked_lambda` has an inferred-result entry. A lambda
+/// stored in a dependency inline body already has a class-file representation and is regenerated
+/// by the bytecode inliner; it does not pass through this source-lambda classification again.
+/// Callable references have no inferred result in kotlinc either, so their absence here matches
+/// the reference.
+fn nothing_conflict(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> bool {
+    fn is_nothing(ty: Ty) -> bool {
+        matches!(ty.non_null(), Ty::Nothing | Ty::Null)
+    }
+    let Some(inferred_result) = ir.lambda_inferred_results.get(&fid).copied() else {
+        // Current language levels select the caller-facing result as the implementation signature.
+        // The frontend records that decision by omitting the pre-2.4 inferred-result fact, so this
+        // backend does not need a parallel language-version option.
+        return false;
+    };
+    signature.params.iter().copied().any(is_nothing) || is_nothing(inferred_result)
+}
+
+/// The result type used by the lambda implementation method. Before language level 2.4 checked
+/// FIR records the body's inferred result; current language levels deliberately omit that fact and
+/// use the selected function signature's result instead.
+fn implementation_result(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> Ty {
+    ir.lambda_inferred_results
+        .get(&fid)
+        .copied()
+        .unwrap_or(signature.ret)
+}
+
+/// Whether the class's `FunctionN` supertype is written raw, without the generic `Signature`.
+/// kotlinc's `IrTypeMapper.writeGenericType` skips the generics when
+/// `hasNothingInNonContravariantPosition(supertype)` holds (`KotlinTypeMapper.kt`): an argument
+/// `isNullableNothing()`, or `isNothing()` where the type parameter's variance is not `IN`.
+/// `FunctionN`'s value parameters are `in` — a non-null `Nothing` there keeps the generic
+/// supertype, its argument written as a star (`Function1<*Lkotlin/Unit;>;`) — while its result is
+/// `out`, so a `Nothing`/`Nothing?` implementation result leaves the supertype raw. That result is
+/// the pre-2.4 inferred body result when recorded, otherwise the selected function result; the raw
+/// generic-signature rule is independent of why this lambda was forced to a class.
+fn raw_supertype(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> bool {
+    fn is_nothing(ty: Ty) -> bool {
+        matches!(ty.non_null(), Ty::Nothing | Ty::Null)
+    }
+    signature
+        .params
+        .iter()
+        .copied()
+        .any(|ty| is_nothing(ty) && ty.admits_null())
+        || is_nothing(implementation_result(ir, fid, signature))
+}
+
 /// Whether a value class's declared underlying type admits `null`: a nullable type, or a type
 /// parameter whose bound does (`Result<T>(val a: T)` over `T : Any?`).
 fn admits_null(underlying: Ty) -> bool {
@@ -594,10 +651,20 @@ fn realize_class(
     }
     // The specialized `invoke` returns the lambda's own result: nothing for `Unit`, and a primitive
     // boxed, since it overrides the generic `R`. A value class stays its carrier, which the
-    // bridge boxes.
-    let result = match signature.ret {
-        ret if is_primitive(ret) => Ty::nullable(ret),
-        ret => ret,
+    // bridge boxes. kotlinc types it by the body's INFERRED result, which a `Nothing`/`Nothing?`
+    // body pins to `Void` even when the selected function type's return is wider.
+    let result = match implementation_result(ir, fid, signature) {
+        inferred if matches!(inferred.non_null(), Ty::Nothing | Ty::Null) => {
+            if inferred.admits_null() {
+                Ty::nullable(Ty::Nothing)
+            } else {
+                Ty::Nothing
+            }
+        }
+        _ => match signature.ret {
+            ret if is_primitive(ret) => Ty::nullable(ret),
+            ret => ret,
+        },
     };
     for &expression in &expressions {
         let IrExpr::Return(Some(value)) = ir.exprs[expression as usize] else {
@@ -711,6 +778,7 @@ fn declare_class(
         public_inline: false,
         invoke: fid,
         function_type: site.function_type,
+        raw_supertype: raw_supertype(ir, fid, signature),
         captures: captures
             .iter()
             .map(|capture| capture.capture.clone())
@@ -791,7 +859,7 @@ fn become_invoke(ir: &mut IrFile, fid: FunId, class: ClassId, captured: usize, r
         .params
         .iter()
         .map(|ty| {
-            (ty.is_reference() && !ty.upper_bound_admits_null())
+            super::parameter_assertions::requires_reference_guard(*ty)
                 .then_some(crate::ir::IrParameterCheck::NonNull)
         })
         .collect();
@@ -876,6 +944,7 @@ mod method_domain_tests {
             public_inline: false,
             invoke: 3,
             function_type: Ty::fun(vec![], Ty::Unit),
+            raw_supertype: false,
             captures: vec![],
             captured_receivers: vec![],
             lifting_root: None,
