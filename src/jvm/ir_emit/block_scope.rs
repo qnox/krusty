@@ -42,20 +42,35 @@ impl Emitter<'_> {
             code.inline_call_marker(true);
         }
         self.link_safe_call_chain(block, code);
+        let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
         let marked_initializer = self.renders_initializer_boundary(block);
         self.mark_initializer_line(block, false, code);
+        // The optimized safe call still owns an ordinary lexical block. Enter its depth before
+        // asking for the fast path so nested selector emission, local ranges, and frames observe
+        // the same lifecycle as `emit_open_block`.
+        self.block_depth += 1;
         let EmittedBlock {
             discard_after_close,
             reserved_inline_stack,
-        } = self.emit_open_block(
-            stmts,
-            value,
-            terminal_target,
-            delays_stack_normalization,
-            code,
-        );
+        } = if self.try_emit_duplicated_safe_call(&stmts, value, true, code) {
+            self.terminal_statement_target = None;
+            self.statement_line = enclosing_statement_line;
+            EmittedBlock {
+                discard_after_close: None,
+                reserved_inline_stack: None,
+            }
+        } else {
+            self.block_depth -= 1;
+            self.emit_open_block(
+                stmts,
+                value,
+                terminal_target,
+                delays_stack_normalization,
+                code,
+            )
+        };
         self.mark_initializer_line(block, true, code);
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
@@ -107,36 +122,38 @@ impl Emitter<'_> {
         let saved = self.open_slot_scope();
         self.block_depth += 1;
         let mut dead = false;
-        let mut normalize_at_lambda_frame = delays_stack_normalization;
         let mut reserved_inline_stack = None;
-        for &statement in stmts {
-            if normalize_at_lambda_frame
-                && matches!(
-                    self.ir.debug_local_provenance(statement),
-                    Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
-                )
-            {
-                reserved_inline_stack = Some(self.open_reserved_inline_stack(code));
-                normalize_at_lambda_frame = false;
+        if !self.try_emit_duplicated_safe_call(stmts, value, false, code) {
+            let mut normalize_at_lambda_frame = delays_stack_normalization;
+            for &statement in stmts {
+                if normalize_at_lambda_frame
+                    && matches!(
+                        self.ir.debug_local_provenance(statement),
+                        Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
+                    )
+                {
+                    reserved_inline_stack = Some(self.open_reserved_inline_stack(code));
+                    normalize_at_lambda_frame = false;
+                }
+                self.mark_statement_line(statement, code);
+                // A statement nets zero on the operand stack (its value is stored/discarded). Reset the
+                // tracked height to that baseline afterward: raw spliced control flow is opaque to the
+                // builder's linear counter and can leave `cur_stack` drifted above the real,
+                // verified-balanced height. Later emission still relies on accurate physical stack
+                // accounting even though final-body analysis owns verifier frames.
+                let base = code.stack_height();
+                self.emit(statement, code);
+                if self.discarding_diverges(statement) {
+                    dead = true;
+                    break;
+                }
+                code.set_stack(base.max(0) as u16);
             }
-            self.mark_statement_line(statement, code);
-            // A statement nets zero on the operand stack (its value is stored/discarded). Reset the
-            // tracked height to that baseline afterward: raw spliced control flow is opaque to the
-            // builder's linear counter and can leave `cur_stack` drifted above the real,
-            // verified-balanced height. Later emission still relies on accurate physical stack
-            // accounting even though final-body analysis owns verifier frames.
-            let base = code.stack_height();
-            self.emit(statement, code);
-            if self.discarding_diverges(statement) {
-                dead = true;
-                break;
-            }
-            code.set_stack(base.max(0) as u16);
-        }
-        if !dead {
-            if let Some(value) = value {
-                self.mark_statement_line(value, code);
-                self.emit_value(value, code);
+            if !dead {
+                if let Some(value) = value {
+                    self.mark_statement_line(value, code);
+                    self.emit_value(value, code);
+                }
             }
         }
         // A callable's own scope is its body. A value-returning lambda keeps those locals

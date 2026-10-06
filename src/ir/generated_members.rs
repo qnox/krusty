@@ -74,6 +74,15 @@ impl IrGeneratedDeclarationDebug {
     }
 }
 
+/// The `Any` member a value class's synthesis generated because source did not declare it. Each
+/// is published in `@Metadata` like kotlinc's synthesized override, in this declaration order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum IrValueClassAnyMember {
+    Equals,
+    HashCode,
+    ToString,
+}
+
 /// Whether generated function metadata replaces the class's inferred declared-function set or is
 /// appended to a source-declared class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

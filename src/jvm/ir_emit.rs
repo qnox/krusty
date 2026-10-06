@@ -5640,6 +5640,9 @@ struct Emitter<'a> {
     /// Safe-call guards that share one null exit (`a?.b?.c`), by guard `When`: the label, and whether
     /// this guard is the chain's outermost one, which binds it and yields the null result.
     safe_call_null_exits: HashMap<u32, (Label, bool)>,
+    /// A safe-call receiver already on the operand stack. The one read of this temporary consumes
+    /// it in place (`dup; ifnull`) instead of loading a slot that was never stored.
+    stack_resident_value: Option<u32>,
     /// A chain's receiver temporaries declared after its first guard already jumped to the shared
     /// null exit, by that exit: none of them is assigned on every path into it.
     safe_call_exit_temporaries: HashMap<Label, Vec<u32>>,
@@ -5787,6 +5790,7 @@ impl<'a> Emitter<'a> {
             unassigned_values: HashSet::new(),
             label_unassigned_values: HashMap::new(),
             safe_call_null_exits: HashMap::new(),
+            stack_resident_value: None,
             safe_call_exit_temporaries: HashMap::new(),
             var_types: collect_body_var_types(ir, roots.iter().copied()),
             value_stores: non_null_operands::ValueStores::collect(ir, &roots),
