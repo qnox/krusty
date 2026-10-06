@@ -292,7 +292,7 @@ impl BodyFirChecker<'_> {
                     result: member.ty,
                     extension_receiver_parameter: None,
 
-                    constant_value_field: false,
+                    metadata_constant_read: false,
                 }),
                 false,
                 &[],

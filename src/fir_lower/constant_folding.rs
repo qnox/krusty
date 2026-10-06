@@ -98,9 +98,9 @@ fn property_has_constant_value(
 ) -> bool {
     match target {
         crate::fir::FirPropertyTarget::External {
-            constant_value_field,
+            metadata_constant_read,
             ..
-        } => *constant_value_field,
+        } => *metadata_constant_read,
         crate::fir::FirPropertyTarget::Module { property, .. } => {
             index.property(*property).is_some_and(|header| {
                 index.compile_time_constant(header.declaration).is_some()

@@ -1332,7 +1332,7 @@ impl BodyFirChecker<'_> {
             extension_receiver_parameter: None,
             dispatch: crate::fir::FirPropertyDispatch::Ordinary,
 
-            constant_value_field: false,
+            metadata_constant_read: false,
         })
     }
 

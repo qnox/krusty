@@ -9,8 +9,8 @@ pub(super) struct ExternalPropertyTarget {
     pub(super) parameters: Vec<Ty>,
     pub(super) result: Ty,
     pub(super) extension_receiver_parameter: Option<u32>,
-    /// Java `val` field. Copied from the selected property; super and reference accessors stay false.
-    pub(super) constant_value_field: bool,
+    /// Whether this selected read is a constant-value expression for Kotlin metadata.
+    pub(super) metadata_constant_read: bool,
 }
 
 type SelectedPropertyRead = (
@@ -104,7 +104,7 @@ impl BodyFirChecker<'_> {
                     interface: target.interface,
                 },
 
-                constant_value_field: false,
+                metadata_constant_read: false,
             },
             dispatch_receiver: Some(dispatch_receiver),
             extension_receiver: None,
@@ -156,7 +156,7 @@ impl BodyFirChecker<'_> {
                     interface: target.interface,
                 },
 
-                constant_value_field: false,
+                metadata_constant_read: false,
             },
             dispatch_receiver: Some(dispatch_receiver),
             extension_receiver: None,
@@ -197,7 +197,7 @@ impl BodyFirChecker<'_> {
             parameters,
             result: property.ty,
             extension_receiver_parameter,
-            constant_value_field: property.constant_value_field,
+            metadata_constant_read: property.metadata_constant_read,
         })
     }
 
@@ -210,7 +210,7 @@ impl BodyFirChecker<'_> {
             parameters: getter.member.params.clone(),
             result: getter.ret,
             extension_receiver_parameter: None,
-            constant_value_field: false,
+            metadata_constant_read: false,
         })
     }
 
@@ -224,7 +224,7 @@ impl BodyFirChecker<'_> {
             parameters: setter.params.clone(),
             result: setter.ret,
             extension_receiver_parameter: None,
-            constant_value_field: false,
+            metadata_constant_read: false,
         })
     }
 
@@ -258,7 +258,7 @@ impl BodyFirChecker<'_> {
             parameters,
             result: setter.ret,
             extension_receiver_parameter,
-            constant_value_field: false,
+            metadata_constant_read: false,
         })
     }
 
@@ -812,7 +812,7 @@ impl BodyFirChecker<'_> {
                         parameters: access.property.getter.params.clone(),
                         result: access.property.ty,
                         extension_receiver_parameter: None,
-                        constant_value_field: access.property.constant_value_field,
+                        metadata_constant_read: access.property.metadata_constant_read,
                     });
                 let dispatch_receiver = singleton_dispatch
                     .map(|singleton| self.singleton_call_receiver(expression, singleton))
@@ -834,7 +834,7 @@ impl BodyFirChecker<'_> {
                 context_access,
                 compiler_intrinsic,
                 owner_storage,
-                constant_value_field,
+                metadata_constant_read,
                 ..
             }) => {
                 // A classifier-qualified companion property has a syntactic qualifier but no
@@ -926,7 +926,7 @@ impl BodyFirChecker<'_> {
                                 parameters: selected.member.params.clone(),
                                 result: selected.ret,
                                 extension_receiver_parameter: None,
-                                constant_value_field,
+                                metadata_constant_read,
                             }
                         })
                     })
@@ -945,7 +945,7 @@ impl BodyFirChecker<'_> {
                             parameters: accessor.params.clone(),
                             result: declaration_ty,
                             extension_receiver_parameter: None,
-                            constant_value_field,
+                            metadata_constant_read,
                         })
                     });
                 if owner_storage {
@@ -1053,7 +1053,7 @@ impl BodyFirChecker<'_> {
                         result: access.property.ty,
                         extension_receiver_parameter,
 
-                        constant_value_field: false,
+                        metadata_constant_read: false,
                     });
                 // An extension imported from an object is still a MEMBER extension: the
                 // selected getter carries its exact singleton dispatch declaration. Preserve
@@ -1130,7 +1130,7 @@ impl BodyFirChecker<'_> {
                                     .expect("FIR parameter ordinals fit in u32"),
                             ),
 
-                            constant_value_field: false,
+                            metadata_constant_read: false,
                         })
                 });
                 (
@@ -1146,7 +1146,7 @@ impl BodyFirChecker<'_> {
                 stable_declaration,
                 external_identity,
                 singleton_dispatch,
-                constant_value_field,
+                metadata_constant_read,
                 ..
             }) => {
                 let ty = self.info.semantic_ty(expression);
@@ -1171,7 +1171,7 @@ impl BodyFirChecker<'_> {
                         parameters: Vec::new(),
                         result: ty,
                         extension_receiver_parameter: None,
-                        constant_value_field,
+                        metadata_constant_read,
                     }),
                     dispatch_receiver,
                     None,
@@ -1444,7 +1444,7 @@ impl BodyFirChecker<'_> {
             parameters,
             result,
             extension_receiver_parameter,
-            constant_value_field,
+            metadata_constant_read,
         } = external
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
         let resolved = |ty| {
@@ -1461,7 +1461,7 @@ impl BodyFirChecker<'_> {
                 .into_boxed_slice(),
             result: resolved(result)?,
             extension_receiver_parameter,
-            constant_value_field,
+            metadata_constant_read,
             dispatch: crate::fir::FirPropertyDispatch::Ordinary,
         })
     }
@@ -2124,7 +2124,7 @@ impl BodyFirChecker<'_> {
                                     result: setter.ret,
                                     extension_receiver_parameter: None,
 
-                                    constant_value_field: false,
+                                    metadata_constant_read: false,
                                 }
                             })
                         });
@@ -2217,7 +2217,7 @@ impl BodyFirChecker<'_> {
                                     result: setter.callable.ret,
                                     extension_receiver_parameter: None,
 
-                                    constant_value_field: false,
+                                    metadata_constant_read: false,
                                 }
                             })
                         });
@@ -2302,7 +2302,7 @@ impl BodyFirChecker<'_> {
                                         .expect("FIR parameter ordinals fit in u32"),
                                 ),
 
-                                constant_value_field: false,
+                                metadata_constant_read: false,
                             })
                     });
                     (
@@ -2330,7 +2330,7 @@ impl BodyFirChecker<'_> {
                         result: Ty::Unit,
                         extension_receiver_parameter: None,
 
-                        constant_value_field: false,
+                        metadata_constant_read: false,
                     }),
                     None,
                     None,

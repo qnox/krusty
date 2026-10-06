@@ -76,7 +76,7 @@ impl JvmLibraries {
             is_const: false,
             implicit_integer_coercion: false,
             compile_time_constant: None,
-            constant_value_field: false,
+            metadata_constant_read: false,
             visibility: function.visibility,
             owner,
             receiver_rank: 0,

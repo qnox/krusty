@@ -179,7 +179,7 @@ impl BodyLowering<'_> {
                     extension_receiver_parameter,
                     dispatch,
 
-                    constant_value_field: _,
+                    metadata_constant_read: _,
                 } = getter.as_ref()
                 else {
                     return Err(FirLoweringFailure::UnsupportedPropertyReferenceTarget);

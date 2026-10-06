@@ -81,7 +81,7 @@ impl JvmLibraries {
         property: &mut PropertyInfo,
         declaration_package: Option<crate::types::TypeName>,
     ) {
-        property.constant_value_field = self.declares_java_constant_value_field(property);
+        property.metadata_constant_read = self.java_field_is_metadata_constant_read(property);
         // A JavaBean projection reuses the Java methods' declarations; it does not declare Kotlin
         // accessors with generated property-parameter roles. The function provider publishes those
         // methods' exact parameter identities before this projection is registered.
@@ -222,7 +222,7 @@ impl JvmLibraries {
     /// A Java final field with no compile-time payload. Kotlin metadata still marks a `val`
     /// initialized from it `HAS_CONSTANT`. A Kotlin `@JvmField` lives on a class that has metadata
     /// and is not one of these, and a `const` or JLS constant already publishes its payload.
-    fn declares_java_constant_value_field(&self, property: &PropertyInfo) -> bool {
+    fn java_field_is_metadata_constant_read(&self, property: &PropertyInfo) -> bool {
         if property.producer != crate::libraries::PropertyProducer::Field
             || property.setter.is_some()
             || property.is_const
