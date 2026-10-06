@@ -1852,11 +1852,13 @@ impl BodyLowering<'_> {
             let IrCheckedArgument::Expression { value, .. } = argument else {
                 return false;
             };
-            inline_argument_template(self.ir, *value).is_some_and(|(_, captures, _, _)| {
-                captures
-                    .into_iter()
-                    .any(|capture| !self.passes_reordered_operand_in_place(capture))
-            })
+            inline_argument_template(self.ir, *value).is_some_and(
+                |(implementation, captures, _, _)| {
+                    captures.into_iter().enumerate().any(|(ordinal, capture)| {
+                        !self.inline_capture_passes_in_place(implementation, ordinal, capture)
+                    })
+                },
+            )
         });
         let direct = direct && !orders_inline_captures;
         let mut statements = Vec::new();
@@ -2026,7 +2028,7 @@ impl BodyLowering<'_> {
                     .params
                     .clone();
                 for (ordinal, capture) in reference.captures.iter_mut().enumerate() {
-                    if self.passes_reordered_operand_in_place(*capture) {
+                    if self.inline_capture_passes_in_place(reference.adapter, ordinal, *capture) {
                         continue;
                     }
                     let ty = self
@@ -2060,7 +2062,7 @@ impl BodyLowering<'_> {
             } if inline_argument_template(self.ir, value).is_some() => {
                 let parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
                 for (ordinal, capture) in captures.iter_mut().enumerate() {
-                    if self.passes_reordered_operand_in_place(*capture) {
+                    if self.inline_capture_passes_in_place(impl_fn, ordinal, *capture) {
                         continue;
                     }
                     let ty = self
@@ -2082,6 +2084,30 @@ impl BodyLowering<'_> {
             _ => {}
         }
         Some(())
+    }
+
+    /// A shared mutable capture is the holder identity, not the holder's current element. Its
+    /// `GetValue` is stable even though an ordinary read of the source `var` is not: copying the
+    /// semantic element into an argument-order temporary would sever the lambda from the cell and
+    /// leave the spliced body treating that scalar as the shared holder. Other captures follow the
+    /// ordinary reordered-operand rule.
+    fn inline_capture_passes_in_place(
+        &self,
+        implementation: u32,
+        ordinal: usize,
+        capture: ExprId,
+    ) -> bool {
+        let ordinal = u32::try_from(ordinal).expect("too many inline captures");
+        if self
+            .ir
+            .shared_capture_parameters
+            .contains_key(&(implementation, ordinal))
+        {
+            debug_assert!(matches!(self.ir.expr(capture), IrExpr::GetValue(_)));
+            true
+        } else {
+            self.passes_reordered_operand_in_place(capture)
+        }
     }
 
     /// Preserve the checker-selected logical operand type on the allocation-free ordered path.

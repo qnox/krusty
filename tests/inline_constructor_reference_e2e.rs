@@ -191,6 +191,24 @@ fun box(): String = A().prop\n\
 }
 
 #[test]
+fn argument_ordering_keeps_an_inline_lambdas_mutable_capture_cell() {
+    common::expect_box_ok_with_stdlib(
+        "\
+inline fun invokeNow(action: () -> Unit) = action()\n\
+\n\
+fun box(): String {\n\
+    var state = 0\n\
+    val observe = { state }\n\
+    invokeNow { state += 2 }\n\
+    val result = observe()\n\
+    return if (result == 2) \"OK\" else \"FAIL: $result\"\n\
+}\n\
+",
+        "InlineMutableCaptureOrder",
+    );
+}
+
+#[test]
 fn a_stored_reference_stays_a_carrier_beside_an_inlined_use() {
     common::expect_box_ok_with_stdlib(
         "\
