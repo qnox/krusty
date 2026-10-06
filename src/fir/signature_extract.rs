@@ -71,6 +71,34 @@ struct CompactLambdaReturnScope {
 }
 
 impl SignatureConstraintExtractor {
+    fn lexical_receiver_function_value(
+        &self,
+        file: &File,
+        call: ExprId,
+        spelling: &str,
+    ) -> Option<SigExprId> {
+        // Function-type values have no callable type parameters or stable source parameter names.
+        // Keep an inapplicable lexical value out of this tower rung so a member or extension with
+        // the same spelling can still be selected by signature semantics.
+        let accepts_source_arguments = !file
+            .call_type_args
+            .get(&call.0)
+            .is_some_and(|arguments| !arguments.is_empty())
+            && !file
+                .call_arg_names
+                .get(&call.0)
+                .is_some_and(|names| names.iter().any(Option::is_some));
+        if !accepts_source_arguments {
+            return None;
+        }
+        self.lexical_callables.iter().rev().find_map(|values| {
+            values
+                .get(spelling)
+                .filter(|callable| callable.has_receiver)
+                .map(|callable| callable.value)
+        })
+    }
+
     fn lambda_return_matches(&self, label: Option<&str>) -> bool {
         label.is_some()
             && self
@@ -1640,12 +1668,7 @@ impl SignatureConstraintExtractor {
                 let selected = match args {
                     Some(args) => {
                         let lexical_callee =
-                            self.lexical_callables.iter().rev().find_map(|values| {
-                                values
-                                    .get(name.as_str())
-                                    .filter(|callable| callable.has_receiver)
-                                    .map(|callable| callable.value)
-                            });
+                            self.lexical_receiver_function_value(file, expression, name.as_str());
                         if let Some(callee) = lexical_callee {
                             // A safe extension-function-value invocation still binds its guarded
                             // receiver as the function type's receiver parameter. Keep the local
@@ -1897,12 +1920,7 @@ impl SignatureConstraintExtractor {
                             )?;
                         }
                         let lexical_callee =
-                            self.lexical_callables.iter().rev().find_map(|values| {
-                                values
-                                    .get(name.as_str())
-                                    .filter(|callable| callable.has_receiver)
-                                    .map(|callable| callable.value)
-                            });
+                            self.lexical_receiver_function_value(file, expression, name.as_str());
                         if let Some(callee) = lexical_callee {
                             // An extension-function value is invoked with its written receiver as the
                             // function type's receiver parameter. Preserve that lexical binding in the

@@ -819,6 +819,8 @@ mod extension_default_stub_e2e;
 mod extension_delegate_fields_e2e;
 #[path = "extension_fun_e2e.rs"]
 mod extension_fun_e2e;
+#[path = "extension_function_value_receiver_e2e.rs"]
+mod extension_function_value_receiver_e2e;
 #[path = "extension_property_e2e.rs"]
 mod extension_property_e2e;
 #[path = "extension_receiver_property_smartcast_e2e.rs"]
