@@ -162,7 +162,7 @@ impl Emitter<'_> {
                         declared_property_accessor_jvm(self.ir, property, field)
                     }
                 })
-                .unwrap_or_else(|| jvm_declared_ty(&field.ty));
+                .unwrap_or_else(|| jvm_value_ty(&field.ty));
             let return_ty = if class.is_annotation {
                 crate::jvm::annotation_kclass::annotation_member_jvm_type(return_ty)
             } else {
@@ -180,7 +180,7 @@ impl Emitter<'_> {
         Some(PropertyAccess::Field {
             owner,
             name: instance_field_jvm_name(self.ir, class, field),
-            descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
+            descriptor: type_descriptor(jvm_value_ty(&field.ty)),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
             is_static: static_storage(self.ir, class),
         })

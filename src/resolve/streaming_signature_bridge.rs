@@ -3953,6 +3953,61 @@ pub(crate) fn finalized_streamed_signature_index(
         false
     }
 
+    /// `equals`/`hashCode`/`toString` stubs are recorded for every `value` keyword so a boxed
+    /// value class can fill them. An unboxed `@JvmInline` class, and a `value class` rejected
+    /// because `FullValueClasses` is off, must not keep those instance methods beside the inline
+    /// `-impl` family.
+    fn generated_value_keyword_method_is_suppressed(
+        headers: &crate::fir::StreamedHeaderModule,
+        table: &SymbolTable,
+        classifier_types: &HashMap<crate::fir::DeclarationId, TypeName>,
+        stub: &crate::fir::DeclarationStub,
+    ) -> bool {
+        if stub.kind != crate::fir::DeclarationKind::Function
+            || !stub
+                .flags
+                .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+        {
+            return false;
+        }
+        let structural_method = stub
+            .lookup_name
+            .and_then(|name| headers.lookup_names.get(name))
+            .is_some_and(|name| matches!(name, "toString" | "hashCode" | "equals"));
+        if !structural_method {
+            return false;
+        }
+        let Some(owner) = headers
+            .declarations
+            .anchor(stub.id)
+            .and_then(|anchor| anchor.owner)
+        else {
+            return false;
+        };
+        let Some(owner_stub) = headers.stubs.iter().find(|candidate| candidate.id == owner) else {
+            return false;
+        };
+        if !owner_stub
+            .flags
+            .has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
+            || owner_stub.flags.has(crate::fir::DeclarationFlags::DATA)
+        {
+            return false;
+        }
+        let classifier = classifier_types.get(&owner).unwrap_or_else(|| {
+            panic!(
+                "value-keyword owner {owner:?} must have a compact classifier identity before generated method finalization"
+            )
+        });
+        let class = table.class_by_type_name(*classifier).unwrap_or_else(|| {
+            panic!(
+                "value-keyword owner {owner:?} ({}) must have one collected classifier declaration",
+                classifier.render(),
+            )
+        });
+        !class.full_value
+    }
+
     let (graph, extraction_failures) = extracted.into_parts();
     let mut required = Vec::new();
     let mut explicit = Vec::new();
@@ -3978,6 +4033,12 @@ pub(crate) fn finalized_streamed_signature_index(
         .iter()
         .filter(|stub| {
             generated_data_object_method_is_suppressed(headers, table, &classifier_types, stub)
+                || generated_value_keyword_method_is_suppressed(
+                    headers,
+                    table,
+                    &classifier_types,
+                    stub,
+                )
         })
         .map(|stub| stub.id)
         .collect::<HashSet<_>>();
@@ -4800,6 +4861,26 @@ pub(crate) fn finalized_streamed_signature_index(
             .declarations
             .anchor(stub.id)
             .expect("a compact stub must retain its stable anchor");
+        let mut flags = stub.flags;
+        if stub.kind == DeclarationKind::Classifier
+            && flags.has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
+        {
+            let jvm_inline = crate::types::type_name("kotlin/jvm/JvmInline");
+            let class = table
+                .classes
+                .values()
+                .find(|class| class.stable_declaration == Some(stub.id));
+            if class.is_some_and(|class| {
+                class
+                    .annotations
+                    .iter()
+                    .any(|annotation| *annotation == jvm_inline)
+            }) {
+                flags = flags.with(crate::fir::DeclarationFlags::VALUE, true);
+            } else if class.is_some_and(|class| class.full_value) {
+                flags = flags.with(crate::fir::DeclarationFlags::FULL_VALUE, true);
+            }
+        }
         index.publish_declaration_header(
             stub.id,
             crate::fir::ResolvedDeclarationHeader {
@@ -4807,7 +4888,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 owner: anchor.owner,
                 name: None,
                 visibility: stub.visibility,
-                flags: stub.flags,
+                flags,
                 initialization_order: stub.initialization_order,
             },
             stub.lookup_name

@@ -466,7 +466,16 @@ pub fn actualization(
             headers.syntax.declaration(candidate),
         )
         else {
-            return false;
+            // `equals`/`hashCode`/`toString` of a data or value class are compiler-generated and
+            // have no compact header. The coarse key already paired them by name; both being
+            // generated is the whole of their shape.
+            let generated = |declaration| {
+                headers.stub(declaration).is_some_and(|stub| {
+                    stub.flags
+                        .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                })
+            };
+            return generated(expect) && generated(candidate);
         };
         let expect_type_parameters = headers.syntax.type_parameters(expect_type_parameters);
         let candidate_type_parameters = headers.syntax.type_parameters(candidate_type_parameters);
@@ -1591,5 +1600,55 @@ mod tests {
                 actual: implementation,
             })
         );
+    }
+
+    /// Generated `equals`/`hashCode`/`toString` on a `value class` have no compact header. An
+    /// `expect`/`actual` pair still owes nothing: both sides generate the same member.
+    #[test]
+    fn value_class_generated_members_actualize() {
+        let headers = headers(&[
+            (
+                "common",
+                "// LANGUAGE: +MultiPlatformProjects, +FullValueClasses\n\
+                 expect value class Value1(val x: Char)\n",
+            ),
+            (
+                "platform",
+                "// LANGUAGE: +MultiPlatformProjects, +FullValueClasses\n\
+                 actual value class Value1 actual constructor(val x: Char)\n",
+            ),
+        ]);
+        let generated = |source: u32, name: &str| {
+            headers.stubs.iter().find(|stub| {
+                stub.source == SourceFileId::from_raw(source)
+                    && stub.kind == DeclarationKind::Function
+                    && stub
+                        .flags
+                        .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                    && stub
+                        .lookup_name
+                        .and_then(|lookup| headers.lookup_names.get(lookup))
+                        == Some(name)
+            })
+        };
+        let expect_to_string = generated(0, "toString").expect("expect toString");
+        let actual_to_string = generated(1, "toString").expect("actual toString");
+        assert!(
+            headers.syntax.declaration(expect_to_string.id).is_none(),
+            "a generated value-class member has no compact header"
+        );
+        let bindings = crate::resolve::actualization_type_bindings(
+            &headers,
+            &crate::libraries::EmptySymbolSource,
+        );
+        let matched = actualization(&headers, &bindings);
+        assert!(
+            matched.unactualized_members.is_empty(),
+            "generated members are not missing expect members: {:?}",
+            matched.unactualized_members
+        );
+        assert!(matched.pairs.iter().any(|pair| {
+            pair.expect == expect_to_string.id && pair.actual == actual_to_string.id
+        }));
     }
 }
