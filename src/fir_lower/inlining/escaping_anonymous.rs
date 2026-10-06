@@ -31,8 +31,9 @@ pub(super) struct CallSite<'a> {
 
 /// Point each copied construction of an anonymous object at a class specialized for this
 /// expansion. A class that does not use the reified binding and does not capture an inline lambda
-/// is left alone. Once it is copied, a missing body or accessor mapping fails the lowering instead
-/// of keeping the declaration class.
+/// is left alone. Once it is copied, a missing concrete body or accessor mapping fails the lowering
+/// instead of keeping the declaration class. An implementation already consumed by common inline
+/// lowering is explicitly bodyless and remains elided on the copy.
 pub(super) fn specialize(
     ir: &mut crate::ir::IrFile,
     roots: impl IntoIterator<Item = ExprId>,
@@ -325,17 +326,20 @@ fn specialized_class(
             .get(method as usize)
             .cloned()
             .ok_or_else(|| malformed(class_name))?;
-        let body = function.body.ok_or_else(|| malformed(class_name))?;
-        let (cloned_body, cloned) = crate::ir::clone_expression_dag(ir, body);
-        let mut copied = cloned.values().copied().collect::<Vec<_>>();
-        copied.sort_unstable();
-        for copy in copied {
-            specialize_inline_copy(ir, copy, expansion.bindings, expansion.reified_bindings)
-                .ok_or_else(|| malformed(class_name))?;
-            owned.push(copy);
-        }
         let mut shape = function;
-        shape.body = Some(cloned_body);
+        if let Some(body) = shape.body {
+            let (cloned_body, cloned) = crate::ir::clone_expression_dag(ir, body);
+            let mut copied = cloned.values().copied().collect::<Vec<_>>();
+            copied.sort_unstable();
+            for copy in copied {
+                specialize_inline_copy(ir, copy, expansion.bindings, expansion.reified_bindings)
+                    .ok_or_else(|| malformed(class_name))?;
+                owned.push(copy);
+            }
+            shape.body = Some(cloned_body);
+        } else if !ir.inline_only_fns.contains(&method) {
+            return Err(malformed(class_name));
+        }
         // Member descriptors stay the declaration's erasure. Reified operations in the body are
         // specialized above; substituting the signature would emit a concrete descriptor plus a
         // bridge where kotlinc keeps the erased member.

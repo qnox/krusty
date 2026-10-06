@@ -5,6 +5,30 @@ fn run_ok(stem: &str, body: &str) {
 }
 
 #[test]
+fn copied_anonymous_object_keeps_a_consumed_member_lambda_elided() {
+    run_ok(
+        "CopiedAnonymousConsumedLambda",
+        "interface Source<out E> { suspend fun consume(sink: Sink<E>) }\n\
+         interface Sink<in E> { suspend fun send(item: E); fun close(cause: Throwable?) }\n\
+         suspend inline fun <E> Source<E>.consumeEach(crossinline action: suspend (E) -> Unit) {\n\
+             consume(object : Sink<E> {\n\
+                 override suspend fun send(item: E) = action(item)\n\
+                 override fun close(cause: Throwable?) { cause?.let { throw it } }\n\
+             })\n\
+         }\n\
+         suspend inline fun <E, R> Source<E>.fold(\n\
+             initial: R,\n\
+             crossinline operation: suspend (R, E) -> R,\n\
+         ): R {\n\
+             var accumulator = initial\n\
+             consumeEach { accumulator = operation(accumulator, it) }\n\
+             return accumulator\n\
+         }\n\
+         fun box(): String = \"OK\"\n",
+    );
+}
+
+#[test]
 fn captures_read_parameter() {
     run_ok(
         "AnonRead",
