@@ -776,6 +776,10 @@ fn push_secondary_constructor(
                 .unwrap_or_default(),
             prefix_params,
             params: named_params.iter().map(|(_, ty)| *ty).collect(),
+            declared_spellings: index
+                .declaration_spellings(declaration)
+                .cloned()
+                .unwrap_or_default(),
             named_params,
             metadata_visibility: Some(
                 index

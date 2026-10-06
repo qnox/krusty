@@ -70,6 +70,10 @@ pub struct IrSecondaryCtor {
     /// body value slots before `params`, but are absent from Kotlin source metadata and default masks.
     pub prefix_params: Vec<Ty>,
     pub params: Vec<Ty>,
+    /// Source type spellings for this exact constructor declaration, recorded before syntax is
+    /// discarded so metadata emission never has to recover aliases from an owner or parameter
+    /// type.
+    pub declared_spellings: crate::spelling::DeclaredSpellings,
     /// SOURCE parameter names paired with SEMANTIC (checker-resolved) types — what the class
     /// `@Metadata` `Constructor` record describes (`params` above are the erased IR realization,
     /// which loses fun-type shapes and generic arguments). This is metadata payload, not a

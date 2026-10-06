@@ -26,6 +26,9 @@ pub(super) struct SynthesizedValueMembers {
     /// Exact synthesized expressions that have already rendered a nested value-class carrier to a
     /// String while retaining the nested class as their logical concat-boundary type.
     pub(super) rendered_value_class_text: HashSet<ExprId>,
+    /// Exact generated instance methods that delegate Kotlin `Any` members to their static
+    /// carrier implementations. A same-spelled source overload is not one of these functions.
+    pub(super) any_delegators: HashSet<u32>,
 }
 
 impl SynthesizedValueMembers {
@@ -93,6 +96,37 @@ pub(super) fn record_renamed_functions(
             .chain(realized.accessors.keys())
             .chain(realized.constructor_impls.values()),
     );
+}
+
+/// Source functions that the frontend bound to Kotlin `Any` members, keyed by their exact common
+/// IR realization. A same-spelled function without that checked override edge is deliberately
+/// absent, regardless of its physical name or arity.
+fn custom_any_roles(ir: &IrFile, owner: TypeName) -> HashMap<u32, crate::types::SemanticCallRole> {
+    ir.function_overrides
+        .get(&owner)
+        .into_iter()
+        .flatten()
+        .filter_map(|edge| {
+            let role = edge.overridden_semantic_role?;
+            if !matches!(
+                role,
+                crate::types::SemanticCallRole::KotlinAnyEquals
+                    | crate::types::SemanticCallRole::KotlinAnyHashCode
+                    | crate::types::SemanticCallRole::KotlinAnyToString
+            ) {
+                return None;
+            }
+            let crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) =
+                edge.implementation
+            else {
+                return None;
+            };
+            ir.checked_callable_functions
+                .get(&declaration)
+                .copied()
+                .map(|function| (function, role))
+        })
+        .collect()
 }
 
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
@@ -202,6 +236,7 @@ pub(super) fn synth_value_members(
     // the first static parameter slot, so the body itself needs no slot rewrite; value-class property
     // reads inside it are lowered to the carrier later in this pass. The ordinary instance override is
     // synthesized below as the ABI delegator back to this implementation.
+    let custom_any_roles = custom_any_roles(ir, internal_name);
     let mut custom_equals = false;
     let mut custom_hash_code = false;
     let mut custom_to_string = false;
@@ -210,16 +245,16 @@ pub(super) fn synth_value_members(
         let Some(function) = ir.functions.get_mut(fid as usize) else {
             continue;
         };
-        let custom_impl = match (function.name.as_str(), function.params.as_slice()) {
-            ("equals", [_]) => {
+        let custom_impl = match custom_any_roles.get(&fid) {
+            Some(crate::types::SemanticCallRole::KotlinAnyEquals) => {
                 custom_equals = true;
                 Some("equals-impl")
             }
-            ("hashCode", []) => {
+            Some(crate::types::SemanticCallRole::KotlinAnyHashCode) => {
                 custom_hash_code = true;
                 Some("hashCode-impl")
             }
-            ("toString", []) => {
+            Some(crate::types::SemanticCallRole::KotlinAnyToString) => {
                 custom_to_string = true;
                 Some("toString-impl")
             }
@@ -227,6 +262,10 @@ pub(super) fn synth_value_members(
         };
         if let Some(name) = custom_impl {
             let declared = (function.params.clone(), function.ret);
+            // Metadata describes the override as source declared it; only its JVM realization
+            // becomes the static `-impl` over the carrier.
+            ir.vc_declared_sigs
+                .insert(fid, (function.name.clone(), declared.0.clone(), declared.1));
             function.name = name.to_string();
             function.params.insert(0, u_ir);
             function.is_static = true;
@@ -252,28 +291,19 @@ pub(super) fn synth_value_members(
         ir.classes[class_id as usize].methods.push(fid);
         fid
     };
-    let add_inst =
-        |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| -> Option<u32> {
-            // Don't synthesize over a user-defined member of the same name.
-            let exists = ir.classes[class_id as usize]
-                .methods
-                .iter()
-                .any(|&m| ir.functions.get(m as usize).is_some_and(|f| f.name == name));
-            if exists {
-                return None;
-            }
-            let fid = ir.add_fun(crate::ir::IrFunction {
-                name: name.to_string(),
-                params,
-                ret,
-                body: Some(body),
-                is_static: false,
-                dispatch_receiver: Some(internal_name),
-                param_checks: Vec::new(),
-            });
-            ir.classes[class_id as usize].methods.push(fid);
-            Some(fid)
-        };
+    let add_inst = |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| -> u32 {
+        let fid = ir.add_fun(crate::ir::IrFunction {
+            name: name.to_string(),
+            params,
+            ret,
+            body: Some(body),
+            is_static: false,
+            dispatch_receiver: Some(internal_name),
+            param_checks: Vec::new(),
+        });
+        ir.classes[class_id as usize].methods.push(fid);
+        fid
+    };
     let this_field = |ir: &mut IrFile| {
         let recv = ir.add_expr(IrExpr::GetValue(0));
         ir.add_expr(IrExpr::GetField {
@@ -299,10 +329,9 @@ pub(super) fn synth_value_members(
     {
         let g = this_field(ir);
         let body = ret_block(ir, g);
-        if let Some(fid) = add_inst(ir, "unbox-impl", vec![], u_ir, body) {
-            ir.synthetic_methods.insert(fid);
-            ir.jvm_value_class_representation_order.insert(fid, 2);
-        }
+        let fid = add_inst(ir, "unbox-impl", vec![], u_ir, body);
+        ir.synthetic_methods.insert(fid);
+        ir.jvm_value_class_representation_order.insert(fid, 2);
     }
     // box-impl(U): X  — `new X(u)`. Also ACC_SYNTHETIC.
     {
@@ -475,6 +504,8 @@ pub(super) fn synth_value_members(
             let acc = ir.add_expr(IrExpr::StringConcat(vec![prefix, rendered, close]));
             let sbody = ret_block(ir, acc);
             let impl_fid = add_static(ir, "toString-impl", vec![u_ir], str_ir, sbody);
+            ir.jvm_value_class_generated_any
+                .insert(impl_fid, crate::ir::IrValueClassAnyMember::ToString);
             let member = Receiver {
                 rest: &[],
                 ret: str_ir,
@@ -496,11 +527,11 @@ pub(super) fn synth_value_members(
             args: vec![fv],
         });
         let ibody = ret_block(ir, call);
-        if let Some(fid) = add_inst(ir, "toString", vec![], str_ir, ibody) {
-            ir.open_methods.insert(fid);
-            if !custom_to_string {
-                ir.jvm_nullability_unannotated_methods.insert(fid);
-            }
+        let fid = add_inst(ir, "toString", vec![], str_ir, ibody);
+        realized.any_delegators.insert(fid);
+        ir.open_methods.insert(fid);
+        if !custom_to_string {
+            ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }
     // hashCode-impl(U v): v.hashCode() ; hashCode(): return hashCode-impl(this.field)
@@ -509,6 +540,8 @@ pub(super) fn synth_value_members(
             let h = property_hash(ir, u_ir);
             let sbody = ret_block(ir, h);
             let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
+            ir.jvm_value_class_generated_any
+                .insert(impl_fid, crate::ir::IrValueClassAnyMember::HashCode);
             let member = Receiver {
                 rest: &[],
                 ret: int_ir,
@@ -530,11 +563,11 @@ pub(super) fn synth_value_members(
             args: vec![fv],
         });
         let ibody = ret_block(ir, call);
-        if let Some(fid) = add_inst(ir, "hashCode", vec![], int_ir, ibody) {
-            ir.open_methods.insert(fid);
-            if !custom_hash_code {
-                ir.jvm_nullability_unannotated_methods.insert(fid);
-            }
+        let fid = add_inst(ir, "hashCode", vec![], int_ir, ibody);
+        realized.any_delegators.insert(fid);
+        ir.open_methods.insert(fid);
+        if !custom_hash_code {
+            ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }
     // equals-impl(U v, Object other): other is X && equals-impl0(v, other.unbox-impl())
@@ -600,6 +633,8 @@ pub(super) fn synth_value_members(
             stmts.push(ir.add_expr(IrExpr::Return(Some(t))));
             let sbody = ir.add_expr(IrExpr::Block { stmts, value: None });
             let impl_fid = add_static(ir, "equals-impl", vec![u_ir, any_ir], bool_ir, sbody);
+            ir.jvm_value_class_generated_any
+                .insert(impl_fid, crate::ir::IrValueClassAnyMember::Equals);
             let other = [Ty::nullable(any_ir)];
             let member = Receiver {
                 rest: &other,
@@ -624,12 +659,12 @@ pub(super) fn synth_value_members(
             args: vec![fv, other_i],
         });
         let ibody = ret_block(ir, call);
-        if let Some(fid) = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody) {
-            crate::jvm::method_parameters::record_function(ir, fid, &["other"], &[]);
-            ir.open_methods.insert(fid);
-            if !custom_equals {
-                ir.jvm_nullability_unannotated_methods.insert(fid);
-            }
+        let fid = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody);
+        realized.any_delegators.insert(fid);
+        crate::jvm::method_parameters::record_function(ir, fid, &["other"], &[]);
+        ir.open_methods.insert(fid);
+        if !custom_equals {
+            ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }
 
@@ -1043,5 +1078,61 @@ pub(super) fn shift_slots(ir: &mut IrFile, root: ExprId) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn override_edge(
+        owner: TypeName,
+        implementation: crate::fir::CallableId,
+        role: Option<crate::types::SemanticCallRole>,
+    ) -> crate::ir::IrFunctionOverride {
+        crate::ir::IrFunctionOverride {
+            implementation: crate::fir::ResolvedFunctionOverrideTarget::Module(implementation),
+            implementation_function: None,
+            implementation_owner: owner,
+            overridden: crate::fir::ResolvedFunctionOverrideTarget::Module(
+                crate::fir::CallableId::from_raw(99),
+            ),
+            overridden_owner: crate::types::type_name("kotlin/Any"),
+            overridden_semantic_role: role,
+            collection_barrier: None,
+            overridden_is_interface: false,
+            name: "equals".to_string(),
+            declared_parameters: vec![Ty::obj("kotlin/Any")],
+            declared_result: Ty::Boolean,
+            applied_parameters: vec![Ty::obj("kotlin/Any")],
+            applied_result: Ty::Boolean,
+            implementation_parameters: vec![Ty::String],
+            implementation_parameter_identities: Vec::new(),
+            overridden_parameter_identities: Vec::new(),
+            implementation_result: Ty::Boolean,
+            suspend: false,
+            has_kotlin_superclass_override: false,
+            depth: 1,
+        }
+    }
+
+    #[test]
+    fn same_named_function_is_custom_any_only_with_the_checked_override_role() {
+        let mut ir = IrFile::default();
+        let owner = crate::types::type_name("app/Token");
+        let declaration = crate::fir::CallableId::from_raw(7);
+        let function = 3;
+        ir.checked_callable_functions.insert(declaration, function);
+        ir.function_overrides
+            .insert(owner, vec![override_edge(owner, declaration, None)]);
+
+        assert!(custom_any_roles(&ir, owner).is_empty());
+
+        ir.function_overrides.get_mut(&owner).unwrap()[0].overridden_semantic_role =
+            Some(crate::types::SemanticCallRole::KotlinAnyEquals);
+        assert_eq!(
+            custom_any_roles(&ir, owner),
+            HashMap::from([(function, crate::types::SemanticCallRole::KotlinAnyEquals)])
+        );
     }
 }

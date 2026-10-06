@@ -298,6 +298,39 @@ fn a_public_var_with_a_bodiless_private_set_publishes_only_its_getter() {
     assert_members_identical("PrivateSet", SRC, &["app/PrivateSetKt", "app/Resetter"]);
 }
 
+#[test]
+fn a_generic_extension_setter_parameter_refers_to_its_type_parameter_by_id() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Slot<S>(var content: S)\n\
+        var <E> Slot<E>.stored: E\n\
+        \x20   get() = content\n\
+        \x20   set(value) { content = value }\n\
+        var <F> Slot<F>.unnamed: F\n\
+        \x20   get() = content\n\
+        \x20   set(next) { content = next }\n";
+    assert_identical(
+        "GenericExtensionSetter",
+        SRC,
+        "app/GenericExtensionSetterKt",
+    );
+}
+
+#[test]
+fn a_class_lists_its_properties_in_declaration_order() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Slot<S>(var content: S)\n\
+        class Host<H>(var plain: H) {\n\
+        \x20   var <M> Slot<M>.member: M\n\
+        \x20       get() = content\n\
+        \x20       set(next) { content = next }\n\
+        \x20   val later: H get() = plain\n\
+        \x20   val Slot<H>.last: H get() = content\n\
+        }\n";
+    assert_identical("PropertyListOrder", SRC, "app/Host");
+}
+
 /// kotlinc writes `HAS_CONSTANT` only for a `val` whose DECLARED type could be a `const val`
 /// type: a constant initializer of a wider declared type has none.
 #[test]
