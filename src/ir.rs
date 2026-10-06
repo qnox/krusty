@@ -1587,6 +1587,9 @@ pub struct IrSpecializedAnonymousClass {
 pub struct IrFile {
     pub package: Option<String>,
     pub source_line_count: u32,
+    /// Finalized source-language decision for recursive non-reified `typeOf` bounds. The JVM
+    /// realizes this checked per-file fact; it does not select the policy itself.
+    pub(crate) recursive_type_of: bool,
     /// Checked file-level annotation applications. These are declaration metadata, not syntax;
     /// backend plugins consume their folded values without retaining or reopening the source AST.
     pub file_annotations: DeclarationAnnotations,

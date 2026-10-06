@@ -1963,6 +1963,9 @@ pub struct File {
     /// `+FullValueClasses`: a `value class` without `@JvmInline` is a boxed class with structural
     /// `equals`/`hashCode`/`toString`. Without the feature that declaration is an error.
     pub full_value_classes: bool,
+    /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
+    /// parameters whose declared upper bounds contain a cycle.
+    pub recursive_type_of: bool,
     /// Opt-in markers accepted module-wide (`-opt-in`), as dotted fully qualified names.
     pub opted_in_markers: Vec<String>,
 }

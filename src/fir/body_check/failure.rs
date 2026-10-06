@@ -16,6 +16,9 @@ pub enum BodyCheckFailureKind {
     MissingStableCallTarget,
     MissingStablePropertyTarget,
     LocalVariableCallableReference,
+    /// A selected `typeOf` operand reaches a cycle through a non-reified type parameter's bounds,
+    /// while the source file has not enabled `JvmSupportRecursiveTypeOf`.
+    RecursiveTypeOf(Box<str>),
     UnsupportedCallShape,
     /// The resolver selected a function-value conversion the naming walk did not name.
     UnnamedFunctionValueConversion,

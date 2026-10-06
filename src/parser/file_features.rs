@@ -25,5 +25,6 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         features.has("UnitConversionsOnArbitraryExpressions");
     file.eager_lambda_analysis = features.has("EagerLambdaAnalysis");
     file.full_value_classes = features.has("FullValueClasses");
+    file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }
