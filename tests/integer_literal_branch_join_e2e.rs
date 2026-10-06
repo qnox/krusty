@@ -387,30 +387,5 @@ fun direct(): Long {\n\
 }\n\
 fun returned(flag: Boolean): Long = if (flag) 2147483647 + 1 else 0\n\
 ";
-    let methods = [
-        "public static final int continuation(",
-        "public static final long whenBits(",
-        "public static final long nested(",
-        "public static final long blocked(",
-        "public static final int wrapped(",
-        "public static final long shifted(",
-        "public static final long direct(",
-        "public static final long returned(",
-    ];
-    match common::method_code_diffs_against_kotlinc(
-        "LongBranch",
-        &[],
-        src,
-        "LongBranchKt",
-        &methods,
-    ) {
-        None => panic!("reference kotlinc is provisioned"),
-        Some(results) => {
-            let failures = results
-                .into_iter()
-                .filter_map(Result::err)
-                .collect::<Vec<_>>();
-            assert!(failures.is_empty(), "{}", failures.join("\n"));
-        }
-    }
+    common::assert_classes_identical_to_kotlinc("LongBranch", src, &["LongBranchKt"]);
 }
