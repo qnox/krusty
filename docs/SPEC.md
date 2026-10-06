@@ -2603,6 +2603,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   exit of its protected region, so when it sits inside (or wraps) another `try` the duplicated code lands
   in overlapping exception ranges and trips a verify error — so a nesting that involves any `finally` is
   rejected (skip), never miscompiled (`NestedTry` in `tests/feature_box_e2e.rs`).
+- **An `inline` function brackets each `finally` copy with `InlineMarker.finallyStart` and
+  `finallyEnd`.** The argument is how many `finally` bodies are open, counting the copy being
+  emitted, so the first is `1` and a `finally` inside a `finally` is `2`. The calls stay in the
+  inline function's own method. A function that is not `inline` emits the same copies without them.
+  Test: `tests/inline_finally_marker_e2e.rs`.
 - `as T` to a non-null reference type throws on `null`: `Intrinsics.checkNotNull(value, "null cannot be
   cast to non-null type <kotlin-name>")` then `checkcast` — matching kotlinc. The same null-check
   applies to a DEFINITELY-NON-NULL type-parameter target `as (T & Any)` — even on an unbounded

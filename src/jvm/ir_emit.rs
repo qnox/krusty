@@ -4817,6 +4817,7 @@ fn emit_method_inner_with_holder(
     // public accessors for its private callees, so every copy is legal in another class.
     e.export_private_calls =
         ir.inline_fns.contains(&fid) && !ir.method_visibility(fid).is_private();
+    e.finally_markers = ir.inline_fns.contains(&fid);
     // kotlinc's transformer keeps a suspend body's own local names: they name the spills.
     let transformed = env.emit_time_machines.transformed(fid);
     // Suspend lowering does not preserve source-local expression IDs.
@@ -5618,6 +5619,12 @@ struct Emitter<'a> {
     /// This method is a non-private `inline` function. Private calls in it name `access$`
     /// accessors, because the splicer copies these instructions into other classes.
     export_private_calls: bool,
+    /// This method is `inline`, so each copy of a `finally` is bracketed by
+    /// `InlineMarker.finallyStart`/`finallyEnd`.
+    finally_markers: bool,
+    /// How many `finally` bodies are currently being emitted. The marker argument is one more
+    /// than the bodies already open, so the outermost copy is `1`.
+    finally_marker_depth: u32,
     /// Interface companion `$$INSTANCE` self-reads for this class, fixed from `static_owner`.
     self_companion: Option<TypeName>,
     /// Checked classifier declarations: which kind of classifier an operand's type names.
@@ -5774,6 +5781,8 @@ impl<'a> Emitter<'a> {
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
             export_private_calls: false,
+            finally_markers: false,
+            finally_marker_depth: 0,
             classifiers: env.signature_symbols,
             dispatch_classifiers: env.dispatch_classifiers.clone(),
             owner: owner.to_string(),

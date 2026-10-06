@@ -94,6 +94,30 @@ impl Emitter<'_> {
         self.close_region_segment(index, code);
     }
 
+    /// Emit one copy of a `finally` body. An `inline` function brackets it with
+    /// `InlineMarker.finallyStart(depth)` and `finallyEnd(depth)`, where `depth` counts this copy.
+    pub(super) fn emit_finalizer_copy(&mut self, finalizer: u32, code: &mut CodeBuilder) {
+        if self.finally_markers {
+            self.finally_marker_depth = self.finally_marker_depth.saturating_add(1);
+            self.mark_finally(true, code);
+        }
+        self.emit(finalizer, code);
+        if self.finally_markers {
+            self.mark_finally(false, code);
+            self.finally_marker_depth = self.finally_marker_depth.saturating_sub(1);
+        }
+    }
+
+    fn mark_finally(&mut self, start: bool, code: &mut CodeBuilder) {
+        let depth = i32::try_from(self.finally_marker_depth).unwrap_or(i32::MAX);
+        code.push_int(depth, self.cw);
+        let name = if start { "finallyStart" } else { "finallyEnd" };
+        let method = self
+            .cw
+            .methodref("kotlin/jvm/internal/InlineMarker", name, "(I)V");
+        code.invokestatic(method, 1, 0);
+    }
+
     /// End the open segments a transfer leaves ahead of the copy of `finalizer` it is about to
     /// inline: that finalizer's own, and those of every `try` nested inside its `try`. A nested
     /// region that is not open — a finalizer's whose copy the transfer already ran, or one whose
@@ -242,7 +266,7 @@ impl Emitter<'_> {
                 // merge at `after`, which does type it, is rejected as inconsistent. The lease ends
                 // with this copy: the handler copies below are reached on edges that never stored it.
                 let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
-                self.emit(f, code);
+                self.emit_finalizer_copy(f, code);
                 if let Some(parked) = parked {
                     self.release_temporary(parked);
                 }
@@ -368,7 +392,7 @@ impl Emitter<'_> {
                 if let Some(f) = finally {
                     // Same as the normal path: this catch stored the result, and `after` loads it.
                     let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
-                    self.emit(f, code);
+                    self.emit_finalizer_copy(f, code);
                     if let Some(parked) = parked {
                         self.release_temporary(parked);
                     }
@@ -429,7 +453,7 @@ impl Emitter<'_> {
             // `top`. It is a backend temporary, not a value, and holds its own lease: nested
             // catch-all handlers each lease their own, and a lease cannot collide with a value id.
             let parked = self.lease_frame_temporary(parked, thr_ty);
-            self.emit(f, code);
+            self.emit_finalizer_copy(f, code);
             // Re-raise the caught exception after the `finally` — unless the `finally` itself transfers
             // control (`finally { return … }` / `finally { throw … }`), in which case the rethrow is
             // unreachable and emitting it would leave a dead instruction without a stackmap frame.
