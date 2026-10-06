@@ -7744,6 +7744,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `resolve::integer_constants::tests::division_by_zero_adapts_to_long_without_a_folded_value`,
   `tests/integer_literal_branch_join_e2e.rs::division_by_zero_int_constant_throws_after_adapting_to_long`,
   `tests/classpath_jdk_static_e2e.rs::non_literal_int_does_not_match_long_parameter`.
+- **A one-word safe call duplicates its receiver.** `a?.close()`, `foo()?.close()`, `a?.foo(x)`,
+  and `a?.n` evaluate the receiver once, `dup` it, and `ifnull` to a `pop`. The non-null path uses
+  the value still on the stack as the call or property receiver; that receiver is not stored in a
+  temporary. A chain (`a?.b?.c`), a scalar receiver (`Int?`), a receiver wider than one word, and a
+  selector that reads the receiver more than once keep the temporary. Test: `tests/safe_call_dup_e2e.rs`.
 - **An elvis over a safe call keeps its own null check.** fir2ir builds `a?.f() ?: b` as an elvis
   `when` over a temporary holding the safe call's (nullable) value, so kotlinc emits the safe call's
   `ifnull` to the shared null path and then the elvis's own `dup; ifnonnull`, whatever `f()`'s
