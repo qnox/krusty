@@ -867,8 +867,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Every plain top-level property now gets a record mirroring kotlinc's observed encoding (verified
   by decoding kotlinc 2.4.0 output; matrix in `docs/METADATA_NOTES.md`): `flags` (f11, elided at
   the 518 wire default) composed from visibility bits, `IS_VAR|HAS_SETTER`, `IS_CONST|HAS_CONSTANT`
-  for `const val`, `HAS_CONSTANT` for a `val` with a compile-time-constant initializer (never for a
-  `var`), `IS_LATEINIT`; `getter_flags`/`setter_flags` (f7/f8) only for CUSTOM accessor bodies
+  for `const val`, `HAS_CONSTANT` for an immutable property whose type can be a `const val` (a
+  primitive, `String`, or an unsigned type; a platform `String!` qualifies and `String?` does not)
+  when the initializer has a constant value: a non-null literal, a `+` chain of string literals and
+  templates whose parts do, a numeric conversion or unary plus/minus of such a value, or a read of
+  a `const` property or a Java `val` field (final, no Kotlin metadata, no `ConstantValue`). A
+  folded `1 + 2`, an ordinary `plus` such as `constString + "b"` or `File.separator + "z"`, and
+  every `var` do not. Proven by
+  `tests/classpath_top_level_property_e2e.rs::constant_initializer_metadata_matches_kotlinc`.
+  `IS_LATEINIT`; `getter_flags`/`setter_flags` (f7/f8) only for CUSTOM accessor bodies
   (visibility | `isNotDefault`); a custom setter's value parameter (f6); and a
   `JvmPropertySignature` naming exactly the accessors the emitter really produces — none for
   `const` (inlined) or `private` (direct field access; the synthetic `access$…$p` bridges are not
@@ -2647,7 +2654,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reader derives descriptors by mapping class NAMES through a flat table and an array's descriptor
   depends on its type argument. The specialized primitive arrays (`IntArray` → `[I`) are in that
   table and record nothing, so `vararg xs: Int` records no descriptor while `vararg xs: Payload`
-  does. The rule keys off the array, not off `vararg`. Tests:
+  does. The rule keys off the array, not off `vararg`. A reference `vararg` records `Array<out E>` on package and member
+  functions, constructors and a `vararg val` constructor property alike. Tests:
   `tests/metadata_array_signature_e2e.rs` (byte-identity vs kotlinc 2.4.10); table in
   `docs/METADATA_NOTES.md`.
 - **A backing field's descriptor is recorded only when a reader cannot rebuild it.** kotlinc's
@@ -2656,6 +2664,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type-parameter field even when it has no accessors, a boxed nullable primitive, a value class's
   carrier, a reference array and a delegate field. One rule serves class, companion and facade
   properties. Tests: `tests/metadata_field_signature_e2e.rs`.
+- **`HAS_CONSTANT` follows kotlinc's serializer exactly.** A `val` records it when its declared
+  type could be a `const val` type (a non-null built-in scalar or `String`; a platform `String!`
+  qualifies) and its initializer passes `FirToConstantValueChecker`: a literal, a string template
+  or concatenation of
+  string literals over constants, a `const val` or provider-published Java final-field read, or a
+  number conversion (`toByte` … `toDouble`, `toChar`) or `unaryMinus` applied to a constant.
+  `val x: Any = "s"`, `1 + 2` and
+  `!true` have none, while `0.toDouble()` and `"$X"` do. Common lowering decides it once from the
+  checked initializer (`fir_lower::metadata_constants`) for class and package properties alike.
+  Checked FIR marks a constant that is the selected value of a `const val` or Java constant field
+  (`FirBody::is_constant_read`); an ordinary Java final field carries the same semantic read fact
+  on its selected property target. Only literals fold in kotlinc's parser: `+3` and
+  `"a" + "b"` are constants, while `+X` and `"a" + S` stay `unaryPlus`/`plus` calls and record
+  none. `-X`, `"$S"` and the bare read `S` are constants. Tests: `tests/metadata_property_flags_e2e.rs`.
+- **Accessor and function records follow declaration identity, never a JVM name.** A property's
+  `JvmPropertySignature` names only the accessors the property owns. A private property with
+  default accessors has none, so `operator fun getValue(...)` beside `private val value` is a
+  `Function` record and not the property's getter, and a declared `fun getCount(): Int` beside a
+  private `count` stays a `Function` record. A value class's declared `override fun toString()` is a
+  declared `Function` too, while the `equals`/`hashCode`/`toString` its synthesis generated are
+  recorded by the exact `-impl` identities that synthesis created, never by method name. A setter's
+  value parameter is its own declaration and addresses the property's type parameters by table id.
+  A class serializes each member list in the order it builds the records, so a member extension
+  property declared first stays first. Tests: `tests/metadata_accessor_signature_e2e.rs`,
+  `tests/metadata_property_flags_e2e.rs`.
 - **A class records only the supertypes source DECLARED.** An undeclared `kotlin/Any` is never a
   `Class.supertype`, generic or not — even though a generic class's JVM `Signature` attribute must
   materialize that superclass position, so the recorded generic signature krusty reuses for the
@@ -3503,6 +3536,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a target spelled without type arguments (`as Sm`) takes them from the path's declared supertype
   (`Opt<T>` to `Sm<T>`); an explicit application is the proven type as written. Test:
   `tests/this_smartcast_e2e.rs`; box: `inference/pcla/issues/kt57707.kt`.
+- **A cast of a suspend callable to its continuation-passing function keeps both types.**
+  `ref as Function2<Int, Continuation<Int>, Any?>` on `ref: suspend (Int) -> Int` types the cast
+  expression as that ordinary function and makes the same carrier the stable path's read
+  projection, so a later `ref(1, c)` uses the cast-proven invoke. That call publishes the carrier
+  on the callee expression; checked FIR then invokes the selected signature instead of the
+  declaration's storage type. The original suspend value stays
+  an intersection constituent: a later `is SuspendFunction` / `is KSuspendFunction`, and a use that
+  expects the suspend type, see that constituent rather than only the carrier. A non-null cast of a
+  nullable suspend value removes nullability from the carrier and from the retained suspend
+  constituent. The continuation shape is not a Kotlin subtype, so neither constituent replaces the
+  other. The proof that a constituent is a suspend function is that function value, or the local's
+  recorded callable-reference signature — not a classifier's `operator invoke`. Test:
+  `tests/suspend_callable_cast_e2e.rs`; corpus:
+  `coroutines/functionReference_Function_SuspendFunction_casts.kt`.
 - **A local `var` smart-casts like a `val`** when no already-created capturing closure can mutate it
   (`tests/var_smartcast_e2e.rs`). Straight-line assignments replace the flow type. Inline-spliced
   lambdas follow the same ordered flow; a lambda declared later does not invalidate an earlier proof.
@@ -7723,6 +7770,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `resolve::integer_constants::tests::division_by_zero_adapts_to_long_without_a_folded_value`,
   `tests/integer_literal_branch_join_e2e.rs::division_by_zero_int_constant_throws_after_adapting_to_long`,
   `tests/classpath_jdk_static_e2e.rs::non_literal_int_does_not_match_long_parameter`.
+- **A one-word safe call duplicates its receiver.** `a?.close()`, `foo()?.close()`, `a?.foo(x)`,
+  and `a?.n` evaluate the receiver once, `dup` it, and `ifnull` to a `pop`. The non-null path uses
+  the value still on the stack as the call or property receiver; that receiver is not stored in a
+  temporary. A chain (`a?.b?.c`), a scalar receiver (`Int?`), a receiver wider than one word, and a
+  selector that reads the receiver more than once keep the temporary. Test: `tests/safe_call_dup_e2e.rs`.
 - **An elvis over a safe call keeps its own null check.** fir2ir builds `a?.f() ?: b` as an elvis
   `when` over a temporary holding the safe call's (nullable) value, so kotlinc emits the safe call's
   `ifnull` to the shared null path and then the elvis's own `dup; ifnonnull`, whatever `f()`'s
@@ -9206,6 +9258,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class.
   Tests: `tests/serialization_class_serial_name_e2e.rs` (the JSON and every descriptor's
   `serialName` under both compilers, and the string constants each generated class loads).
+- **`element<T>()` takes T's serializer the way kotlinc's `serializer<T>()` intrinsic does.** The
+  intrinsic's fast path comes first: when T's companion (or T itself, as a `@Serializable object`)
+  declares the accessor `serializer(KSerializer<T1>, …): KSerializer<T<T1, …>>`, it calls that
+  accessor with an intrinsic serializer per type argument — `JsonElement.Companion.serializer()`,
+  never the `JsonElementSerializer` its `@Serializable(with = …)` names, and
+  `Twig.Companion.serializer()` rather than `Twig$$serializer.INSTANCE`. Only a type without the
+  accessor takes the general lookup (a builtin, a constructed `ArrayListSerializer` over intrinsic
+  operands); a nullable T wraps the result in `.nullable`.
+  The accessor is SELECTED in the frontend through the ordinary checked-member-call operation:
+  the plugin supplies the classifier, name, argument types and expected result, and receives only
+  the resolver's final call (stable declaration, singleton receiver, specialized signature,
+  substitutions, argument mapping, access and inline/suspend facts). It never sees a candidate
+  list. Inherited members therefore participate normally, while an inaccessible exact-shape member
+  is not published to the plan. The plan carries that complete selection as a synthesized call
+  that lowers to the exact module or dependency declaration on its selected singleton receiver.
+  A same-name, same-arity function whose `KSerializer` type arguments differ (a
+  non-`@Serializable` class's `serializer(): KSerializer<String>`) is never selected; kotlinc's own
+  check reads only the outer `KSerializer` and would call it, krusty refuses the element instead.
+  A plugin-generated companion is published as the singleton it is, so a call on it realizes to
+  its `Companion` field.
+  Known gap: a builtin serializer passed as an operand (`List<String?>`) still gets the
+  `checkcast KSerializer` the backend's reference coercion inserts; the intrinsic writes none.
+  Tests: `tests/descriptor_element_companion_serializer_e2e.rs` (a repository-owned dependency
+  class and `JsonElement`, each element's serializer row for row against the reference compiler
+  and the resulting descriptors under both; a sibling-file class; inherited, inaccessible and
+  lookalike dependency accessors), `tests/descriptor_element_specialization_e2e.rs`, and the
+  selection unit tests in `src/plugins/serialization/intrinsic_serializer.rs`.
 - **A property's `@Serializable(with = X::class)` decodes through `X`, as it encodes through it.**
   `serialize` and `childSerializers` consult the property's explicit serializer ahead of its type;
   `deserialize` did not. A property whose type has no derivable serializer made the whole
@@ -10770,7 +10849,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `x is SuspendFunction0<*>` (and a reified `x is T` once `T` is `suspend () -> R`) is
   `instanceof kotlin/coroutines/jvm/internal/SuspendFunction` conjoined with
   `isFunctionOfArity(x, N+1)`. A source `is` of the function-type spelling itself stays rejected
-  as an erased type, the same way `is (Int) -> Int` is. `x as SuspendFunctionN` is only the
+  as an erased type, the same way `is (Int) -> Int` is. An `as` to an unrelated function
+  classifier replaces the later read with that classifier's signature, and the binding keeps the
+  type it was declared with. `Foo::bar as KFunction2` and `suspend { x: Int -> x } as Function2`
+  therefore still prove `is KSuspendFunction1`, `is SuspendFunction1`, and `is Function2` with
+  concrete arguments: each is the always-true check kotlinc accepts. A mutable binding does not
+  retain its initializer's callable-reference proof after reassignment.
+  (`src/fir/body_check_tests.rs`,
+  `a_suspend_reference_keeps_its_type_after_an_unrelated_function_cast`, and
+  `tests/suspend_conversion_e2e.rs`.)
+  `x as SuspendFunctionN` is only the
   `checkcast` to `Function{N+1}`; the marker test stays on `is` and on `as?`. A reference to a
   suspend function keeps that suspend function type even with no expected function type, including
   a local `::suspendLocal`: its carrier implements `Function{N+1}` and
