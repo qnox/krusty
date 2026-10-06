@@ -4,7 +4,16 @@
 
 use super::common;
 
+static FIXTURE_COMPILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn expect_method_matches(name: &str, src: &str, class: &str, method: &str) {
+    // Every assertion below compiles the same intentionally broad fixture. The coverage lane runs
+    // four e2e tests concurrently; compiling this try/finally-heavy source four times at once made
+    // all copies bail while the exact GHA-built compiler accepts it in isolation. Keep the semantic
+    // assertions distinct, but give this one fixture a single compilation slot.
+    let _fixture = FIXTURE_COMPILE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match common::method_code_diff_against_kotlinc(name, &[], src, class, method) {
         None => panic!("reference kotlinc is provisioned"),
         Some(Ok(())) => {}
