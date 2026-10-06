@@ -3453,14 +3453,11 @@ pub fn byte_diff_against_kotlinc_cp_target(
     )))
 }
 
-/// Compare ONE method's instruction sequence against the reference compiler's, with the
-/// dependencies in `lib` (none when empty) built by the reference compiler.
+/// Compile `src` with kotlinc and krusty and require `class` to be the same bytes.
 ///
-/// Whole-class identity also covers the constant pool, the debug tables and `SourceDebugExtension`,
-/// which diverge for reasons of their own; this instrument answers the narrower question a splice
-/// or coroutine change is actually about — whether the emitted code is the same instructions in the
-/// same order, naming the same members, over the same local slots. Pool indices and byte offsets are
-/// normalized in process; no `javap` process is involved.
+/// `method` is named in the failure text. The pass condition is the class file, so a match does
+/// not disassemble anything. Dependencies in `lib` (none when empty) are built by the reference
+/// compiler.
 #[allow(dead_code)]
 pub fn method_code_diff_against_kotlinc(
     name: &str,
@@ -3472,9 +3469,9 @@ pub fn method_code_diff_against_kotlinc(
     method_code_diffs_against_kotlinc(name, lib, src, class, &[method])?.pop()
 }
 
-/// [`method_code_diff_against_kotlinc`] for several methods of one compiled class. The dependency,
-/// source module, and both class files are built once; each requested method still produces its own
-/// exact instruction/exception-table/local-table result and diagnostic.
+/// [`method_code_diff_against_kotlinc`] for several members of one class. The dependency and both
+/// class files are built once. A byte match passes every member without disassembly. A mismatch
+/// fails every member with that class-file difference.
 pub fn method_code_diffs_against_kotlinc(
     name: &str,
     lib: &[(&str, &str)],
@@ -3489,7 +3486,9 @@ pub fn method_code_diffs_against_kotlinc(
     };
     let dir = scratch_dir()?;
     let kref = dir.join("ref");
+    let kout = dir.join("krusty");
     std::fs::create_dir_all(&kref).ok()?;
+    std::fs::create_dir_all(&kout).ok()?;
     let src_path = dir.join(format!("{name}.kt"));
     std::fs::write(&src_path, src).ok()?;
     let mut args = vec!["-d".to_string(), kref.to_string_lossy().into_owned()];
@@ -3514,313 +3513,50 @@ pub fn method_code_diffs_against_kotlinc(
         .iter()
         .find(|(emitted, _)| emitted == class)
         .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
+    let krusty_path = kout.join(format!("{class}.class"));
+    if let Some(parent) = krusty_path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    std::fs::write(&krusty_path, krusty_bytes).ok()?;
     let reference_bytes = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
 
     let results = if reference_bytes == *krusty_bytes {
         methods.iter().map(|_| Ok(())).collect()
     } else {
-        let reference = krusty::jvm::classreader::ClassBodies::parse(Arc::new(reference_bytes));
-        let actual = krusty::jvm::classreader::ClassBodies::parse(Arc::new(krusty_bytes.to_vec()));
+        let offset = reference_bytes
+            .iter()
+            .zip(krusty_bytes.iter())
+            .position(|(left, right)| left != right)
+            .unwrap_or_else(|| reference_bytes.len().min(krusty_bytes.len()));
+        let window = |bytes: &[u8]| {
+            let start = offset.saturating_sub(8);
+            let end = offset.saturating_add(8).min(bytes.len());
+            format!("{:02x?}", &bytes[start..end])
+        };
+        let listing = |dir: &Path| {
+            let classpath = dir.to_string_lossy();
+            let binary_name = class.replace('/', ".");
+            javap(&["-p", "-c", "-l", "-cp", classpath.as_ref(), &binary_name])
+                .unwrap_or_else(|| "(javap unavailable)".to_string())
+        };
+        let reference = listing(&kref);
+        let actual = listing(&kout);
         methods
             .iter()
             .map(|method| {
-                let Some(reference) = reference.as_ref() else {
-                    return Err(format!("{name}/{class}: kotlinc class file is unreadable"));
-                };
-                let Some(actual) = actual.as_ref() else {
-                    return Err(format!("{name}/{class}: krusty class file is unreadable"));
-                };
-                compare_selected_method(name, class, method, reference, actual)
+                Err(format!(
+                    "{name}/{class}: bytes differ at offset {offset} (kotlinc {} B, krusty {} B)\n\
+                     kotlinc {}\nkrusty  {}\n{method}\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}",
+                    reference_bytes.len(),
+                    krusty_bytes.len(),
+                    window(&reference_bytes),
+                    window(krusty_bytes)
+                ))
             })
             .collect()
     };
     let _ = std::fs::remove_dir_all(&dir);
     Some(results)
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct ComparableMethodCode {
-    instructions: Vec<krusty::jvm::inline::Insn>,
-    handlers: Vec<(usize, usize, usize, Option<u16>)>,
-    locals: Vec<(usize, usize, u16, String, String)>,
-}
-
-fn compare_selected_method(
-    source: &str,
-    class: &str,
-    selector: &str,
-    reference: &krusty::jvm::classreader::ClassBodies,
-    actual: &krusty::jvm::classreader::ClassBodies,
-) -> Result<(), String> {
-    let (reference_name, reference_descriptor) = select_coded_method(reference, class, selector)
-        .map_err(|error| format!("{source}/{class}.{selector}: kotlinc {error}"))?;
-    let (actual_name, actual_descriptor) = select_coded_method(actual, class, selector)
-        .map_err(|error| format!("{source}/{class}.{selector}: krusty {error}"))?;
-    if (reference_name, reference_descriptor) != (actual_name, actual_descriptor) {
-        return Err(format!(
-            "{source}/{class}.{selector}: descriptors differ: kotlinc {reference_name}{reference_descriptor}, krusty {actual_name}{actual_descriptor}"
-        ));
-    }
-
-    let reference_code = reference
-        .method_code(reference_name, reference_descriptor)
-        .ok_or_else(|| {
-            format!(
-                "{source}/{class}.{selector}: kotlinc method {reference_name}{reference_descriptor} has no readable body"
-            )
-        })?;
-    let actual_code = actual
-        .method_code(actual_name, actual_descriptor)
-        .ok_or_else(|| {
-            format!(
-                "{source}/{class}.{selector}: krusty method {actual_name}{actual_descriptor} has no readable body"
-            )
-        })?;
-
-    // Relocating both bodies into ONE fresh pool turns equal constants, member references and
-    // bootstrap graphs into equal indices regardless of the order of their defining class pools.
-    let mut pool = krusty::jvm::classfile::ClassWriter::new(
-        "krusty/test/MethodComparison",
-        "java/lang/Object",
-    );
-    let reference = comparable_method_code(&reference_code, &mut pool)
-        .map_err(|error| format!("{source}/{class}.{selector}: kotlinc {error}"))?;
-    let actual = comparable_method_code(&actual_code, &mut pool)
-        .map_err(|error| format!("{source}/{class}.{selector}: krusty {error}"))?;
-
-    if reference.instructions != actual.instructions {
-        let index = reference
-            .instructions
-            .iter()
-            .zip(&actual.instructions)
-            .position(|(left, right)| left != right)
-            .unwrap_or_else(|| reference.instructions.len().min(actual.instructions.len()));
-        return Err(format!(
-            "{source}/{class}.{selector}: instructions differ at #{index} ({reference_descriptor})\n\
-             kotlinc {:?}\nkrusty  {:?}\n\
-             instruction counts: kotlinc {}, krusty {}",
-            reference.instructions.get(index),
-            actual.instructions.get(index),
-            reference.instructions.len(),
-            actual.instructions.len()
-        ));
-    }
-    if reference.handlers != actual.handlers {
-        return Err(format!(
-            "{source}/{class}.{selector}: exception tables differ ({reference_descriptor})\n\
-             kotlinc {:?}\nkrusty  {:?}",
-            reference.handlers, actual.handlers
-        ));
-    }
-    if reference.locals != actual.locals {
-        return Err(format!(
-            "{source}/{class}.{selector}: local-variable tables differ ({reference_descriptor})\n\
-             kotlinc {:?}\nkrusty  {:?}",
-            reference.locals, actual.locals
-        ));
-    }
-    Ok(())
-}
-
-fn comparable_method_code(
-    code: &krusty::jvm::classreader::MethodCode,
-    pool: &mut krusty::jvm::classfile::ClassWriter,
-) -> Result<ComparableMethodCode, String> {
-    let mut instructions = krusty::jvm::inline::disassemble(&code.code)
-        .ok_or_else(|| "method body does not disassemble".to_string())?;
-    let offsets = krusty::jvm::inline::insn_offsets_at(&instructions, 0);
-    let boundary = |byte: u16| {
-        offsets
-            .binary_search(&(byte as usize))
-            .map_err(|_| format!("debug/handler boundary {byte} is not an instruction boundary"))
-    };
-
-    let handlers = code
-        .handlers
-        .iter()
-        .map(|handler| {
-            let catch = if handler.catch_type == 0 {
-                None
-            } else {
-                Some(
-                    krusty::jvm::inline::relocate_const(&code.source_cp, handler.catch_type, pool)
-                        .ok_or_else(|| {
-                            format!(
-                                "exception handler has unreadable catch type #{}",
-                                handler.catch_type
-                            )
-                        })?,
-                )
-            };
-            Ok((
-                boundary(handler.start_pc)?,
-                boundary(handler.end_pc)?,
-                boundary(handler.handler_pc)?,
-                catch,
-            ))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let locals = code
-        .locals
-        .iter()
-        .map(|local| {
-            let end = local.start_pc.checked_add(local.length).ok_or_else(|| {
-                format!(
-                    "local {} has overflowing range {} + {}",
-                    local.name, local.start_pc, local.length
-                )
-            })?;
-            Ok((
-                boundary(local.start_pc)?,
-                boundary(end)?,
-                local.slot,
-                local.name.clone(),
-                local.descriptor.clone(),
-            ))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    krusty::jvm::inline::relocate_insns(
-        &mut instructions,
-        &code.source_cp,
-        &code.bootstrap_methods,
-        pool,
-    )
-    .ok_or_else(|| "method body has an unsupported constant-pool reference".to_string())?;
-    Ok(ComparableMethodCode {
-        instructions,
-        handlers,
-        locals,
-    })
-}
-
-fn select_coded_method<'a>(
-    methods: &'a krusty::jvm::classreader::ClassBodies,
-    class: &str,
-    selector: &str,
-) -> Result<(&'a str, &'a str), String> {
-    let open = selector
-        .find('(')
-        .ok_or_else(|| format!("method selector has no '(': {selector}"))?;
-    let prefix = selector[..open].trim();
-    let displayed_name = prefix
-        .split_whitespace()
-        .next_back()
-        .ok_or_else(|| format!("method selector has no name: {selector}"))?;
-    let class_name = class.rsplit('/').next().unwrap_or(class);
-    let method_name = if displayed_name == class_name
-        || class_name
-            .rsplit('$')
-            .next()
-            .is_some_and(|simple| displayed_name == simple)
-    {
-        "<init>"
-    } else {
-        displayed_name
-    };
-    let return_descriptor = if method_name == "<init>" {
-        Some("V".to_string())
-    } else {
-        prefix
-            .strip_suffix(displayed_name)
-            .and_then(|before| before.split_whitespace().next_back())
-            .and_then(java_type_descriptor)
-    };
-    let parameter_descriptors = selector[open + 1..]
-        .split_once(')')
-        .and_then(|(parameters, _)| java_parameter_descriptors(parameters));
-
-    let candidates = methods
-        .coded_methods()
-        .filter(|(name, descriptor)| {
-            if *name != method_name {
-                return false;
-            }
-            let Some(close) = descriptor.find(')') else {
-                return false;
-            };
-            if return_descriptor
-                .as_deref()
-                .is_some_and(|result| descriptor[close + 1..] != *result)
-            {
-                return false;
-            }
-            parameter_descriptors
-                .as_deref()
-                .is_none_or(|parameters| descriptor[1..close] == *parameters)
-        })
-        .collect::<Vec<_>>();
-    match candidates.as_slice() {
-        [candidate] => Ok(*candidate),
-        [] => Err(format!(
-            "has no coded method matching {selector}; coded methods: {:?}",
-            methods.coded_methods().collect::<Vec<_>>()
-        )),
-        _ => Err(format!(
-            "method selector {selector} is ambiguous between {candidates:?}"
-        )),
-    }
-}
-
-fn java_parameter_descriptors(parameters: &str) -> Option<String> {
-    if parameters.trim().is_empty() {
-        return Some(String::new());
-    }
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    let mut descriptors = String::new();
-    for (index, character) in parameters.char_indices() {
-        match character {
-            '<' => depth += 1,
-            '>' => depth = depth.checked_sub(1)?,
-            ',' if depth == 0 => {
-                descriptors.push_str(&java_type_descriptor(&parameters[start..index])?);
-                start = index + character.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    (depth == 0).then(|| ())?;
-    descriptors.push_str(&java_type_descriptor(&parameters[start..])?);
-    Some(descriptors)
-}
-
-fn java_type_descriptor(displayed: &str) -> Option<String> {
-    let mut displayed = displayed.trim();
-    let mut dimensions = 0usize;
-    if let Some(element) = displayed.strip_suffix("...") {
-        dimensions += 1;
-        displayed = element.trim_end();
-    }
-    while let Some(element) = displayed.strip_suffix("[]") {
-        dimensions += 1;
-        displayed = element.trim_end();
-    }
-    let mut erased = String::with_capacity(displayed.len());
-    let mut depth = 0usize;
-    for character in displayed.chars() {
-        match character {
-            '<' => depth += 1,
-            '>' => depth = depth.checked_sub(1)?,
-            _ if depth == 0 => erased.push(character),
-            _ => {}
-        }
-    }
-    if depth != 0 || erased.is_empty() {
-        return None;
-    }
-    let value = match erased.trim() {
-        "void" => "V".to_string(),
-        "boolean" => "Z".to_string(),
-        "byte" => "B".to_string(),
-        "char" => "C".to_string(),
-        "short" => "S".to_string(),
-        "int" => "I".to_string(),
-        "long" => "J".to_string(),
-        "float" => "F".to_string(),
-        "double" => "D".to_string(),
-        class => format!("L{};", class.replace('.', "/")),
-    };
-    Some(format!("{}{value}", "[".repeat(dimensions)))
 }
 
 /// Whether `bytes` contains a CALL to `callee` — a method reference an instruction names, rather
