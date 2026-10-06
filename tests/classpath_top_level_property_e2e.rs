@@ -13,61 +13,70 @@ const LIB: &str = "package lib\n\
      val absent: String? = null\n";
 
 /// `HAS_CONSTANT` follows kotlinc's constant-value checker, not constant folding. A Java `val`
-/// field, a string template that reads one, and `1.toLong()` carry the flag. `1 + 2`,
-/// `File.separator + "z"`, a `const` string concatenated with `+`, a widened `Any`, and a `var` do
-/// not. The facade, the class, and the object are each compared in full.
+/// field, a string template that reads one, and `1.toLong()` carry the flag. `1 + 2`, a Java field
+/// concatenated with `+`, a `const` string concatenated with `+`, a widened `Any`, and a `var` do
+/// not. The Java declarations are repository-owned so this proves the provider contract rather
+/// than a special case for a JDK owner. The facade, the class, and the object are compared in full.
 #[test]
 fn constant_initializer_metadata_matches_kotlinc() {
+    let java = [(
+        "JavaValues.java".to_string(),
+        "package fixtures;\n\
+         public final class JavaValues {\n\
+             public static final String FINAL_TEXT = new String(\"x\");\n\
+             public static final char FINAL_CHAR = Character.toLowerCase('Q');\n\
+             public static final int COMPILE_TIME_INT = 2147483647;\n\
+             private JavaValues() {}\n\
+         }\n"
+        .to_string(),
+    )];
+    let (library, _) =
+        common::javac_compile(&java, &[]).expect("javac must build the constant-field fixture");
     const SOURCE: &str = "package parity\n\
         const val A = \"a\"\n\
-        val fromJava = java.io.File.separator\n\
-        val fromJavaChar = java.io.File.separatorChar\n\
+        val fromJava = fixtures.JavaValues.FINAL_TEXT\n\
+        val fromJavaChar = fixtures.JavaValues.FINAL_CHAR\n\
         val folded = \"a\" + \"b\"\n\
         val both = \"a\" + \"b\" + \"c\"\n\
-        val template = \"x${java.io.File.separator}y\"\n\
+        val template = \"x${fixtures.JavaValues.FINAL_TEXT}y\"\n\
         val templateConst = \"x${A}y\"\n\
         val templatePlus = \"x${A}y\" + \"z\"\n\
-        val templateJavaPlus = \"x${java.io.File.separator}y\" + \"z\"\n\
+        val templateJavaPlus = \"x${fixtures.JavaValues.FINAL_TEXT}y\" + \"z\"\n\
         val arith = 1 + 2\n\
-        val mixed = java.io.File.separator + \"z\"\n\
+        val mixed = fixtures.JavaValues.FINAL_TEXT + \"z\"\n\
         val plusConst = A + \"b\"\n\
         val widened: Any = \"a\"\n\
-        val widenedJava: Any = java.io.File.separator\n\
+        val widenedJava: Any = fixtures.JavaValues.FINAL_TEXT\n\
         val toLong = 1.toLong()\n\
-        val charCode = java.io.File.separatorChar.toInt()\n\
+        val charCode = fixtures.JavaValues.FINAL_CHAR.toInt()\n\
         val unary = 1.unaryMinus()\n\
         val nested = -(1 + 2)\n\
         val convOfSum = (1 + 2).toLong()\n\
         val alias = A\n\
-        val max = Integer.MAX_VALUE\n\
-        var mutable = java.io.File.separator\n\
-        val runtime = System.getProperty(\"user.dir\")\n\
+        val max = fixtures.JavaValues.COMPILE_TIME_INT\n\
+        var mutable = fixtures.JavaValues.FINAL_TEXT\n\
+        var dynamic = \"runtime\"\n\
+        fun dynamicText(): String = dynamic\n\
+        val runtime = dynamicText()\n\
         const val c = \"c\"\n\
         class Box {\n\
-            val inst: String = java.io.File.separator\n\
+            val inst: String = fixtures.JavaValues.FINAL_TEXT\n\
             val folded = \"a\" + \"b\"\n\
             val arith = 1 + 2\n\
         }\n\
         object Holder {\n\
-            val fromJava: String = java.io.File.separator\n\
+            val fromJava: String = fixtures.JavaValues.FINAL_TEXT\n\
         }\n";
-    let classpath = [common::stdlib_jar(), common::jdk_modules()];
-    for class in [
-        "parity/ConstantInitializersKt",
-        "parity/Box",
-        "parity/Holder",
-    ] {
-        match common::byte_diff_against_kotlinc_cp(
-            "ConstantInitializers",
-            SOURCE,
-            class,
-            &classpath,
-        ) {
-            None => panic!("constant initializer metadata: reference toolchain unavailable"),
-            Some(Ok(())) => {}
-            Some(Err(error)) => panic!("{error}"),
-        }
-    }
+    common::assert_classes_identical_to_kotlinc_against(
+        "ConstantInitializers",
+        SOURCE,
+        &[
+            "parity/ConstantInitializersKt",
+            "parity/Box",
+            "parity/Holder",
+        ],
+        &[library],
+    );
 }
 
 /// Enforce the producer contract directly. Every property is emitted by Krusty; kotlinc only supplies
