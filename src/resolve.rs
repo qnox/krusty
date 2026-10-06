@@ -49477,7 +49477,11 @@ impl<'a> Checker<'a> {
         // A successful cast contributes an intersection with the path's existing stable type; it
         // never widens that type. In particular, evaluating `nonNull as T?` does not make later
         // reads nullable. Preserve the already-more-specific declaration/flow fact and only use
-        // the cast target when it actually narrows it.
+        // the cast target when it actually narrows it. A suspend value is not a subtype of its
+        // continuation-passing carrier, so this read projection is the carrier. `apply_narrowings`
+        // keeps the incomparable suspend constituent beside it. The binding's declared semantic
+        // type remains a separate proof for later type tests, and a non-null cast still drops
+        // nullability from the read projection.
         Some(
             declared
                 .filter(|declared| self.receiver_is_assignable(*declared, narrowed))
@@ -58411,10 +58415,35 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         nominal: Ty,
     ) -> Vec<Ty> {
+        let mut types = Vec::new();
         if let Some(function) = self.expression_function_value_type(scope, expression, nominal) {
-            return vec![function];
+            // Preserve the exact value type. A successful non-null cast records its own non-null
+            // flow constituent; ordinary nullable function values must not acquire that proof just
+            // because a functional expected type asks for their callable shape.
+            types.push(function);
         }
-        self.nominal_function_types(scope, nominal)
+        // A cast expression is the target. Facts proved about its operand belong to a later read
+        // of that stable path; using them here would invoke the pre-cast suspend signature.
+        if !matches!(self.file.expr(expression), Expr::As { .. }) {
+            // The read projection stays first, so invoke keeps the cast carrier. Intersection and
+            // callable-reference facts supply the suspend value the carrier does not subtype.
+            for fact in self.proven_function_value_facts(scope, expression) {
+                if !types.contains(&fact) {
+                    types.push(fact);
+                }
+            }
+        }
+        if types.is_empty() {
+            self.nominal_function_types(scope, nominal)
+                .into_iter()
+                // Callable hierarchy traversal describes the non-null value's invoke shapes.
+                // Contextual assignment must retain the expression's own nullability; merely
+                // discovering a FunctionN supertype is not a successful smart cast.
+                .map(|function| nominal.rewrap_nullability(function))
+                .collect()
+        } else {
+            types
+        }
     }
 
     /// Callable constituent of an expression used for a particular SAM target. A type parameter
@@ -58449,7 +58478,7 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         nominal: Ty,
     ) -> Option<Ty> {
-        if matches!(nominal, Ty::Fun(_)) {
+        if matches!(nominal.non_null(), Ty::Fun(_)) {
             return Some(nominal);
         }
         if let Some(function) = self.callable_reference_types.get(&expression).copied() {
@@ -58472,15 +58501,12 @@ impl<'a> Checker<'a> {
             })
         {
             let nominal = local.ty;
-            if let Some(function) = matches!(nominal, Ty::Fun(_))
+            let stable_reference = (!local.is_var)
+                .then_some(local.callable_reference_type)
+                .flatten();
+            if let Some(function) = matches!(nominal.non_null(), Ty::Fun(_))
                 .then_some(nominal)
-                .or(local.callable_reference_type)
-                .or_else(|| {
-                    crate::symbol_resolver::classifier_callable_signature(
-                        &self.fed_source(),
-                        nominal,
-                    )
-                })
+                .or(stable_reference)
             {
                 return Some(function);
             }

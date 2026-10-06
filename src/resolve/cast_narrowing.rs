@@ -87,4 +87,41 @@ impl Checker<'_> {
         self.apply_narrowings(&rhs_scope, &casts, &[], false);
         Some(rhs_scope)
     }
+
+    /// Exact function values proved for `expression` besides its current read type.
+    ///
+    /// A cast to the continuation-passing carrier leaves that carrier as the read projection and
+    /// keeps the original suspend value in the intersection. The local's callable-reference
+    /// signature is the same kind of fact. A nominal classifier's `operator invoke` is not: this
+    /// walk never asks a classifier for callable signatures.
+    pub(super) fn proven_function_value_facts(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+    ) -> Vec<Ty> {
+        let mut facts = Vec::new();
+        let mut push = |ty: Ty| {
+            if matches!(ty.non_null(), Ty::Fun(_)) && !facts.contains(&ty) {
+                facts.push(ty);
+            }
+        };
+        let Some(path) = self.expr_access_path(expression) else {
+            return facts;
+        };
+        for constituent in self.lookup_intersection_narrowing(scope, &path) {
+            push(constituent);
+        }
+        if path.segments.is_empty() {
+            if let super::scope::PathRoot::Value(identity) = path.root {
+                if let Some((_, local)) = self.visible_flow_value(scope, identity) {
+                    if !local.is_var {
+                        if let Some(function) = local.callable_reference_type {
+                            push(function);
+                        }
+                    }
+                }
+            }
+        }
+        facts
+    }
 }

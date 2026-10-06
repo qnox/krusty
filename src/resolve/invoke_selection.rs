@@ -164,7 +164,11 @@ impl Checker<'_> {
                 .or_else(|| self.read_callable_reference_types.get(&receiver))
                 .copied();
         }
+        // This is the callable signature selected for invocation, not the receiver's nullability.
+        // `record_invoke` checks the separately narrowed receiver value immediately afterwards, so
+        // a nullable value still errors while a stable property proved non-null remains callable.
         self.expression_function_type(scope, receiver, receiver_ty)
+            .map(Ty::non_null)
     }
 
     /// Whether invoking a type-parameter value selects a function constituent other than the one its
@@ -1377,6 +1381,14 @@ impl Checker<'_> {
                 );
                 self.expect_call_arg(scope, *p, args[i], actual);
             }
+        }
+        // A bare local call selects the receiver value and its function signature together. Publish
+        // that committed semantic type on the callee expression; checked FIR consumes the same
+        // decision instead of recovering from an earlier placeholder or re-reading storage type.
+        if matches!(semantic_receiver_ty, Ty::Fun(_))
+            && matches!(self.file.expr(receiver), Expr::Name(_))
+        {
+            self.set(receiver, semantic_receiver_ty);
         }
         self.expr_lowers.insert(
             call,

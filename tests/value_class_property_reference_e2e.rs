@@ -52,6 +52,30 @@ fn a_reference_to_a_member_of_a_value_class_resolves() {
     );
 }
 
+/// Selecting the callable view for an explicit `invoke` must not replace the callable-reference
+/// expression's semantic type. The backend still needs that reference identity to materialize its
+/// receiver and accessor, for both concrete and substituted value-class carriers.
+#[test]
+fn a_value_class_property_reference_can_be_invoked_explicitly() {
+    assert_eq!(
+        run(
+            "@JvmInline\n\
+             value class Z(val x: Int)\n\
+             \n\
+             @JvmInline\n\
+             value class G<T : Int>(val x: T)\n\
+             \n\
+             fun box(): String {\n\
+             \x20   if (Z::x.invoke(Z(42)) != 42) return \"FAIL1\"\n\
+             \x20   if (G<Int>::x.invoke(G(7)) != 7) return \"FAIL2\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+            "ValueClassPropertyRefInvoke",
+        ),
+        "OK"
+    );
+}
+
 /// An EXTENSION on a value class: the accessor is the facade's hash-mangled
 /// `getXx-IQRRRT4(I)I`, not `getXx(LZ;)I`. Its receiver is unboxed the same way.
 #[test]
