@@ -96,4 +96,34 @@ pub enum IrClassifierKind {
 pub struct IrModuleClassifier {
     pub singleton: bool,
     pub companion_owner: Option<TypeName>,
+    /// Source kind of this classifier. A property reference calls an inherited member on the
+    /// classifier it was written on, and that kind chooses interface dispatch.
+    pub kind: IrClassifierKind,
+}
+
+impl super::IrFile {
+    /// Source classifier kind for an exact common-IR identity, regardless of whether the
+    /// declaration belongs to this file or another file in the module.
+    pub(crate) fn source_classifier_kind(&self, classifier: TypeName) -> Option<IrClassifierKind> {
+        if let Some(class) = self
+            .classes
+            .iter()
+            .find(|candidate| candidate.fq_name_id() == classifier)
+        {
+            return Some(if class.is_annotation {
+                IrClassifierKind::Annotation
+            } else if class.is_object {
+                IrClassifierKind::Object
+            } else if class.is_enum {
+                IrClassifierKind::Enum
+            } else if class.is_interface {
+                IrClassifierKind::Interface
+            } else {
+                IrClassifierKind::Class
+            });
+        }
+        self.referenced_module_classifiers
+            .get(&classifier)
+            .map(|classifier| classifier.kind)
+    }
 }

@@ -117,8 +117,17 @@ private fun <T> checkTypeEquality(
 /// ordinary Kotlin declarations, not compiler intrinsics; keeping the expansion here makes the gate,
 /// focused corpus helpers, and survey compile the same source program.
 pub fn prepare_test_source(src: &str) -> String {
+    // kotlinc inserts `@JvmInline` for this placeholder only while `FullValueClasses` is off.
+    // With the feature, the placeholder is empty so the class is a boxed `value class`, the same
+    // shape as an unannotated `value class` written beside it.
+    let inline_annotation =
+        if crate::features::LangFeatures::from_source(src).has("FullValueClasses") {
+            ""
+        } else {
+            "@JvmInline"
+        };
     let mut prepared = src
-        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline")
+        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", inline_annotation)
         .replace("BACKEND_UNDER_TEST", "\"JVM_IR\"");
     if directive(src, "CHECK_TYPE_WITH_EXACT") {
         prepared.push_str(EXACT_TYPE_HELPER);
@@ -901,6 +910,20 @@ mod tests {
         );
         assert!(prepared.contains("private fun <T> checkExactType"));
         assert!(prepared.contains("value: @kotlin.internal.Exact T"));
+    }
+
+    #[test]
+    fn full_value_classes_drops_the_optional_jvm_inline_placeholder() {
+        let with_feature = prepare_test_source(
+            "// LANGUAGE: +MultiPlatformProjects, +FullValueClasses\nOPTIONAL_JVM_INLINE_ANNOTATION\nvalue class A(val x: Int)\n",
+        );
+        assert!(!with_feature.contains("@JvmInline"));
+        assert!(!with_feature.contains("OPTIONAL_JVM_INLINE_ANNOTATION"));
+        assert!(with_feature.contains("value class A"));
+        let without_feature =
+            prepare_test_source("OPTIONAL_JVM_INLINE_ANNOTATION\nvalue class A(val x: Int)\n");
+        assert!(without_feature.starts_with("@JvmInline\n"));
+        assert!(!without_feature.contains("OPTIONAL_JVM_INLINE_ANNOTATION"));
     }
 
     #[test]

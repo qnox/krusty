@@ -411,7 +411,7 @@ pub(super) fn build_class_metadata_with_facts(
                     return_value_status: property.return_value_status,
                     spellings: ir
                         .prop_declared_spellings
-                        .get(&(c.fq_name_id(), property.name.clone()))
+                        .get(&(c.fq_name_id(), property.source_order))
                         .cloned()
                         .unwrap_or_default(),
                     name: property.name.clone(),
@@ -582,7 +582,7 @@ pub(super) fn build_class_metadata_with_facts(
             return_value_status: Default::default(),
             spellings: ir
                 .prop_declared_spellings
-                .get(&(c.fq_name_id(), ext.name.clone()))
+                .get(&(c.fq_name_id(), ext.source_order))
                 .cloned()
                 .unwrap_or_default(),
             name: ext.name.clone(),

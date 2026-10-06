@@ -823,6 +823,8 @@ mod extension_default_stub_e2e;
 mod extension_delegate_fields_e2e;
 #[path = "extension_fun_e2e.rs"]
 mod extension_fun_e2e;
+#[path = "extension_function_value_receiver_e2e.rs"]
+mod extension_function_value_receiver_e2e;
 #[path = "extension_property_e2e.rs"]
 mod extension_property_e2e;
 #[path = "extension_receiver_property_smartcast_e2e.rs"]
@@ -923,6 +925,8 @@ mod front_end_errors_e2e;
 mod front_end_errors_more_e2e;
 #[path = "full_form_destructuring_e2e.rs"]
 mod full_form_destructuring_e2e;
+#[path = "full_value_classes_e2e.rs"]
+mod full_value_classes_e2e;
 #[path = "fun_interface_constructor_reference_e2e.rs"]
 mod fun_interface_constructor_reference_e2e;
 #[path = "fun_interface_value_class_e2e.rs"]
@@ -1049,6 +1053,8 @@ mod inheritance_e2e;
 mod inherited_interface_default_e2e;
 #[path = "inherited_member_owner_e2e.rs"]
 mod inherited_member_owner_e2e;
+#[path = "inherited_property_reference_e2e.rs"]
+mod inherited_property_reference_e2e;
 #[path = "inherited_reference_owner_e2e.rs"]
 mod inherited_reference_owner_e2e;
 #[path = "init_block_lines_e2e.rs"]
@@ -1641,6 +1647,8 @@ mod named_arg_member_e2e;
 mod named_arg_source_order_e2e;
 #[path = "named_args_classpath_e2e.rs"]
 mod named_args_classpath_e2e;
+#[path = "named_argument_operands_e2e.rs"]
+mod named_argument_operands_e2e;
 #[path = "named_ctor_args_e2e.rs"]
 mod named_ctor_args_e2e;
 #[path = "named_super_arg_e2e.rs"]
@@ -1899,6 +1907,8 @@ mod redundant_checkcasts_before_aastore_e2e;
 mod redundant_null_check_e2e;
 #[path = "redundant_null_jumps_e2e.rs"]
 mod redundant_null_jumps_e2e;
+#[path = "reference_consumer_casts_e2e.rs"]
+mod reference_consumer_casts_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]
 mod renamed_builtin_bridge_owner_e2e;
 #[path = "renamed_builtin_property_null_check_e2e.rs"]
@@ -2519,6 +2529,8 @@ mod try_catch_expr_nullable_merge_e2e;
 mod try_expected_type_join_e2e;
 #[path = "type_annotation_newline_e2e.rs"]
 mod type_annotation_newline_e2e;
+#[path = "type_argument_serializer_e2e.rs"]
+mod type_argument_serializer_e2e;
 #[path = "type_of_e2e.rs"]
 mod type_of_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
@@ -2541,6 +2553,8 @@ mod typealias_emission_e2e;
 mod typealias_function_type_e2e;
 #[path = "typealias_generic_target_e2e.rs"]
 mod typealias_generic_target_e2e;
+#[path = "typealias_projection_e2e.rs"]
+mod typealias_projection_e2e;
 #[path = "typeparam_cast_e2e.rs"]
 mod typeparam_cast_e2e;
 #[path = "unimported_cross_package_type_e2e.rs"]

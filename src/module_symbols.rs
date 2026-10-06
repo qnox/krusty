@@ -231,6 +231,7 @@ impl<'a> ModuleSymbols<'a> {
                 Ty::Unit,
                 String::new(),
             );
+            constructor.set_is_primary_constructor(true);
             let param_names = c
                 .ctor_param_names
                 .iter()
@@ -1695,6 +1696,7 @@ mod tests {
             nullable_tparam_props: HashMap::new(),
             generic_property_shapes: HashMap::new(),
             value_field: None,
+            full_value: false,
             generic_methods: HashMap::new(),
         }
     }

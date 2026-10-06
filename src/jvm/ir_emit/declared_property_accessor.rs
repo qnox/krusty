@@ -49,7 +49,7 @@ pub(super) fn emit(
         })
         .or(field.type_param.as_deref());
     let signatures = property_jvm_signatures(formatter, &field.ty, type_parameter);
-    let field_jt = jvm_declared_ty(&field.ty);
+    let field_jt = jvm_value_ty(&field.ty);
     let field_desc = type_descriptor(field_jt);
     let accessor_jt = declared_property_accessor_jvm(ir, property, field);
     let accessor_desc = type_descriptor(accessor_jt);
@@ -226,11 +226,12 @@ pub(super) fn declared_property_accessor_jvm(
     property: &crate::ir::IrProperty,
     field: &crate::ir::IrField,
 ) -> Ty {
-    if property.getter_jvm_name.is_some() {
-        jvm_declared_ty(&field.ty)
+    let semantic = if property.getter_jvm_name.is_some() {
+        field.ty
     } else {
-        jvm_declared_ty(&stored_value_ty(property.ty))
-    }
+        stored_value_ty(property.ty)
+    };
+    jvm_value_ty(&semantic)
 }
 
 /// Adapt the physical backing-field value already on the stack to the property's declared return.

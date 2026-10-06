@@ -1,7 +1,7 @@
 //! JVM realization of checked instance-field writes.
 
 use super::{
-    emit_num_conv, instance_field_jvm_name, jvm_declared_ty, slot_words, static_storage,
+    emit_num_conv, instance_field_jvm_name, jvm_value_ty, slot_words, static_storage,
     type_descriptor, Emitter,
 };
 use crate::ir::{ClassId, IrBinOp, IrExpr};
@@ -85,7 +85,7 @@ impl Emitter<'_> {
         let class_decl = &self.ir.classes[class as usize];
         let field = &class_decl.fields[index as usize];
         let name = instance_field_jvm_name(self.ir, class_decl, field);
-        let field_ty = jvm_declared_ty(&field.ty);
+        let field_ty = jvm_value_ty(&field.ty);
         let owner = class_decl.fq_name();
         if static_storage(self.ir, class_decl) {
             self.emit_static_storage_field(receiver, value, &owner, &name, field_ty, code);
@@ -204,7 +204,7 @@ impl Emitter<'_> {
         };
         let class_decl = &self.ir.classes[class as usize];
         let field = &class_decl.fields[index as usize];
-        let field_ty = jvm_declared_ty(&field.ty);
+        let field_ty = jvm_value_ty(&field.ty);
         if field_ty != Ty::Int || self.emits_control_flow(rhs) || self.must_spill_across(rhs) {
             return false;
         }
