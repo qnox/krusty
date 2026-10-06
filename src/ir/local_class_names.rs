@@ -1554,6 +1554,7 @@ impl super::IrFile {
         let mut pending = closure.iter().copied().collect::<Vec<_>>();
         let mut local_clones = HashMap::new();
         let mut new_detached = Vec::new();
+        let mut reachable_implementations = HashSet::new();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
@@ -1591,6 +1592,7 @@ impl super::IrFile {
                 if let IrExpr::Lambda { impl_fn: slot, .. } = &mut self.exprs[expression as usize] {
                     *slot = impl_fn;
                 }
+                reachable_implementations.insert(impl_fn);
                 if let Some(body) = self.functions[impl_fn as usize].body {
                     pending.push(body);
                 }
@@ -1602,7 +1604,7 @@ impl super::IrFile {
             pending.extend(children);
         }
 
-        let owned = self
+        let mut owned = self
             .functions
             .iter()
             .enumerate()
@@ -1613,6 +1615,13 @@ impl super::IrFile {
                     .then_some(index as FunId)
             })
             .collect::<Vec<_>>();
+        // Common inline lowering can consume an implementation body before an enclosing
+        // anonymous class is copied. Its signature still belongs to this reachable copy: a
+        // bodyless static helper may take the anonymous object as a capture parameter, and leaving
+        // that parameter on the declaration class makes the copied call site unverifiable.
+        owned.extend(reachable_implementations);
+        owned.sort_unstable();
+        owned.dedup();
         for function in owned {
             remap_owned_function(self, function, names);
         }
@@ -2203,12 +2212,11 @@ mod tests {
         let target = crate::types::type_name("sample/Target");
         let names = HashMap::from([(source, target)]);
         let mut ir = super::super::IrFile::default();
-        let body = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
         let implementation = ir.add_fun(IrFunction {
             name: "invoke".to_string(),
-            params: Vec::new(),
-            ret: Ty::Int,
-            body: Some(body),
+            params: vec![Ty::obj_name(source)],
+            ret: Ty::obj_name(source),
+            body: None,
             is_static: true,
             dispatch_receiver: None,
             param_checks: Vec::new(),
@@ -2244,5 +2252,13 @@ mod tests {
         assert!(ir.must_inline_lambdas.contains(&implementation));
         assert!(!ir.inline_only_fns.contains(&detached[0].target));
         assert!(!ir.must_inline_lambdas.contains(&detached[0].target));
+        assert_eq!(
+            ir.functions[detached[0].target as usize].params,
+            vec![Ty::obj_name(target)]
+        );
+        assert_eq!(
+            ir.functions[detached[0].target as usize].ret,
+            Ty::obj_name(target)
+        );
     }
 }
