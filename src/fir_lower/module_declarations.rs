@@ -324,6 +324,7 @@ fn publish_classifier(
         IrModuleClassifier {
             singleton: header.flags.has(DeclarationFlags::SINGLETON),
             companion_owner,
+            kind: classifier_kind(header.flags),
         },
     );
     Ok(())
@@ -381,9 +382,23 @@ pub(super) fn publish_referenced(
                 properties.insert(*target);
             }
             IrExpr::Checked(IrCheckedOperation::PropertyReference { target, .. }) => match target {
-                FirPropertyReferenceTarget::Module(property)
-                | FirPropertyReferenceTarget::SpecializedModule { property, .. } => {
+                FirPropertyReferenceTarget::Module(property) => {
                     properties.insert(*property);
+                }
+                FirPropertyReferenceTarget::SpecializedModule {
+                    property,
+                    reflection_owner,
+                    ..
+                } => {
+                    properties.insert(*property);
+                    // The classifier the reference was written on may be a subtype of the
+                    // declaring class, and it may live in another file. Realization names the
+                    // member on that classifier.
+                    if let Some(class) = *reflection_owner {
+                        if index.classifier_declaration(class).is_some() {
+                            classifiers.insert(class);
+                        }
+                    }
                 }
                 FirPropertyReferenceTarget::Classifier { .. }
                 | FirPropertyReferenceTarget::External { .. } => {}

@@ -61,6 +61,10 @@ pub enum FirPropertyReferenceTarget {
     /// a symbolic declaration signature.
     SpecializedModule {
         property: PropertyId,
+        /// Exact classifier the reference was written on for an instance member. This is selected
+        /// with the property and controls reflection substitution; a backend must not reconstruct
+        /// it from the specialized receiver type or the declaring accessor owner.
+        reflection_owner: Option<TypeName>,
         /// Accessor declaration spellings carried by the provider-selected property candidate.
         /// These are declaration facts, not names reconstructed from the property spelling by a
         /// later backend pass.
