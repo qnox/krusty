@@ -37193,6 +37193,16 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             c.type_ref_ty(scope, reference);
         }
     }
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
+        plugin_expression_planning::plan_plugin_expressions(
+            &mut c,
+            plugin_expression_annotations::ClassifierAnnotationInputs {
+                resolved_index,
+                pass_one_symbols: syms.pass_one_symbols(),
+                libraries: syms.libraries(),
+            },
+        );
+    }
     let Checker {
         expr_types,
         callable_reference_types,
@@ -37507,7 +37517,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             .copied()
             .collect(),
     );
-    let mut info = TypeInfo {
+    let info = TypeInfo {
         expr_types,
         callable_reference_types,
         reflective_callable_references,
@@ -37582,18 +37592,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_property_reference_type,
         context_args,
     };
-    if !capture_discovery && !fragment.publishes_annotation_metadata() {
-        plugin_expression_planning::plan_plugin_expressions(
-            file,
-            &mut info,
-            syms.native_plugins(),
-            plugin_expression_annotations::ClassifierAnnotationInputs {
-                resolved_index,
-                pass_one_symbols: syms.pass_one_symbols(),
-                libraries: syms.libraries(),
-            },
-        );
-    }
     info
 }
 

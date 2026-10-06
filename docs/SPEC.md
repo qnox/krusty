@@ -9227,6 +9227,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class.
   Tests: `tests/serialization_class_serial_name_e2e.rs` (the JSON and every descriptor's
   `serialName` under both compilers, and the string constants each generated class loads).
+- **`element<T>()` takes T's serializer the way kotlinc's `serializer<T>()` intrinsic does.** The
+  intrinsic's fast path comes first: when T's companion (or T itself, as a `@Serializable object`)
+  declares the accessor `serializer(KSerializer<T1>, …): KSerializer<T<T1, …>>`, it calls that
+  accessor with an intrinsic serializer per type argument — `JsonElement.Companion.serializer()`,
+  never the `JsonElementSerializer` its `@Serializable(with = …)` names, and
+  `Twig.Companion.serializer()` rather than `Twig$$serializer.INSTANCE`. Only a type without the
+  accessor takes the general lookup (a builtin, a constructed `ArrayListSerializer` over intrinsic
+  operands); a nullable T wraps the result in `.nullable`.
+  The accessor is SELECTED in the frontend through the ordinary checked-member-call operation:
+  the plugin supplies the classifier, name, argument types and expected result, and receives only
+  the resolver's final call (stable declaration, singleton receiver, specialized signature,
+  substitutions, argument mapping, access and inline/suspend facts). It never sees a candidate
+  list. Inherited members therefore participate normally, while an inaccessible exact-shape member
+  is not published to the plan. The plan carries that complete selection as a synthesized call
+  that lowers to the exact module or dependency declaration on its selected singleton receiver.
+  A same-name, same-arity function whose `KSerializer` type arguments differ (a
+  non-`@Serializable` class's `serializer(): KSerializer<String>`) is never selected; kotlinc's own
+  check reads only the outer `KSerializer` and would call it, krusty refuses the element instead.
+  A plugin-generated companion is published as the singleton it is, so a call on it realizes to
+  its `Companion` field.
+  Known gap: a builtin serializer passed as an operand (`List<String?>`) still gets the
+  `checkcast KSerializer` the backend's reference coercion inserts; the intrinsic writes none.
+  Tests: `tests/descriptor_element_companion_serializer_e2e.rs` (a repository-owned dependency
+  class and `JsonElement`, each element's serializer row for row against the reference compiler
+  and the resulting descriptors under both; a sibling-file class; inherited, inaccessible and
+  lookalike dependency accessors), `tests/descriptor_element_specialization_e2e.rs`, and the
+  selection unit tests in `src/plugins/serialization/intrinsic_serializer.rs`.
 - **A property's `@Serializable(with = X::class)` decodes through `X`, as it encodes through it.**
   `serialize` and `childSerializers` consult the property's explicit serializer ahead of its type;
   `deserialize` did not. A property whose type has no derivable serializer made the whole
