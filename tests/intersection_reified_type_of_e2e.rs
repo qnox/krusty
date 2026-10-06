@@ -45,6 +45,10 @@ class D : P, Q
 open class Base
 class L : Base()
 class R : Base()
+open class Common { fun common(): String = "common" }
+interface Shared { fun shared(): String }
+class Left : Common(), Shared { override fun shared(): String = "left" }
+class Right : Common(), Shared { override fun shared(): String = "right" }
 
 fun <T> sel(a: T, b: T) = a
 inline fun <reified T> T.valueTypeOf() = typeOf<T>()
@@ -64,6 +68,8 @@ fun box(): String {
     if (value.valueTypeOf() != typeOf<Any>()) return "any:${value.valueTypeOf()}"
     if (sel(Inv(C()), Inv(D())).v.valueTypeOf() != typeOf<Z>()) return "z:${sel(Inv(C()), Inv(D())).v.valueTypeOf()}"
     if (sel(Inv(L()), Inv(R())).v.valueTypeOf() != typeOf<Base>()) return "base"
+    val classAndInterface = sel(Inv(Left()), Inv(Right())).v
+    if (classAndInterface.common() != "common" || classAndInterface.shared() != "left") return "class-and-interface"
     return "OK"
 }
 "#,

@@ -170,23 +170,6 @@ impl<'a> CommonSupertypeSolver<'a> {
                 most_specific.push(candidate);
             }
         }
-        let any = crate::types::wk::any();
-        let concrete_classes = most_specific
-            .iter()
-            .copied()
-            .filter(|candidate| {
-                candidate.obj_internal().is_some_and(|owner| {
-                    owner != any
-                        && self
-                            .source
-                            .classifier(owner)
-                            .is_some_and(|classifier| !classifier.is_interface())
-                })
-            })
-            .collect::<Vec<_>>();
-        if !concrete_classes.is_empty() {
-            most_specific = concrete_classes;
-        }
         match most_specific.as_slice() {
             [] => Ty::obj("kotlin/Any"),
             [one] => *one,
@@ -243,7 +226,7 @@ impl<'a> CommonSupertypeSolver<'a> {
         let arguments = types
             .iter()
             .map(|ty| match ty {
-                Ty::Obj(_, arguments) => arguments.as_ref(),
+                Ty::Obj(_, arguments) => arguments,
                 _ => &[][..],
             })
             .collect::<Vec<_>>();
