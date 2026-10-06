@@ -229,6 +229,7 @@ fn expansion_ordinal(
     let mut orders = Vec::new();
     for (function, specialization) in &ir.specialized_functions {
         if specialization.parent.is_some()
+            || !super::method_access::lambda_impl_uses_class_strategy(ir, *function, modes)
             || specialization.inline_callee_source_name != callee
             || specialization_location(ir, specialization, facade, modes).as_ref() != Some(location)
         {
