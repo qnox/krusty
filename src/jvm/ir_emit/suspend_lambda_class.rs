@@ -59,7 +59,7 @@ impl Shape {
             Field {
                 name: field.name.clone(),
                 descriptor: ir_type_desc(&field.ty),
-                ty: jvm_declared_ty(&field.ty),
+                ty: jvm_value_ty(&field.ty),
                 private: field.is_private(),
             }
         };

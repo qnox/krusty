@@ -91,9 +91,11 @@ impl Emitter<'_> {
             code.aload(0);
             load(param_tys[param_i], param_slot, code);
             let physical_name = instance_field_jvm_name(self.ir, class, field);
-            let field_ref = self
-                .cw
-                .fieldref(owner, &physical_name, &type_descriptor(field.ty));
+            let field_ref = self.cw.fieldref(
+                owner,
+                &physical_name,
+                &type_descriptor(jvm_value_ty(&field.ty)),
+            );
             code.putfield(field_ref, slot_words(field.ty) as i32);
             // A local class's captured values are stored without a line; its first line is what
             // follows them: an inner class's enclosing-instance store, else the delegation.

@@ -878,7 +878,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             flags.has(crate::fir::DeclarationFlags::ENUM)
                         });
                     let classifier_is_value = classifier_declaration_flags
-                        .map_or(c.is_value, |flags| {
+                        .map_or(c.is_value && c.value_modifier_span.is_none(), |flags| {
                             flags.has(crate::fir::DeclarationFlags::VALUE)
                         });
                     let classifier_is_annotation = classifier_declaration_flags.map_or_else(
@@ -1226,6 +1226,31 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         i as u32,
                         &mut table.resolved_annotations,
                     );
+                    // Decide representation only after this declaration's annotations have been
+                    // bound in its lexical classifier scope. Reading the occurrence table before
+                    // this point misclassifies every `@JvmInline value class` as an unannotated
+                    // full-value declaration.
+                    let has_jvm_inline = c.annotations.iter().any(|annotation| {
+                        table
+                            .resolved_annotation(i as u32, annotation)
+                            .is_some_and(|name| name == type_name("kotlin/jvm/JvmInline"))
+                    });
+                    let wrote_value_keyword = c.value_modifier_span.is_some();
+                    let full_value =
+                        wrote_value_keyword && !has_jvm_inline && file.full_value_classes;
+                    let unboxed_value_class = if wrote_value_keyword {
+                        has_jvm_inline
+                    } else {
+                        classifier_is_value
+                    };
+                    if wrote_value_keyword && !has_jvm_inline && !file.full_value_classes {
+                        if let Some(span) = c.value_modifier_span {
+                            diags.error(
+                                span,
+                                "value classes without '@JvmInline' annotation are not yet supported.",
+                            );
+                        }
+                    }
                     // JVM erasure of every type parameter in scope: the enclosing declarations'
                     // (outer/local) first, then this class's own. A declared reference bound erases to
                     // the bound (`<T : Cargo>` → `Lapp/Cargo;`) — the class counterpart of what the
@@ -2627,7 +2652,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     }
                     // Kotlin's generated object overrides are ordinary declarations with a written
                     // member's stable identity and callable shape; common IR owns their bodies.
-                    if classifier_is_data {
+                    // An abstract or sealed value class does not declare the trio. Advertising a
+                    // final `toString` there would hide the final subclass's own members.
+                    if classifier_is_data || (full_value && classifier_flags.has(ClassFlags::FINAL))
+                    {
                         for (name, params, ret) in [
                             ("toString", Vec::new(), Ty::String),
                             ("hashCode", Vec::new(), Ty::Int),
@@ -3317,8 +3345,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             outer,
                         )
                     });
-                    // A `value class` is represented unboxed as its sole property's type.
-                    let value_field = if classifier_is_value {
+                    // A `@JvmInline` value class is represented unboxed as its sole property's type.
+                    // A boxed `value class` keeps its fields.
+                    let value_field = if unboxed_value_class {
                         props.first().map(|(n, t, _)| (n.clone(), *t))
                     } else {
                         None
@@ -3450,6 +3479,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             nullable_tparam_props,
                             generic_property_shapes,
                             value_field,
+                            full_value,
                             generic_methods,
                         },
                     );
@@ -3529,6 +3559,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     nullable_tparam_props: HashMap::new(),
                                     generic_property_shapes: HashMap::new(),
                                     value_field: None,
+                                    full_value: false,
                                     generic_methods: HashMap::new(),
                                 },
                             );

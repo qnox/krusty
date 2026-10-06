@@ -1,7 +1,7 @@
 //! JVM realization of checked instance-field reads.
 
 use super::{
-    instance_field_jvm_name, jvm_declared_ty, slot_words, static_accessors, static_storage,
+    instance_field_jvm_name, jvm_value_ty, slot_words, static_accessors, static_storage,
     type_descriptor, Emitter,
 };
 use crate::ir::{ClassId, IrExpr};
@@ -19,7 +19,7 @@ impl Emitter<'_> {
         let field = &class_decl.fields[index as usize];
         let source_name = field.name.clone();
         let name = instance_field_jvm_name(self.ir, class_decl, field);
-        let field_ty = jvm_declared_ty(&field.ty);
+        let field_ty = jvm_value_ty(&field.ty);
         let owner = class_decl.fq_name();
         let is_lateinit = field.is_lateinit();
         if let Some(method) = static_accessors::cross_class_backing_field_method(

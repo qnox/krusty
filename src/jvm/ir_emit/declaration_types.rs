@@ -7,7 +7,9 @@
 use super::*;
 
 pub(crate) use crate::jvm::method_descriptors::jvm_tys;
-pub(in crate::jvm) use crate::jvm::method_descriptors::{ir_method_desc, jvm_declared_ty};
+pub(in crate::jvm) use crate::jvm::method_descriptors::{
+    ir_method_desc, jvm_declared_ty, jvm_value_ty,
+};
 
 pub(super) fn jvm_function_params(ir: &IrFile, function: crate::ir::FunId) -> Vec<Ty> {
     let mut parameters = jvm_tys(&ir.functions[function as usize].params);
@@ -63,18 +65,18 @@ pub(super) fn ir_type_desc(ty: &Ty) -> String {
 }
 
 pub(super) fn local_variable_desc(ty: Ty) -> String {
-    type_descriptor(if ty == Ty::Unit {
-        Ty::obj("kotlin/Unit")
+    // A local is a value slot. `void` is only a method result, so a type that erases to `Unit`
+    // — the type itself, or a parameter bounded by it — is the `kotlin.Unit` singleton here.
+    let descriptor = type_descriptor(ty);
+    if descriptor == "V" {
+        type_descriptor(Ty::obj("kotlin/Unit"))
     } else {
-        ty
-    })
+        descriptor
+    }
 }
 
 pub(super) fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {
-    fields
-        .iter()
-        .map(|field| jvm_declared_ty(&field.ty))
-        .collect()
+    fields.iter().map(|field| jvm_value_ty(&field.ty)).collect()
 }
 
 pub(in crate::jvm) fn class_ctor_jvm_tys(class: &IrClass) -> Vec<Ty> {

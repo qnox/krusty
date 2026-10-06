@@ -160,6 +160,7 @@ fun box(): String {
     (
         "FunctionValueInvokeValueClass",
         r#"
+@JvmInline
 value class Value(val value: String)
 fun take(value: Value): String = value.value
 fun box(): String {
@@ -191,6 +192,7 @@ fun box(): String {
     (
         "ValueClassLetCallableRef",
         r#"// WITH_STDLIB
+@JvmInline
 value class Value(val value: String)
 object Sink {
     var result: String = "FAIL"

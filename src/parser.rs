@@ -161,6 +161,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         init_order: Vec::new(),
         is_data: false,
         is_value: false,
+        value_modifier_span: None,
         kind: ClassKind::Class,
         singleton: false,
         enum_entries: Vec::new(),
@@ -915,6 +916,9 @@ struct Parser<'a> {
     /// Saved/restored at every nested block boundary so syntax context, not a lambda-only special
     /// case, owns the decision.
     block_trailing_is_value: bool,
+    /// Span of a `value` modifier consumed by the most recent declaration prefix. Class registration
+    /// takes it before the class body is parsed, so a nested `value class` cannot overwrite it.
+    value_modifier_span: Option<Span>,
     /// Type parameters visible to hoisted anonymous classifiers in the current parser context.
     lexical_type_parameters: LexicalTypeParameters,
     /// Simple names of annotations consumed by the most recent `skip_decl_prefix`, awaiting attachment
@@ -1054,6 +1058,7 @@ impl<'a> Parser<'a> {
             when_guards: features.has("WhenGuards"),
             no_trailing_lambda: false,
             block_trailing_is_value: false,
+            value_modifier_span: None,
             lexical_type_parameters: LexicalTypeParameters::default(),
             pending_annotations: Vec::new(),
             pending_annotation_args: Vec::new(),
@@ -1467,9 +1472,11 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::KwClass => {
                     let is_value = mods.iter().any(|m| m == "inline" || m == "value");
+                    let value_modifier_span = self.take_value_modifier_span(&mods);
                     let mut d = self.parse_class();
                     d.modality = modality_from_modifiers(&mods);
                     d.is_value = is_value;
+                    d.value_modifier_span = value_modifier_span;
                     self.register_top_level_classifier(d, &mods, decls_before);
                 }
                 // top-level property: `val`/`var name (: Type)? = init`
@@ -2345,6 +2352,7 @@ impl<'a> Parser<'a> {
             singleton: true,
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
@@ -2731,6 +2739,7 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             kind: ClassKind::Enum,
             singleton: false,
             enum_entries: entries,
@@ -3110,6 +3119,7 @@ impl<'a> Parser<'a> {
         modifiers: &[String],
         enclosing_instance_exists: bool,
     ) -> bool {
+        let value_modifier_span = self.take_value_modifier_span(modifiers);
         let is_inner = modifiers.iter().any(|modifier| modifier == "inner");
         // Only an `inner class` has the containing instance and therefore the containing class's
         // type parameters in scope. All other nested classifier kinds are static lexical boundaries.
@@ -3213,6 +3223,7 @@ impl<'a> Parser<'a> {
             nested.is_value = modifiers
                 .iter()
                 .any(|modifier| modifier == "inline" || modifier == "value");
+            nested.value_modifier_span = value_modifier_span;
         }
         if is_inner && supports_inner {
             nested.inner_of = Some(outer.to_string());
@@ -3481,6 +3492,7 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3833,6 +3845,7 @@ impl<'a> Parser<'a> {
             init_order: Vec::new(),
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             kind: ClassKind::Interface,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3945,6 +3958,7 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -4079,6 +4093,7 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             kind: ClassKind::Class,
             singleton: true,
             enum_entries: Vec::new(),

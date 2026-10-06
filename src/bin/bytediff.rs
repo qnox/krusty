@@ -167,7 +167,7 @@ fn main() {
             break;
         }
         let src = std::fs::read_to_string(f).unwrap_or_default();
-        let src = src.replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
+        let src = krusty::conformance::prepare_test_source(&src);
         if src.contains("// FILE:")
             || src.contains("// MODULE:")
             || !src.contains("fun box()")

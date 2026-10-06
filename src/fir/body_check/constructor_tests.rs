@@ -96,7 +96,7 @@ fn source_constructor_accepts_suspend_callable_value_through_sam_parameter() {
 #[test]
 fn source_classifier_shadows_same_named_builtin_array_constructor() {
     let (body, index) = checked_function_body(
-        "value class UIntArray(private val storage: IntArray) {\n\
+        "class UIntArray(private val storage: IntArray) {\n\
              val size get() = storage.size\n\
          }\n\
          fun make(): UIntArray = UIntArray(intArrayOf(1, 2, 3))\n",

@@ -1493,9 +1493,10 @@ fn kotlin_codegen_box_conformance() {
                 let tc0 = std::time::Instant::now();
                 let tr0 = std::time::Instant::now();
                 let src = fs::read_to_string(file).unwrap_or_default();
-                // The Kotlin test runner expands the `OPTIONAL_JVM_INLINE_ANNOTATION` placeholder to
-                // `@JvmInline` (single-field value classes). Mirror that so value-class tests reach the
-                // compiler instead of failing to parse on the bare placeholder identifier.
+                // The Kotlin test runner expands `OPTIONAL_JVM_INLINE_ANNOTATION` to `@JvmInline`
+                // unless `+FullValueClasses` is on, in which case the placeholder is empty. Mirror
+                // that so value-class tests reach the compiler instead of failing to parse on the
+                // bare placeholder identifier.
                 let src = krusty::conformance::prepare_test_source(&src);
                 t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 let __ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
