@@ -1944,6 +1944,9 @@ pub struct File {
     /// `+EagerLambdaAnalysis`: a lambda that does not discriminate applicable candidates by its
     /// shape is analyzed before the most specific candidate is chosen.
     pub eager_lambda_analysis: bool,
+    /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
+    /// parameters whose declared upper bounds contain a cycle.
+    pub recursive_type_of: bool,
     /// Opt-in markers accepted module-wide (`-opt-in`), as dotted fully qualified names.
     pub opted_in_markers: Vec<String>,
 }
