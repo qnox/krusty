@@ -1960,6 +1960,9 @@ pub struct File {
     /// separately from the caller-facing function result. The checked FIR boundary records that
     /// semantic choice so a backend never needs its own language-version switch.
     pub lambda_implementation_uses_inferred_result: bool,
+    /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
+    /// parameters whose declared upper bounds contain a cycle.
+    pub recursive_type_of: bool,
     /// Opt-in markers accepted module-wide (`-opt-in`), as dotted fully qualified names.
     pub opted_in_markers: Vec<String>,
 }

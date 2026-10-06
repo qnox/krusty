@@ -58,6 +58,11 @@ pub enum TypeOfInsn {
     },
     /// `iconst 6; ldc "<argument>"; invokestatic Intrinsics.reifiedOperationMarker`.
     ReifiedMarker(String),
+    /// Pop the `KTypeParameter` into a realization temporary. A recursive bound loads it instead of
+    /// building the parameter again.
+    StoreTemp(u32),
+    /// Push a `KTypeParameter` stored by [`TypeOfInsn::StoreTemp`].
+    LoadTemp(u32),
 }
 
 /// Why a `typeOf` operand has no JVM realization.
@@ -181,17 +186,33 @@ impl<'a> TypeParameters<'a> {
 }
 
 /// Append the realization of `typeOf<ty>()` to `out`.
+///
+/// `recursive_bounds` is kotlinc's `JvmSupportRecursiveTypeOf`. Without it, a non-reified parameter
+/// whose bounds reach itself has no realization. With it, that parameter is stored after
+/// `typeParameter` and every later use, including its own upper bound, loads the stored value.
 pub(super) fn generate(
     ty: Ty,
     parameters: &TypeParameters<'_>,
+    recursive_bounds: bool,
     out: &mut Vec<TypeOfInsn>,
 ) -> Result<(), TypeOfError> {
-    Generator { parameters, out }.type_of(ty, false)
+    Generator {
+        parameters,
+        out,
+        recursive_bounds,
+        stored: HashMap::new(),
+        next_temp: 0,
+    }
+    .type_of(ty, false)
 }
 
 struct Generator<'g, 'a> {
     parameters: &'g TypeParameters<'a>,
     out: &'g mut Vec<TypeOfInsn>,
+    recursive_bounds: bool,
+    /// Type parameters already materialized, by semantic identity, as realization temporaries.
+    stored: HashMap<String, u32>,
+    next_temp: u32,
 }
 
 fn k_type_descriptor(arguments: &[&str]) -> String {
@@ -306,10 +327,22 @@ impl Generator<'_, '_> {
                 self.push(TypeOfInsn::AconstNull);
                 return Ok(());
             }
-            if references_recursive_bound(self.parameters, identity, &mut Vec::new())? {
-                return Err(TypeOfError::RecursiveBound(parameter.name.clone()));
+            if let Some(&temp) = self.stored.get(identity) {
+                self.push(TypeOfInsn::LoadTemp(temp));
+            } else if self.recursive_bounds
+                && parameter_is_self_recursive(self.parameters, identity)
+            {
+                self.materialize_recursive(identity)?;
+                let temp = self.stored[identity];
+                self.push(TypeOfInsn::LoadTemp(temp));
+            } else {
+                if !self.recursive_bounds
+                    && references_recursive_bound(self.parameters, identity, &mut Vec::new())?
+                {
+                    return Err(TypeOfError::RecursiveBound(parameter.name.clone()));
+                }
+                self.type_parameter(parameter, container)?;
             }
-            self.type_parameter(parameter, container)?;
             vec!["Lkotlin/reflect/KClassifier;".to_owned()]
         } else {
             // A nullable primitive is its wrapper class, as kotlinc maps `Int?` to `Integer`.
@@ -375,6 +408,18 @@ impl Generator<'_, '_> {
         parameter: &IrTypeParameter,
         container: Container,
     ) -> Result<(), TypeOfError> {
+        self.type_parameter_header(parameter, container);
+        let bounds = TypeParameters::bounds(parameter);
+        self.push(TypeOfInsn::Dup);
+        let arguments = self.unrolled(&bounds, 2, K_TYPE, |generator, bound| {
+            generator.type_of(bound, true)
+        })?;
+        self.set_upper_bounds(&arguments);
+        Ok(())
+    }
+
+    /// `Reflection.typeParameter`, leaving the new parameter on the stack and not touching its bounds.
+    fn type_parameter_header(&mut self, parameter: &IrTypeParameter, container: Container) {
         self.container(container);
         self.push(TypeOfInsn::LdcString(parameter.name.clone()));
         self.push(TypeOfInsn::GetStatic {
@@ -392,16 +437,35 @@ impl Generator<'_, '_> {
             "(Ljava/lang/Object;Ljava/lang/String;Lkotlin/reflect/KVariance;Z)Lkotlin/reflect/KTypeParameter;"
                 .to_owned(),
         );
-        let bounds = TypeParameters::bounds(parameter);
-        self.push(TypeOfInsn::Dup);
+    }
+
+    /// A parameter whose bounds reach itself cannot be built while those bounds are built. Store it
+    /// first, then describe the bounds, which load the stored parameter wherever they name it.
+    fn materialize_recursive(&mut self, identity: &str) -> Result<(), TypeOfError> {
+        if self.stored.contains_key(identity) {
+            return Ok(());
+        }
+        let (parameter, container) = self.parameters.declaration(identity)?;
+        let parameter = parameter.clone();
+        self.type_parameter_header(&parameter, container);
+        let temp = self.next_temp;
+        self.next_temp += 1;
+        self.push(TypeOfInsn::StoreTemp(temp));
+        self.stored.insert(identity.to_owned(), temp);
+        self.push(TypeOfInsn::LoadTemp(temp));
+        let bounds = TypeParameters::bounds(&parameter);
         let arguments = self.unrolled(&bounds, 2, K_TYPE, |generator, bound| {
             generator.type_of(bound, true)
         })?;
+        self.set_upper_bounds(&arguments);
+        Ok(())
+    }
+
+    fn set_upper_bounds(&mut self, arguments: &[String]) {
         self.reflection(
             "setUpperBounds",
             format!("(Lkotlin/reflect/KTypeParameter;{})V", arguments.concat()),
         );
-        Ok(())
     }
 
     fn container(&mut self, container: Container) {
@@ -534,11 +598,17 @@ fn descriptor_words(descriptor: &str) -> (i32, i32) {
 }
 
 /// Encode a realization into a method body being emitted.
+///
+/// Recursive parameters occupy locals at `local_base` and above. The returned value is the first
+/// slot this realization did not use.
 pub(super) fn encode(
     instructions: &[TypeOfInsn],
     code: &mut super::classfile::CodeBuilder,
     cw: &mut super::classfile::ClassWriter,
-) {
+    local_base: u16,
+) -> u16 {
+    let mut slots = HashMap::<u32, u16>::new();
+    let mut next = local_base;
     for instruction in instructions {
         match instruction {
             TypeOfInsn::LdcClass(class) => code.ldc_class(class, cw),
@@ -595,7 +665,70 @@ pub(super) fn encode(
                 );
                 code.invokestatic(marker, 2, 0);
             }
+            TypeOfInsn::StoreTemp(id) => {
+                let slot = *slots.entry(*id).or_insert_with(|| {
+                    let slot = next;
+                    next += 1;
+                    slot
+                });
+                code.astore(slot);
+            }
+            TypeOfInsn::LoadTemp(id) => {
+                let slot = slots[id];
+                code.aload(slot);
+            }
         }
+    }
+    next
+}
+
+/// Whether walking `identity`'s bounds returns to `identity`, through other parameters when the
+/// cycle is mutual (`T : Comparable<U>`, `U : Comparable<T>`). A parameter that only mentions some
+/// other self-recursive parameter (`U : List<T>` where `T : Comparable<T>`) is not itself recursive:
+/// kotlinc still builds it with `dup` and stores only `T`.
+fn parameter_is_self_recursive(parameters: &TypeParameters<'_>, identity: &str) -> bool {
+    reaches_itself(parameters, identity, identity, &mut Vec::new(), true)
+}
+
+fn reaches_itself(
+    parameters: &TypeParameters<'_>,
+    start: &str,
+    current: &str,
+    seen: &mut Vec<String>,
+    at_start: bool,
+) -> bool {
+    if !at_start && current == start {
+        return true;
+    }
+    if seen.iter().any(|seen| seen == current) {
+        return false;
+    }
+    let Ok((parameter, _)) = parameters.declaration(current) else {
+        return false;
+    };
+    seen.push(current.to_owned());
+    let found = TypeParameters::bounds(parameter)
+        .into_iter()
+        .any(|bound| type_reaches_parameter(parameters, start, bound, seen));
+    seen.pop();
+    found
+}
+
+fn type_reaches_parameter(
+    parameters: &TypeParameters<'_>,
+    start: &str,
+    ty: Ty,
+    seen: &mut Vec<String>,
+) -> bool {
+    match ty.non_null() {
+        Ty::TyParam(identity, _) => reaches_itself(parameters, start, identity, seen, false),
+        Ty::PlatformNullable(inner) | Ty::InProjection(inner) | Ty::OutProjection(inner) => {
+            type_reaches_parameter(parameters, start, *inner, seen)
+        }
+        Ty::StarProjection(_) => false,
+        other => classifier_arguments(other)
+            .into_iter()
+            .any(|argument| type_reaches_parameter(parameters, start, argument, seen)),
     }
 }
 
@@ -651,7 +784,7 @@ mod tests {
         let ir = IrFile::default();
         let parameters = TypeParameters::new(&ir, "AKt");
         let mut out = Vec::new();
-        generate(ty, &parameters, &mut out).expect("describable");
+        generate(ty, &parameters, false, &mut out).expect("describable");
         out
     }
 
@@ -719,7 +852,7 @@ mod tests {
         ir.publish_classifier_roles(&MutableListRole);
         let parameters = TypeParameters::new(&ir, "AKt");
         let mut out = Vec::new();
-        generate(ty, &parameters, &mut out).expect("describable");
+        generate(ty, &parameters, false, &mut out).expect("describable");
         assert_eq!(out[0], TypeOfInsn::LdcClass("java/util/List".to_owned()));
         assert_eq!(
             out.last(),
@@ -760,9 +893,76 @@ mod tests {
             generate(
                 Ty::ty_param("T@nowhere", Ty::obj("kotlin/Any")),
                 &parameters,
+                false,
                 &mut out
             ),
             Err(TypeOfError::UnknownTypeParameter("T@nowhere".to_owned()))
+        );
+    }
+
+    /// `T : Comparable<T>` inside `List<T>` is refused until the recursive-bound flag stores `T`
+    /// and both the bound and the list argument load that same temporary.
+    #[test]
+    fn a_self_recursive_bound_is_stored_once_and_loaded_again() {
+        let mut ir = IrFile::default();
+        ir.functions.push(crate::ir::IrFunction {
+            name: "foo".to_owned(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let bound = Ty::obj_args("kotlin/Comparable", &[parameter]);
+        ir.signatures.insert(
+            0,
+            crate::ir::IrGenericSig {
+                type_params: vec![IrTypeParameter {
+                    name: "T".to_owned(),
+                    semantic_name: "T".to_owned(),
+                    bounds: vec![(bound, false)],
+                    variance: TypeVariance::Invariant,
+                    reified: false,
+                }],
+                params: Vec::new(),
+                ret: Some(Ty::Unit),
+                supers: Vec::new(),
+            },
+        );
+        let list = Ty::obj_args("kotlin/collections/List", &[parameter]);
+        let parameters = TypeParameters::new(&ir, "AKt");
+        let mut refused = Vec::new();
+        assert_eq!(
+            generate(list, &parameters, false, &mut refused),
+            Err(TypeOfError::RecursiveBound("T".to_owned()))
+        );
+        let mut out = Vec::new();
+        generate(list, &parameters, true, &mut out).expect("recursive bound is realized");
+        let store = out
+            .iter()
+            .position(|instruction| matches!(instruction, TypeOfInsn::StoreTemp(0)))
+            .expect("the parameter is stored");
+        let bounds = out
+            .iter()
+            .position(|instruction| {
+                matches!(
+                    instruction,
+                    TypeOfInsn::InvokeStatic {
+                        name: "setUpperBounds",
+                        ..
+                    }
+                )
+            })
+            .expect("upper bounds are set");
+        assert!(store < bounds);
+        assert_eq!(
+            out.iter()
+                .filter(|instruction| matches!(instruction, TypeOfInsn::LoadTemp(0)))
+                .count(),
+            3,
+            "the bound receiver, the bound argument, and the list argument each load T"
         );
     }
 }
