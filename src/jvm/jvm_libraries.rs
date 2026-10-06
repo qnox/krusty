@@ -1661,6 +1661,7 @@ impl JvmLibraries {
                     use crate::libraries::builtin_member_realization as rules;
                     let range = rules::unsigned_range_construction(&facts);
                     let operation = rules::unsigned_member_operation(&facts);
+                    let unsigned_bitwise = rules::unsigned_bitwise_intrinsic(&facts);
                     if let Some(realization) =
                         range.or_else(|| rules::primitive_iterator_next(&facts))
                     {
@@ -1670,6 +1671,12 @@ impl JvmLibraries {
                         unsigned_intrinsics::realize_unsigned_member(
                             element,
                             operation,
+                            &mut member,
+                        );
+                    }
+                    if let Some(intrinsic) = unsigned_bitwise {
+                        unsigned_intrinsics::realize_unsigned_bitwise_member(
+                            intrinsic,
                             &mut member,
                         );
                     }

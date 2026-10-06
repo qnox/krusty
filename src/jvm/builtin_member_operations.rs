@@ -12,7 +12,7 @@ use crate::libraries::builtin_member_realization::{
     primitive_binary_operands, primitive_compare_operand,
 };
 use crate::libraries::{CompilerIntrinsic, PrimitiveBinaryIntrinsic, PrimitiveUnaryIntrinsic};
-use crate::types::{Ty, TypeName};
+use crate::types::Ty;
 
 /// Checked operands of one invocation of a builtin member.
 pub(super) struct BuiltinMemberOperands<'a> {
@@ -95,11 +95,7 @@ pub(super) fn operation(
             let rhs = coerce(ir, *argument, parameter, arithmetic(rhs_ty));
             let value = IrExpr::PrimitiveBinOp { op, lhs, rhs };
             if arithmetic(result) == result {
-                return Some(BuiltinMemberOperation::Value(unsigned_value(
-                    ir,
-                    unsigned_rebuild(receiver_ty, result),
-                    value,
-                )));
+                return Some(BuiltinMemberOperation::Value(value));
             }
             let value = ir.add_expr(value);
             Some(BuiltinMemberOperation::Value(IrExpr::TypeOp {
@@ -161,77 +157,15 @@ fn unary_operation(
             } else {
                 IrConst::Int(-1)
             }));
-            Some(unsigned_value(
-                ir,
-                unsigned_rebuild(receiver_ty, result),
-                IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::BitXor,
-                    lhs: operand,
-                    rhs: all_bits,
-                },
-            ))
+            Some(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::BitXor,
+                lhs: operand,
+                rhs: all_bits,
+            })
         }
         _ => None,
     };
     value.map(BuiltinMemberOperation::Value)
-}
-
-/// The unsigned result of a bitwise intrinsic declared on `kotlin/UInt` or `kotlin/ULong`.
-///
-/// The call that reaches realization often carries only the erased carrier (`Int`/`Long`). The
-/// declaring class is the fact that still names the value class, so the carrier opcode is rebuilt
-/// with that class's `constructor-impl`. A signed owner (`kotlin/Int.inv`) is not rebuilt.
-pub(super) fn unsigned_bitwise_result(owner: TypeName, intrinsic: CompilerIntrinsic) -> Option<Ty> {
-    let unsigned = if owner == crate::types::wk::uint() {
-        Ty::UInt
-    } else if owner == crate::types::wk::ulong() {
-        Ty::ULong
-    } else {
-        return None;
-    };
-    matches!(
-        intrinsic,
-        CompilerIntrinsic::PrimitiveBitAnd
-            | CompilerIntrinsic::PrimitiveBitOr
-            | CompilerIntrinsic::PrimitiveBitXor
-            | CompilerIntrinsic::PrimitiveShiftLeft
-            | CompilerIntrinsic::PrimitiveShiftRight
-            | CompilerIntrinsic::PrimitiveUnsignedShiftRight
-            | CompilerIntrinsic::PrimitiveBitNot
-    )
-    .then_some(unsigned)
-}
-
-/// The unsigned type a bitwise member rebuilds, when the receiver is `UInt` or `ULong` and the
-/// call result is that type or the carrier it has already been erased to. A signed receiver keeps
-/// `result`, so `Int.inv()` stays a bare `ixor`.
-fn unsigned_rebuild(receiver_ty: Ty, result: Ty) -> Ty {
-    match receiver_ty {
-        Ty::UInt if matches!(result, Ty::UInt | Ty::Int) => Ty::UInt,
-        Ty::ULong if matches!(result, Ty::ULong | Ty::Long) => Ty::ULong,
-        _ => result,
-    }
-}
-
-/// `UInt` and `ULong` bitwise results are the carrier opcode plus `constructor-impl`. A signed
-/// primitive result is the opcode alone: `Int.inv()` stays `ixor` with `-1`.
-fn unsigned_value(ir: &mut IrFile, result: Ty, value: IrExpr) -> IrExpr {
-    let (owner, descriptor) = match result {
-        Ty::UInt => ("kotlin/UInt", "(I)I"),
-        Ty::ULong => ("kotlin/ULong", "(J)J"),
-        _ => return value,
-    };
-    let value = ir.add_expr(value);
-    IrExpr::Call {
-        callee: Callee::Static {
-            owner: crate::types::type_name(owner),
-            name: "constructor-impl".to_string(),
-            descriptor: descriptor.to_string(),
-            inline: crate::libraries::InlineKind::None,
-        },
-        dispatch_receiver: None,
-        args: vec![value],
-    }
 }
 
 fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<IrBinOp> {
@@ -340,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unsigned_bitwise_result_is_rebuilt_by_constructor_impl() {
+    fn an_unsigned_bitwise_result_remains_a_semantic_primitive_operation() {
         let mut ir = IrFile::default();
         let receiver = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
         let argument = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
@@ -359,57 +293,12 @@ mod tests {
         .expect("`UInt.shr` is a scalar operation")
         .commit(&mut ir, call);
 
-        let IrExpr::Call {
-            callee:
-                Callee::Static {
-                    owner,
-                    name,
-                    descriptor,
-                    inline,
-                },
-            dispatch_receiver: None,
-            args,
-        } = ir.expr(call)
-        else {
-            panic!("`UInt.shr` rebuilds its carrier with constructor-impl");
-        };
-        assert_eq!(*owner, crate::types::type_name("kotlin/UInt"));
-        assert_eq!(name, "constructor-impl");
-        assert_eq!(descriptor, "(I)I");
-        assert_eq!(*inline, crate::libraries::InlineKind::None);
-        let [value] = args.as_slice() else {
-            panic!("constructor-impl takes the shifted carrier");
-        };
         assert!(matches!(
-            ir.expr(*value),
+            ir.expr(call),
             IrExpr::PrimitiveBinOp {
                 op: IrBinOp::Ushr,
                 ..
             }
-        ));
-
-        // A call site may already have erased the unsigned result to its carrier. The receiver
-        // still names the value class, and the carrier is rebuilt the same way.
-        let erased = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        operation(
-            &mut ir,
-            CompilerIntrinsic::PrimitiveBitAnd,
-            BuiltinMemberOperands {
-                receiver,
-                receiver_ty: Ty::UInt,
-                arguments: &[argument],
-                parameters: &[Ty::Int],
-                result: Ty::Int,
-            },
-        )
-        .expect("`UInt.and` is a scalar operation")
-        .commit(&mut ir, erased);
-        assert!(matches!(
-            ir.expr(erased),
-            IrExpr::Call {
-                callee: Callee::Static { name, descriptor, .. },
-                ..
-            } if name == "constructor-impl" && descriptor == "(I)I"
         ));
 
         let long_receiver = ir.add_expr(IrExpr::Const(IrConst::Long(1)));
@@ -427,23 +316,8 @@ mod tests {
         )
         .expect("`ULong.inv` is a scalar operation")
         .commit(&mut ir, inverted);
-        let IrExpr::Call {
-            callee: Callee::Static {
-                owner, descriptor, ..
-            },
-            args,
-            ..
-        } = ir.expr(inverted)
-        else {
-            panic!("`ULong.inv` rebuilds its carrier with constructor-impl");
-        };
-        assert_eq!(*owner, crate::types::type_name("kotlin/ULong"));
-        assert_eq!(descriptor, "(J)J");
-        let [value] = args.as_slice() else {
-            panic!("constructor-impl takes the inverted carrier");
-        };
         assert!(matches!(
-            ir.expr(*value),
+            ir.expr(inverted),
             IrExpr::PrimitiveBinOp {
                 op: IrBinOp::BitXor,
                 ..

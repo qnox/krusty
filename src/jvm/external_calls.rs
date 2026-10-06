@@ -1,7 +1,7 @@
 use super::classpath::{Classpath, ExternalCallableKind};
 use crate::fir::ExternalCallableId;
 use crate::ir::{Callee, IrCheckedOperation, IrExpr, IrFile};
-use crate::types::InlineParameterModifier;
+use crate::types::{InlineParameterModifier, Ty};
 
 use super::default_call_operands::{DefaultCallOperand, DefaultCallOperands};
 
@@ -412,11 +412,10 @@ pub(super) fn realize(
                     .get(&expression)
                     .copied()
                     .ok_or(target)?;
-                let result = super::builtin_member_operations::unsigned_bitwise_result(
-                    callable.physical_owner,
-                    intrinsic,
-                )
-                .unwrap_or(semantic_ret);
+                // The selected declaration owns the intrinsic's result. A callable-reference
+                // adapter may expose its erased carrier at this call site, but that must not erase
+                // the operation's semantic value-class identity.
+                let result = callable.ret;
                 let operation = super::builtin_member_operations::operation(
                     ir,
                     intrinsic,
@@ -431,6 +430,9 @@ pub(super) fn realize(
                 .ok_or(target)?;
                 ir.ext_call_source_receiver.remove(&expression);
                 operation.commit(ir, expression);
+                if matches!(result.canonical_semantic().non_null(), Ty::UInt | Ty::ULong) {
+                    ir.logical_types.insert(expression, result);
+                }
                 continue;
             }
         }

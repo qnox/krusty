@@ -280,12 +280,6 @@ pub(crate) enum UnsignedMemberOperation {
     Divide,
     Remainder,
     ToString,
-    BitAnd,
-    BitOr,
-    BitXor,
-    ShiftLeft,
-    LogicalShiftRight,
-    Inv,
 }
 
 /// The unsigned value class an [`UnsignedMemberOperation`] is declared on.
@@ -305,11 +299,8 @@ impl UnsignedElement {
 }
 
 /// The unsigned value class and operation of an exact `UInt`/`ULong` declaration:
-/// `compareTo(same): Int`, `div(same): same` and `rem(same): same` as operators, `toString(): String`,
-/// infix `and`/`or`/`xor` of the same unsigned type, infix `shl`/`shr` with an `Int` count, and
-/// `inv()`. `shr` is the logical shift. A property, a mixed-width overload, a `UByte`/`UShort`
-/// member, or a bitwise spelling that is not the infix (or, for `inv`, parameterless) declaration
-/// stays ordinary.
+/// `compareTo(same): Int`, `div(same): same` and `rem(same): same` as operators, and
+/// `toString(): String`. Any other overload, including the mixed-width ones, stays ordinary.
 pub(crate) fn unsigned_member_operation(
     facts: &BuiltinMemberDeclaration<'_>,
 ) -> Option<(UnsignedElement, UnsignedMemberOperation)> {
@@ -321,34 +312,64 @@ pub(crate) fn unsigned_member_operation(
     } else {
         return None;
     };
-    if facts.is_property {
+    let element = class.ty();
+    if facts.is_property || facts.is_infix {
         return None;
     }
-    let element = class.ty();
-    let same = facts.params == [element];
-    let binary = facts.is_operator && !facts.is_infix && same;
+    let binary = facts.is_operator && facts.params == [element];
     let operation = match facts.name {
         "compareTo" if binary && facts.ret == Ty::Int => UnsignedMemberOperation::CompareTo,
         "div" if binary && facts.ret == element => UnsignedMemberOperation::Divide,
         "rem" if binary && facts.ret == element => UnsignedMemberOperation::Remainder,
-        "toString" if !facts.is_infix && facts.params.is_empty() && facts.ret == Ty::String => {
+        "toString" if facts.params.is_empty() && facts.ret == Ty::String => {
             UnsignedMemberOperation::ToString
-        }
-        "and" if facts.is_infix && same && facts.ret == element => UnsignedMemberOperation::BitAnd,
-        "or" if facts.is_infix && same && facts.ret == element => UnsignedMemberOperation::BitOr,
-        "xor" if facts.is_infix && same && facts.ret == element => UnsignedMemberOperation::BitXor,
-        "shl" if facts.is_infix && facts.params == [Ty::Int] && facts.ret == element => {
-            UnsignedMemberOperation::ShiftLeft
-        }
-        "shr" if facts.is_infix && facts.params == [Ty::Int] && facts.ret == element => {
-            UnsignedMemberOperation::LogicalShiftRight
-        }
-        "inv" if !facts.is_infix && facts.params.is_empty() && facts.ret == element => {
-            UnsignedMemberOperation::Inv
         }
         _ => return None,
     };
     Some((class, operation))
+}
+
+/// The primitive operation implemented by one exact unsigned bitwise member signature.
+///
+/// This is deliberately the same declaration-to-intrinsic mapping used for signed builtin
+/// operations: no intermediate semantic role is needed once the provider has the owner, full
+/// parameter list, result and modifiers together. A same-named overload remains an ordinary
+/// stdlib declaration with its own implementation.
+pub(crate) fn unsigned_bitwise_intrinsic(
+    facts: &BuiltinMemberDeclaration<'_>,
+) -> Option<CompilerIntrinsic> {
+    use crate::types::wk;
+    let element = if facts.owner == wk::uint() {
+        Ty::UInt
+    } else if facts.owner == wk::ulong() {
+        Ty::ULong
+    } else {
+        return None;
+    };
+    if facts.is_property || facts.ret != element {
+        return None;
+    }
+    match facts.name {
+        "and" | "or" | "xor" if facts.is_infix && facts.params == [element] => {
+            Some(match facts.name {
+                "and" => CompilerIntrinsic::PrimitiveBitAnd,
+                "or" => CompilerIntrinsic::PrimitiveBitOr,
+                "xor" => CompilerIntrinsic::PrimitiveBitXor,
+                _ => unreachable!(),
+            })
+        }
+        "shl" | "shr" if facts.is_infix && facts.params == [Ty::Int] => {
+            Some(if facts.name == "shl" {
+                CompilerIntrinsic::PrimitiveShiftLeft
+            } else {
+                CompilerIntrinsic::PrimitiveUnsignedShiftRight
+            })
+        }
+        "inv" if !facts.is_infix && facts.params.is_empty() => {
+            Some(CompilerIntrinsic::PrimitiveBitNot)
+        }
+        _ => None,
+    }
 }
 
 fn range_construction(facts: &BuiltinMemberDeclaration<'_>) -> Option<MemberRealization> {
@@ -722,52 +743,49 @@ mod tests {
             None
         );
         assert_eq!(
-            unsigned_member_operation(&BuiltinMemberDeclaration {
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
                 is_operator: false,
                 is_infix: true,
                 ..facts("kotlin/UInt", "and", &[Ty::UInt], Ty::UInt)
             }),
-            Some((UnsignedElement::UInt, UnsignedMemberOperation::BitAnd))
+            Some(CompilerIntrinsic::PrimitiveBitAnd)
         );
         assert_eq!(
-            unsigned_member_operation(&BuiltinMemberDeclaration {
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
                 is_infix: true,
                 ..facts("kotlin/ULong", "shr", &[Ty::Int], Ty::ULong)
             }),
-            Some((
-                UnsignedElement::ULong,
-                UnsignedMemberOperation::LogicalShiftRight
-            ))
+            Some(CompilerIntrinsic::PrimitiveUnsignedShiftRight)
         );
         assert_eq!(
-            unsigned_member_operation(&BuiltinMemberDeclaration {
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
                 is_operator: false,
                 ..facts("kotlin/UInt", "inv", &[], Ty::UInt)
             }),
-            Some((UnsignedElement::UInt, UnsignedMemberOperation::Inv))
+            Some(CompilerIntrinsic::PrimitiveBitNot)
         );
         // A non-infix bitwise spelling, a shift whose count is not `Int`, a foreign unsigned
         // class and a wrong result stay ordinary declarations and therefore keep their inline body.
         assert_eq!(
-            unsigned_member_operation(&facts("kotlin/UInt", "or", &[Ty::UInt], Ty::UInt)),
+            unsigned_bitwise_intrinsic(&facts("kotlin/UInt", "or", &[Ty::UInt], Ty::UInt)),
             None
         );
         assert_eq!(
-            unsigned_member_operation(&BuiltinMemberDeclaration {
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
                 is_infix: true,
                 ..facts("kotlin/UInt", "shl", &[Ty::UInt], Ty::UInt)
             }),
             None
         );
         assert_eq!(
-            unsigned_member_operation(&BuiltinMemberDeclaration {
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
                 is_infix: true,
                 ..facts("kotlin/UByte", "and", &[Ty::UByte], Ty::UByte)
             }),
             None
         );
         assert_eq!(
-            unsigned_member_operation(&BuiltinMemberDeclaration {
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
                 is_infix: true,
                 ..facts("kotlin/UInt", "xor", &[Ty::UInt], Ty::Int)
             }),

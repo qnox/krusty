@@ -161,12 +161,7 @@ impl Emitter<'_> {
             .get(&expression)
             .copied()
             .map(|ty| ty.canonical_semantic().non_null());
-        let (owner, descriptor, words) = match semantic {
-            Some(Ty::UInt) => ("kotlin/UInt", "(I)I", 1),
-            Some(Ty::ULong) => ("kotlin/ULong", "(J)J", 2),
-            _ => return,
-        };
-        let method = self.cw.methodref(owner, "constructor-impl", descriptor);
-        code.invokestatic(method, words, words);
+        let Some(semantic) = semantic else { return };
+        super::value_class_adapters::emit_native_value_class_constructor(self.cw, code, semantic);
     }
 }
