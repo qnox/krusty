@@ -297,7 +297,16 @@ For full-suite performance work, run:
 ```
 
 The final `SLOWEST TEST BINARIES` table is the first profiling signal. Use it before changing tests
-or inventing custom loops.
+or inventing custom loops. A nightly run also prints each test slower than 200ms:
+
+```text
+slow-test: summary count=<n> threshold=200ms
+slow-test: <ms>ms bin=<invocation> test=<module>::<case>
+```
+
+`KRUSTY_SLOW_TEST_MS` changes the threshold. The duration is libtest's `--report-time`. A stable
+compiler rejects that flag, so a stable run keeps the binary table and does not print per-test lines.
+Coverage always builds with the pinned nightly, so its log includes the same lines.
 
 For compiler-only conformance profiling, use:
 

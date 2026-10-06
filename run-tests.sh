@@ -76,6 +76,15 @@ for a in "$@"; do
   esac
 done
 
+# Nightly libtest can print each test's duration. Stable libtest rejects the flag, so a stable run
+# keeps the binary timing table and does not invent per-test numbers.
+KRUSTY_LIBTEST_TIME_ARGS=""
+rustc_release="$(rustc -vV 2>/dev/null | awk -F': ' '/^release:/ { print $2; exit }' || true)"
+case "$rustc_release" in
+  *nightly*) KRUSTY_LIBTEST_TIME_ARGS="-Z unstable-options --report-time --color never" ;;
+esac
+export KRUSTY_LIBTEST_TIME_ARGS
+
 # Filtered/profile-specific runs are single-purpose. They still receive the global deadline: these are
 # exactly the runs used while diagnosing a resolver loop, so letting the focused path hang would make
 # the guard least effective where it matters most. Print the full cargo selection before `exec`; if the
@@ -106,13 +115,40 @@ if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
   # executable lookup, so the deadline now measures the behavior it is intended to bound.
   echo "run-tests.sh: building focused test: cargo test $profile_arg --no-run $*" >&2
   cargo test $profile_arg --no-run "$@"
-  echo "run-tests.sh: focused test execution timeout=${focused_timeout}s: cargo test $profile_arg $*" >&2
-  focused_log="$(mktemp)"
-  trap 'rm -f "$focused_log"' EXIT
+  focused_run_args=("$@")
+  if [ -n "$KRUSTY_LIBTEST_TIME_ARGS" ]; then
+    case " ${focused_run_args[*]} " in
+      *" --report-time "*) ;;
+      *)
+        focused_rebuilt=()
+        focused_has_dd=0
+        for focused_arg in "${focused_run_args[@]}"; do
+          focused_rebuilt+=("$focused_arg")
+          if [ "$focused_arg" = "--" ]; then
+            focused_has_dd=1
+            # shellcheck disable=SC2206
+            focused_rebuilt+=($KRUSTY_LIBTEST_TIME_ARGS)
+          fi
+        done
+        if [ "$focused_has_dd" -eq 0 ]; then
+          # shellcheck disable=SC2206
+          focused_rebuilt+=(-- $KRUSTY_LIBTEST_TIME_ARGS)
+        fi
+        focused_run_args=("${focused_rebuilt[@]}")
+        ;;
+    esac
+  fi
+  echo "run-tests.sh: focused test execution timeout=${focused_timeout}s: cargo test $profile_arg ${focused_run_args[*]}" >&2
+  focused_dir="$(mktemp -d)"
+  focused_log="$focused_dir/focused.log"
+  trap 'rm -rf "$focused_dir"' EXIT
   set +e
-  run_with_deadline "$focused_timeout" cargo test $profile_arg "$@" 2>&1 | tee "$focused_log"
+  run_with_deadline "$focused_timeout" cargo test $profile_arg "${focused_run_args[@]}" 2>&1 | tee "$focused_log"
   focused_status="${PIPESTATUS[0]}"
   set -e
+  if [ -n "$KRUSTY_LIBTEST_TIME_ARGS" ]; then
+    libtest_print_slow_tests "$focused_log"
+  fi
   if [ "$focused_status" -ne 0 ]; then
     exit "$focused_status"
   fi
@@ -279,7 +315,7 @@ run_one() {
   name="$uniq"
   local start end ms
   start="$(epoch_ms)"
-  if run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" "$b" $extra >"$1/$name.log" 2>&1; then
+  if run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" "$b" $extra $KRUSTY_LIBTEST_TIME_ARGS >"$1/$name.log" 2>&1; then
     :
   else
     status=$?
@@ -406,6 +442,14 @@ done < <(printf '%s\n' "${rest[@]}" | grep -v '/e2e-')
 if [ "${#pool_bins[@]}" -gt 0 ]; then
   printf '%s\n' "${pool_bins[@]}" \
     | xargs -P "$jobs" -I{} bash -c 'run_one "$0" "$1::--test-threads='"$threads"'"' "$logdir" {}
+fi
+
+if [ -n "$KRUSTY_LIBTEST_TIME_ARGS" ]; then
+  slow_logs=()
+  while IFS= read -r slow_log; do
+    slow_logs+=("$slow_log")
+  done < <(find "$logdir" -name '*.log' -type f | LC_ALL=C sort)
+  libtest_print_slow_tests "${slow_logs[@]}"
 fi
 
 if [ -f "$logdir/FAILED" ]; then

@@ -129,27 +129,43 @@ echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs, --test-t
 # `--test-threads` is bounded explicitly instead of leaving libtest at nproc. The e2e target is one
 # large binary, so forcing it to 1 serializes almost the entire coverage workload; using a small
 # default preserves full coverage while avoiding the memory pressure seen with unbounded parallelism.
+# `--quiet` hides the per-test duration, so coverage keeps the listing and records tests over the
+# slow threshold before a passing log is deleted.
+record_coverage_slow_tests() {
+  local log="$1" label="$2"
+  [ -n "${KRUSTY_SLOW_TEST_DIR:-}" ] && [ -f "$log" ] || return 0
+  libtest_slow_tests "$log" "${KRUSTY_SLOW_TEST_MS:-200}" | while IFS=$'\t' read -r ms test_name; do
+    printf '%s\t%s\t%s\n' "$ms" "$label" "$test_name"
+  done >"$KRUSTY_SLOW_TEST_DIR/$label.tsv"
+}
+export -f record_coverage_slow_tests
+
 run_coverage_test_binary() {
   local binary="$1" status_root="$2" threads="$3" seconds="$4"
   local name="$(basename "$binary")"
   local result="$status_root/$name"
   mkdir -p "$result"
-  if run_with_deadline "$seconds" "$binary" --quiet --test-threads="$threads" \
-      >"$result/output.log" 2>&1; then
+  local status=0
+  if ! run_with_deadline "$seconds" "$binary" -Z unstable-options --report-time --color never \
+      --test-threads="$threads" >"$result/output.log" 2>&1; then
+    status="$?"
+  fi
+  record_coverage_slow_tests "$result/output.log" "$name"
+  if [ "$status" -eq 0 ]; then
     rm -rf "$result"
     return 0
-  else
-    local status="$?"
   fi
   printf '%s\n' "$status" >"$result/status"
   if [ "$status" -eq 124 ]; then
-    printf 'coverage: TIMEOUT after %ss: %s --quiet --test-threads=%s\n' \
+    printf 'coverage: TIMEOUT after %ss: %s --report-time --test-threads=%s\n' \
       "$seconds" "$binary" "$threads" >>"$result/output.log"
   fi
 }
 export -f run_coverage_test_binary
 
 status_dir="$(mktemp -d)"
+slow_dir="$(mktemp -d)"
+export KRUSTY_SLOW_TEST_DIR="$slow_dir"
 printf '%s\0' "${run[@]}" | xargs -0 -P "$jobs" -I{} \
   bash -c 'run_coverage_test_binary "$@"' _ {} "$status_dir" "$test_threads" "$test_timeout"
 
@@ -179,9 +195,10 @@ if [ -n "$e2e_bin" ]; then
       skip_args+=(--skip "$pattern")
     done <"$plan_dir/skips-$shard"
     echo "coverage: $label: $expected tests" >&2
-    if run_with_deadline "$e2e_timeout" "$e2e_bin" --quiet --test-threads="$test_threads" \
-        "${skip_args[@]}" >"$result/output.log" 2>&1; then
+    if run_with_deadline "$e2e_timeout" "$e2e_bin" -Z unstable-options --report-time --color never \
+        --test-threads="$test_threads" "${skip_args[@]}" >"$result/output.log" 2>&1; then
       selected="$(libtest_selected_tests "$result/output.log" || echo 0)"
+      record_coverage_slow_tests "$result/output.log" "$label"
       if [ "$selected" = "$expected" ]; then
         rm -rf "$result"
       else
@@ -190,6 +207,7 @@ if [ -n "$e2e_bin" ]; then
       fi
     else
       status="$?"
+      record_coverage_slow_tests "$result/output.log" "$label"
       printf '%s\n' "$status" >"$result/status"
       if [ "$status" -eq 124 ]; then
         printf 'coverage: TIMEOUT after %ss: %s\n' "$e2e_timeout" "$label" >>"$result/output.log"
@@ -198,6 +216,13 @@ if [ -n "$e2e_bin" ]; then
   done
   rm -rf "$plan_dir"
 fi
+slow_combined="$(mktemp)"
+if compgen -G "$slow_dir/*.tsv" >/dev/null; then
+  cat "$slow_dir"/*.tsv >"$slow_combined"
+fi
+libtest_print_slow_records "${KRUSTY_SLOW_TEST_MS:-200}" "$slow_combined"
+rm -f "$slow_combined"
+rm -rf "$slow_dir"
 if compgen -G "$status_dir/*" >/dev/null; then
   echo "coverage: FAIL — test binaries reported failures:" >&2
   for result in "$status_dir"/*; do

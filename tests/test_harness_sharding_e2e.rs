@@ -969,3 +969,87 @@ fn a_panicking_caller_releases_its_server_claim() {
     assert_eq!(reused, 0);
     assert_eq!(next_id.load(Ordering::Relaxed), 1);
 }
+
+fn slow_test_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("libtest-shards.sh")
+}
+
+fn run_slow_tests(log: &Path, threshold: &str) -> std::process::Output {
+    Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; libtest_slow_tests \"$2\" \"$3\"",
+            "slow-tests",
+        ])
+        .arg(slow_test_script())
+        .arg(log)
+        .arg(threshold)
+        .output()
+        .expect("list slow tests")
+}
+
+#[test]
+fn slow_tests_are_those_over_the_threshold() {
+    let dir = std::env::temp_dir().join(format!("krusty-slow-tests-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("slow-test fixture dir");
+    let log = dir.join("sample.log");
+    fs::write(
+        &log,
+        "\
+running 5 tests
+test fast::one ... ok <0.001s>
+test boundary::exact ... ok <0.200s>
+test boundary::over ... ok <0.201s>
+test slow::fails ... FAILED <1.500s>
+test slow::skipped ... ignored
+test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.70s
+",
+    )
+    .expect("write sample log");
+
+    let listed = run_slow_tests(&log, "200");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(listed.stdout).expect("utf-8"),
+        "1500\tslow::fails\n201\tboundary::over\n"
+    );
+
+    let shard = dir.join("shard-1-of-2.log");
+    fs::write(&shard, "test other::case ... ok <0.250s>\n").expect("write shard log");
+    let printed = Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; KRUSTY_SLOW_TEST_MS=200 libtest_print_slow_tests \"$2\" \"$3\"",
+            "print-slow-tests",
+        ])
+        .arg(slow_test_script())
+        .arg(&log)
+        .arg(&shard)
+        .output()
+        .expect("print slow tests");
+    assert!(
+        printed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(printed.stdout).expect("utf-8"),
+        "\
+slow-test: summary count=3 threshold=200ms
+slow-test: 1500ms bin=sample test=slow::fails
+slow-test: 250ms bin=shard-1-of-2 test=other::case
+slow-test: 201ms bin=sample test=boundary::over
+"
+    );
+
+    let invalid = run_slow_tests(&log, "200ms");
+    assert_eq!(invalid.status.code(), Some(2));
+    let _ = fs::remove_dir_all(&dir);
+}
