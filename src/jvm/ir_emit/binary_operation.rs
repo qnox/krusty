@@ -125,6 +125,7 @@ impl Emitter<'_> {
                         _ => unreachable!(),
                     },
                 }
+                self.rebuild_unsigned_bitwise_result(expression, code);
             }
             Shl | Shr | Ushr => {
                 self.emit_operands(&[lhs, rhs], code); // shift amount is an `Int`
@@ -143,8 +144,29 @@ impl Emitter<'_> {
                         _ => unreachable!(),
                     },
                 }
+                self.rebuild_unsigned_bitwise_result(expression, code);
             }
             Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe => self.emit_comparison(expression, code),
         }
+    }
+
+    /// `UInt` and `ULong` bitwise and shift results are the carrier opcode plus `constructor-impl`.
+    /// Checked FIR publishes that result as the operation's logical type. A signed operation, and an
+    /// inlined arithmetic body whose carrier opcode is already the argument of `constructor-impl`,
+    /// keeps the opcode alone.
+    fn rebuild_unsigned_bitwise_result(&mut self, expression: u32, code: &mut CodeBuilder) {
+        let semantic = self
+            .ir
+            .logical_types
+            .get(&expression)
+            .copied()
+            .map(|ty| ty.canonical_semantic().non_null());
+        let (owner, descriptor, words) = match semantic {
+            Some(Ty::UInt) => ("kotlin/UInt", "(I)I", 1),
+            Some(Ty::ULong) => ("kotlin/ULong", "(J)J", 2),
+            _ => return,
+        };
+        let method = self.cw.methodref(owner, "constructor-impl", descriptor);
+        code.invokestatic(method, words, words);
     }
 }
