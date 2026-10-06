@@ -295,6 +295,24 @@ pub(super) fn emit_suspend_lambda_class(
         true,
         env,
     );
+    // A lambda value created inside this state machine may retain a standalone implementation.
+    // Placement attaches that private static to this exact class so its metafactory handle has
+    // legal access. Emit those attached helpers beside invokeSuspend; a continuation generated
+    // while emitting one re-enters through the access bridge emitted on this same writer.
+    for &method in &c.methods {
+        if method != lambda.invoke_suspend {
+            emit_method(
+                ir,
+                method,
+                StaticOwner::Class(c.fq_name),
+                &shape.class,
+                facade,
+                &mut cw,
+                false,
+                env,
+            );
+        }
+    }
     cw.set_method_debug(
         "invokeSuspend",
         INVOKE_SUSPEND_DESC,

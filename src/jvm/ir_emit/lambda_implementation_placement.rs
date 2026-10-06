@@ -113,44 +113,61 @@ pub(crate) fn reparent_lambda_impls(ir: &mut IrFile) {
     // order within each group so ordinary ownership remains deterministic.
     classes.sort_by_key(|&class| !constructed.contains(&ir.classes[class].fq_name_id()));
 
-    for class_id in classes {
-        let class = &ir.classes[class_id];
-        let mut roots = Vec::new();
-        for &function in &class.methods {
-            roots.extend(
-                ir.functions
-                    .get(function as usize)
-                    .and_then(|shape| shape.body),
-            );
-        }
-        roots.extend(class.init_body);
-        roots.extend(ir.companion_clinit_body(class.fq_name));
-        roots.extend(class.super_arg_prelude.iter().copied());
-        roots.extend(class.super_args.iter().copied());
-        for constructor in &class.secondary_ctors {
-            roots.extend(constructor.body);
-            roots.extend(constructor.defaults.iter().flatten().copied());
-            roots.extend(constructor.delegate_prelude.iter().copied());
-            roots.extend(constructor.delegate_args.iter().copied());
-        }
-        for entry in &class.enum_entries {
-            roots.extend(entry.args.iter().copied());
-        }
+    let class_roots = classes
+        .into_iter()
+        .map(|class_id| {
+            let class = &ir.classes[class_id];
+            let mut roots = Vec::new();
+            for &function in &class.methods {
+                roots.extend(
+                    ir.functions
+                        .get(function as usize)
+                        .and_then(|shape| shape.body),
+                );
+            }
+            roots.extend(class.init_body);
+            roots.extend(ir.companion_clinit_body(class.fq_name));
+            roots.extend(class.super_arg_prelude.iter().copied());
+            roots.extend(class.super_args.iter().copied());
+            for constructor in &class.secondary_ctors {
+                roots.extend(constructor.body);
+                roots.extend(constructor.defaults.iter().flatten().copied());
+                roots.extend(constructor.delegate_prelude.iter().copied());
+                roots.extend(constructor.delegate_args.iter().copied());
+            }
+            for entry in &class.enum_entries {
+                roots.extend(entry.args.iter().copied());
+            }
 
-        for implementation in reachable_implementations(ir, roots, true) {
-            // Only a free standalone implementation moves. A spliced inline-only implementation
-            // has no method, and one referenced by facade code must remain accessible there.
-            if !owned.contains(&implementation)
-                && !facade_reachable.contains(&implementation)
-                && !ir.inline_only_fns.contains(&implementation)
-                && ir
-                    .functions
-                    .get(implementation as usize)
-                    .is_some_and(|function| function.dispatch_receiver.is_none())
+            (class_id, roots)
+        })
+        .collect::<Vec<_>>();
+
+    // An actual lambda value fixes the private implementation's physical owner: its metafactory
+    // handle must name a method on the class that emits the handle. Claim every such edge before
+    // considering a detached direct call. In particular, a continuation class re-entering the
+    // same suspend implementation must not steal it from the enclosing suspend-lambda class; the
+    // continuation reaches the implementation through the access bridge emitted beside it.
+    for include_direct_specializations in [false, true] {
+        for (class_id, roots) in &class_roots {
+            for implementation in
+                reachable_implementations(ir, roots.clone(), include_direct_specializations)
             {
-                owned.insert(implementation);
-                ir.classes[class_id].methods.push(implementation);
-                ir.note_class_method(class_id as u32, implementation);
+                // Only a free standalone implementation moves. A spliced inline-only
+                // implementation has no method, and one referenced by facade code must remain
+                // accessible there.
+                if !owned.contains(&implementation)
+                    && !facade_reachable.contains(&implementation)
+                    && !ir.inline_only_fns.contains(&implementation)
+                    && ir
+                        .functions
+                        .get(implementation as usize)
+                        .is_some_and(|function| function.dispatch_receiver.is_none())
+                {
+                    owned.insert(implementation);
+                    ir.classes[*class_id].methods.push(implementation);
+                    ir.note_class_method(*class_id as u32, implementation);
+                }
             }
         }
     }
@@ -340,6 +357,8 @@ mod tests {
             ctor_params: None,
             ctor_desc: None,
             external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         });
 
         reparent_lambda_impls(&mut ir);
@@ -353,6 +372,84 @@ mod tests {
             vec![copy_method, implementation]
         );
         assert_eq!(ir.class_method_owners[&implementation], vec![copy_id]);
+    }
+
+    #[test]
+    fn a_lambda_value_claims_its_helper_before_a_direct_continuation_call() {
+        let mut ir = IrFile::default();
+        let unit = ir.add_expr(IrExpr::UnitInstance);
+        let implementation = ir.add_fun(function("lambda", unit, None));
+        source_lambda(&mut ir, implementation);
+        ir.specialized_functions.insert(
+            implementation,
+            crate::ir::IrSpecializedFunction {
+                source: implementation,
+                caller_declaration: crate::fir::DeclarationId::from_raw(0),
+                caller: Some(crate::ir::IrEnclosure::File),
+                caller_is_default: false,
+                caller_source_name: "run".to_string(),
+                inline_callee: crate::fir::CallableId::from_raw(0),
+                inline_callee_source_name: "inlineCall".to_string(),
+                parent: None,
+            },
+        );
+
+        let direct = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(implementation),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let continuation_name = crate::types::type_name("sample/Continuation");
+        let continuation_method =
+            ir.add_fun(function("invokeSuspend", direct, Some(continuation_name)));
+        let mut continuation = crate::plugins::synthetic_class("sample/Continuation");
+        continuation.methods.push(continuation_method);
+        let continuation_id = ir.add_class(continuation);
+        ir.note_class_method(continuation_id, continuation_method);
+        ir.add_expr(IrExpr::New {
+            internal: continuation_name,
+            args: Vec::new(),
+            ctor_params: None,
+            ctor_desc: None,
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        });
+
+        let lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: None,
+        });
+        let enclosing_name = crate::types::type_name("sample/EnclosingLambda");
+        let enclosing_method = ir.add_fun(function("invokeSuspend", lambda, Some(enclosing_name)));
+        let mut enclosing = crate::plugins::synthetic_class("sample/EnclosingLambda");
+        enclosing.methods.push(enclosing_method);
+        let enclosing_id = ir.add_class(enclosing);
+        ir.note_class_method(enclosing_id, enclosing_method);
+        ir.add_expr(IrExpr::New {
+            internal: enclosing_name,
+            args: Vec::new(),
+            ctor_params: None,
+            ctor_desc: None,
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        });
+
+        reparent_lambda_impls(&mut ir);
+
+        assert_eq!(
+            ir.classes[continuation_id as usize].methods,
+            vec![continuation_method]
+        );
+        assert_eq!(
+            ir.classes[enclosing_id as usize].methods,
+            vec![enclosing_method, implementation]
+        );
+        assert_eq!(ir.class_method_owners[&implementation], vec![enclosing_id]);
     }
 
     #[test]
