@@ -203,6 +203,9 @@ fn one_host_links_a_static_executable_for_every_supported_architecture() {
     // descriptors, vtables and constructor path are cross-compiled too, not only straight code.
     let mut linked = Vec::new();
     for &target in NativeTarget::ALL {
+        if !target.os.static_elf() {
+            continue;
+        }
         if !krusty::native::can_link(target) {
             eprintln!("skipping {target}: no prebuilt runtime in this build");
             continue;

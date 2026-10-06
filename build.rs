@@ -30,13 +30,23 @@ const COMMON_FLAGS: &[&str] = &[
     "-std=c11",
     "-ffreestanding",
     "-nostdlib",
-    "-fno-pic",
     "-fno-stack-protector",
     "-fno-asynchronous-unwind-tables",
     "-fno-unwind-tables",
     "-O2",
     "-c",
 ];
+
+/// Flags for one runtime object, beyond [`COMMON_FLAGS`]. Linux stays non-PIC: the executable is
+/// static and at a fixed address. The simulator dylib is slid by dyld, so its objects are
+/// position-independent and do not use a small code model.
+fn object_cflags(arch: target_contract::Arch, os: target_contract::Os) -> &'static [&'static str] {
+    if os.static_elf() {
+        arch.runtime_cflags()
+    } else {
+        &["-fPIC"]
+    }
+}
 
 const SOURCES: &[&str] = &[
     "krusty_rt.c",
@@ -84,11 +94,12 @@ fn prebuild_runtime() -> Result<(), String> {
     let mut built_any = false;
     let mut compiler_missing = false;
     for (arch, os) in target_contract::SUPPORTED {
-        let triple = target_contract::triple(arch, os);
-        // Every object is checked against the target's ELF machine: a `KRUSTY_RUNTIME_CC` wrapper
-        // that adds its own `--target` would otherwise file one architecture's code under
-        // another's name without a single failed step.
-        let machine = arch.elf_machine();
+        let triple = target_contract::clang_triple(arch, os);
+        let isa = target_contract::isa_triple(arch, os);
+        // Every object is checked against the target it was asked for: a `KRUSTY_RUNTIME_CC`
+        // wrapper that adds its own `--target` would otherwise file one architecture's code under
+        // another's name without a single failed step. Linux objects are ELF; the simulator's are
+        // Mach-O.
         // Filed under the whole target, not the architecture alone: two supported targets that
         // share an architecture must not share, or overwrite, one directory.
         let target_dir =
@@ -102,7 +113,7 @@ fn prebuild_runtime() -> Result<(), String> {
             let status = Command::new(&compiler)
                 .arg(format!("--target={triple}"))
                 .args(COMMON_FLAGS)
-                .args(arch.runtime_cflags())
+                .args(object_cflags(arch, os))
                 .arg("-I")
                 .arg(runtime_dir)
                 .arg("-o")
@@ -111,9 +122,10 @@ fn prebuild_runtime() -> Result<(), String> {
                 .status();
             match status {
                 Ok(status) if status.success() => {
-                    if let Err(problem) = check_object(&object, machine, arch.max_page_size()) {
+                    if let Err(problem) = check_object(&object, arch, os) {
                         return Err(format!(
-                            "native runtime: `{compiler}` built `{source}` for `{triple}` as {problem}"
+                            "native runtime: `{compiler}` built `{source}` for `{triple}` \
+                             (codegen `{isa}`) as {problem}"
                         ));
                     }
                     objects.push(object)
@@ -180,13 +192,21 @@ fn prebuild_runtime() -> Result<(), String> {
     Ok(())
 }
 
-/// The ELF identity of a freshly compiled object: a 64-bit little-endian relocatable for `machine`
-/// whose loaded sections ask for no more alignment than `max_page_size`, the most krusty's linker
-/// can give on the target (it starts the writable segment on such a page). `Err` names what it is
-/// instead: an object the linker would refuse is a target that cannot link, and saying so here
-/// names the cause where it arises rather than at every link.
-fn check_object(object: &Path, machine: u16, max_page_size: u64) -> Result<(), String> {
+/// The identity of a freshly compiled object: a 64-bit little-endian relocatable for `arch` on
+/// `os`, whose loaded sections ask for no more alignment than the link can give. `Err` names what
+/// it is instead: an object the linker would refuse is a target that cannot link, and saying so
+/// here names the cause where it arises rather than at every link.
+fn check_object(
+    object: &Path,
+    arch: target_contract::Arch,
+    os: target_contract::Os,
+) -> Result<(), String> {
     let bytes = std::fs::read(object).map_err(|error| format!("an unreadable file ({error})"))?;
+    if !os.static_elf() {
+        return check_macho(&bytes);
+    }
+    let machine = arch.elf_machine();
+    let max_page_size = arch.max_page_size();
     if bytes.len() < 20 || &bytes[..4] != b"\x7fELF" {
         return Err("something that is not ELF".to_string());
     }
@@ -229,6 +249,64 @@ fn check_object(object: &Path, machine: u16, max_page_size: u64) -> Result<(), S
                  {max_page_size:#x}-byte maximum page size"
             ));
         }
+    }
+    Ok(())
+}
+
+/// A 64-bit little-endian Mach-O relocatable for arm64, which is what freestanding clang emits for
+/// the iOS simulator without an SDK. Sections may not ask for more than a 16 KiB alignment: that
+/// is the simulator's page size and the alignment the dylib's segments use.
+fn check_macho(bytes: &[u8]) -> Result<(), String> {
+    const MH_MAGIC_64: &[u8] = &[0xcf, 0xfa, 0xed, 0xfe];
+    const CPU_TYPE_ARM64: u32 = 0x0100_000c;
+    const MH_OBJECT: u32 = 1;
+    const PAGE: u32 = 0x4000;
+    if bytes.len() < 32 || &bytes[..4] != MH_MAGIC_64 {
+        return Err("something that is not a 64-bit Mach-O object".to_string());
+    }
+    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
+    let cputype = u32_at(4);
+    if cputype != CPU_TYPE_ARM64 {
+        return Err(format!("code for Mach-O cputype {cputype:#x}, not arm64"));
+    }
+    let kind = u32_at(12);
+    if kind != MH_OBJECT {
+        return Err(format!("Mach-O type {kind}, not a relocatable object"));
+    }
+    let ncmds = u32_at(16) as usize;
+    let mut at = 32;
+    for _ in 0..ncmds {
+        if at + 8 > bytes.len() {
+            return Err("a Mach-O object whose load commands are cut short".to_string());
+        }
+        let cmd = u32_at(at);
+        let cmdsize = u32_at(at + 4) as usize;
+        if cmdsize < 8 || at + cmdsize > bytes.len() {
+            return Err("a Mach-O object whose load commands are cut short".to_string());
+        }
+        // LC_SEGMENT_64. The section alignment field is a power of two.
+        if cmd == 0x19 {
+            if cmdsize < 72 {
+                return Err("a Mach-O segment command that is too small".to_string());
+            }
+            let nsects = u32_at(at + 64) as usize;
+            let mut section = at + 72;
+            for _ in 0..nsects {
+                if section + 80 > at + cmdsize {
+                    return Err("a Mach-O segment whose sections are cut short".to_string());
+                }
+                let align = u32_at(section + 52);
+                if align < 32 && (1u32 << align) > PAGE {
+                    return Err(format!(
+                        "an object with a section aligned to {} bytes, more than the simulator's \
+                         {PAGE:#x}-byte page",
+                        1u32 << align
+                    ));
+                }
+                section += 80;
+            }
+        }
+        at += cmdsize;
     }
     Ok(())
 }

@@ -10,14 +10,32 @@
 //! Inputs are parsed with the `object` crate; the executable is written directly, because an ELF64
 //! header and two program headers are 176 bytes whose layout is fixed by the ABI, and owning that is
 //! simpler than driving a general writer.
+//!
+//! That is the Linux image. The iOS simulator target is an unsigned arm64 `MH_DYLIB`: its objects
+//! are position-independent Mach-O, and the link imports `write`, `mmap`, `munmap` and `exit` from
+//! `/usr/lib/libSystem.B.dylib`. No Apple SDK is read. The load commands dyld needs — the libSystem
+//! dependency, the simulator build version, and classic bind and rebase info — are written by hand
+//! the same way the ELF header is.
 
 mod abi;
 mod elf;
 #[cfg(test)]
 mod fixture;
+mod macho;
 mod relocate;
 
-pub use elf::runtime_symbols;
+/// Every global symbol the prebuilt runtime for `target` defines. Empty when this build has no
+/// runtime for it. Names are the link names: a Mach-O leading underscore is not part of one, so a
+/// program symbol and the runtime symbol it calls compare equal.
+pub fn runtime_symbols(target: NativeTarget) -> Result<HashSet<String>, ProgramLinkError> {
+    if target.os.static_elf() {
+        elf::runtime_symbols(target)
+    } else {
+        macho::runtime_symbols(target)
+    }
+}
+
+use std::collections::HashSet;
 
 use super::prebuilt;
 use super::target::{Arch, NativeTarget};
@@ -301,9 +319,10 @@ impl std::fmt::Display for ProgramLinkError {
 
 impl std::error::Error for ProgramLinkError {}
 
-/// Link a program's objects with the prebuilt runtime for `target` into a static executable.
+/// Link a program's objects with the prebuilt runtime for `target`.
 ///
-/// The returned bytes are a complete ELF file; the caller decides where to write it.
+/// A Linux target produces a static ELF executable. The iOS simulator produces an unsigned Mach-O
+/// dylib. The caller decides where to write the bytes.
 pub fn link_program(
     program_objects: &[&[u8]],
     target: NativeTarget,
@@ -311,7 +330,11 @@ pub fn link_program(
     let runtime = prebuilt::runtime_objects(target).ok_or(ProgramLinkError::NoRuntime(target))?;
     let mut inputs: Vec<&[u8]> = program_objects.to_vec();
     inputs.extend(runtime.iter().map(|(_, bytes)| *bytes));
-    elf::link_static(&inputs, target)
+    if target.os.static_elf() {
+        elf::link_static(&inputs, target)
+    } else {
+        macho::link_dylib(&inputs, target)
+    }
 }
 
 /// Whether this build of krusty can link native programs for `target` at all.
@@ -364,6 +387,13 @@ mod tests {
             if !runtime_for(target) {
                 continue;
             }
+            if !target.os.static_elf() {
+                // The simulator dylib has no `_start`, so the runtime alone is a complete image.
+                // Its load commands are checked by `the_ios_simulator_runtime_is_an_unsigned_dylib`.
+                link_program(&[], target)
+                    .unwrap_or_else(|error| panic!("{target}: the runtime alone links: {error}"));
+                continue;
+            }
             match link_program(&[], target) {
                 Err(ProgramLinkError::UndefinedSymbol(name)) => {
                     assert_eq!(name, "kt_program_entry", "{target}");
@@ -381,7 +411,7 @@ mod tests {
     #[test]
     fn a_program_links_against_the_runtime_on_every_target() {
         for target in NativeTarget::ALL.iter().copied() {
-            if !runtime_for(target) {
+            if !target.os.static_elf() || !runtime_for(target) {
                 continue;
             }
             let program = returning_entry(target.arch);
@@ -512,7 +542,7 @@ mod tests {
     #[test]
     fn a_program_linked_against_the_runtime_runs_where_this_host_can_run_it() {
         for target in NativeTarget::ALL.iter().copied() {
-            if !runtime_for(target) {
+            if !target.os.static_elf() || !runtime_for(target) {
                 continue;
             }
             let program = answer_program(target.arch);
@@ -547,9 +577,113 @@ mod tests {
                 continue;
             }
             let names = runtime_symbols(target).unwrap_or_else(|error| panic!("{target}: {error}"));
-            assert!(names.contains("_start"), "{target}: {names:?}");
-            assert!(names.contains("kt_program_returned"), "{target}: {names:?}");
             assert!(!names.contains("kt_program_entry"), "{target}: {names:?}");
+            if target.os.static_elf() {
+                assert!(names.contains("_start"), "{target}: {names:?}");
+                assert!(names.contains("kt_program_returned"), "{target}: {names:?}");
+            } else {
+                assert!(!names.contains("_start"), "{target}: {names:?}");
+                assert!(names.contains("kt_runtime_init"), "{target}: {names:?}");
+            }
+        }
+    }
+
+    /// The simulator image is an unsigned arm64 dylib. The runtime alone is enough: there is no
+    /// `_start` to satisfy, and the only undefined symbols are the four libSystem imports. The
+    /// gate reads the load commands; it does not execute the dylib.
+    #[test]
+    fn the_ios_simulator_runtime_is_an_unsigned_dylib() {
+        use object::{Object, ObjectSection, ObjectSymbol};
+
+        let target = "ios-simulator-aarch64"
+            .parse::<NativeTarget>()
+            .expect("the simulator is a supported target");
+        if !runtime_for(target) {
+            return;
+        }
+        let bytes = link_program(&[], target)
+            .unwrap_or_else(|error| panic!("{target}: the runtime alone links: {error}"));
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        assert_eq!(&bytes[..4], &[0xcf, 0xfa, 0xed, 0xfe], "MH_MAGIC_64");
+        assert_eq!(u32_at(4), 0x0100_000c, "CPU_TYPE_ARM64");
+        assert_eq!(u32_at(12), 6, "MH_DYLIB");
+        assert_eq!(
+            u32_at(24),
+            0x4 | 0x80 | 0x10_0000,
+            "MH_DYLDLINK|MH_TWOLEVEL|MH_NO_REEXPORTED_DYLIBS"
+        );
+        let ncmds = u32_at(16);
+        let mut at = 32usize;
+        let mut load_dylib = None;
+        let mut build_version = None;
+        let mut signed = false;
+        let mut bitcode = false;
+        for _ in 0..ncmds {
+            let cmd = u32_at(at);
+            let size = u32_at(at + 4) as usize;
+            assert!(
+                size >= 8 && at + size <= bytes.len(),
+                "load command {cmd:#x} at {at}"
+            );
+            if cmd == 0x1d {
+                signed = true;
+            }
+            if cmd == 0xc {
+                let name_at = at + u32_at(at + 8) as usize;
+                let end = bytes[name_at..]
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .expect("a terminated dylib path");
+                load_dylib =
+                    Some(String::from_utf8_lossy(&bytes[name_at..name_at + end]).into_owned());
+            }
+            if cmd == 0x32 {
+                build_version = Some((u32_at(at + 8), u32_at(at + 12)));
+            }
+            if cmd == 0x19 {
+                let nsects = u32_at(at + 64) as usize;
+                let mut section = at + 72;
+                for _ in 0..nsects {
+                    let name_end = bytes[section..section + 16]
+                        .iter()
+                        .position(|&byte| byte == 0)
+                        .unwrap_or(16);
+                    let name =
+                        std::str::from_utf8(&bytes[section..section + name_end]).unwrap_or("");
+                    if name == "__LLVM" {
+                        bitcode = true;
+                    }
+                    section += 80;
+                }
+            }
+            at += size;
+        }
+        assert_eq!(load_dylib.as_deref(), Some("/usr/lib/libSystem.B.dylib"));
+        assert_eq!(
+            build_version,
+            Some((7, 15 << 16)),
+            "PLATFORM_IOSSIMULATOR, 15.0.0"
+        );
+        assert!(!signed, "the dylib is unsigned");
+        assert!(!bitcode, "the dylib contains no bitcode");
+        let file = object::File::parse(bytes.as_slice()).expect("the dylib parses");
+        let mut undefined = Vec::new();
+        for symbol in file.symbols() {
+            if symbol.is_undefined() {
+                let name = symbol.name().expect("an undefined symbol has a name");
+                undefined.push(name.strip_prefix('_').unwrap_or(name).to_string());
+            }
+        }
+        undefined.sort();
+        undefined.dedup();
+        assert_eq!(
+            undefined,
+            ["exit", "mmap", "munmap", "write"],
+            "libSystem is the whole import surface"
+        );
+        for section in file.sections() {
+            let name = section.name().unwrap_or("");
+            assert_ne!(name, "__LLVM");
         }
     }
 

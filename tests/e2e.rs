@@ -1727,6 +1727,8 @@ mod native_function_type_classes_e2e;
 mod native_gc_e2e;
 #[path = "native_gc_stress_e2e.rs"]
 mod native_gc_stress_e2e;
+#[path = "native_ios_e2e.rs"]
+mod native_ios_e2e;
 #[path = "native_interface_bridges_e2e.rs"]
 mod native_interface_bridges_e2e;
 #[path = "native_interface_implementations_e2e.rs"]

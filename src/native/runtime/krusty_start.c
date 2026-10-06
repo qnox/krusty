@@ -1,7 +1,10 @@
 /* krusty native runtime: the process entry point. Hand-written freestanding C; build.rs compiles it
-   into the runtime for every target. */
+   into the runtime for every target. The iOS simulator image is a dylib: dyld calls an exported
+   function, so there is no `_start` and this file contributes no symbol there. */
 #include "krusty_rt.h"
 #include "krusty_sys.h"
+
+#if !defined(__APPLE__)
 
 void kt_program_entry(void);
 
@@ -34,3 +37,5 @@ __asm__(".globl _start\n"
 #else
 #error "krusty native: unsupported architecture"
 #endif
+
+#endif /* !__APPLE__ */

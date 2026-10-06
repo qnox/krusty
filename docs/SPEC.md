@@ -11761,6 +11761,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   still compiles and runs: the refusal is the C declaration, not the function.
   Tests: `tests/native_c_abi_e2e.rs` (`a_public_function_is_exported_and_an_internal_one_is_not`,
   `a_c_caller_sees_the_initialized_value`, `a_public_classifier_parameter_is_declined_by_name`).
+- **Native: the iOS simulator image is an unsigned arm64 dylib.** `ios-simulator-aarch64` lowers
+  with the Apple AArch64 calling convention and position-independent code, then links to an
+  `MH_DYLIB`. The dylib imports `write`, `mmap`, `munmap`, and `exit` from
+  `/usr/lib/libSystem.B.dylib` and records `LC_BUILD_VERSION` for the iOS simulator at 15.0. Those
+  four symbols are declared by hand; the compile path reads no Apple SDK and does not sign the
+  image or embed bitcode. A missing C compiler at krusty's build leaves the target absent, the
+  same rule as Linux. The image is not executed on a non-Apple host: the gate checks the object
+  format and the load commands.
+  Tests: `tests/native_ios_e2e.rs` (`a_public_function_links_to_an_unsigned_simulator_dylib`),
+  `the_ios_simulator_runtime_is_an_unsigned_dylib`.
 
 - **`-Xwarning-level=<NAME>:<SEVERITY>` configures a typed diagnostic identity.** The accepted
   severities are kotlinc's exact, case-sensitive `error`, `warning`, and `disabled` spellings.

@@ -60,7 +60,7 @@ const IMAGE_LIMIT: u64 = 1 << 32;
 /// Reading the answer out of the runtime objects keeps it true as the runtime grows, which a list
 /// written down beside them would not. A runtime object that cannot be read is an error rather
 /// than a shorter list.
-pub fn runtime_symbols(target: NativeTarget) -> Result<HashSet<String>, ProgramLinkError> {
+pub(super) fn runtime_symbols(target: NativeTarget) -> Result<HashSet<String>, ProgramLinkError> {
     let mut names = HashSet::new();
     for (name, bytes) in prebuilt::runtime_objects(target).unwrap_or_default() {
         let file = parse(&format!("runtime object `{name}`"), bytes, target.arch)?;
@@ -672,6 +672,9 @@ mod tests {
     #[test]
     fn the_segments_are_laid_out_for_each_architecture_s_largest_page() {
         for target in NativeTarget::ALL {
+            if !target.os.static_elf() {
+                continue;
+            }
             let (ret, expected) = match target.arch {
                 Arch::X86_64 => (
                     vec![0xc3, 0x90, 0x90, 0x90],
@@ -819,6 +822,9 @@ mod tests {
     #[test]
     fn a_rel_relocation_table_is_refused() {
         for target in NativeTarget::ALL {
+            if !target.os.static_elf() {
+                continue;
+            }
             let rel = absolute_reference(target.arch, 9);
             // The input is what the test says it is: a REL table whose one entry has no addend.
             let file = Elf::parse(rel.as_slice()).expect("the REL object parses");
@@ -853,6 +859,9 @@ mod tests {
     #[test]
     fn a_crel_relocation_table_is_refused() {
         for target in NativeTarget::ALL {
+            if !target.os.static_elf() {
+                continue;
+            }
             let crel = absolute_reference(target.arch, 0x4000_0014);
             let error = link_static(&[&crel], *target).expect_err("a CREL table is refused");
             assert_eq!(
@@ -879,6 +888,9 @@ mod tests {
     #[test]
     fn the_same_reference_in_a_rela_table_links() {
         for target in NativeTarget::ALL {
+            if !target.os.static_elf() {
+                continue;
+            }
             let rela = absolute_reference(target.arch, 4);
             let bytes =
                 link_static(&[&rela], *target).unwrap_or_else(|error| panic!("{target}: {error}"));
