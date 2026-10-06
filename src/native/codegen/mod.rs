@@ -1,9 +1,9 @@
 //! krusty's own code generator: checked common IR to machine code.
 //!
-//! This replaces the C emitter. Nothing here prints source for another compiler; a Kotlin file is
-//! lowered to Cranelift IR, compiled to a relocatable ELF object by Cranelift, and linked by
-//! krusty's own linker (`super::linker`) against the runtime that was prebuilt when krusty itself
-//! was built. A user's build touches no C toolchain.
+//! This replaces the C emitter. A Kotlin file is lowered to Cranelift IR, compiled to a relocatable
+//! ELF object by Cranelift, and linked by krusty's own linker (`super::linker`) against the runtime
+//! that was prebuilt when krusty itself was built. A user's build touches no C toolchain. The one
+//! text artifact is the module's public C header: the names a C caller can link, not a program.
 //!
 //! **Why Cranelift, and what it owns.** `docs/BUILD_AND_NATIVE_PLAN.md`, *Decided: Cranelift, as a
 //! library*: Cranelift owns instruction selection and register allocation — and only those. The
@@ -70,6 +70,8 @@ pub struct CodegenModule {
     entry_file: Option<String>,
     /// The prebuilt runtime's defined symbols, read by the first file that needs them.
     runtime_symbols: Option<std::collections::HashSet<String>>,
+    /// Public ABI lines, in file order and source order within a file.
+    abi: Vec<super::c_abi::Record>,
 }
 
 impl Backend for CraneliftBackend {
@@ -141,13 +143,15 @@ impl Backend for CraneliftBackend {
             }
             state.entry_file = Some(stem.clone());
         }
+        state.abi.extend(lowered.abi);
         vec![(format!("{stem}.o"), lowered.object)]
     }
 
-    fn finalize(&self, _state: Self::State, _module_name: &str) -> Vec<Artifact> {
+    fn finalize(&self, state: Self::State, module_name: &str) -> Vec<Artifact> {
         // The runtime is not an artifact of a user's build: it was prebuilt with krusty and the
-        // linker supplies it. There is nothing module-level to emit.
-        Vec::new()
+        // linker supplies it. The header is the module's public C ABI, not a program to compile.
+        let header = super::c_abi::header(module_name, &state.abi);
+        vec![(format!("{module_name}.h"), header.into_bytes())]
     }
 }
 

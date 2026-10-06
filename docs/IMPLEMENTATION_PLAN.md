@@ -4480,15 +4480,23 @@ each one lowering more and declining less:
   object), function types with a fixed `invoke` slot, SAM conversions, callable references to
   functions and properties including bound ones and dependency members, default arguments through
   one wrapper per omission shape, local functions, and the stdlib scope functions.
-- **Cross-file calls.** A top-level function is exported as `kt_mod_<callable id>`, the checked
+- **Cross-file calls.** A top-level function is defined as `kt_mod_<callable id>`, the checked
   callable identity, so the defining file and a caller in another file of the module name the same
   symbol without seeing each other's lowering. `Callee::Module`, and a `CrossFile` edge that still
   carries that id, imports it and calls it directly. The module's objects are linked together.
-  Every file exports `kt_fileinit_<source file id>`, which runs that file's top-level initializers
+  Every file defines `kt_fileinit_<source file id>`, which runs that file's top-level initializers
   at most once. The entry calls its own before `main` or `box`. A cross-file call calls the
   defining file's before the function, so a property defined there has its value even when that
   file is not the entry. The flag is set before the initializers run: a re-entrant use sees the
-  default and does not recurse.
+  default and does not recurse. `kt_mod_<id>` and `kt_fileinit_<id>` are hidden: the module link
+  resolves them, and they are not dynamic exports.
+- **Public C ABI.** A public top-level function whose parameters and result are primitives,
+  `String`, or `Unit` is declared in `<module>.h` and exported under `package_name`, with a
+  `__Type` suffix when it has parameters. The wrapper runs the file initializer, then the
+  function. An `internal` function is neither declared nor exported. A public function that takes
+  or returns a classifier — or any other type this ABI cannot spell — is named in the header and
+  not declared, and the Kotlin program still runs.
+  Tests: `tests/native_c_abi_e2e.rs`.
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host

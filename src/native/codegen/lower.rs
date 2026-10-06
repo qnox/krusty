@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 mod arithmetic;
 mod boxed;
+mod c_abi;
 mod calls;
 mod classes_literal;
 mod classifier_shapes;
@@ -70,6 +71,8 @@ pub struct Lowered {
     pub object: Vec<u8>,
     /// Whether this file declared `main` and therefore defines [`PROGRAM_ENTRY`].
     pub defines_entry: bool,
+    /// This file's contribution to the module's C header, in source order.
+    pub abi: Vec<super::super::c_abi::Record>,
 }
 
 /// How a Kotlin type is carried in machine code.
@@ -298,6 +301,8 @@ pub fn lower_file(
     {
         return Err("a `main` that takes its arguments".to_string());
     }
+    let abi = super::super::c_abi::file_records(ir);
+    lowering.define_c_exports(file_init, &abi)?;
 
     let object = module
         .finish()
@@ -306,6 +311,7 @@ pub fn lower_file(
     Ok(Lowered {
         object,
         defines_entry,
+        abi,
     })
 }
 
@@ -571,9 +577,16 @@ impl<'a> FileLowering<'a> {
                 continue;
             }
             let signature = self.function_signature(index as crate::ir::FunId)?;
+            // A file-level function is reached across the module by its `kt_mod_` symbol, which
+            // stays hidden. The public C name, when there is one, is a separate export.
+            let linkage = if super::super::c_abi::is_file_level(self.ir, index) {
+                Linkage::Hidden
+            } else {
+                Linkage::Export
+            };
             let id = self
                 .module
-                .declare_function(&self.symbols.functions[index], Linkage::Export, &signature)
+                .declare_function(&self.symbols.functions[index], linkage, &signature)
                 .map_err(|error| format!("declaring `{}` ({error})", function.name))?;
             self.functions.push(Some(id));
         }

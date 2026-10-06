@@ -292,7 +292,11 @@ fn native_sources_outcome(
     if artifacts.is_empty() {
         return NativeBox::Declined("the backend emitted nothing".to_string());
     }
-    let objects: Vec<Vec<u8>> = artifacts.into_iter().map(|(_, object)| object).collect();
+    let objects: Vec<Vec<u8>> = artifacts
+        .into_iter()
+        .filter(|(name, _)| name.ends_with(".o"))
+        .map(|(_, object)| object)
+        .collect();
     let object_refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
     let image = match krusty::native::link_program(&object_refs, target) {
         Ok(image) => image,

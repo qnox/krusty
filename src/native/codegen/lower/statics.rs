@@ -158,7 +158,7 @@ impl<'a> FileLowering<'a> {
         let symbol = super::super::super::symbols::file_init_symbol(source);
         let id = self
             .module
-            .declare_function(&symbol, Linkage::Export, &void)
+            .declare_function(&symbol, Linkage::Hidden, &void)
             .map_err(|error| format!("declaring `{symbol}` ({error})"))?;
         let flag_name = format!("kt_fileinit_done_{}", source.raw());
         let flag = self
