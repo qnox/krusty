@@ -586,7 +586,7 @@ fn attach_bridge_debug_tables(
             .iter()
             .map(|parameter| (parameter.identity.clone(), parameter.semantic))
             .unzip();
-        let parameter_names = crate::jvm::parameter_names::resolved_local_variables(
+        let parameter_names = crate::jvm::parameter_names::bridge_local_variables(
             &identities,
             &semantic_types,
             &bridge.name,

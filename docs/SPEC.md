@@ -5974,7 +5974,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `invoke(text)` of `(String) -> String` names it `p1`. Each override edge carries the overridden
   declaration's parameter identities beside the implementation's. A builtin member publishes its
   `.kotlin_builtins` parameter names like any other metadata declaration. A Java binary declaration
-  still publishes none, so its bridge has no parameter rows where kotlinc writes `p0`, `p1`.
+  publishes no source name. The bridge `LocalVariableTable` spells that unnamed parameter `pN`
+  from the identity's ordinal (`p0`, `p1`); the ordinal stays out of source identity and reflection
+  names.
   Tests: `tests/bridge_parameter_names_e2e.rs`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
