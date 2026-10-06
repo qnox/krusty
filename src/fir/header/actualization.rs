@@ -474,23 +474,11 @@ pub fn actualization(
                 let Some(stub) = headers.stub(declaration) else {
                     return false;
                 };
-                let structural_name = stub
-                    .lookup_name
-                    .and_then(|name| headers.lookup_names.get(name))
-                    .is_some_and(|name| matches!(name, "equals" | "hashCode" | "toString"));
-                let structural_owner = headers
-                    .declarations
-                    .anchor(declaration)
-                    .and_then(|anchor| anchor.owner)
-                    .and_then(|owner| headers.stub(owner))
-                    .is_some_and(|owner| {
-                        owner.flags.has(crate::fir::DeclarationFlags::DATA)
-                            || owner.flags.has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
-                    });
                 stub.flags
                     .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
-                    && structural_name
-                    && structural_owner
+                    && stub
+                        .flags
+                        .has(crate::fir::DeclarationFlags::GENERATED_STRUCTURAL_MEMBER)
             };
             return generated_structural_member(expect) && generated_structural_member(candidate);
         };
@@ -1650,6 +1638,12 @@ mod tests {
         };
         let expect_to_string = generated(0, "toString").expect("expect toString");
         let actual_to_string = generated(1, "toString").expect("actual toString");
+        assert!(expect_to_string
+            .flags
+            .has(DeclarationFlags::GENERATED_STRUCTURAL_MEMBER));
+        assert!(actual_to_string
+            .flags
+            .has(DeclarationFlags::GENERATED_STRUCTURAL_MEMBER));
         assert!(
             headers.syntax.declaration(expect_to_string.id).is_none(),
             "a generated value-class member has no compact header"
