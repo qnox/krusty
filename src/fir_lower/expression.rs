@@ -1471,14 +1471,21 @@ impl BodyLowering<'_> {
         expression_id: crate::fir::FirExprId,
         first_generated: usize,
     ) {
+        // A receiver that is itself a reference (`create2(create("D")::test)::test`) is lowered
+        // first and already owns its node. This expression owns the reference that is still unnamed.
         let mut references = (first_generated..self.ir.exprs.len()).filter(|&raw| {
-            matches!(
-                self.ir.exprs[raw],
-                crate::ir::IrExpr::CallableReference(_)
-                    | crate::ir::IrExpr::Checked(
-                        crate::ir::IrCheckedOperation::PropertyReference { .. }
-                    )
-            )
+            let unnamed = !self
+                .ir
+                .callable_reference_provenance
+                .contains_key(&(raw as u32));
+            unnamed
+                && matches!(
+                    self.ir.exprs[raw],
+                    crate::ir::IrExpr::CallableReference(_)
+                        | crate::ir::IrExpr::Checked(
+                            crate::ir::IrCheckedOperation::PropertyReference { .. }
+                        )
+                )
         });
         let (Some(reference), None) = (references.next(), references.next()) else {
             return;

@@ -3501,8 +3501,14 @@ pub fn method_code_diffs_against_kotlinc(
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
 
     let classpath: Vec<PathBuf> = libout.into_iter().chain([stdlib_jar()]).collect();
-    let classes = compile_in_process(src, name, &classpath, None)
-        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let jdk_modules = jdk_modules();
+    let report = compile_in_process_report(src, name, &classpath, Some(jdk_modules.as_path()));
+    assert!(
+        !report.has_errors && !report.classes.is_empty(),
+        "{name}: krusty failed to compile: {}",
+        report.diagnostics.join("; ")
+    );
+    let classes = report.classes;
     let (_, krusty_bytes) = classes
         .iter()
         .find(|(emitted, _)| emitted == class)

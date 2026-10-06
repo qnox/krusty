@@ -1349,10 +1349,14 @@ fn publish_inline_substitutions(
             if declaration != target {
                 return None;
             }
-            signature
-                .formals
-                .get(ordinal as usize)
-                .map(|name| (name.clone(), substitution.value, substitution.reified))
+            signature.formals.get(ordinal as usize).map(|name| {
+                (
+                    name.clone(),
+                    substitution.value,
+                    substitution.reified_runtime,
+                    substitution.reified,
+                )
+            })
         })
         .collect::<Vec<_>>();
     if !bindings.is_empty() {
@@ -1360,12 +1364,12 @@ fn publish_inline_substitutions(
             expression,
             bindings
                 .iter()
-                .map(|(name, value, _)| (name.clone(), *value))
+                .map(|(name, value, _, _)| (name.clone(), *value))
                 .collect(),
         );
         let reified = bindings
             .into_iter()
-            .filter_map(|(name, value, reified)| reified.then_some((name, value)))
+            .filter_map(|(name, _, runtime, reified)| reified.then_some((name, runtime)))
             .collect::<Vec<_>>();
         if !reified.is_empty() {
             ir.reified_call_subst.insert(expression, reified);

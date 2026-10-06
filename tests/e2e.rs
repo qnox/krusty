@@ -190,6 +190,8 @@ mod build840_mm1_safe_call_lambda_ext_e2e;
 mod build840_nn1_suspend_inline_withlock_e2e;
 #[path = "builder_inference_receivers_e2e.rs"]
 mod builder_inference_receivers_e2e;
+#[path = "builder_sibling_lower_bounds_e2e.rs"]
+mod builder_sibling_lower_bounds_e2e;
 #[path = "builtin_intrinsics_coverage_e2e.rs"]
 mod builtin_intrinsics_coverage_e2e;
 #[path = "builtin_member_realization_e2e.rs"]
@@ -1065,6 +1067,8 @@ mod init_block_lines_e2e;
 mod inline_call_operand_spill_e2e;
 #[path = "inline_capture_splice_e2e.rs"]
 mod inline_capture_splice_e2e;
+#[path = "inline_constructor_reference_e2e.rs"]
+mod inline_constructor_reference_e2e;
 #[path = "inline_crossinline_object_e2e.rs"]
 mod inline_crossinline_object_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]
@@ -1073,6 +1077,8 @@ mod inline_deep_coverage_e2e;
 mod inline_end_branch_e2e;
 #[path = "inline_erased_capture_e2e.rs"]
 mod inline_erased_capture_e2e;
+#[path = "inline_finally_marker_e2e.rs"]
+mod inline_finally_marker_e2e;
 #[path = "inline_lambda_as_value_e2e.rs"]
 mod inline_lambda_as_value_e2e;
 #[path = "inline_lambda_caller_loop_jump_e2e.rs"]
@@ -1183,6 +1189,8 @@ mod interface_supertype_members_e2e;
 mod internal_classpath_access_e2e;
 #[path = "internal_member_names_e2e.rs"]
 mod internal_member_names_e2e;
+#[path = "intersection_reified_type_of_e2e.rs"]
+mod intersection_reified_type_of_e2e;
 #[path = "invariant_argument_wildcards_e2e.rs"]
 mod invariant_argument_wildcards_e2e;
 #[path = "invoke_operator_extension_e2e.rs"]
