@@ -7792,9 +7792,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   expected-type rule as a bare literal: `v or if (hasMore) 0x80 else 0` selects `Long.or` because
   both branches fit `Long`, and `f(if (c) 1 else 2)` still prefers `f(Int)` over `f(Long)`. A branch
   that does not fit (`200` into `Byte`) or is not a constant (`x: Int`) does not adapt. The
-  conditional is still computed as `Int` and widened at the use, so an overflowing `Int` addition
-  inside a branch wraps before that widening. Test:
-  `tests/numeric_ops_coverage_e2e.rs::integer_constant_conditional_adapts`.
+  conditional's own arithmetic stays `Int`, so an overflowing addition inside a branch wraps before
+  it adapts. The adaptation to `Long` is on each branch, before the join: a constant branch is the
+  sign-extended `Long` constant (`ldc2_w` / `lconst`), not an `int` value plus one `i2l` after the
+  merge. A shift distance stays `Int`. Tests:
+  `tests/numeric_ops_coverage_e2e.rs::integer_constant_conditional_adapts`,
+  `tests/integer_literal_branch_join_e2e.rs::long_operand_conditionals_match_kotlinc`.
 - **An overflowing `Int` constant expression widens after it wraps.** `2147483647 + 1` and
   `-(1 shl 31)` are `Int` computations: the addition and the shift overflow in 32 bits, unary minus
   of `Int.MIN_VALUE` stays `Int.MIN_VALUE`, and only then does the value become `Long`

@@ -365,3 +365,49 @@ fn member_property_int_constant_initializer_adapts_to_long() {
         "member_property_int_constant_initializer_adapts_to_long",
     );
 }
+
+/// A `Long` use widens each integer-constant branch before the join. The branch arithmetic still
+/// wraps as `Int`; the widened constant is what `lor` consumes, and a shift distance stays `Int`.
+#[test]
+fn long_operand_conditionals_match_kotlinc() {
+    let src = "\
+fun continuation(v: Long, hasMore: Boolean): Int =\n\
+    ((v and 0x7f) or if (hasMore) 0x80 else 0).toInt()\n\
+fun whenBits(v: Long, n: Int): Long = v or when (n) { 0 -> 0x80; else -> 0 }\n\
+fun nested(v: Long, a: Boolean, b: Boolean): Long =\n\
+    v or if (a) if (b) 0x80 else 0x40 else 0\n\
+fun blocked(v: Long, hasMore: Boolean): Long =\n\
+    v or if (hasMore) { 0x80 } else { val ignored = 1; 0 }\n\
+fun wrapped(v: Long, flag: Boolean): Int =\n\
+    (v or if (flag) 2147483647 + 1 else 0).toInt()\n\
+fun shifted(v: Long, wide: Boolean): Long = v shl if (wide) 1 else 2\n\
+fun direct(): Long {\n\
+    val sum: Long = 2147483647 + 1\n\
+    return sum\n\
+}\n\
+fun returned(flag: Boolean): Long = if (flag) 2147483647 + 1 else 0\n\
+";
+    let methods = [
+        "public static final int continuation(",
+        "public static final long whenBits(",
+        "public static final long nested(",
+        "public static final long blocked(",
+        "public static final int wrapped(",
+        "public static final long shifted(",
+        "public static final long direct(",
+        "public static final long returned(",
+    ];
+    match common::method_code_diffs_against_kotlinc(
+        "LongBranch",
+        &[],
+        src,
+        "LongBranchKt",
+        &methods,
+    ) {
+        None => panic!("reference kotlinc is provisioned"),
+        Some(results) => {
+            let failures = results.into_iter().filter_map(Result::err).collect::<Vec<_>>();
+            assert!(failures.is_empty(), "{}", failures.join("\n"));
+        }
+    }
+}
