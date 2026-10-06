@@ -792,7 +792,7 @@ fn classes_against_kotlinc_lib_request(
     let kotlinc_extra = language_settings
         .map(kotlinc_language_options)
         .unwrap_or_default();
-    let library = super::common_core::kotlinc_lib_out_with(lib, &kotlinc_extra)?;
+    let library = super::common_core::kotlinc_lib::kotlinc_lib_out_with(lib, &kotlinc_extra)?;
     let target = jvm_target
         .map(super::common_core::kotlinc_jvm_target_argument)
         .unwrap_or_else(|| "default".to_string());

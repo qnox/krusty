@@ -14332,10 +14332,9 @@ impl<'a> Checker<'a> {
             let narrowed_base = declined_receiver
                 .and_then(|receiver| self.narrowed_read_base.get(&receiver).copied());
             let declined = declined_receiver.and_then(|receiver| {
-                let found = self.declined_smartcast_target(scope, receiver, |this, target| {
+                self.declined_smartcast_target(scope, receiver, |this, target| {
                     exists_on_non_null(this, target)
-                });
-                found
+                })
             });
             if declined.is_some() {
                 if report_diagnostics {
@@ -37532,7 +37531,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             .copied()
             .collect(),
     );
-    let info = TypeInfo {
+    TypeInfo {
         expr_types,
         callable_reference_types,
         reflective_callable_references,
@@ -37608,8 +37607,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_property_reference_type,
         context_args,
         lambda_body_results,
-    };
-    info
+    }
 }
 
 pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {

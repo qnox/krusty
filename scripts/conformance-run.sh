@@ -16,6 +16,7 @@ source "$script_dir/libtest-shards.sh"
 source "$script_dir/conformance-report.sh"
 source "$script_dir/phase-timing.sh"
 phase_log_prefix=conformance-run
+export phase_log_prefix
 PHASE_TIMING_LOG="$(mktemp)"
 
 bin="$1"

@@ -108,7 +108,7 @@ fn operation(
 /// What a classifier's singleton offers the intrinsic's fast path.
 enum Accessor {
     Absent,
-    Selected(FrontendResolvedSingletonCall),
+    Selected(Box<FrontendResolvedSingletonCall>),
 }
 
 /// Ask the ordinary resolver/checker for the singleton call. The plugin only recognizes whether the
@@ -133,7 +133,7 @@ fn accessor(
     {
         return Some(Accessor::Absent);
     }
-    Some(Accessor::Selected(call))
+    Some(Accessor::Selected(Box::new(call)))
 }
 
 /// Whether `callable`'s DECLARED signature is exactly
