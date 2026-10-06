@@ -1116,9 +1116,13 @@ pub struct ClassDecl {
     pub singleton: bool,
     /// `data class` — synthesizes equals/hashCode/toString/componentN/copy.
     pub is_data: bool,
-    /// `@JvmInline value class` — an inline class. krusty currently compiles it as a regular final
-    /// single-field class (self-consistent, box-OK) rather than kotlinc's unboxed `-impl` form.
+    /// `inline class` or `value class`. A legacy `inline class`, and a `value class` whose
+    /// resolved annotation is `kotlin.jvm.JvmInline`, is unboxed. A `value class` without that
+    /// annotation is a boxed class when `FullValueClasses` is enabled.
     pub is_value: bool,
+    /// Span of the `value` keyword. Absent for a legacy `inline class` and for an ordinary class.
+    /// The missing-`@JvmInline` diagnostic points here.
+    pub value_modifier_span: Option<Span>,
     /// `enum class Name { A, B }` — the entries in declaration order (extends `java/lang/Enum`). Each
     /// [`AstEnumEntry`] carries its own name / constructor args / body methods / body properties.
     pub enum_entries: Vec<AstEnumEntry>,
@@ -1960,6 +1964,9 @@ pub struct File {
     /// separately from the caller-facing function result. The checked FIR boundary records that
     /// semantic choice so a backend never needs its own language-version switch.
     pub lambda_implementation_uses_inferred_result: bool,
+    /// `+FullValueClasses`: a `value class` without `@JvmInline` is a boxed class with structural
+    /// `equals`/`hashCode`/`toString`. Without the feature that declaration is an error.
+    pub full_value_classes: bool,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,
