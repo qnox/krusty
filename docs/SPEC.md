@@ -5726,8 +5726,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Frontend tests assert the exact declaration-to-provenance mapping. End-to-end JVM tests assert the
   complete emitted class set against kotlinc rather than inspecting parser-generated names.
 - **An unbound constructor reference is the lambda of an inline collection transform.**
-  `values.map(::Holder)` does not allocate a function reference. The adapter is a block that
-  returns `new Holder(element)` and captures nothing, so the stdlib `map` plan splices that
+  `values.map(::Holder)` does not allocate a function reference. The collection-transform plan is
+  published for that constructor reference the same way it is for a lambda literal. The adapter
+  is a block that returns `new Holder(element)` and captures nothing, so the plan splices that
   construction into the destination `add` and drops the adapter. The same template is what an
   inline iterator body (`forEach`) and any other external inline lambda parameter splice. A
   constructor reference stored in a variable stays a callable reference. Test:

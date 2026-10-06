@@ -2021,7 +2021,8 @@ pub(super) fn inline_argument_template(
     ir: &crate::ir::IrFile,
     expression: ExprId,
 ) -> Option<(u32, Vec<ExprId>, ExprId, usize)> {
-    let constructor_adapter = match ir.expr(expression) {
+    let expression = ir.expr(expression).clone();
+    let constructor_adapter = match expression {
         IrExpr::Lambda {
             impl_fn,
             captures,
@@ -2035,6 +2036,24 @@ pub(super) fn inline_argument_template(
                 *inline_body,
                 usize::from(*arity),
             ));
+        }
+        IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body: None,
+            arity,
+            ..
+        } if ir.lambda_class_provenance(*impl_fn)
+            == Some(crate::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter) =>
+        {
+            let impl_fn = *impl_fn;
+            let arity = usize::from(*arity);
+            let captures = captures.clone();
+            let (inline_body, body_arity) = constructor_reference_inline_value(ir, impl_fn)?;
+            if body_arity != arity + captures.len() {
+                return None;
+            }
+            return Some((impl_fn, captures, inline_body, arity));
         }
         IrExpr::CallableReference(reference)
             if reference.bound_receiver.is_none()
