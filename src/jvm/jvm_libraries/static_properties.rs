@@ -7,6 +7,7 @@
 //! [`PropertyInfo`] with receiver-less accessors. The provider facade only asks for the property.
 
 use super::*;
+use crate::libraries::LibConst;
 
 impl JvmLibraries {
     pub(super) fn library_const(value: &crate::jvm::classreader::ConstVal) -> LibConst {
