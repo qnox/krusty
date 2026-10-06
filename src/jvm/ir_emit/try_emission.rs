@@ -98,18 +98,30 @@ impl Emitter<'_> {
     /// `InlineMarker.finallyStart(depth)` and `finallyEnd(depth)`, where `depth` counts this copy.
     pub(super) fn emit_finalizer_copy(&mut self, finalizer: u32, code: &mut CodeBuilder) {
         if self.finally_markers {
-            self.finally_marker_depth = self.finally_marker_depth.saturating_add(1);
+            self.finally_marker_depth = self
+                .finally_marker_depth
+                .checked_add(1)
+                .expect("finally marker nesting exceeds u32");
             self.mark_finally(true, code);
         }
         self.emit(finalizer, code);
         if self.finally_markers {
-            self.mark_finally(false, code);
-            self.finally_marker_depth = self.finally_marker_depth.saturating_sub(1);
+            // kotlinc has no dead end marker after a finalizer that returns, throws, breaks, or
+            // continues. Apart from matching its marker contract, omitting that instruction keeps
+            // an unreachable call from requiring a verifier frame of its own.
+            if !self.discarding_diverges(finalizer) {
+                self.mark_finally(false, code);
+            }
+            self.finally_marker_depth = self
+                .finally_marker_depth
+                .checked_sub(1)
+                .expect("finally marker nesting underflow");
         }
     }
 
     fn mark_finally(&mut self, start: bool, code: &mut CodeBuilder) {
-        let depth = i32::try_from(self.finally_marker_depth).unwrap_or(i32::MAX);
+        let depth = i32::try_from(self.finally_marker_depth)
+            .expect("finally marker nesting exceeds the JVM Int argument");
         code.push_int(depth, self.cw);
         let name = if start { "finallyStart" } else { "finallyEnd" };
         let method = self

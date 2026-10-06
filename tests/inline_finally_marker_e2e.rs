@@ -39,6 +39,30 @@ inline fun nested(body: () -> Int): Int {\n\
         }\n\
     }\n\
 }\n\
+inline fun returnFinally(body: () -> Int): Int {\n\
+    try {\n\
+        return body()\n\
+    } finally {\n\
+        return 7\n\
+    }\n\
+}\n\
+inline fun throwFinally(body: () -> Int): Int {\n\
+    try {\n\
+        return body()\n\
+    } finally {\n\
+        throw IllegalStateException()\n\
+    }\n\
+}\n\
+inline fun continueFinally(body: () -> Int): Int {\n\
+    while (true) {\n\
+        try {\n\
+            return body()\n\
+        } finally {\n\
+            continue\n\
+        }\n\
+    }\n\
+}\n\
+fun useFinally(): Int = runFinally { 1 }\n\
 ";
 
 #[test]
@@ -68,5 +92,45 @@ fn a_finally_inside_a_finally_uses_the_next_depth() {
         SRC,
         "InlineFinallyKt",
         "public static final int nested(",
+    );
+}
+
+#[test]
+fn a_returning_finally_has_no_unreachable_end_marker() {
+    expect_method_matches(
+        "InlineFinally",
+        SRC,
+        "InlineFinallyKt",
+        "public static final int returnFinally(",
+    );
+}
+
+#[test]
+fn a_throwing_finally_has_no_unreachable_end_marker() {
+    expect_method_matches(
+        "InlineFinally",
+        SRC,
+        "InlineFinallyKt",
+        "public static final int throwFinally(",
+    );
+}
+
+#[test]
+fn a_loop_transfer_from_finally_has_no_unreachable_end_marker() {
+    expect_method_matches(
+        "InlineFinally",
+        SRC,
+        "InlineFinallyKt",
+        "public static final int continueFinally(",
+    );
+}
+
+#[test]
+fn a_copied_finally_consumes_its_declaration_markers() {
+    expect_method_matches(
+        "InlineFinally",
+        SRC,
+        "InlineFinallyKt",
+        "public static final int useFinally(",
     );
 }
