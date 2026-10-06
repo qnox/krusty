@@ -140,3 +140,47 @@ fn a_members_derivable_signature_records_no_descriptor() {
         }\n";
     assert_identical("MemberDerivableSig", SRC, "app/Plain");
 }
+
+/// A member function's and a constructor's reference `vararg` record the projected
+/// `Array<out E>` too, exactly like a package function's: the class writer used to keep the
+/// invariant array the checker carries.
+#[test]
+fn a_member_and_constructor_vararg_record_a_projected_array() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Payload\n\
+        class Holder(vararg val items: Payload) {\n\
+        \x20   constructor(count: Int, vararg names: String) : this()\n\
+        \x20   fun take(vararg xs: Payload): Int = xs.size\n\
+        \x20   fun units(vararg xs: Unit): Int = xs.size\n\
+        \x20   fun ints(vararg xs: Int): Int = xs.size\n\
+        }\n";
+    assert_identical("MemberVarargProjection", SRC, "app/Holder");
+}
+
+/// The synthetic array keeps the element's source spelling below it, and a class type parameter
+/// stays an indexed type argument rather than replacing the recorded array type.
+#[test]
+fn constructor_varargs_preserve_alias_and_type_parameter_elements() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Payload\n\
+        typealias Cargo = Payload\n\
+        class Aliased(vararg val items: Cargo) {\n\
+        \x20   constructor(marker: Boolean, vararg names: Cargo) : this()\n\
+        \x20   fun take(vararg cargo: Cargo): Int = cargo.size\n\
+        }\n\
+        class Generic<T>(vararg val items: T) {\n\
+        \x20   fun <U> take(vararg values: U): Int = values.size\n\
+        }\n";
+    assert_identical("ConstructorVarargAlias", SRC, "app/Aliased");
+    assert_identical("ConstructorVarargTypeParameter", SRC, "app/Generic");
+}
+
+#[test]
+fn an_annotation_class_vararg_records_a_projected_array() {
+    const SRC: &str = "package app\n\
+        \n\
+        annotation class Names(vararg val names: String)\n";
+    assert_identical("AnnotationVarargProjection", SRC, "app/Names");
+}

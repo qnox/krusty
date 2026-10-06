@@ -87,6 +87,19 @@ pub(crate) fn vararg_recorded_type(ty: crate::types::Ty) -> crate::types::Ty {
     }
 }
 
+/// Convert a source vararg element declaration into the type and spelling pair Kotlin metadata
+/// records for the parameter/property. Keeping the pair together prevents an element alias from
+/// being attached to the synthetic array classifier itself.
+pub(crate) fn vararg_recorded_declaration(
+    ty: crate::types::Ty,
+    element_spelling: &crate::spelling::Spelled,
+) -> (crate::types::Ty, crate::spelling::Spelled) {
+    (
+        vararg_recorded_type(ty),
+        element_spelling.as_array_element(),
+    )
+}
+
 /// Whether a signature position forces the declaration to record an explicit
 /// `JvmMethodSignature.desc` because its JVM descriptor is not recoverable from the recorded Kotlin
 /// type.

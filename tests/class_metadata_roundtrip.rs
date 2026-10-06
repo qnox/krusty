@@ -138,6 +138,7 @@ fn secondary_constructor_default_flags_round_trip() {
     let defaults = [false, true];
     let secondary = [CtorMeta {
         params: &parameters,
+        param_spellings: &[],
         param_defaults: &defaults,
         desc: "(Ljava/lang/String;Ljava/lang/String;)V",
         sig_name: None,
