@@ -947,9 +947,10 @@ impl Emitter<'_> {
     }
 
     /// kotlinc's choice per argument. An `@InlineOnly` callee reads a dispatch receiver or ordinary
-    /// argument that is already a local from that local (`genOrGetLocal`); its extension receiver
-    /// is always stored. When the body loads its parameters first, the stored arguments are instead
-    /// evaluated in place.
+    /// argument that is already a local from that local (`genOrGetLocal`), including a local under
+    /// a representation-preserving reference coercion; its extension receiver is always stored.
+    /// When the body loads its parameters first, the stored arguments are instead evaluated in
+    /// place.
     ///
     /// `None` only when a function-typed local has no provider-published `crossinline`/`noinline`
     /// modifier. An inline parameter, `crossinline` included, reads that local where it already
@@ -994,10 +995,11 @@ impl Emitter<'_> {
                 supplies.push(Supply::CallerLocal);
                 continue;
             }
-            let local = matches!(self.ir.expr(argument), IrExpr::GetValue(v)
-                if self.slots.contains_key(v))
-                && self.local_needs_no_boxing(argument, physical[index]);
-            if !local {
+            let Some(operand) = self.reference_local_operand(argument) else {
+                supplies.push(evaluated);
+                continue;
+            };
+            if !self.local_needs_no_boxing(operand, physical[index]) {
                 supplies.push(evaluated);
                 continue;
             }
@@ -1016,7 +1018,7 @@ impl Emitter<'_> {
                 supplies.push(evaluated);
                 continue;
             }
-            if function_typed(argument) {
+            if function_typed(operand) {
                 let parameter = index.checked_sub(leading_non_argument_operands)?;
                 let inlining = self
                     .ir
@@ -1036,6 +1038,36 @@ impl Emitter<'_> {
             supplies.push(Supply::CallerLocal);
         }
         Some(supplies)
+    }
+
+    /// The caller local an argument reads, through coercions that keep the reference as it is.
+    ///
+    /// `println(message)` widens `String` to `Any?`. That coercion writes no bytecode, so kotlinc's
+    /// `genOrGetLocal` still loads the caller's local. A coercion that boxes or unboxes (`Int` to
+    /// `Any`) is not this local: the parameter is a different representation.
+    fn reference_local_operand(&self, argument: u32) -> Option<u32> {
+        let mut current = argument;
+        loop {
+            match self.ir.expr(current) {
+                IrExpr::GetValue(value) if self.slots.contains_key(value) => return Some(current),
+                IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg,
+                    type_operand,
+                } if self.reference_view_coercion(*arg, *type_operand) => current = *arg,
+                _ => return None,
+            }
+        }
+    }
+
+    /// Whether an implicit coercion leaves a reference value in the same JVM representation.
+    fn reference_view_coercion(&self, arg: u32, type_operand: Ty) -> bool {
+        let source = self.value_ty(arg);
+        let target = ir_ty_to_jvm(&stored_value_ty(type_operand));
+        source.is_reference()
+            && target.is_reference()
+            && source.scalar_value_repr().is_none()
+            && type_operand.scalar_value_repr().is_none()
     }
 
     /// kotlinc's `isLocalWithNoBoxing`: the local and the parameter are both primitive or both
@@ -1075,6 +1107,7 @@ impl Emitter<'_> {
                 checkcast: None,
             };
         }
+        let argument = self.reference_local_operand(argument).unwrap_or(argument);
         let IrExpr::GetValue(value) = self.ir.expr(argument) else {
             unreachable!("a caller-local argument is a local read");
         };

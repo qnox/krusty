@@ -72,6 +72,36 @@ fn inline_only_arguments_are_read_where_the_body_loads_them_like_kotlinc() {
 }
 
 #[test]
+fn an_inline_only_println_of_a_local_loads_the_local_after_system_out() {
+    // `println` is `@InlineOnly` and its body is `getstatic System.out; aload message`. A
+    // non-null `String` argument is widened to `Any?` before the call. That widening emits no
+    // bytecode, so the parameter is still the caller's local: kotlinc reads it after `System.out`.
+    // Storing it first and folding the store leaves `aload; getstatic; swap`.
+    let src = "fun printed(message: String) = println(message)\n\
+        fun counted(n: Int) = println(n)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "InlinePrintlnLocal",
+        src,
+        "InlinePrintlnLocalKt",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    for member in ["void printed(java.lang.String)", "void counted(int)"] {
+        let reference = method_instructions(&built.reference, member);
+        assert!(!reference.is_empty(), "{member} not found");
+        assert_eq!(
+            method_instructions(&built.krusty, member),
+            reference,
+            "{member}"
+        );
+    }
+}
+
+#[test]
 fn inline_only_arguments_read_in_place_still_run() {
     common::expect_box_ok_with_stdlib(
         &format!(
