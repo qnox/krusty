@@ -643,6 +643,8 @@ mod dependency_override_signature_e2e;
 mod dependency_property_reference_name_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
+#[path = "descriptor_element_companion_serializer_e2e.rs"]
+mod descriptor_element_companion_serializer_e2e;
 #[path = "descriptor_element_specialization_e2e.rs"]
 mod descriptor_element_specialization_e2e;
 #[path = "descriptor_inner_classes_e2e.rs"]
@@ -2163,6 +2165,8 @@ mod safe_call_any_member_e2e;
 mod safe_call_argument_list_e2e;
 #[path = "safe_call_collection_transform_e2e.rs"]
 mod safe_call_collection_transform_e2e;
+#[path = "safe_call_dup_e2e.rs"]
+mod safe_call_dup_e2e;
 #[path = "safe_call_e2e.rs"]
 mod safe_call_e2e;
 #[path = "safe_call_generic_field_e2e.rs"]
@@ -2368,6 +2372,8 @@ mod suspend_anonymous_object_name_e2e;
 
 #[path = "suspend_bytecode_transformer_e2e.rs"]
 mod suspend_bytecode_transformer_e2e;
+#[path = "suspend_callable_cast_e2e.rs"]
+mod suspend_callable_cast_e2e;
 #[path = "suspend_conversion_e2e.rs"]
 mod suspend_conversion_e2e;
 #[path = "suspend_debug_metadata_e2e.rs"]
