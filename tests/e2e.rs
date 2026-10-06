@@ -1429,6 +1429,8 @@ mod member_overloads_e2e;
 mod member_property_inference_e2e;
 #[path = "member_read_on_nullable_call_result_e2e.rs"]
 mod member_read_on_nullable_call_result_e2e;
+#[path = "metadata_accessor_signature_e2e.rs"]
+mod metadata_accessor_signature_e2e;
 #[path = "metadata_array_signature_e2e.rs"]
 mod metadata_array_signature_e2e;
 #[path = "metadata_captured_type_parameters_e2e.rs"]
