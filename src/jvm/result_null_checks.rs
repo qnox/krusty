@@ -10,6 +10,7 @@ use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::jvm::physical_type::ir_ty_to_jvm;
 
 pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
+    materialize_unnamed_checks_before_result_coercion(ir);
     let placements = (0..ir.exprs.len())
         .filter_map(|assertion| {
             let assertion = assertion as ExprId;
@@ -65,5 +66,89 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
         if ir.declaration_result_coercions.remove(&coercion) {
             ir.declaration_result_coercions.insert(assertion);
         }
+    }
+}
+
+/// An unnamed platform check materializes its operand so it can check and then yield the same
+/// value. When that operand is a generic call result, the temporary must own the declaration's
+/// erased slot, not the call-site narrowing: kotlinc stores `Object`, checks that local, and casts
+/// only the final read. Common lowering keeps the whole sequence as one block, which makes this
+/// JVM representation choice explicit and unambiguous here.
+fn materialize_unnamed_checks_before_result_coercion(ir: &mut IrFile) {
+    let placements =
+        (0..ir.exprs.len())
+            .filter_map(|block| {
+                let IrExpr::Block {
+                    stmts,
+                    value: Some(result),
+                } = ir.exprs.get(block)?
+                else {
+                    return None;
+                };
+                let [declaration, assertion] = stmts.as_slice() else {
+                    return None;
+                };
+                let IrExpr::Variable {
+                    index,
+                    init: Some(coercion),
+                    named: false,
+                    ..
+                } = ir.exprs.get(*declaration)?
+                else {
+                    return None;
+                };
+                let IrExpr::NotNullAssert {
+                    operand: checked,
+                    check: crate::ir::NullCheck::Unnamed,
+                } = ir.exprs.get(*assertion)?
+                else {
+                    return None;
+                };
+                let IrExpr::GetValue(checked_value) = ir.exprs.get(*checked)? else {
+                    return None;
+                };
+                let IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: produced,
+                    type_operand,
+                } = ir.exprs.get(*coercion)?
+                else {
+                    return None;
+                };
+                if !ir.declaration_result_coercions.contains(coercion) {
+                    return None;
+                }
+                let IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: yielded,
+                    type_operand: yielded_type,
+                } = ir.exprs.get(*result)?
+                else {
+                    return None;
+                };
+                let IrExpr::GetValue(yielded_value) = ir.exprs.get(*yielded)? else {
+                    return None;
+                };
+                if checked_value != index || yielded_value != index || yielded_type != type_operand
+                {
+                    return None;
+                }
+                let call = crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, *produced)?;
+                let slot = crate::jvm::call_result_boundaries::checked_result_slot(ir, call)?;
+                let physical = ir_ty_to_jvm(&slot);
+                let target = ir_ty_to_jvm(type_operand);
+                (physical.is_reference() && target.is_reference() && physical != target)
+                    .then_some((*declaration, *coercion, *produced, slot))
+            })
+            .collect::<Vec<_>>();
+
+    for (declaration, coercion, produced, slot) in placements {
+        let IrExpr::Variable { ty, init, .. } = &mut ir.exprs[declaration as usize] else {
+            unreachable!("a collected unnamed check starts with a variable declaration");
+        };
+        *ty = slot;
+        *init = Some(produced);
+        ir.physical_types.insert(produced, slot);
+        ir.declaration_result_coercions.remove(&coercion);
     }
 }
