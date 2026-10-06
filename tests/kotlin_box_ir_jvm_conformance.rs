@@ -1723,10 +1723,49 @@ fn kotlin_codegen_box_conformance() {
                         .map(String::as_str)
                         .or_else(|| panic.downcast_ref::<&str>().copied())
                         .unwrap_or("non-string panic payload");
+                    // A caught compiler panic is a failed box, not a silently unscored applicable
+                    // case: for a scoring run, reference-compile the applicable case and score zero
+                    // matched bytes against the real reference `.class` sizes. Applicability is a pure
+                    // directive scan over the source, so it cannot re-trigger the backend panic. The
+                    // box outcome stays FAIL (carrying the panic diagnostics) for the manifest gate,
+                    // and a reference-infrastructure failure still fails the run closed.
+                    let case_score = if score_on {
+                        let applicable = if no_run {
+                            frontend_applicable(&src, krusty::conformance::BACKENDS)
+                        } else {
+                            backend_applicable(&src, krusty::conformance::BACKENDS)
+                        };
+                        if applicable {
+                            let stem = file
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("File")
+                                .to_string();
+                            let compile_cp = common::classpath_jars_for(&src);
+                            let jdk = jdk_roots.select(&src);
+                            let reference = box_reference_classes::reference_compile(
+                                &src,
+                                &stem,
+                                &compile_cp,
+                                jdk,
+                                COROUTINE_HELPERS,
+                            )
+                            .map(|reference| box_byte_score::qualified_from_reference(&reference));
+                            box_byte_score::score_case(
+                                reference.as_ref().map_err(String::as_str),
+                                false,
+                                &box_byte_score::QualifiedClasses::new(),
+                            )
+                        } else {
+                            box_byte_score::CaseScore::NotScored
+                        }
+                    } else {
+                        box_byte_score::CaseScore::NotScored
+                    };
                     (
                         file.clone(),
                         TestResult::Fail(format!("compiler panic: {message}")),
-                        box_byte_score::CaseScore::NotScored,
+                        case_score,
                     )
                 });
                 t_closure.fetch_add(tc0.elapsed().as_nanos() as u64, Ordering::Relaxed);

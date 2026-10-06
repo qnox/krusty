@@ -315,6 +315,16 @@ Optional profiling knobs:
   each full-suite e2e shard.
 - `KRUSTY_E2E_SHARDS=<count>` overrides the twenty-two whole-module shards used by the plain full-suite
   run.
+- `KRUSTY_CONFORMANCE_SHARDS=<count>` overrides the four corpus shards the plain gate's box pass is
+  partitioned into (no reference compilation, so the pass is cheap).
+- `KRUSTY_SCORED_CONFORMANCE_SHARDS=<count>` overrides the twelve shards the scored byte-equality run
+  (`conformance-run.sh`) partitions the corpus into. That run reference-compiles every applicable
+  case with the real kotlinc, so it is partitioned more finely than the plain gate's box pass.
+- `KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 300-second per-shard deadline
+  the scored run (`conformance-run.sh`) applies. Reference-compiling a corpus shard cold (empty
+  ref-class cache on a first run or CI cache miss) plus the JVM/kotlinc-server teardown exceeds the
+  plain gate's unit-test ceiling, so this workload has its own larger deadline. A warm shard finishes
+  in seconds, far inside it, so the ceiling never slows a cached run.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.

@@ -23,9 +23,12 @@ export KRUSTY_KOTLINC="$kotlinc"
 export KRUSTY_KOTLIN_BOX_DIR="$box_dir"
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
 
-shards="$KRUSTY_CONFORMANCE_SHARDS"
+# This runner always scores (it sets KRUSTY_CONFORMANCE_REPORT per shard), so it partitions by the
+# scored-run shard count — finer than the plain gate's, to keep each reference-compiling shard
+# inside the per-shard deadline.
+shards="$KRUSTY_SCORED_CONFORMANCE_SHARDS"
 libtest_require_positive_shard_count \
-  "$shards" "conformance-run: KRUSTY_CONFORMANCE_SHARDS"
+  "$shards" "conformance-run: KRUSTY_SCORED_CONFORMANCE_SHARDS"
 
 report_dir="$(mktemp -d)"
 trap 'rm -rf "$report_dir"' EXIT
@@ -40,12 +43,12 @@ for ((shard = 0; shard < shards; shard++)); do
   KRUSTY_CONFORMANCE_SHARD_INDEX="$shard" \
     KRUSTY_CONFORMANCE_SHARD_COUNT="$shards" \
     KRUSTY_CONFORMANCE_REPORT="$report" \
-    run_with_deadline "$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
+    run_with_deadline "$KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS" \
     "$bin" kotlin_codegen_box_conformance --nocapture >&2
   status=$?
   set -e
   if [ "$status" -eq 124 ]; then
-    echo "conformance-run: timed out after ${KRUSTY_CONFORMANCE_TIMEOUT_SECONDS}s: Kotlin $v, shard $((shard + 1))/$shards" >&2
+    echo "conformance-run: timed out after ${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS}s: Kotlin $v, shard $((shard + 1))/$shards" >&2
     exit "$status"
   fi
   if [ "$status" -ne 0 ] && [ "$failed" -eq 0 ]; then

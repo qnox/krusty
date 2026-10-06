@@ -231,7 +231,11 @@ const TEST_ONLY_LANGUAGE_FEATURES: &[&str] = &["ImplicitSignedToUnsignedIntegerC
 ///   otherwise-reserved `kotlin` package;
 /// - `-opt-in=<marker>` for each fully-qualified marker named by an `// OPT_IN:` directive, so a
 ///   case using an experimental API (e.g. an `@OptionalExpectation` requires
-///   `kotlin.ExperimentalMultiplatform`) compiles instead of failing the opt-in requirement.
+///   `kotlin.ExperimentalMultiplatform`) compiles instead of failing the opt-in requirement;
+/// - `-Xreturn-value-checker=<mode>` for a `// RETURN_VALUE_CHECKER_MODE:` case, so the reference
+///   accepts its `@MustUseReturnValues`/`@IgnorableReturnValue` annotations (krusty does not model
+///   the checker, so it never passes this flag to its own compile, but the case's runtime `box()`
+///   is unaffected, leaving it applicable and still requiring a reference compile).
 fn reference_directive_args(src: &str) -> Vec<String> {
     let mut args = language_directives::kotlinc_args(src);
     let opts_in_test_only = TEST_ONLY_LANGUAGE_FEATURES.iter().any(|feature| {
@@ -241,7 +245,13 @@ fn reference_directive_args(src: &str) -> Vec<String> {
     if opts_in_test_only {
         args.push("-Dkotlinc.test.allow.testonly.language.features=true".to_string());
     }
-    if directive(src, "ALLOW_KOTLIN_PACKAGE") {
+    // Real kotlinc rejects any source that declares a type under the reserved `kotlin` package
+    // unless `-Xallow-kotlin-package` is set. A case opts in either explicitly with
+    // `// ALLOW_KOTLIN_PACKAGE` or implicitly by declaring such a package in one of its files
+    // (several corpus cases do the latter without the directive). krusty does not enforce the
+    // reservation, so it compiles without the flag; the reference must get it or the applicable
+    // case cannot be scored.
+    if directive(src, "ALLOW_KOTLIN_PACKAGE") || declares_reserved_kotlin_package(src) {
         args.push("-Xallow-kotlin-package".to_string());
     }
     for marker in src
@@ -252,7 +262,35 @@ fn reference_directive_args(src: &str) -> Vec<String> {
     {
         args.push(format!("-opt-in={marker}"));
     }
+    if let Some(mode) = src.lines().find_map(|line| {
+        line.trim_start()
+            .strip_prefix("// RETURN_VALUE_CHECKER_MODE:")
+    }) {
+        // Map the test directive's enum value to the compiler flag spelling. An unrecognized value
+        // is left unmapped so the reference compile fails closed (REF-FAIL) rather than silently
+        // scoring against the wrong invocation.
+        let flag = match mode.trim() {
+            "FULL" => Some("full"),
+            "CHECKER" => Some("check"),
+            "DISABLED" => Some("disable"),
+            _ => None,
+        };
+        if let Some(flag) = flag {
+            args.push(format!("-Xreturn-value-checker={flag}"));
+        }
+    }
     args
+}
+
+/// Whether any source file declares a top-level package of `kotlin` or a `kotlin.*` subpackage,
+/// which real kotlinc accepts only under `-Xallow-kotlin-package`.
+fn declares_reserved_kotlin_package(src: &str) -> bool {
+    src.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("package ")
+            .map(str::trim)
+            .is_some_and(|pkg| pkg == "kotlin" || pkg.starts_with("kotlin."))
+    })
 }
 
 fn compiler_identity() -> (Option<String>, u64) {
@@ -873,6 +911,20 @@ mod tests {
             reference_directive_args("// ALLOW_KOTLIN_PACKAGE\npackage kotlin.jvm\n"),
             vec!["-Xallow-kotlin-package".to_string()]
         );
+        // A source that declares a `kotlin.*` package opts in the same flag WITHOUT the directive,
+        // as several corpus cases do (e.g. a `// FILE:` block under `package kotlin.internal`).
+        assert_eq!(
+            reference_directive_args(
+                "// FILE: a.kt\npackage kotlin.internal\nannotation class A\n// FILE: b.kt\nfun box() = \"OK\"\n"
+            ),
+            vec!["-Xallow-kotlin-package".to_string()]
+        );
+        // A package that merely starts with the letters `kotlin` but is not the reserved package is
+        // not matched, so an ordinary case is unaffected.
+        assert_eq!(
+            reference_directive_args("package kotlinx.demo\nfun box() = \"OK\"\n"),
+            Vec::<String>::new()
+        );
         // A test-only feature additionally opts in the JVM property.
         assert_eq!(
             reference_directive_args(
@@ -898,6 +950,25 @@ mod tests {
                 "-opt-in=kotlin.ExperimentalMultiplatform".to_string(),
                 "-opt-in=kotlin.contracts.ExperimentalContracts".to_string(),
             ]
+        );
+        // `// RETURN_VALUE_CHECKER_MODE: <MODE>` enables kotlinc's return-value checker so the
+        // reference compile accepts a case's `@MustUseReturnValues`/`@IgnorableReturnValue`; the
+        // directive's enum value maps to the compiler flag's `{check|full|disable}` spelling.
+        assert_eq!(
+            reference_directive_args(
+                "// RETURN_VALUE_CHECKER_MODE: FULL\n// WITH_STDLIB\nfun box() = \"OK\"\n"
+            ),
+            vec!["-Xreturn-value-checker=full".to_string()]
+        );
+        assert_eq!(
+            reference_directive_args("// RETURN_VALUE_CHECKER_MODE: CHECKER\nfun box() = \"OK\"\n"),
+            vec!["-Xreturn-value-checker=check".to_string()]
+        );
+        assert_eq!(
+            reference_directive_args(
+                "// RETURN_VALUE_CHECKER_MODE: DISABLED\nfun box() = \"OK\"\n"
+            ),
+            vec!["-Xreturn-value-checker=disable".to_string()]
         );
         // The real `expectActualTypealiasCoercion` corpus case opts in all three.
         assert_eq!(
