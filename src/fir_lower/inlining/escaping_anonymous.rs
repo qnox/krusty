@@ -941,57 +941,124 @@ fn retarget_property_operation(
         ),
         _ => return Ok(()),
     };
-    let Some((getter, setter)) = copied_layout_accessors(ir, target, source, source_name) else {
+    let Some(layout) = copied_property_layout(ir, target, source, source_name) else {
         return Ok(());
     };
-    let function = match value {
-        Some(_) => setter.ok_or_else(|| malformed(source_name))?,
-        None => getter.ok_or_else(|| malformed(source_name))?,
+    let accessor = match (&layout, value) {
+        (CopiedPropertyLayout::Member { setter, .. }, Some(_))
+        | (CopiedPropertyLayout::Extension { setter, .. }, Some(_)) => *setter,
+        (CopiedPropertyLayout::Member { getter, .. }, None)
+        | (CopiedPropertyLayout::Extension { getter, .. }, None) => *getter,
     };
-    let cloned = require_clone(function, clones, source_name)?;
-    let index = ir.classes[copy_id as usize]
-        .methods
-        .iter()
-        .position(|method| *method == cloned)
-        .ok_or_else(|| malformed(source_name))?;
-    let index = u32::try_from(index).map_err(|_| malformed(source_name))?;
     let receiver = dispatch_receiver.ok_or_else(|| malformed(source_name))?;
-    let mut args = context_arguments.into_iter().map(Some).collect::<Vec<_>>();
-    if let Some(extension_receiver) = extension_receiver {
-        args.push(Some(extension_receiver));
+    if let Some(function) = accessor {
+        let cloned = require_clone(function, clones, source_name)?;
+        let index = ir.classes[copy_id as usize]
+            .methods
+            .iter()
+            .position(|method| *method == cloned)
+            .ok_or_else(|| malformed(source_name))?;
+        let index = u32::try_from(index).map_err(|_| malformed(source_name))?;
+        let mut args = context_arguments.into_iter().map(Some).collect::<Vec<_>>();
+        if let Some(extension_receiver) = extension_receiver {
+            args.push(Some(extension_receiver));
+        }
+        if let Some(value) = value {
+            args.push(Some(value));
+        }
+        ir.exprs[expression as usize] = IrExpr::MethodCall {
+            class: copy_id,
+            index,
+            receiver,
+            args,
+        };
+        return Ok(());
     }
-    if let Some(value) = value {
-        args.push(Some(value));
+    let CopiedPropertyLayout::Member {
+        backing_field: true,
+        name,
+        ty,
+        interface,
+        ..
+    } = layout
+    else {
+        return Err(malformed(source_name));
+    };
+    if extension_receiver.is_some() || !context_arguments.is_empty() {
+        return Err(malformed(source_name));
     }
-    ir.exprs[expression as usize] = IrExpr::MethodCall {
-        class: copy_id,
-        index,
-        receiver,
-        args,
+    let owner = ir.classes[copy_id as usize].fq_name;
+    ir.exprs[expression as usize] = match value {
+        Some(value) => IrExpr::PropertyWrite {
+            receiver: Some(receiver),
+            owner,
+            name,
+            value,
+            ty,
+            interface,
+            operation: Some(expression),
+        },
+        None => IrExpr::PropertyRead {
+            receiver: Some(receiver),
+            owner,
+            name,
+            ty,
+            interface,
+            operation: Some(expression),
+        },
     };
     Ok(())
 }
 
-fn copied_layout_accessors(
+enum CopiedPropertyLayout {
+    Member {
+        backing_field: bool,
+        getter: Option<FunId>,
+        setter: Option<FunId>,
+        name: String,
+        ty: Ty,
+        interface: bool,
+    },
+    Extension {
+        getter: Option<FunId>,
+        setter: Option<FunId>,
+    },
+}
+
+fn copied_property_layout(
     ir: &crate::ir::IrFile,
     property: crate::fir::PropertyId,
     source: ClassId,
     source_name: TypeName,
-) -> Option<(Option<FunId>, Option<FunId>)> {
+) -> Option<CopiedPropertyLayout> {
     match ir.local_property_layouts.get(&property)? {
         crate::ir::IrLocalPropertyLayout::Member {
             class,
             owner,
+            backing_field,
             getter,
             setter,
+            name,
+            ty,
+            interface,
             ..
-        } if *class == source || *owner == source_name => Some((*getter, *setter)),
+        } if *class == source || *owner == source_name => Some(CopiedPropertyLayout::Member {
+            backing_field: backing_field.is_some(),
+            getter: *getter,
+            setter: *setter,
+            name: name.clone(),
+            ty: *ty,
+            interface: *interface,
+        }),
         crate::ir::IrLocalPropertyLayout::MemberExtension {
             owner,
             getter,
             setter,
             ..
-        } if *owner == source_name => Some((Some(*getter), *setter)),
+        } if *owner == source_name => Some(CopiedPropertyLayout::Extension {
+            getter: Some(*getter),
+            setter: *setter,
+        }),
         _ => None,
     }
 }

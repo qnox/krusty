@@ -29,6 +29,36 @@ fn copied_anonymous_object_keeps_a_consumed_member_lambda_elided() {
 }
 
 #[test]
+fn nested_suspend_crossinline_object_reads_its_direct_capture_field() {
+    run_ok(
+        "NestedSuspendCrossinlineCapture",
+        "import kotlin.coroutines.*\n\
+         interface Stream<out E> { suspend fun collect(sink: Sink<E>) }\n\
+         fun interface Sink<in E> { suspend fun emit(value: E) }\n\
+         inline fun <E, R> Stream<E>.transform(\n\
+             crossinline operation: suspend Sink<R>.(E) -> Unit,\n\
+         ): Stream<R> = object : Stream<R> {\n\
+             override suspend fun collect(sink: Sink<R>) {\n\
+                 this@transform.collect { value -> sink.operation(value) }\n\
+             }\n\
+         }\n\
+         inline fun <E, R : Any> Stream<E>.choose(\n\
+             crossinline operation: suspend (E) -> R?,\n\
+         ): Stream<R> = transform { value ->\n\
+             val transformed = operation(value) ?: return@transform\n\
+             emit(transformed)\n\
+         }\n\
+         fun Stream<String>.selected(): Stream<String> = choose { it }\n\
+         fun box(): String {\n\
+             object : Stream<String> {\n\
+                 override suspend fun collect(sink: Sink<String>) {}\n\
+             }.selected()\n\
+             return \"OK\"\n\
+         }\n",
+    );
+}
+
+#[test]
 fn captures_read_parameter() {
     run_ok(
         "AnonRead",
