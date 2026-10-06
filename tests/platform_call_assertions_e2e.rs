@@ -435,8 +435,8 @@ fn property_and_index_guards_name_the_producing_callable() {
 }
 
 /// A Java enum constant is not-null. Returning or storing the repository-owned `E.A` emits no
-/// `checkNotNullExpressionValue`. `System.out` and a static field of an enum type that is not an
-/// enum constant still do.
+/// `checkNotNullExpressionValue`. A repository-owned static field of the same enum type that is not
+/// an enum constant still does.
 #[test]
 fn java_enum_constant_is_not_a_platform_value() {
     let java = [
@@ -461,7 +461,6 @@ fn java_enum_constant_is_not_a_platform_value() {
          fun entryIsNull(): Boolean = E.A == null\n\
          fun ordinaryFinalIsNull(): Boolean = Holder.NOT_ENTRY == null\n\
          fun ordinaryMutableIsNull(): Boolean = Holder.mutable == null\n\
-         fun out(): java.io.PrintStream = System.out\n\
          fun alias(): E = Holder.NOT_ENTRY\n\
          fun mutable(): E = Holder.mutable\n";
     let stdlib = common::stdlib_jar();

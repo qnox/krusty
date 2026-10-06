@@ -8,19 +8,17 @@ use super::super::classreader::JavaNullability;
 use crate::libraries::ResultEnhancement;
 use crate::types::{Ty, TypeName};
 
-/// Nullability of a Java field. An enum constant (`ACC_ENUM`) is not-null: kotlinc
-/// reports `Enum.ENTRY == null` as always false and emits no platform guard. Every
-/// other unqualified Java reference field stays flexible, including a static field
-/// whose type is an enum but which is not an enum constant.
-pub(super) fn java_field_nullability(
-    access: u16,
-    annotated: Option<JavaNullability>,
-) -> Option<JavaNullability> {
-    if access & super::super::classreader::ACC_ENUM != 0 {
+/// Normalize a Java field type. An enum constant (`ACC_ENUM`) is not-null: kotlinc reports
+/// `Enum.ENTRY == null` as always false and emits no platform guard. Every other unqualified Java
+/// reference field stays flexible, including a static field whose type is an enum but which is not
+/// an enum constant.
+pub(super) fn java_field_type(ty: Ty, access: u16, annotated: Option<JavaNullability>) -> Ty {
+    let nullability = if access & super::super::classreader::ACC_ENUM != 0 {
         Some(JavaNullability::NotNull)
     } else {
         annotated
-    }
+    };
+    java_type_nullability(ty, nullability)
 }
 
 pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>) -> Ty {

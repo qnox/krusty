@@ -2506,10 +2506,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   A public Java INSTANCE field read is guarded like any other platform value and names the field
   (`value must not be null`), matching kotlinc. An index `javaList[0]` is the `get` call and is guarded
-  as `get(...)`. A Java static field read is `T!` and is guarded the same way (`System.out`). A Java
-  enum constant (`ACC_ENUM`, `FileVisitResult.CONTINUE`) is not-null, so `== null` is always false and
-  a non-null use emits no guard. A static field of an enum type that is not itself an enum constant
-  stays `T!` and is guarded.
+  as `get(...)`. An ordinary Java static field read is `T!` and is guarded the same way. A Java enum
+  constant (`ACC_ENUM`) is not-null, so `== null` is always false and a non-null use emits no guard.
+  A static field of an enum type that is not itself an enum constant stays `T!` and is guarded.
   Test: `tests/platform_call_assertions_e2e.rs::java_enum_constant_is_not_a_platform_value`.
   Also unimplemented:
   kotlinc's OTHER form, the message-less `Intrinsics.checkNotNull(Object)V`, which it emits wherever the
