@@ -93,25 +93,25 @@ fn materialize_unnamed_checks_before_result_coercion(ir: &mut IrFile) {
                     init: Some(coercion),
                     named: false,
                     ..
-                } = ir.exprs.get(*declaration)?
+                } = ir.exprs.get(*declaration as usize)?
                 else {
                     return None;
                 };
                 let IrExpr::NotNullAssert {
                     operand: checked,
                     check: crate::ir::NullCheck::Unnamed,
-                } = ir.exprs.get(*assertion)?
+                } = ir.exprs.get(*assertion as usize)?
                 else {
                     return None;
                 };
-                let IrExpr::GetValue(checked_value) = ir.exprs.get(*checked)? else {
+                let IrExpr::GetValue(checked_value) = ir.exprs.get(*checked as usize)? else {
                     return None;
                 };
                 let IrExpr::TypeOp {
                     op: IrTypeOp::ImplicitCoercion,
                     arg: produced,
                     type_operand,
-                } = ir.exprs.get(*coercion)?
+                } = ir.exprs.get(*coercion as usize)?
                 else {
                     return None;
                 };
@@ -122,11 +122,11 @@ fn materialize_unnamed_checks_before_result_coercion(ir: &mut IrFile) {
                     op: IrTypeOp::ImplicitCoercion,
                     arg: yielded,
                     type_operand: yielded_type,
-                } = ir.exprs.get(*result)?
+                } = ir.exprs.get(*result as usize)?
                 else {
                     return None;
                 };
-                let IrExpr::GetValue(yielded_value) = ir.exprs.get(*yielded)? else {
+                let IrExpr::GetValue(yielded_value) = ir.exprs.get(*yielded as usize)? else {
                     return None;
                 };
                 if checked_value != index || yielded_value != index || yielded_type != type_operand
