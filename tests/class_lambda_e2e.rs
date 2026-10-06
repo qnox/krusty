@@ -107,6 +107,19 @@ fn collect_classes(root: &Path, dir: &Path, classes: &mut Vec<String>) {
     }
 }
 
+/// Two class-name inventories describe the same population when they hold the same names.
+/// `collect_classes` returns names in `read_dir` order, which the filesystem does not promise is
+/// stable, so an identical population can arrive in different orders; compare sorted copies rather
+/// than the raw vectors. Sorting copies (not ignoring content) keeps a missing or extra class a
+/// mismatch.
+fn same_class_population(krusty: &[String], reference: &[String]) -> bool {
+    let mut krusty = krusty.to_vec();
+    let mut reference = reference.to_vec();
+    krusty.sort();
+    reference.sort();
+    krusty == reference
+}
+
 fn compile_krusty_with_modes_and_args(
     lambda_strategy: &str,
     sam_strategy: &str,
@@ -512,9 +525,9 @@ fn class_lambda_metadata_matches_kotlinc() {
     };
     let krusty_lambdas = lambdas(krusty_classes);
     let reference_lambdas = lambdas(reference_classes);
-    assert_eq!(
-        krusty_lambdas, reference_lambdas,
-        "lambda class names differ from kotlinc"
+    assert!(
+        same_class_population(&krusty_lambdas, &reference_lambdas),
+        "lambda class names differ from kotlinc: krusty={krusty_lambdas:?} kotlinc={reference_lambdas:?}"
     );
     for name in &reference_lambdas {
         let ours = std::fs::read(krusty_output.join(format!("{name}.class"))).expect("read krusty");
@@ -532,6 +545,59 @@ fn class_lambda_metadata_matches_kotlinc() {
         );
     }
     let _ = std::fs::remove_dir_all(work);
+}
+
+/// `collect_classes` returns names in filesystem `read_dir` order, which is not guaranteed stable:
+/// the metadata test once compared the two inventories as raw vectors and failed when both
+/// compilers emitted the same six classes in a different directory order. The same population in
+/// any order must compare equal.
+#[test]
+fn class_name_comparison_ignores_directory_order() {
+    let reference = vec![
+        "MainKt$box$1".to_string(),
+        "MainKt$box$2".to_string(),
+        "MainKt$id$1".to_string(),
+        "Holder$pick$1".to_string(),
+        "MainKt$box$3".to_string(),
+        "MainKt$box$4".to_string(),
+    ];
+    let mut shuffled = reference.clone();
+    shuffled.reverse();
+    shuffled.rotate_left(3);
+    assert_ne!(
+        shuffled, reference,
+        "the permutation must differ from the input order to exercise the fix"
+    );
+    assert!(
+        same_class_population(&shuffled, &reference),
+        "an identical class population in a different read_dir order must still compare equal"
+    );
+}
+
+/// Sorting the inventories must not hide a real differential: a class missing on krusty's side or
+/// an extra one it emits still has to fail, so the fix stays a reorder, not a weaker comparison.
+#[test]
+fn class_name_comparison_rejects_missing_or_extra_class() {
+    let reference = vec![
+        "MainKt$box$1".to_string(),
+        "MainKt$box$2".to_string(),
+        "MainKt$id$1".to_string(),
+    ];
+    let missing = vec!["MainKt$box$2".to_string(), "MainKt$box$1".to_string()];
+    assert!(
+        !same_class_population(&missing, &reference),
+        "a missing class must not be hidden by sorting"
+    );
+    let extra = vec![
+        "MainKt$id$1".to_string(),
+        "MainKt$box$1".to_string(),
+        "MainKt$box$2".to_string(),
+        "Holder$pick$1".to_string(),
+    ];
+    assert!(
+        !same_class_population(&extra, &reference),
+        "an extra class must not be hidden by sorting"
+    );
 }
 
 /// A lambda class declares kotlinc's typed `invoke` (`invoke(ILToken;)Ljava/lang/Integer;`, a
