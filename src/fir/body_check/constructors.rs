@@ -1237,7 +1237,7 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
             parameter.context_kind,
         )
     });
-    let (parameters, defaults, span) = if secondary.is_none() {
+    let (parameters, mut defaults, span) = if secondary.is_none() {
         let (parameters, defaults) = checked_constructor_parameters(
             context_source
                 .clone()
@@ -1267,6 +1267,22 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
         )?;
         (parameters, defaults, constructor.span)
     };
+    let value_parameter_count = signature
+        .parameters
+        .len()
+        .checked_sub(context_count)
+        .ok_or(CheckedBodyDriverFailure::ParameterShapeMismatch)?;
+    if work.parameters.len() != value_parameter_count {
+        return Err(CheckedBodyDriverFailure::ParameterShapeMismatch);
+    }
+    defaults.retain(|default| {
+        usize::try_from(default.parameter)
+            .ok()
+            .and_then(|parameter| parameter.checked_sub(context_count))
+            .and_then(|parameter| work.parameters.get(parameter))
+            .copied()
+            .unwrap_or(false)
+    });
     if defaults.is_empty() {
         return Err(CheckedBodyDriverFailure::MissingBody);
     }

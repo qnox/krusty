@@ -194,9 +194,9 @@ pub fn actualized_declaration_pairs(
 }
 
 /// Match actualized declaration subtrees from compact Pass-1 headers and already-bound classifier
-/// identities. This is also the authority for expect-owned default expressions: callers publish
-/// their presence on `actual`, but retain `expect` as the stable provider identity for Pass-2
-/// checking.
+/// identities. Callers publish an expect parameter's default on `actual` and retain `expect` as
+/// the Pass-2 provider when the actual left that parameter bare. An actual that writes the default
+/// itself keeps its own expression.
 pub fn actualization(
     headers: &StreamedHeaderModule,
     bindings: &ActualizationTypeBindings,

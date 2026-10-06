@@ -153,7 +153,20 @@ pub(super) fn defaults(
     symbols: &mut FrontendSymbols,
     diags: &mut crate::diag::DiagSink,
 ) -> Option<crate::fir::DefaultArgumentStore> {
-    providers.sort_by_key(|provider| (provider.target, provider.provider, provider.relation));
+    providers.sort_by(|left, right| {
+        (
+            left.target,
+            left.provider,
+            left.relation,
+            left.parameters.as_ref(),
+        )
+            .cmp(&(
+                right.target,
+                right.provider,
+                right.relation,
+                right.parameters.as_ref(),
+            ))
+    });
     providers.dedup();
     let selection = default_check_selection(&providers, index, headers, files.len())?;
     let mut store = crate::fir::DefaultArgumentStore::default();
@@ -216,7 +229,7 @@ fn check_default_source(
             .declaration_anchor(provider.provider)
             .is_some_and(|anchor| anchor.source == source);
         if selected {
-            items.push(*provider);
+            items.push(provider.clone());
         }
         !selected
     });
@@ -322,7 +335,7 @@ fn check_default_source(
             file,
             &info,
             source,
-            item,
+            item.clone(),
             &*index,
             &active,
             sources.origins_mut(),

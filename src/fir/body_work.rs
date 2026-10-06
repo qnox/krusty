@@ -27,11 +27,14 @@ pub enum DefaultArgumentRelation {
 
 /// Pass-1 source/owner mapping for one callable's signature defaults. This mapping is consumed
 /// while the provider's bounded syntax is live and never crosses Pass 1.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DefaultArgumentProvider {
     pub target: DeclarationId,
     pub provider: DeclarationId,
     pub relation: DefaultArgumentRelation,
+    /// Parameters whose expressions this provider owns, in target declaration order. Multiple
+    /// disjoint providers may contribute to one callable after expect/actual merging.
+    pub parameters: Box<[bool]>,
 }
 
 /// Pass-1-only executable inventory used to select and immediately check retained inline bodies.
