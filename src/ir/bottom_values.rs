@@ -63,6 +63,9 @@ fn completion_for(ir: &IrFile, mut expression: ExprId) -> Option<IrBottomValueCo
             IrExpr::Call { callee, .. } if physically_invoked(callee) => {
                 return Some(invoked_completion(substituted_generic));
             }
+            IrExpr::InvokeFunction { .. } => {
+                return Some(invoked_completion(substituted_generic));
+            }
             // A property read is still the checked operation here. Realization replaces that node
             // in place with the accessor call or field load, so the completion has to be chosen
             // before the producer has a call shape. The accessor's descriptor returns
@@ -237,6 +240,28 @@ mod tests {
                 completion: IrBottomValueCompletion::FallThroughWhenDiscarded,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn a_checked_nothing_function_value_invocation_has_bottom_completion() {
+        let mut ir = IrFile::with_package(None);
+        let function = ir.add_expr(IrExpr::GetValue(0));
+        let invocation = ir.add_expr(IrExpr::InvokeFunction {
+            func: function,
+            args: Vec::new(),
+            params: Vec::new(),
+            ret: Ty::Nothing,
+        });
+
+        let completed = complete_bottom_value(&mut ir, invocation, Ty::Nothing);
+
+        assert!(matches!(
+            ir.expr(completed),
+            IrExpr::BottomValue {
+                producer,
+                completion: IrBottomValueCompletion::Diverge,
+            } if *producer == invocation
         ));
     }
 }

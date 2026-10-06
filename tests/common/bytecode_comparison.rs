@@ -854,6 +854,7 @@ fn classes_against_kotlinc_lib_request(
     }
     .unwrap_or_else(|| panic!("{name}: krusty failed to compile"))
     .into_iter()
+    .filter(|(name, _)| !name.ends_with(".kotlin_module"))
     .collect();
     Some(ClassSets { reference, krusty })
 }

@@ -66,13 +66,30 @@ impl<'a> RegenerationSite<'a> {
         descriptor: &str,
         symbols: &'a dyn BackendClassifierSource,
     ) -> RegenerationSite<'a> {
+        Self::special("<init>", descriptor, symbols)
+    }
+
+    /// The site of a JVM special method. Copies are numbered under `$special` and retain this
+    /// method as their `EnclosingMethod`; unlike a source function, no Kotlin name participates in
+    /// the generated class name.
+    pub(in crate::jvm::ir_emit) fn special(
+        method: &str,
+        descriptor: &str,
+        symbols: &'a dyn BackendClassifierSource,
+    ) -> RegenerationSite<'a> {
         RegenerationSite {
-            method: "<init>".to_string(),
+            method: method.to_string(),
             descriptor: descriptor.to_string(),
             function: String::new(),
             special: true,
             symbols,
         }
+    }
+
+    pub(in crate::jvm::ir_emit) fn class_initializer(
+        symbols: &'a dyn BackendClassifierSource,
+    ) -> RegenerationSite<'a> {
+        Self::special("<clinit>", "()V", symbols)
     }
 }
 

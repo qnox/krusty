@@ -1138,6 +1138,9 @@ fn emit_jvm_interface_companion_surface(
             Ty::Unit,
             clinit_statics.iter().map(|&(_, _, init)| init),
         );
+        emitter.regeneration_site = Some(
+            bytecode_inline_call::RegenerationSite::class_initializer(env.signature_symbols),
+        );
         let mut clinit = CodeBuilder::new(0);
         emitter.emit_delegated_property_array(env, c.fq_name, &fq_name, &mut clinit);
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
@@ -4376,6 +4379,9 @@ fn emit_enum_class(
                 .iter()
                 .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied()),
         );
+        e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
+            env.signature_symbols,
+        ));
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, &fq, &mut clinit);
         // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
