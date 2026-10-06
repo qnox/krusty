@@ -153,6 +153,9 @@ impl Parser<'_> {
                         .visibility
                         .get_or_insert(Visibility::from_modifier(&text));
                 }
+                if text == "value" {
+                    self.value_modifier_span = Some(self.tok().span);
+                }
                 mods.push(text);
                 self.bump();
             } else {
@@ -178,6 +181,17 @@ impl Parser<'_> {
 }
 
 impl Parser<'_> {
+    /// The `value` keyword in `modifiers`, if this prefix wrote one. Cleared so a nested class
+    /// parsed next records its own keyword.
+    pub(super) fn take_value_modifier_span(&mut self, modifiers: &[String]) -> Option<Span> {
+        let span = self.value_modifier_span.take();
+        modifiers
+            .iter()
+            .any(|modifier| modifier == "value")
+            .then_some(span)
+            .flatten()
+    }
+
     /// Start a declaration whose modifier list [`Parser::record_declaration_prefix`] will keep.
     pub(super) fn begin_declaration_prefix(&mut self) {
         self.declaration_prefix = PrefixInProgress::default();

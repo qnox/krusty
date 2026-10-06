@@ -829,6 +829,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   splice then reads a constructor call or `Unit` in place too, so `x.resume(P("OK"))` stores no
   local (`fir_lower/source_calls.rs`, `jvm/ir_emit/in_place_arguments.rs`). Tests:
   `tests/inline_arguments_in_place_e2e.rs`.
+- **An `@InlineOnly` call reads a local through a representation-preserving coercion.**
+  `println(message)` widens a non-null `String` to `Any?`. That coercion emits no bytecode, so
+  kotlinc's `genOrGetLocal` still loads the caller's local after `getstatic System.out`. A
+  coercion that boxes or unboxes (`Int` to `Any`) is stored
+  (`jvm/ir_emit/bytecode_inline_call.rs`). Test:
+  `tests/inline_arguments_in_place_e2e.rs::an_inline_only_println_of_a_local_loads_the_local_after_system_out`.
 - **A private suspend member's `access$` bridge is the one every other class uses.** A
   continuation re-enters a private member with an ordinary call from its own class, so the owner's
   single `access$<name>` bridge serves both it and a suspend lambda class calling the member.
@@ -1539,6 +1545,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unboxed carrier, so an unrejected `a === b` silently compares two scalar carriers or boxes one as an
   unrelated JVM wrapper. No source/classpath branch is part of the identity policy.
   `referential_equality_on_a_value_class_operand` in `tests/resolve_parser_diag_coverage_e2e.rs`.
+- **A `value class` without `@JvmInline` is boxed when `FullValueClasses` is on, and rejected
+  otherwise.** kotlinc's message is `value classes without '@JvmInline' annotation are not yet
+  supported.`, pointed at the `value` keyword. The annotation is the resolved `kotlin.jvm.JvmInline`
+  identity, so `import kotlin.jvm.JvmInline as Inline` / `@Inline` stays unboxed. A legacy
+  `inline class` is unboxed without the annotation. With the feature, the class is a final JVM
+  class: public constructor, private final fields, getters, and data-class `equals`/`hashCode`/
+  `toString` (`A(x=1)`, `31 * acc + field.hashCode()`) without `componentN`, `copy`, or the
+  `-impl`/`box-impl` family. Those three generated members actualize between an `expect value
+  class` and its `actual`: they are not source members, and a headerless pair of the same name
+  is one declaration. `@JvmInline value class` keeps the unboxed inline ABI either way.
+  A final full value class stores each constructor property before the superclass constructor, so a
+  superclass `init` block and any member it calls (an abstract getter, `toString`) observe those
+  values. An abstract or sealed value class declares no constructor properties and does not
+  generate `equals`/`hashCode`/`toString`; a regular class that extends one keeps `Any`'s identity
+  members. A final value class that extends one still generates its own trio. A secondary constructor may omit a parameter that has a default, the same way an
+  ordinary class does. `Unit` and `Nothing` are legal constructor properties: their JVM value
+  positions are `kotlin.Unit` and `java.lang.Void`, not `void`. A local-variable descriptor follows
+  the same rule, including a type parameter that erases to `Unit`. `tests/full_value_classes_e2e.rs`.
 - `==` on `String` (Kotlin `==` = `.equals`, `===` = reference). Structural
   `==`/`!=` on reference operands compiles to `kotlin/jvm/internal/Intrinsics.areEqual(Object,Object)Z`
   — the exact helper kotlinc's JVM backend emits (`backend.jvm/.../intrinsics/Equals.kt`), so the
@@ -3609,6 +3633,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stays intact and erases to `Object`. This is representation of an already-selected declaration.
   Test: `star_projected_member_and_extension_references_use_their_declared_bounds` in
   `tests/reference_adaptation_e2e.rs`.
+- **An inherited property reference is owned by the classifier it was written on.** `A::parent`
+  and `a::parent`, where `parent` is declared on a supertype of `A`, reflect `A` and call `A`'s
+  accessor. kotlin-reflect substitutes the property type from that owner (`A?`, not the
+  declaration's `T?`). `H<A>::parent` still reflects `H`. The checker records that exact written
+  owner on the selected property-reference target; common IR retains it, and JVM realization does
+  not reconstruct it from a receiver type or provider map. A class that implements the declaring
+  interface calls the accessor with `invokevirtual` on that class. A classifier declared in
+  another file of the same module is published with its source kind; one normalized common-IR kind
+  query covers either source location, and a missing published kind fails realization instead of
+  falling back to the declaring owner. Tests:
+  `checked_fir_records_the_written_owner_of_each_inherited_property_reference`,
+  `an_inherited_property_reference_substitutes_through_the_referenced_classifier` and
+  `an_inherited_property_reference_in_another_file_uses_the_referenced_classifier` in
+  `tests/inherited_property_reference_e2e.rs`. Corpus:
+  `reflection/properties/genericOverriddenProperty.kt`.
 - **An unbound inherited member reference is owned by the classifier it was written on.**
   `A::foo`, where `foo` is declared on `H<T>` and `A : H<A>`, reflects owner `A`. kotlin-reflect
   then substitutes the return type through that owner (`test.A?`). `H<A>::foo` still names `H`,
@@ -3617,8 +3656,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   recover it from the reference's function type. A bound reference keeps the declaration's
   owner. An unbound extension keeps its own owner: a top-level `fun Extension.member()` reflects
   on the file facade.
-  Test: `tests/inherited_reference_owner_e2e.rs`. Corpus:
-  `reflection/functions/genericOverriddenFunction.kt`.
+   Test: `tests/inherited_reference_owner_e2e.rs`. Corpus:
+   `reflection/functions/genericOverriddenFunction.kt`.
 - **A generic callable reference is reflected by the declaration's erased JVM signature.**
   `fun <T> foo(x: T): T` referenced as `KFunction1<Int, Int>` still names
   `foo(Ljava/lang/Object;)Ljava/lang/Object;`. A primary bound is that erasure:
@@ -3631,8 +3670,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   not `answer(C, Int)`). The omitted receiver is the parameter whose identity says it is the
   extension receiver; a companion declaration whose parameter identities do not match its
   parameters is a lowering error, not a signature that keeps the receiver. Test:
-  `tests/callable_ref_generic_signature_e2e.rs`. Corpus:
-  `reflection/functions/typeParameterInReturnType.kt`.
+   `tests/callable_ref_generic_signature_e2e.rs`. Corpus:
+   `reflection/functions/typeParameterInReturnType.kt`.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
   `continue` or an expression of type `Nothing` (a `throw`, or a call that never returns) in the same
   block are unreachable; krusty drops them (and a trailing block value), matching kotlinc. Emitting them
@@ -8931,6 +8970,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests:
   `tests/context_function_type_e2e.rs::a_receiver_function_value_without_context_does_not_hide_an_applicable_callable`,
   `tests/context_function_type_e2e.rs::a_lone_receiver_function_value_reports_its_missing_context`.
+
+- **`receiver.f(args)` invokes a value `f` of extension function type at the VALUE's tower level.**
+  The call is `f.invoke(receiver, args)`, and kotlinc ranks that candidate by the level that
+  declared `f`, not by the receiver. With an expression receiver the order is: members of the
+  receiver; then each local scope innermost first, where local extension functions precede a
+  same-level function value; then the implicit receivers' member extensions and their
+  extension-function-typed properties; then top-level extension functions; then top-level
+  properties. So a parameter `f: Scope.() -> R` beats both `fun Scope.f()` at top level and a
+  member extension of the enclosing class, while a member `f()` of the receiver still wins.
+  An object or companion NAMED by its classifier (`TheScope.f()`, `Holder.Companion.f()`) is
+  kotlinc's `QualifierValue` group, ranked after every other group: any applicable function value
+  — local, property, or top level — beats even a member of that singleton, whereas
+  `val s = TheScope; s.f()` picks the member. Krusty previously had no function-value rung on the
+  qualified-singleton path (`unresolved reference 'block'` for
+  `suspend fun <R> scope(block: suspend Scope.() -> R): R = TheScope.block()`) and on the
+  expression path tried function values only after every extension function, silently selecting
+  the extension.
+  Tests: `tests/extension_function_value_receiver_e2e.rs`.
 
 - **A flow narrowing does not survive a loop that writes its subject.** A straight-line proof is a
   proof about ONE edge, and a loop has a back edge: a body that reassigns `x` reaches its own start
@@ -14869,6 +14926,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (byte-identical to kotlinc), `…::primary_constructor_annotation_arguments_reach_metadata`,
   `…::primary_constructor_annotation_reaches_the_no_arg_convenience_ctor`,
   `…::deprecated_primary_constructor_marks_its_default_overload`.
+  A classifier annotated with `@kotlin.Deprecated` at any level, including `HIDDEN`, carries the
+  same zero-length JVM `Deprecated` attribute beside the runtime annotation. That covers a class, an
+  interface, an enum, and an annotation class. The attribute name interns after `SourceFile` and
+  before `RuntimeVisibleAnnotations`.
+  Test: `tests/annotation_emission_e2e.rs::deprecated_classifier_carries_the_jvm_deprecated_attribute`.
   Like the property annotations above, these are RECORDED but NOT diagnosed by the checker — krusty's
   annotation constant folder is narrower than kotlinc's, and reporting from a newly added check would
   reject sources that compile today.
