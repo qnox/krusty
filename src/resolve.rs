@@ -49382,7 +49382,13 @@ impl<'a> Checker<'a> {
             .zip(args.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
         let resolved = crate::types::ty_subst_alias_expansion(expansion, &bindings);
-        let conflicts = conflicting_use_site_spans(&formals, arguments, expansion, &bindings);
+        let conflicts = conflicting_use_site_spans(
+            &formals,
+            arguments,
+            expansion,
+            &bindings,
+            &self.file.type_projection_spans,
+        );
         AppliedAlias {
             ty: resolved,
             conflicts,

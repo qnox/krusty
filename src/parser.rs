@@ -4217,16 +4217,18 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn skip_variance(&mut self) -> (bool, bool) {
+    fn skip_variance(&mut self) -> (bool, bool, Option<Span>) {
         if self.at(TokenKind::KwIn) {
+            let span = self.tok().span;
             self.bump();
-            return (true, false);
+            return (true, false, Some(span));
         }
         if self.at(TokenKind::Ident) && self.keyword_text("out") {
+            let span = self.tok().span;
             self.bump();
-            return (false, true);
+            return (false, true, Some(span));
         }
-        (false, false)
+        (false, false, None)
     }
 
     /// Parse a generic type-argument list `< (variance? type | *),+ >` via the real grammar
@@ -4239,10 +4241,11 @@ impl<'a> Parser<'a> {
         }
         self.skip_newlines();
         while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
-            let (in_projection, out_projection) = self.skip_variance();
-            if self.eat(TokenKind::Star) {
+            let (in_projection, out_projection, projection_span) = self.skip_variance();
+            if self.at(TokenKind::Star) {
                 // Star projection `<*>` — erased to `Any?`.
                 let span = self.tok().span;
+                self.bump();
                 args.push(TypeRef {
                     name: "Any".to_string(),
                     flags: TrFlags::default()
@@ -4262,6 +4265,11 @@ impl<'a> Parser<'a> {
             } else {
                 let mut argument = self.parse_type();
                 argument.set_projection(in_projection, out_projection);
+                if let Some(projection_span) = projection_span {
+                    self.file
+                        .type_projection_spans
+                        .insert(argument.span, projection_span);
+                }
                 args.push(argument);
             }
             self.skip_newlines();

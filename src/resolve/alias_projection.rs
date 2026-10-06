@@ -117,6 +117,7 @@ pub(super) fn conflicting_use_site_spans(
     arguments: &[TypeRef],
     expansion: Ty,
     bindings: &HashMap<String, Ty>,
+    projection_spans: &HashMap<Span, Span>,
 ) -> Vec<Span> {
     let mut conflicting = HashSet::new();
     note_template_conflicts(expansion, bindings, &mut conflicting);
@@ -126,7 +127,7 @@ pub(super) fn conflicting_use_site_spans(
         .filter_map(|(formal, argument)| {
             conflicting
                 .contains(formal)
-                .then(|| use_site_projection_span(argument))
+                .then(|| use_site_projection_span(argument, projection_spans))
                 .flatten()
         })
         .collect()
@@ -199,18 +200,19 @@ fn projected_formal(inner: Ty) -> Option<String> {
     }
 }
 
-fn use_site_projection_span(argument: &TypeRef) -> Option<Span> {
-    let prefix = if argument.in_projection() {
-        3
-    } else if argument.out_projection() {
-        4
-    } else {
+fn use_site_projection_span(
+    argument: &TypeRef,
+    projection_spans: &HashMap<Span, Span>,
+) -> Option<Span> {
+    if !argument.in_projection() && !argument.out_projection() {
         return None;
-    };
-    Some(Span::new(
-        argument.span.lo.saturating_sub(prefix),
-        argument.span.hi,
-    ))
+    }
+    Some(*projection_spans.get(&argument.span).unwrap_or_else(|| {
+        panic!(
+            "projected type argument {:?} must retain its keyword span",
+            argument.span
+        )
+    }))
 }
 
 fn apply_written_type_modifiers(syntax: &TypeRef, base: Ty) -> Ty {

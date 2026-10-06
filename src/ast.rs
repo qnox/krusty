@@ -1867,6 +1867,10 @@ pub struct File {
     /// when a later pass rewrites a target for its own template. A reference with no entry keeps
     /// [`TypeRef::name`].
     pub alias_spellings: std::collections::HashMap<Span, TypeRef>,
+    /// Exact `in`/`out` keyword span for a projected type argument, keyed by that argument's type
+    /// span. Diagnostics consume this parser-owned source fact instead of guessing an offset from
+    /// the referenced type, which may be separated from the keyword by trivia.
+    pub type_projection_spans: std::collections::HashMap<Span, Span>,
     /// Every `typealias Name<T…> = Target`: the alias name, its declared type-parameter names, and
     /// the complete source target shape. Resolution binds this once for semantic use and metadata.
     pub type_alias_fun: Vec<(String, Vec<String>, TypeRef)>,

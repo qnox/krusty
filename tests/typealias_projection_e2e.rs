@@ -76,6 +76,9 @@ fn an_opposite_typealias_projection_is_rejected() {
         val a: OutAlias<in String>? = null
         val b: InAlias<out String>? = null
         val x: Wrap<OutAlias<in String>>? = null
+        val c: OutAlias<in /* trivia belongs between the projection and type */ String>? = null
+        val d: InAlias<out
+            String>? = null
     "#;
     common::assert_errors_match_kotlinc(&[("Main.kt", source)], &[]);
 }
