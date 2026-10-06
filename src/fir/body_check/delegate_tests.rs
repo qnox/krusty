@@ -146,6 +146,7 @@ fn delegate_member_substitution_names_its_receiver_class_parameter() {
             parameter: parameter.into(),
             reified: false,
             value: ResolvedTy::new(Ty::String).unwrap(),
+            reified_runtime: ResolvedTy::new(Ty::String).unwrap(),
             additional_bounds: Box::new([]),
         }],
     );

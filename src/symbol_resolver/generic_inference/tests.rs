@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn a_single_generic_lower_bound_keeps_platform_flexibility() {
+    let flexible = Ty::platform_nullable(Ty::obj_args(
+        "kotlin/collections/MutableMap",
+        &[Ty::String, Ty::obj("kotlin/Any")],
+    ));
+    assert_eq!(
+        merge_inferred_lower_bounds_from_symbols(&crate::libraries::EmptySymbolSource, &[flexible],),
+        flexible
+    );
+}
+
+#[test]
 fn identity_evidence_is_published_without_changing_ordinary_unification() {
     let any = Ty::nullable(Ty::obj("kotlin/Any"));
     let t = Ty::ty_param("owner:T", any);

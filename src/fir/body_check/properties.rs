@@ -1333,15 +1333,18 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::MissingStablePropertyTarget,
                     )
                 })?;
+                let reified = header.flags.is_reified();
+                let value = self.resolved_type(
+                    self.file.expr_span(expression).ok_or_else(|| {
+                        self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                    })?,
+                    value,
+                )?;
                 Ok(FirTypeSubstitution {
                     parameter: parameter.into(),
-                    reified: header.flags.is_reified(),
-                    value: self.resolved_type(
-                        self.file.expr_span(expression).ok_or_else(|| {
-                            self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
-                        })?,
-                        value,
-                    )?,
+                    reified,
+                    value,
+                    reified_runtime: self.reified_substitution_runtime(reified, value),
                     additional_bounds: Box::new([]),
                 })
             })

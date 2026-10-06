@@ -187,6 +187,9 @@ impl<'a> TypeParameters<'a> {
 
 /// Append the realization of `typeOf<ty>()` to `out`.
 ///
+/// `ty` is the classifier the frontend already selected for this reified operation. An
+/// intersection is not a runtime class and is refused here: approximating it belongs to type
+/// checking, which records [`crate::fir::FirTypeSubstitution::reified_runtime`].
 /// `recursive_bounds` is kotlinc's `JvmSupportRecursiveTypeOf`. Without it, a non-reified parameter
 /// whose bounds reach itself has no realization. With it, that parameter is stored after
 /// `typeParameter` and every later use, including its own upper bound, loads the stored value.
@@ -882,6 +885,18 @@ mod tests {
         assert!(!out
             .iter()
             .any(|instruction| matches!(instruction, TypeOfInsn::ReifiedMarker(_))));
+    }
+
+    #[test]
+    fn an_intersection_is_not_a_type_of_classifier() {
+        let intersection = Ty::intersection(&[Ty::obj("demo/X"), Ty::obj("demo/Y")]);
+        let ir = IrFile::default();
+        let parameters = TypeParameters::new(&ir, "AKt");
+        let mut out = Vec::new();
+        assert_eq!(
+            generate(intersection, &parameters, false, &mut out),
+            Err(TypeOfError::Undescribable(intersection))
+        );
     }
 
     #[test]

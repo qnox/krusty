@@ -289,10 +289,12 @@ impl BodyFirChecker<'_> {
                         )
                     }
                 };
+                let value = resolved(value)?;
                 Ok(FirTypeSubstitution {
                     parameter,
                     reified,
-                    value: resolved(value)?,
+                    value,
+                    reified_runtime: self.reified_substitution_runtime(reified, value),
                     additional_bounds,
                 })
             })

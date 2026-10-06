@@ -537,6 +537,25 @@ struct BodyFirChecker<'a> {
 }
 
 impl BodyFirChecker<'_> {
+    /// Runtime classifier of a reified type argument. Semantic `value` stays the checked type,
+    /// including an intersection; this is the one classifier a reified operation may record.
+    pub(super) fn reified_substitution_runtime(
+        &self,
+        reified: bool,
+        value: crate::fir::ResolvedTy,
+    ) -> crate::fir::ResolvedTy {
+        if !reified {
+            return value;
+        }
+        let runtime = crate::symbol_resolver::reified_runtime_type(value.get(), &|name| {
+            self.index.recorded_direct_supertypes(name)
+        });
+        if runtime == value.get() {
+            return value;
+        }
+        crate::fir::ResolvedTy::new(runtime).unwrap_or(value)
+    }
+
     fn safe_call_guard_receiver(&self, mut receiver: FirReceiver) -> FirReceiver {
         while let Some(FirExprKind::ImplicitConversion { value, .. }) = self
             .body

@@ -42,6 +42,7 @@ fn external_call_keeps_checked_type_substitutions_until_provider_realization() {
                 },
                 reified: false,
                 value: resolved(Ty::String),
+                reified_runtime: resolved(Ty::String),
                 additional_bounds: Box::new([]),
             }]),
         }),
@@ -69,6 +70,7 @@ fn external_call_keeps_checked_type_substitutions_until_provider_realization() {
                 parameter: FirTypeParameterRef::External { callable, ordinal: 0 },
                 reified: false,
                 value: Ty::String,
+                reified_runtime: Ty::String,
                 additional_bounds,
             }] if *callable == declaration && additional_bounds.is_empty()
         )

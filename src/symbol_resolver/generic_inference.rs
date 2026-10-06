@@ -7,6 +7,8 @@ use nullable_actual::nullable_generic_actual;
 mod bound_relations;
 mod call_constraints;
 mod call_site_variables;
+mod common_supertype;
+pub(crate) use common_supertype::reified_runtime_type;
 mod conditional_result;
 mod postponed_result;
 
@@ -1215,6 +1217,31 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
         return merged;
     }
+    let same_generic_classifier = match (current.non_null(), actual.non_null()) {
+        (Ty::Obj(left, left_arguments), Ty::Obj(right, right_arguments)) => {
+            left == right
+                && !left_arguments.is_empty()
+                && left_arguments.len() == right_arguments.len()
+        }
+        _ => false,
+    };
+    if same_generic_classifier {
+        // Two invariant instantiations (`Inv<A>` and `Inv<B>`) are not a raw classifier and not
+        // `Any`. Their common supertype keeps the classifier and captures the arguments' own common
+        // supertype. Do not apply this structural join to unrelated top-level classifiers: ordinary
+        // inference already has a stable nearest-hierarchy rule, and replacing it changes such
+        // established results as mixed scalar varargs and Java flexible collection expectations.
+        let supertype =
+            common_supertype::common_super_type(source, current.non_null(), actual.non_null());
+        if !supertype.is_erased_top() {
+            return if current.is_nullable() || actual.is_nullable() {
+                Ty::nullable(supertype.non_null())
+            } else {
+                supertype
+            };
+        }
+    }
+
     let left = receiver_hierarchy(source, current.non_null());
     let right = receiver_hierarchy(source, actual.non_null());
     let mut common = left
@@ -1247,6 +1274,56 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     } else {
         *common
     }
+}
+
+/// Collapse a complete set of lower constraints in one operation. Keeping the original bounds is
+/// significant: a common type synthesized from the first pair is not itself a source constraint
+/// and must not make the answer depend on the order in which arguments were visited.
+pub(crate) fn merge_inferred_lower_bounds_from_symbols(
+    source: &dyn SymbolSource,
+    bounds: &[Ty],
+) -> Ty {
+    let bounds = bounds
+        .iter()
+        .map(|bound| inference_actual(*bound))
+        .collect::<Vec<_>>();
+    let Some((&first, rest)) = bounds.split_first() else {
+        return Ty::Error;
+    };
+    // A one-element constraint set is not a common-type problem. In particular, preserve a Java
+    // flexible wrapper verbatim: normalizing `Map<K, V>!` through the structural solver would turn
+    // it into ordinary `Map<K, V>?` and lose the mutable/read-only expectation bridge.
+    if rest.is_empty() {
+        return first;
+    }
+    let same_generic_classifier = bounds
+        .iter()
+        .copied()
+        .map(Ty::non_null)
+        .try_fold(None, |known, bound| {
+            let Ty::Obj(owner, arguments) = bound else {
+                return Err(());
+            };
+            if arguments.is_empty() {
+                return Err(());
+            }
+            match known {
+                None => Ok(Some((owner, arguments.len()))),
+                Some((known_owner, known_arity))
+                    if known_owner == owner && known_arity == arguments.len() =>
+                {
+                    Ok(known)
+                }
+                _ => Err(()),
+            }
+        })
+        .is_ok();
+    if same_generic_classifier {
+        return common_supertype::common_super_types(source, &bounds);
+    }
+    rest.iter().copied().fold(first, |known, actual| {
+        merge_inferred_ty_from_symbols(Some(source), known, actual)
+    })
 }
 
 pub(crate) fn unify_inferred_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {

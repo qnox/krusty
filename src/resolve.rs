@@ -120,6 +120,7 @@ mod inspection_analysis;
 mod integer_constants;
 mod interface_delegate_calls;
 mod interface_delegation;
+mod intersection_receiver_selection;
 mod invoke_selection;
 mod lambda_call_shapes;
 mod property_read_selection;
@@ -13415,7 +13416,10 @@ impl<'a> Checker<'a> {
                 let checked_ty = selected_property.as_mut().and_then(|property| {
                     self.apply_checked_source_property_result(receiver, property)
                 });
-                let ty = checked_ty.unwrap_or(selected.ty);
+                // A captured invariant argument is an out-projection (`Inv<out (X & Y)>`). The
+                // projection is the argument, not the value a read produces: the read is the upper
+                // bound, which is what exposes `X` and `Y` on `sel(Inv(A), Inv(B)).v`.
+                let ty = checked_ty.unwrap_or(selected.ty).projection_read_ty();
                 // Core property selection already incorporates a nearer covariant accessor override.
                 // The inherited declaration still owns the physical accessor/field shape; its erased
                 // return must not overwrite the selected logical property type.
@@ -14713,6 +14717,12 @@ impl<'a> Checker<'a> {
             }
         };
 
+        let selected_receiver = self
+            // A type parameter's lookup receiver is its complete declared bound intersection;
+            // `rt` remains the source value type so the ordinary no-projection case still records
+            // that value unchanged.
+            .selected_intersection_member_receiver(member_receiver, &selected)
+            .unwrap_or(rt);
         let mut member = self
             .resolver()
             .commit_selected_member_function(member_receiver, selected);
@@ -14721,7 +14731,7 @@ impl<'a> Checker<'a> {
         // checked call still dispatches on the source receiver `F`. In particular, Kotlin protected
         // access permits an inherited call through the subclass receiver and rejects the same call
         // through an arbitrary base-typed value.
-        member.receiver = rt;
+        member.receiver = selected_receiver;
         match self.record_selected_member_call(scope, call, args, member) {
             Some(Ty::Error) => MemberSlotCall::Rejected,
             Some(ret) => MemberSlotCall::Resolved(ret),
@@ -15670,8 +15680,9 @@ impl<'a> Checker<'a> {
     /// the type parameters' declared and already-collected upper bounds.
     ///
     /// A symbolic parameter is not automatically applicable. In `Builder<T : Base>.set(T)`, after
-    /// one call contributes `Value <: T`, a later `set(Other())` would merge the lower bounds to
-    /// `Any`. That violates `T : Base`, so the member is inapplicable and the scope tower must be
+    /// one call contributes `Value <: T`, a later `set(Other())` with an `Other` outside `Base`
+    /// joins the lower bounds to their common supertype `Any`. That violates `T : Base`, so the
+    /// member is inapplicable and the scope tower must be
     /// allowed to consider an extension overload. Deferring this check until the outer call is
     /// solved loses the overload decision and reports the violation at the wrong call.
     fn postponed_argument_constraint_is_satisfiable(&self, expected: Ty, actual: Ty) -> bool {
@@ -15716,7 +15727,13 @@ impl<'a> Checker<'a> {
             collect_declared_bounds(actual, &constraints.formals, &mut declared_bounds);
 
             let mut trial = constraints.clone();
-            trial.constrain_assignable(expected, actual, &inferred, &shadowed_formals);
+            trial.constrain_assignable(
+                &self.fed_source(),
+                expected,
+                actual,
+                &inferred,
+                &shadowed_formals,
+            );
             for (formal, &lower) in &trial.lower {
                 if shadowed_formals.contains(formal)
                     || lower == Ty::Error
@@ -16959,11 +16976,13 @@ impl<'a> Checker<'a> {
             (!inferred.is_empty()).then_some(inferred)
         });
         if let Some(inferred) = expected_bindings.as_ref() {
+            let mut frames = std::mem::take(&mut self.postponed_call_constraints);
             for (formal, actual) in inferred {
-                for frame in &mut self.postponed_call_constraints {
-                    frame.constrain_equal(formal, *actual);
+                for frame in &mut frames {
+                    frame.constrain_equal(&self.fed_source(), formal, *actual);
                 }
             }
+            self.postponed_call_constraints = frames;
         }
         let full_params = self
             .applied_member_call_params(
@@ -19005,6 +19024,13 @@ impl<'a> Checker<'a> {
                 let (mut rt, argument_scope) =
                     self.check_receiver_before_arguments(scope, receiver);
                 let scope = &argument_scope;
+                let inferred_intersection = self.inferred_expression_intersection(receiver);
+                if inferred_intersection.len() > 1 {
+                    // Keep the expression's denotable/physical type in its own slot. Candidate
+                    // collection sees the complete inferred semantic intersection, and the
+                    // selected declaration records any required receiver conversion.
+                    rt = Ty::intersection(&inferred_intersection);
+                }
                 if let Some(projected) = self
                     .flow_intersection_member_receiver(scope, receiver, &name)
                     .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
@@ -21474,7 +21500,7 @@ impl<'a> Checker<'a> {
                                         inferred.lower,
                                         inferred.upper,
                                     );
-                                    postponed_constraints.merge(inferred);
+                                    postponed_constraints.merge(&self.fed_source(), inferred);
                                 }
                                 return checked;
                             }
@@ -21866,7 +21892,7 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                postponed_constraints.merge(inferred);
+                                postponed_constraints.merge(&self.fed_source(), inferred);
                             }
                             return checked;
                         }
@@ -22142,7 +22168,7 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                postponed_constraints.merge(inferred);
+                                postponed_constraints.merge(&self.fed_source(), inferred);
                             }
                             // `expected_function` was specialized with these bindings before the
                             // lambda was checked. The checked lambda therefore already carries the
@@ -24683,6 +24709,10 @@ impl<'a> Checker<'a> {
             }
         }
         let mut receiver_ty = self.expr(scope, receiver);
+        let inferred_intersection = self.inferred_expression_intersection(receiver);
+        if inferred_intersection.len() > 1 {
+            receiver_ty = Ty::intersection(&inferred_intersection);
+        }
         if let Some(projected) = self
             .flow_intersection_property_receiver(scope, receiver, &name, true)
             .or_else(|| self.type_parameter_member_receiver(scope, receiver_ty, &name))
@@ -41715,7 +41745,19 @@ impl<'a> Checker<'a> {
                             declared = declared.array_read_elem().unwrap_or(declared);
                         }
                         let mut actual = kind.inference_type(&source, declared);
-                        if !whole_array {
+                        // `@Exact` compares the argument's complete semantic type. Replacing an
+                        // already-recorded intersection with a fresh per-argument witness makes two
+                        // occurrences of the same value look like different types and rejects
+                        // `checkTypeEquality(value, value)`. Flow witnesses are only needed for an
+                        // ordinary parameter that may select one constituent during applicability.
+                        if !whole_array
+                            && !candidate
+                                .call_sig
+                                .exact_params
+                                .get(declaration_parameter)
+                                .copied()
+                                .unwrap_or(false)
+                        {
                             if let Some(Ty::TyParam(formal, _)) = signature
                                 .params
                                 .get(declaration_parameter)
@@ -50194,208 +50236,6 @@ impl<'a> Checker<'a> {
         scope.narrow_path(path, ty);
     }
 
-    /// Project a flow intersection onto the constituent that owns the member being used. Candidate
-    /// collection and overload selection remain the resolver's job; this operation only chooses the
-    /// receiver view exposed by the proven intersection. When two bounds contribute the same
-    /// parameter shape, Kotlin's synthetic intersection override has the covariant result, so the
-    /// bound with the uniquely most-specific result is the correct projection regardless of test
-    /// order (`A.foo(): Any?`, `B.foo(): String`).
-    fn flow_intersection_member_receiver(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: ExprId,
-        name: &str,
-    ) -> Option<Ty> {
-        let path = self.expr_access_path(receiver)?;
-        let bounds = self.lookup_intersection_narrowing(scope, &path);
-        self.intersection_member_receiver(&bounds, name)
-    }
-
-    /// Project a flow intersection onto the constituent that supplies the selected property facet.
-    /// A write requires a setter on that constituent; a read accepts the ordinary getter facet.
-    fn flow_intersection_property_receiver(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: ExprId,
-        name: &str,
-        write: bool,
-    ) -> Option<Ty> {
-        let path = self.expr_access_path(receiver)?;
-        let bounds = self.lookup_intersection_narrowing(scope, &path);
-        self.intersection_property_receiver(&bounds, name, write)
-    }
-
-    /// Select a property fake override inherited through several direct semantic supertypes. The
-    /// nominal receiver remains the runtime value; checked FIR carries the chosen supertype view.
-    fn nominal_intersection_property_receiver(
-        &self,
-        receiver: Ty,
-        name: &str,
-        write: bool,
-    ) -> Option<Ty> {
-        let source = self.fed_source();
-        // A nominal declaration is already Kotlin's selected override. Projecting it onto one of
-        // its direct supertypes discards a covariant result (`B.result: String` would become
-        // `A.result: Any`). Only a classifier with no usable declaration of its own needs the
-        // synthetic intersection/fake-override selection below.
-        let has_declared_facet =
-            crate::symbol_resolver::declared_member_callables(&source, receiver, name)
-                .properties()
-                .iter()
-                .any(|property| {
-                    property.kind == crate::libraries::PropKind::Member
-                        && property.receiver_rank == 0
-                        && (!write || property.setter.is_some())
-                });
-        if has_declared_facet {
-            return None;
-        }
-        let bounds = crate::symbol_resolver::direct_supertypes(&source, receiver);
-        // A fake override may combine a getter inherited from one direct supertype with the sole
-        // compatible setter inherited from another (`A.val x` plus `B.var x`). For a write, the
-        // setter-owning constituent is the semantic receiver view even though it is the only
-        // writable contributor. Reads retain the multi-contributor rule below so an ordinary
-        // single-parent inherited property keeps its nominal receiver and covariant refinements.
-        if write {
-            return self.intersection_property_receiver(&bounds, name, true);
-        }
-        // A single property-bearing parent is ordinary inheritance, not an intersection. Keep the
-        // nominal receiver so `select_member_property` can use nearer accessor overrides to refine
-        // a provider-derived property (for example a Kotlin `getEntries(): Array<Derived>`
-        // overriding Java's synthetic `entries: Array<Base>`). Projecting directly to the Java
-        // parent erases that covariant override before selection sees it.
-        let resolver = self.resolver();
-        let contributors = bounds
-            .iter()
-            .filter(|&&bound| resolver.select_member_property(bound, name).is_some())
-            .count();
-        if contributors < 2 {
-            return None;
-        }
-        self.intersection_property_receiver(&bounds, name, write)
-    }
-
-    /// Project a type-parameter receiver onto the constituent of its declared intersection that
-    /// owns the selected member. The expression keeps no synthetic intersection type: checked FIR
-    /// sees the concrete receiver view whose dispatch target was selected, including the cast that
-    /// an erased first bound may require for a member declared only on a later bound.
-    fn type_parameter_member_receiver(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: Ty,
-        name: &str,
-    ) -> Option<Ty> {
-        let primary = receiver.non_null().ty_param_bound()?;
-        let mut bounds = vec![primary];
-        bounds.extend(self.semantic_tparam_extra_bounds(scope, receiver));
-        self.intersection_member_receiver(&bounds, name)
-    }
-
-    fn intersection_member_receiver(&self, bounds: &[Ty], name: &str) -> Option<Ty> {
-        if bounds.len() < 2 {
-            return None;
-        }
-        let member_families = bounds
-            .iter()
-            .copied()
-            .map(|bound| {
-                let members = self
-                    .stable_receiver_callables(bound, name)
-                    .functions()
-                    .iter()
-                    .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                (bound, members)
-            })
-            .filter(|(_, members)| !members.is_empty())
-            .collect::<Vec<_>>();
-        if let [(bound, _)] = member_families.as_slice() {
-            return Some(*bound);
-        }
-        let single = member_families
-            .iter()
-            .filter_map(|(bound, members)| match members.as_slice() {
-                [member] => Some((*bound, member)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if single.len() == member_families.len() && single.len() > 1 {
-            let same_parameters = single.windows(2).all(|pair| {
-                pair[0].1.semantic_params() == pair[1].1.semantic_params()
-                    && pair[0].1.context_count == pair[1].1.context_count
-            });
-            if same_parameters {
-                let context = crate::assignable::TyCtx::new();
-                let winners = single
-                    .iter()
-                    .filter(|(_, candidate)| {
-                        single.iter().all(|(_, other)| {
-                            crate::assignable::is_subtype(
-                                &context,
-                                self,
-                                candidate.callable.ret,
-                                other.callable.ret,
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                if let [winner] = winners.as_slice() {
-                    return Some(winner.0);
-                }
-            }
-        }
-
-        self.intersection_property_receiver(bounds, name, false)
-    }
-
-    /// Select the concrete receiver view for a synthetic intersection property. Equivalent fake
-    /// overrides may occur on several incomparable bounds; after covariant-result filtering they
-    /// denote the same property contract, so stable bound order breaks that semantic tie.
-    fn intersection_property_receiver(&self, bounds: &[Ty], name: &str, write: bool) -> Option<Ty> {
-        if bounds.len() < 2 {
-            return None;
-        }
-        let resolver = self.resolver();
-        let properties = bounds
-            .iter()
-            .copied()
-            .filter_map(|bound| {
-                let property = resolver.select_member_property(bound, name)?;
-                if write
-                    && !property
-                        .property
-                        .as_ref()
-                        .is_some_and(|property| property.setter.is_some())
-                {
-                    return None;
-                }
-                Some((bound, property.ty))
-            })
-            .collect::<Vec<_>>();
-        if let [(bound, _)] = properties.as_slice() {
-            return Some(*bound);
-        }
-        let context = crate::assignable::TyCtx::new();
-        let winners = properties
-            .iter()
-            .filter(|(_, candidate)| {
-                properties.iter().all(|(_, other)| {
-                    crate::assignable::is_subtype(&context, self, *candidate, *other)
-                })
-            })
-            .collect::<Vec<_>>();
-        match winners.as_slice() {
-            [winner] => Some(winner.0),
-            [] => None,
-            _ if winners.windows(2).all(|pair| pair[0].1 == pair[1].1) => winners
-                .into_iter()
-                .map(|winner| winner.0)
-                .min_by_key(|bound| bound.source_name()),
-            _ => None,
-        }
-    }
-
     /// The flow-narrowed type of a stable property READ (`a.b`, `a?.b`, `this.b`): when an
     /// enclosing condition proved this exact access path non-null or `is T`, the read sees the
     /// narrowed type, and the lowerer emits the `checkcast`/unbox from its generic per-expression
@@ -57696,8 +57536,15 @@ impl<'a> Checker<'a> {
             actual,
         );
         let mut shadowed_formals = std::collections::HashSet::new();
-        for constraints in self.postponed_call_constraints.iter_mut().rev() {
-            constraints.constrain_assignable(expected, actual, &inferred, &shadowed_formals);
+        let mut frames = std::mem::take(&mut self.postponed_call_constraints);
+        for constraints in frames.iter_mut().rev() {
+            constraints.constrain_assignable(
+                &self.fed_source(),
+                expected,
+                actual,
+                &inferred,
+                &shadowed_formals,
+            );
             crate::trace_compiler!(
                 "resolve",
                 "postponed constraint expected={expected:?} actual={actual:?} lower={:?} upper={:?}",
@@ -57706,6 +57553,7 @@ impl<'a> Checker<'a> {
             );
             shadowed_formals.extend(constraints.formals.iter().cloned());
         }
+        self.postponed_call_constraints = frames;
         if postponed_symbolic_constraint || postponed_pending {
             return;
         }
@@ -58613,8 +58461,22 @@ impl<'a> Checker<'a> {
                     .unwrap_or(nominal)
             }
         } else {
-            nominal
+            self.intersection_constituent_for_expected(nominal, expected)
+                .unwrap_or(nominal)
         }
+    }
+
+    /// The constituent of a denotable intersection that is exactly the expected type. Delegation
+    /// and other value boundaries record that constituent rather than the whole intersection.
+    fn intersection_constituent_for_expected(&self, nominal: Ty, expected: Ty) -> Option<Ty> {
+        let Ty::Intersection(parts) = nominal.non_null() else {
+            return None;
+        };
+        let expected = expected.non_null();
+        parts
+            .iter()
+            .copied()
+            .find(|part| part.non_null() == expected)
     }
 
     /// Commit the contextual numeric conversion chosen for a value boundary. Candidate probing uses
@@ -58629,10 +58491,13 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let contextual = self.expression_type_for_expected(scope, expression, nominal, expected);
         let selected_intersection_projection = contextual != nominal
-            && self
+            && (self
                 .expr_access_path(expression)
                 .map(|path| self.lookup_intersection_narrowing(scope, &path))
-                .is_some_and(|constituents| constituents.contains(&contextual));
+                .is_some_and(|constituents| constituents.contains(&contextual))
+                || self
+                    .intersection_constituent_for_expected(nominal, contextual)
+                    .is_some());
         if selected_intersection_projection {
             // This is a committed value boundary, not candidate probing. Publish the exact
             // constituent selected from the proven non-denotable intersection so checked FIR can
@@ -63733,6 +63598,10 @@ impl<'a> Checker<'a> {
                     self.silent_error_exprs.insert(e);
                 }
                 return self.set(e, Ty::Error);
+            }
+            let inferred_intersection = self.inferred_expression_intersection(receiver);
+            if inferred_intersection.len() > 1 {
+                rt = Ty::intersection(&inferred_intersection);
             }
             if let Some(projected) = self
                 .flow_intersection_property_receiver(scope, receiver, &name, false)
