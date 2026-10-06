@@ -4685,6 +4685,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   signature first. The classes are byte-identical to kotlinc 2.4.20's. Tests:
   `tests/constructor_argument_specificity_e2e.rs`.
 
+- **A call reordered by named arguments stores only what kotlinc stores.** Each argument is stored
+  in a temporary in source order, except one kotlinc passes in place because evaluating it has no
+  effect to reorder: a constant (folded ones such as `1 + 2` and `"a" + "b"` included), a read of a
+  `val`, a parameter or a receiver, a function literal that is not SAM-converted, an unbound
+  callable reference and an unbound class literal. A `var` read, an object, a string template, a
+  property read, a SAM-converted lambda and a bound reference (its receiver evaluates where it is
+  written) are stored. A scalar stored for a reference parameter is boxed where it is passed, in a
+  call and in a constructor delegation alike. Suspension does not add a whole-call spill: the JVM
+  state machine preserves already-pushed operands, so an already ordered call stays direct and a
+  genuinely reordered call applies this selective rule. Operands retained for an inline function
+  from a dependency keep their established path. Tests: `tests/named_argument_operands_e2e.rs`.
+
+- **A callable reference is cast only where its consumer reads it.** The reference's carrier class
+  reaches its use uncast, and the consumer narrows it as it would any other value: `Function1` for a
+  function-typed parameter or local, `KFunction` for a reference-typed local, temporary or result,
+  and nothing for `Any`. A stored bound reference in a reordered call keeps its `KFunctionN` type.
+  A `KFunctionN<P…, R>` in a generic `Signature` is written `KFunction<R>`, the one type argument of
+  its JVM class. Tests: `tests/reference_consumer_casts_e2e.rs`, `tests/named_argument_operands_e2e.rs`.
+
 - **A captured `var` initialized to its holder's default leaves the holder unset.** A `Ref$XxxRef`
   holder starts at its field's JVM default, so a constant initializer equal to it (zero, positive
   zero for `Float`/`Double`, `false`, `'\u0000'`, or `null` in an `ObjectRef`) is not stored, as
@@ -9521,8 +9540,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     container is the declaring class's `KClass`, a `FunctionReferenceImpl` for a function, or a
     `PropertyReferenceNImpl` signed by the getter for a property. A top-level function's owner is
     the facade of the file that declares it, which for an inline function from another file is not
-    the file being compiled. A recursive bound or a `suspend` function type is an error, as in
-    kotlinc.
+    the file being compiled. A `suspend` function type is an error, as in kotlinc. A non-reified
+    parameter whose bounds reach itself (`T : Comparable<T>`, including a mutual cycle) is an
+    error unless `JvmSupportRecursiveTypeOf` is enabled (`// LANGUAGE:` or
+    `-XXLanguage:+JvmSupportRecursiveTypeOf`). With the flag, `typeParameter` is stored in a local
+    before `setUpperBounds`, and every later use — the bound and the type that names the parameter —
+    loads that local and calls `typeOf(KClassifier)` instead of building the parameter again. A
+    parameter that only mentions some other self-recursive parameter (`U : List<T>`) keeps the
+    ordinary `dup` sequence. The printed type is `kotlin.collections.List<T>` and the parameter's
+    upper bounds are `[kotlin.Comparable<T>]`.
   - A type parameter's bound may name a parameter of an enclosing declaration (`inner class
     D<Y : X>`, `val <Y> B<Y>.p where Y : X`), and keeps it as a type parameter; it used to erase to
     `Any`, which also changed the generic `Signature` attribute (`<Y:TX;>`).
@@ -9539,6 +9565,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   returns names that class. The lambda is a class of that call (`<caller>$$inlined$<callee>$N`),
   as is the declaration lambda. Tests: `fir_lower::inlining::escaping_inline_object` and
   `tests/local_object_type_of_e2e.rs`. Corpus: `reflection/typeOf/localClass.kt`.
+  With `+JvmSupportRecursiveTypeOf`, recursive non-reified bounds are supported as well, including
+  `reflection/typeOf/nonReifiedTypeParameters/recursiveBound{With,Without}Inline.kt`.
   A member-extension call publishes its solved method type arguments the same way an ordinary
   extension call does. Inline expansion of `inline fun <reified T> Receiver.foo` inside the
   declaring class therefore substitutes `T`; without those arguments the expanded `typeOf<T>()`
