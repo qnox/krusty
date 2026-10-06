@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::frame_map::{FrameKey, Mark};
+use super::frame_map::{FrameKey, Mark, TempRole, TempSlot};
 use super::{CodeBuilder, Emitter, Label, Ty};
 use crate::ir::{IrDebugLocalProvenance, IrExpr};
 
@@ -46,7 +46,10 @@ impl Emitter<'_> {
         let terminal_target = self.terminal_statement_target.take();
         let marked_initializer = self.renders_initializer_boundary(block);
         self.mark_initializer_line(block, false, code);
-        let discard_after_close = self.emit_open_block(
+        let EmittedBlock {
+            discard_after_close,
+            reserved_inline_stack,
+        } = self.emit_open_block(
             stmts,
             value,
             terminal_target,
@@ -57,16 +60,21 @@ impl Emitter<'_> {
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
             self.close_scope_locals(code, marked_initializer);
-            self.close_spliced_lambda_frame(block, code);
         }
-        if normalizes_inline_stack {
+        if normalizes_inline_stack
+            && (!delays_stack_normalization || reserved_inline_stack.is_some())
+        {
             code.inline_call_marker(false);
+        }
+        if !self.ir.callable_scopes.contains(&block) {
+            self.close_spliced_lambda_frame(block, code);
         }
         if let Some(discarded) = discard_after_close {
             super::discard(self.value_ty(discarded), code);
         }
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
+        self.release_reserved_inline_stack(reserved_inline_stack);
     }
 
     /// Emit a block in value position: its statements run for effect and its trailing value is
@@ -100,6 +108,7 @@ impl Emitter<'_> {
         self.block_depth += 1;
         let mut dead = false;
         let mut normalize_at_lambda_frame = delays_stack_normalization;
+        let mut reserved_inline_stack = None;
         for &statement in stmts {
             if normalize_at_lambda_frame
                 && matches!(
@@ -107,7 +116,7 @@ impl Emitter<'_> {
                     Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
                 )
             {
-                code.inline_call_marker(true);
+                reserved_inline_stack = Some(self.open_reserved_inline_stack(code));
                 normalize_at_lambda_frame = false;
             }
             self.mark_statement_line(statement, code);
@@ -136,12 +145,15 @@ impl Emitter<'_> {
             self.close_external_inline_frame(block, code);
             self.close_scope_locals(code, false);
         }
-        self.close_spliced_lambda_frame(block, code);
-        if normalizes_inline_stack {
+        if normalizes_inline_stack
+            && (!delays_stack_normalization || reserved_inline_stack.is_some())
+        {
             code.inline_call_marker(false);
         }
+        self.close_spliced_lambda_frame(block, code);
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
+        self.release_reserved_inline_stack(reserved_inline_stack);
         self.statement_line = enclosing_statement_line;
     }
 
@@ -210,7 +222,7 @@ impl Emitter<'_> {
         terminal_target: Option<Label>,
         normalize_at_lambda_frame: bool,
         code: &mut CodeBuilder,
-    ) -> Option<u32> {
+    ) -> EmittedBlock {
         let enclosing_statement_line = self.statement_line;
         self.block_depth += 1;
         let mut dead = false;
@@ -226,6 +238,7 @@ impl Emitter<'_> {
         });
         self.note_inlined_only_cells(&stmts, value);
         let mut normalize_at_lambda_frame = normalize_at_lambda_frame;
+        let mut reserved_inline_stack = None;
         for (index, statement) in stmts.into_iter().enumerate() {
             if normalize_at_lambda_frame
                 && matches!(
@@ -233,7 +246,7 @@ impl Emitter<'_> {
                     Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
                 )
             {
-                code.inline_call_marker(true);
+                reserved_inline_stack = Some(self.open_reserved_inline_stack(code));
                 normalize_at_lambda_frame = false;
             }
             self.mark_statement_line(statement, code);
@@ -265,7 +278,35 @@ impl Emitter<'_> {
         // Once it closes, an instruction consuming the block's value belongs to that enclosing
         // statement, not to the last branch/statement visited inside the block.
         self.statement_line = enclosing_statement_line;
-        discard_after_frame_close
+        EmittedBlock {
+            discard_after_close: discard_after_frame_close,
+            reserved_inline_stack,
+        }
+    }
+
+    /// Claim the words FixStack will use before the inline lambda's own frame marker claims its
+    /// slot. The emitted marker preserves that allocation boundary until the finished method is
+    /// normalized; the reservations themselves keep subsequent frame-map entries above it.
+    fn open_reserved_inline_stack(&mut self, code: &mut CodeBuilder) -> Vec<TempSlot> {
+        let Ok(words) = u16::try_from(code.stack_height()) else {
+            self.run.set_emit_error(
+                "the operand stack at an inline lambda boundary exceeds the JVM limit".to_string(),
+            );
+            code.inline_call_marker_with_reserved_locals();
+            return Vec::new();
+        };
+        let mut reserved = Vec::with_capacity(usize::from(words));
+        for _ in 0..words {
+            reserved.push(self.frame.enter_temp(TempRole::InlineStackSpill, Ty::Int));
+        }
+        code.inline_call_marker_with_reserved_locals();
+        reserved
+    }
+
+    fn release_reserved_inline_stack(&mut self, reserved: Option<Vec<TempSlot>>) {
+        for slot in reserved.into_iter().flatten().rev() {
+            self.frame.leave_temp(slot);
+        }
     }
 
     pub(super) fn mark_statement_line(&mut self, statement: u32, code: &mut CodeBuilder) {
@@ -348,6 +389,11 @@ impl Emitter<'_> {
 pub(super) struct SlotScope {
     slots: HashMap<u32, (u16, Ty)>,
     frame: Mark,
+}
+
+pub(super) struct EmittedBlock {
+    pub(super) discard_after_close: Option<u32>,
+    pub(super) reserved_inline_stack: Option<Vec<TempSlot>>,
 }
 
 /// A source local whose debug range is open: declared in the block at `depth`, live in `slot`

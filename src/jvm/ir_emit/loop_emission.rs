@@ -65,9 +65,9 @@ impl Emitter<'_> {
                 // authorizes this lifetime, so no source-shape lookup is involved.
                 IrExpr::Block { stmts, value } => {
                     let saved = self.open_slot_scope();
-                    let discard_after_close =
-                        self.emit_open_block(stmts, value, Some(bottom), false, code);
-                    if let Some(discarded) = discard_after_close {
+                    let emitted = self.emit_open_block(stmts, value, Some(bottom), false, code);
+                    debug_assert!(emitted.reserved_inline_stack.is_none());
+                    if let Some(discarded) = emitted.discard_after_close {
                         super::discard(self.value_ty(discarded), code);
                     }
                     Some(saved)
