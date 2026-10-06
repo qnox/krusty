@@ -24,6 +24,9 @@ pub(super) fn common_super_types(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty
         .map(|bound| bound.non_null())
         .collect::<Vec<_>>();
     let result = CommonSupertypeSolver::new(source).common(&bounds);
+    if result == Ty::Error {
+        return Ty::Error;
+    }
     if nullable {
         Ty::nullable(result.non_null())
     } else {
@@ -36,6 +39,7 @@ struct CommonSupertypeSolver<'a> {
     active: Vec<(bool, Vec<Ty>)>,
     active_classifiers: Vec<(TypeName, usize)>,
     completed: Vec<(bool, Vec<Ty>, Ty)>,
+    invalid_classifier_shape: bool,
 }
 
 impl<'a> CommonSupertypeSolver<'a> {
@@ -45,12 +49,19 @@ impl<'a> CommonSupertypeSolver<'a> {
             active: Vec::new(),
             active_classifiers: Vec::new(),
             completed: Vec::new(),
+            invalid_classifier_shape: false,
         }
     }
 
     fn common(&mut self, bounds: &[Ty]) -> Ty {
-        self.common_at(bounds, false)
-            .unwrap_or_else(|| Ty::obj_name(crate::types::wk::any()))
+        let result = self
+            .common_at(bounds, false)
+            .unwrap_or_else(|| Ty::obj_name(crate::types::wk::any()));
+        if self.invalid_classifier_shape {
+            Ty::Error
+        } else {
+            result
+        }
     }
 
     /// Join one unordered constraint set. Returning `None` means this exact join is already active:
@@ -231,11 +242,18 @@ impl<'a> CommonSupertypeSolver<'a> {
             })
             .collect::<Vec<_>>();
         let arity = arguments.first().map_or(0, |arguments| arguments.len());
-        let variances = self
-            .source
-            .classifier(classifier)
-            .map(|shape| shape.type_param_variances().clone())
-            .unwrap_or_default();
+        if arity == 0 {
+            return Some(Ty::obj_name(classifier));
+        }
+        let Some(shape) = self.source.classifier(classifier) else {
+            self.invalid_classifier_shape = true;
+            return None;
+        };
+        let variances = shape.type_param_variances();
+        if variances.len() != arity {
+            self.invalid_classifier_shape = true;
+            return None;
+        }
         let mut combined_arguments = Vec::with_capacity(arity);
         for index in 0..arity {
             let projected = arguments
@@ -246,10 +264,7 @@ impl<'a> CommonSupertypeSolver<'a> {
                 combined_arguments.push(projected[0]);
                 continue;
             }
-            let variance = variances
-                .get(index)
-                .copied()
-                .unwrap_or(TypeVariance::Invariant);
+            let variance = variances[index];
             if variance == TypeVariance::In {
                 // A contravariant argument contributes no readable lower bound. Computing its
                 // common supertype is both semantically unused and recursively re-enters F-bounded
@@ -429,12 +444,47 @@ fn closure(source: &dyn SymbolSource, root: Ty) -> Vec<Ty> {
 #[cfg(test)]
 mod tests {
     use super::{common_super_type, common_super_types, reified_runtime_type};
-    use crate::symbol_source::SymbolSource;
-    use crate::types::{type_name, Ty};
+    use crate::libraries::{Callables, ClassifierDeclaration, LibraryType, ResolvedSymbols};
+    use crate::symbol_source::{SymbolNamespace, SymbolSource};
+    use crate::types::{type_name, Ty, TypeParameters, TypeVariance};
+    use std::rc::Rc;
+    use std::sync::Arc;
 
     struct EmptySource;
 
     impl SymbolSource for EmptySource {}
+
+    struct GenericSource {
+        variance: TypeVariance,
+    }
+
+    impl SymbolSource for GenericSource {
+        fn symbols(&self, namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {
+            let identity = namespace.existing_classifier(name);
+            let classifier = identity
+                .filter(|identity| identity.matches("demo/Inv"))
+                .map(|_| {
+                    let mut classifier = LibraryType::declaration_header();
+                    classifier.type_parameters = TypeParameters::new(
+                        vec!["T".to_string()],
+                        vec![Vec::new()],
+                        vec![self.variance],
+                    );
+                    Arc::new(classifier)
+                });
+            Rc::new(ResolvedSymbols {
+                builtin_classifier: false,
+                classifier_name: classifier.as_ref().and(identity),
+                classifier_declaration: classifier
+                    .as_ref()
+                    .and(identity)
+                    .map(ClassifierDeclaration::Ordinary),
+                classifier,
+                callables: Callables::None,
+                importable_declaration: false,
+            })
+        }
+    }
 
     #[test]
     fn a_deep_invariant_join_is_not_operand_order_dependent() {
@@ -445,11 +495,64 @@ mod tests {
             right = Ty::obj_args("demo/Inv", &[right]);
         }
 
-        let left_first = common_super_type(&EmptySource, left, right);
-        let right_first = common_super_type(&EmptySource, right, left);
+        let source = GenericSource {
+            variance: TypeVariance::Invariant,
+        };
+        let left_first = common_super_type(&source, left, right);
+        let right_first = common_super_type(&source, right, left);
         assert_eq!(left_first, right_first);
         assert_ne!(left_first, left);
         assert_ne!(left_first, right);
+    }
+
+    #[test]
+    fn generic_join_uses_the_declared_variance() {
+        let left = Ty::obj_args("demo/Inv", &[Ty::obj("demo/Left")]);
+        let right = Ty::obj_args("demo/Inv", &[Ty::obj("demo/Right")]);
+        let any = Ty::obj("kotlin/Any");
+
+        assert_eq!(
+            common_super_type(
+                &GenericSource {
+                    variance: TypeVariance::Invariant,
+                },
+                left,
+                right,
+            ),
+            Ty::obj_args("demo/Inv", &[Ty::out_projection(any)])
+        );
+        assert_eq!(
+            common_super_type(
+                &GenericSource {
+                    variance: TypeVariance::Out,
+                },
+                left,
+                right,
+            ),
+            Ty::obj_args("demo/Inv", &[any])
+        );
+        assert_eq!(
+            common_super_type(
+                &GenericSource {
+                    variance: TypeVariance::In,
+                },
+                left,
+                right,
+            ),
+            Ty::obj_args("demo/Inv", &[Ty::star_projection(Ty::nullable(any))])
+        );
+    }
+
+    #[test]
+    fn a_missing_generic_declaration_is_not_treated_as_invariant() {
+        assert_eq!(
+            common_super_type(
+                &EmptySource,
+                Ty::obj_args("demo/Inv", &[Ty::obj("demo/Left")]),
+                Ty::obj_args("demo/Inv", &[Ty::obj("demo/Right")]),
+            ),
+            Ty::Error
+        );
     }
 
     #[test]
