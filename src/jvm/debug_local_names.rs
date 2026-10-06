@@ -151,7 +151,8 @@ fn marker_name(ir: &IrFile, declaration: ExprId) -> Option<String> {
             Some(name)
         }
         IrDebugLocalProvenance::InlineValue { .. }
-        | IrDebugLocalProvenance::InlineLambdaReceiver { .. } => None,
+        | IrDebugLocalProvenance::InlineLambdaReceiver { .. }
+        | IrDebugLocalProvenance::InlineCallableReferenceParameter { .. } => None,
     }
 }
 
@@ -216,6 +217,9 @@ pub(super) fn render(
                 .unwrap_or_else(|| lambda_implementation_name(origin));
             Some(format!("$this${}", escaped(&name)))
         }
+        Some(IrDebugLocalProvenance::InlineCallableReferenceParameter { ordinal }) => Some(
+            super::parameter_names::inline_callable_reference_parameter(ordinal),
+        ),
         // A marker is named by [`marker_name`], which knows the class it is emitted into.
         Some(
             IrDebugLocalProvenance::FunctionFrameMarker
