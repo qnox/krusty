@@ -23,14 +23,22 @@ pub(super) fn finalize_data_classes(
         let Some(header) = index.declaration_header(declaration) else {
             continue;
         };
-        if anchor.kind != DeclarationKind::Classifier || !header.flags.has(DeclarationFlags::DATA) {
+        // An abstract or sealed value class publishes `FULL_VALUE` but has no constructor
+        // properties and no generated trio. Only a final one, like a data class, synthesizes
+        // `equals`/`hashCode`/`toString`.
+        let structural = header.flags.has(DeclarationFlags::DATA)
+            || (header.flags.has(DeclarationFlags::FULL_VALUE)
+                && header.flags.has(DeclarationFlags::FINAL));
+        if anchor.kind != DeclarationKind::Classifier || !structural {
             continue;
         }
         let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() else {
             continue;
         };
         let fields = data_property_fields(index, declaration, class, ir)?;
-        if !header.flags.has(DeclarationFlags::SINGLETON) {
+        if header.flags.has(DeclarationFlags::DATA)
+            && !header.flags.has(DeclarationFlags::SINGLETON)
+        {
             synthesize_components_and_copy(index, declaration, class, &fields, ir)?;
         }
         synthesize_to_string(index, declaration, class, &fields, ir)?;

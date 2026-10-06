@@ -93,6 +93,14 @@ impl DeclarationFlags {
     /// The declaration wrote a visibility modifier. An `override` with none keeps the overridden
     /// member's visibility rather than defaulting to `public`.
     pub const HAS_VISIBILITY_MODIFIER: u64 = 1 << 39;
+    /// The source wrote the `value` keyword. This is not the unboxed `@JvmInline` representation:
+    /// that is [`Self::VALUE`], decided after the annotation resolves. With `FullValueClasses` and
+    /// no `@JvmInline`, the class stays boxed and [`Self::FULL_VALUE`] records the structural
+    /// `equals`/`hashCode`/`toString` shape.
+    pub const VALUE_KEYWORD: u64 = 1 << 40;
+    /// A boxed multi-field `value class` (`+FullValueClasses`, no `@JvmInline`). It is a final
+    /// class with structural equality, not an unboxed inline class.
+    pub const FULL_VALUE: u64 = 1 << 41;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

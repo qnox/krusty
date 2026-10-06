@@ -106,7 +106,6 @@ fn parse_with_features_and_script(
     hoist_local_classes(&mut p.file, script_scope);
     fixup_parenless_base_classes(&mut p.file);
     debug_lines::attach(&mut p.file, src);
-    expand_fun_type_aliases(&mut p.file);
     if !p.diags.has_errors() {
         if let Err(error) = p.file.validate_integrity(src) {
             p.diags
@@ -161,6 +160,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         init_order: Vec::new(),
         is_data: false,
         is_value: false,
+        value_modifier_span: None,
         kind: ClassKind::Class,
         singleton: false,
         enum_entries: Vec::new(),
@@ -637,7 +637,8 @@ fn fixup_parenless_base_classes(file: &mut File) {
 type TypeAliasShapes = std::collections::HashMap<String, (Vec<String>, TypeRef)>;
 
 /// Replace every leaf reference to one of `params` in `ty` with the corresponding use-site type
-/// argument. The use site's nullability and source span remain attached to the substituted node.
+/// argument. The occurrence's nullability, variance, and source span stay on the substituted node:
+/// `MutableMap<in Y, X?>` keeps `in` and `?` after `Y` and `X` are replaced.
 fn substitute_type_alias_parameters(ty: &mut TypeRef, params: &[String], args: &[TypeRef]) {
     if ty.fun_params.is_empty() && ty.name != "<fun>" && ty.targs.is_empty() {
         if let Some(index) = params.iter().position(|param| *param == ty.name) {
@@ -732,161 +733,6 @@ pub(crate) fn expanded_type_alias_target(
     expanded
 }
 
-/// Expand the file's structurally recorded type aliases: every `TypeRef` naming one is rewritten to
-/// its target shape, so downstream consumers see the ordinary semantic type.
-/// Runs per file at the parse seam — an alias declared in a SIBLING file is not expanded (unresolved
-/// → the test skips, as before). Nested alias references inside a substituted target expand through
-/// the recursion; the depth cap only guards a (kotlinc-rejected) recursive alias from looping.
-fn expand_fun_type_aliases(file: &mut File) {
-    if file.type_alias_fun.is_empty() {
-        return;
-    }
-    // Keyed by BOTH the simple spelling and this file's own fully qualified one: `app.Handler`
-    // denotes the same declaration as `Handler`, and only the qualified form reaches resolution
-    // intact (nothing else expands it), so without the second key it resolves as a qualified
-    // CLASSIFIER — which a function-type alias has none of, making valid Kotlin unresolvable.
-    let package = file.package.as_deref().unwrap_or("");
-    let aliases: TypeAliasShapes = file
-        .type_alias_fun
-        .iter()
-        .flat_map(|(n, ps, t)| {
-            let qualified =
-                (!package.is_empty()).then(|| (format!("{package}.{n}"), (ps.clone(), t.clone())));
-            std::iter::once((n.clone(), (ps.clone(), t.clone()))).chain(qualified)
-        })
-        .collect();
-    // Taken out and put back so the walk below can borrow the declaration arena mutably while
-    // recording into it.
-    let mut spellings = std::mem::take(&mut file.alias_spellings);
-    fn expand_opt(
-        tr: &mut Option<TypeRef>,
-        aliases: &TypeAliasShapes,
-        spellings: &mut HashMap<Span, TypeRef>,
-    ) {
-        if let Some(t) = tr {
-            expand_type_alias_ref(t, aliases, 0, spellings);
-        }
-    }
-    fn expand_params(
-        params: &mut [Param],
-        aliases: &TypeAliasShapes,
-        spellings: &mut HashMap<Span, TypeRef>,
-    ) {
-        for p in params {
-            expand_type_alias_ref(&mut p.ty, aliases, 0, spellings);
-        }
-    }
-    fn expand_bounds(
-        bounds: &mut [(String, TypeRef)],
-        aliases: &TypeAliasShapes,
-        spellings: &mut HashMap<Span, TypeRef>,
-    ) {
-        for (_, t) in bounds {
-            expand_type_alias_ref(t, aliases, 0, spellings);
-        }
-    }
-    fn expand_fun(
-        f: &mut FunDecl,
-        aliases: &TypeAliasShapes,
-        spellings: &mut HashMap<Span, TypeRef>,
-    ) {
-        expand_opt(&mut f.receiver, aliases, spellings);
-        expand_params(&mut f.params, aliases, spellings);
-        expand_opt(&mut f.ret, aliases, spellings);
-        expand_bounds(&mut f.type_param_bounds, aliases, spellings);
-    }
-    fn expand_prop(
-        p: &mut PropDecl,
-        aliases: &TypeAliasShapes,
-        spellings: &mut HashMap<Span, TypeRef>,
-    ) {
-        expand_opt(&mut p.receiver, aliases, spellings);
-        expand_opt(&mut p.ty, aliases, spellings);
-        expand_bounds(&mut p.type_param_bounds, aliases, spellings);
-    }
-    fn expand_class(
-        c: &mut ClassDecl,
-        aliases: &TypeAliasShapes,
-        spellings: &mut HashMap<Span, TypeRef>,
-    ) {
-        c.type_parameters
-            .map_bounds(|bounds| expand_bounds(bounds, aliases, spellings));
-        for p in &mut c.props {
-            expand_type_alias_ref(&mut p.ty, aliases, 0, spellings);
-        }
-        for t in &mut c.supertypes {
-            expand_type_alias_ref(t, aliases, 0, spellings);
-        }
-        for m in &mut c.methods {
-            expand_fun(m, aliases, spellings);
-        }
-        for p in &mut c.body_props {
-            expand_prop(p, aliases, spellings);
-        }
-        for sc in &mut c.secondary_ctors {
-            expand_params(&mut sc.params, aliases, spellings);
-        }
-        for e in &mut c.enum_entries {
-            for m in &mut e.methods {
-                expand_fun(m, aliases, spellings);
-            }
-            for p in &mut e.props {
-                expand_prop(p, aliases, spellings);
-            }
-        }
-    }
-
-    let aliases = &aliases;
-    for decl in &mut file.decl_arena {
-        match decl {
-            Decl::Fun(f) => expand_fun(f, aliases, &mut spellings),
-            Decl::Property(p) => expand_prop(p, aliases, &mut spellings),
-            Decl::Class(c) => expand_class(c, aliases, &mut spellings),
-        }
-    }
-    for expr in &mut file.expr_arena {
-        match expr {
-            Expr::Is { ty, .. } | Expr::As { ty, .. } => {
-                expand_type_alias_ref(ty, aliases, 0, &mut spellings)
-            }
-            Expr::Try { catches, .. } => {
-                for c in catches {
-                    expand_type_alias_ref(&mut c.ty, aliases, 0, &mut spellings);
-                }
-            }
-            _ => {}
-        }
-    }
-    for stmt in &mut file.stmt_arena {
-        match stmt {
-            Stmt::Local { ty, .. } | Stmt::LocalDelegate { ty, .. } => {
-                expand_opt(ty, aliases, &mut spellings)
-            }
-            Stmt::LocalLateinit { ty, .. } => expand_type_alias_ref(ty, aliases, 0, &mut spellings),
-            Stmt::LocalFun(f) => expand_fun(f, aliases, &mut spellings),
-            Stmt::LocalClass(c) => expand_class(c, aliases, &mut spellings),
-            _ => {}
-        }
-    }
-    for trs in file.call_type_args.values_mut() {
-        for t in trs {
-            expand_type_alias_ref(t, aliases, 0, &mut spellings);
-        }
-    }
-    for trs in file.lambda_param_types.values_mut() {
-        for t in trs.iter_mut().flatten() {
-            expand_type_alias_ref(t, aliases, 0, &mut spellings);
-        }
-    }
-    for t in file.anon_fun_ret.values_mut() {
-        expand_type_alias_ref(t, aliases, 0, &mut spellings);
-    }
-    for t in file.anon_fun_receivers.values_mut() {
-        expand_type_alias_ref(t, aliases, 0, &mut spellings);
-    }
-    file.alias_spellings = spellings;
-}
-
 struct Parser<'a> {
     src: &'a str,
     t: &'a [Token],
@@ -915,6 +761,9 @@ struct Parser<'a> {
     /// Saved/restored at every nested block boundary so syntax context, not a lambda-only special
     /// case, owns the decision.
     block_trailing_is_value: bool,
+    /// Span of a `value` modifier consumed by the most recent declaration prefix. Class registration
+    /// takes it before the class body is parsed, so a nested `value class` cannot overwrite it.
+    value_modifier_span: Option<Span>,
     /// Type parameters visible to hoisted anonymous classifiers in the current parser context.
     lexical_type_parameters: LexicalTypeParameters,
     /// Simple names of annotations consumed by the most recent `skip_decl_prefix`, awaiting attachment
@@ -1054,6 +903,7 @@ impl<'a> Parser<'a> {
             when_guards: features.has("WhenGuards"),
             no_trailing_lambda: false,
             block_trailing_is_value: false,
+            value_modifier_span: None,
             lexical_type_parameters: LexicalTypeParameters::default(),
             pending_annotations: Vec::new(),
             pending_annotation_args: Vec::new(),
@@ -1467,9 +1317,11 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::KwClass => {
                     let is_value = mods.iter().any(|m| m == "inline" || m == "value");
+                    let value_modifier_span = self.take_value_modifier_span(&mods);
                     let mut d = self.parse_class();
                     d.modality = modality_from_modifiers(&mods);
                     d.is_value = is_value;
+                    d.value_modifier_span = value_modifier_span;
                     self.register_top_level_classifier(d, &mods, decls_before);
                 }
                 // top-level property: `val`/`var name (: Type)? = init`
@@ -2345,6 +2197,7 @@ impl<'a> Parser<'a> {
             singleton: true,
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
@@ -2731,6 +2584,7 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             kind: ClassKind::Enum,
             singleton: false,
             enum_entries: entries,
@@ -3110,6 +2964,7 @@ impl<'a> Parser<'a> {
         modifiers: &[String],
         enclosing_instance_exists: bool,
     ) -> bool {
+        let value_modifier_span = self.take_value_modifier_span(modifiers);
         let is_inner = modifiers.iter().any(|modifier| modifier == "inner");
         // Only an `inner class` has the containing instance and therefore the containing class's
         // type parameters in scope. All other nested classifier kinds are static lexical boundaries.
@@ -3213,6 +3068,7 @@ impl<'a> Parser<'a> {
             nested.is_value = modifiers
                 .iter()
                 .any(|modifier| modifier == "inline" || modifier == "value");
+            nested.value_modifier_span = value_modifier_span;
         }
         if is_inner && supports_inner {
             nested.inner_of = Some(outer.to_string());
@@ -3481,6 +3337,7 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3833,6 +3690,7 @@ impl<'a> Parser<'a> {
             init_order: Vec::new(),
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             kind: ClassKind::Interface,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3945,6 +3803,7 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -4079,6 +3938,7 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
+            value_modifier_span: None,
             kind: ClassKind::Class,
             singleton: true,
             enum_entries: Vec::new(),
@@ -4372,16 +4232,18 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn skip_variance(&mut self) -> (bool, bool) {
+    fn skip_variance(&mut self) -> (bool, bool, Option<Span>) {
         if self.at(TokenKind::KwIn) {
+            let span = self.tok().span;
             self.bump();
-            return (true, false);
+            return (true, false, Some(span));
         }
         if self.at(TokenKind::Ident) && self.keyword_text("out") {
+            let span = self.tok().span;
             self.bump();
-            return (false, true);
+            return (false, true, Some(span));
         }
-        (false, false)
+        (false, false, None)
     }
 
     /// Parse a generic type-argument list `< (variance? type | *),+ >` via the real grammar
@@ -4394,10 +4256,12 @@ impl<'a> Parser<'a> {
         }
         self.skip_newlines();
         while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
-            let (in_projection, out_projection) = self.skip_variance();
-            if self.eat(TokenKind::Star) {
+            let (in_projection, out_projection, projection_span) = self.skip_variance();
+            self.skip_plain_newlines();
+            if self.at(TokenKind::Star) {
                 // Star projection `<*>` — erased to `Any?`.
                 let span = self.tok().span;
+                self.bump();
                 args.push(TypeRef {
                     name: "Any".to_string(),
                     flags: TrFlags::default()
@@ -4417,6 +4281,11 @@ impl<'a> Parser<'a> {
             } else {
                 let mut argument = self.parse_type();
                 argument.set_projection(in_projection, out_projection);
+                if let Some(projection_span) = projection_span {
+                    self.file
+                        .type_projection_spans
+                        .insert(argument.span, projection_span);
+                }
                 args.push(argument);
             }
             self.skip_newlines();
@@ -6173,7 +6042,9 @@ mod tests {
     fn use_site_variance_is_preserved_on_type_arguments() {
         let mut diagnostics = DiagSink::new();
         let source = "class Context<T>\n\
-                      fun <T> projected(input: Context<in T>, output: Context<out T>, array: Array<in T>) {}";
+                      fun <T> projected(input: Context<in\n\
+                          T>, output: Context<out\n\
+                          T>, array: Array<in T>) {}";
         let tokens = lex(source, &mut diagnostics);
         let file = parse(source, &tokens, &mut diagnostics);
         assert!(

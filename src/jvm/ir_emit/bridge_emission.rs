@@ -8,9 +8,9 @@
 use super::{
     box_prim_free, discard, emit_num_conv, emit_return, emit_value_class_box_adapter,
     emit_value_class_unbox_adapter, finish_code, finish_code_sig, ir_ty_to_jvm, jvm_declared_ty,
-    jvm_function_params, jvm_tys, load, local_variable_desc, method_descriptor, slot_words,
-    throw_assertion_error, type_descriptor, unbox_prim_from, verif_for_jvm_free, ClassWriter,
-    CodeBuilder, EmitEnv, EmitRun, JvmSignatureFormatter, VerifType,
+    jvm_function_params, jvm_tys, jvm_value_ty, load, local_variable_desc, method_descriptor,
+    slot_words, throw_assertion_error, type_descriptor, unbox_prim_from, verif_for_jvm_free,
+    ClassWriter, CodeBuilder, EmitEnv, EmitRun, JvmSignatureFormatter, VerifType,
 };
 use crate::ir::IrFile;
 use crate::types::Ty;
@@ -308,7 +308,7 @@ fn emit_bridge(
             .fields
             .first()
             .expect("a value-class bridge owner must have an underlying field");
-        let field_ty = jvm_declared_ty(&field.ty);
+        let field_ty = jvm_value_ty(&field.ty);
         assert_eq!(
             field_ty, receiver,
             "a static value-class member receiver must use its field carrier"
@@ -586,7 +586,7 @@ fn attach_bridge_debug_tables(
             .iter()
             .map(|parameter| (parameter.identity.clone(), parameter.semantic))
             .unzip();
-        let parameter_names = crate::jvm::parameter_names::resolved_local_variables(
+        let parameter_names = crate::jvm::parameter_names::bridge_local_variables(
             &identities,
             &semantic_types,
             &bridge.name,

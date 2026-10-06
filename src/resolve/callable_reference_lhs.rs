@@ -65,14 +65,18 @@ impl Checker<'_> {
                     .cloned()
                     .unwrap_or_default();
                 let span = self.file.expr_spans[root_expression.0 as usize];
-                Some(self.alias_application_ty(
-                    scope,
-                    alias.formals,
-                    alias.expansion,
-                    root_name,
-                    &arguments,
-                    span,
-                ))
+                {
+                    let applied = self.alias_application_ty(
+                        scope,
+                        alias.formals,
+                        alias.expansion,
+                        root_name,
+                        &arguments,
+                        span,
+                    );
+                    self.report_alias_projection_conflicts(&applied.conflicts, applied.ty);
+                    Some(applied.ty)
+                }
             }
             (ResolvedQualifier::Classifier(internal), _) => {
                 Some(self.applied_callable_ref_classifier(
