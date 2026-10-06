@@ -12,8 +12,9 @@ impl IrFile {
     ///
     /// [`Self::remap_classifier_identities`] rewrites the whole file, including the declaration a
     /// copy was taken from. This walk uses that same type, expression, and class-field contract on
-    /// `roots`, on functions whose bodies those roots own, and on classes named by a value of
-    /// `names`.
+    /// `roots`, on functions whose bodies copied lambda edges own, and on classes named by a value
+    /// of `names`. `owned_expressions` is the exact cloned-expression boundary. A child outside
+    /// that set is a substituted caller operand, not part of the inline template copy.
     ///
     /// Cloning an expression shares a lambda's `impl_fn` with the inline template. Remapping that
     /// function in place would retarget every call site. An implementation referenced from outside
@@ -23,6 +24,7 @@ impl IrFile {
         &mut self,
         names: &HashMap<TypeName, TypeName>,
         roots: impl IntoIterator<Item = ExprId>,
+        owned_expressions: &HashSet<ExprId>,
         detached_impls: &mut HashSet<FunId>,
     ) -> Vec<DetachedLambdaImplementation> {
         if names.is_empty() {
@@ -57,10 +59,14 @@ impl IrFile {
         let mut closure = HashSet::new();
         let mut pending = roots.into_iter().collect::<Vec<_>>();
         while let Some(expression) = pending.pop() {
-            if !closure.insert(expression) {
+            if !owned_expressions.contains(&expression) || !closure.insert(expression) {
                 continue;
             }
-            super::super::for_each_child(&self.exprs, expression, &mut |child| pending.push(child));
+            super::super::for_each_child(&self.exprs, expression, &mut |child| {
+                if owned_expressions.contains(&child) {
+                    pending.push(child);
+                }
+            });
         }
 
         let mut seen = HashSet::new();
@@ -131,7 +137,7 @@ impl IrFile {
                 }
                 reachable_implementations.insert(impl_fn);
                 if let Some(body) = self.functions[impl_fn as usize].body {
-                    pending.push(body);
+                    extend_owned_implementation(&self.exprs, body, &mut closure, &mut pending);
                 }
             } else if let Some(source) = match self.exprs[expression as usize] {
                 IrExpr::Call {
@@ -176,14 +182,16 @@ impl IrFile {
                 }
                 reachable_implementations.insert(impl_fn);
                 if let Some(body) = self.functions[impl_fn as usize].body {
-                    pending.push(body);
+                    extend_owned_implementation(&self.exprs, body, &mut closure, &mut pending);
                 }
             }
             remap_expression(&mut self.exprs[expression as usize], names);
             remap_expression_class_ids(&mut self.exprs[expression as usize], &class_ids);
             let mut children = Vec::new();
             super::super::for_each_child(&self.exprs, expression, &mut |child| {
-                children.push(child)
+                if closure.contains(&child) {
+                    children.push(child);
+                }
             });
             pending.extend(children);
         }
@@ -244,6 +252,26 @@ impl IrFile {
             remap_expression_facts(self, expression_id, names);
         }
         new_detached
+    }
+}
+
+/// Once a copied lambda edge selects an implementation, that implementation body belongs to the
+/// copy even though it is not a direct child of the `Lambda` expression. In contrast, ordinary
+/// child expressions outside `owned_expressions` are substituted caller operands and must retain
+/// their caller ownership.
+fn extend_owned_implementation(
+    expressions: &[IrExpr],
+    root: ExprId,
+    closure: &mut HashSet<ExprId>,
+    pending: &mut Vec<ExprId>,
+) {
+    let mut bodies = vec![root];
+    while let Some(expression) = bodies.pop() {
+        if !closure.insert(expression) {
+            continue;
+        }
+        pending.push(expression);
+        super::super::for_each_child(expressions, expression, &mut |child| bodies.push(child));
     }
 }
 

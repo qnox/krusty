@@ -50,10 +50,12 @@ pub(super) fn specialize(
     let mut renames = HashMap::new();
     let mut detached_impls = HashSet::new();
     let roots = roots.into_iter().collect::<Vec<_>>();
+    let owned = roots.iter().copied().collect::<HashSet<_>>();
     for root in &roots {
         retarget(
             ir,
             *root,
+            &owned,
             &expansion,
             &mut seen,
             &mut renames,
@@ -61,7 +63,14 @@ pub(super) fn specialize(
         )?;
     }
     for root in &roots {
-        remap_reachable_implementations(ir, &renames, *root, &mut detached_impls, &expansion);
+        remap_reachable_implementations(
+            ir,
+            &renames,
+            *root,
+            &owned,
+            &mut detached_impls,
+            &expansion,
+        );
     }
     Ok(())
 }
@@ -75,6 +84,7 @@ struct Expansion<'a> {
 fn retarget(
     ir: &mut crate::ir::IrFile,
     root: ExprId,
+    owned: &HashSet<ExprId>,
     expansion: &Expansion<'_>,
     seen: &mut HashSet<ExprId>,
     renames: &mut HashMap<TypeName, TypeName>,
@@ -83,13 +93,17 @@ fn retarget(
     let mut pending = vec![root];
     let mut constructions = Vec::new();
     while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
+        if !owned.contains(&expression) || !seen.insert(expression) {
             continue;
         }
         if matches!(ir.expr(expression), IrExpr::New { .. }) {
             constructions.push(expression);
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+            if owned.contains(&child) {
+                pending.push(child);
+            }
+        });
     }
     constructions.sort_unstable();
     for expression in constructions {
@@ -116,8 +130,8 @@ fn retarget(
             *name = specialized;
         }
     }
-    remap_reachable_implementations(ir, renames, root, detached_impls, expansion);
-    note_caller_property_uses(ir, root);
+    remap_reachable_implementations(ir, renames, root, owned, detached_impls, expansion);
+    note_caller_property_uses(ir, root, owned);
     Ok(())
 }
 
@@ -128,10 +142,12 @@ fn remap_reachable_implementations(
     ir: &mut crate::ir::IrFile,
     renames: &HashMap<TypeName, TypeName>,
     root: ExprId,
+    owned: &HashSet<ExprId>,
     detached_impls: &mut HashSet<FunId>,
     expansion: &Expansion<'_>,
 ) {
-    for detached in ir.remap_reachable_classifier_identities(renames, [root], detached_impls) {
+    for detached in ir.remap_reachable_classifier_identities(renames, [root], owned, detached_impls)
+    {
         ir.specialized_functions.insert(
             detached.target,
             crate::ir::IrSpecializedFunction {
@@ -153,15 +169,19 @@ fn remap_reachable_implementations(
     }
 }
 
-fn note_caller_property_uses(ir: &mut crate::ir::IrFile, root: ExprId) {
+fn note_caller_property_uses(ir: &mut crate::ir::IrFile, root: ExprId, owned: &HashSet<ExprId>) {
     let mut pending = vec![root];
     let mut seen = HashSet::new();
     let mut uses = Vec::new();
     while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
+        if !owned.contains(&expression) || !seen.insert(expression) {
             continue;
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+            if owned.contains(&child) {
+                pending.push(child);
+            }
+        });
         let receiver = match ir.expr(expression) {
             IrExpr::Checked(
                 crate::ir::IrCheckedOperation::PropertyRead {
@@ -431,11 +451,13 @@ fn specialized_class(
     );
     for method in ir.classes[class_id as usize].methods.clone() {
         if let Some(body) = ir.functions[method as usize].body {
-            retarget(ir, body, expansion, seen, renames, detached_impls)?;
+            let owned = expression_ids(ir, body);
+            retarget(ir, body, &owned, expansion, seen, renames, detached_impls)?;
         }
     }
     if let Some(body) = ir.classes[class_id as usize].init_body {
-        retarget(ir, body, expansion, seen, renames, detached_impls)?;
+        let owned = expression_ids(ir, body);
+        retarget(ir, body, &owned, expansion, seen, renames, detached_impls)?;
     }
     let pending_roots = ir
         .specialized_anonymous_classes
@@ -443,7 +465,8 @@ fn specialized_class(
         .map(|record| record.pending_property_roots.clone())
         .unwrap_or_default();
     for root in pending_roots {
-        retarget(ir, root, expansion, seen, renames, detached_impls)?;
+        let owned = expression_ids(ir, root);
+        retarget(ir, root, &owned, expansion, seen, renames, detached_impls)?;
     }
     Ok(Some(placeholder))
 }
@@ -767,7 +790,6 @@ fn publish_one_copy(
         }
     }
     publish_property_members(ir, source, source_name, copy_name, &clones)?;
-    retarget_copied_property_calls(ir, copy_id, source, source_name, &clones)?;
     retarget_caller_property_uses(ir, copy_id, &spec, source_name)?;
     specialize(
         ir,
@@ -783,6 +805,7 @@ fn publish_one_copy(
             inline_callee_source_name: &spec.inline_callee_source_name,
         },
     )?;
+    retarget_copied_property_calls(ir, copy_id, source, source_name, &clones)?;
     finalize_construction_signature(ir, copy_id, &spec, source_name)?;
     if let Some(record) = ir.specialized_anonymous_classes.get_mut(&copy_id) {
         record.method_clones = clones;
@@ -878,12 +901,28 @@ fn retarget_copied_property_calls(
     roots.extend(ir.classes[copy_id as usize].init_body);
     let mut pending = roots;
     let mut seen = HashSet::new();
+    let mut seen_functions = HashSet::new();
     let mut operations = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        let implementation = match ir.expr(expression) {
+            IrExpr::Lambda { impl_fn, .. } if ir.specialized_functions.contains_key(impl_fn) => {
+                Some(*impl_fn)
+            }
+            IrExpr::Call {
+                callee: crate::ir::Callee::Local(function),
+                ..
+            } if ir.specialized_functions.contains_key(function) => Some(*function),
+            _ => None,
+        };
+        if let Some(implementation) = implementation {
+            if seen_functions.insert(implementation) {
+                pending.extend(ir.functions[implementation as usize].body);
+            }
+        }
         if matches!(
             ir.expr(expression),
             IrExpr::Checked(

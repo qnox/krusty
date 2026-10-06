@@ -1959,8 +1959,12 @@ mod tests {
         ir.inline_only_fns.insert(implementation);
         ir.must_inline_lambdas.insert(implementation);
 
-        let detached =
-            ir.remap_reachable_classifier_identities(&names, [reachable], &mut HashSet::new());
+        let detached = ir.remap_reachable_classifier_identities(
+            &names,
+            [reachable],
+            &HashSet::from([reachable, reachable_inline_body]),
+            &mut HashSet::new(),
+        );
 
         assert_eq!(detached.len(), 1);
         assert_eq!(detached[0].source, implementation);
@@ -2027,8 +2031,12 @@ mod tests {
             inline_body: None,
         });
 
-        let detached =
-            ir.remap_reachable_classifier_identities(&names, [reachable], &mut HashSet::new());
+        let detached = ir.remap_reachable_classifier_identities(
+            &names,
+            [reachable],
+            &HashSet::from([reachable]),
+            &mut HashSet::new(),
+        );
 
         assert_eq!(detached.len(), 1);
         assert_eq!(detached[0].source, implementation);
@@ -2085,8 +2093,12 @@ mod tests {
             args: Vec::new(),
         });
 
-        let detached =
-            ir.remap_reachable_classifier_identities(&names, [reachable], &mut HashSet::new());
+        let detached = ir.remap_reachable_classifier_identities(
+            &names,
+            [reachable],
+            &HashSet::from([reachable]),
+            &mut HashSet::new(),
+        );
 
         assert_eq!(detached.len(), 1);
         assert_eq!(detached[0].source, implementation);
@@ -2149,8 +2161,12 @@ mod tests {
             args: Vec::new(),
         });
 
-        let detached =
-            ir.remap_reachable_classifier_identities(&names, [reachable], &mut HashSet::new());
+        let detached = ir.remap_reachable_classifier_identities(
+            &names,
+            [reachable],
+            &HashSet::from([reachable]),
+            &mut HashSet::new(),
+        );
 
         assert_eq!(detached.len(), 1);
         assert_eq!(detached[0].source, implementation);
@@ -2168,5 +2184,58 @@ mod tests {
             ir.functions[detached[0].target as usize].ret,
             Ty::obj_name(target)
         );
+    }
+
+    #[test]
+    fn reachable_remap_does_not_take_ownership_of_a_substituted_caller_lambda() {
+        let source = crate::types::type_name("sample/Source");
+        let target = crate::types::type_name("sample/Target");
+        let names = HashMap::from([(source, target)]);
+        let mut ir = super::super::IrFile::default();
+        let implementation = ir.add_fun(IrFunction {
+            name: "invoke".to_string(),
+            params: vec![Ty::obj_name(source)],
+            ret: Ty::obj_name(source),
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let caller_lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: None,
+        });
+        let copied_root = ir.add_expr(IrExpr::Block {
+            stmts: vec![caller_lambda],
+            value: None,
+        });
+        ir.inline_only_fns.insert(implementation);
+        ir.must_inline_lambdas.insert(implementation);
+
+        let detached = ir.remap_reachable_classifier_identities(
+            &names,
+            [copied_root],
+            &HashSet::from([copied_root]),
+            &mut HashSet::new(),
+        );
+
+        assert!(detached.is_empty());
+        assert!(matches!(
+            ir.expr(caller_lambda),
+            IrExpr::Lambda { impl_fn, .. } if *impl_fn == implementation
+        ));
+        assert_eq!(
+            ir.functions[implementation as usize].params,
+            vec![Ty::obj_name(source)]
+        );
+        assert_eq!(
+            ir.functions[implementation as usize].ret,
+            Ty::obj_name(source)
+        );
+        assert!(ir.inline_only_fns.contains(&implementation));
+        assert!(ir.must_inline_lambdas.contains(&implementation));
     }
 }
