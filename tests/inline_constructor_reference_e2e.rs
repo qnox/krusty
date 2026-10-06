@@ -171,6 +171,26 @@ fun box(): String {\n\
 }
 
 #[test]
+fn an_object_that_captures_an_inlined_reference_still_runs() {
+    common::expect_box_ok_with_stdlib(
+        "\
+inline fun inlineFun(crossinline lambda: () -> String) =\n\
+    object {\n\
+        fun foo(): String = lambda.invoke()\n\
+    }.foo()\n\
+\n\
+class A {\n\
+    val prop = inlineFun(::bar)\n\
+    fun bar() = \"OK\"\n\
+}\n\
+\n\
+fun box(): String = A().prop\n\
+",
+        "InlineRefAnonObject",
+    );
+}
+
+#[test]
 fn a_stored_reference_stays_a_carrier_beside_an_inlined_use() {
     common::expect_box_ok_with_stdlib(
         "\

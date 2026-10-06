@@ -5792,7 +5792,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receiver contains another reference (`create2(create("D")::test)::test`) keeps its own class
   name for that marker. The receiver and captures of a spliced reference run at that argument,
   before the next one (`create("C")::test` runs `create` before a later `create("F")`). A
-  reference stored in a variable stays a carrier, including beside
+  copy the inlined body evaluates, such as an object that captures the reference and invokes
+  it, stays a carrier. A reference stored in a variable stays a carrier, including beside
   another spliced use. A bound reference whose adapter is not that single return stays a
   carrier. A reified extension reference passed to `let` places the recorded call. Test:
   `tests/inline_constructor_reference_e2e.rs`.
