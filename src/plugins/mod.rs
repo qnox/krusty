@@ -239,6 +239,7 @@ pub struct FrontendNamedClassContext<'a> {
 }
 
 /// A source class named by a class-valued annotation argument.
+#[derive(Clone)]
 pub struct FrontendNamedClass {
     pub classifier: TypeName,
     /// The class as a diagnostic names it without type arguments: `X<*, *>`.
@@ -277,6 +278,11 @@ pub struct PluginContext {
     /// kotlinx.serialization cores but not in supported older ones, and emitting a reference to a
     /// class that is not there fails at class-load rather than at compile time.
     runtime_serializers: std::collections::HashSet<TypeName>,
+    /// Serializer classes this compilation does NOT declare that a property's `@Serializable(with =
+    /// …)` names, on the property or inside its declared type (`List<@Serializable(with = S::class)
+    /// T>`), mapped to whether the provider confirms an `object` (read through `INSTANCE`) rather
+    /// than a class (constructed). Absent ⇒ the provider could not classify it.
+    external_serializer_objects: std::collections::HashMap<TypeName, bool>,
 }
 
 impl Default for PluginContext {
@@ -287,6 +293,7 @@ impl Default for PluginContext {
             target_type_descriptor: no_target_type_descriptor,
             external_serializers: std::collections::HashMap::new(),
             runtime_serializers: std::collections::HashSet::new(),
+            external_serializer_objects: std::collections::HashMap::new(),
         }
     }
 }
@@ -299,6 +306,7 @@ impl Clone for PluginContext {
             target_type_descriptor: self.target_type_descriptor,
             external_serializers: self.external_serializers.clone(),
             runtime_serializers: self.runtime_serializers.clone(),
+            external_serializer_objects: self.external_serializer_objects.clone(),
         }
     }
 }
@@ -341,6 +349,21 @@ impl PluginContext {
     ) -> Self {
         self.runtime_serializers = serializers;
         self
+    }
+
+    /// Record the provider-confirmed kind of each external serializer class a property names.
+    pub(crate) fn with_external_serializer_objects(
+        mut self,
+        objects: std::collections::HashMap<TypeName, bool>,
+    ) -> Self {
+        self.external_serializer_objects = objects;
+        self
+    }
+
+    /// Whether external serializer class `serializer` is an `object`; `None` when the provider did
+    /// not classify it.
+    pub(crate) fn external_serializer_is_object(&self, serializer: TypeName) -> Option<bool> {
+        self.external_serializer_objects.get(&serializer).copied()
     }
 
     /// Whether the active runtime provides `serializer`. A builtin mapping must consult this before
@@ -462,6 +485,31 @@ impl PluginContext {
     ) -> bool {
         self.ir_property_annotations(ir, class, property)
             .is_some_and(|annotations| Self::annotation_named(annotations, annotation).is_some())
+    }
+
+    /// The checked declared spelling of `class`'s ordinary property `property`: the same tree, with
+    /// the same checked type-use annotation applications, that the property's `@Metadata` records.
+    /// The source name locates the already selected serializable field inside this class; its stable
+    /// declaration order selects the spelling, so a same-named member extension cannot replace it.
+    /// The empty spelling when the declared type spelled no alias and carried no recorded
+    /// type-use annotation.
+    pub fn property_declared_type<'ir>(
+        &self,
+        ir: &'ir IrFile,
+        class: ClassId,
+        property: &str,
+    ) -> &'ir crate::ir::Spelled {
+        ir.classes
+            .get(class as usize)
+            .and_then(|class| {
+                let property = class
+                    .properties
+                    .iter()
+                    .find(|candidate| candidate.name == property)?;
+                ir.prop_declared_spellings
+                    .get(&(class.fq_name_id(), property.source_order))
+            })
+            .map_or(crate::ir::Spelled::NONE, |spellings| &spellings.ret)
     }
 
     pub fn property_canonical_type(
@@ -631,8 +679,44 @@ pub fn run_enabled(
     let ctx = ctx
         .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
         .with_external_serializers(external)
-        .with_runtime_serializers(runtime_serializers(classifiers));
+        .with_runtime_serializers(runtime_serializers(classifiers))
+        .with_external_serializer_objects(declared_serializer_objects(ir, classifiers));
     plugins.host(module_name).run(ir, &ctx);
+}
+
+/// The provider-confirmed kind of every serializer class a property's `@Serializable(with = …)`
+/// names, on the property itself or on its declared type and type arguments, that this compilation
+/// does not declare (a declared one is classified from its own IR class).
+fn declared_serializer_objects(
+    ir: &IrFile,
+    classifiers: &dyn crate::types::ClassifierFactSource,
+) -> std::collections::HashMap<TypeName, bool> {
+    let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
+    let declared = ir
+        .classes
+        .iter()
+        .map(|class| class.fq_name_id())
+        .collect::<std::collections::HashSet<_>>();
+    let property_annotations = ir
+        .classes
+        .iter()
+        .flat_map(|class| &class.property_annotations)
+        .flat_map(|property| property.annotations.applications())
+        .filter(|annotation| annotation.internal == serializable)
+        .flat_map(|annotation| &annotation.values)
+        .filter_map(|(_, value)| match value {
+            crate::ir::AnnoValue::Class(serializer) => serializer.kotlin_class_internal(),
+            _ => None,
+        });
+    let mut type_annotations = Vec::new();
+    for spelling in ir.prop_declared_spellings.values() {
+        serialization::named_serializers(&spelling.ret, &mut type_annotations);
+    }
+    property_annotations
+        .chain(type_annotations)
+        .filter(|serializer| !declared.contains(serializer))
+        .filter_map(|serializer| Some((serializer, classifiers.classifier_is_object(serializer)?)))
+        .collect()
 }
 
 fn serial_info_annotations(

@@ -113,6 +113,7 @@ pub fn emit_analyzed<B: Backend>(
             .filter(|package| *package != crate::types::TypeName::ROOT)
             .map(|package| package.render().replace('/', "."));
         let mut ir = crate::ir::IrFile::with_package(package);
+        ir.recursive_type_of = source.recursive_type_of();
         let mut sink = match crate::fir_lower::CommonIrBodySink::new(&index, source_id, &mut ir) {
             Ok(sink) => sink,
             Err(error) => {
@@ -730,6 +731,17 @@ fn consume_body_group(
                 diags.error(
                     failure.span.unwrap_or_else(|| Span::new(0, 0)),
                     "references to variables aren't supported yet",
+                );
+            }
+            crate::fir::CheckedBodyDriverFailure::Check(crate::fir::BodyCheckFailure {
+                span,
+                kind: crate::fir::BodyCheckFailureKind::RecursiveTypeOf(parameter),
+            }) => {
+                diags.error(
+                    span.unwrap_or_else(|| Span::new(0, 0)),
+                    format!(
+                        "non-reified type parameters with recursive bounds are not supported yet: {parameter}"
+                    ),
                 );
             }
             _ => diags.error(

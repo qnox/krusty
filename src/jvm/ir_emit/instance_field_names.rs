@@ -13,7 +13,7 @@
 use crate::ir::{IrClass, IrField, IrFile};
 use crate::jvm::names::type_descriptor;
 
-use super::declaration_types::jvm_declared_ty;
+use super::declaration_types::{jvm_declared_ty, jvm_value_ty};
 
 pub(super) fn instance_field_jvm_name(ir: &IrFile, class: &IrClass, field: &IrField) -> String {
     let field_index = class
@@ -41,7 +41,7 @@ fn physical_name(ir: &IrFile, class: &IrClass, index: usize, earlier: &[String])
     }
     let field = &class.fields[index];
     let owner = class.fq_name();
-    let descriptor = type_descriptor(jvm_declared_ty(&field.ty));
+    let descriptor = type_descriptor(jvm_value_ty(&field.ty));
     let base = field.name.as_str();
     let earlier_has = |candidate: &str| earlier.iter().any(|name| name == candidate);
     let conflicts_with_static = |candidate: &str| {

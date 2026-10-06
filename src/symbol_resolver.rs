@@ -115,22 +115,6 @@ pub(crate) struct FunctionImportScope {
     classifier_levels: Vec<classifier_scope::ClassifierImportLevel>,
 }
 
-/// Classifier candidates contributed by one star-import precedence level. A star owner may denote
-/// either a package (`import sample.*`) or a classifier (`import sample.Outer.*`); the retained level
-/// stores its stable name, and the source's semantic facet decides which namespace it contributes.
-/// Callables have their own namespace traversal, but classifier resolution in both signature and
-/// body checking shares this operation so a compiled nested class cannot disappear between passes.
-pub(crate) fn classifier_candidates_at_scope_level<S: SymbolSource + ?Sized>(
-    source: &S,
-    name: &str,
-    owners: &[TypeName],
-) -> Vec<TypeName> {
-    classifier_scope::scoped_classifier_candidates_at_scope_level(source, name, owners)
-        .into_iter()
-        .map(|candidate| candidate.classifier)
-        .collect()
-}
-
 impl FunctionImportScope {
     pub(crate) fn new(
         explicit: std::collections::HashMap<String, CallableImport>,

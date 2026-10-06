@@ -36,6 +36,7 @@ mod access_control;
 mod accessor_annotations;
 mod actualization_names;
 mod alias_constructor_application;
+mod alias_projection;
 mod annotation_applications;
 mod annotation_argument_constness;
 mod anonymous_extension_functions;
@@ -100,6 +101,8 @@ mod enum_entries;
 mod enum_entry_method_owner;
 mod explicit_backing_fields;
 mod explicit_property_write;
+mod explicit_receiver_levels;
+use explicit_receiver_levels::{FunctionValueLevel, FunctionValueRungs};
 mod expression_getter;
 mod extension_receiver_uses;
 mod finalized_projection;
@@ -2011,8 +2014,12 @@ pub struct ClassSig {
     pub generic_property_shapes: HashMap<String, Ty>,
     /// For a `@JvmInline value class X(val v: U)` — the sole underlying property's `(name, type U)`.
     /// A value-class value is represented unboxed as `U`; `X` carries static `box-impl`/`unbox-impl`/
-    /// `constructor-impl` members for boxed contexts. `None` for an ordinary class.
+    /// `constructor-impl` members for boxed contexts. `None` for an ordinary class and for a boxed
+    /// `value class` enabled by `FullValueClasses`.
     pub value_field: Option<(String, Ty)>,
+    /// Boxed `value class` (`+FullValueClasses`, no `@JvmInline`): structural `equals`/`hashCode`/
+    /// `toString`, no `componentN`/`copy`, and no unboxed carrier.
+    pub full_value: bool,
     /// For a generic higher-order method (`fun <R> map(f: (T) -> R): R`), the un-erased declared shape
     /// needed to substitute the receiver's type arguments into the lambda parameter types and infer the
     /// method's own type parameters from the lambda body. Keyed by method name; only methods whose
@@ -2127,6 +2134,7 @@ impl ClassSig {
             nullable_tparam_props: HashMap::new(),
             generic_property_shapes: HashMap::new(),
             value_field: None,
+            full_value: false,
             generic_methods: HashMap::new(),
         }
     }
@@ -2680,11 +2688,8 @@ pub struct ClassNames {
     alias_expansions: HashMap<TypeName, crate::libraries::AliasExpansion>,
     /// Qualified identity of a SOURCE `typealias` reachable under this spelling.
     ///
-    /// A classpath alias keeps its identity inside its [`AliasExpansion`](crate::libraries::AliasExpansion);
-    /// a source alias has no template here, because [`expand_type_aliases`] folds its target
-    /// straight into the name map and the spelling then resolves exactly like the target class.
-    /// That is right for every semantic purpose and wrong for exactly one: `@Metadata` records the
-    /// SPELLING as `Type.abbreviated_type`, so the alias identity needs its own edge to survive.
+    /// Source aliases also have a template during Pass 1. The separate identity edge survives after
+    /// the temporary name universe is released so metadata can record `Type.abbreviated_type`.
     source_alias_identities: HashMap<String, TypeName>,
     /// First segment that failed while binding a source spelling in this file.
     unresolved_segments: HashMap<String, String>,
@@ -2708,7 +2713,7 @@ impl ClassNames {
         }
     }
 
-    /// Record a classpath alias's expansion template under the spelling that names it.
+    /// Record an alias expansion under a spelling whose ordinary scope lookup selected it.
     pub fn insert_alias_expansion(
         &mut self,
         spelling: String,
@@ -2718,7 +2723,7 @@ impl ClassNames {
         self.alias_expansions.insert(expansion.identity, expansion);
     }
 
-    /// The expansion template for a spelling, if it names a classpath alias.
+    /// The expansion template for a spelling, if it names an alias.
     pub fn alias_expansion(&self, name: &str) -> Option<&crate::libraries::AliasExpansion> {
         self.alias_bindings
             .get(name)
@@ -3260,6 +3265,12 @@ pub struct SymbolTable {
     /// producer; a declaration-only support source contributes no declared spellings.
     pub stable_declared_spellings:
         HashMap<crate::fir::DeclarationId, crate::spelling::DeclaredSpellings>,
+    /// Source spans of checked type-use annotations while Pass 1 still owns their occurrences,
+    /// keyed by stable declaration, expanded semantic type path, and resolved annotation identity.
+    /// Constructor-plan diagnostics consume this before `SymbolTable` is destroyed; no coordinate
+    /// crosses into checked FIR or common IR.
+    pub(crate) type_use_annotation_spans:
+        HashMap<(crate::fir::DeclarationId, Box<[u32]>, TypeName), Span>,
     /// How each source `typealias` spelled its own RIGHT-HAND SIDE, keyed by the alias's identity.
     ///
     /// Two things need it. `TypeAlias.underlying_type` (f4) names an alias DIRECTLY when the
@@ -3413,6 +3424,7 @@ impl Default for SymbolTable {
             source_alias_fqns: HashMap::new(),
             source_alias_expansions: HashMap::new(),
             stable_declared_spellings: HashMap::new(),
+            type_use_annotation_spans: HashMap::new(),
             alias_expansion_spellings: HashMap::new(),
             anonymous_object_types: HashMap::new(),
             anonymous_object_captures: HashMap::new(),
@@ -9135,7 +9147,7 @@ fn apply_alias_expansion(
         .cloned()
         .zip(args.iter().copied())
         .collect::<crate::symbol_resolver::GSigBinds>();
-    let expansion = crate::symbol_resolver::ty_subst(alias.expansion, &bindings);
+    let expansion = crate::types::ty_subst_alias_expansion(alias.expansion, &bindings);
     crate::trace_compiler!(
         "signature",
         "apply typealias spelling={} identity={:?} target={:?} formals={:?} arguments={args:?} template={:?} expansion={expansion:?}",
@@ -9198,6 +9210,37 @@ fn type_argument_of_ref(
 ) -> Ty {
     let ty = ty_of_ref_with(argument, classes, tparams, diags);
     projected_typeref_argument(argument, ty, Ty::nullable(Ty::obj("kotlin/Any")))
+}
+
+/// Apply a function-type alias template when the spelling has no classifier binding.
+///
+/// Class-target aliases are folded into the name map and take the classifier path.
+/// `typealias Listener = (String) -> Unit` has nothing to fold, but signature collection has
+/// already recorded its expansion under this spelling.
+fn function_alias_expansion_use(
+    r: &TypeRef,
+    classes: &ClassNames,
+    tparams: &TParams,
+    diags: &mut DiagSink,
+) -> Option<Ty> {
+    if r.is_import() {
+        return None;
+    }
+    let alias = classes.alias_expansion(&r.name)?;
+    let args: Vec<Ty> = r
+        .targs
+        .iter()
+        .map(|argument| type_argument_of_ref(argument, classes, tparams, diags))
+        .collect();
+    Some(apply_alias_expansion(
+        classes,
+        &r.name,
+        alias.target,
+        &args,
+        false,
+        r.span,
+        diags,
+    ))
 }
 
 fn ty_of_ref_with(
@@ -9297,6 +9340,14 @@ fn ty_of_ref_with(
                 diags,
             )
         }
+    } else if let Some(expanded) =
+        (!matches!(failed_binding, Some(ClassifierBindingError::Ambiguous(_)),))
+            .then(|| function_alias_expansion_use(r, classes, tparams, diags))
+            .flatten()
+    {
+        // A function-type alias has no classifier, so the name map cannot fold it onto a class.
+        // The template seeded for this spelling still substitutes the use's arguments.
+        expanded
     } else {
         match failed_binding {
             Some(ClassifierBindingError::Ambiguous(_)) => {
@@ -14837,6 +14888,13 @@ impl<'a> Checker<'a> {
             return ClassifierValueCall::NoValue;
         };
         self.set(receiver, receiver_ty);
+        // Every candidate on the singleton's value is in kotlinc's last tower group, so a function
+        // value accepting it as an extension receiver wins first — even over its members.
+        if let Some(ret) =
+            self.record_qualified_singleton_function_invoke(scope, call, args, receiver_ty, name)
+        {
+            return ClassifierValueCall::Checked(ret);
+        }
 
         let type_args = self.explicit_call_type_args(scope, call);
         // A classifier value is an ordinary value receiver. Shape its arguments through the same
@@ -14971,22 +15029,13 @@ impl<'a> Checker<'a> {
             );
         }
 
-        if let Some(ret) = self.check_member_extension_function_call(
-            scope,
-            call,
-            receiver_ty,
-            name,
-            args,
-            &argument_types,
-        ) {
-            return ClassifierValueCall::Checked(ret);
-        }
         // `Classifier.name()` can denote the classifier's companion singleton as an ordinary
-        // value receiver.  Keep the lexical local-extension rung in that value's scope tower just
-        // as `value.name()` and `value?.name()` do.  `classifier_value_ty` has already attached the
-        // checked singleton realization to `receiver`, so the selected local call carries a real
-        // extension receiver into FIR instead of asking lowering to rediscover the companion.
-        if let Some(ret) = self.record_local_extension_call(
+        // value receiver.  Keep the lexical and implicit-receiver levels in that value's scope
+        // tower just as `value.name()` and `value?.name()` do.  `classifier_value_ty` has already
+        // attached the checked singleton realization to `receiver`, so the selected local call
+        // carries a real extension receiver into FIR instead of asking lowering to rediscover the
+        // companion. Function values already had their earlier turn above.
+        if let Some(ret) = self.record_scope_level_receiver_call(
             scope,
             CallArgs {
                 call,
@@ -14996,6 +15045,7 @@ impl<'a> Checker<'a> {
             receiver,
             receiver_ty,
             name,
+            FunctionValueRungs::AlreadyTried,
         ) {
             return ClassifierValueCall::Checked(ret);
         }
@@ -18921,34 +18971,6 @@ impl<'a> Checker<'a> {
                 let explicit_invoke_ty = (name == CALLABLE_INVOKE_OPERATOR)
                     .then(|| self.invoke_function_view(scope, receiver, rt))
                     .flatten();
-                let receiver_function_argument_params = explicit_invoke_ty
-                    .and_then(|ty| match ty {
-                        Ty::Fun(signature) if signature.params.len() == args.len() => {
-                            Some(signature.params.clone())
-                        }
-                        _ => None,
-                    })
-                    .or_else(|| {
-                        self.receiver_function_member_call_params(scope, rt, &name, args.len())
-                    })
-                    .or_else(|| {
-                        // A selected member/extension PROPERTY can itself be the function value
-                        // invoked by this syntax (`receiver.block(arg)`). Its function signature is
-                        // available before argument checking and therefore owns contextual lambda
-                        // typing just like a local function value does. Waiting until the later
-                        // property-read fallback first checks `{ this.member }` expectation-free and
-                        // leaks that provisional diagnostic even though the property's parameter is
-                        // a receiver function type.
-                        self.select_property_read(scope, rt, &name)
-                            .ok()
-                            .flatten()
-                            .and_then(|selection| match selection.ty().non_null() {
-                                Ty::Fun(signature) if signature.params.len() == args.len() => {
-                                    Some(signature.params.clone())
-                                }
-                                _ => None,
-                            })
-                    });
                 // For a class method with function-type parameters, type lambda arguments against the
                 // method's `lambda_param_types` (so `it` resolves), mirroring the free-function path.
                 // A MODULE (user-declared) class method only: a classpath receiver leaves this `None` so
@@ -18973,6 +18995,41 @@ impl<'a> Checker<'a> {
                         }
                     })
                     .collect::<Vec<_>>();
+                let receiver_function_argument_params = explicit_invoke_ty
+                    .and_then(|ty| match ty {
+                        Ty::Fun(signature) if signature.params.len() == args.len() => {
+                            Some(signature.params.clone())
+                        }
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        self.receiver_function_member_call_params(
+                            scope,
+                            call,
+                            rt,
+                            &name,
+                            args,
+                            &generic_member_partial,
+                        )
+                    })
+                    .or_else(|| {
+                        // A selected member/extension PROPERTY can itself be the function value
+                        // invoked by this syntax (`receiver.block(arg)`). Its function signature is
+                        // available before argument checking and therefore owns contextual lambda
+                        // typing just like a local function value does. Waiting until the later
+                        // property-read fallback first checks `{ this.member }` expectation-free and
+                        // leaks that provisional diagnostic even though the property's parameter is
+                        // a receiver function type.
+                        self.select_property_read(scope, rt, &name)
+                            .ok()
+                            .flatten()
+                            .and_then(|selection| match selection.ty().non_null() {
+                                Ty::Fun(signature) if signature.params.len() == args.len() => {
+                                    Some(signature.params.clone())
+                                }
+                                _ => None,
+                            })
+                    });
                 // Selection and contextual lambda typing depend on the receiver's semantic members,
                 // not on whether lowering later obtains that receiver from an expression, an object
                 // singleton, or a companion field. Classifier receivers use this same planner above.
@@ -19439,13 +19496,9 @@ impl<'a> Checker<'a> {
                     self.resolved_call_type_args
                         .insert(call, call_targs.iter().copied().map(Some).collect());
                 }
-                // Member extensions precede imported extensions.
-                if let Some(ret) = self
-                    .check_member_extension_function_call(scope, call, rt, &name, args, &arg_tys)
-                {
-                    return ret;
-                }
-                if let Some(ret) = self.record_local_extension_call(
+                // The local levels, then member extensions and function-valued properties of the
+                // implicit receivers, precede top-level and imported extensions.
+                if let Some(ret) = self.record_scope_level_receiver_call(
                     scope,
                     CallArgs {
                         call,
@@ -19455,6 +19508,7 @@ impl<'a> Checker<'a> {
                     receiver,
                     rt,
                     &name,
+                    FunctionValueRungs::InTower,
                 ) {
                     return ret;
                 }
@@ -19506,21 +19560,15 @@ impl<'a> Checker<'a> {
                 if let Some(ret) = extension_ret {
                     return ret;
                 }
-                if let Some((signature, origin)) = self.receiver_function_value(scope, &name) {
-                    if let Some(ret) = self.record_receiver_function_invoke(
-                        scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys: &arg_tys,
-                        },
-                        &name,
-                        signature,
-                        origin,
-                        Some(rt),
-                    ) {
-                        return ret;
-                    }
+                // A top-level function value follows the top-level extension functions.
+                if let Some(ret) = self.record_explicit_receiver_function_invoke(
+                    scope,
+                    call_args,
+                    rt,
+                    &name,
+                    Some(FunctionValueLevel::TopLevel),
+                ) {
+                    return ret;
                 }
                 if let Some(plan) = property_invoke_plan {
                     if let Some((visibility, owner)) = plan.property.access() {
@@ -25652,11 +25700,15 @@ mod tests {
     #[test]
     fn value_class_constructor_keeps_its_semantic_array_parameter() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "value class UIntArray(private val storage: IntArray) { val size get() = storage.size }",
+        let jvm_annotations = parse_file(
+            "package kotlin.jvm\nannotation class JvmInline",
             &mut diagnostics,
         );
-        let symbols = collect_signatures(&[file], &mut diagnostics);
+        let file = parse_file(
+            "@JvmInline value class UIntArray(private val storage: IntArray) { val size get() = storage.size }",
+            &mut diagnostics,
+        );
+        let symbols = collect_signatures(&[jvm_annotations, file], &mut diagnostics);
 
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         let class = symbols
@@ -26455,12 +26507,15 @@ val result = object { fun value(): String = captured }
         let mut diagnostics = DiagSink::new();
         let kotlin_annotations = parse_file(
             "package kotlin\n\
-             annotation class Suppress(vararg val names: String)\n\
-             annotation class JvmInline",
+             annotation class Suppress(vararg val names: String)",
             &mut diagnostics,
         );
         let exact_annotation = parse_file(
             "package kotlin.internal\nannotation class Exact",
+            &mut diagnostics,
+        );
+        let jvm_annotations = parse_file(
+            "package kotlin.jvm\nannotation class JvmInline",
             &mut diagnostics,
         );
         let file = if detected_features {
@@ -26468,9 +26523,9 @@ val result = object { fun value(): String = captured }
         } else {
             parse_file(src, &mut diagnostics)
         };
-        let files = vec![kotlin_annotations, exact_annotation, file];
+        let files = vec![kotlin_annotations, exact_annotation, jvm_annotations, file];
         let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[2], &mut symbols, &mut diagnostics);
+        let info = check_file(&files[3], &mut symbols, &mut diagnostics);
         let errors = diagnostics
             .diags
             .iter()
@@ -27230,7 +27285,7 @@ class Calls {
     suspend fun consume(): Int = memberIdentity(memberProduce())
 }
 
-@JvmInline value class Token(val value: Int)
+@kotlin.jvm.JvmInline value class Token(val value: Int)
 class ValueCalls {
     suspend fun <T> produce(): T = null as T
     suspend fun <T> identity(value: T): T = value
@@ -27239,7 +27294,7 @@ class ValueCalls {
     suspend fun consume(): Token = identity(wrap(forward(produce())))
 }
 
-@JvmInline value class AnyToken(val value: Any)
+@kotlin.jvm.JvmInline value class AnyToken(val value: Any)
 class AnyValueCalls {
     suspend fun <T> produce(): T = null as T
     suspend fun <T> identity(value: T): T = value
@@ -47084,6 +47139,7 @@ impl<'a> Checker<'a> {
         secondary: usize,
         primary_params: &[Ty],
         secondary_params: &[Vec<Ty>],
+        supports_default_abi: bool,
     ) -> Vec<CtorDelegationCandidate> {
         let mut candidates = Vec::new();
         let context_count = class
@@ -47116,7 +47172,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg)
                     .map(|ordinal| ordinal + context_count),
-                supports_default_abi: !class.is_value,
+                supports_default_abi,
                 low_priority: class
                     .primary_ctor_annotations
                     .as_ref()
@@ -47176,7 +47232,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg)
                     .map(|ordinal| ordinal + secondary_context_count),
-                supports_default_abi: !class.is_value,
+                supports_default_abi,
                 low_priority: self.has_low_priority_annotation(scope, &constructor.annotations),
                 parameter_constraints: params
                     .iter()
@@ -48802,11 +48858,23 @@ impl<'a> Checker<'a> {
 
     /// Resolve a syntactic type without erasing source nullability.
     fn type_ref_ty(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
+        let (resolved, conflicts) = self.type_ref_ty_resolved(scope, r);
+        // Nullability on the written use is part of the intermediate type kotlinc quotes. The
+        // conflict spans belong to this application; nested alias arguments already reported theirs.
+        self.report_alias_projection_conflicts(&conflicts, resolved);
+        resolved
+    }
+
+    fn type_ref_ty_resolved(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> (Ty, Vec<Span>) {
+        let mut conflicts = Vec::new();
         let mut unresolved_segment = None;
         let scoped = if scope.tparam_contains(&r.name) {
             Some(scope.tparam_bound(&r.name))
         } else if scope.type_alias(&r.name).is_some() {
-            self.scoped_source_alias_ty(scope, r)
+            self.scoped_source_alias_ty(scope, r).map(|applied| {
+                conflicts = applied.conflicts;
+                applied.ty
+            })
         } else if function_type_ref_shape(r).is_some() {
             // A function type is a structural type node, not a classifier named `<fun>`. Resolve
             // its components before entering classifier lookup so an unresolved parameter is
@@ -48830,14 +48898,16 @@ impl<'a> Checker<'a> {
                         Some(if r.is_import() {
                             alias.expansion
                         } else {
-                            self.alias_application_ty(
+                            let applied = self.alias_application_ty(
                                 scope,
                                 alias.formals,
                                 alias.expansion,
                                 &r.name,
                                 &r.targs,
                                 r.span,
-                            )
+                            );
+                            conflicts = applied.conflicts;
+                            applied.ty
                         })
                     } else {
                         typeref_classifier(r, Some(internal))
@@ -48852,7 +48922,10 @@ impl<'a> Checker<'a> {
                     unresolved_segment = failed_segment;
                     // Primitive/function aliases have no classifier facet, so no classifier was
                     // selected above. Resolve that sole alias binding through the normal type path.
-                    self.scoped_source_alias_ty(scope, r)
+                    self.scoped_source_alias_ty(scope, r).map(|applied| {
+                        conflicts = applied.conflicts;
+                        applied.ty
+                    })
                 }
             }
         };
@@ -48871,51 +48944,16 @@ impl<'a> Checker<'a> {
             CheckerModuleSymbols::Streamed(_) => None,
         } {
             Ty::from_name(&primitive_alias).unwrap_or(Ty::Error)
-        } else if let Some(t) = self.scoped_source_alias_ty(scope, r) {
-            t
+        } else if let Some(applied) = self.scoped_source_alias_ty(scope, r) {
+            conflicts = applied.conflicts;
+            applied.ty
         } else {
             Ty::Error
         };
-        let base = if r.definitely_non_null() {
-            definitely_non_null_ty(base)
-        } else {
-            base
-        };
-        let resolved = if r.nullable() && base != Ty::Error {
-            Ty::nullable(base)
-        } else {
-            base
-        };
-        if resolved == Ty::Error {
-            if let Some(segment) = unresolved_segment {
-                self.unresolved_type_segments
-                    .insert((r.span.lo, r.span.hi), segment);
-            }
-        }
-        if !scope.tparam_contains(&r.name) {
-            if let Some(internal) = resolved.non_null().kotlin_class_internal() {
-                if !r.is_import() && !self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
-                    if let Some(access) = self.resolver().inaccessible_classifier_access(internal) {
-                        self.diags.error_with_identity(
-                            r.span,
-                            DiagnosticIdentity::ClassifierAccess {
-                                reference: r.span,
-                                classifier: internal,
-                            },
-                            inaccessible_classifier_message(&r.name, access),
-                        );
-                    }
-                }
-            }
-        }
-        if resolved != Ty::Error && !r.is_import() {
-            self.resolved_type_tys
-                .insert((r.span.lo, r.span.hi), resolved);
-            if !scope.tparam_contains(&r.name) {
-                self.check_type_reference_opt_in(r, resolved);
-            }
-        }
-        resolved
+        (
+            self.publish_type_ref(scope, r, base, unresolved_segment),
+            conflicts,
+        )
     }
 
     /// Resolve and publish one body-local typealias on the classifier namespace rung where it is
@@ -49197,41 +49235,6 @@ impl<'a> Checker<'a> {
             .map(|(_, expansion)| expansion)
     }
 
-    /// Resolve a reference to a scoped source `typealias` (see
-    /// [`Self::scoped_source_alias_identity`]) by substituting the use's type arguments into the
-    /// collected expansion. Same-file and cross-file spellings use this one semantic operation.
-    fn scoped_source_alias_ty(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Option<Ty> {
-        // A detached import `import pkg.Owner.Alias` selects the alias declaration; it is not an
-        // application of a generic alias with an empty argument list. Preserve the declaration-
-        // owned expansion only long enough to validate the import. Ordinary uses of the imported
-        // spelling still enter below and must provide or infer their own arguments.
-        if r.is_import() {
-            return self.scoped_source_alias_target(scope, &r.name);
-        }
-        if let Some(alias) = scope.type_alias(&r.name) {
-            return Some(self.alias_application_ty(
-                scope,
-                alias.formals,
-                alias.expansion,
-                &r.name,
-                &r.targs,
-                r.span,
-            ));
-        }
-        if let Some(alias) = self.qualified_body_local_type_alias(scope, &r.name) {
-            return Some(self.alias_application_ty(
-                scope,
-                alias.formals,
-                alias.expansion,
-                &r.name,
-                &r.targs,
-                r.span,
-            ));
-        }
-        let identity = self.scoped_source_alias_identity(scope, &r.name)?;
-        Some(self.source_alias_application_ty(scope, identity, &r.name, &r.targs, r.span))
-    }
-
     /// Resolve the type operand of `is`/`as`. Kotlin permits a generic typealias to be written as a
     /// bare runtime type (`value is Alias`, `value as Alias`): every omitted alias parameter is a
     /// star projection, while fixed components of the expansion remain exact. This is deliberately
@@ -49263,7 +49266,7 @@ impl<'a> Checker<'a> {
             .into_iter()
             .map(|formal| (formal, star))
             .collect::<crate::symbol_resolver::GSigBinds>();
-        let mut resolved = crate::symbol_resolver::ty_subst(expansion, &bindings);
+        let mut resolved = crate::types::ty_subst_alias_expansion(expansion, &bindings);
         if reference.definitely_non_null() {
             resolved = definitely_non_null_ty(resolved);
         }
@@ -49275,72 +49278,6 @@ impl<'a> Checker<'a> {
                 .insert((reference.span.lo, reference.span.hi), resolved);
         }
         resolved
-    }
-
-    /// Apply one already-scoped source alias to use-site type arguments. Type syntax and constructor
-    /// syntax share this exact expansion so `typealias A<T> = Array<T>; A<Int>(...)` cannot resolve
-    /// the annotation but lose the constructor's semantic array identity.
-    fn source_alias_application_ty(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        identity: TypeName,
-        display_name: &str,
-        arguments: &[TypeRef],
-        span: Span,
-    ) -> Ty {
-        let Some((formals, expansion)) = self.source_alias_expansion(identity) else {
-            return Ty::Error;
-        };
-        self.alias_application_ty(scope, formals, expansion, display_name, arguments, span)
-    }
-
-    fn alias_application_ty(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        formals: Vec<String>,
-        expansion: Ty,
-        display_name: &str,
-        arguments: &[TypeRef],
-        span: Span,
-    ) -> Ty {
-        if formals.len() != arguments.len() {
-            self.diags.error(
-                span,
-                format!(
-                    "wrong number of type arguments for type alias '{}': expected {}, found {}.",
-                    display_name,
-                    formals.len(),
-                    arguments.len()
-                ),
-            );
-            return Ty::Error;
-        }
-        if formals.is_empty() {
-            return expansion;
-        }
-        // Use-site projections ride the substituted argument exactly as on a classifier use
-        // (`projected_typeref_argument`): `P<out T>` must reach the expansion as an out-projection
-        // and `P<*>` as a distinct star carrying its upper bound, or metadata/JVM signatures lose
-        // the existential spelling and incorrectly publish an explicit `out` argument. An alias
-        // type parameter cannot declare a bound (kotlinc rejects it), so a star's upper bound is
-        // always `Any?`.
-        let args = arguments
-            .iter()
-            .map(|argument| {
-                let resolved = if argument.is_star_projection() {
-                    // No operand to resolve; `projected_typeref_argument` discards it for a star.
-                    Ty::Error
-                } else {
-                    self.type_ref_ty(scope, argument)
-                };
-                projected_typeref_argument(argument, resolved, Ty::nullable(Ty::obj("kotlin/Any")))
-            })
-            .collect::<Vec<_>>();
-        let bindings = formals
-            .into_iter()
-            .zip(args)
-            .collect::<crate::symbol_resolver::GSigBinds>();
-        crate::symbol_resolver::ty_subst(expansion, &bindings)
     }
 
     /// True if `t` names a `@JvmInline value class`, independent of which symbol provider owns it.
@@ -49370,28 +49307,7 @@ impl<'a> Checker<'a> {
     fn type_ref_ty_silent(&self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
         let lexical_alias = scope.type_alias(&r.name).and_then(|alias| {
             (alias.formals.len() == r.targs.len()).then(|| {
-                let arguments = r
-                    .targs
-                    .iter()
-                    .map(|argument| {
-                        let resolved = if argument.is_star_projection() {
-                            Ty::Error
-                        } else {
-                            self.type_ref_ty_silent(scope, argument)
-                        };
-                        projected_typeref_argument(
-                            argument,
-                            resolved,
-                            Ty::nullable(Ty::obj("kotlin/Any")),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let bindings = alias
-                    .formals
-                    .into_iter()
-                    .zip(arguments)
-                    .collect::<crate::symbol_resolver::GSigBinds>();
-                crate::symbol_resolver::ty_subst(alias.expansion, &bindings)
+                self.silent_alias_substitution(scope, &alias.formals, alias.expansion, &r.targs)
             })
         });
         let base = if let Some(alias) = lexical_alias {
@@ -49402,10 +49318,16 @@ impl<'a> Checker<'a> {
             typeref_leaf(r, &mut |nested| self.type_ref_ty_silent(scope, nested))
                 .unwrap_or(Ty::Error)
         } else {
-            let internal = self.select_classifier(scope, &r.name);
-            if internal == InheritedNestedClassifier::Ambiguous {
+            let (selection, _, selected_alias) = self.select_classifier_binding(scope, &r.name);
+            if let Some(alias) = selected_alias.filter(|_| !r.is_import()) {
+                if alias.formals.len() == r.targs.len() {
+                    self.silent_alias_substitution(scope, &alias.formals, alias.expansion, &r.targs)
+                } else {
+                    Ty::Error
+                }
+            } else if selection == InheritedNestedClassifier::Ambiguous {
                 Ty::Error
-            } else if let Some(internal) = typeref_classifier(r, internal.found()) {
+            } else if let Some(internal) = typeref_classifier(r, selection.found()) {
                 if r.targs.is_empty() {
                     Ty::obj_name(internal)
                 } else {
@@ -54376,6 +54298,23 @@ impl<'a> Checker<'a> {
                             sc_index,
                             &primary_params,
                             &secondary_params,
+                            // An unboxed value class has no ordinary `$default` constructor. A boxed
+                            // full value class does, so `this(x)` may omit a parameter that has one.
+                            !cl.is_value
+                                || current_owner.is_some_and(|owner| {
+                                    c.resolved_index.is_some_and(|index| {
+                                        index
+                                            .classifier_declaration(owner)
+                                            .and_then(|declaration| {
+                                                index.declaration_header(declaration)
+                                            })
+                                            .is_some_and(|header| {
+                                                header
+                                                    .flags
+                                                    .has(crate::fir::DeclarationFlags::FULL_VALUE)
+                                            })
+                                    })
+                                }),
                         );
                         c.select_ctor_delegation(
                             delegation_scope,
@@ -61948,22 +61887,18 @@ impl<'a> Checker<'a> {
                                 extension,
                                 member_mapping_failure,
                             } => self
-                                .check_member_extension_function_call(
-                                    scope, e, recv, &name, a, arg_tys,
+                                .record_scope_level_receiver_call(
+                                    scope,
+                                    CallArgs {
+                                        call: e,
+                                        args: a,
+                                        arg_tys,
+                                    },
+                                    receiver,
+                                    recv,
+                                    &name,
+                                    FunctionValueRungs::InTower,
                                 )
-                                .or_else(|| {
-                                    self.record_local_extension_call(
-                                        scope,
-                                        CallArgs {
-                                            call: e,
-                                            args: a,
-                                            arg_tys,
-                                        },
-                                        receiver,
-                                        recv,
-                                        &name,
-                                    )
-                                })
                                 .or_else(|| {
                                     let call_args = CallArgs {
                                         call: e,
@@ -62014,22 +61949,18 @@ impl<'a> Checker<'a> {
                                 extension,
                                 member_mapping_failure,
                             } => self
-                                .check_member_extension_function_call(
-                                    scope, e, recv, &name, a, arg_tys,
+                                .record_scope_level_receiver_call(
+                                    scope,
+                                    CallArgs {
+                                        call: e,
+                                        args: a,
+                                        arg_tys,
+                                    },
+                                    receiver,
+                                    recv,
+                                    &name,
+                                    FunctionValueRungs::InTower,
                                 )
-                                .or_else(|| {
-                                    self.record_local_extension_call(
-                                        scope,
-                                        CallArgs {
-                                            call: e,
-                                            args: a,
-                                            arg_tys,
-                                        },
-                                        receiver,
-                                        recv,
-                                        &name,
-                                    )
-                                })
                                 .or_else(|| {
                                     let call_args = CallArgs {
                                         call: e,
@@ -62080,22 +62011,18 @@ impl<'a> Checker<'a> {
                         ) {
                             ret
                         } else {
-                            self.check_member_extension_function_call(
-                                scope, e, recv, &name, a, arg_tys,
+                            self.record_scope_level_receiver_call(
+                                scope,
+                                CallArgs {
+                                    call: e,
+                                    args: a,
+                                    arg_tys,
+                                },
+                                receiver,
+                                recv,
+                                &name,
+                                FunctionValueRungs::InTower,
                             )
-                            .or_else(|| {
-                                self.record_local_extension_call(
-                                    scope,
-                                    CallArgs {
-                                        call: e,
-                                        args: a,
-                                        arg_tys,
-                                    },
-                                    receiver,
-                                    recv,
-                                    &name,
-                                )
-                            })
                             .or_else(|| {
                                 self.record_extension_call(
                                     scope,
@@ -62177,23 +62104,21 @@ impl<'a> Checker<'a> {
             } else {
                 result
             };
+            // Local and implicit-receiver function values competed on their own levels above; a
+            // top-level one follows the top-level extension functions.
             let result = if result == Ty::Error {
-                self.receiver_function_value(scope, &name)
-                    .and_then(|(signature, origin)| {
-                        self.record_receiver_function_invoke(
-                            scope,
-                            CallArgs {
-                                call: e,
-                                args: args.as_deref().unwrap_or_default(),
-                                arg_tys: &checked_arg_tys,
-                            },
-                            &name,
-                            signature,
-                            origin,
-                            Some(safe_rt),
-                        )
-                    })
-                    .unwrap_or(Ty::Error)
+                self.record_explicit_receiver_function_invoke(
+                    scope,
+                    CallArgs {
+                        call: e,
+                        args: args.as_deref().unwrap_or_default(),
+                        arg_tys: &checked_arg_tys,
+                    },
+                    safe_rt,
+                    &name,
+                    Some(FunctionValueLevel::TopLevel),
+                )
+                .unwrap_or(Ty::Error)
             } else {
                 result
             };
@@ -66789,69 +66714,6 @@ impl<'a> Checker<'a> {
             ),
         );
         Some(selected.callable.ret)
-    }
-
-    /// Select and commit the local-extension scope-tower rung. Qualified and safe calls share this
-    /// exact path so neither can skip a nearer local declaration in favor of an imported extension.
-    fn record_local_extension_call(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        receiver_expression: ExprId,
-        receiver: Ty,
-        name: &str,
-    ) -> Option<Ty> {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
-        let argument_names = self.file.call_arg_names.get(&call.0).cloned();
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let selected = match self.select_local_extension_candidate(
-            scope,
-            receiver,
-            name,
-            args,
-            arg_tys,
-            argument_names.as_deref(),
-            trailing_lambda,
-        ) {
-            LocalExtensionSelection::None => return None,
-            LocalExtensionSelection::Ambiguous => {
-                if !self.call_already_has_argument_diagnostic(call, args) {
-                    self.diags.error(
-                        self.call_callee_name_span(call),
-                        INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                    );
-                }
-                return Some(Ty::Error);
-            }
-            LocalExtensionSelection::Selected(selected) => selected,
-        };
-        let SelectedLocalExtension {
-            statement,
-            signature,
-            context_args,
-        } = *selected;
-        let context_count = signature.context_count.min(signature.params.len());
-        self.expect_call_args(
-            scope,
-            &signature.params[context_count..],
-            signature.vararg(),
-            args,
-            arg_tys,
-        );
-        let ret = signature.ret;
-        self.mark_local_function_call(
-            call,
-            statement,
-            signature,
-            args.len(),
-            context_args,
-            Some(receiver_expression),
-        );
-        Some(ret)
     }
 
     /// Select the lexical local-extension rung without committing it to a source call expression.
