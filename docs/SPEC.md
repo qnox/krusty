@@ -14899,6 +14899,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (byte-identical to kotlinc), `…::primary_constructor_annotation_arguments_reach_metadata`,
   `…::primary_constructor_annotation_reaches_the_no_arg_convenience_ctor`,
   `…::deprecated_primary_constructor_marks_its_default_overload`.
+  A classifier annotated with `@kotlin.Deprecated` at any level, including `HIDDEN`, carries the
+  same zero-length JVM `Deprecated` attribute beside the runtime annotation. That covers a class, an
+  interface, an enum, and an annotation class. The attribute name interns after `SourceFile` and
+  before `RuntimeVisibleAnnotations`.
+  Test: `tests/annotation_emission_e2e.rs::deprecated_classifier_carries_the_jvm_deprecated_attribute`.
   Like the property annotations above, these are RECORDED but NOT diagnosed by the checker — krusty's
   annotation constant folder is narrower than kotlinc's, and reporting from a newly added check would
   reject sources that compile today.

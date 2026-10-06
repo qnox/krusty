@@ -1571,6 +1571,55 @@ fn an_instantiated_kclass_annotation_reads_its_member() {
     );
 }
 
+/// `@kotlin.Deprecated` on a classifier stamps the zero-length JVM `Deprecated` attribute beside
+/// the runtime annotation. The name interns after `SourceFile` and before
+/// `RuntimeVisibleAnnotations`. Covers an interface (including `ReplaceWith` and `ERROR`), a class,
+/// an enum, an annotation class, and `HIDDEN`.
+#[test]
+fn deprecated_classifier_carries_the_jvm_deprecated_attribute() {
+    let src = "package parity\n\
+         @Deprecated(\n\
+             \"old\",\n\
+             replaceWith = ReplaceWith(\"Newer\", imports = [\"a.B\"]),\n\
+             level = DeprecationLevel.ERROR\n\
+         )\n\
+         interface Gone\n\
+         \n\
+         @Deprecated(\"old\")\n\
+         class Box\n\
+         \n\
+         @Deprecated(\"old\")\n\
+         enum class Choice { A }\n\
+         \n\
+         @Deprecated(\"old\")\n\
+         annotation class Mark\n\
+         \n\
+         @Deprecated(\"old\", level = DeprecationLevel.HIDDEN)\n\
+         class Hidden\n";
+    let (krusty_dir, kotlinc_dir) = compile_both("deprecated_classifier", "D.kt", src)
+        .unwrap_or_else(|| panic!("provisioned kotlinc/JAVA_HOME unavailable"));
+    for class in [
+        "parity/Gone",
+        "parity/Box",
+        "parity/Choice",
+        "parity/Mark",
+        "parity/Hidden",
+    ] {
+        let read = |dir: &std::path::Path| {
+            fs::read(dir.join(format!("{class}.class")))
+                .unwrap_or_else(|error| panic!("reading {class}.class: {error}"))
+        };
+        let (krusty, kotlinc) = (read(&krusty_dir), read(&kotlinc_dir));
+        assert_eq!(
+            krusty,
+            kotlinc,
+            "{class} must be byte-for-byte identical to kotlinc (krusty {} B, kotlinc {} B)",
+            krusty.len(),
+            kotlinc.len(),
+        );
+    }
+}
+
 /// A class-literal argument is reported on the argument itself, as kotlinc's annotation-argument
 /// checker does: one whose receiver failed to resolve is not a constant, and one whose receiver is
 /// a value is not a class literal.
