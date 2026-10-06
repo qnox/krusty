@@ -527,6 +527,7 @@ fn materialize_delegation(
                     is_open: true,
                     modifiers: DELEGATION_PROPERTY_MODIFIERS,
                     delegate_field: None,
+                    has_constant_initializer: false,
                     is_private: false,
                     setter_visibility: crate::types::Visibility::Public,
                     getter: Some(getter),
