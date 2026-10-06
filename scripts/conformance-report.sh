@@ -1,33 +1,35 @@
 #!/usr/bin/env bash
-# The box byte-equality report shared by the box test, `conformance-run.sh`, and the badge:
+# The two box conformance reports shared by the box test, `conformance-run.sh`, and the badges. Both
+# are one line, a one-decimal percentage of two integer counts over the same applicable box cases:
 #
-#   <pct> <matched> <total>
+#   <pct> <passed> <applicable>   case report (KRUSTY_CONFORMANCE_REPORT, conformance badge)
+#   <pct> <matched> <total>       JVM byte report (KRUSTY_JVM_BYTE_REPORT, JVM byte-equality badge)
 #
-# `matched` and `total` are integer `.class` byte counts summed over the applicable box cases:
-# matching leading bytes per (module, class) pair against the longer of the two lengths, a missing
-# or extra class at its full length, and a failed box at zero against its reference classes. `pct`
-# is the one-decimal display of 100 * matched / total, and 0.0 when total is 0. Box pass/fail counts
-# are never part of this line; the outcome manifests gate them separately.
+# `passed` is the applicable cases whose box() returned "OK". `matched` and `total` are `.class`
+# byte counts: matching leading bytes per (module, class) pair against the longer of the two
+# lengths, a missing or extra class at its full length, and a failed box at zero against its
+# reference classes. `pct` is the one-decimal display of 100 * count / of, and 0.0 when of is 0.
+# Neither report carries the other's counts; the outcome manifests gate box() results separately.
 
-# Validate the single report line in file $1 and print it as "<pct> <matched> <total>". Return 1 on
-# a missing, unreadable, or malformed report, or one with matched > total. Counts carry no leading
-# zeros (Bash arithmetic would read them as octal) and at most 15 digits, so summing every shard
-# stays within 64-bit arithmetic.
+# Validate the single report line in file $1 and print it as "<pct> <count> <of>". Return 1 on a
+# missing, unreadable, or malformed report, or one whose count exceeds its denominator. Counts carry
+# no leading zeros (Bash arithmetic would read them as octal) and at most 15 digits, so summing
+# every shard stays within 64-bit arithmetic.
 conformance_report_parse() {
-  local content pct matched total
+  local content pct count of
   [ -f "$1" ] && [ -r "$1" ] || return 1
   content="$(<"$1")"
   [[ $content =~ ^(0|[1-9][0-9]{0,2})\.[0-9]\ (0|[1-9][0-9]{0,14})\ (0|[1-9][0-9]{0,14})$ ]] ||
     return 1
-  read -r pct matched total <<<"$content"
-  [ "$matched" -le "$total" ] || return 1
-  printf '%s %s %s\n' "$pct" "$matched" "$total"
+  read -r pct count of <<<"$content"
+  [ "$count" -le "$of" ] || return 1
+  printf '%s %s %s\n' "$pct" "$count" "$of"
 }
 
-# Print the report line for integer byte counts $1 (matched) and $2 (total).
+# Print the report line for integer counts $1 (count) and $2 (of).
 conformance_report_line() {
   local pct
-  pct="$(awk -v matched="$1" -v total="$2" \
-    'BEGIN { printf "%.1f", total == 0 ? 0 : 100 * matched / total }')"
+  pct="$(awk -v count="$1" -v of="$2" \
+    'BEGIN { printf "%.1f", of == 0 ? 0 : 100 * count / of }')"
   printf '%s %s %s\n' "$pct" "$1" "$2"
 }

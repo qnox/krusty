@@ -108,7 +108,8 @@ kotlinc-byte caches are isolated by version. Matrix runs opt into the KSP integr
 both KSP and pinned serialization-runtime provisioning, so missing prerequisites fail rather than
 turning those tests into passing skips. Each leg uses the same configurable process-group conformance
 deadline as the local harness, including its spawned compiler and runner JVMs. Each leg's box run
-uploads its byte-equality report (see "Current Conformance") as the `pct-<version>` artifact. A
+uploads its case report and its JVM byte report (see "Current Conformance") as the separate
+`pct-<version>` and `jvm-byte-equality-<version>` artifacts. A
 release publishes only after every combined leg passes and matches both exact box outcome manifests.
 
 ### Box-test JDK
@@ -266,21 +267,25 @@ GitHub has actually reported:
 5. Repeat step 3. It must print `[{"context":"ci-and-conformance","integration_id":15368}]`, and an
    open pull request then lists `ci-and-conformance` as required.
 
-The conformance badge changes only when a master `release` job publishes. To verify a publication,
-confirm that run's `release` job succeeded, render its max-version report locally, and compare the
-result with the Gist's `krusty-conformance.json`:
+The conformance and JVM byte-equality badges change only when a master `release` job publishes. To
+verify a publication, confirm that run's `release` job succeeded, render its max-version reports
+locally, and compare the results with the Gist's `krusty-conformance.json` and
+`krusty-jvm-byte-equality.json`:
 
 ```sh
 gh run view <run-id> --repo qnox/krusty --json jobs \
   --jq '.jobs[] | select(.name == "release") | {conclusion, steps: [.steps[] | {name, conclusion}]}'
-gh run download <run-id> --repo qnox/krusty -n "pct-$(just max-version)" -D target/pct
-just conformance-badge target/pct/pct.txt
+v="$(just max-version)"
+gh run download <run-id> --repo qnox/krusty -n "pct-$v" -n "jvm-byte-equality-$v" -D target/reports
+just conformance-badge target/reports/pct-$v/pct.txt target/reports/jvm-byte-equality-$v/jvm-byte-equality.txt
 curl -fsSL https://gist.githubusercontent.com/qnox/dec8149bc4f43b203d6cc9adc14f2026/raw/krusty-conformance.json
+curl -fsSL https://gist.githubusercontent.com/qnox/dec8149bc4f43b203d6cc9adc14f2026/raw/krusty-jvm-byte-equality.json
 ```
 
-The `label`, `message`, and `color` in `docs/badges/conformance.json` must match the Gist's. A
-`release` job that skipped its publish steps (an older master commit, or no `CONFORMANCE_GIST_ID`)
-left the badge unchanged.
+The `label`, `message`, and `color` in `docs/badges/conformance.json` and
+`docs/badges/jvm-byte-equality.json` must match the Gist's respective files. A `release` job that
+skipped its publish steps (an older master commit, or no `CONFORMANCE_GIST_ID`) left both badges
+unchanged.
 
 ## Focused Runs
 
@@ -313,7 +318,7 @@ KRUSTY_BYTE_DIFF=1 KRUSTY_SERVER_POOL=4 ./run-tests.sh --test conformance -- --n
 
 The summary gains a `byte-diff: identical I | divergent D | ref-fail R` line, and a per-file report
 (first difference per file) lands in `target/byte_diff_report.txt`. Every krusty-compiled topology,
-including `// MODULE:` and mixed-Java tests, is reference-compiled the way the byte-equality score
+including `// MODULE:` and mixed-Java tests, is reference-compiled the way the JVM byte-equality score
 does it (see "Current Conformance"); kotlinc's `META-INF/*.kotlin_module` artifact is not compared.
 `KRUSTY_BYTE_DIFF_DUMP=<dir>` also writes both class sets of each divergent case. The first run pays one warm
 kotlinc compile (~0.4 s) per file — raise `KRUSTY_SERVER_POOL` on a large-RAM host; later runs hit
@@ -431,14 +436,26 @@ unless the requested category is enabled.
 
 There is no conformance number written down in this repository, deliberately. Every figure committed
 to a document went stale within days of the commit that changed it, and a stale number read as
-current is worse than no number. The live measure is the **conformance badge** in `README.md`. It is
-a **byte-equality score**, not a case pass rate: the share of generated `.class` bytes that match
-the same-version kotlinc's, over every applicable `codegen/box` case.
+current is worse than no number. The live measures are two badges in `README.md`, both computed by
+one box run over the same applicable `codegen/box` cases of each Kotlin version:
 
-For each applicable case, the scored run compiles the case with krusty and also reference-compiles
-the same topology (Kotlin and Java sources, `// MODULE:` dependencies, directives, classpath, and
-JDK) with the pinned kotlinc of that version. Both compilers' `.class` files, Java-emitted ones
-included, are paired by module and JVM internal class name:
+- The **conformance badge** (`krusty-conformance.json`) is the case pass rate: the share of the
+  applicable cases whose `box()` returns `OK` on krusty-emitted bytecode, shown as
+  `<pct>% (<passed>/<applicable>)`.
+- The **JVM byte-equality badge** (`krusty-jvm-byte-equality.json`) is the share of generated
+  `.class` bytes that match the same-version kotlinc's over those same cases, shown as
+  `<pct>% (<matched>/<total> bytes)`. Other target platforms may get their own sibling badges
+  later; none replaces the conformance badge.
+
+A case is applicable when kotlinc's own JVM box runner expects it to pass (`src/conformance.rs`
+`backend_applicable`, mirroring `InTextDirectivesUtils.isPassingTarget`): cases restricted to other
+backends by `TARGET_BACKEND`/`DONT_TARGET_EXACT_BACKEND`, or muted on JVM by the `IGNORE_BACKEND`
+family, count in neither badge's numerator nor denominator.
+
+For the byte score, each applicable case is compiled with krusty and also reference-compiled in the
+same topology (Kotlin and Java sources, `// MODULE:` dependencies, directives, classpath, and JDK)
+with the pinned kotlinc of that version. Both compilers' `.class` files, Java-emitted ones included,
+are paired by module and JVM internal class name:
 
 - A pair counts its identical leading bytes, up to the first differing byte, as `matched`, and the
   longer of the two lengths as `total`. Bytes after the first difference never count.
@@ -448,55 +465,64 @@ included, are paired by module and JVM internal class name:
 - A reference compile or infrastructure failure fails the run; it is never a silent zero or a
   dropped case.
 
-`matched` and `total` are integer byte counts summed over cases and then over shards. The
-percentage, `100 * matched / total` with one decimal (`0.0` when `total` is 0), is derived only
-from those sums, so it is never an average of per-case or per-shard percentages. A case is
-applicable when kotlinc's own JVM box runner expects it to pass (`src/conformance.rs`
-`backend_applicable`, mirroring `InTextDirectivesUtils.isPassingTarget`): cases restricted to other
-backends by `TARGET_BACKEND`/`DONT_TARGET_EXACT_BACKEND`, or muted on JVM by the `IGNORE_BACKEND`
-family, count in neither `matched` nor `total`.
+Both reports keep integer counts, summed over cases and then over shards: `passed` and `applicable`
+cases for conformance, `matched` and `total` bytes for JVM byte equality. Each percentage,
+`100 * count / of` with one decimal (`0.0` when the denominator is 0), is derived only from its own
+sums, so it is never an average of per-case or per-shard percentages, and neither report's counts
+stand in for the other's. Only the box corpus feeds either badge. The non-box conformance tests
+(serialization, KSP, and the rest of `just conformance-regressions`) are correctness gates in every
+version lane and contribute neither cases nor bytes.
 
-The score and runtime correctness are separate gates. A case whose classes differ from kotlinc's but
+The scores and runtime correctness are separate gates. A case whose classes differ from kotlinc's but
 whose `box()` returns `OK` still passes, and the exact outcome manifests (see "Box Outcome
-Manifests") still decide whether the run succeeds. The run's stderr keeps both: the `cases: …
-| box()=OK: … | FAIL: …` line, and `byte-score: matched M | total T | P%  (N applicable cases
-scored)`.
+Manifests") still decide whether the run succeeds. The run's stderr keeps both per-shard summaries:
+the `cases: … | box()=OK: … | FAIL: …` line, and `byte-score: matched M | total T | P%  (N
+applicable cases scored)`.
 
 Commands:
 
 ```sh
-just conformance [VERSION]               # stdout: "<pct> <matched> <total>"; default max version
-just conformance-run "$(just conformance-bin)" <version>   # the same, for a prebuilt binary
-just conformance-badge [REPORT]          # writes docs/badges/conformance.json (untracked preview)
+just conformance [VERSION] [BYTES]      # stdout: "<pct> <passed> <applicable>"; default max version
+just conformance-run "$(just conformance-bin)" <version> [BYTES]   # the same, for a prebuilt binary
+just conformance-badge [CASES BYTES]    # writes docs/badges/*.json (untracked previews)
 ```
 
-`scripts/conformance-run.sh` runs `KRUSTY_SCORED_CONFORMANCE_SHARDS` shards, each writing the report
-line to `KRUSTY_CONFORMANCE_REPORT`. A missing or malformed shard report, a shard timeout, or a
-manifest mismatch fails the run; the combined line is still printed after a manifest mismatch so the
-score stays visible. `scripts/conformance-report.sh` owns the line format. Set
+`scripts/conformance-run.sh` runs `KRUSTY_SCORED_CONFORMANCE_SHARDS` shards. Each shard writes the
+case report `<pct> <passed> <applicable>` to `KRUSTY_CONFORMANCE_REPORT` and the JVM byte report
+`<pct> <matched> <total>` to `KRUSTY_JVM_BYTE_REPORT`; `KRUSTY_JVM_BYTE_REPORT` is also what turns
+reference scoring on. The runner prints the combined case report on stdout, and the combined JVM
+byte report on stderr (`conformance-run: Kotlin <version> JVM byte equality (matched/total .class
+bytes): …`) and to the `BYTES` file when one is given. Either shard report missing or malformed, a
+shard timeout, or a manifest mismatch fails the run; both combined reports are still written after a
+manifest mismatch so the scores stay visible, and a run that stops earlier leaves `BYTES` empty.
+`scripts/conformance-report.sh` owns the shared line format. Set
 `KRUSTY_CLASS_DUMP_COMPILE_MISSING=1` locally so a reference-cache miss compiles live with kotlinc.
 
-`just conformance-badge` renders the max version's report with `scripts/conformance-badge.sh`:
-the label `Kotlin <version> byte conformance`, the message `<pct>% (<matched>/<total> bytes)`, and the
-color red below 10%, orange from 10%, yellow from 50%, and brightgreen from 70%. Pass `REPORT` to
-render an existing report instead of running the suite, for example a pull request's max-version
-artifact:
+`just conformance-badge` renders both reports of the max version's run with
+`scripts/conformance-badge.sh`. `docs/badges/conformance.json` gets the label
+`Kotlin <version> conformance` and the message `<pct>% (<passed>/<applicable>)`;
+`docs/badges/jvm-byte-equality.json` gets the label `Kotlin <version> JVM byte equality` and the
+message `<pct>% (<matched>/<total> bytes)`. Each is colored red below 10%, orange from 10%, yellow
+from 50%, and brightgreen from 70%. Pass `CASES` and `BYTES` together to render existing reports of
+one run instead of running the suite, for example a pull request's max-version artifacts:
 
 ```sh
-gh run download <run-id> -n "pct-$(just max-version)" -D target/pct
-just conformance-badge target/pct/pct.txt
+v="$(just max-version)"
+gh run download <run-id> -n "pct-$v" -n "jvm-byte-equality-$v" -D target/reports
+just conformance-badge target/reports/pct-$v/pct.txt target/reports/jvm-byte-equality-$v/jvm-byte-equality.txt
 ```
 
-In CI, every version lane prints the same badge fields for its report and uploads it as
-`pct-<version>`. Only the `release` job on master publishes the max version's payload to the badge
-Gist; pull requests and merge groups never publish.
+In CI, every version lane prints both reports' badge fields and uploads them as the separate
+`pct-<version>` and `jvm-byte-equality-<version>` artifacts. Only the `release` job on master
+publishes the max version's two payloads to the badge Gist, each to its own file; pull requests and
+merge groups never publish.
 
 To inspect where bytes are lost, focus a case with `KRUSTY_BOX_ONLY=<substring>` (which turns the
 score on for that selection, failed boxes included) and add `KRUSTY_BYTE_DIFF=1` for the first
 difference per class set in `target/byte_diff_report.txt` (see "Byte-Identity Differential Mode").
 
-Read the badge, or the `conformance` job of the latest master CI run, when you need today's figure;
-run `just conformance` locally when you need this checkout's.
+Read the badges, or the `conformance` job of the latest master CI run, when you need today's
+figures; run `just conformance` locally when you need this checkout's.
 
 A count in a phase-log entry (`docs/IMPLEMENTATION_PLAN.md`) is a snapshot of what that phase
 measured at the time it landed, not a claim about the present, and must not be quoted as current.

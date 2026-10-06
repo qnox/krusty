@@ -276,14 +276,17 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: conformance-bin
-      # pct.txt is the byte-equality report "<pct> <matched> <total>" (class bytes); printing its badge
-      # fields validates it and previews, without publishing, what the master release would show.
+      # One box run writes both reports over the same applicable cases: pct.txt is the case report
+      # "<pct> <passed> <applicable>" and jvm-byte-equality.txt the JVM byte report
+      # "<pct> <matched> <total>" (.class bytes). Printing their badge fields validates each and
+      # previews, without publishing, what the master release would show.
       - name: run box conformance ${{ matrix.version }}
         run: |
           set -euo pipefail
           chmod +x conformance-bin krusty
-          just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" > pct.txt
-          bash scripts/conformance-badge.sh fields pct.txt "${{ matrix.version }}"
+          just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" jvm-byte-equality.txt > pct.txt
+          bash scripts/conformance-badge.sh fields conformance pct.txt "${{ matrix.version }}"
+          bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "${{ matrix.version }}"
       - name: run non-box conformance ${{ matrix.version }}
         env:
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
@@ -307,6 +310,13 @@ jobs:
         with:
           name: pct-${{ matrix.version }}
           path: pct.txt
+          if-no-files-found: error
+      - name: upload JVM byte equality
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jvm-byte-equality-${{ matrix.version }}
+          path: jvm-byte-equality.txt
           if-no-files-found: error
 
   # The one check a ruleset requires: its context does not change with the Kotlin version matrix.
@@ -558,19 +568,31 @@ jobs:
       - name: record the published commit
         if: steps.tip.outputs.publish == 'true'
         run: scripts/release-publisher.sh record
-      # Badge: read the max version's byte-equality report (produced by the conformance matrix) and
-      # publish it to the gist.
+      # Badges: the max version's case report (conformance) and JVM byte report (JVM byte
+      # equality), both from that version's one box run in the conformance matrix, each published
+      # to its own gist file.
       - name: download max-version pct
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: actions/download-artifact@v8
         with:
           name: pct-${{ needs.versions.outputs.max }}
-      - name: compute badge payload
+      - name: download max-version JVM byte equality
+        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: jvm-byte-equality-${{ needs.versions.outputs.max }}
+      - name: compute conformance badge payload
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         id: c
         env:
           MAX_VERSION: ${{ needs.versions.outputs.max }}
-        run: bash scripts/conformance-badge.sh fields pct.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
+        run: bash scripts/conformance-badge.sh fields conformance pct.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
+      - name: compute JVM byte-equality badge payload
+        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
+        id: b
+        env:
+          MAX_VERSION: ${{ needs.versions.outputs.max }}
+        run: bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
       - name: publish conformance badge → gist
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: Schneegans/dynamic-badges-action@v1.9.0
@@ -581,6 +603,16 @@ jobs:
           label: ${{ steps.c.outputs.label }}
           message: ${{ steps.c.outputs.message }}
           color: ${{ steps.c.outputs.color }}
+      - name: publish JVM byte-equality badge → gist
+        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
+        uses: Schneegans/dynamic-badges-action@v1.9.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.CONFORMANCE_GIST_ID }}
+          filename: krusty-jvm-byte-equality.json
+          label: ${{ steps.b.outputs.label }}
+          message: ${{ steps.b.outputs.message }}
+          color: ${{ steps.b.outputs.color }}
       - name: publish kotlin-version badge → gist
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: Schneegans/dynamic-badges-action@v1.9.0

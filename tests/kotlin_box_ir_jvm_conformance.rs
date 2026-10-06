@@ -1009,19 +1009,21 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
     runner_dir
 }
 
-/// The badge's machine report line, `<pct> <matched> <total>`: a one-decimal byte-equality
-/// percentage followed by the integer matched and total `.class` BYTE counts over the cases
-/// kotlinc's own JVM box runner expects to pass (`backend_applicable`: `TARGET_BACKEND`,
-/// `DONT_TARGET_EXACT_BACKEND` and the `IGNORE_BACKEND` family), never the whole corpus. The
-/// percentage is derived from the exact integer sums; `total == 0` yields `0.0` with no
-/// divide-by-zero. `scripts/conformance-report.sh` parses and re-derives the same line.
-fn conformance_report(matched: u64, total: u64) -> String {
-    let pct = if total == 0 {
+/// One machine report line, `<pct> <count> <of>`: a one-decimal percentage of two integer counts
+/// over the cases kotlinc's own JVM box runner expects to pass (`backend_applicable`:
+/// `TARGET_BACKEND`, `DONT_TARGET_EXACT_BACKEND` and the `IGNORE_BACKEND` family), never the whole
+/// corpus. Two reports share the format: the conformance badge's `<pct> <passed> <applicable>` box
+/// cases (`KRUSTY_CONFORMANCE_REPORT`) and the JVM byte-equality badge's `<pct> <matched> <total>`
+/// `.class` bytes (`KRUSTY_JVM_BYTE_REPORT`). The percentage is derived from the exact integer
+/// counts; `of == 0` yields `0.0` with no divide-by-zero. `scripts/conformance-report.sh` parses and
+/// re-derives the same line.
+fn count_report(count: u64, of: u64) -> String {
+    let pct = if of == 0 {
         0.0
     } else {
-        100.0 * matched as f64 / total as f64
+        100.0 * count as f64 / of as f64
     };
-    format!("{pct:.1} {matched} {total}\n")
+    format!("{pct:.1} {count} {of}\n")
 }
 
 fn conformance_shard() -> Option<(usize, usize)> {
@@ -1059,10 +1061,12 @@ fn retain_conformance_shard<T>(items: Vec<T>, index: usize, count: usize) -> Vec
 }
 
 #[test]
-fn conformance_report_has_stable_machine_format() {
-    // matched=3064 bytes of total=7352 bytes -> 41.7%.
-    assert_eq!(conformance_report(3064, 7352), "41.7 3064 7352\n");
-    assert_eq!(conformance_report(0, 0), "0.0 0 0\n");
+fn count_reports_have_stable_machine_format() {
+    // 3064 passed of 7352 applicable cases, or 3064 matched of 7352 total bytes -> 41.7%.
+    assert_eq!(count_report(3064, 7352), "41.7 3064 7352\n");
+    assert_eq!(count_report(24811524, 47290709), "52.5 24811524 47290709\n");
+    assert_eq!(count_report(7, 7), "100.0 7 7\n");
+    assert_eq!(count_report(0, 0), "0.0 0 0\n");
 }
 
 #[test]
@@ -1521,12 +1525,13 @@ fn kotlin_codegen_box_conformance() {
     let no_run = env("KRUSTY_NO_RUN").is_some();
     let byte_diff_on = env("KRUSTY_BYTE_DIFF").is_some();
     // Byte-equality scoring reference-compiles every applicable case, so it is active only when a
-    // score is actually wanted: a metric run (`KRUSTY_CONFORMANCE_REPORT`, set per shard by
+    // score is actually wanted: a JVM byte report (`KRUSTY_JVM_BYTE_REPORT`, set per shard by
     // `conformance-run.sh`), an opt-in byte diff, or a focused `KRUSTY_BOX_ONLY` inspection. A plain
-    // full-suite box run (no report, no filter) stays a correctness-only gate and never pays the
-    // reference-compile cost. `KRUSTY_NO_RUN` compiles without running `box()`, so it never scores.
+    // full-suite box run, or one that asks only for the case report, stays a correctness-only gate
+    // and never pays the reference-compile cost. `KRUSTY_NO_RUN` compiles without running `box()`,
+    // so it never scores.
     let score_on = !no_run
-        && (env("KRUSTY_CONFORMANCE_REPORT").is_some()
+        && (env("KRUSTY_JVM_BYTE_REPORT").is_some()
             || byte_diff_on
             || env("KRUSTY_BOX_ONLY").is_some());
     let class_dump = env("KRUSTY_CLASS_DUMP").map(PathBuf::from);
@@ -1993,13 +1998,15 @@ fn kotlin_codegen_box_conformance() {
         }
     }
     if let Some(path) = env("KRUSTY_CONFORMANCE_REPORT") {
-        // The machine report carries the integer matched/total BYTE counts (and their percentage),
-        // not the box pass/applicable counts. A scoring-off run (e.g. KRUSTY_NO_RUN) reports 0/0.
-        fs::write(
-            &path,
-            conformance_report(byte_score.matched, byte_score.total),
-        )
-        .unwrap_or_else(|err| panic!("failed to write conformance report: {err}"));
+        let applicable = files.len() - not_applicable;
+        fs::write(&path, count_report(passed as u64, applicable as u64))
+            .unwrap_or_else(|err| panic!("failed to write conformance report: {err}"));
+    }
+    if let Some(path) = env("KRUSTY_JVM_BYTE_REPORT") {
+        // The same applicable cases, counted in `.class` bytes. A scoring-off run (KRUSTY_NO_RUN)
+        // reports 0/0.
+        fs::write(&path, count_report(byte_score.matched, byte_score.total))
+            .unwrap_or_else(|err| panic!("failed to write JVM byte report: {err}"));
     }
     if no_run {
         eprintln!("box ratchet: skipped (KRUSTY_NO_RUN compiles without running box())");

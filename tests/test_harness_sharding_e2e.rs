@@ -239,7 +239,7 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
     let binary = temp.join("conformance-bin");
     fs::write(
         &binary,
-        "#!/usr/bin/env bash\nprintf '%s|%s|%s|%s|%s|%s/%s\\n' \"$KRUSTY_LANGUAGE_VERSION\" \"$KRUSTY_KOTLINC\" \"$KRUSTY_KOTLIN_BOX_DIR\" \"$1\" \"$2\" \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" \"$KRUSTY_CONFORMANCE_SHARD_COUNT\" >&2\nprintf '62.5 5 8\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\n",
+        "#!/usr/bin/env bash\nprintf '%s|%s|%s|%s|%s|%s/%s\\n' \"$KRUSTY_LANGUAGE_VERSION\" \"$KRUSTY_KOTLINC\" \"$KRUSTY_KOTLIN_BOX_DIR\" \"$1\" \"$2\" \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" \"$KRUSTY_CONFORMANCE_SHARD_COUNT\" >&2\nprintf '62.5 5 8\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\nprintf '25.0 1 4\\n' >\"$KRUSTY_JVM_BYTE_REPORT\"\n",
     )
     .expect("write reporting conformance fixture");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
@@ -256,8 +256,8 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
         .expect("run reporting conformance fixture");
 
     // The scored runner partitions by KRUSTY_SCORED_CONFORMANCE_SHARDS (default 12); each shard
-    // reports `62.5 5 8` matched/total bytes, so the integer counts sum to 5*12 / 8*12 before the
-    // percentage is derived.
+    // reports `62.5 5 8` passed/applicable cases and `25.0 1 4` matched/total bytes, so each
+    // report's integer counts sum over 12 shards before its percentage is derived.
     let shards = 12;
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"62.5 60 96\n");
@@ -287,6 +287,9 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
                 temp.display(),
             )
         })
+        .chain(std::iter::once(
+            "conformance-run: Kotlin 2.4.10 JVM byte equality (matched/total .class bytes): 25.0 12 48\n".to_owned(),
+        ))
         .collect();
     assert_eq!(without_phase_timing(&stderr), expected_stderr);
     fs::remove_dir_all(temp).expect("remove conformance report test directory");
@@ -306,7 +309,7 @@ fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
     // Every shard reports; the second one then fails its expected-failure check.
     fs::write(
         &binary,
-        "#!/usr/bin/env bash\nprintf 'shard %s\\n' \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" >&2\nprintf '50.0 1 2\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\n[ \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" != 1 ] || exit 101\n",
+        "#!/usr/bin/env bash\nprintf 'shard %s\\n' \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" >&2\nprintf '50.0 1 2\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\nprintf '10.0 1 10\\n' >\"$KRUSTY_JVM_BYTE_REPORT\"\n[ \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" != 1 ] || exit 101\n",
     )
     .expect("write failing-shard conformance fixture");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
@@ -323,7 +326,8 @@ fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
         .expect("run failing-shard conformance fixture");
 
     // Every one of the scored run's 12 shards reports before the first failing status propagates:
-    // integer counts still sum across all shards (1*12 / 2*12) even though shard 1 exits nonzero.
+    // both reports' integer counts still sum across all shards (cases 1*12 / 2*12, bytes 1*12 /
+    // 10*12) even though shard 1 exits nonzero.
     let shards = 12;
     assert_eq!(output.status.code(), Some(101));
     assert_eq!(output.stdout, b"50.0 12 24\n");
@@ -336,6 +340,9 @@ fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
     );
     let expected_stderr: String = (0..shards)
         .map(|index| format!("shard {index}\n"))
+        .chain(std::iter::once(
+            "conformance-run: Kotlin 2.4.10 JVM byte equality (matched/total .class bytes): 10.0 12 120\n".to_owned(),
+        ))
         .collect();
     assert_eq!(without_phase_timing(&stderr), expected_stderr);
     fs::remove_dir_all(temp).expect("remove failing-shard test directory");

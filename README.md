@@ -5,30 +5,37 @@
 <p align="center">
   <a href="https://github.com/qnox/krusty/actions/workflows/ci.yml"><img src="https://github.com/qnox/krusty/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-kotlin.json" alt="Latest supported Kotlin version">
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-conformance.json" alt="Kotlin byte conformance: share of .class bytes matching kotlinc across the codegen/box suite">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-conformance.json" alt="Kotlin conformance: share of applicable codegen/box cases whose box() returns OK">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-jvm-byte-equality.json" alt="JVM byte equality: share of .class bytes matching kotlinc across the same codegen/box cases">
 </p>
 
-<!-- Conformance badge = byte equality with the same-version kotlinc over the applicable Kotlin
-     `codegen/box` cases, shown as "<pct>% (<matched>/<total> bytes)". In every case, both compilers'
-     `.class` files are paired by module and class name. A pair counts its identical leading bytes,
-     up to the first differing byte, out of the longer file's length; a class that only one compiler
-     emits counts 0 out of its full length; a case whose box() does not return "OK" counts 0 out of
-     the size of kotlinc's classes. The percentage is the summed matched bytes over the summed total
-     bytes. Applicable means kotlinc's own JVM box runner expects the case to pass:
+<!-- Both badges come from one run of the applicable Kotlin `codegen/box` cases per Kotlin version.
+     Applicable means kotlinc's own JVM box runner expects the case to pass:
      TARGET_BACKEND / DONT_TARGET_EXACT_BACKEND / IGNORE_BACKEND* exclusions are left out.
-     Whether box() returns "OK" is a separate gate: every case must match the exact fail and
-     not-applicable manifests in tests/box_expected_*/. See docs/TEST_HARNESS.md "Current Conformance".
-     The master build recomputes it and writes the badge JSON to a Gist
+     Conformance badge (krusty-conformance.json) = share of those cases whose `box()` returns "OK"
+     on krusty-emitted bytecode, shown as "<pct>% (<passed>/<applicable>)".
+     JVM byte-equality badge (krusty-jvm-byte-equality.json) = byte equality with the same-version
+     kotlinc over the same cases, shown as "<pct>% (<matched>/<total> bytes)". In every case, both
+     compilers' `.class` files are paired by module and class name. A pair counts its identical
+     leading bytes, up to the first differing byte, out of the longer file's length; a class that
+     only one compiler emits counts 0 out of its full length; a case whose box() does not return
+     "OK" counts 0 out of the size of kotlinc's classes. The percentage is the summed matched bytes
+     over the summed total bytes. Other test suites (serialization, KSP, and the rest of the
+     conformance tests) are correctness gates only and count toward neither badge.
+     Every case must also match the exact fail and not-applicable manifests in tests/box_expected_*/.
+     See docs/TEST_HARNESS.md "Current Conformance".
+     The master build recomputes both and writes the badge JSON to a Gist
      (no repo commit) — see the `release` job in .github/workflows/ci.yml. The gist id is wired via
      the CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
 
 krusty is built to be a drop-in replacement for `kotlinc` on the JVM. For the Kotlin subset it
 supports, it accepts `kotlinc`'s command-line flags and aims to emit `.class` files byte-for-byte
-identical to `kotlinc`'s, from a single native binary. The conformance badge shows how close it is
-today: the share of `.class` bytes that match `kotlinc`'s across the applicable cases of Kotlin's own
-`codegen/box` test suite. Each class counts its matching bytes up to the first difference, and a
-case whose `box()` test fails counts zero. Whether each case runs correctly is checked separately on
-every build.
+identical to `kotlinc`'s, from a single native binary. Two badges measure it against the applicable
+cases of Kotlin's own `codegen/box` test suite. The conformance badge shows how much of that suite
+it passes today: the share of cases whose `box()` test returns `OK`. The JVM byte-equality badge
+shows how close its output is to `kotlinc`'s on the same cases: the share of `.class` bytes that
+match. Each class counts its matching bytes up to the first difference, and a case whose `box()`
+test fails counts zero.
 
 [Website](https://krustythecompiler.dev) · [Download](https://github.com/qnox/krusty/releases/latest) · [Sponsor](https://github.com/sponsors/qnox)
 
