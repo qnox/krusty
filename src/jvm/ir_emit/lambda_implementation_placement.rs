@@ -167,6 +167,8 @@ pub(crate) fn reparent_lambda_impls(ir: &mut IrFile) {
                     owned.insert(implementation);
                     ir.classes[*class_id].methods.push(implementation);
                     ir.note_class_method(*class_id as u32, implementation);
+                    ir.class_static_local_functions
+                        .insert(implementation, ir.classes[*class_id].fq_name);
                 }
             }
         }
@@ -450,6 +452,10 @@ mod tests {
             vec![enclosing_method, implementation]
         );
         assert_eq!(ir.class_method_owners[&implementation], vec![enclosing_id]);
+        assert_eq!(
+            ir.class_static_local_functions[&implementation],
+            enclosing_name
+        );
     }
 
     #[test]
