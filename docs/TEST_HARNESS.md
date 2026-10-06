@@ -285,6 +285,17 @@ The e2e suite has its own built-in phase profiler: `KRUSTY_PROF=1` makes every h
 `PROF\t<phase>\t<ms>` lines (`krusty` in-process compile, `kotlinc` reference compile incl. queue
 wait, `box` JVM round-trip) to stderr — run the e2e binary with `--nocapture` and aggregate.
 
+`just coverage` prints a wall-clock line for every phase of that job, in whole seconds:
+`coverage: phase start <name>` when the phase begins and `coverage: phase <name> <seconds>s` when it
+finishes. The phases are toolchain provision, instrumentation, the CLI build, the language-server
+build, the compiler test-binary build, the language-server test-binary build, each non-e2e test
+binary, e2e shard planning, each e2e shard, and each coverage report. Cargo's own compile progress
+stays on stderr for those builds. The run ends with `coverage: phases` repeating every finished
+phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
+the sum of the rows. The conformance box runner prints the same shape as
+`conformance-run: phase box-shard-N-of-M <seconds>s`. The conformance binary job prints
+`conformance-build: phase conformance-test-binary` and `conformance-build: phase krusty-cli`.
+
 Performance-relevant harness state:
 
 - e2e dependency libs are compiled BY KRUSTY, in-process (`tests/common::compile_libs`), memoized
