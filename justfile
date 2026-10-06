@@ -14,7 +14,7 @@
 #   just kotlin-native download+unpack the matching Kotlin/Native distribution; prints root path
 #   just klib-semantics exercise the common KLIB metadata decoder against that distribution
 #   just box-corpus clone+cache the Kotlin codegen/box corpus; prints box dir
-#   just conformance       print box-suite conformance "<pct> <passed> <applicable>"
+#   just conformance       print box-suite byte conformance "<pct> <matched> <total>" (class bytes)
 #   just profile-box [filter]  profile compiler-only box cases; writes target/flamegraph.svg
 #   just install-hooks    lefthook install
 #   just version          krusty release version, e.g. 2.4.20-build.3
@@ -417,16 +417,18 @@ conformance-bin:
     [ -n "$bin" ] && [ -x "$bin" ] || { echo "could not locate conformance test binary" >&2; exit 1; }
     printf '%s\n' "$bin"
 
-# Run the codegen/box conformance suite and print "<pct> <passed> <applicable>". The suite's native
-# exit status holds every file to the version's exact fail/not-applicable manifests; the report exposes the score.
+# Run the codegen/box conformance suite and print the byte-equality report "<pct> <matched> <total>":
+# matching `.class` bytes over total `.class` bytes across the applicable cases, compared with the
+# same version's kotlinc (see scripts/conformance-report.sh). The suite's exit status separately holds
+# every file's box() outcome to the version's exact fail/not-applicable manifests.
 conformance VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
     just conformance-run "$(just conformance-bin)" "{{VERSION}}"
 
 # Run a PREBUILT conformance test binary (path BIN) against Kotlin VERSION and print
-# "<pct> <passed> <applicable>". The test writes the report before its assertions, so callers receive
-# the metric even when a file disagrees with the outcome manifests.
+# "<pct> <matched> <total>" byte counts summed over every shard. The test writes the report before
+# its assertions, so callers receive the metric even when a file disagrees with the outcome manifests.
 conformance-run BIN VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -439,22 +441,27 @@ conformance-regressions BIN VERSION:
     set -euo pipefail
     bash scripts/conformance-regressions.sh "{{BIN}}" "{{VERSION}}"
 
-# Write the shields.io endpoint badges (docs/badges/*.json) from current numbers. CI commits these
-# on master; safe to run locally to preview. Color ramps with the conformance percentage.
-conformance-badge:
+# Preview the shields.io endpoint badges in docs/badges/*.json (untracked) for the max version. The
+# conformance badge shows the byte-equality report of `just conformance`, or of an existing REPORT
+# file such as a downloaded `pct-<version>` CI artifact. The master release job publishes the same
+# payload (scripts/conformance-badge.sh) to the badge Gist; nothing here publishes.
+conformance-badge REPORT="":
     #!/usr/bin/env bash
     set -euo pipefail
-    read -r pct passed applicable < <(just conformance)
-    color=red
-    awk "BEGIN{exit !($pct>=10)}" && color=orange || true
-    awk "BEGIN{exit !($pct>=50)}" && color=yellow || true
-    awk "BEGIN{exit !($pct>=70)}" && color=brightgreen || true
+    v="$(just max-version)"
+    report='{{REPORT}}'
+    if [ -z "$report" ]; then
+      mkdir -p target
+      report="target/conformance-$v.report"
+      just conformance "$v" > "$report"
+    fi
     mkdir -p docs/badges
-    printf '{"schemaVersion":1,"label":"Kotlin %s conformance","message":"%s%% (%s/%s)","color":"%s"}\n' \
-      "$(just max-version)" "$pct" "$passed" "$applicable" "$color" > docs/badges/conformance.json
+    trap 'rm -f docs/badges/conformance.json.tmp' EXIT
+    bash scripts/conformance-badge.sh json "$report" "$v" > docs/badges/conformance.json.tmp
+    mv docs/badges/conformance.json.tmp docs/badges/conformance.json
     printf '{"schemaVersion":1,"label":"Kotlin","message":"%s","color":"blue"}\n' \
-      "$(just max-version)" > docs/badges/kotlin.json
-    echo "wrote docs/badges/conformance.json + kotlin.json"
+      "$v" > docs/badges/kotlin.json
+    echo "wrote docs/badges/conformance.json + kotlin.json from $report"
 
 # Run the box-corpus survey — the roadmap of why krusty SKIPS a codegen/box test (the unresolved /
 # unsupported buckets, most-frequent first). Provisions the SAME version-matched, cached corpus +

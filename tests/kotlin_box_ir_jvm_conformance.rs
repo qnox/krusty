@@ -1009,12 +1009,12 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
     runner_dir
 }
 
-/// The badge's machine report, `<pct> <passed> <applicable>`. The denominator is the cases kotlinc's
-/// own JVM box runner expects to pass (`backend_applicable`: `TARGET_BACKEND`,
-/// `DONT_TARGET_EXACT_BACKEND` and the `IGNORE_BACKEND` family), never the whole corpus.
-/// The machine report line: a one-decimal byte-equality percentage followed by the integer matched
-/// and total `.class` BYTE counts. The percentage is derived here, at the display boundary, from the
-/// exact integer sums; `total == 0` yields `0.0` with no divide-by-zero.
+/// The badge's machine report line, `<pct> <matched> <total>`: a one-decimal byte-equality
+/// percentage followed by the integer matched and total `.class` BYTE counts over the cases
+/// kotlinc's own JVM box runner expects to pass (`backend_applicable`: `TARGET_BACKEND`,
+/// `DONT_TARGET_EXACT_BACKEND` and the `IGNORE_BACKEND` family), never the whole corpus. The
+/// percentage is derived from the exact integer sums; `total == 0` yields `0.0` with no
+/// divide-by-zero. `scripts/conformance-report.sh` parses and re-derives the same line.
 fn conformance_report(matched: u64, total: u64) -> String {
     let pct = if total == 0 {
         0.0

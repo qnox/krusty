@@ -235,7 +235,8 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
         .expect("run reporting conformance fixture");
 
     // The scored runner partitions by KRUSTY_SCORED_CONFORMANCE_SHARDS (default 12); each shard
-    // reports `62.5 5 8`, so the integer counts sum to 5*12 / 8*12 before the percentage is derived.
+    // reports `62.5 5 8` matched/total bytes, so the integer counts sum to 5*12 / 8*12 before the
+    // percentage is derived.
     let shards = 12;
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"62.5 60 96\n");

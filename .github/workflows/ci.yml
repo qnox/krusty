@@ -267,13 +267,14 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: conformance-bin
+      # pct.txt is the byte-equality report "<pct> <matched> <total>" (class bytes); printing its badge
+      # fields validates it and previews, without publishing, what the master release would show.
       - name: run box conformance ${{ matrix.version }}
         run: |
           set -euo pipefail
           chmod +x conformance-bin krusty
           just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" > pct.txt
-          read -r pct passed applicable < pct.txt
-          echo "pct=$pct passed=$passed applicable=$applicable"
+          bash scripts/conformance-badge.sh fields pct.txt "${{ matrix.version }}"
       - name: run non-box conformance ${{ matrix.version }}
         env:
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
@@ -526,25 +527,19 @@ jobs:
       - name: record the published commit
         if: steps.tip.outputs.publish == 'true'
         run: scripts/release-publisher.sh record
-      # Badge: read the max version's pct (produced by the conformance matrix) and publish to the gist.
+      # Badge: read the max version's byte-equality report (produced by the conformance matrix) and
+      # publish it to the gist.
       - name: download max-version pct
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: actions/download-artifact@v8
         with:
           name: pct-${{ needs.versions.outputs.max }}
-      - name: compute badge color
+      - name: compute badge payload
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         id: c
-        run: |
-          set -euo pipefail
-          read -r pct passed applicable < pct.txt
-          color=red
-          awk "BEGIN{exit !($pct>=10)}" && color=orange || true
-          awk "BEGIN{exit !($pct>=50)}" && color=yellow || true
-          awk "BEGIN{exit !($pct>=70)}" && color=brightgreen || true
-          {
-            echo "pct=$pct"; echo "passed=$passed"; echo "applicable=$applicable"; echo "color=$color"
-          } >> "$GITHUB_OUTPUT"
+        env:
+          MAX_VERSION: ${{ needs.versions.outputs.max }}
+        run: bash scripts/conformance-badge.sh fields pct.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
       - name: publish conformance badge → gist
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: Schneegans/dynamic-badges-action@v1.9.0
@@ -552,8 +547,8 @@ jobs:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.CONFORMANCE_GIST_ID }}
           filename: krusty-conformance.json
-          label: Kotlin ${{ needs.versions.outputs.max }} conformance
-          message: ${{ steps.c.outputs.pct }}% (${{ steps.c.outputs.passed }}/${{ steps.c.outputs.applicable }})
+          label: ${{ steps.c.outputs.label }}
+          message: ${{ steps.c.outputs.message }}
           color: ${{ steps.c.outputs.color }}
       - name: publish kotlin-version badge → gist
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
