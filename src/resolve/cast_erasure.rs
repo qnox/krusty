@@ -34,6 +34,23 @@ impl Checker<'_> {
             .ancestors()
             .flat_map(|rung| rung.intersection_narrowing(&path))
             .collect::<Vec<_>>();
+        if let (super::scope::PathRoot::Value(identity), true) =
+            (&path.root, path.segments.is_empty())
+        {
+            if let Some((_, local)) = self.visible_flow_value(scope, *identity) {
+                // A cast may replace the read projection without changing the type the binding
+                // was declared to hold. Keep that stable semantic fact in FIR's intersection.
+                known.push(local.declared_ty);
+                // A callable reference's exact function shape is recorded separately from its
+                // nominal reflection type. It remains a fact only for an immutable binding: a
+                // mutable binding may now contain a value unrelated to its initializer.
+                if !local.is_var {
+                    if let Some(function) = local.callable_reference_type {
+                        known.push(function);
+                    }
+                }
+            }
+        }
         if known.is_empty() && operand_ty == declared {
             return operand_ty;
         }
