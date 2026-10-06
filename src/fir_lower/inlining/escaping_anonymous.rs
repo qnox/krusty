@@ -797,18 +797,29 @@ fn finalize_construction_signature(
         .iter()
         .map(|argument| argument.ty)
         .collect::<Vec<_>>();
-    let IrExpr::New {
-        internal,
-        args,
-        ctor_params,
-        ..
-    } = &mut ir.exprs[spec.order as usize]
-    else {
+    let IrExpr::New { internal, args, .. } = &ir.exprs[spec.order as usize] else {
         return Err(malformed(source_name));
     };
-    if *internal != ir.classes[copy_id as usize].fq_name_id() || args.len() != declared.len() {
+    let expected = ir.classes[copy_id as usize].fq_name_id();
+    if *internal != expected {
+        // A nested inline expansion may specialize the same construction again before accessors
+        // are published. That descendant now owns the constructor descriptor; the intermediate
+        // copy must not reject or overwrite it. Accept only an exact specialization chain rooted
+        // at this copy and tied to this same construction expression.
+        let Some(owner) = ir.class_id_by_name(*internal) else {
+            return Err(malformed(source_name));
+        };
+        if !specialization_descends_from(ir, owner, copy_id, spec.order) {
+            return Err(malformed(source_name));
+        }
+        return Ok(());
+    }
+    if args.len() != declared.len() {
         return Err(malformed(source_name));
     }
+    let IrExpr::New { ctor_params, .. } = &mut ir.exprs[spec.order as usize] else {
+        unreachable!("the construction shape was checked above");
+    };
     if let Some(parameters) = ctor_params {
         if parameters.len() != declared.len() {
             return Err(malformed(source_name));
@@ -816,6 +827,28 @@ fn finalize_construction_signature(
         *parameters = declared;
     }
     Ok(())
+}
+
+fn specialization_descends_from(
+    ir: &crate::ir::IrFile,
+    mut class: ClassId,
+    ancestor: ClassId,
+    construction: ExprId,
+) -> bool {
+    let mut seen = HashSet::new();
+    while seen.insert(class) {
+        let Some(specialization) = ir.specialized_anonymous_classes.get(&class) else {
+            return false;
+        };
+        if specialization.order != construction {
+            return false;
+        }
+        if specialization.source == ancestor {
+            return true;
+        }
+        class = specialization.source;
+    }
+    false
 }
 
 /// Property reads inside the copy still name the declaration's property. That layout's owner is

@@ -411,6 +411,44 @@ fn an_inlined_suspend_lambda_capture_is_initialized() {
     run_ok("AnonInlineSuspendLambdaCapture", SOURCE);
 }
 
+/// A construction inside one retained inline body can be specialized again when another inline
+/// body expands around it. The terminal copy owns the constructor descriptor; an intermediate copy
+/// must neither overwrite that descriptor nor reject the construction after ownership moves.
+#[test]
+fn a_nested_crossinline_object_has_one_terminal_constructor_owner() {
+    const SOURCE: &str = r#"
+fun interface Receiver<in T> {
+    fun accept(value: T)
+}
+
+interface Producer<out T> {
+    fun produce(receiver: Receiver<T>)
+}
+
+inline fun <T> producer(crossinline block: Receiver<T>.() -> Unit): Producer<T> =
+    object : Producer<T> {
+        override fun produce(receiver: Receiver<T>) {
+            receiver.block()
+        }
+    }
+
+inline fun <T, R> Producer<T>.convert(
+    crossinline transform: Receiver<R>.(T) -> Unit
+): Producer<R> = producer {
+    produce { value -> transform(value) }
+}
+
+fun box(): String {
+    val source = producer<String> { accept("OK") }
+    var result = "FAIL"
+    source.convert<String, String> { accept(it) }.produce { result = it }
+    return result
+}
+"#;
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("NestedCrossinlineObject", SOURCE);
+}
+
 /// A `by lazy { object : … { override fun f() = property } }` delegate. The lambda's result type is
 /// inferred from the object, so the construction is visited again once the `lazy` call settles.
 /// The member's inferred result was completed on the first visit; the revisit must still read its
