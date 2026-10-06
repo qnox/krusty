@@ -1047,6 +1047,8 @@ mod inheritance_e2e;
 mod inherited_interface_default_e2e;
 #[path = "inherited_member_owner_e2e.rs"]
 mod inherited_member_owner_e2e;
+#[path = "inherited_property_reference_e2e.rs"]
+mod inherited_property_reference_e2e;
 #[path = "inherited_reference_owner_e2e.rs"]
 mod inherited_reference_owner_e2e;
 #[path = "init_block_lines_e2e.rs"]

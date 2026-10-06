@@ -775,6 +775,9 @@ impl BodyFirChecker<'_> {
                         SelectedPropertyView {
                             mutable: property.setter.is_some(),
                             receiver_type,
+                            reflection_owner: (!target_is_extension)
+                                .then(|| property.reflection_owner.kotlin_class_internal())
+                                .flatten(),
                             extension_receiver: target_is_extension,
                             property_type: property.prop_ty,
                             getter_name: &property.getter.name,
@@ -821,6 +824,7 @@ impl BodyFirChecker<'_> {
                         SelectedPropertyView {
                             mutable: property.setter.is_some(),
                             receiver_type: None,
+                            reflection_owner: None,
                             extension_receiver: false,
                             property_type: property.ty,
                             getter_name: &property.getter.name,
@@ -1124,6 +1128,7 @@ impl BodyFirChecker<'_> {
         let SelectedPropertyView {
             mutable,
             receiver_type,
+            reflection_owner,
             extension_receiver: extension_receiver_target,
             property_type,
             getter_name,
@@ -1179,6 +1184,7 @@ impl BodyFirChecker<'_> {
         Ok(FirExprKind::PropertyReference {
             target: FirPropertyReferenceTarget::SpecializedModule {
                 property: target,
+                reflection_owner,
                 getter_name: getter_name.into(),
                 setter_name: setter_name.map(Into::into),
                 receiver: receiver_type.map(resolved).transpose()?,
@@ -1439,6 +1445,9 @@ struct ReferenceReceivers {
 struct SelectedPropertyView<'a> {
     mutable: bool,
     receiver_type: Option<Ty>,
+    /// Exact written classifier retained by the winning property candidate. This is distinct from
+    /// both the selected receiver's specialized type and the accessor's declaring owner.
+    reflection_owner: Option<crate::types::TypeName>,
     extension_receiver: bool,
     property_type: Ty,
     getter_name: &'a str,
