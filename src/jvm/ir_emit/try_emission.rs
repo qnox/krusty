@@ -16,7 +16,7 @@ use crate::jvm::classfile::{CodeBuilder, Label};
 use crate::types::Ty;
 
 use super::frame_map::{FrameKey, TempRole, TempSlot};
-use super::{debug_lines, ir_ty_to_jvm, load, local_variable_desc, store, Emitter};
+use super::{debug_lines, ir_ty_to_jvm, load, local_variable_desc, slot_words, store, Emitter};
 
 /// The operands of an IR `try` being emitted, as `IrExpr::Try` holds them.
 pub(super) struct TryParts<'a> {
@@ -559,26 +559,28 @@ impl Emitter<'_> {
         let target = if brk { end } else { cont };
         self.mark_expression_start(transfer, code);
         code.nop();
-        // A break that leaves a `finally` is the inline-return frame's exit. kotlinc reloads that
-        // frame's result after the finalizer and carries it on the stack across the jump that
-        // skips the catch-all, so the landing label is the use (`ireturn`) and not another load.
-        let leaves_finalizer = brk && self.return_finalizers.len() > depth;
+        // Every break to an inline-return frame leaves that result on the stack. A path that
+        // skips `finally` and a path that never entered it (`setup() ?: return false` beside
+        // `return block()`) meet at the same label, and kotlinc's landing use is the store, not
+        // another load.
         let survives = self.emit_transfer_finalizers(depth, code);
         if survives {
-            if leaves_finalizer && !code.is_dead() {
+            if brk && !code.is_dead() {
                 if let Some(label) = label {
                     if let Some(&(value, ty)) = self.inline_return_frame_results.get(label) {
-                        let slot = self.activate_inline_return_frame_result(value, ty);
-                        load(ty, slot, code);
-                        if self
-                            .label_stack_resident_values
-                            .insert(target, value)
-                            .is_some_and(|existing| existing != value)
-                        {
-                            self.run.set_emit_error(
-                                "an inline-return label receives different stack-carried values"
-                                    .to_string(),
-                            );
+                        if slot_words(ty) > 0 {
+                            let slot = self.activate_inline_return_frame_result(value, ty);
+                            load(ty, slot, code);
+                            if self
+                                .label_stack_resident_values
+                                .insert(target, value)
+                                .is_some_and(|existing| existing != value)
+                            {
+                                self.run.set_emit_error(
+                                    "an inline-return label receives different stack-carried values"
+                                        .to_string(),
+                                );
+                            }
                         }
                     }
                 }
