@@ -1685,6 +1685,8 @@ mod native_builder_scope_e2e;
 mod native_builtin_companions_e2e;
 #[path = "native_builtin_supertypes_e2e.rs"]
 mod native_builtin_supertypes_e2e;
+#[path = "native_c_abi_e2e.rs"]
+mod native_c_abi_e2e;
 #[path = "native_callable_name_e2e.rs"]
 mod native_callable_name_e2e;
 #[path = "native_class_literals_e2e.rs"]
@@ -1699,12 +1701,10 @@ mod native_comparable_e2e;
 mod native_concurrency_e2e;
 #[path = "native_const_reference_e2e.rs"]
 mod native_const_reference_e2e;
-#[path = "native_cross_file_e2e.rs"]
-mod native_cross_file_e2e;
-#[path = "native_c_abi_e2e.rs"]
-mod native_c_abi_e2e;
 #[path = "native_context_parameter_sam_e2e.rs"]
 mod native_context_parameter_sam_e2e;
+#[path = "native_cross_file_e2e.rs"]
+mod native_cross_file_e2e;
 #[path = "native_delegated_properties_e2e.rs"]
 mod native_delegated_properties_e2e;
 #[path = "native_delegation_e2e.rs"]
