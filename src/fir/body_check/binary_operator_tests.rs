@@ -115,6 +115,59 @@ fn a_constant_operand_keeps_its_checked_widening() {
     }
 }
 
+fn assert_numeric_conversion_to(body: &FirBody, expression: FirExprId, target: Ty) {
+    assert!(
+        matches!(
+            kind(body, expression),
+            FirExprKind::ImplicitConversion {
+                conversion: FirConversion {
+                    kind: FirConversionKind::NumericConversion { to },
+                    ..
+                },
+                ..
+            } if to.get() == target
+        ),
+        "expected a checked numeric conversion to {target:?}, found {:?}",
+        kind(body, expression)
+    );
+}
+
+#[test]
+fn a_selected_numeric_conditional_converts_each_result_edge_in_checked_fir() {
+    let (body, _) = checked_function_body(
+        "fun bits(v: Long, flag: Boolean): Long = v or if (flag) 128 else 0\n",
+        "bits",
+    );
+    let (_, rhs) = binary(&body, FirBinaryOperation::BitwiseOr);
+    let FirExprKind::Conditional {
+        then_branch,
+        then_conversion: None,
+        else_branch,
+        else_conversion: None,
+        ..
+    } = kind(&body, rhs)
+    else {
+        panic!("the selected Long operand must remain a checked conditional")
+    };
+    assert_eq!(ty(&body, rhs), Ty::Long);
+    assert_numeric_conversion_to(&body, *then_branch, Ty::Long);
+    assert_numeric_conversion_to(&body, *else_branch, Ty::Long);
+
+    let (body, _) = checked_function_body(
+        "fun bits(v: Long, n: Int): Long = v or when (n) { 0 -> 128; else -> 0 }\n",
+        "bits",
+    );
+    let (_, rhs) = binary(&body, FirBinaryOperation::BitwiseOr);
+    let FirExprKind::When { branches, .. } = kind(&body, rhs) else {
+        panic!("the selected Long operand must remain a checked when")
+    };
+    assert_eq!(ty(&body, rhs), Ty::Long);
+    assert_eq!(branches.len(), 2);
+    for branch in branches {
+        assert_numeric_conversion_to(&body, branch.result, Ty::Long);
+    }
+}
+
 /// `UInt? == UInt` stays a source-order equality. The non-null operand is a carrier in a
 /// parameter and a box in a function value, so the checker must not unbox it up front.
 #[test]

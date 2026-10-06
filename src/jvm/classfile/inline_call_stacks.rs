@@ -36,7 +36,11 @@ fn inline_call_markers(code: &[u8]) -> Option<Vec<usize>> {
         if code[pc] == CODEGEN_MARKER_OP
             && matches!(
                 CodegenMarker::from_operand(*code.get(pc + 1)?),
-                Some(CodegenMarker::BeforeInlineCall | CodegenMarker::AfterInlineCall)
+                Some(
+                    CodegenMarker::BeforeInlineCall
+                        | CodegenMarker::BeforeInlineCallWithReservedLocals
+                        | CodegenMarker::AfterInlineCall
+                )
             )
         {
             found.push(pc);

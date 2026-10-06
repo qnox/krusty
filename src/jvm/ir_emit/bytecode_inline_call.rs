@@ -686,8 +686,20 @@ impl Emitter<'_> {
             .unwrap_or_default();
         // Route planning keeps every lambda that declares a member of the caller on the bridge;
         // one that still does is a broken plan, never code left in the caller.
-        if placement == LambdaPlacement::Objects && !self.cw.rollback(checkpoint) {
-            return Err("an object-only lambda declared a member of the calling class");
+        match placement {
+            LambdaPlacement::Objects => {
+                if !self.cw.rollback(checkpoint) {
+                    return Err("an object-only lambda declared a member of the calling class");
+                }
+            }
+            LambdaPlacement::Invokes => {
+                // Compiling a literal lambda into its scratch MethodNode may itself inline calls
+                // and allocate their source-map ranges. The scratch compile is not source
+                // execution order: the enclosing callee maps its own body before it inserts the
+                // lambda. Restore the caller's map now; `CallLines::lambda` imports the saved
+                // lambda map at the insertion.
+                self.cw.restore_source_map(&checkpoint);
+            }
         }
         let parameters =
             self.call_parameters(&supplies, &physical, args, &lambda_bindings, captured);
@@ -820,11 +832,13 @@ impl Emitter<'_> {
             call_line,
             claimable,
             visited: HashMap::new(),
+            lambda_lines: &lambda_lines,
+            lambda_visited: HashMap::new(),
         };
         let mut objects =
             lines
                 .emitter
-                .call_objects(call_expression, target.name, true, lambda_lines);
+                .call_objects(call_expression, target.name, true, lambda_lines.clone());
         let inlined = inliner::inline(
             callee,
             parameters,
@@ -1401,16 +1415,20 @@ impl inliner::SourceLines for UnmappedLines {
 /// The inlined body's lines, mapped into the caller's source map against the call's line. A line
 /// the body revisits keeps the line it was first mapped to (`SourceMapCopier.visitedLines`), even
 /// when a range mapped since would extend to cover it.
-struct CallLines<'e, 'a, 'b> {
+struct CallLines<'e, 'a, 'b, 'l> {
     emitter: &'e mut Emitter<'a>,
     body: &'b crate::jvm::classreader::MethodCode,
     inline_only: bool,
     call_line: u16,
     claimable: u16,
     visited: HashMap<u16, u16>,
+    /// Source map produced while compiling the call's literal lambdas into scratch methods.
+    lambda_lines: &'l SourceMap,
+    /// One `SourceMapCopier` for those lambda lines: each old output line is imported once.
+    lambda_visited: HashMap<u16, u16>,
 }
 
-impl inliner::SourceLines for CallLines<'_, '_, '_> {
+impl inliner::SourceLines for CallLines<'_, '_, '_, '_> {
     fn map(&mut self, line: u16) -> Option<u16> {
         if let Some(&mapped) = self.visited.get(&line) {
             return Some(mapped);
@@ -1433,6 +1451,20 @@ impl inliner::SourceLines for CallLines<'_, '_, '_> {
     }
     fn call_site(&self) -> Option<u16> {
         Some(self.call_line)
+    }
+
+    fn lambda(&mut self, line: u16) -> Option<u16> {
+        if let Some(&mapped) = self.lambda_visited.get(&line) {
+            return Some(mapped);
+        }
+        let (name, path, source, call_site) = self.lambda_lines.resolve(line)?;
+        let mapped = self
+            .emitter
+            .cw
+            .source_map_for_inlining(self.claimable)?
+            .map_copied_line(name, path, source, call_site)?;
+        self.lambda_visited.insert(line, mapped);
+        Some(mapped)
     }
 }
 
