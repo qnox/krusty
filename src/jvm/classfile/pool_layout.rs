@@ -140,7 +140,7 @@ impl<'a> Layout<'a> {
             reach(read, slot.index, &mut kept);
             let rewritten = match slot.holder {
                 Holder::Code(method, part) => by_method.get(&method).map(|&at| (at, part)),
-                Holder::Class | Holder::AttributeName => None,
+                Holder::Class | Holder::AttributeName | Holder::CodeAttribute(_) => None,
             };
             match rewritten {
                 Some((at, part)) => {
@@ -160,7 +160,7 @@ impl<'a> Layout<'a> {
         let mut first_named = vec![usize::MAX; count];
         let mut code_starts: HashMap<usize, usize> = HashMap::new();
         for (position, slot) in read.visit_order().enumerate() {
-            if let Holder::Code(method, _) = slot.holder {
+            if let Holder::CodeAttribute(method) | Holder::Code(method, _) = slot.holder {
                 code_starts.entry(method).or_insert(position);
             }
             let rewritten = matches!(
@@ -337,7 +337,7 @@ fn orphan_anchors(
         .visit_order()
         .enumerate()
         .filter_map(|(position, slot)| match slot.holder {
-            Holder::Code(method, _) => Some((method, position)),
+            Holder::CodeAttribute(method) | Holder::Code(method, _) => Some((method, position)),
             _ => None,
         })
         .fold(HashMap::new(), |mut starts, (method, position)| {
