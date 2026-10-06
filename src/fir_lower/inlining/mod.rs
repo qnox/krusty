@@ -829,10 +829,7 @@ impl BodyLowering<'_> {
                 matches!(
                     self.ir.expr(*expression),
                     IrExpr::InvokeFunction { func, .. }
-                        if matches!(
-                            self.ir.expr(*func),
-                            IrExpr::Lambda { inline_body: Some(_), .. }
-                        )
+                        if lambda_invocation_is_spliceable(self.ir, *expression, *func)
                 )
             })
             .collect::<Vec<_>>();
@@ -1020,14 +1017,20 @@ impl BodyLowering<'_> {
         if !lambda_invocation_is_spliceable(self.ir, invocation, func) {
             return None;
         }
-        let IrExpr::Lambda {
-            impl_fn,
-            captures,
-            inline_body: Some(inline_body),
-            ..
-        } = self.ir.expr(func).clone()
-        else {
-            return None;
+        let (impl_fn, captures, inline_body, indexed_parameters) = match self.ir.expr(func).clone()
+        {
+            IrExpr::Lambda {
+                impl_fn,
+                captures,
+                inline_body: Some(inline_body),
+                ..
+            } => (impl_fn, captures, inline_body, false),
+            IrExpr::CallableReference(_) => {
+                let (impl_fn, captures, inline_body, _) =
+                    super::source_calls::inline_argument_template(self.ir, func)?;
+                (impl_fn, captures, inline_body, true)
+            }
+            _ => return None,
         };
         let parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
 
@@ -1073,14 +1076,20 @@ impl BodyLowering<'_> {
                 declarations.push(declaration);
                 slot
             } else {
-                let source_name = (parameter as usize >= capture_count)
-                    .then(|| {
-                        lambda_parameter_identities
-                            .as_ref()
-                            .and_then(|identities| identities.get(parameter as usize))
-                            .and_then(|identity| identity.source_name.clone())
-                    })
-                    .flatten();
+                let source_name = if indexed_parameters && parameter as usize >= capture_count {
+                    // kotlinc names the invocation parameters of an inlined callable reference
+                    // `p0`, `p1`, … rather than the referenced declaration's source names.
+                    Some(format!("p{}", parameter as usize - capture_count))
+                } else {
+                    (parameter as usize >= capture_count)
+                        .then(|| {
+                            lambda_parameter_identities
+                                .as_ref()
+                                .and_then(|identities| identities.get(parameter as usize))
+                                .and_then(|identity| identity.source_name.clone())
+                        })
+                        .flatten()
+                };
                 match (self.ir.expr(value), &source_name, binding) {
                     (IrExpr::GetValue(slot), None, _)
                     | (IrExpr::GetValue(slot), _, LambdaParameterBinding::Remapped) => *slot,
@@ -1128,8 +1137,12 @@ impl BodyLowering<'_> {
             local_base,
         )?;
         self.next_temporary = local_base.checked_add(local_count)?;
-        self.ir.inline_only_fns.insert(impl_fn);
-        self.ir.functions.get_mut(impl_fn as usize)?.body = None;
+        // A callable-reference adapter may still be the invoke of a carrier realized for another
+        // use of the same reference. Only a source lambda's implementation is consumed by the splice.
+        if !indexed_parameters {
+            self.ir.inline_only_fns.insert(impl_fn);
+            self.ir.functions.get_mut(impl_fn as usize)?.body = None;
+        }
         self.ir.exprs[invocation as usize] = IrExpr::Block {
             stmts: declarations,
             value: Some(body),
@@ -1152,23 +1165,37 @@ fn lambda_invocation_is_spliceable(
     let IrExpr::InvokeFunction { args, .. } = ir.expr(invocation) else {
         return false;
     };
-    let IrExpr::Lambda {
-        impl_fn,
-        arity,
-        captures,
-        inline_body: Some(_),
-        ..
-    } = ir.expr(lambda)
-    else {
-        return false;
-    };
-    // A suspend lambda's arity counts the continuation its invocation passes implicitly.
-    let suspend = ir.suspend_funs.contains(impl_fn);
-    args.len() + usize::from(suspend) == *arity as usize
-        && ir
-            .functions
-            .get(*impl_fn as usize)
-            .is_some_and(|function| function.params.len() == captures.len() + args.len())
+    let arg_count = args.len();
+    match ir.expr(lambda).clone() {
+        IrExpr::Lambda {
+            impl_fn,
+            arity,
+            captures,
+            inline_body: Some(_),
+            ..
+        } => {
+            // A suspend lambda's arity counts the continuation its invocation passes implicitly.
+            let suspend = ir.suspend_funs.contains(&impl_fn);
+            arg_count + usize::from(suspend) == usize::from(arity)
+                && ir
+                    .functions
+                    .get(impl_fn as usize)
+                    .is_some_and(|function| function.params.len() == captures.len() + arg_count)
+        }
+        IrExpr::CallableReference(_) => {
+            let Some((impl_fn, captures, _, arity)) =
+                super::source_calls::inline_argument_template(ir, lambda)
+            else {
+                return false;
+            };
+            arg_count == arity
+                && ir
+                    .functions
+                    .get(impl_fn as usize)
+                    .is_some_and(|function| function.params.len() == captures.len() + arg_count)
+        }
+        _ => false,
+    }
 }
 
 /// How a spliced lambda's parameters meet the arguments of its invocation.

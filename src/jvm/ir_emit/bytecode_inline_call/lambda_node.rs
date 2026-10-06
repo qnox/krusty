@@ -108,44 +108,19 @@ struct LiteralLambda {
     result_semantic: Ty,
 }
 
-/// An unbound constructor reference the bytecode inliner can place as a lambda: its adapter
-/// returns the construction and captures nothing. `None` for a reference that stays a carrier.
-pub(super) fn constructor_reference_template(ir: &IrFile, argument: u32) -> Option<(u32, u32, Ty)> {
+/// A callable reference the bytecode inliner can place as a lambda: its adapter returns one value.
+/// The capture prefix is the reference's captures followed by its bound receiver. `None` for a
+/// reference that stays a carrier.
+pub(super) fn constructor_reference_template(
+    ir: &IrFile,
+    argument: u32,
+) -> Option<(u32, Vec<u32>, u32, Ty)> {
     let IrExpr::CallableReference(reference) = ir.expr(argument) else {
         return None;
     };
-    if reference.bound_receiver.is_some()
-        || !reference.captures.is_empty()
-        || reference.adaptation.is_some()
-        || reference.declaration_suspend
-        || !matches!(
-            reference.target,
-            crate::ir::IrCallableReferenceTarget::Constructor { .. }
-        )
-    {
-        return None;
-    }
-    let Ty::Fun(signature) = reference.function_type.non_null() else {
-        return None;
-    };
-    if signature.suspend {
-        return None;
-    }
-    let function = ir.functions.get(reference.adapter as usize)?;
-    if function.params.len() != signature.params.len() {
-        return None;
-    }
-    let body = function.body?;
-    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
-        return None;
-    };
-    let [statement] = stmts.as_slice() else {
-        return None;
-    };
-    let IrExpr::Return(Some(inline_body)) = ir.expr(*statement) else {
-        return None;
-    };
-    Some((reference.adapter, *inline_body, reference.function_type))
+    let (adapter, captures, inline_body, _) =
+        crate::fir_lower::inline_argument_template(ir, argument)?;
+    Some((adapter, captures, inline_body, reference.function_type))
 }
 
 impl Emitter<'_> {
@@ -153,10 +128,15 @@ impl Emitter<'_> {
     /// error names the checked fact the literal lacks; the implementation method never stands in
     /// for it.
     fn literal_lambda(&self, argument: u32) -> Result<(LiteralLambda, usize), &'static str> {
-        if let Some((impl_fn, inline_body, function_type)) =
+        if let Some((impl_fn, captures, inline_body, function_type)) =
             constructor_reference_template(self.ir, argument)
         {
-            return self.constructor_reference_literal(impl_fn, inline_body, function_type);
+            return self.constructor_reference_literal(
+                impl_fn,
+                captures,
+                inline_body,
+                function_type,
+            );
         }
         let IrExpr::Lambda {
             impl_fn,
@@ -204,28 +184,31 @@ impl Emitter<'_> {
         ))
     }
 
-    /// The constructor reference `::Holder` as the lambda `map` inlines: the adapter's returned
-    /// construction, with the reference's function type as its parameters and result.
+    /// A callable reference as the lambda an inline call places: the adapter's returned call, with
+    /// the reference's captures and bound receiver ahead of its function parameters.
     fn constructor_reference_literal(
         &self,
         impl_fn: u32,
+        captures: Vec<u32>,
         inline_body: u32,
         function_type: Ty,
     ) -> Result<(LiteralLambda, usize), &'static str> {
         let Ty::Fun(signature) = function_type.non_null() else {
-            return Err("a constructor reference has no function type");
+            return Err("a callable reference has no function type");
         };
         let physical = jvm_function_params(self.ir, impl_fn);
-        if physical.len() != signature.params.len() {
-            return Err("a constructor reference adapter does not take its function parameters");
+        let split = captures.len();
+        if physical.len() != split + signature.params.len() {
+            return Err("a callable reference adapter does not take its captures and parameters");
         }
+        let (capture_types, physical_parameters) = physical.split_at(split);
         let result_semantic = self
             .ir
             .logical_types
             .get(&inline_body)
             .copied()
             .unwrap_or(signature.ret);
-        let (parameter_types, parameter_coercions) = physical
+        let (parameter_types, parameter_coercions) = physical_parameters
             .iter()
             .zip(signature.params.iter())
             .map(|(&physical, &semantic)| self.inline_parameter(semantic, physical))
@@ -233,9 +216,9 @@ impl Emitter<'_> {
         Ok((
             LiteralLambda {
                 impl_fn,
-                captures: Vec::new(),
+                captures,
                 inline_body,
-                capture_types: Vec::new(),
+                capture_types: capture_types.to_vec(),
                 parameter_types,
                 parameter_coercions,
                 result_semantic,

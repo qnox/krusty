@@ -781,78 +781,68 @@ fn realize_own_invoke(
     reference.invoke = Some(adapter);
 }
 
-/// Whether `expression` is an unbound constructor reference passed to an inline function
-/// parameter of a dependency call. The bytecode inliner splices that reference; realizing a
-/// carrier would emit the class kotlinc omits.
-fn inlined_constructor_argument(
+/// Whether emitting `expression` would evaluate the callable reference as a value. An inline
+/// argument does not: the splice places the adapter's returned call and drops the carrier. A
+/// reference no live root reaches does not either; same-file inlining has already consumed it.
+fn reference_needs_carrier(
     ir: &IrFile,
     callables: &crate::backend::CheckedBackendCallables,
     expression: u32,
+    parents: &std::collections::HashMap<u32, Vec<u32>>,
+    roots: &std::collections::HashSet<u32>,
 ) -> bool {
-    let IrExpr::CallableReference(reference) = ir.expr(expression) else {
+    if roots.contains(&expression) {
+        return true;
+    }
+    let Some(users) = parents.get(&expression) else {
         return false;
     };
-    if reference.bound_receiver.is_some()
-        || !reference.captures.is_empty()
-        || reference.adaptation.is_some()
-        || reference.declaration_suspend
-        || !matches!(
-            reference.target,
-            crate::ir::IrCallableReferenceTarget::Constructor { .. }
-        )
-    {
+    users
+        .iter()
+        .any(|user| !is_inlined_call_argument(ir, callables, *user, expression))
+}
+
+/// Whether `call` passes `argument` to an inline function parameter. The argument list is the
+/// pre-realization value-parameter list: an extension receiver is still the call's dispatch
+/// receiver, and `inline_modifiers` lines up with these parameters.
+fn is_inlined_call_argument(
+    ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
+    call: u32,
+    argument: u32,
+) -> bool {
+    let IrExpr::Call { callee, args, .. } = ir.expr(call) else {
+        return false;
+    };
+    if !args.contains(&argument) || !ir.inline_call_sites.contains(&call) {
         return false;
     }
-    let Some(function) = ir.functions.get(reference.adapter as usize) else {
+    let crate::ir::Callee::External { target, params, .. } = callee else {
         return false;
     };
-    let Some(body) = function.body else {
+    let Some(position) = args.iter().position(|candidate| *candidate == argument) else {
         return false;
     };
-    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+    let Some(callable) = callables.callable(*target) else {
         return false;
     };
-    let [statement] = stmts.as_slice() else {
-        return false;
-    };
-    let IrExpr::Return(Some(_)) = ir.expr(*statement) else {
-        return false;
-    };
-    let mut used = false;
-    for (call, expr) in ir.exprs.iter().enumerate() {
-        let IrExpr::Call { callee, args, .. } = expr else {
-            continue;
-        };
-        if !args.contains(&expression) {
-            continue;
-        }
-        let call = u32::try_from(call).expect("an expression index fits ExprId");
-        if !ir.inline_call_sites.contains(&call) {
-            return false;
-        }
-        let crate::ir::Callee::External { target, params, .. } = callee else {
-            return false;
-        };
-        let Some(position) = args.iter().position(|argument| *argument == expression) else {
-            return false;
-        };
-        let Some(callable) = callables.callable(*target) else {
-            return false;
-        };
-        let inline_parameter = callable.inline.can_inline()
-            && matches!(params.get(position), Some(Ty::Fun(_)))
-            && callable
-                .inline_modifiers
-                .get(position)
-                .is_some_and(|modifier| {
-                    *modifier != crate::types::InlineParameterModifier::Noinline
-                });
-        if !inline_parameter {
-            return false;
-        }
-        used = true;
+    callable.inline.can_inline()
+        && matches!(params.get(position), Some(Ty::Fun(_)))
+        && callable
+            .inline_modifiers
+            .get(position)
+            .is_some_and(|modifier| *modifier != crate::types::InlineParameterModifier::Noinline)
+}
+
+fn expression_parents(ir: &IrFile) -> std::collections::HashMap<u32, Vec<u32>> {
+    let mut parents = std::collections::HashMap::<u32, Vec<u32>>::new();
+    for index in 0..ir.exprs.len() {
+        let index = u32::try_from(index).expect("an expression index fits ExprId");
+        crate::ir::for_each_child(&ir.exprs, index, &mut |child| {
+            parents.entry(child).or_default().push(index);
+        });
     }
-    used
+    parents
 }
 
 pub(super) fn realize(
@@ -880,22 +870,42 @@ pub(super) fn realize(
         }
     }
     let expression_count = ir.exprs.len();
+    let parents = expression_parents(ir);
+    let roots = super::lambda_classes::emitted_roots(ir, true)
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let mut carrier_adapters = std::collections::HashSet::new();
+    for raw in 0..expression_count {
+        let adapter = match &ir.exprs[raw] {
+            IrExpr::CallableReference(reference) => reference.adapter,
+            _ => continue,
+        };
+        if crate::fir_lower::inline_argument_template(ir, raw as u32).is_some()
+            && reference_needs_carrier(ir, callables, raw as u32, &parents, &roots)
+        {
+            carrier_adapters.insert(adapter);
+        }
+    }
     for raw in 0..expression_count {
         let IrExpr::CallableReference(reference) = ir.exprs[raw].clone() else {
             continue;
         };
-        // An unbound constructor reference passed to an inline function parameter is the lambda
-        // the bytecode inliner splices. It has no carrier: kotlinc writes neither the reference
-        // class nor the adapter, and names the inline marker after the class the reference would
-        // have been.
+        // A callable reference the splice places has no carrier: kotlinc writes neither the
+        // reference class nor the adapter, and names the inline marker after the class the
+        // reference would have been. A use that still evaluates the reference keeps the carrier,
+        // and with it the adapter.
         let sole = adapter_uses.get(&reference.adapter) == Some(&1);
-        if sole && inlined_constructor_argument(ir, callables, raw as u32) {
-            if let Some(name) =
-                crate::jvm::local_class_names::callable_reference_name(ir, raw as u32)
-            {
-                ir.lambda_class_names.insert(reference.adapter, name);
+        if crate::fir_lower::inline_argument_template(ir, raw as u32).is_some()
+            && !reference_needs_carrier(ir, callables, raw as u32, &parents, &roots)
+        {
+            if !carrier_adapters.contains(&reference.adapter) {
+                if let Some(name) =
+                    crate::jvm::local_class_names::callable_reference_name(ir, raw as u32)
+                {
+                    ir.lambda_class_names.insert(reference.adapter, name);
+                }
+                ir.inline_only_fns.insert(reference.adapter);
             }
-            ir.inline_only_fns.insert(reference.adapter);
             continue;
         }
         let adapter_owner = adapter_owners.get(&reference.adapter).copied();

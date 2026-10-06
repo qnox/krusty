@@ -1856,25 +1856,9 @@ impl BodyLowering<'_> {
                             CheckedArgumentPolicy::Selected {
                                 preserve_inline_lambdas,
                                 ..
-                            } => {
-                                preserve_inline_lambdas
-                                    && (matches!(
-                                        self.ir.expr(value),
-                                        IrExpr::Lambda {
-                                            inline_body: Some(_),
-                                            ..
-                                        }
-                                    ) || unbound_constructor_reference(self.ir, value))
-                            }
+                            } => preserve_inline_lambdas && inline_argument_stays(self.ir, value),
                             CheckedArgumentPolicy::SameFileInline { inline, .. } => {
-                                inline
-                                    && matches!(
-                                        self.ir.expr(value),
-                                        IrExpr::Lambda {
-                                            inline_body: Some(_),
-                                            ..
-                                        }
-                                    )
+                                inline && inline_argument_stays(self.ir, value)
                             }
                         };
                         if matches!(policy, CheckedArgumentPolicy::SameFileInline { .. })
@@ -2013,41 +1997,35 @@ impl BodyLowering<'_> {
     }
 }
 
-/// An unbound constructor reference the inline argument position keeps in place, the same way it
-/// keeps a lambda literal: `map(::Holder)` splices the construction instead of storing a carrier.
-fn unbound_constructor_reference(ir: &crate::ir::IrFile, expression: ExprId) -> bool {
-    let IrExpr::CallableReference(reference) = ir.expr(expression) else {
-        return false;
-    };
-    reference.bound_receiver.is_none()
-        && reference.captures.is_empty()
-        && reference.adaptation.is_none()
-        && !reference.declaration_suspend
-        && matches!(
-            reference.target,
-            crate::ir::IrCallableReferenceTarget::Constructor { .. }
-        )
+/// A lambda literal, or a callable reference whose adapter is that literal, stays in the argument
+/// position. Spilling either would be the function object the splice is there to avoid.
+fn inline_argument_stays(ir: &crate::ir::IrFile, value: ExprId) -> bool {
+    match ir.expr(value) {
+        IrExpr::Lambda {
+            inline_body: Some(_),
+            ..
+        } => true,
+        IrExpr::CallableReference(_) => inline_argument_template(ir, value).is_some(),
+        _ => false,
+    }
 }
 
-/// The inline template of a lambda, or of an unbound constructor reference whose adapter is
-/// exactly that template. `map(::Holder)` is the second shape: the adapter returns `new Holder`
-/// and has no capture, so the collection transform can splice the construction and drop the
-/// adapter.
-pub(super) fn inline_argument_template(
+/// The inline template of a lambda, or of a non-suspend callable reference whose adapter is that
+/// template. The reference's target is not consulted: the adapter's captures, bound receiver, and
+/// one returned value are the invocation. A stored reference never reaches this helper.
+pub(crate) fn inline_argument_template(
     ir: &crate::ir::IrFile,
     expression: ExprId,
 ) -> Option<(u32, Vec<ExprId>, ExprId, usize)> {
-    let expression = ir.expr(expression).clone();
-    let constructor_adapter = match expression {
+    let expression_node = ir.expr(expression).clone();
+    match expression_node {
         IrExpr::Lambda {
             impl_fn,
             captures,
             inline_body: Some(inline_body),
             arity,
             ..
-        } => {
-            return Some((impl_fn, captures, inline_body, usize::from(arity)));
-        }
+        } => Some((impl_fn, captures, inline_body, usize::from(arity))),
         IrExpr::Lambda {
             impl_fn,
             captures,
@@ -2058,36 +2036,45 @@ pub(super) fn inline_argument_template(
             == Some(crate::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter) =>
         {
             let arity = usize::from(arity);
-            let (inline_body, body_arity) = constructor_reference_inline_value(ir, impl_fn)?;
+            let (inline_body, body_arity) = adapter_returned_value(ir, impl_fn)?;
             if body_arity != arity + captures.len() {
                 return None;
             }
-            return Some((impl_fn, captures, inline_body, arity));
+            Some((impl_fn, captures, inline_body, arity))
         }
-        IrExpr::CallableReference(reference)
-            if reference.bound_receiver.is_none()
-                && reference.captures.is_empty()
-                && reference.adaptation.is_none()
-                && !reference.declaration_suspend
-                && matches!(
-                    reference.target,
-                    crate::ir::IrCallableReferenceTarget::Constructor { .. }
-                ) =>
-        {
-            reference.adapter
-        }
-        _ => return None,
-    };
-    let (inline_body, arity) = constructor_reference_inline_value(ir, constructor_adapter)?;
-    Some((constructor_adapter, Vec::new(), inline_body, arity))
+        IrExpr::CallableReference(reference) => callable_reference_inline_template(ir, &reference),
+        _ => None,
+    }
 }
 
-/// The value a constructor-reference adapter returns. The adapter is a block whose only
-/// statement is that return; the inline splice wants the value, not a transfer out of `map`.
-fn constructor_reference_inline_value(
+/// The invocation a callable-reference adapter places at an inline argument. The capture prefix is
+/// the reference's captures followed by its bound receiver, which is the order the adapter's
+/// parameters record them; the remaining parameters are the call.
+fn callable_reference_inline_template(
     ir: &crate::ir::IrFile,
-    adapter: u32,
-) -> Option<(ExprId, usize)> {
+    reference: &crate::ir::IrCallableReference,
+) -> Option<(u32, Vec<ExprId>, ExprId, usize)> {
+    let crate::types::Ty::Fun(signature) = reference.function_type.non_null() else {
+        return None;
+    };
+    if signature.suspend || reference.declaration_suspend {
+        return None;
+    }
+    let (inline_body, parameter_count) = adapter_returned_value(ir, reference.adapter)?;
+    let mut captures = reference.captures.clone();
+    if let Some(receiver) = reference.bound_receiver {
+        captures.push(receiver);
+    }
+    let arity = parameter_count.checked_sub(captures.len())?;
+    if signature.params.len() != arity {
+        return None;
+    }
+    Some((reference.adapter, captures, inline_body, arity))
+}
+
+/// The value an adapter returns. The adapter is a block whose only statement is that return; the
+/// inline splice wants the value, not a transfer out of the caller.
+fn adapter_returned_value(ir: &crate::ir::IrFile, adapter: u32) -> Option<(ExprId, usize)> {
     let function = ir.functions.get(adapter as usize)?;
     let body = function.body?;
     let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
