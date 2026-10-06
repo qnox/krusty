@@ -230,7 +230,7 @@ fn duplicated_safe_call(
         super::local_variable_representation::slot_type(emitter.ir, *variable, semantic_ty);
     // `ifnull` consumes a reference. A nullable primitive is unboxed before the
     // selector, so its one-word value is an `int` and keeps the temporary.
-    if super::slot_words(slot_ty) != 1 || slot_ty.is_jvm_scalar() {
+    if !duplicable_receiver_slot(slot_ty) {
         return None;
     }
     let guard = value?;
@@ -259,6 +259,10 @@ fn duplicated_safe_call(
             null_result: *null_result,
         },
     )
+}
+
+fn duplicable_receiver_slot(slot_ty: Ty) -> bool {
+    super::slot_words(slot_ty) == 1 && !slot_ty.is_jvm_scalar()
 }
 
 fn is_null_equality(ir: &crate::ir::IrFile, condition: u32, temporary: u32) -> bool {
@@ -339,4 +343,46 @@ fn value_reads(ir: &crate::ir::IrFile, root: u32, temporary: u32) -> usize {
         count += value_reads(ir, child, temporary);
     });
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{duplicable_receiver_slot, selector_reads_temporary_once_as_receiver};
+    use crate::ir::{Callee, IrExpr, IrFile};
+
+    #[test]
+    fn only_a_one_word_reference_receiver_can_stay_on_the_stack() {
+        assert!(duplicable_receiver_slot(crate::types::Ty::obj("app/Host")));
+        assert!(!duplicable_receiver_slot(crate::types::Ty::Int));
+        assert!(!duplicable_receiver_slot(crate::types::Ty::Long));
+    }
+
+    #[test]
+    fn a_selector_with_a_second_receiver_read_keeps_the_temporary() {
+        let mut ir = IrFile::default();
+        let receiver = ir.add_expr(IrExpr::GetValue(7));
+        let argument = ir.add_expr(IrExpr::GetValue(7));
+        let selector = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(0),
+            dispatch_receiver: Some(receiver),
+            args: vec![argument],
+        });
+
+        assert!(!selector_reads_temporary_once_as_receiver(&ir, selector, 7));
+    }
+
+    #[test]
+    fn a_static_call_requires_the_recorded_extension_receiver_position() {
+        let mut ir = IrFile::default();
+        let receiver = ir.add_expr(IrExpr::GetValue(7));
+        let selector = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(0),
+            dispatch_receiver: None,
+            args: vec![receiver],
+        });
+
+        assert!(!selector_reads_temporary_once_as_receiver(&ir, selector, 7));
+        ir.static_extension_receivers.insert(selector, 0);
+        assert!(selector_reads_temporary_once_as_receiver(&ir, selector, 7));
+    }
 }
