@@ -137,6 +137,40 @@ fun box(): String {\n\
 }
 
 #[test]
+fn a_reference_whose_receiver_contains_a_reference_keeps_call_order() {
+    common::expect_box_ok_with_stdlib(
+        "\
+class Foo(val a: String) {\n\
+    fun test() = a\n\
+}\n\
+\n\
+var effects = \"\"\n\
+\n\
+fun create(a: String): Foo {\n\
+    effects += a\n\
+    return Foo(a)\n\
+}\n\
+\n\
+fun create2(a: String, f: () -> String): Foo {\n\
+    effects += a\n\
+    return Foo(a)\n\
+}\n\
+\n\
+inline fun test(a: String, b: () -> String, c: () -> String, d: () -> String, e: String): String {\n\
+    return a + b() + c() + d() + e\n\
+}\n\
+\n\
+fun box(): String {\n\
+    val result = test(create(\"A\").a, create(\"B\")::a, create(\"C\")::test, create2(\"E\", create(\"D\")::test)::test, create(\"F\").a)\n\
+    if (effects != \"ABCDEF\") return \"fail 1: $effects\"\n\
+    return if (result == \"ABCEF\") \"OK\" else \"fail 2: $result\"\n\
+}\n\
+",
+        "NestedReceiverRef",
+    );
+}
+
+#[test]
 fn a_stored_reference_stays_a_carrier_beside_an_inlined_use() {
     common::expect_box_ok_with_stdlib(
         "\

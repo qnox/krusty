@@ -5788,8 +5788,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   caller's value: the spliced body reads its own parameters, then the selector consumes the
   receiver. `value?.let(::id)` and `value?.let(""::extId)` therefore return that value. A
   reference whose function type returns `Unit` keeps the invocation as an effect of that
-  returned value (`listOf(...).forEach(b::addFoo)` still calls `addFoo`). A reference stored in
-  a variable stays a carrier, including beside another spliced use. A bound reference whose adapter is not that single return stays a
+  returned value (`listOf(...).forEach(b::addFoo)` still calls `addFoo`). A reference whose
+  receiver contains another reference (`create2(create("D")::test)::test`) keeps its own class
+  name for that marker. A reference stored in a variable stays a carrier, including beside
+  another spliced use. A bound reference whose adapter is not that single return stays a
   carrier. A reified extension reference passed to `let` places the recorded call. Test:
   `tests/inline_constructor_reference_e2e.rs`.
 - **A `fun interface` constructor reference is a `FunInterfaceConstructorReference`.** `::Action`
