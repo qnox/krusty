@@ -771,6 +771,7 @@ impl IrFile {
             "custom serializer constructor parameter",
             self.custom_serializer_constructions
                 .values()
+                .chain(self.type_use_serializer_constructions.values())
                 .flat_map(|construction| construction.parameters.iter().copied()),
         )?;
         reject_all(
