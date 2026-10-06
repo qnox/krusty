@@ -489,7 +489,7 @@ impl ProductionSignatureSemantics<'_> {
             .into_iter()
             .zip(arguments)
             .collect::<crate::symbol_resolver::GSigBinds>();
-        Some(crate::symbol_resolver::ty_subst(expansion, &bindings))
+        Some(crate::types::ty_subst_alias_expansion(expansion, &bindings))
     }
 
     /// Resolve a source type-alias lookup spelling to its declaration-owned expansion. This is a

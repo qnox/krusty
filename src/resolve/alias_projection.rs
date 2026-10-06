@@ -104,7 +104,7 @@ impl Checker<'_> {
             .cloned()
             .zip(arguments)
             .collect::<crate::symbol_resolver::GSigBinds>();
-        crate::symbol_resolver::ty_subst(expansion, &bindings)
+        crate::types::ty_subst_alias_expansion(expansion, &bindings)
     }
 }
 

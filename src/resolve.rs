@@ -9137,7 +9137,7 @@ fn apply_alias_expansion(
         .cloned()
         .zip(args.iter().copied())
         .collect::<crate::symbol_resolver::GSigBinds>();
-    let expansion = crate::symbol_resolver::ty_subst(alias.expansion, &bindings);
+    let expansion = crate::types::ty_subst_alias_expansion(alias.expansion, &bindings);
     crate::trace_compiler!(
         "signature",
         "apply typealias spelling={} identity={:?} target={:?} formals={:?} arguments={args:?} template={:?} expansion={expansion:?}",
@@ -49297,7 +49297,7 @@ impl<'a> Checker<'a> {
             .into_iter()
             .map(|formal| (formal, star))
             .collect::<crate::symbol_resolver::GSigBinds>();
-        let mut resolved = crate::symbol_resolver::ty_subst(expansion, &bindings);
+        let mut resolved = crate::types::ty_subst_alias_expansion(expansion, &bindings);
         if reference.definitely_non_null() {
             resolved = definitely_non_null_ty(resolved);
         }
@@ -49384,7 +49384,7 @@ impl<'a> Checker<'a> {
             .cloned()
             .zip(args.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
-        let resolved = crate::symbol_resolver::ty_subst(expansion, &bindings);
+        let resolved = crate::types::ty_subst_alias_expansion(expansion, &bindings);
         let conflicts = conflicting_use_site_spans(&formals, arguments, expansion, &bindings);
         AppliedAlias {
             ty: resolved,

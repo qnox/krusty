@@ -286,21 +286,12 @@ impl SymbolResolver<'_> {
                     }
                 }
                 for level in imports.classifier_levels() {
-                    let candidates = level
-                        .packages
-                        .iter()
-                        .filter_map(|&package| {
-                            let record = self.src.symbols(SymbolNamespace::Package(package), first);
-                            let classifier = record.classifier_name?;
-                            if level.builtins_only && !record.builtin_classifier {
-                                return None;
-                            }
-                            let alias = alias_on_selected_classifier(
-                                classifier,
-                                record.classifier_declaration.as_ref(),
-                            );
-                            Some((classifier, alias))
-                        })
+                    let candidates =
+                        super::classifier_scope::scoped_classifier_candidates_at_import_level(
+                            &self.src, first, level,
+                        )
+                        .into_iter()
+                        .map(|candidate| (candidate.classifier, candidate.alias))
                         .collect();
                     if let Some(selection) = consider(candidates) {
                         return selected(selection);
@@ -308,17 +299,12 @@ impl SymbolResolver<'_> {
                 }
             }
             Some(FunctionScopeRef::Flat(packages)) => {
-                let candidates = packages
-                    .iter()
-                    .filter_map(|&package| {
-                        let record = self.src.symbols(SymbolNamespace::Package(package), first);
-                        let classifier = record.classifier_name?;
-                        let alias = alias_on_selected_classifier(
-                            classifier,
-                            record.classifier_declaration.as_ref(),
-                        );
-                        Some((classifier, alias))
-                    })
+                let candidates =
+                    super::classifier_scope::scoped_classifier_candidates_at_scope_level(
+                        &self.src, first, packages,
+                    )
+                    .into_iter()
+                    .map(|candidate| (candidate.classifier, candidate.alias))
                     .collect();
                 if let Some(selection) = consider(candidates) {
                     return selected(selection);
