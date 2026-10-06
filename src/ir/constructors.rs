@@ -302,5 +302,11 @@ pub struct IrCustomSerializerConstruction {
     pub parameters: Box<[Ty]>,
     /// The accessor's operand ordinal passed to each constructor parameter, in parameter order.
     pub operands: Box<[u32]>,
-    pub target: IrConstructorTarget,
+    pub target: IrCustomSerializerConstructorTarget,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IrCustomSerializerConstructorTarget {
+    Module(IrConstructorTarget),
+    External(super::IrExternalConstructorTarget),
 }
