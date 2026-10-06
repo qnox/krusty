@@ -10,17 +10,16 @@ use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
 
 /// The lambda implementation referenced by one expression.
 ///
-/// A normal lambda value owns an explicit `impl_fn` edge. An inlined source lambda may instead
-/// survive as a direct implementation call. `lambda_origins` is its stable semantic identity.
-/// Parameter-layout facts are deliberately
-/// insufficient here because callable-reference and function-value adapters publish them too.
+/// A normal lambda value owns an explicit `impl_fn` edge. A lambda implementation detached for a
+/// copied inline expansion may instead survive as a direct call. `specialized_functions` records
+/// that exact copy; ordinary direct source-lambda calls retain their existing physical owner.
 fn implementation_edge(ir: &IrFile, expression: ExprId) -> Option<FunId> {
     match ir.expr(expression) {
         IrExpr::Lambda { impl_fn, .. } => Some(*impl_fn),
         IrExpr::Call {
             callee: Callee::Local(function),
             ..
-        } if ir.lambda_origins.contains_key(function) => Some(*function),
+        } if ir.specialized_functions.contains_key(function) => Some(*function),
         _ => None,
     }
 }
@@ -165,11 +164,24 @@ mod tests {
     }
 
     #[test]
-    fn a_direct_source_lambda_call_places_its_implementation_on_the_emitting_class() {
+    fn a_direct_specialized_lambda_call_places_its_implementation_on_the_emitting_class() {
         let mut ir = IrFile::default();
         let unit = ir.add_expr(IrExpr::UnitInstance);
         let implementation = ir.add_fun(function("lambda", unit, None));
         source_lambda(&mut ir, implementation);
+        ir.specialized_functions.insert(
+            implementation,
+            crate::ir::IrSpecializedFunction {
+                source: implementation,
+                caller_declaration: crate::fir::DeclarationId::from_raw(0),
+                caller: Some(crate::ir::IrEnclosure::File),
+                caller_is_default: false,
+                caller_source_name: "run".to_string(),
+                inline_callee: crate::fir::CallableId::from_raw(0),
+                inline_callee_source_name: "inlineCall".to_string(),
+                parent: None,
+            },
+        );
 
         let call = ir.add_expr(IrExpr::Call {
             callee: Callee::Local(implementation),
@@ -190,6 +202,31 @@ mod tests {
             vec![method, implementation]
         );
         assert_eq!(ir.class_method_owners[&implementation], vec![class_id]);
+    }
+
+    #[test]
+    fn an_ordinary_direct_source_lambda_call_keeps_its_existing_owner() {
+        let mut ir = IrFile::default();
+        let unit = ir.add_expr(IrExpr::UnitInstance);
+        let implementation = ir.add_fun(function("lambda", unit, None));
+        source_lambda(&mut ir, implementation);
+
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(implementation),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let owner = crate::types::type_name("sample/Owner");
+        let method = ir.add_fun(function("run", call, Some(owner)));
+        let mut class = crate::plugins::synthetic_class("sample/Owner");
+        class.methods.push(method);
+        let class_id = ir.add_class(class);
+        ir.note_class_method(class_id, method);
+
+        reparent_lambda_impls(&mut ir);
+
+        assert_eq!(ir.classes[class_id as usize].methods, vec![method]);
+        assert!(!ir.class_method_owners.contains_key(&implementation));
     }
 
     #[test]

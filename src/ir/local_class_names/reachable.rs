@@ -141,9 +141,9 @@ impl IrFile {
                 _ => None,
             } {
                 // Common inlining can consume the `Lambda` node while retaining a direct call to
-                // its implementation. That call is still an exact semantic implementation edge.
-                // Detach it when the declaration implementation has another site, then remap the
-                // copy's descriptor together with the anonymous class it captures.
+                // its implementation. Always detach this copied edge: the specialization record
+                // is the exact fact that lets a backend place it with the copied class without
+                // reinterpreting every ordinary direct source-lambda call as a relocation request.
                 let impl_fn = if let Some(existing) = detached_impl(
                     source,
                     expression,
@@ -151,9 +151,7 @@ impl IrFile {
                     &closure,
                     &local_clones,
                     detached_impls,
-                    self.class_method_owners.get(&source).is_some_and(|owners| {
-                        owners.iter().any(|owner| class_ids.contains_key(owner))
-                    }),
+                    true,
                 ) {
                     existing
                 } else {

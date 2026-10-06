@@ -2109,4 +2109,62 @@ mod tests {
             Ty::obj_name(target)
         );
     }
+
+    #[test]
+    fn reachable_remap_specializes_a_consumed_lambda_with_no_other_site() {
+        let source = crate::types::type_name("sample/Source");
+        let target = crate::types::type_name("sample/Target");
+        let names = HashMap::from([(source, target)]);
+        let mut ir = super::super::IrFile::default();
+        let implementation = ir.add_fun(IrFunction {
+            name: "invoke".to_string(),
+            params: vec![Ty::obj_name(source)],
+            ret: Ty::obj_name(source),
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir.lambda_origins.insert(
+            implementation,
+            crate::ir::IrLambdaOrigin {
+                identity: 0,
+                lexical_owner: None,
+                enclosing_name: "box".to_string(),
+                binding_name: None,
+                ordinal: 0,
+                implementation_name: "box".to_string(),
+                implementation_ordinal: 0,
+                receiver_parameter: None,
+                label: None,
+                form: crate::ir::IrLambdaForm::Literal,
+                class_provenance: None,
+            },
+        );
+        let reachable = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(implementation),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+
+        let detached =
+            ir.remap_reachable_classifier_identities(&names, [reachable], &mut HashSet::new());
+
+        assert_eq!(detached.len(), 1);
+        assert_eq!(detached[0].source, implementation);
+        assert!(!detached[0].class_site);
+        assert!(matches!(
+            ir.expr(reachable),
+            IrExpr::Call { callee: Callee::Local(function), .. }
+                if *function == detached[0].target
+        ));
+        assert_eq!(
+            ir.functions[detached[0].target as usize].params,
+            vec![Ty::obj_name(target)]
+        );
+        assert_eq!(
+            ir.functions[detached[0].target as usize].ret,
+            Ty::obj_name(target)
+        );
+    }
 }
