@@ -14701,7 +14701,10 @@ impl<'a> Checker<'a> {
         };
 
         let selected_receiver = self
-            .selected_intersection_member_receiver(rt, &selected)
+            // A type parameter's lookup receiver is its complete declared bound intersection;
+            // `rt` remains the source value type so the ordinary no-projection case still records
+            // that value unchanged.
+            .selected_intersection_member_receiver(member_receiver, &selected)
             .unwrap_or(rt);
         let mut member = self
             .resolver()
