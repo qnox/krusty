@@ -103,40 +103,42 @@ fn a_bridge_takes_a_function_types_parameter_names() {
 /// `p0`, `p1` in its `LocalVariableTable`, with the erased descriptor.
 #[test]
 fn a_java_bridge_names_an_unnamed_parameter_positionally() {
-    let src = "import java.nio.file.FileVisitResult\n\
-         import java.nio.file.FileVisitor\n\
-         import java.nio.file.Path\n\
-         import java.nio.file.SimpleFileVisitor\n\
-         import java.nio.file.attribute.BasicFileAttributes\n\
+    let java = [(
+        "UnnamedBiMapper.java".to_string(),
+        "package fixtures;\n\
+         public interface UnnamedBiMapper<T> {\n\
+             T map(T first, T second);\n\
+         }\n"
+        .to_string(),
+    )];
+    let (library, _) =
+        common::javac_compile(&java, &[]).expect("javac must build the unnamed-parameter fixture");
+    let src = "import fixtures.UnnamedBiMapper\n\
          \n\
-         fun visitor(fallback: FileVisitResult): FileVisitor<Path> =\n\
-         \x20   object : SimpleFileVisitor<Path>() {\n\
-         \x20       override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult = fallback\n\
-         \x20       override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult = fallback\n\
-         \x20   }\n";
-    let built = common::compare_with_kotlinc_plugin_jdk(
+         fun mapper(): UnnamedBiMapper<String> = object : UnnamedBiMapper<String> {\n\
+         \x20   override fun map(left: String, right: String): String = left\n\
+         }\n";
+    let built = common::compare_with_kotlinc_plugin_jdk_cp(
         "JavaBridgeLocals",
         src,
-        "JavaBridgeLocalsKt$visitor$1",
+        "JavaBridgeLocalsKt$mapper$1",
+        &[library],
         "21",
         &[],
     )
     .expect("reference kotlinc is provisioned");
-    for member in [
-        "public java.nio.file.FileVisitResult visitFile(java.lang.Object, java.nio.file.attribute.BasicFileAttributes);",
-        "public java.nio.file.FileVisitResult preVisitDirectory(java.lang.Object, java.nio.file.attribute.BasicFileAttributes);",
-    ] {
-        let reference = local_variables(&built.reference, member);
-        assert!(
-            reference.iter().any(|row| row.contains(" p0 ")),
-            "kotlinc names the erased Java parameter p0: {reference:?}"
-        );
-        assert_eq!(
-            local_variables(&built.krusty, member),
-            reference,
-            "{member}"
-        );
-    }
+    let member = "public java.lang.Object map(java.lang.Object, java.lang.Object);";
+    let reference = local_variables(&built.reference, member);
+    assert_eq!(
+        reference,
+        [
+            "0 this LJavaBridgeLocalsKt$mapper$1;",
+            "1 p0 Ljava/lang/Object;",
+            "2 p1 Ljava/lang/Object;",
+        ],
+        "kotlinc bridge locals"
+    );
+    assert_eq!(local_variables(&built.krusty, member), reference, member);
 }
 
 #[test]
