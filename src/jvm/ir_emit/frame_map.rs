@@ -85,6 +85,9 @@ struct Entry {
     occupant: Occupant,
     slot: u16,
     words: u16,
+    /// A deferred entry owns its semantic position but does not occupy the cursor until its first
+    /// store. Operand-local scopes may therefore borrow the slot while computing that store.
+    active: bool,
 }
 
 /// A live unkeyed temporary. Not `Copy`: leaving it consumes it, so it is left at most once.
@@ -132,6 +135,50 @@ impl FrameMap {
     /// Enter a keyed local of type `ty` and return its slot.
     pub(super) fn enter(&mut self, key: FrameKey, ty: Ty) -> u16 {
         self.push(Occupant::Key(key), ty).1
+    }
+
+    /// Record a keyed local at the current cursor without occupying its slot yet.
+    ///
+    /// This is the JVM shape of an inline-return result: its declaration precedes the expression
+    /// that computes it, but kotlinc lets locals inside that expression reuse the result slot. The
+    /// first store activates the same entry after those nested locals have left scope.
+    pub(super) fn enter_deferred(&mut self, key: FrameKey, ty: Ty) -> u16 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let slot = self.size;
+        self.entries.push(Entry {
+            id,
+            occupant: Occupant::Key(key),
+            slot,
+            words: slot_words(ty),
+            active: false,
+        });
+        slot
+    }
+
+    /// Make a deferred keyed local occupy the slot recorded at its declaration.
+    pub(super) fn activate_deferred(&mut self, key: FrameKey) -> u16 {
+        let occupant = Occupant::Key(key);
+        let index = self
+            .entries
+            .iter()
+            .rposition(|entry| entry.occupant == occupant)
+            .unwrap_or_else(|| panic!("deferred frame entry {key:?} was never declared"));
+        let (slot, words, active) = {
+            let entry = &self.entries[index];
+            (entry.slot, entry.words, entry.active)
+        };
+        if active {
+            return slot;
+        }
+        assert_eq!(
+            self.size, slot,
+            "deferred frame entry {key:?} activated while a nested slot is live"
+        );
+        self.entries[index].active = true;
+        self.size += words;
+        self.max = self.max.max(self.size);
+        slot
     }
 
     /// Enter an unkeyed temporary of type `ty`.
@@ -189,7 +236,7 @@ impl FrameMap {
     pub(super) fn aligned_call_operand_base(&self, parameters: &[(Option<u32>, u16)]) -> u16 {
         let mut base = self.size;
         let mut holders = Vec::new();
-        for entry in self.entries.iter().rev() {
+        for entry in self.entries.iter().rev().filter(|entry| entry.active) {
             match entry.occupant {
                 Occupant::Key(FrameKey::CallOperand(value))
                     if parameters
@@ -252,7 +299,12 @@ impl FrameMap {
     /// of a lambda body is laid out from the same base as the one before it.
     pub(super) fn rewind_to(&mut self, mark: Mark) {
         self.drop_to(mark);
-        self.size = mark.size;
+        self.size = self
+            .entries
+            .iter()
+            .filter(|entry| entry.active)
+            .map(|entry| entry.slot + entry.words)
+            .fold(mark.size, u16::max);
     }
 
     /// Claim every slot below `top` without entering it: a spliced inline body lays its own locals
@@ -272,6 +324,7 @@ impl FrameMap {
             occupant,
             slot,
             words,
+            active: true,
         });
         self.size += words;
         self.max = self.max.max(self.size);
@@ -283,6 +336,9 @@ impl FrameMap {
     /// the cursor to its slot.
     fn leave_at(&mut self, index: usize) {
         let entry = self.entries.remove(index);
+        if !entry.active {
+            return;
+        }
         match self.entries.get(index) {
             None => self.size = entry.slot,
             Some(above) => crate::trace_compiler!(
@@ -319,6 +375,24 @@ mod tests {
         let temp = frame.enter_temp(TempRole::OperandSpill, Ty::Double);
         assert_eq!(temp.slot(), 4);
         assert_eq!((frame.size(), frame.max()), (6, 6));
+    }
+
+    #[test]
+    fn a_deferred_entry_lends_its_slot_until_the_first_store() {
+        let mut frame = FrameMap::default();
+        let result = FrameKey::Value(0);
+        assert_eq!(frame.enter_deferred(result, Ty::Int), 0);
+        assert_eq!(frame.size(), 0);
+
+        let operand = frame.mark();
+        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 0);
+        frame.leave_block(operand);
+        assert_eq!(frame.activate_deferred(result), 0);
+        assert_eq!((frame.size(), frame.max()), (1, 1));
+
+        // The entry predates the operand scope, so restoring that scope cannot release it.
+        frame.leave_block(operand);
+        assert_eq!(frame.enter(FrameKey::Value(2), Ty::Int), 1);
     }
 
     #[test]

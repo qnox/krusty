@@ -5668,8 +5668,8 @@ struct Emitter<'a> {
     /// The suspensions of the function being emitted, by call expression, each with the value
     /// class box its resumption unboxes. Empty for every function whose machine the IR pass owns.
     machine_suspensions: HashMap<u32, Option<(TypeName, Ty)>>,
-    /// Where each inline-return frame emitted so far keeps its result, by the frame's label.
-    inline_return_frame_results: HashMap<String, (u16, Ty)>,
+    /// The deferred result value of each inline-return frame, by the frame's label.
+    inline_return_frame_results: HashMap<String, (u32, Ty)>,
     /// The suspension points kotlinc's coroutine transformer takes, when it takes this function.
     transformed_suspensions: transformed_suspensions::TransformedSuspensions,
     /// The declarations that read a suspend lambda's parameters from their fields, in the
@@ -6147,21 +6147,23 @@ impl<'a> Emitter<'a> {
             } => self.emit_local_variable(e, index, ty, init, named, code),
             IrExpr::InlineFrameMarker => self.emit_inline_frame_marker(e, code),
             IrExpr::SetValue { var, value } => {
-                let Some(&(slot, jt)) = self.slots.get(&var) else {
+                let Some(&(_, jt)) = self.slots.get(&var) else {
                     panic!(
                         "malformed IR: assignment target {var} has no allocated JVM slot while emitting {}; known slots: {:?}",
                         self.owner,
                         self.slots.keys().collect::<Vec<_>>()
                     );
                 };
+                let deferred = self.inline_return_frame_result_type(var).is_some();
                 match local_updates::iinc_delta(self.ir, e, var, value, jt) {
-                    Some(delta) => code.iinc(slot, delta),
+                    Some(delta) if !deferred => code.iinc(self.slots[&var].0, delta),
                     _ => {
                         self.emit_value(value, code);
                         // Coerced to the slot's type as the initializer is: a value of another
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back.
                         self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
+                        let slot = self.activate_inline_return_frame_result(var, jt);
                         store(jt, slot, code);
                     }
                 }
