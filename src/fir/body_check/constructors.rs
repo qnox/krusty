@@ -702,11 +702,16 @@ impl BodyFirChecker<'_> {
                     .contains(argument)
                 {
                     let target = self.resolved_type(span, parameter_ty)?;
-                    return Ok(FirCallArgument::Expression {
+                    return Ok(FirCallArgument::Vararg {
                         parameter,
-                        value,
-                        conversion: self
-                            .selected_value_conversion(*argument, value, target, cause)?,
+                        origin: cause,
+                        elements: vec![FirVarargElement {
+                            value,
+                            spread: true,
+                            conversion: self
+                                .selected_value_conversion(*argument, value, target, cause)?,
+                        }]
+                        .into_boxed_slice(),
                     });
                 }
                 let expected = if self.file.is_spread_arg(*argument) {

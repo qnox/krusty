@@ -448,10 +448,15 @@ impl BodyFirChecker<'_> {
                     .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
                 physical_parameter,
             )?;
-            return Ok(FirCallArgument::Expression {
+            return Ok(FirCallArgument::Vararg {
                 parameter: parameter_id,
-                value,
-                conversion: self.selected_value_conversion(argument, value, target, cause)?,
+                origin: cause,
+                elements: vec![FirVarargElement {
+                    value,
+                    spread: true,
+                    conversion: self.selected_value_conversion(argument, value, target, cause)?,
+                }]
+                .into_boxed_slice(),
             });
         }
         let expected = if self.file.is_spread_arg(argument) {
