@@ -759,9 +759,13 @@ impl BodyFirChecker<'_> {
                 )
             })
             .filter(|_| {
-                arguments
-                    .iter()
-                    .any(|argument| matches!(self.file.expr(*argument), Expr::Lambda { .. }))
+                arguments.iter().any(|argument| {
+                    matches!(self.file.expr(*argument), Expr::Lambda { .. })
+                        || matches!(
+                            self.info.expr_lowers.get(argument),
+                            Some(crate::resolve::ExprLowering::ConstructorRef { .. })
+                        )
+                })
             });
         if let Some(body_plan) = collection_transform {
             let span = self.file.expr_span(expression);

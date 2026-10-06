@@ -16,6 +16,7 @@ use super::*;
 
 mod lambda_node;
 mod lambda_route;
+use lambda_node::callable_reference_template;
 mod regenerated_objects;
 use crate::jvm::bytecode_passes::coroutines::markers::{
     is_after_inline_marker, is_before_inline_marker,
@@ -154,6 +155,7 @@ impl Emitter<'_> {
         } else {
             let has_lambda_arg = args.iter().any(|&argument| {
                 matches!(self.ir.expr(argument), IrExpr::Lambda { .. })
+                    || callable_reference_template(self.ir, argument).is_some()
                     || self.function_ref_class_and_captures(argument).is_some()
                     || self.property_ref_class_and_captures(argument).is_some()
             });
@@ -272,15 +274,9 @@ impl Emitter<'_> {
         {
             return InlineCallOutcome::NotApplicable;
         }
-        let has_lambda_arg = args.iter().any(|&argument| {
-            matches!(
-                self.ir.expr(argument),
-                IrExpr::Lambda {
-                    inline_body: Some(_),
-                    ..
-                }
-            )
-        });
+        let has_lambda_arg = args
+            .iter()
+            .any(|&argument| self.is_inline_lambda_shape(argument));
         if !has_lambda_arg {
             return InlineCallOutcome::declined_or_handled(
                 self.try_inline_classpath_body(&inline_call, code),
@@ -904,6 +900,18 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// A source lambda with an inline body, or an unbound constructor reference the inliner places
+    /// as that lambda.
+    fn is_inline_lambda_shape(&self, argument: u32) -> bool {
+        matches!(
+            self.ir.expr(argument),
+            IrExpr::Lambda {
+                inline_body: Some(_),
+                ..
+            }
+        ) || callable_reference_template(self.ir, argument).is_some()
+    }
+
     /// Whether argument `index` of `call_expression` is a literal lambda the inline body's invokes
     /// expand: one passed to an inline parameter ([`super::inline_parameters`]). A literal for a
     /// `noinline` or non-function parameter is an ordinary argument, the function object the body
@@ -915,13 +923,7 @@ impl Emitter<'_> {
         index: usize,
         argument: u32,
     ) -> Result<bool, &'static str> {
-        if !matches!(
-            self.ir.expr(argument),
-            IrExpr::Lambda {
-                inline_body: Some(_),
-                ..
-            }
-        ) {
+        if !self.is_inline_lambda_shape(argument) {
             return Ok(false);
         }
         index
