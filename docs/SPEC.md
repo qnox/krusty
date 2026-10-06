@@ -2506,8 +2506,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   A public Java INSTANCE field read is guarded like any other platform value and names the field
   (`value must not be null`), matching kotlinc. An index `javaList[0]` is the `get` call and is guarded
-  as `get(...)`. Not yet guarded, because the value is not modeled as `T!` today (a front-end gap, not
-  an emitter one): a Java STATIC field read (`System.out` types as `PrintStream`, not `PrintStream!`).
+  as `get(...)`. An ordinary Java static field read is `T!` and is guarded the same way. A Java enum
+  constant (`ACC_ENUM`) is not-null, so `== null` is always false and a non-null use emits no guard.
+  A static field of an enum type that is not itself an enum constant stays `T!` and is guarded.
+  Test: `tests/platform_call_assertions_e2e.rs::java_enum_constant_is_not_a_platform_value`.
   Also unimplemented:
   kotlinc's OTHER form, the message-less `Intrinsics.checkNotNull(Object)V`, which it emits wherever the
   narrowed value has no name to report — a plain read of a platform-typed local, a source-block branch,
@@ -5974,7 +5976,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `invoke(text)` of `(String) -> String` names it `p1`. Each override edge carries the overridden
   declaration's parameter identities beside the implementation's. A builtin member publishes its
   `.kotlin_builtins` parameter names like any other metadata declaration. A Java binary declaration
-  still publishes none, so its bridge has no parameter rows where kotlinc writes `p0`, `p1`.
+  publishes no source name. The bridge `LocalVariableTable` spells that unnamed parameter `pN`
+  from the identity's ordinal (`p0`, `p1`); the ordinal stays out of source identity and reflection
+  names.
   Tests: `tests/bridge_parameter_names_e2e.rs`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
@@ -6802,8 +6806,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of the member-modality rule). Interface bridges synthesize across FILES of one module: a
   cross-file module interface's erased signatures come from the symbol table (generic-iface
   direction only — body-presence isn't recorded there, so the fake-override direction stays
-  same-file). Tests: `mpp_expect_actual_e2e`; corpus `multiplatform/` 75 PASS / 0 FAIL
-  (box total 2744 → 2825).
+  same-file). Default-expression ownership is per parameter: a default written only on the
+  `expect` stays the expression provider for the surviving `actual` (`foo("O")` appends the
+  expect's `"K"`), while an `actual` default owns that parameter even when another parameter still
+  inherits its expression from the expect. Overrides preserve the resulting provider set rather
+  than collapsing it to either declaration. Thus `copyInto` uses `42`, `43`, and `size + 44`, and a
+  call through an override sees the actual interface default `"actual"`. Tests:
+  `mpp_expect_actual_e2e`; corpus `multiplatform/`, including
+  `multiplatform/k2/defaultArguments/bothInExpectAndActual.kt` and `bothInExpectAndActual2.kt`.
 
 - **A folded `dependsOn` file is a common source.** An optional expectation with no JVM actual
   (`kotlin.js.JsStatic`, from the stdlib common-metadata klib) resolves in a common source and is
@@ -9205,6 +9215,48 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **`@Serializable(with = S::class)` on a property's TYPE ARGUMENT selects that argument's
+  serializer.** `val items: List<@Serializable(with = S::class) Item>` serializes each element with
+  `S` whatever serializer `Item` has, including none: kotlinc builds
+  `ArrayListSerializer(S.INSTANCE)` for an `object` `S` and `new S()` for a class, each narrowed to
+  `KSerializer`, `.nullable` around a nullable element, at any depth (`Map<String, List<@… X>>`),
+  inside the same `$childSerializers` cache an unannotated collection uses. The parser kept the
+  annotation and discarded its argument list, so the element looked for `Item`'s own serializer and
+  the backend declined the file. There is one frontend-owned record of these applications: the
+  property's checked declared spelling (`Spelled`, carried to the IR as
+  `IrFile::prop_declared_spellings`), the same tree whose checked type-use annotations the
+  property's `@Metadata` encodes. The IR side table is keyed by classifier identity and stable
+  declaration order, not property spelling: an ordinary property and member-extension overloads
+  may share a source name without donating annotations to one another. The parser keeps an
+  argument-bearing type annotation's arguments
+  in `File::type_annotation_arguments`, the checker folds them when it publishes checked type-use
+  annotations, and the serialization plugin reads the checked `@Serializable(with = …)` through
+  `PluginContext::property_declared_type`, walking `Spelled::args` in step with the checked type's
+  arguments. Neither the checker nor common IR keeps a second, serialization-only copy. On the
+  declared type itself (`val v: @Serializable(with = S::class) Item`) the annotation is the
+  property's own serializer, without the property-annotation marker kotlinc reserves for a
+  property-level one. A serializer this compilation does not declare is read through `INSTANCE`
+  only when the provider confirms an `object`; this also fixes a property-level
+  `@Serializable(with = DependencyObject::class)`, which was constructed through the object's
+  private constructor. Below a typealias application the spelling already describes the EXPANDED
+  type: a use-site argument's annotations sit at the expansion position the alias substitutes it
+  into (`Swapped<@A Item, String>` with `typealias Swapped<V, K> = Map<K, V>` annotates the map's
+  value), and an annotation the alias's right-hand side writes on its root
+  (`typealias Coded = @Serializable(with = S::class) Item`) is the serializer of every `Coded`
+  occurrence, as kotlinc honours both. A serializer class named on a property or type occurrence is
+  built only through the primary constructor selected and validated while checked declarations and
+  dependency metadata are available. FIR records its stable module/dependency identity, declared
+  parameter types, and the annotated type-argument serializer passed to each parameter; common IR
+  and the JVM backend consume that record without guessing `()V` or recovering a constructor from
+  a name. This supports dependency serializer classes and generic serializers such as
+  `BoxSerializer<T>(KSerializer<T>)`; an unavailable or inaccessible constructor remains an
+  explicit unsupported element instead of becoming a guessed allocation. Known gap: kotlinc caches a CLASS
+  serializer named for a whole property (property-level or on the declared type itself) in
+  `$childSerializers`, where krusty constructs it at each use; the behaviour is identical.
+  Tests: `tests/type_argument_serializer_e2e.rs` (object, class, nullable, nested, declared-type
+  and typealias shapes, dependency objects/classes, and a generic dependency serializer under both
+  compilers; the cache factories and the generated `$serializer` against kotlinc's bytes, with and
+  without typealiases).
 - **A computed property default is an optional element's default too.** A defaulted property is
   written only when the encoder asks for defaults or the value differs from the default:
   `shouldEncodeElementDefault(desc, i) || self.x != <default>`. Only a CONSTANT default was compared,
