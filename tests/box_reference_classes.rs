@@ -30,7 +30,9 @@ pub const MAIN_MODULE: &str = "main";
 
 /// Bump when the on-disk cache layout or the comparison population changes — invalidates every
 /// cached entry. `v2` added per-module nesting and Java `.class` artifacts to `v1`'s flat tree.
-const REF_CACHE_SALT: &str = "ref-classes-v2-modular";
+/// `v3` strips kotlinc diagnostic-test markers from the reference source, so marker-bearing cases
+/// that `v2` cached as FAILED must recompile.
+const REF_CACHE_SALT: &str = "ref-classes-v3-strip-markers";
 
 /// A reference `.class` inventory grouped by module identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -424,16 +426,60 @@ fn write_group(dir: &Path, blocks: &[(String, String)]) -> Result<Vec<PathBuf>, 
             // `ArrayElementKt`) and javac requires it to match the public class, so a Java block's
             // name already carries `.java` while a Kotlin block carries only its leaf stem.
             let leaf = name.rsplit('/').next().unwrap_or(name);
-            let file = if name.ends_with(".java") {
-                block_dir.join(leaf)
+            let (file, contents) = if name.ends_with(".java") {
+                (block_dir.join(leaf), source.clone())
             } else {
-                block_dir.join(format!("{leaf}.kt"))
+                // kotlinc rejects the raw diagnostic-test markers krusty's lexer consumes as trivia,
+                // so strip them for the reference exactly as kotlinc's own test runner does.
+                (
+                    block_dir.join(format!("{leaf}.kt")),
+                    strip_diagnostic_markers(source),
+                )
             };
-            std::fs::write(&file, source)
+            std::fs::write(&file, &contents)
                 .map_err(|error| format!("cannot write reference source: {error}"))?;
             Ok(file)
         })
         .collect()
+}
+
+/// Strip kotlinc diagnostic-test markers — `<!DIAGNOSTIC_NAME!>` (open) and `<!>` (close) — the same
+/// way krusty's lexer consumes them as trivia (`src/lexer.rs`), so the reference compiler sees the
+/// program krusty actually compiled rather than failing on the raw markers (kotlinc's own box-test
+/// runner strips them identically before compiling).
+///
+/// An open marker is recognized only when an upper-snake-case name follows `<!` AND a closing `!>`
+/// appears on the same line, so a real `a < !b` is left intact. Markers never span a line, so
+/// removing them preserves line numbers — and thus `LineNumberTable` bytes — on both sides.
+fn strip_diagnostic_markers(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'<' && i + 2 < b.len() && b[i + 1] == b'!' && b[i + 2] == b'>' {
+            i += 3; // close marker `<!>`
+            continue;
+        }
+        if b[i] == b'<'
+            && i + 2 < b.len()
+            && b[i + 1] == b'!'
+            && (b[i + 2].is_ascii_uppercase() || b[i + 2] == b'_')
+        {
+            let mut j = i + 2;
+            while j + 1 < b.len() && b[j] != b'\n' && !(b[j] == b'!' && b[j + 1] == b'>') {
+                j += 1;
+            }
+            if j + 1 < b.len() && b[j] == b'!' && b[j + 1] == b'>' {
+                i = j + 2; // consume through `!>`
+                continue;
+            }
+        }
+        // A real `<` or any other byte (including UTF-8 continuation bytes, which are never `<`/`!`)
+        // is copied verbatim.
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).expect("stripping ASCII markers preserves UTF-8")
 }
 
 struct ScratchDir(PathBuf);
@@ -731,6 +777,27 @@ mod tests {
         assert!(
             error.contains("error") || error.contains("Broken") || error.contains("module"),
             "the failure must identify a cause: {error}"
+        );
+    }
+
+    #[test]
+    fn diagnostic_markers_are_stripped_but_real_less_than_is_kept() {
+        // Open marker with an upper-snake name and a same-line `!>`, plus a bare close marker.
+        assert_eq!(
+            strip_diagnostic_markers("1 + <!NON_TAIL_RECURSIVE_CALL!>f<!>(x)\n"),
+            "1 + f(x)\n"
+        );
+        // A real `a < !b` (lowercase operand, no same-line `!>`) must survive untouched.
+        assert_eq!(strip_diagnostic_markers("a < !b\n"), "a < !b\n");
+        // Line counts are preserved so LineNumberTable bytes match on both sides.
+        let marked = "val x =\n    <!UNUSED!>y<!>\n";
+        let stripped = strip_diagnostic_markers(marked);
+        assert_eq!(stripped, "val x =\n    y\n");
+        assert_eq!(stripped.matches('\n').count(), marked.matches('\n').count());
+        // Non-ASCII content is preserved verbatim.
+        assert_eq!(
+            strip_diagnostic_markers("val s = \"αβ\" <!FOO!>+ z<!>\n"),
+            "val s = \"αβ\" + z\n"
         );
     }
 

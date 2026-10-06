@@ -10,6 +10,8 @@ static DHAT_ALLOC: krusty::dhat::Alloc = krusty::dhat::Alloc;
 
 mod common;
 
+#[path = "box_byte_score.rs"]
+mod box_byte_score;
 #[path = "box_ratchet.rs"]
 mod box_ratchet;
 #[path = "box_reference_classes.rs"]

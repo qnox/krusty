@@ -34,7 +34,9 @@ use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::classreader::parse_class;
 
+use super::box_byte_score;
 use super::box_ratchet::{self, Outcome};
+use super::box_reference_classes;
 use super::common;
 
 // BoxRunner.java source embedded at compile time; compiled once at test start.
@@ -635,6 +637,38 @@ fn write_classes_to_dir(classes: &[(String, Vec<u8>)], dir: &Path) -> Option<()>
     Some(())
 }
 
+/// krusty's emitted classes for one box case: the flat list the JVM runner loads, plus the module
+/// boundaries byte scoring pairs on. Every class is kept once in `flat`; `module_ranges` records
+/// each module's contiguous half-open range into it, in emission order. A single-module topology
+/// holds one range covering every class under [`box_reference_classes::MAIN_MODULE`]; a multi-module
+/// build records one range per module so a class name shared by two modules stays two identities.
+struct CompiledClasses {
+    flat: Vec<(String, Vec<u8>)>,
+    module_ranges: Vec<(String, std::ops::Range<usize>)>,
+}
+
+impl CompiledClasses {
+    /// Wrap a single module's flat class list (ordinary, `// FILE:`, or mixed-Java topology).
+    fn single_module(flat: Vec<(String, Vec<u8>)>) -> Self {
+        let range = 0..flat.len();
+        CompiledClasses {
+            module_ranges: vec![(box_reference_classes::MAIN_MODULE.to_string(), range)],
+            flat,
+        }
+    }
+
+    /// The module-qualified inventory for byte scoring, keyed by `(module, internal name)`.
+    fn qualified(&self) -> box_byte_score::QualifiedClasses {
+        let mut out = box_byte_score::QualifiedClasses::new();
+        for (module, range) in &self.module_ranges {
+            for (name, bytes) in &self.flat[range.clone()] {
+                out.insert((module.clone(), name.clone()), bytes.clone());
+            }
+        }
+        out
+    }
+}
+
 /// Compile a `// MODULE:` test the way a Gradle multi-module build (or kotlinc's separate-compilation
 /// test mode) does — but with EVERY module compiled by KRUSTY, so this also exercises krusty's own
 /// `@Metadata` WRITE→READ round-trip across a real classpath boundary. Each module is compiled in
@@ -646,7 +680,7 @@ fn compile_module_test(
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
     progress: &dyn Fn(&str),
-) -> Option<Vec<(String, Vec<u8>)>> {
+) -> Option<CompiledClasses> {
     static UID: AtomicU64 = AtomicU64::new(0);
     let mut modules = split_modules(src)?;
     // kotlinc's `// WITH_COROUTINES` helpers live in an implicit `support` module every module sees.
@@ -659,6 +693,7 @@ fn compile_module_test(
     let _ = fs::remove_dir_all(&tmp);
     let mut dirmap: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     let mut all: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut module_ranges: Vec<(String, std::ops::Range<usize>)> = Vec::new();
     let mut ok = true;
     // Build units: a `dependsOn` target compiles INTO its dependents (kotlinc's JVM MPP model — the
     // platform module and its dependsOn chain are ONE compilation), so each unit's sources already
@@ -770,12 +805,19 @@ fn compile_module_test(
             break;
         }
         dirmap.insert(m.name.clone(), moddir);
+        let start = all.len();
         all.extend(classes);
+        // Byte scoring pairs by module identity, so each module's classes stay a distinct range
+        // even when two modules emit the same internal class name.
+        module_ranges.push((m.name.clone(), start..all.len()));
     }
     // The dependency classes were read off disk during compilation and are now all held in `all` (for the
     // in-memory BoxRunner), so the scratch dir is no longer needed.
     let _ = fs::remove_dir_all(&tmp);
-    (ok && !all.is_empty()).then_some(all)
+    (ok && !all.is_empty()).then_some(CompiledClasses {
+        flat: all,
+        module_ranges,
+    })
 }
 
 /// Find the class that declares `static box()Ljava/lang/String;`.
@@ -970,13 +1012,16 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
 /// The badge's machine report, `<pct> <passed> <applicable>`. The denominator is the cases kotlinc's
 /// own JVM box runner expects to pass (`backend_applicable`: `TARGET_BACKEND`,
 /// `DONT_TARGET_EXACT_BACKEND` and the `IGNORE_BACKEND` family), never the whole corpus.
-fn conformance_report(applicable: usize, passed: usize) -> String {
-    let pct = if applicable == 0 {
+/// The machine report line: a one-decimal byte-equality percentage followed by the integer matched
+/// and total `.class` BYTE counts. The percentage is derived here, at the display boundary, from the
+/// exact integer sums; `total == 0` yields `0.0` with no divide-by-zero.
+fn conformance_report(matched: u64, total: u64) -> String {
+    let pct = if total == 0 {
         0.0
     } else {
-        100.0 * passed as f64 / applicable as f64
+        100.0 * matched as f64 / total as f64
     };
-    format!("{pct:.1} {passed} {applicable}\n")
+    format!("{pct:.1} {matched} {total}\n")
 }
 
 fn conformance_shard() -> Option<(usize, usize)> {
@@ -1015,7 +1060,8 @@ fn retain_conformance_shard<T>(items: Vec<T>, index: usize, count: usize) -> Vec
 
 #[test]
 fn conformance_report_has_stable_machine_format() {
-    assert_eq!(conformance_report(7352, 3064), "41.7 3064 7352\n");
+    // matched=3064 bytes of total=7352 bytes -> 41.7%.
+    assert_eq!(conformance_report(3064, 7352), "41.7 3064 7352\n");
     assert_eq!(conformance_report(0, 0), "0.0 0 0\n");
 }
 
@@ -1248,6 +1294,7 @@ fun box(): String = Registry.value()\n";
     let classes = compile_module_test(&source, &classpath, Some(jdk.as_path()), &|_| {})
         .expect("the folded common source compiles through the module harness");
     let classes: Vec<_> = classes
+        .flat
         .into_iter()
         .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
         .collect();
@@ -1473,6 +1520,15 @@ fn kotlin_codegen_box_conformance() {
 
     let no_run = env("KRUSTY_NO_RUN").is_some();
     let byte_diff_on = env("KRUSTY_BYTE_DIFF").is_some();
+    // Byte-equality scoring reference-compiles every applicable case, so it is active only when a
+    // score is actually wanted: a metric run (`KRUSTY_CONFORMANCE_REPORT`, set per shard by
+    // `conformance-run.sh`), an opt-in byte diff, or a focused `KRUSTY_BOX_ONLY` inspection. A plain
+    // full-suite box run (no report, no filter) stays a correctness-only gate and never pays the
+    // reference-compile cost. `KRUSTY_NO_RUN` compiles without running `box()`, so it never scores.
+    let score_on = !no_run
+        && (env("KRUSTY_CONFORMANCE_REPORT").is_some()
+            || byte_diff_on
+            || env("KRUSTY_BOX_ONLY").is_some());
     let class_dump = env("KRUSTY_CLASS_DUMP").map(PathBuf::from);
     let byte_diffs: Mutex<Vec<(PathBuf, ByteDiff)>> = Mutex::new(Vec::new());
 
@@ -1483,7 +1539,7 @@ fn kotlin_codegen_box_conformance() {
     let _dhat = krusty::dhat::Profiler::new_heap();
 
     // Parallel phase: compile each test in-process, run in the per-thread JVM.
-    let results: Vec<(PathBuf, TestResult)> = pool.install(|| {
+    let results: Vec<(PathBuf, TestResult, box_byte_score::CaseScore)> = pool.install(|| {
         files
             .par_iter()
             .map(|file| {
@@ -1507,7 +1563,11 @@ fn kotlin_codegen_box_conformance() {
                         backend_applicable(&src, krusty::conformance::BACKENDS)
                     };
                     if !applicable {
-                        return (file.clone(), TestResult::NotApplicable);
+                        return (
+                            file.clone(),
+                            TestResult::NotApplicable,
+                            box_byte_score::CaseScore::NotScored,
+                        );
                     }
                     // In-process compilation. A `// WITH_STDLIB` test gets the kotlin-stdlib jar on krusty's
                     // classpath (so stdlib aliases/types resolve); others compile with no stdlib.
@@ -1521,98 +1581,141 @@ fn kotlin_codegen_box_conformance() {
                     let tj0 = std::time::Instant::now();
                     let compile_cp = common::classpath_jars_for(&src);
                     t_cpjars.fetch_add(tj0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    let t0 = std::time::Instant::now();
-                    mark_box_case_phase(&active, tid, file, "compile");
-                    // A `// FILE:` multi-file test, OR a `// WITH_COROUTINES` test (which needs the
-                    // generated `helpers` source compiled alongside it), goes through the multi-block path.
                     let jdk = jdk_roots.select(&src);
                     let jdk_modules = jdk.classpath_root();
-                    let compiled = if src.contains("// MODULE:") {
-                        compile_module_test(&src, &compile_cp, jdk_modules, &|phase| {
-                            mark_box_case_phase(&active, tid, file, phase)
-                        })
-                    } else if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
-                        compile_multifile(&src, &stem, &compile_cp, jdk_modules)
+
+                    // Box outcome and krusty's module-qualified classes (`None` when krusty emitted
+                    // nothing). The reference compile and scoring run after, so a failed box still
+                    // scores against the reference denominator.
+                    let (test_result, compiled) = (|| -> (TestResult, Option<CompiledClasses>) {
+                        let t0 = std::time::Instant::now();
+                        mark_box_case_phase(&active, tid, file, "compile");
+                        // A `// FILE:` multi-file test, OR a `// WITH_COROUTINES` test (which needs the
+                        // generated `helpers` source compiled alongside it), goes through the multi-block path.
+                        let compiled = if src.contains("// MODULE:") {
+                            compile_module_test(&src, &compile_cp, jdk_modules, &|phase| {
+                                mark_box_case_phase(&active, tid, file, phase)
+                            })
+                        } else if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
+                            compile_multifile(&src, &stem, &compile_cp, jdk_modules)
+                                .map(CompiledClasses::single_module)
+                        } else {
+                            compile_source(&src, &stem, &compile_cp, jdk_modules, &|phase| {
+                                mark_box_case_phase(&active, tid, file, phase)
+                            })
+                            .map(CompiledClasses::single_module)
+                        };
+                        let compiled = match compiled {
+                            Some(c) => c,
+                            None => {
+                                return (
+                                    TestResult::Fail(
+                                        "compiler rejected the corpus case".to_string(),
+                                    ),
+                                    None,
+                                )
+                            }
+                        };
+                        t_compile.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        mark_box_case_phase(&active, tid, file, "post-compile");
+                        if let Some(dump) = &class_dump {
+                            if let Err(error) =
+                                dump_compiled_classes(dump, &stem, &src, &compiled.flat)
+                            {
+                                return (
+                                    TestResult::Fail(format!("failed to dump classes: {error}")),
+                                    None,
+                                );
+                            }
+                        }
+                        if byte_diff_on {
+                            let outcome =
+                                byte_diff_file(&src, &stem, &compile_cp, jdk, &compiled.flat);
+                            byte_diffs.lock().unwrap().push((file.clone(), outcome));
+                        }
+                        let box_class = match find_box_class(&compiled.flat) {
+                            Some(c) => c,
+                            None => {
+                                return (
+                                    TestResult::Fail(
+                                        "emitted classes contain no `box()` entry point"
+                                            .to_string(),
+                                    ),
+                                    Some(compiled),
+                                )
+                            }
+                        };
+
+                        // KRUSTY_NO_RUN: compile + lower only (no JVM execution) — for profiling the
+                        // front-end/codegen cost in isolation. A lowered file counts as Pass.
+                        if no_run {
+                            return (TestResult::Pass, Some(compiled));
+                        }
+
+                        // Execute in the per-thread persistent JVM. Reflection tests use the runner
+                        // that can see kotlin-reflect; every other test uses the runner that cannot.
+                        let wants_reflect = krusty::conformance::extra_libs(&src).reflect;
+                        let classpath = if wants_reflect {
+                            &reflect_runtime_classpath
+                        } else {
+                            &runtime_classpath
+                        };
+                        let mut guard = runners[tid].lock().unwrap();
+                        let slot = if wants_reflect {
+                            &mut guard.reflect
+                        } else {
+                            &mut guard.plain
+                        };
+                        if slot.is_none() {
+                            *slot = Some(BoxRunner::new(&java, &runner_cp_str, classpath));
+                        }
+                        let t1 = std::time::Instant::now();
+                        mark_box_case_phase(&active, tid, file, "jvm");
+                        let result = match slot.as_mut().unwrap().run(&compiled.flat, &box_class) {
+                            Some(r) => r,
+                            None => {
+                                // BoxRunner died (JVM crash/OOM); restart it for the next test.
+                                *slot = None;
+                                "ERROR:BoxRunnerCrash".to_string()
+                            }
+                        };
+                        t_jvm.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+                        if result == "OK" {
+                            (TestResult::Pass, Some(compiled))
+                        } else {
+                            (TestResult::Fail(result), Some(compiled))
+                        }
+                    })();
+
+                    // Byte-equality scoring: reference-compile this exact topology and score the
+                    // emitted bytes. A passing box scores its common prefixes; a failed box scores
+                    // zero against the reference denominator; a reference failure fails the run.
+                    let case_score = if score_on {
+                        mark_box_case_phase(&active, tid, file, "reference");
+                        let box_passed = matches!(test_result, TestResult::Pass);
+                        let krusty = compiled
+                            .as_ref()
+                            .map(CompiledClasses::qualified)
+                            .unwrap_or_default();
+                        let reference = box_reference_classes::reference_compile(
+                            &src,
+                            &stem,
+                            &compile_cp,
+                            jdk,
+                            COROUTINE_HELPERS,
+                        )
+                        .map(|reference| box_byte_score::qualified_from_reference(&reference));
+                        box_byte_score::score_case(
+                            reference.as_ref().map_err(String::as_str),
+                            box_passed,
+                            &krusty,
+                        )
                     } else {
-                        compile_source(&src, &stem, &compile_cp, jdk_modules, &|phase| {
-                            mark_box_case_phase(&active, tid, file, phase)
-                        })
-                    };
-                    let classes = match compiled {
-                        Some(c) => c,
-                        None => {
-                            return (
-                                file.clone(),
-                                TestResult::Fail("compiler rejected the corpus case".to_string()),
-                            )
-                        }
-                    };
-                    t_compile.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    mark_box_case_phase(&active, tid, file, "post-compile");
-                    if let Some(dump) = &class_dump {
-                        if let Err(error) = dump_compiled_classes(dump, &stem, &src, &classes) {
-                            return (
-                                file.clone(),
-                                TestResult::Fail(format!("failed to dump classes: {error}")),
-                            );
-                        }
-                    }
-                    if byte_diff_on {
-                        let outcome = byte_diff_file(&src, &stem, &compile_cp, jdk, &classes);
-                        byte_diffs.lock().unwrap().push((file.clone(), outcome));
-                    }
-                    let box_class = match find_box_class(&classes) {
-                        Some(c) => c,
-                        None => {
-                            return (
-                                file.clone(),
-                                TestResult::Fail(
-                                    "emitted classes contain no `box()` entry point".to_string(),
-                                ),
-                            )
-                        }
+                        box_byte_score::CaseScore::NotScored
                     };
 
-                    // KRUSTY_NO_RUN: compile + lower only (no JVM execution) — for profiling the
-                    // front-end/codegen cost in isolation. A lowered file counts as Pass.
-                    if no_run {
-                        return (file.clone(), TestResult::Pass);
-                    }
-
-                    // Execute in the per-thread persistent JVM. Reflection tests use the runner
-                    // that can see kotlin-reflect; every other test uses the runner that cannot.
-                    let wants_reflect = krusty::conformance::extra_libs(&src).reflect;
-                    let classpath = if wants_reflect {
-                        &reflect_runtime_classpath
-                    } else {
-                        &runtime_classpath
-                    };
-                    let mut guard = runners[tid].lock().unwrap();
-                    let slot = if wants_reflect {
-                        &mut guard.reflect
-                    } else {
-                        &mut guard.plain
-                    };
-                    if slot.is_none() {
-                        *slot = Some(BoxRunner::new(&java, &runner_cp_str, classpath));
-                    }
-                    let t1 = std::time::Instant::now();
-                    mark_box_case_phase(&active, tid, file, "jvm");
-                    let result = match slot.as_mut().unwrap().run(&classes, &box_class) {
-                        Some(r) => r,
-                        None => {
-                            // BoxRunner died (JVM crash/OOM); restart it for the next test.
-                            *slot = None;
-                            "ERROR:BoxRunnerCrash".to_string()
-                        }
-                    };
-                    t_jvm.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-                    if result == "OK" {
-                        (file.clone(), TestResult::Pass)
-                    } else {
-                        (file.clone(), TestResult::Fail(result))
-                    }
+                    (file.clone(), test_result, case_score)
                 }))
                 .unwrap_or_else(|panic| {
                     let message = panic
@@ -1623,6 +1726,7 @@ fn kotlin_codegen_box_conformance() {
                     (
                         file.clone(),
                         TestResult::Fail(format!("compiler panic: {message}")),
+                        box_byte_score::CaseScore::NotScored,
                     )
                 });
                 t_closure.fetch_add(tc0.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -1686,10 +1790,17 @@ fn kotlin_codegen_box_conformance() {
     let mut passed = 0usize;
     let mut not_applicable = 0usize;
     let mut failures: Vec<String> = Vec::new();
+    // Integer byte-score accumulators (kept exact; the display percentage is derived only below).
+    let mut byte_score = box_byte_score::ByteScore::default();
+    let mut scored_cases = 0usize;
+    let mut reference_failures: Vec<String> = Vec::new();
+    // Applicable cases a scoring run left without a score (e.g. a compiler panic unwound before the
+    // reference compile). Enforces "no silently unscored applicable case".
+    let mut unscored_applicable: Vec<String> = Vec::new();
 
     // KRUSTY_BOX_LIST=<path>: write one `PASS|FAIL <file>` line per corpus file, sorted.
     let mut listing: Vec<String> = Vec::new();
-    for (file, r) in &results {
+    for (file, r, score) in &results {
         match r {
             TestResult::NotApplicable => not_applicable += 1,
             TestResult::Pass => {
@@ -1699,6 +1810,20 @@ fn kotlin_codegen_box_conformance() {
             TestResult::Fail(why) => {
                 compiled += 1;
                 failures.push(format!("{}: {why}", file.display()));
+            }
+        }
+        match score {
+            box_byte_score::CaseScore::NotScored => {
+                if score_on && !matches!(r, TestResult::NotApplicable) {
+                    unscored_applicable.push(file.display().to_string());
+                }
+            }
+            box_byte_score::CaseScore::Scored(case) => {
+                byte_score.add(*case);
+                scored_cases += 1;
+            }
+            box_byte_score::CaseScore::RefFail(why) => {
+                reference_failures.push(format!("{}: {why}", file.display()));
             }
         }
         if env("KRUSTY_BOX_LIST").is_some() {
@@ -1781,8 +1906,44 @@ fn kotlin_codegen_box_conformance() {
     for f in failures.iter().take(fail_cap) {
         eprintln!("  FAIL {f}");
     }
+    if score_on {
+        // A reference compile/infrastructure failure fails the run with the identifiable case(s) and
+        // cause — never counted as a normal zero-credit box failure, never silently dropped.
+        if !reference_failures.is_empty() {
+            for f in reference_failures.iter().take(fail_cap) {
+                eprintln!("  REF-FAIL {f}");
+            }
+            panic!(
+                "reference compilation failed for {} applicable case(s); first: {}",
+                reference_failures.len(),
+                reference_failures[0]
+            );
+        }
+        // Every applicable case must be scored once reference failures are ruled out: no applicable
+        // case is silently left unscored.
+        assert!(
+            unscored_applicable.is_empty(),
+            "{} applicable case(s) were left unscored (e.g. a compiler panic): {}",
+            unscored_applicable.len(),
+            unscored_applicable
+                .iter()
+                .take(fail_cap)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let pct = if byte_score.total == 0 {
+            0.0
+        } else {
+            100.0 * byte_score.matched as f64 / byte_score.total as f64
+        };
+        eprintln!(
+            "byte-score: matched {} | total {} | {pct:.1}%  ({scored_cases} applicable cases scored)",
+            byte_score.matched, byte_score.total
+        );
+    }
     if env("KRUSTY_BOX_LIST").is_some() {
-        for (file, r) in &results {
+        for (file, r, _) in &results {
             let tag = match r {
                 TestResult::NotApplicable => "NOT-APPLICABLE",
                 TestResult::Pass => "PASS",
@@ -1792,33 +1953,48 @@ fn kotlin_codegen_box_conformance() {
         }
     }
     if let Some(path) = env("KRUSTY_CONFORMANCE_REPORT") {
-        let applicable = files.len() - not_applicable;
-        fs::write(&path, conformance_report(applicable, passed))
-            .unwrap_or_else(|err| panic!("failed to write conformance report: {err}"));
+        // The machine report carries the integer matched/total BYTE counts (and their percentage),
+        // not the box pass/applicable counts. A scoring-off run (e.g. KRUSTY_NO_RUN) reports 0/0.
+        fs::write(
+            &path,
+            conformance_report(byte_score.matched, byte_score.total),
+        )
+        .unwrap_or_else(|err| panic!("failed to write conformance report: {err}"));
     }
     if no_run {
         eprintln!("box ratchet: skipped (KRUSTY_NO_RUN compiles without running box())");
     } else {
         check_expected_failures(&box_dir, &results, &corpus, full_run);
     }
-    assert!(
-        passed > 0,
-        "no box() cases ran — check Kotlin box corpus discovery / JDK"
-    );
+    // A full run with zero passes means box() never ran (broken corpus discovery or JVM runner).
+    // A deliberate `KRUSTY_BOX_ONLY` selection may legitimately pick only known-failing cases (the
+    // documented way to inspect a failed box's byte score), so there it is enough that an applicable
+    // case was discovered and attempted.
+    if env("KRUSTY_BOX_ONLY").is_some() {
+        assert!(
+            files.len() - not_applicable > 0,
+            "KRUSTY_BOX_ONLY matched no applicable box case — check the selector / JDK"
+        );
+    } else {
+        assert!(
+            passed > 0,
+            "no box() cases ran — check Kotlin box corpus discovery / JDK"
+        );
+    }
 }
 
 /// Hold the run to both exact outcome manifests (see `box_ratchet`), or rewrite them under
 /// `KRUSTY_BLESS_BOX_FAILURES=1`.
 fn check_expected_failures(
     box_dir: &Path,
-    results: &[(PathBuf, TestResult)],
+    results: &[(PathBuf, TestResult, box_byte_score::CaseScore)],
     corpus: &BTreeSet<String>,
     full_run: bool,
 ) {
     let version = krusty::kotlin_version::target();
     let outcomes: BTreeMap<String, Outcome> = results
         .iter()
-        .map(|(file, result)| {
+        .map(|(file, result, _)| {
             let outcome = match result {
                 TestResult::Pass => Outcome::Pass,
                 TestResult::Fail(_) => Outcome::Fail,
