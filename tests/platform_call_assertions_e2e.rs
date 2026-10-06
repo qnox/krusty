@@ -434,6 +434,76 @@ fn property_and_index_guards_name_the_producing_callable() {
     );
 }
 
+/// A Java enum constant is not-null. Returning or storing the repository-owned `E.A` emits no
+/// `checkNotNullExpressionValue`. A repository-owned static field of the same enum type that is not
+/// an enum constant still does.
+#[test]
+fn java_enum_constant_is_not_a_platform_value() {
+    let java = [
+        ("E.java".to_string(), "public enum E { A, B }\n".to_string()),
+        (
+            "Holder.java".to_string(),
+            "public class Holder {\n\
+                 public static final E NOT_ENTRY = E.A;\n\
+                 public static E mutable = E.A;\n\
+             }\n"
+            .to_string(),
+        ),
+    ];
+    let (library, _) =
+        common::javac_compile(&java, &[]).expect("javac must build the enum-constant fixture");
+    let src = "fun explicit(): E = E.A\n\
+         val stored: E = E.A\n\
+         fun viaLocal(): E {\n\
+             val x = E.A\n\
+             return x\n\
+         }\n\
+         fun entryIsNull(): Boolean = E.A == null\n\
+         fun ordinaryFinalIsNull(): Boolean = Holder.NOT_ENTRY == null\n\
+         fun ordinaryMutableIsNull(): Boolean = Holder.mutable == null\n\
+         fun alias(): E = Holder.NOT_ENTRY\n\
+         fun mutable(): E = Holder.mutable\n";
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = [library.clone(), stdlib.clone(), jdk.clone()];
+    let krusty =
+        common::expect_compile_in_process(src, "EnumNull", &classpath, Some(jdk.as_path()));
+    let work = common::scratch_dir().expect("allocate kotlinc enum-null fixture");
+    let file = work.join("EnumNull.kt");
+    let output = work.join("out");
+    std::fs::create_dir_all(&output).expect("create kotlinc output");
+    std::fs::write(&file, src).expect("write enum-null fixture");
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let cp = format!("{}{sep}{}", library.display(), stdlib.display());
+    let args = vec![
+        "-d".to_string(),
+        output.to_string_lossy().into_owned(),
+        "-classpath".to_string(),
+        cp,
+        file.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = common::kotlinc_compile(&args).expect("reference compiler unavailable");
+    assert_eq!(code, 0, "kotlinc rejected the fixture: {stderr}");
+    let mut reference = Vec::new();
+    collect_classes(&output, &output, &mut reference);
+    let _ = std::fs::remove_dir_all(&work);
+    let mut krusty_files = krusty;
+    krusty_files.sort_by(|left, right| left.0.cmp(&right.0));
+    reference.sort_by(|left, right| left.0.cmp(&right.0));
+    let krusty_names: Vec<&str> = krusty_files.iter().map(|(name, _)| name.as_str()).collect();
+    let reference_names: Vec<&str> = reference.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(krusty_names, reference_names, "class set");
+    for ((name, krusty_bytes), (_, reference_bytes)) in krusty_files.iter().zip(&reference) {
+        assert_eq!(
+            krusty_bytes,
+            reference_bytes,
+            "{name} must match kotlinc (krusty {} B, kotlinc {} B)",
+            krusty_bytes.len(),
+            reference_bytes.len()
+        );
+    }
+}
+
 #[test]
 fn every_guarded_message_is_derived_from_the_checked_call() {
     let sites = assertion_sites(&positions().krusty, "krusty");
