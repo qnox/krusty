@@ -781,6 +781,80 @@ fn realize_own_invoke(
     reference.invoke = Some(adapter);
 }
 
+/// Whether `expression` is an unbound constructor reference passed to an inline function
+/// parameter of a dependency call. The bytecode inliner splices that reference; realizing a
+/// carrier would emit the class kotlinc omits.
+fn inlined_constructor_argument(
+    ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
+    expression: u32,
+) -> bool {
+    let IrExpr::CallableReference(reference) = ir.expr(expression) else {
+        return false;
+    };
+    if reference.bound_receiver.is_some()
+        || !reference.captures.is_empty()
+        || reference.adaptation.is_some()
+        || reference.declaration_suspend
+        || !matches!(
+            reference.target,
+            crate::ir::IrCallableReferenceTarget::Constructor { .. }
+        )
+    {
+        return false;
+    }
+    let Some(function) = ir.functions.get(reference.adapter as usize) else {
+        return false;
+    };
+    let Some(body) = function.body else {
+        return false;
+    };
+    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+        return false;
+    };
+    let [statement] = stmts.as_slice() else {
+        return false;
+    };
+    let IrExpr::Return(Some(_)) = ir.expr(*statement) else {
+        return false;
+    };
+    let mut used = false;
+    for (call, expr) in ir.exprs.iter().enumerate() {
+        let IrExpr::Call { callee, args, .. } = expr else {
+            continue;
+        };
+        if !args.contains(&expression) {
+            continue;
+        }
+        let call = u32::try_from(call).expect("an expression index fits ExprId");
+        if !ir.inline_call_sites.contains(&call) {
+            return false;
+        }
+        let crate::ir::Callee::External { target, params, .. } = callee else {
+            return false;
+        };
+        let Some(position) = args.iter().position(|argument| *argument == expression) else {
+            return false;
+        };
+        let Some(callable) = callables.callable(*target) else {
+            return false;
+        };
+        let inline_parameter = callable.inline.can_inline()
+            && matches!(params.get(position), Some(Ty::Fun(_)))
+            && callable
+                .inline_modifiers
+                .get(position)
+                .is_some_and(|modifier| {
+                    *modifier != crate::types::InlineParameterModifier::Noinline
+                });
+        if !inline_parameter {
+            return false;
+        }
+        used = true;
+    }
+    used
+}
+
 pub(super) fn realize(
     ir: &mut IrFile,
     callables: &crate::backend::CheckedBackendCallables,
@@ -810,8 +884,21 @@ pub(super) fn realize(
         let IrExpr::CallableReference(reference) = ir.exprs[raw].clone() else {
             continue;
         };
-        let adapter_owner = adapter_owners.get(&reference.adapter).copied();
+        // An unbound constructor reference passed to an inline function parameter is the lambda
+        // the bytecode inliner splices. It has no carrier: kotlinc writes neither the reference
+        // class nor the adapter, and names the inline marker after the class the reference would
+        // have been.
         let sole = adapter_uses.get(&reference.adapter) == Some(&1);
+        if sole && inlined_constructor_argument(ir, callables, raw as u32) {
+            if let Some(name) =
+                crate::jvm::local_class_names::callable_reference_name(ir, raw as u32)
+            {
+                ir.lambda_class_names.insert(reference.adapter, name);
+            }
+            ir.inline_only_fns.insert(reference.adapter);
+            continue;
+        }
+        let adapter_owner = adapter_owners.get(&reference.adapter).copied();
         let own_invoke = sole && own_invoke_realizable(ir, &reference);
         realize_adapter_reference(
             ir,

@@ -1858,13 +1858,13 @@ impl BodyLowering<'_> {
                                 ..
                             } => {
                                 preserve_inline_lambdas
-                                    && matches!(
+                                    && (matches!(
                                         self.ir.expr(value),
                                         IrExpr::Lambda {
                                             inline_body: Some(_),
                                             ..
                                         }
-                                    )
+                                    ) || unbound_constructor_reference(self.ir, value))
                             }
                             CheckedArgumentPolicy::SameFileInline { inline, .. } => {
                                 inline
@@ -2011,6 +2011,22 @@ impl BodyLowering<'_> {
     fn direct_call_operand(&mut self, value: ExprId, _target: Ty) -> ExprId {
         value
     }
+}
+
+/// An unbound constructor reference the inline argument position keeps in place, the same way it
+/// keeps a lambda literal: `map(::Holder)` splices the construction instead of storing a carrier.
+fn unbound_constructor_reference(ir: &crate::ir::IrFile, expression: ExprId) -> bool {
+    let IrExpr::CallableReference(reference) = ir.expr(expression) else {
+        return false;
+    };
+    reference.bound_receiver.is_none()
+        && reference.captures.is_empty()
+        && reference.adaptation.is_none()
+        && !reference.declaration_suspend
+        && matches!(
+            reference.target,
+            crate::ir::IrCallableReferenceTarget::Constructor { .. }
+        )
 }
 
 /// The inline template of a lambda, or of an unbound constructor reference whose adapter is

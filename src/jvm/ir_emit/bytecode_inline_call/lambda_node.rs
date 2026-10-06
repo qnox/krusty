@@ -108,11 +108,56 @@ struct LiteralLambda {
     result_semantic: Ty,
 }
 
+/// An unbound constructor reference the bytecode inliner can place as a lambda: its adapter
+/// returns the construction and captures nothing. `None` for a reference that stays a carrier.
+pub(super) fn constructor_reference_template(ir: &IrFile, argument: u32) -> Option<(u32, u32, Ty)> {
+    let IrExpr::CallableReference(reference) = ir.expr(argument) else {
+        return None;
+    };
+    if reference.bound_receiver.is_some()
+        || !reference.captures.is_empty()
+        || reference.adaptation.is_some()
+        || reference.declaration_suspend
+        || !matches!(
+            reference.target,
+            crate::ir::IrCallableReferenceTarget::Constructor { .. }
+        )
+    {
+        return None;
+    }
+    let Ty::Fun(signature) = reference.function_type.non_null() else {
+        return None;
+    };
+    if signature.suspend {
+        return None;
+    }
+    let function = ir.functions.get(reference.adapter as usize)?;
+    if function.params.len() != signature.params.len() {
+        return None;
+    }
+    let body = function.body?;
+    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+        return None;
+    };
+    let [statement] = stmts.as_slice() else {
+        return None;
+    };
+    let IrExpr::Return(Some(inline_body)) = ir.expr(*statement) else {
+        return None;
+    };
+    Some((reference.adapter, *inline_body, reference.function_type))
+}
+
 impl Emitter<'_> {
     /// The literal lambda `argument` and its source arity, every type read from the checked IR. An
     /// error names the checked fact the literal lacks; the implementation method never stands in
     /// for it.
     fn literal_lambda(&self, argument: u32) -> Result<(LiteralLambda, usize), &'static str> {
+        if let Some((impl_fn, inline_body, function_type)) =
+            constructor_reference_template(self.ir, argument)
+        {
+            return self.constructor_reference_literal(impl_fn, inline_body, function_type);
+        }
         let IrExpr::Lambda {
             impl_fn,
             arity,
@@ -156,6 +201,46 @@ impl Emitter<'_> {
                 result_semantic,
             },
             arity,
+        ))
+    }
+
+    /// The constructor reference `::Holder` as the lambda `map` inlines: the adapter's returned
+    /// construction, with the reference's function type as its parameters and result.
+    fn constructor_reference_literal(
+        &self,
+        impl_fn: u32,
+        inline_body: u32,
+        function_type: Ty,
+    ) -> Result<(LiteralLambda, usize), &'static str> {
+        let Ty::Fun(signature) = function_type.non_null() else {
+            return Err("a constructor reference has no function type");
+        };
+        let physical = jvm_function_params(self.ir, impl_fn);
+        if physical.len() != signature.params.len() {
+            return Err("a constructor reference adapter does not take its function parameters");
+        }
+        let result_semantic = self
+            .ir
+            .logical_types
+            .get(&inline_body)
+            .copied()
+            .unwrap_or(signature.ret);
+        let (parameter_types, parameter_coercions) = physical
+            .iter()
+            .zip(signature.params.iter())
+            .map(|(&physical, &semantic)| self.inline_parameter(semantic, physical))
+            .unzip();
+        Ok((
+            LiteralLambda {
+                impl_fn,
+                captures: Vec::new(),
+                inline_body,
+                capture_types: Vec::new(),
+                parameter_types,
+                parameter_coercions,
+                result_semantic,
+            },
+            signature.params.len(),
         ))
     }
 
@@ -545,6 +630,13 @@ impl Emitter<'_> {
                 .map_err(|_| "an inline lambda's code is too long")?;
             let marker =
                 crate::jvm::debug_local_names::spliced_lambda_marker_name(self.ir, callee, impl_fn)
+                    .or_else(|| {
+                        let class = crate::jvm::local_class_names::callable_reference_name(
+                            self.ir, argument,
+                        )?;
+                        let class = class.segment_ref();
+                        (!class.is_empty()).then(|| format!("$i$a$-{callee}-{class}"))
+                    })
                     .ok_or("a spliced lambda frame has no realized class provenance")?;
             scratch.add_local_entry(
                 marker_start,
@@ -558,6 +650,7 @@ impl Emitter<'_> {
                 local.record(Some(length), &mut scratch);
             }
             let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
+            let constructor_reference = constructor_reference_template(self.ir, argument).is_some();
             for (index, &ty) in parameter_types.iter().enumerate() {
                 let name = identities
                     .and_then(|identities| identities.get(captures.len() + index))
@@ -573,7 +666,8 @@ impl Emitter<'_> {
                             )
                         }
                         _ => identity.source_name.clone(),
-                    });
+                    })
+                    .or_else(|| constructor_reference.then(|| format!("p{index}")));
                 if let Some(name) = name {
                     let (slot, _) = parameter_slots[captures.len() + index];
                     scratch.add_local_entry(0, Some(end), slot, &name, &type_descriptor(ty));
