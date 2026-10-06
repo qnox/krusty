@@ -55,7 +55,6 @@ pub(super) fn also_run_natively(src: &str, stem: &str, expected: &str) {
 ///
 /// Same rule as [`expect_native_box`]: a decline fails the test, and a build that cannot reach
 /// the host target skips.
-#[allow(dead_code)]
 pub fn expect_native_sources(sources: &[(&str, &str)], expected: &str) {
     let Some(target) = krusty::native::NativeTarget::host() else {
         return;
@@ -85,23 +84,7 @@ pub fn expect_native_sources(sources: &[(&str, &str)], expected: &str) {
 /// yet" is the failure it is meant to catch. Skips only when this build cannot reach the target.
 #[allow(dead_code)]
 pub fn expect_native_box(src: &str, stem: &str, expected: &str) {
-    let Some(target) = krusty::native::NativeTarget::host() else {
-        return;
-    };
-    if !krusty::native::can_link(target) {
-        return;
-    }
-    match native_box_outcome(src, stem, target) {
-        NativeBox::Unavailable => {}
-        NativeBox::Answered(answer) => assert_eq!(answer, expected, "{stem}"),
-        NativeBox::Declined(reason) => {
-            panic!("{stem}: the native backend must lower this program — {reason}")
-        }
-        failure => panic!(
-            "{stem}: the native backend ran it wrong — {}",
-            failure.as_failure()
-        ),
-    }
+    expect_native_sources(&[(stem, src)], expected);
 }
 
 /// Require the native backend to DECLINE `src`, naming `reason` in what it says.
