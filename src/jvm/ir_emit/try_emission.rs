@@ -559,8 +559,21 @@ impl Emitter<'_> {
         let target = if brk { end } else { cont };
         self.mark_expression_start(transfer, code);
         code.nop();
+        // A break that leaves a `finally` is the inline-return frame's exit. kotlinc reloads that
+        // frame's result after the finalizer and carries it on the stack across the jump that
+        // skips the catch-all, so the landing label is the use (`ireturn`) and not another load.
+        let leaves_finalizer = brk && self.return_finalizers.len() > depth;
         let survives = self.emit_transfer_finalizers(depth, code);
         if survives {
+            if leaves_finalizer && !code.is_dead() {
+                if let Some(label) = label {
+                    if let Some(&(value, ty)) = self.inline_return_frame_results.get(label) {
+                        let slot = self.activate_inline_return_frame_result(value, ty);
+                        load(ty, slot, code);
+                        self.stack_resident_value = Some(value);
+                    }
+                }
+            }
             code.goto(target);
         }
         self.reopen_finally_segments(code);
