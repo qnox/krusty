@@ -136,6 +136,28 @@ fn a_named_serializer_on_the_declared_type_itself() {
     );
 }
 
+/// A declared type spelling belongs to one stable property declaration, not every property with
+/// the same source name. A member-extension overload must not replace the constructor property's
+/// serializer merely because both metadata records are named `item`.
+#[test]
+fn a_same_named_member_extension_does_not_replace_the_serialized_property_spelling() {
+    let source = round_trip(
+        "@Serializable\n\
+         data class Holder(\n\
+         \x20   val item: @Serializable(with = ItemObjectSerializer::class) Item,\n\
+         ) {\n\
+         \x20   val String.item: @Serializable(with = ItemClassSerializer::class) Item\n\
+         \x20       get() = Item(this)\n\
+         }\n",
+        "Holder(Item(\"x\"))",
+        "back.item.raw == \"x\"",
+    );
+    assert_eq!(
+        both_compilers_box(&source, "type_argument_property_identity"),
+        "OK {\"item\":\"x\"}"
+    );
+}
+
 const DEPENDENCY: &str = "package codecs\n\
 \n\
 import kotlinx.serialization.KSerializer\n\

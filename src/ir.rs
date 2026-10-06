@@ -2029,10 +2029,11 @@ pub struct IrFile {
     /// writes `I, Base, J`), while [`IrClass::superclass`] keeps the superclass apart. Absent when
     /// the superclass is written first or none is declared.
     pub class_superclass_positions: std::collections::HashMap<crate::types::TypeName, u32>,
-    /// The same, for a class PROPERTY, keyed by `(class fully-qualified name, property name)` —
-    /// a property has no `FunId` to hang off.
+    /// The same, for a class PROPERTY, keyed by `(class fully-qualified name, stable declaration
+    /// order)`. Source spelling is metadata payload, not declaration identity: an ordinary property
+    /// and one or more member-extension properties may legally share a name.
     pub prop_declared_spellings: std::collections::HashMap<
-        (crate::types::TypeName, String),
+        (crate::types::TypeName, u32),
         crate::spelling::DeclaredSpellings,
     >,
     /// Function ids realizing an extension receiver among their physical parameters. Metadata and JVM

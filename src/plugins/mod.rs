@@ -416,8 +416,10 @@ impl PluginContext {
             .is_some_and(|annotations| Self::annotation_named(annotations, annotation).is_some())
     }
 
-    /// The checked declared spelling of `class`'s property `property`: the same tree, with the
-    /// same checked type-use annotation applications, that the property's `@Metadata` records.
+    /// The checked declared spelling of `class`'s ordinary property `property`: the same tree, with
+    /// the same checked type-use annotation applications, that the property's `@Metadata` records.
+    /// The source name locates the already selected serializable field inside this class; its stable
+    /// declaration order selects the spelling, so a same-named member extension cannot replace it.
     /// The empty spelling when the declared type spelled no alias and carried no recorded
     /// type-use annotation.
     pub fn property_declared_type<'ir>(
@@ -429,8 +431,12 @@ impl PluginContext {
         ir.classes
             .get(class as usize)
             .and_then(|class| {
+                let property = class
+                    .properties
+                    .iter()
+                    .find(|candidate| candidate.name == property)?;
                 ir.prop_declared_spellings
-                    .get(&(class.fq_name_id(), property.to_owned()))
+                    .get(&(class.fq_name_id(), property.source_order))
             })
             .map_or(crate::ir::Spelled::NONE, |spellings| &spellings.ret)
     }

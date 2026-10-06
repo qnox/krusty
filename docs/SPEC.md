@@ -9130,7 +9130,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the backend declined the file. There is one frontend-owned record of these applications: the
   property's checked declared spelling (`Spelled`, carried to the IR as
   `IrFile::prop_declared_spellings`), the same tree whose checked type-use annotations the
-  property's `@Metadata` encodes. The parser keeps an argument-bearing type annotation's arguments
+  property's `@Metadata` encodes. The IR side table is keyed by classifier identity and stable
+  declaration order, not property spelling: an ordinary property and member-extension overloads
+  may share a source name without donating annotations to one another. The parser keeps an
+  argument-bearing type annotation's arguments
   in `File::type_annotation_arguments`, the checker folds them when it publishes checked type-use
   annotations, and the serialization plugin reads the checked `@Serializable(with = …)` through
   `PluginContext::property_declared_type`, walking `Spelled::args` in step with the checked type's
