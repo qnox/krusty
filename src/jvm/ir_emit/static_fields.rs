@@ -156,6 +156,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
         env.signature_symbols,
     ));
+    e.record_locals = true;
     let mut code = CodeBuilder::new(0);
     e.emit_delegated_property_array(env, env.facade_class, facade, &mut code);
     // Each store maps to its property's declaration line (kotlinc's `<clinit>` LineNumberTable).
@@ -697,6 +698,7 @@ pub(super) fn emit_class_static_initializer(
         e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
             env.signature_symbols,
         ));
+        e.record_locals = true;
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
         emit_companion_init(e.cw, &mut clinit, fq_name, c);

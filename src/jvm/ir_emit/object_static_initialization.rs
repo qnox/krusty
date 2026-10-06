@@ -87,6 +87,7 @@ pub(super) fn emit(
     emitter.regeneration_site = Some(
         super::bytecode_inline_call::RegenerationSite::class_initializer(env.signature_symbols),
     );
+    emitter.record_locals = true;
     let mut clinit = CodeBuilder::new(0);
     emitter.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
     let ci = emitter.cw.class_ref(fq_name);
