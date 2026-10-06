@@ -10,9 +10,9 @@ use crate::types::Ty;
 use std::collections::HashSet;
 
 /// kotlinc guards a parameter whose type is non-null and whose JVM type is not primitive, which
-/// includes `Unit` (`kotlin.Unit`).
-fn requires_reference_guard(ty: Ty) -> bool {
-    (ty.is_reference() || ty == Ty::Unit) && !ty.upper_bound_admits_null()
+/// includes `Unit` (`kotlin.Unit`) and `Nothing` (`java.lang.Void`).
+pub(super) fn requires_reference_guard(ty: Ty) -> bool {
+    (ty.is_reference() || ty == Ty::Unit || ty == Ty::Nothing) && !ty.upper_bound_admits_null()
 }
 
 fn realize_function(ir: &mut IrFile, function: FunId) {

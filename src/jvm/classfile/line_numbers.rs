@@ -325,7 +325,16 @@ impl CodeBuilder {
         let pc = self.bytes.len() as u16;
         if self.line_marks.last() != Some(&(pc, line)) {
             self.line_marks.push((pc, line));
+            self.inlined_line_marks.push((pc, line));
         }
+    }
+
+    /// Line marks whose provenance is an inlined body or its caller-line restoration.
+    pub(crate) fn inlined_line_marks(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        self.inlined_line_marks
+            .iter()
+            .copied()
+            .filter(|mark| self.line_marks.contains(mark))
     }
 
     /// Whether the line in effect was forgotten after an inlined body ([`Self::forget_line`]), so

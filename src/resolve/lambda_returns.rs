@@ -422,6 +422,10 @@ impl Checker<'_> {
         } else {
             inferred
         };
+        // The body's own inferred result, before coercion to the selected function type's return.
+        // A backend that specializes the implementation method's signature (kotlinc's indy
+        // metafactory adaptation) reads this, not the caller-facing boundary type.
+        self.lambda_body_results.insert(lambda, inferred);
         match result_constraint {
             LambdaResultConstraint::Fixed(expected) => {
                 let result = super::conditional_branch::branch_value_expression(self.file, body);

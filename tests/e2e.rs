@@ -1035,6 +1035,8 @@ mod imported_companion_property_e2e;
 mod increment_statement_e2e;
 #[path = "indy_infra_e2e.rs"]
 mod indy_infra_e2e;
+#[path = "indy_lambda_fallback_parity_e2e.rs"]
+mod indy_lambda_fallback_parity_e2e;
 #[path = "indy_lambda_parity_e2e.rs"]
 mod indy_lambda_parity_e2e;
 #[path = "inferred_alias_abbreviation_e2e.rs"]

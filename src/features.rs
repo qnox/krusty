@@ -10,6 +10,7 @@ use crate::language_version::LanguageVersion;
 /// `NameBasedDestructuring`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LangFeatures {
+    language_version: LanguageVersion,
     enabled: HashSet<String>,
     /// Opt-in requirement markers accepted for the whole module (`-opt-in=<fq name>`), spelled as
     /// kotlinc's `AnalysisFlags.optIn` holds them: dotted fully qualified names.
@@ -41,6 +42,7 @@ impl LangFeatures {
             }
         }
         Self {
+            language_version,
             enabled,
             opted_in: BTreeSet::new(),
         }
@@ -82,6 +84,15 @@ fn language_level_enables(language_version: LanguageVersion, since: (u16, u16)) 
 }
 
 impl LangFeatures {
+    /// The public source-language level from which this feature baseline was derived.
+    ///
+    /// Ordered feature overrides do not replace the language level: consumers that implement a
+    /// language-level semantic transition must read this fact instead of introducing a second
+    /// compiler-specific switch.
+    pub const fn language_version(&self) -> LanguageVersion {
+        self.language_version
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

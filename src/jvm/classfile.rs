@@ -1246,7 +1246,10 @@ impl ClassWriter {
                 panic!("cannot compute JVM frames for {name}{desc}: {decline:?}")
             })
         });
-        let lvt = if name == "<init>" || name == "<clinit>" {
+        // Constructor locals are reconstructed from the declaration after emission. A static
+        // initializer has no declaration-owned parameter table: any entries it records come from
+        // real initializer code (notably an inlined body's `$i$f$…` frame) and must survive.
+        let lvt = if name == "<init>" {
             Vec::new()
         } else {
             self.local_table(code)
@@ -2018,6 +2021,10 @@ pub struct CodeBuilder {
     exceptions: Vec<(Label, Label, Label, u16)>,
     /// `LineNumberTable` marks recorded during emission: `(start_pc, line)`. See [`Self::mark_line`].
     line_marks: Vec<(u16, u16)>,
+    /// Marks copied from an inlined body (including its caller-line restoration). Constructors and
+    /// class initializers curate their final table, so they retain this provenance separately from
+    /// ordinary nested-expression marks.
+    inlined_line_marks: Vec<(u16, u16)>,
     /// A bytecode offset whose last recorded line mark must be KEPT when another mark lands on the
     /// same offset: the next one appends after it instead of replacing it. See
     /// [`CodeBuilder::mark_line_retained`].
@@ -2075,6 +2082,7 @@ impl CodeBuilder {
             switch_fixups: Vec::new(),
             exceptions: Vec::new(),
             line_marks: Vec::new(),
+            inlined_line_marks: Vec::new(),
             retained_line_mark: None,
             local_entries: Vec::new(),
             implicit_void_return_pc: None,

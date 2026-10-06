@@ -9457,6 +9457,11 @@ pub struct TypeInfo {
     /// the checker resolves through imports (`var res: Result<T>? = null`) keeps its (value-)class type
     /// instead of collapsing to the initializer's type. Absent for an inferred (no-annotation) local.
     pub local_decl_types: HashMap<StmtId, Ty>,
+    /// Every checked lambda body's inferred result before coercion to the selected function type's
+    /// return, keyed by the lambda expression. Checked FIR publishes it with the lambda's callable
+    /// so a target specializing the implementation method's signature reads the body's own type,
+    /// not the caller-facing boundary.
+    pub lambda_body_results: HashMap<ExprId, Ty>,
     /// Checker-resolved property declaration types, keyed by the declaration span. Property lowering
     /// consumes this exact type; it must not re-resolve an annotation or replace it with the getter/body
     /// expression type, because that can change an overriding accessor's JVM descriptor.
@@ -35869,6 +35874,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         loop_depth: 0,
         return_allowed: true,
         lambda_returns: LambdaReturnScopes::default(),
+        lambda_body_results: HashMap::new(),
     };
     if resolved_index.is_none() {
         let (annotations, arguments): (Vec<_>, Vec<_>) =
@@ -37283,6 +37289,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_local_class_declarations,
         checked_local_classifier_identities,
         checked_local_classifier_type_arguments,
+        lambda_body_results,
         ..
     } = c;
     if !capture_discovery && !fragment.publishes_annotation_metadata() {
@@ -37591,6 +37598,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_provide_targets,
         delegate_property_reference_type,
         context_args,
+        lambda_body_results,
     };
     info
 }
@@ -38645,6 +38653,10 @@ struct Checker<'a> {
     /// Resolver-owned return labels, targets, expected/result types, and active lambda nesting for
     /// the body currently being checked.
     lambda_returns: LambdaReturnScopes,
+    /// Every checked lambda body's inferred result before coercion to the selected function type's
+    /// return, keyed by the lambda expression. A rechecked lambda's committed result overwrites a
+    /// probing one. Body state (`take_body_state`) deliberately does not swap this published fact.
+    lambda_body_results: HashMap<ExprId, Ty>,
 }
 
 /// What a local class reads from its enclosing scope, split by whether the reference is modelled.

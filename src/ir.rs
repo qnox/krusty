@@ -2525,6 +2525,11 @@ pub struct IrFile {
     /// BOXED there — the value-class pass reads this to type such a slot as the boxed value class (so
     /// `it.getOrThrow()` unboxes it), without the lowerer probing value-class-ness itself.
     pub lambda_own_params_from: std::collections::HashMap<u32, u32>,
+    /// Lambda implementation id → the body's own inferred result when the selected language
+    /// level keeps that type as the implementation signature (before 2.4). Absence at current
+    /// levels is the checked decision to use the caller-facing result. A backend consumes this
+    /// semantic fact without receiving a second language-version switch.
+    pub lambda_inferred_results: std::collections::HashMap<FunId, Ty>,
     /// Lifted-lambda function id → the DECLARED parameter types and return type of the user
     /// `fun interface` method the lambda was SAM-converted to. Absent for a plain `FunctionN` lambda,
     /// whose `invoke` slots are all generic. The distinction only matters to a target that erases

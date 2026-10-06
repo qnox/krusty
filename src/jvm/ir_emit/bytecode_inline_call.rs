@@ -885,7 +885,15 @@ impl Emitter<'_> {
         // marked again for the jump that follows; elsewhere it is forgotten, so the next mark of
         // any line is written.
         match caller_line {
-            Some(line) if self.inside_condition => code.inlined_line(line),
+            Some(line)
+                if self.inside_condition
+                    || self
+                        .regeneration_site
+                        .as_ref()
+                        .is_some_and(RegenerationSite::is_class_initializer) =>
+            {
+                code.inlined_line(line)
+            }
             _ => code.forget_line(),
         }
 
