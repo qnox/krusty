@@ -82,6 +82,23 @@ impl ConstantEvaluation {
         (constant.ty == body.expr(expression)?.ty.get().canonical_semantic()).then_some(constant)
     }
 
+    /// Fold a checker-selected conversion carried by an expression edge. Numeric constant
+    /// conversions are intrinsic-const just like an explicit conversion node; a plain numeric
+    /// widening remains a runtime conversion.
+    pub(super) fn fold_conversion(
+        &mut self,
+        body: &FirBody,
+        expression: FirExprId,
+        conversion: FirConversion,
+    ) -> Option<EvaluatedConstant> {
+        let FirConversionKind::NumericConversion { to } = conversion.kind else {
+            return None;
+        };
+        let constant = self.evaluate(body, expression)?;
+        let converted = convert(constant, conversion)?;
+        (converted.ty == to.get().canonical_semantic()).then_some(converted)
+    }
+
     /// A flattened concatenation's parts with each run of constant parts merged into one
     /// `String` constant, as kotlinc folds a string concatenation whose neighbouring arguments
     /// are constants or operations over constants.
