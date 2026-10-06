@@ -18,6 +18,12 @@ pub(super) fn module_function_symbol(callable: crate::fir::CallableId) -> String
     format!("kt_mod_{}", callable.raw())
 }
 
+/// Symbol of a file's once-only top-level initializer. Both the file and any caller in the module
+/// derive it from the source-file identity, the same way [`module_function_symbol`] is derived.
+pub(super) fn file_init_symbol(source: crate::fir::SourceFileId) -> String {
+    format!("kt_fileinit_{}", source.raw())
+}
+
 pub(super) fn c_identifier(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for character in name.chars() {

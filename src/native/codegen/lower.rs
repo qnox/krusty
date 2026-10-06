@@ -177,6 +177,8 @@ pub struct FileInput<'a> {
     /// Every symbol the prebuilt runtime defines, which the program's own names must avoid. Read
     /// once per build by the backend rather than once per file.
     pub runtime_symbols: &'a std::collections::HashSet<String>,
+    /// This file's identity in the module. Its initializer is exported under it.
+    pub source: crate::fir::SourceFileId,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::native::dependency_references`].
     pub dependency_properties:
@@ -195,6 +197,7 @@ pub fn lower_file(
         callables,
         dependency_properties,
         runtime_symbols,
+        source,
     } = input;
     let class_model = model::build(ir)?;
 
@@ -264,6 +267,7 @@ pub fn lower_file(
     lowering.define_default_constructors()?;
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
+    let file_init = lowering.define_file_init(source, statics_init)?;
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
@@ -276,7 +280,7 @@ pub fn lower_file(
                 Entry::Box => function.name == "box" && carrier(function.ret) == Carrier::Ref,
             };
         if is_entry {
-            lowering.define_program_entry(index, entry, statics_init)?;
+            lowering.define_program_entry(index, entry, file_init, statics_init.is_some())?;
             defines_entry = true;
         }
     }
@@ -802,7 +806,8 @@ impl<'a> FileLowering<'a> {
         &mut self,
         main_index: usize,
         entry: Entry,
-        statics_init: Option<FuncId>,
+        file_init: FuncId,
+        statics_may_throw: bool,
     ) -> Result<(), Unsupported> {
         let void = Signature::new(CallConv::SystemV);
         let entry_id = self
@@ -848,12 +853,13 @@ impl<'a> FileLowering<'a> {
             let bottom = builder.ins().stack_addr(types::I64, slot, 0);
             let init_ref = self.module.declare_func_in_func(init, builder.func);
             builder.ins().call(init_ref, &[bottom]);
-            // Top-level properties are initialized before the entry function runs, which is when
-            // the JVM would have touched the facade and run its `<clinit>`.
+            // This file's top-level properties initialize before the entry, through the same
+            // once-only function a cross-file call uses. A second call, from another file, is a
+            // return.
             let uncaught_ref = self.module.declare_func_in_func(uncaught, builder.func);
-            if let Some(statics_init) = statics_init {
-                let statics_ref = self.module.declare_func_in_func(statics_init, builder.func);
-                builder.ins().call(statics_ref, &[]);
+            let file_init_ref = self.module.declare_func_in_func(file_init, builder.func);
+            builder.ins().call(file_init_ref, &[]);
+            if statics_may_throw {
                 // An initializer that threw has left its exception pending. Kotlin never reaches
                 // the entry then — the JVM fails the facade's `<clinit>` first — so the program
                 // ends here, reporting it, before the entry's first statement can run.

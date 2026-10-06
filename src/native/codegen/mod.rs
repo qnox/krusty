@@ -114,6 +114,7 @@ impl Backend for CraneliftBackend {
                 callables: &file.callables,
                 runtime_symbols,
                 dependency_properties: &properties,
+                source: file.source,
             },
             self.target,
             &stem,
