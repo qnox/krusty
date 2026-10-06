@@ -111,7 +111,11 @@ impl Emitter<'_> {
             BitAnd | BitOr | BitXor => {
                 self.emit_binary_operands_with_live_prefix(lhs, rhs, code);
                 self.mark_expression_start(expression, code);
-                match lt {
+                // A checked unsigned operand can retain its semantic identity after value-class
+                // rewriting even though emission has put its signed carrier on the stack. Opcode
+                // width is a JVM representation decision, so select it from that carrier rather
+                // than treating every non-`Ty::Long` identity as an int-category value.
+                match ir_ty_to_jvm(&lt) {
                     Ty::Long => match op {
                         BitAnd => code.land(),
                         BitOr => code.lor(),
@@ -130,7 +134,7 @@ impl Emitter<'_> {
             Shl | Shr | Ushr => {
                 self.emit_operands(&[lhs, rhs], code); // shift amount is an `Int`
                 self.mark_expression_start(expression, code);
-                match lt {
+                match ir_ty_to_jvm(&lt) {
                     Ty::Long => match op {
                         Shl => code.lshl(),
                         Shr => code.lshr(),
