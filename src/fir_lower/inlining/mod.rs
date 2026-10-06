@@ -747,6 +747,10 @@ impl BodyLowering<'_> {
                     // the call site's expression: the spliced invocation keeps that line, and the
                     // frame-closing nop can then return to the inlined call.
                     if matches!(self.ir.expr(lambda), IrExpr::CallableReference(_)) {
+                        // The copy is the splice's view of the argument, not a second value. It
+                        // shares the argument's adapter, so leaving it unmarked would keep a
+                        // carrier for that adapter and drop the inline marker's class name.
+                        self.ir.inline_callable_reference_arguments.insert(copy);
                         match self.ir.expr_source_lines.get(&lambda).copied() {
                             Some(line) => {
                                 self.ir.expr_source_lines.insert(copy, line);
