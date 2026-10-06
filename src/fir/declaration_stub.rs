@@ -101,6 +101,9 @@ impl DeclarationFlags {
     /// A boxed multi-field `value class` (`+FullValueClasses`, no `@JvmInline`). It is a final
     /// class with structural equality, not an unboxed inline class.
     pub const FULL_VALUE: u64 = 1 << 41;
+    /// A compiler-generated structural identity member of a data or value class. This role is
+    /// declaration-owned: consumers must not rediscover it from the callable's spelling.
+    pub const GENERATED_STRUCTURAL_MEMBER: u64 = 1 << 42;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

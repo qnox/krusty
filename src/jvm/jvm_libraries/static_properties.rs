@@ -7,8 +7,38 @@
 //! [`PropertyInfo`] with receiver-less accessors. The provider facade only asks for the property.
 
 use super::*;
+use crate::libraries::LibConst;
 
 impl JvmLibraries {
+    pub(super) fn library_const(value: &crate::jvm::classreader::ConstVal) -> LibConst {
+        use crate::jvm::classreader::ConstVal;
+
+        match value {
+            ConstVal::Int(value) => LibConst::Int(*value),
+            ConstVal::Long(value) => LibConst::Long(*value),
+            ConstVal::Float(value) => LibConst::Float(*value),
+            ConstVal::Double(value) => LibConst::Double(*value),
+            ConstVal::Str(value) => LibConst::Str(value.clone()),
+        }
+    }
+
+    pub(super) fn const_fields<F>(
+        fields: &[crate::jvm::classreader::FieldSig],
+        mut ty: F,
+    ) -> std::collections::HashMap<String, LibraryConst>
+    where
+        F: FnMut(&crate::jvm::classreader::FieldSig) -> Option<Ty>,
+    {
+        fields
+            .iter()
+            .filter_map(|field| {
+                let ty = ty(field)?;
+                let value = Self::library_const(field.const_value.as_ref()?);
+                Some((field.name.clone(), LibraryConst { ty, value }))
+            })
+            .collect()
+    }
+
     /// The receiver-less property `internal.name` names, published in `internal`'s namespace: a
     /// `companion { … }` block property, or a static field (a Java static, or the outer-class
     /// storage of a companion `@JvmField`).
@@ -253,6 +283,7 @@ impl JvmLibraries {
             is_const: field.constant.is_some() && field.is_final,
             implicit_integer_coercion: false,
             compile_time_constant: field.constant,
+            metadata_constant_read: false,
             visibility: field.visibility,
             owner: field.owner,
             receiver_rank: 0,
@@ -523,6 +554,7 @@ impl JvmLibraries {
             is_const: mp.is_const,
             implicit_integer_coercion: false,
             compile_time_constant: None,
+            metadata_constant_read: false,
             visibility: mp.visibility,
             owner,
             receiver_rank: 0,

@@ -92,6 +92,7 @@ mod tests {
             is_open: false,
             modifiers: Default::default(),
             delegate_field: None,
+            has_constant_initializer: false,
             is_private: false,
             setter_visibility: Visibility::Public,
             getter: None,

@@ -30,12 +30,6 @@ pub(super) fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool
     )
 }
 
-/// Whether `init` is a literal the source wrote, the only initializer Kotlin metadata's
-/// `HAS_CONSTANT` describes: a value folded from an operation over constants is not one.
-pub(super) fn literal_initializer(ir: &IrFile, init: crate::ir::ExprId) -> bool {
-    const_value_idx_peek(ir, init) && !ir.folded_constants.contains(&init)
-}
-
 /// The initializer `<clinit>` runs for static `s`: its source initializer, unless a `const val`
 /// folds it into a `ConstantValue`. `None` for a static with no initializer (`lateinit var`).
 pub(super) fn clinit_initializer(

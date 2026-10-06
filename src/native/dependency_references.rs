@@ -101,6 +101,8 @@ fn accessor_plan(
         result,
         extension_receiver_parameter,
         dispatch,
+
+        metadata_constant_read: _,
     } = target
     else {
         return Err(format!(

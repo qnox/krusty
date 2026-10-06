@@ -3904,14 +3904,13 @@ pub(crate) fn finalized_streamed_signature_index(
         if stub.kind != crate::fir::DeclarationKind::Function
             || !stub
                 .flags
-                .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                .has(crate::fir::DeclarationFlags::GENERATED_STRUCTURAL_MEMBER)
         {
             return false;
         }
         let Some(name) = stub
             .lookup_name
             .and_then(|name| headers.lookup_names.get(name))
-            .filter(|name| matches!(*name, "toString" | "hashCode" | "equals"))
         else {
             return false;
         };
@@ -3966,15 +3965,8 @@ pub(crate) fn finalized_streamed_signature_index(
         if stub.kind != crate::fir::DeclarationKind::Function
             || !stub
                 .flags
-                .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                .has(crate::fir::DeclarationFlags::GENERATED_STRUCTURAL_MEMBER)
         {
-            return false;
-        }
-        let structural_method = stub
-            .lookup_name
-            .and_then(|name| headers.lookup_names.get(name))
-            .is_some_and(|name| matches!(name, "toString" | "hashCode" | "equals"));
-        if !structural_method {
             return false;
         }
         let Some(owner) = headers

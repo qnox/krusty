@@ -60,6 +60,7 @@ mod local_property_references;
 mod local_type_parameters;
 mod loops;
 mod member_dispatch;
+mod metadata_constants;
 mod module_declarations;
 mod package_declarations;
 mod properties;

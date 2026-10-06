@@ -1,5 +1,5 @@
-//! Checked FIR for Kotlin's built-in binary operators on primitive values: the operand types an
-//! operation compares or computes at, and the conversions that bring each operand there.
+//! Checked FIR construction for source binary expressions: selected member calls, built-in
+//! operations, operand types, and the conversions that bring each operand to its selected type.
 
 use super::*;
 
@@ -22,6 +22,96 @@ pub(super) struct BinaryOperand {
 }
 
 impl BodyFirChecker<'_> {
+    /// Build one already-resolved source binary expression.
+    ///
+    /// The resolver owns operator selection. This stage preserves its selected callable or
+    /// primitive operation.
+    pub(super) fn checked_binary_source_expression(
+        &mut self,
+        expression: ExprId,
+        source_operation: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        let selected_name = match source_operation {
+            BinOp::Add => Some("plus"),
+            BinOp::Sub => Some("minus"),
+            BinOp::Mul => Some("times"),
+            BinOp::Div => Some("div"),
+            BinOp::Rem => Some("rem"),
+            BinOp::Eq | BinOp::Ne => Some("equals"),
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some("compareTo"),
+            BinOp::And | BinOp::Or | BinOp::RefEq | BinOp::RefNe => None,
+        };
+        if let Some((operation, lhs_target, rhs_target)) = selected_name
+            .and_then(|name| self.selected_primitive_binary_operation(expression, name))
+        {
+            let span = self
+                .file
+                .expr_span(expression)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+            let lhs = BinaryOperand {
+                source: lhs,
+                ty: self.expression_type(lhs)?,
+                target: Some(self.resolved_type(span, lhs_target)?),
+            };
+            let rhs = BinaryOperand {
+                source: rhs,
+                ty: self.expression_type(rhs)?,
+                target: Some(self.resolved_type(span, rhs_target)?),
+            };
+            return self.checked_binary_expression_at_targets(operation, lhs, rhs);
+        }
+        if matches!(
+            source_operation,
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+        ) && self.selected_ieee_relational_operation(expression)
+        {
+            // The operator is already selected and checked. Primitive floating relations use IEEE
+            // ordering directly; an explicit `.compareTo()` remains a selected call returning Int.
+            return self.builtin_binary_expression(expression, source_operation, lhs, rhs);
+        }
+        if let Some(convention) =
+            selected_name.filter(|name| self.selected_operator(expression, name))
+        {
+            if matches!(
+                source_operation,
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+            ) {
+                let selected =
+                    self.source_member_operator_call(expression, convention, lhs, &[rhs])?;
+                let FirExprKind::Call(call) = selected else {
+                    unreachable!("a selected member operator always produces a call")
+                };
+                let operation = match source_operation {
+                    BinOp::Lt => FirBinaryOperation::Less,
+                    BinOp::Le => FirBinaryOperation::LessOrEqual,
+                    BinOp::Gt => FirBinaryOperation::Greater,
+                    BinOp::Ge => FirBinaryOperation::GreaterOrEqual,
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Rem
+                    | BinOp::Eq
+                    | BinOp::Ne
+                    | BinOp::And
+                    | BinOp::Or
+                    | BinOp::RefEq
+                    | BinOp::RefNe => {
+                        unreachable!("only relational operators use compareTo FIR")
+                    }
+                };
+                return Ok(FirExprKind::ComparisonCall { operation, call });
+            }
+            return self.source_member_operator_call(expression, convention, lhs, &[rhs]);
+        }
+        if matches!(source_operation, BinOp::Eq | BinOp::Ne) {
+            return self.checked_equality_expression(expression, source_operation, lhs, rhs);
+        }
+        self.builtin_binary_expression(expression, source_operation, lhs, rhs)
+    }
+
     pub(super) fn checked_equality_expression(
         &mut self,
         expression: ExprId,

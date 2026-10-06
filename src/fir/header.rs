@@ -1332,6 +1332,7 @@ fn extract_file_stub_inventory(
                     DeclarationFlags::default()
                         .with(DeclarationFlags::OVERRIDE, true)
                         .with(DeclarationFlags::OPERATOR, name == "equals")
+                        .with(DeclarationFlags::GENERATED_STRUCTURAL_MEMBER, true)
                         .with(DeclarationFlags::FINAL, true),
                     Visibility::Public,
                 ));

@@ -2244,6 +2244,7 @@ mod tests {
             is_open: true,
             modifiers: Default::default(),
             delegate_field: None,
+            has_constant_initializer: false,
             is_private: false,
             setter_visibility: crate::types::Visibility::Public,
             getter: None,

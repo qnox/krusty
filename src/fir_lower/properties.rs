@@ -195,6 +195,7 @@ pub(super) fn predeclare_properties(
                         visibility: header.visibility,
                         flags: header.flags,
                         initializer: None,
+                        has_constant_initializer: false,
                         delegate: None,
                         delegate_plan: None,
                         getter: None,
@@ -1409,6 +1410,7 @@ fn materialize_member_property(
             class_flags.has(DeclarationFlags::INTERFACE),
         ),
         delegate_field: None,
+        has_constant_initializer: property.has_constant_initializer,
         is_private: property.visibility.is_private(),
         setter_visibility: setter_visibility(index, property.declaration, property.visibility),
         getter,
@@ -2038,6 +2040,18 @@ pub(super) fn accept_property_body(
         .map(|statement| statement.origin);
     let is_setter = anchor.kind == DeclarationKind::Accessor && anchor.sibling == 1;
     let setter_exit = is_setter.then(|| setter_exit_line(&body)).flatten();
+    let declared_ty = ir
+        .checked_properties
+        .get(&property_id)
+        .ok_or(FirFileLoweringFailure::MissingProperty(
+            property_declaration,
+        ))?
+        .ty;
+    let has_constant_initializer = anchor.kind == DeclarationKind::Property
+        && index
+            .property(property_id)
+            .is_some_and(|property| !property.mutable)
+        && super::metadata_constants::has_constant_initializer(&body, index, declared_ty);
     let lowered = lower_body_with_context(body, index, ir, local_callables)
         .map_err(FirFileLoweringFailure::Body)?;
     if !lowered.defaults.is_empty() {
@@ -2057,20 +2071,14 @@ pub(super) fn accept_property_body(
     if let Some(exit) = setter_exit {
         ir.record_accessor_body_exit(value, exit);
     }
-    let has_constant_initializer = anchor.kind == DeclarationKind::Property
-        && anchor.owner.is_none()
-        && index
-            .property(property_id)
-            .is_some_and(|property| !property.mutable)
-        && !ir.folded_constants.contains(&value)
-        && super::constant_folding::is_metadata_constant(ir.expr(value));
     let companion_block_member = index
         .declaration_header(property_declaration)
         .is_some_and(|header| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER));
-    if has_constant_initializer && companion_block_member {
+    let package_member = anchor.owner.is_none();
+    if has_constant_initializer && package_member && companion_block_member {
         // Recorded on its classifier's property record instead of the package's.
         ir.companion_blocks.mark_constant_initializer(property_id);
-    } else if has_constant_initializer {
+    } else if has_constant_initializer && package_member {
         let package_property = ir
             .package_properties
             .iter_mut()
@@ -2083,6 +2091,9 @@ pub(super) fn accept_property_body(
     let property = ir.checked_properties.get_mut(&property_id).ok_or(
         FirFileLoweringFailure::MissingProperty(property_declaration),
     )?;
+    if has_constant_initializer {
+        property.has_constant_initializer = true;
+    }
     if let Some(storage) = lowered.property_storage_type {
         if property.storage_ty.replace(storage).is_some() {
             return Err(FirFileLoweringFailure::MissingProperty(declaration));
