@@ -2635,15 +2635,20 @@ impl BodyFirChecker<'_> {
                 .resolved_whole_array_vararg_args
                 .contains(&operand)
             {
-                arguments.push(FirCallArgument::Expression {
+                arguments.push(FirCallArgument::Vararg {
                     parameter: parameter_id,
-                    value,
-                    conversion: self.selected_value_conversion(
-                        operand,
+                    origin: cause,
+                    elements: vec![FirVarargElement {
                         value,
-                        parameter_ty,
-                        cause,
-                    )?,
+                        spread: true,
+                        conversion: self.selected_value_conversion(
+                            operand,
+                            value,
+                            parameter_ty,
+                            cause,
+                        )?,
+                    }]
+                    .into_boxed_slice(),
                 });
                 continue;
             }
