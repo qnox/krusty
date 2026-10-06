@@ -13,10 +13,11 @@ const LIB: &str = "package lib\n\
      val absent: String? = null\n";
 
 /// `HAS_CONSTANT` follows kotlinc's constant-value checker, not constant folding. A Java `val`
-/// field, a string template that reads one, and `1.toLong()` carry the flag. `1 + 2`, a Java field
-/// concatenated with `+`, a `const` string concatenated with `+`, a widened `Any`, and a `var` do
-/// not. The Java declarations are repository-owned so this proves the provider contract rather
-/// than a special case for a JDK owner. The facade, the class, and the object are compared in full.
+/// field (static or instance), a string template that reads one, and `1.toLong()` carry the flag.
+/// `1 + 2`, a Java field concatenated with `+`, a `const` string concatenated with `+`, a widened
+/// `Any`, and a `var` do not. The Java declarations are repository-owned so this proves the
+/// provider contract rather than a special case for a JDK owner. The facade, the class, and the
+/// object are compared in full.
 #[test]
 fn constant_initializer_metadata_matches_kotlinc() {
     let java = [(
@@ -26,7 +27,8 @@ fn constant_initializer_metadata_matches_kotlinc() {
              public static final String FINAL_TEXT = new String(\"x\");\n\
              public static final char FINAL_CHAR = Character.toLowerCase('Q');\n\
              public static final int COMPILE_TIME_INT = 2147483647;\n\
-             private JavaValues() {}\n\
+             public final String instanceText = new String(\"i\");\n\
+             public JavaValues() {}\n\
          }\n"
         .to_string(),
     )];
@@ -36,6 +38,7 @@ fn constant_initializer_metadata_matches_kotlinc() {
         const val A = \"a\"\n\
         val fromJava = fixtures.JavaValues.FINAL_TEXT\n\
         val fromJavaChar = fixtures.JavaValues.FINAL_CHAR\n\
+        val fromJavaInstance = fixtures.JavaValues().instanceText\n\
         val folded = \"a\" + \"b\"\n\
         val both = \"a\" + \"b\" + \"c\"\n\
         val template = \"x${fixtures.JavaValues.FINAL_TEXT}y\"\n\
