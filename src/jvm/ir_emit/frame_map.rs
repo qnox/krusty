@@ -25,6 +25,18 @@
 use super::slot_words;
 use crate::types::Ty;
 
+fn range_end(slot: u16, words: u16) -> u16 {
+    slot.checked_add(words)
+        .expect("a local slot index does not fit in u16")
+}
+
+fn ranges_overlap(slot: u16, words: u16, other_slot: u16, other_words: u16) -> bool {
+    words > 0
+        && other_words > 0
+        && slot < range_end(other_slot, other_words)
+        && other_slot < range_end(slot, words)
+}
+
 /// Identity of a keyed local: kotlinc's `IrSymbol` key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum FrameKey {
@@ -141,7 +153,8 @@ impl FrameMap {
     ///
     /// This is the JVM shape of an inline-return result: its declaration precedes the expression
     /// that computes it, but kotlinc lets locals inside that expression reuse the result slot. The
-    /// first store activates the same entry after those nested locals have left scope.
+    /// first store occupies that slot once those locals have left, or the next free slot when one
+    /// of them is still live.
     pub(super) fn enter_deferred(&mut self, key: FrameKey, ty: Ty) -> u16 {
         let id = self.next_id;
         self.next_id += 1;
@@ -156,7 +169,11 @@ impl FrameMap {
         slot
     }
 
-    /// Make a deferred keyed local occupy the slot recorded at its declaration.
+    /// Make a deferred keyed local occupy a real slot.
+    ///
+    /// The reserved slot is used when nothing live still covers it, including when a later local
+    /// remains above a borrower that has already left. A borrower that is still live keeps that
+    /// slot, and the result takes the next free one instead of aliasing it.
     pub(super) fn activate_deferred(&mut self, key: FrameKey) -> u16 {
         let occupant = Occupant::Key(key);
         let index = self
@@ -164,19 +181,23 @@ impl FrameMap {
             .iter()
             .rposition(|entry| entry.occupant == occupant)
             .unwrap_or_else(|| panic!("deferred frame entry {key:?} was never declared"));
-        let (slot, words, active) = {
+        let (reserved, words, active) = {
             let entry = &self.entries[index];
             (entry.slot, entry.words, entry.active)
         };
         if active {
-            return slot;
+            return reserved;
         }
-        assert_eq!(
-            self.size, slot,
-            "deferred frame entry {key:?} activated while a nested slot is live"
-        );
-        self.entries[index].active = true;
-        self.size += words;
+        let overlaps = self
+            .entries
+            .iter()
+            .any(|entry| entry.active && ranges_overlap(entry.slot, entry.words, reserved, words));
+        let slot = if overlaps { self.size } else { reserved };
+        let end = range_end(slot, words);
+        let entry = &mut self.entries[index];
+        entry.slot = slot;
+        entry.active = true;
+        self.size = self.size.max(end);
         self.max = self.max.max(self.size);
         slot
     }
@@ -333,14 +354,23 @@ impl FrameMap {
 
     /// Remove one entry. kotlinc throws "Descriptor can be left only if it is last" when it is not
     /// the top one; here that is reported and the cursor is kept. An entry left from the top returns
-    /// the cursor to its slot.
+    /// the cursor to its slot, unless an earlier entry was activated above that slot.
     fn leave_at(&mut self, index: usize) {
         let entry = self.entries.remove(index);
         if !entry.active {
             return;
         }
         match self.entries.get(index) {
-            None => self.size = entry.slot,
+            None => {
+                let occupied = self
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.active)
+                    .map(|entry| range_end(entry.slot, entry.words))
+                    .max()
+                    .unwrap_or(0);
+                self.size = entry.slot.max(occupied);
+            }
             Some(above) => crate::trace_compiler!(
                 "slots",
                 "leave {:?} at slot {} is not last: {:?} at slot {} was entered after it and is live ({} above)",
@@ -393,6 +423,32 @@ mod tests {
         // The entry predates the operand scope, so restoring that scope cannot release it.
         frame.leave_block(operand);
         assert_eq!(frame.enter(FrameKey::Value(2), Ty::Int), 1);
+    }
+
+    #[test]
+    fn a_deferred_entry_moves_when_its_slot_is_still_borrowed() {
+        let mut frame = FrameMap::default();
+        let result = FrameKey::Value(0);
+        assert_eq!(frame.enter_deferred(result, Ty::Int), 0);
+        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 0);
+        assert_eq!(frame.activate_deferred(result), 1);
+        assert_eq!((frame.size(), frame.max()), (2, 2));
+
+        frame.leave(FrameKey::Value(1));
+        assert_eq!(frame.size(), 2);
+        assert_eq!(frame.enter(FrameKey::Value(2), Ty::Int), 2);
+    }
+
+    #[test]
+    fn a_deferred_entry_reclaims_a_freed_slot_under_a_later_local() {
+        let mut frame = FrameMap::default();
+        let result = FrameKey::Value(0);
+        assert_eq!(frame.enter_deferred(result, Ty::Int), 0);
+        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 0);
+        assert_eq!(frame.enter(FrameKey::Value(2), Ty::Long), 1);
+        frame.leave(FrameKey::Value(1));
+        assert_eq!(frame.activate_deferred(result), 0);
+        assert_eq!(frame.size(), 3);
     }
 
     #[test]
