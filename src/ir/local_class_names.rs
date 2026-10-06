@@ -154,6 +154,106 @@ fn checked_arguments(values: &mut [IrCheckedArgument], names: &HashMap<TypeName,
     }
 }
 
+fn resolved_ty(value: &mut crate::fir::ResolvedTy, names: &HashMap<TypeName, TypeName>) {
+    *value = crate::fir::ResolvedTy::new(ty(value.get(), names))
+        .expect("renaming a resolved type keeps it resolved");
+}
+
+fn inline_accessor_splice(
+    splice: &mut Option<Box<crate::fir::FirInlineAccessorSplice>>,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    if let Some(splice) = splice {
+        for substitution in &mut splice.substitutions {
+            resolved_ty(&mut substitution.value, names);
+        }
+    }
+}
+
+fn property_target(
+    target: &mut crate::fir::FirPropertyTarget,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    match target {
+        crate::fir::FirPropertyTarget::Module { inline_splice, .. } => {
+            inline_accessor_splice(inline_splice, names);
+        }
+        crate::fir::FirPropertyTarget::External {
+            receiver,
+            parameters,
+            result,
+            dispatch,
+            ..
+        } => {
+            if let Some(receiver) = receiver {
+                resolved_ty(receiver, names);
+            }
+            for parameter in parameters {
+                resolved_ty(parameter, names);
+            }
+            resolved_ty(result, names);
+            if let crate::fir::FirPropertyDispatch::Super { owner, .. } = dispatch {
+                name(owner, names);
+            }
+        }
+    }
+}
+
+fn property_reference_target(
+    target: &mut crate::fir::FirPropertyReferenceTarget,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    match target {
+        crate::fir::FirPropertyReferenceTarget::Module(_) => {}
+        crate::fir::FirPropertyReferenceTarget::SpecializedModule {
+            reflection_owner,
+            receiver,
+            property_type,
+            declared_receiver,
+            declared_property_type,
+            getter_inline_splice,
+            ..
+        } => {
+            if let Some(owner) = reflection_owner {
+                name(owner, names);
+            }
+            if let Some(receiver) = receiver {
+                resolved_ty(receiver, names);
+            }
+            resolved_ty(property_type, names);
+            if let Some(receiver) = declared_receiver {
+                resolved_ty(receiver, names);
+            }
+            resolved_ty(declared_property_type, names);
+            inline_accessor_splice(getter_inline_splice, names);
+        }
+        crate::fir::FirPropertyReferenceTarget::Classifier {
+            owner,
+            property_type,
+            ..
+        } => {
+            name(owner, names);
+            resolved_ty(property_type, names);
+        }
+        crate::fir::FirPropertyReferenceTarget::External {
+            reflection_owner,
+            getter,
+            setter,
+            property_type,
+            ..
+        } => {
+            if let Some(owner) = reflection_owner {
+                resolved_ty(owner, names);
+            }
+            property_target(getter, names);
+            if let Some(setter) = setter {
+                property_target(setter, names);
+            }
+            resolved_ty(property_type, names);
+        }
+    }
+}
+
 fn checked_operation(operation: &mut IrCheckedOperation, names: &HashMap<TypeName, TypeName>) {
     let substitutions = match operation {
         IrCheckedOperation::Call {
@@ -242,10 +342,12 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &HashMap<TypeNam
         }
         IrCheckedOperation::IllegalProgressionStep { .. } => return,
         IrCheckedOperation::PropertyReference {
+            target,
             substitutions,
             adaptation,
             ..
         } => {
+            property_reference_target(target, names);
             if let Some(adaptation) = adaptation {
                 reference_adaptation(adaptation, names);
             }

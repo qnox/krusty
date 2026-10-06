@@ -829,6 +829,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   splice then reads a constructor call or `Unit` in place too, so `x.resume(P("OK"))` stores no
   local (`fir_lower/source_calls.rs`, `jvm/ir_emit/in_place_arguments.rs`). Tests:
   `tests/inline_arguments_in_place_e2e.rs`.
+- **An `@InlineOnly` call reads a local through a representation-preserving coercion.**
+  `println(message)` widens a non-null `String` to `Any?`. That coercion emits no bytecode, so
+  kotlinc's `genOrGetLocal` still loads the caller's local after `getstatic System.out`. A
+  coercion that boxes or unboxes (`Int` to `Any`) is stored
+  (`jvm/ir_emit/bytecode_inline_call.rs`). Test:
+  `tests/inline_arguments_in_place_e2e.rs::an_inline_only_println_of_a_local_loads_the_local_after_system_out`.
 - **A private suspend member's `access$` bridge is the one every other class uses.** A
   continuation re-enters a private member with an ordinary call from its own class, so the owner's
   single `access$<name>` bridge serves both it and a suspend lambda class calling the member.
@@ -3609,6 +3615,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stays intact and erases to `Object`. This is representation of an already-selected declaration.
   Test: `star_projected_member_and_extension_references_use_their_declared_bounds` in
   `tests/reference_adaptation_e2e.rs`.
+- **An inherited property reference is owned by the classifier it was written on.** `A::parent`
+  and `a::parent`, where `parent` is declared on a supertype of `A`, reflect `A` and call `A`'s
+  accessor. kotlin-reflect substitutes the property type from that owner (`A?`, not the
+  declaration's `T?`). `H<A>::parent` still reflects `H`. The checker records that exact written
+  owner on the selected property-reference target; common IR retains it, and JVM realization does
+  not reconstruct it from a receiver type or provider map. A class that implements the declaring
+  interface calls the accessor with `invokevirtual` on that class. A classifier declared in
+  another file of the same module is published with its source kind; one normalized common-IR kind
+  query covers either source location, and a missing published kind fails realization instead of
+  falling back to the declaring owner. Tests:
+  `checked_fir_records_the_written_owner_of_each_inherited_property_reference`,
+  `an_inherited_property_reference_substitutes_through_the_referenced_classifier` and
+  `an_inherited_property_reference_in_another_file_uses_the_referenced_classifier` in
+  `tests/inherited_property_reference_e2e.rs`. Corpus:
+  `reflection/properties/genericOverriddenProperty.kt`.
 - **An unbound inherited member reference is owned by the classifier it was written on.**
   `A::foo`, where `foo` is declared on `H<T>` and `A : H<A>`, reflects owner `A`. kotlin-reflect
   then substitutes the return type through that owner (`test.A?`). `H<A>::foo` still names `H`,
@@ -3617,8 +3638,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   recover it from the reference's function type. A bound reference keeps the declaration's
   owner. An unbound extension keeps its own owner: a top-level `fun Extension.member()` reflects
   on the file facade.
-  Test: `tests/inherited_reference_owner_e2e.rs`. Corpus:
-  `reflection/functions/genericOverriddenFunction.kt`.
+   Test: `tests/inherited_reference_owner_e2e.rs`. Corpus:
+   `reflection/functions/genericOverriddenFunction.kt`.
 - **A generic callable reference is reflected by the declaration's erased JVM signature.**
   `fun <T> foo(x: T): T` referenced as `KFunction1<Int, Int>` still names
   `foo(Ljava/lang/Object;)Ljava/lang/Object;`. A primary bound is that erasure:
@@ -3631,8 +3652,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   not `answer(C, Int)`). The omitted receiver is the parameter whose identity says it is the
   extension receiver; a companion declaration whose parameter identities do not match its
   parameters is a lowering error, not a signature that keeps the receiver. Test:
-  `tests/callable_ref_generic_signature_e2e.rs`. Corpus:
-  `reflection/functions/typeParameterInReturnType.kt`.
+   `tests/callable_ref_generic_signature_e2e.rs`. Corpus:
+   `reflection/functions/typeParameterInReturnType.kt`.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
   `continue` or an expression of type `Nothing` (a `throw`, or a call that never returns) in the same
   block are unreachable; krusty drops them (and a trailing block value), matching kotlinc. Emitting them

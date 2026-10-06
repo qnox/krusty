@@ -4,6 +4,5 @@
 # The goal is to empty this list of expected failures.
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
-reflection/properties/genericOverriddenProperty.kt
 reflection/typeOf/intersectionType.kt
 reflection/typeOf/typeAliasedType.kt
