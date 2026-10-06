@@ -716,6 +716,11 @@ pub(super) fn resolved_local_variables(
     semantic_types: &[crate::types::Ty],
     function_name: &str,
 ) -> Vec<Option<String>> {
+    assert_eq!(
+        identities.len(),
+        semantic_types.len(),
+        "one semantic type per provider-published parameter identity"
+    );
     let anonymous = if anonymous_context_parameters_are_locals() {
         resolved_anonymous_context_labels(identities, semantic_types)
     } else {
@@ -1191,6 +1196,18 @@ mod tests {
                 Some("p2".to_string()),
                 Some("$completion".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "one semantic type per provider-published parameter identity")]
+    fn resolved_provider_parameter_names_reject_a_mismatched_semantic_arity() {
+        resolved_local_variables(
+            &[crate::fir::ResolvedParameterIdentity::Source(
+                "value".into(),
+            )],
+            &[],
+            "inspect",
         );
     }
 }
