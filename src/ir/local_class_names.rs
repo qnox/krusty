@@ -1586,7 +1586,14 @@ fn detach_lambda_impl(ir: &mut super::IrFile, source: FunId) -> FunId {
     shape.body = shape
         .body
         .map(|body| super::clone_expression_dag(ir, body).0);
-    super::clone::clone_class_method(ir, source, shape, &HashMap::new())
+    let target = super::clone::clone_class_method(ir, source, shape, &HashMap::new());
+    // `inline_only` and `must_inline` describe how the source lambda's existing sites were
+    // consumed. This detached implementation belongs to a newly copied site and must remain
+    // available until that site's own representation pass either consumes or realizes it. Keeping
+    // the source state can emit a continuation for the copy while dropping the method it re-enters.
+    ir.inline_only_fns.remove(&target);
+    ir.must_inline_lambdas.remove(&target);
+    target
 }
 
 fn remap_owned_function(
@@ -2118,6 +2125,8 @@ mod tests {
         };
         let reachable = ir.add_expr(lambda(implementation));
         let other = ir.add_expr(lambda(implementation));
+        ir.inline_only_fns.insert(implementation);
+        ir.must_inline_lambdas.insert(implementation);
 
         let detached =
             ir.remap_reachable_classifier_identities(&names, [reachable], &mut HashSet::new());
@@ -2134,5 +2143,9 @@ mod tests {
             ir.expr(other),
             IrExpr::Lambda { impl_fn, .. } if *impl_fn == implementation
         ));
+        assert!(ir.inline_only_fns.contains(&implementation));
+        assert!(ir.must_inline_lambdas.contains(&implementation));
+        assert!(!ir.inline_only_fns.contains(&detached[0].target));
+        assert!(!ir.must_inline_lambdas.contains(&detached[0].target));
     }
 }
