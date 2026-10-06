@@ -863,11 +863,34 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
         1,
         "the matrix reuses one CLI build"
     );
+    assert_eq!(
+        workflow.matches("bin=$(just krusty-build-tests)").count(),
+        1,
+        "Gradle lanes reuse one krusty-build test binary"
+    );
     assert!(
-        workflow.contains("phase_log_prefix=conformance-build")
+        !workflow.contains("cargo test --profile gate -p krusty-build"),
+        "a Gradle lane must not compile krusty"
+    );
+    assert!(
+        workflow.contains("./krusty-build-tests --ignored"),
+        "a Gradle lane runs the prebuilt krusty-build tests"
+    );
+    assert!(
+        workflow.contains("needs: [build-shared-bins, versions]")
+            && workflow.contains("needs: [build-shared-bins, build-gradle-plugin]"),
+        "conformance and Gradle both wait on the shared binaries"
+    );
+    assert!(
+        !workflow.contains("build-conformance-bin"),
+        "the shared binary job is not named for conformance alone"
+    );
+    assert!(
+        workflow.contains("phase_log_prefix=shared-bins")
             && workflow.contains("phase_begin conformance-test-binary")
-            && workflow.contains("phase_begin krusty-cli"),
-        "the conformance binary job must time its two compiles"
+            && workflow.contains("phase_begin krusty-cli")
+            && workflow.contains("phase_begin krusty-build-tests"),
+        "the shared binary job must time each compile"
     );
     assert!(
         workflow.contains(
