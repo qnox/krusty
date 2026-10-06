@@ -1200,6 +1200,29 @@ mod tests {
     }
 
     #[test]
+    fn bridge_locals_format_only_an_unnamed_identity_positionally() {
+        use crate::fir::ResolvedParameterIdentity;
+        use crate::types::Ty;
+
+        assert_eq!(
+            bridge_local_variables(
+                &[
+                    ResolvedParameterIdentity::Source("named".into()),
+                    ResolvedParameterIdentity::Unnamed { ordinal: 1 },
+                ],
+                &[Ty::String, Ty::String],
+                "map",
+            ),
+            vec![Some("named".to_string()), Some("p1".to_string())]
+        );
+        assert_eq!(
+            resolved_local_variable(&ResolvedParameterIdentity::Unnamed { ordinal: 1 }, "map"),
+            None,
+            "the generic provider projection remains unnamed"
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "one semantic type per provider-published parameter identity")]
     fn resolved_provider_parameter_names_reject_a_mismatched_semantic_arity() {
         resolved_local_variables(

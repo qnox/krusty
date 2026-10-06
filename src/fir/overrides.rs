@@ -17,7 +17,8 @@ use crate::types::TypeName;
 pub enum ResolvedParameterIdentity {
     Source(Box<str>),
     /// The declaration/provider publishes no source name for this parameter. The ordinal is stable
-    /// semantic position only; targets must not turn it into a fabricated `pN` spelling.
+    /// semantic position only. A target may format it on a platform surface whose contract requires
+    /// a positional name; source and reflection metadata must keep it unnamed.
     Unnamed {
         ordinal: u32,
     },
