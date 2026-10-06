@@ -457,14 +457,23 @@ fn build_ctor(
             vp.field_varint(1, flags);
         }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
+                                                    // A `vararg` records `Array<out E>`, like the package-function writer.
+        let element_spelling = shape
+            .param_spellings
+            .get(i)
+            .unwrap_or(crate::spelling::Spelled::NONE);
+        let (recorded, recorded_spelling) = if shape.vararg_index == Some(i) {
+            crate::metadata::vararg_recorded_declaration(*pty, element_spelling)
+        } else {
+            (*pty, element_spelling.clone())
+        };
         let ty = type_pb_tp(
             st,
-            *pty,
-            shape.param_tparams.get(i).copied().flatten(),
-            shape
-                .param_spellings
-                .get(i)
-                .unwrap_or(crate::spelling::Spelled::NONE),
+            recorded,
+            (shape.vararg_index != Some(i))
+                .then(|| shape.param_tparams.get(i).copied().flatten())
+                .flatten(),
+            &recorded_spelling,
             type_parameters,
         );
         vp.field_message(3, &ty); // ValueParameter.type = 3
@@ -475,14 +484,11 @@ fn build_ctor(
                 .array_elem()
                 .or_else(|| pty.type_args().first().copied());
             if let Some(elem) = elem {
-                let et = type_pb_declared(
+                let et = type_pb_tp(
                     st,
                     elem,
-                    shape
-                        .param_spellings
-                        .get(i)
-                        .unwrap_or(crate::spelling::Spelled::NONE)
-                        .arg(0),
+                    shape.param_tparams.get(i).copied().flatten(),
+                    element_spelling,
                     type_parameters,
                 );
                 vp.field_message(4, &et); // ValueParameter.vararg_element_type = 4
@@ -538,6 +544,8 @@ fn jvm_method_sig(st: &mut StringTable<'_>, name: Option<&str>, desc: &str) -> P
 /// A secondary constructor for class metadata (`Class.constructor` = f8, repeated after the primary).
 pub struct CtorMeta<'a> {
     pub params: &'a [(String, Ty)],
+    /// Source spellings parallel to `params`; metadata records aliases from this declaration fact.
+    pub param_spellings: &'a [crate::spelling::Spelled],
     /// Per-parameter `DECLARES_DEFAULT_VALUE` flags in the same source order as `params`.
     pub param_defaults: &'a [bool],
     pub desc: &'a str,
@@ -931,7 +939,7 @@ pub fn build_class(
             &mut st,
             CtorShape {
                 params: sc.params,
-                param_spellings: &[],
+                param_spellings: sc.param_spellings,
                 desc: sc.desc,
                 flags: sc.flags,
                 param_defaults: sc.param_defaults,
@@ -1290,14 +1298,14 @@ pub fn build_class(
             vp.field_varint(2, st.local(pname) as u64);
             // A `vararg` parameter is SPELLED as its element but RECORDED as the array; see the
             // package-function writer for why the spelling is lifted rather than applied.
-            let declared_spelling = if m.vararg_index == Some(i) {
-                m.spellings.param(i).as_array_element()
+            let (declared_ty, declared_spelling) = if m.vararg_index == Some(i) {
+                crate::metadata::vararg_recorded_declaration(*pty, m.spellings.param(i))
             } else {
-                m.spellings.param(i).clone()
+                (*pty, m.spellings.param(i).clone())
             };
             let ty = crate::metadata::type_encoder::encode_declared_type(
                 st,
-                *pty,
+                declared_ty,
                 &declared_spelling,
                 &function_type_parameters,
             )
@@ -1422,33 +1430,44 @@ pub fn build_class(
     let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();
 
-    let mut prop_msgs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
-    let mut func_msgs: Vec<Option<Pb>> = (0..methods.len()).map(|_| None).collect();
-    let mut alias_msgs: Vec<Option<Pb>> = (0..tail.type_aliases.len()).map(|_| None).collect();
+    // kotlinc adds each record to its list as it builds it, so a list serializes in build order,
+    // not in the caller's index order: a member extension property declared before a plain one
+    // stays first. Each slot keeps its build sequence number beside the record.
+    let mut built = 0..;
+    let mut prop_msgs: Vec<Option<(usize, Pb)>> = (0..props.len()).map(|_| None).collect();
+    let mut func_msgs: Vec<Option<(usize, Pb)>> = (0..methods.len()).map(|_| None).collect();
+    let mut alias_msgs: Vec<Option<(usize, Pb)>> =
+        (0..tail.type_aliases.len()).map(|_| None).collect();
     let mut enum_msgs: Vec<Option<Pb>> = (0..enum_entries.len()).map(|_| None).collect();
     for member in tail.member_order {
         match *member {
             ClassMemberOrder::Property(index)
                 if index < props.len() && prop_msgs[index].is_none() =>
             {
-                prop_msgs[index] = Some(build_prop(&mut st, &props[index]));
+                prop_msgs[index] = Some((
+                    built.next().expect("unbounded"),
+                    build_prop(&mut st, &props[index]),
+                ));
             }
             ClassMemberOrder::Function(index)
                 if index < methods.len() && func_msgs[index].is_none() =>
             {
-                func_msgs[index] = Some(build_func(
-                    &mut st,
-                    &mut requirements,
-                    &mut contract_types,
-                    &methods[index],
+                func_msgs[index] = Some((
+                    built.next().expect("unbounded"),
+                    build_func(
+                        &mut st,
+                        &mut requirements,
+                        &mut contract_types,
+                        &methods[index],
+                    ),
                 ));
             }
             ClassMemberOrder::TypeAlias(index)
                 if index < tail.type_aliases.len() && alias_msgs[index].is_none() =>
             {
-                alias_msgs[index] = Some(crate::metadata::builder::type_alias_pb(
-                    &mut st,
-                    &tail.type_aliases[index],
+                alias_msgs[index] = Some((
+                    built.next().expect("unbounded"),
+                    crate::metadata::builder::type_alias_pb(&mut st, &tail.type_aliases[index]),
                 ));
             }
             ClassMemberOrder::EnumEntry(index)
@@ -1467,36 +1486,28 @@ pub fn build_class(
     // Preserve their established property-then-function order after all explicitly ordered members.
     for (index, prop) in props.iter().enumerate() {
         if prop_msgs[index].is_none() {
-            prop_msgs[index] = Some(build_prop(&mut st, prop));
+            prop_msgs[index] = Some((built.next().expect("unbounded"), build_prop(&mut st, prop)));
         }
     }
     for (index, function) in methods.iter().enumerate() {
         if func_msgs[index].is_none() {
-            func_msgs[index] = Some(build_func(
-                &mut st,
-                &mut requirements,
-                &mut contract_types,
-                function,
+            func_msgs[index] = Some((
+                built.next().expect("unbounded"),
+                build_func(&mut st, &mut requirements, &mut contract_types, function),
             ));
         }
     }
     for (index, alias) in tail.type_aliases.iter().enumerate() {
         if alias_msgs[index].is_none() {
-            alias_msgs[index] = Some(crate::metadata::builder::type_alias_pb(&mut st, alias));
+            alias_msgs[index] = Some((
+                built.next().expect("unbounded"),
+                crate::metadata::builder::type_alias_pb(&mut st, alias),
+            ));
         }
     }
-    let prop_msgs: Vec<Pb> = prop_msgs
-        .into_iter()
-        .map(|message| message.expect("every property metadata record is built"))
-        .collect();
-    let func_msgs: Vec<Pb> = func_msgs
-        .into_iter()
-        .map(|message| message.expect("every function metadata record is built"))
-        .collect();
-    let alias_msgs: Vec<Pb> = alias_msgs
-        .into_iter()
-        .map(|message| message.expect("every type-alias metadata record is built"))
-        .collect();
+    let prop_msgs = in_build_order(prop_msgs, "property");
+    let func_msgs = in_build_order(func_msgs, "function");
+    let alias_msgs = in_build_order(alias_msgs, "type-alias");
 
     // Entries the caller did not schedule among the members intern after them, in entry order.
     let enum_msgs: Vec<Pb> = enum_msgs
@@ -1641,6 +1652,17 @@ pub fn build_class(
 /// Build the `(d1, d2)` payload for an ANONYMOUS class (`object : P2 {}` inside a function):
 /// kotlinc's record is `Class { flags = LOCAL visibility (10), fq_name = <raw internal, marked
 /// localName in the string table>, supertype* }` — no members, no constructor record.
+
+/// A member list in the order its records were built, which is the order kotlinc serializes it.
+fn in_build_order(slots: Vec<Option<(usize, Pb)>>, kind: &str) -> Vec<Pb> {
+    let mut built: Vec<(usize, Pb)> = slots
+        .into_iter()
+        .map(|slot| slot.unwrap_or_else(|| panic!("every {kind} metadata record is built")))
+        .collect();
+    built.sort_by_key(|(sequence, _)| *sequence);
+    built.into_iter().map(|(_, record)| record).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2344,6 +2366,7 @@ mod tests {
             &ClassTail {
                 secondary_ctors: &[CtorMeta {
                     params: &[],
+                    param_spellings: &[],
                     param_defaults: &[],
                     desc: "()V",
                     sig_name: None,

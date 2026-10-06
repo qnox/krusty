@@ -2172,6 +2172,9 @@ pub struct IrFile {
     /// JVM value-class member implementations whose leading physical carrier parameter realizes a
     /// source dispatch receiver and therefore carries no nullability annotation.
     pub(crate) jvm_value_class_receiver_impls: std::collections::HashSet<u32>,
+    /// The static `-impl` of each `Any` member the JVM value-class synthesis generated, by exact
+    /// identity. A source-declared override is never in it.
+    pub(crate) jvm_value_class_generated_any: std::collections::HashMap<u32, IrValueClassAnyMember>,
     /// Methods kotlinc marks `ACC_BRIDGE` (0x40) — e.g. a `@Serializable` serializer's
     /// `typeParametersSerializers`. The JVM backend ORs `0x40` for a `FunId` in this set.
     pub bridge_methods: std::collections::HashSet<u32>,
@@ -2912,6 +2915,7 @@ pub(crate) use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
+pub(crate) use generated_members::IrValueClassAnyMember;
 pub use generated_members::{
     IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
