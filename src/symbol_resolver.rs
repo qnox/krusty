@@ -1768,6 +1768,12 @@ pub(crate) enum ErrorReceiverSelection<T> {
 }
 
 impl<'a> SymbolResolver<'a> {
+    /// Value receiver denoted by a classifier in call position: the object itself, or its declared
+    /// companion. Synthetic language/plugin calls use this same semantic projection as source calls.
+    pub(crate) fn classifier_value_receiver(&self, classifier: TypeName) -> Option<Ty> {
+        classifier_value_receiver(&self.src, classifier)
+    }
+
     /// Specialize one already-identified constructor declaration for contextual argument checking.
     /// The caller owns source-to-parameter argument mapping; this operation only applies the
     /// constructor's semantic generic signature and deliberately preserves formals owned by
