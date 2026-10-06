@@ -2821,6 +2821,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   does not change the constraint; the box covers it. Tests:
   `tests/delegate_initializer_constraint_e2e.rs`; box:
   `inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt`.
+- **A builder type variable's lower bounds join to their nearest common supertype.**
+  `Shape.Group(buildMap { put("a", Dot(1)); put("b", Line("x")); if (flag) put("c", extra) })`,
+  with `class Group(val entries: Map<String, Shape>)` and `Dot`, `Line`, `Group` subclasses of the
+  sealed `Shape`, compiles under kotlinc: PCLA collects `Dot <: V`, `Line <: V`, `Group <: V` from the
+  `put` calls and fixes `V` to their common supertype `Shape`, which satisfies the expected
+  `Map<String, Shape>`. krusty's postponed-call frame (`PostponedCallConstraints`,
+  `src/resolve/postponed_constraints.rs`) joined two different lower bounds with the
+  hierarchy-blind `merge_inferred_ty`, which erases any pair of distinct classes to `Any`, and then
+  reported `argument type mismatch: actual type is 'Map<String, Any>', but 'Map<String, Shape>'
+  was expected.` Every lower-bound join in that frame — an argument constraint, an expected-result
+  binding, and a finished lambda's constraints merged into the call — now goes through the
+  symbol-aware `merge_inferred_ty_from_symbols`, which returns the nearest shared supertype from
+  the class hierarchy and still falls back to `Any` when the bounds share none. An unqualified
+  constructor call (`Wrapper(buildMap { … })`) already took `V` from the parameter type; the
+  qualified nested-class constructor `Shape.Group(…)` solved the builder from its lower bounds
+  alone, which is where the erased join surfaced. The same holds for a repository-owned
+  `fun <E> collect(block: Collector<E>.() -> Unit): List<E>`, including an inferred enclosing
+  return type. The solver retains all lower inputs and computes their common type together, so
+  reversing three sibling arguments cannot change the inferred signature. Byte gap: for the
+  qualified call kotlinc emits `checkcast Shape` after each discarded `put` result (the solved
+  `V?`), krusty does not; the test compares diagnostics and the run, not the facade's code. Test:
+  `tests/builder_sibling_lower_bounds_e2e.rs`.
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
   (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
   `<T> assertDoesNotThrow(ThrowingSupplier<T>)` (JUnit, imported as a static) both take a `{ … }`
@@ -9799,9 +9821,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `fir_lower::inlining::escaping_reified_object` (the call-site substitution) and
   `tests/reified_object_type_of_e2e.rs` (those three results against kotlinc).
   Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a
-  reified parameter inside a lambda class regenerated per call site, a reified argument inferred as
-  an intersection type, and a use-site projection written in a typealias
-  (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
+  reified parameter inside a lambda class regenerated per call site, and a use-site projection
+  written in a typealias (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
+- **An invariant instantiation joins at a captured out-projection of the arguments' common supertype.**
+  `sel(Inv(A), Inv(B))`, with `A : X, Y` and `B : X, Y`, has type `Inv<out (X & Y)>` rather than a
+  raw `Inv` or `Any`. Reading `v` produces that captured upper bound, so the value has the members
+  of both `X` and `Y` and not a member declared on only one argument. A call on that intersection
+  records the constituent that declares the member (`x()` sees `X`, `y()` sees `Y`). A reified
+  operation does not reify the intersection: the frontend records its single common supertype on
+  the substitution (`Any` when the components share none, that shared classifier when they do,
+  and the class itself when the captured bound is one class), and `typeOf` encodes that recorded
+  classifier. Corpus: `reflection/typeOf/intersectionType.kt`
+  (`-ProhibitIntersectionReifiedTypeParameter`).
+  Test: `tests/intersection_reified_type_of_e2e.rs`.
 - **A Java member's flexible return keeps the caller's type arguments.** A Java generic class
   applied to the enclosing declaration's own type parameters (`Shelf<X, Y>` inside `fun <X, Y>`,
   or `LinkedHashMap(map)` over a `Map<K, V>`, which infers `LinkedHashMap<K, V>` from the

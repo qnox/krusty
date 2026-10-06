@@ -4434,6 +4434,40 @@ fn flow_intersection_type_argument_preserves_all_bounds_in_checked_fir() {
 }
 
 #[test]
+fn reified_intersection_argument_records_its_common_supertype() {
+    let (body, index) = checked_function_body(
+        "// LANGUAGE: -ProhibitIntersectionReifiedTypeParameter\n\
+         interface X\n\
+         interface Y\n\
+         object A : X, Y\n\
+         object B : X, Y\n\
+         fun <T> sel(left: T, right: T): T = left\n\
+         inline fun <reified T> T.keep(): T = this\n\
+         fun run() { sel(A, B).keep() }\n",
+        "run",
+    );
+    let call = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("keep")).then_some(call)
+        })
+        .expect("reified extension call");
+    let [substitution] = call.substitutions.as_ref() else {
+        panic!("keep must publish its reified type argument")
+    };
+    assert!(substitution.reified);
+    assert!(
+        matches!(substitution.value.get(), Ty::Intersection(parts) if parts.len() == 2),
+        "the semantic argument stays the intersection, got {:?}",
+        substitution.value.get()
+    );
+    assert_eq!(substitution.reified_runtime.get(), Ty::obj("kotlin/Any"));
+}
+
+#[test]
 fn generic_identity_retains_an_incomparable_declared_smart_cast_constituent() {
     let (body, index) = checked_function_body(
         "abstract class A { abstract fun o(): String }\n\
