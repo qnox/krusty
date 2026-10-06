@@ -3508,7 +3508,7 @@ pub fn method_code_diffs_against_kotlinc(
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
 
     let classpath: Vec<PathBuf> = libout.into_iter().chain([stdlib_jar()]).collect();
-    let classes = compile_in_process_metadata_cp(src, name, &classpath)
+    let classes = compile_in_process(src, name, &classpath, None)
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     let (_, krusty_bytes) = classes
         .iter()
