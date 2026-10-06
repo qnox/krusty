@@ -434,7 +434,7 @@ fn property_and_index_guards_name_the_producing_callable() {
     );
 }
 
-/// A Java enum constant is not-null. Returning or storing `FileVisitResult.CONTINUE` emits no
+/// A Java enum constant is not-null. Returning or storing the repository-owned `E.A` emits no
 /// `checkNotNullExpressionValue`. `System.out` and a static field of an enum type that is not an
 /// enum constant still do.
 #[test]
@@ -452,14 +452,15 @@ fn java_enum_constant_is_not_a_platform_value() {
     ];
     let (library, _) =
         common::javac_compile(&java, &[]).expect("javac must build the enum-constant fixture");
-    let src = "import java.nio.file.FileVisitResult\n\
-         \n\
-         fun explicit(): FileVisitResult = FileVisitResult.CONTINUE\n\
-         val stored: FileVisitResult = FileVisitResult.CONTINUE\n\
-         fun viaLocal(): FileVisitResult {\n\
-             val x = FileVisitResult.CONTINUE\n\
+    let src = "fun explicit(): E = E.A\n\
+         val stored: E = E.A\n\
+         fun viaLocal(): E {\n\
+             val x = E.A\n\
              return x\n\
          }\n\
+         fun entryIsNull(): Boolean = E.A == null\n\
+         fun ordinaryFinalIsNull(): Boolean = Holder.NOT_ENTRY == null\n\
+         fun ordinaryMutableIsNull(): Boolean = Holder.mutable == null\n\
          fun out(): java.io.PrintStream = System.out\n\
          fun alias(): E = Holder.NOT_ENTRY\n\
          fun mutable(): E = Holder.mutable\n";
