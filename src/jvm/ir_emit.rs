@@ -7069,11 +7069,22 @@ impl<'a> Emitter<'a> {
             self.unassigned_values.clone_from(unassigned);
         }
         code.bind(label);
-        self.stack_resident_value = if joins_fallthrough {
-            None
-        } else {
-            resident.filter(|_| code.stack_height() > 0)
-        };
+        // The jump that reaches this label already pushed the result. The linear tracker still
+        // shows the dead path in front of the label (an `athrow` leaves height 0), so the landing
+        // use would load the slot again. A label that does not carry a result leaves whatever
+        // value is already stack-resident: a safe-call receiver can cross an unrelated bind.
+        if let Some(value) = resident {
+            if joins_fallthrough {
+                self.stack_resident_value = None;
+            } else if let Some(words) = self
+                .inline_return_frame_result_type(value)
+                .map(slot_words)
+                .filter(|words| *words > 0)
+            {
+                code.set_stack(words);
+                self.stack_resident_value = Some(value);
+            }
+        }
     }
 
     /// The definitely-assigned semantic locals, as `(slot, type)`.

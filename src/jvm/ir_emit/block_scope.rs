@@ -234,7 +234,18 @@ impl Emitter<'_> {
     /// Close a lexical slot scope: restore the value map and leave the locals declared in it, as
     /// kotlinc's block end does.
     pub(super) fn restore_slot_scope(&mut self, scope: SlotScope) {
+        // Activation of an outer inline-return result happens inside this scope, after the
+        // snapshot. Restoring the snapshot would point the result back at the slot it lent to
+        // a nested local (`return@run i * 10` would then read `i`).
+        let activated = std::mem::take(&mut self.slots);
         self.slots = scope.slots;
+        for (value, binding) in activated {
+            if self.slots.contains_key(&value)
+                && self.inline_return_frame_result_type(value).is_some()
+            {
+                self.slots.insert(value, binding);
+            }
+        }
         self.unassigned_values
             .retain(|value| self.slots.contains_key(value));
         self.frame.leave_block(scope.frame);
