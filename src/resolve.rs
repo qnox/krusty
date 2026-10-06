@@ -18966,10 +18966,16 @@ impl<'a> Checker<'a> {
                 let (mut rt, argument_scope) =
                     self.check_receiver_before_arguments(scope, receiver);
                 let scope = &argument_scope;
+                let inferred_intersection = self.inferred_expression_intersection(receiver);
+                if inferred_intersection.len() > 1 {
+                    // Keep the expression's denotable/physical type in its own slot. Candidate
+                    // collection sees the complete inferred semantic intersection, and the
+                    // selected declaration records any required receiver conversion.
+                    rt = Ty::intersection(&inferred_intersection);
+                }
                 if let Some(projected) = self
                     .flow_intersection_member_receiver(scope, receiver, &name)
                     .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
-                    .or_else(|| self.intersection_type_member_receiver(rt, &name))
                 {
                     rt = self.set(receiver, projected);
                 }
@@ -24642,10 +24648,13 @@ impl<'a> Checker<'a> {
             }
         }
         let mut receiver_ty = self.expr(scope, receiver);
+        let inferred_intersection = self.inferred_expression_intersection(receiver);
+        if inferred_intersection.len() > 1 {
+            receiver_ty = Ty::intersection(&inferred_intersection);
+        }
         if let Some(projected) = self
             .flow_intersection_property_receiver(scope, receiver, &name, true)
             .or_else(|| self.type_parameter_member_receiver(scope, receiver_ty, &name))
-            .or_else(|| self.intersection_type_member_receiver(receiver_ty, &name))
         {
             receiver_ty = self.set(receiver, projected);
         } else if let Some(projected) =
@@ -50280,15 +50289,6 @@ impl<'a> Checker<'a> {
         self.intersection_member_receiver(&bounds, name)
     }
 
-    /// Project a denotable intersection onto the constituent that owns the selected member.
-    /// `X & Z` keeps both members visible, and each call records the constituent that declared it.
-    fn intersection_type_member_receiver(&self, receiver: Ty, name: &str) -> Option<Ty> {
-        let Ty::Intersection(bounds) = receiver.non_null() else {
-            return None;
-        };
-        self.intersection_member_receiver(bounds, name)
-    }
-
     fn intersection_member_receiver(&self, bounds: &[Ty], name: &str) -> Option<Ty> {
         if bounds.len() < 2 {
             return None;
@@ -63728,10 +63728,13 @@ impl<'a> Checker<'a> {
                 }
                 return self.set(e, Ty::Error);
             }
+            let inferred_intersection = self.inferred_expression_intersection(receiver);
+            if inferred_intersection.len() > 1 {
+                rt = Ty::intersection(&inferred_intersection);
+            }
             if let Some(projected) = self
                 .flow_intersection_property_receiver(scope, receiver, &name, false)
                 .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
-                .or_else(|| self.intersection_type_member_receiver(rt, &name))
             {
                 rt = self.set(receiver, projected);
             } else if let Some(projected) =

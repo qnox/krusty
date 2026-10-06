@@ -417,6 +417,15 @@ impl ProductionSignatureSemantics<'_> {
                 bindings: Vec::new(),
             };
         }
+        let known = constraint_frame
+            .and_then(|(owner, index)| {
+                self.scoped_constraints
+                    .borrow()
+                    .get(&owner)
+                    .and_then(|stack| stack.get(index))
+                    .cloned()
+            })
+            .unwrap_or_default();
         let (mut functions, properties) = callables.into_parts();
         let mut recorded = Vec::new();
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
@@ -442,11 +451,29 @@ impl ProductionSignatureSemantics<'_> {
                 }
                 continue;
             };
-            // Active builder variables carry lower constraints, not fixed equalities. Each nested
-            // call contributes against the declaration shape independently; substituting the first
-            // lower bound here would make a later sibling argument inapplicable before PCLA solves
-            // the complete constraint set.
             let mut bindings = crate::symbol_resolver::GSigBinds::new();
+            // Active builder variables normally remain lower constraints: seeding every known
+            // value here would let the first nested call reject a later sibling before PCLA sees
+            // the complete set. A result-only nested call is different. It has no input evidence
+            // of its own (`emptyMap()`), so the already-known enclosing expectation is the only
+            // fact that can complete it. Seed exactly the declaration variables used by those
+            // parameter positions and leave every ordinary argument unconstrained.
+            let value_parameter_start = candidate.context_count.min(signature.params.len());
+            for (parameter, argument) in signature.params[value_parameter_start..]
+                .iter()
+                .zip(&arguments)
+            {
+                if !argument.is_expected_type_callable() || argument.result_is_input_constrained() {
+                    continue;
+                }
+                let mut contextual = std::collections::HashSet::new();
+                collect_type_parameters(*parameter, &mut contextual);
+                for formal in contextual {
+                    if let Some(value) = known.get(formal).copied() {
+                        bindings.insert(formal.to_string(), value);
+                    }
+                }
+            }
             let declared_receiver = signature.receiver.or(candidate.receiver);
             if let Some(declared_receiver) = declared_receiver {
                 crate::symbol_resolver::unify_inferred_ty_with_source(
@@ -456,7 +483,6 @@ impl ProductionSignatureSemantics<'_> {
                     &mut bindings,
                 );
             }
-            let value_parameter_start = candidate.context_count.min(signature.params.len());
             for (parameter, argument) in signature.params[value_parameter_start..]
                 .iter()
                 .copied()
