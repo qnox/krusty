@@ -65,3 +65,48 @@ fn a_bound_reference_in_an_inline_call_matches_kotlinc() {
 fn a_local_function_reference_in_an_inline_call_matches_kotlinc() {
     method_matches("public static final java.lang.String local(");
 }
+
+#[test]
+fn a_bound_reference_with_a_default_argument_stays_callable() {
+    common::expect_box_ok_with_stdlib(
+        "\
+class C {\n\
+    fun ffff(i: Int, s: String = \"OK\") = s\n\
+}\n\
+fun box(): String = 42.run(C()::ffff)\n\
+",
+        "BoundAdaptedRef",
+    );
+}
+
+#[test]
+fn a_reified_extension_reference_in_let_runs() {
+    common::expect_box_ok_with_stdlib(
+        "\
+object Foo {\n\
+    val log = \"123\"\n\
+}\n\
+public inline fun <reified T> Foo.foo(value: T): String = log + value\n\
+fun box(): String {\n\
+    val result = \"OK\".let(Foo::foo)\n\
+    if (result != \"123OK\") return result\n\
+    return \"OK\"\n\
+}\n\
+",
+        "ReifiedExtensionRef",
+    );
+}
+
+#[test]
+fn a_stored_reference_stays_a_carrier_beside_an_inlined_use() {
+    common::expect_box_ok_with_stdlib(
+        "\
+fun id(value: String) = value\n\
+fun box(): String {\n\
+    val kept: (String) -> String = ::id\n\
+    return \"O\".let(::id) + kept(\"K\")\n\
+}\n\
+",
+        "StoredAndInlinedRef",
+    );
+}

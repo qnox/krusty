@@ -5782,10 +5782,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   place that returned call at each invoke and emit neither the reference class nor the adapter.
   The inline marker is named after the class the reference would have been
   (`$i$a$-map-…$names$1`, `$i$a$-applyEach-…$unbound$1`), and each invocation parameter local is
-  `p0`, `p1`, …. The spliced call keeps the reference expression's source line, so the
-  frame-closing `nop` returns to the inlined call. A reference stored in a variable stays a
-  callable reference. A declaration-owned
-  collection transform uses the same adapter body as its lambda template. Test:
+  `p0`, `p1`, ….   The spliced call keeps the reference expression's source line, so the
+  frame-closing `nop` returns to the inlined call. Classpath splices such as `let` and `reduce`
+  place that same recorded template. A reference stored in a variable stays a carrier, including
+  beside another spliced use. A bound reference whose adapter is not that single return stays a
+  carrier. A reified extension reference passed to `let` places the recorded call. Test:
   `tests/inline_constructor_reference_e2e.rs`.
 - **A `fun interface` constructor reference is a `FunInterfaceConstructorReference`.** `::Action`
   for `fun interface Action` is not a lambda and not a `FunctionReferenceImpl`. The carrier extends

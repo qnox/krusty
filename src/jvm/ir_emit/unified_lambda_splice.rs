@@ -64,6 +64,9 @@ pub(super) struct UnifiedSplicePlan {
 
 /// The checked facts of the selected literal `lambda`.
 fn literal_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static str> {
+    if ir.callable_reference_inline_template(lambda).is_some() {
+        return callable_reference_facts(ir, lambda);
+    }
     let IrExpr::Lambda {
         impl_fn,
         arity,
@@ -97,6 +100,39 @@ fn literal_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static s
         captures: captures.len(),
         physical: arguments.to_vec(),
         semantic,
+        result,
+    })
+}
+
+/// A recorded callable-reference template, placed as the literal the host invokes.
+fn callable_reference_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static str> {
+    let (adapter, captures, returned, arity, function_type) = ir
+        .callable_reference_inline_template(lambda)
+        .ok_or("a placed callable reference has no recorded inline template")?;
+    let Ty::Fun(signature) = function_type.non_null() else {
+        return Err("a placed callable reference has no function type");
+    };
+    if signature.params.len() != arity {
+        return Err(
+            "a placed callable reference has no checked function type with each argument's type",
+        );
+    }
+    let physical = jvm_function_params(ir, adapter);
+    let Some(arguments) = physical.get(captures.len()..captures.len() + arity) else {
+        return Err("a placed callable reference's method lacks a parameter for each argument");
+    };
+    let result = ir
+        .logical_types
+        .get(&returned)
+        .copied()
+        .unwrap_or(signature.ret);
+    Ok(LiteralFacts {
+        lambda,
+        impl_fn: adapter,
+        inline_body: returned,
+        captures: captures.len(),
+        physical: arguments.to_vec(),
+        semantic: signature.params.clone(),
         result,
     })
 }
@@ -467,6 +503,14 @@ impl Emitter<'_> {
                     callee,
                     facts.impl_fn,
                 )
+                .or_else(|| {
+                    let class = crate::jvm::local_class_names::callable_reference_name(
+                        self.ir,
+                        facts.lambda,
+                    )?;
+                    let class = class.segment_ref();
+                    (!class.is_empty()).then(|| format!("$i$a$-{callee}-{class}"))
+                })
                 .ok_or("a spliced lambda frame has no realized class provenance")?;
                 lam_locals_declared.push((
                     u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
