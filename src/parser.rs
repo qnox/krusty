@@ -4257,6 +4257,7 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
         while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
             let (in_projection, out_projection, projection_span) = self.skip_variance();
+            self.skip_plain_newlines();
             if self.at(TokenKind::Star) {
                 // Star projection `<*>` — erased to `Any?`.
                 let span = self.tok().span;
@@ -6041,7 +6042,9 @@ mod tests {
     fn use_site_variance_is_preserved_on_type_arguments() {
         let mut diagnostics = DiagSink::new();
         let source = "class Context<T>\n\
-                      fun <T> projected(input: Context<in T>, output: Context<out T>, array: Array<in T>) {}";
+                      fun <T> projected(input: Context<in\n\
+                          T>, output: Context<out\n\
+                          T>, array: Array<in T>) {}";
         let tokens = lex(source, &mut diagnostics);
         let file = parse(source, &tokens, &mut diagnostics);
         assert!(
