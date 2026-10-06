@@ -16,11 +16,19 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
             let IrExpr::NotNullAssert { operand, .. } = ir.exprs[assertion as usize] else {
                 return None;
             };
+            let root = operand;
+            let mut coercion = operand;
+            while let IrExpr::Block {
+                value: Some(value), ..
+            } = ir.exprs[coercion as usize]
+            {
+                coercion = value;
+            }
             let IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
-            } = ir.exprs[operand as usize]
+            } = ir.exprs[coercion as usize]
             else {
                 return None;
             };
@@ -30,10 +38,10 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
             )?);
             let target = ir_ty_to_jvm(&type_operand);
             (slot.is_reference() && target.is_reference() && slot != target)
-                .then_some((assertion, operand))
+                .then_some((assertion, root, coercion))
         })
         .collect::<Vec<_>>();
-    for (assertion, coercion) in placements {
+    for (assertion, root, coercion) in placements {
         let IrExpr::NotNullAssert { check, .. } = ir.exprs[assertion as usize].clone() else {
             unreachable!("a collected placement is a null assertion");
         };
@@ -51,7 +59,7 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
         };
         ir.exprs[assertion as usize] = IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
-            arg: coercion,
+            arg: root,
             type_operand,
         };
         if ir.declaration_result_coercions.remove(&coercion) {
