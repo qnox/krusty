@@ -108,6 +108,8 @@ mod interface_compatibility;
 mod intrinsic_probes;
 mod lambda_class;
 pub(super) mod lambda_class_names;
+mod lambda_implementation_placement;
+pub(crate) use lambda_implementation_placement::reparent_lambda_impls;
 mod local_updates;
 mod local_variable_representation;
 mod loop_emission;
@@ -1370,119 +1372,6 @@ fn new_writer_generic(
 /// Emit a whole IR file: the facade class of top-level `static` functions, plus one `.class` per
 /// `IrClass`. Returns `(internal_name, bytes)` for each, or `None` when the IR uses a construct the
 /// JVM backend can't represent (so every emission path skips it rather than miscompiling).
-/// Mark the lambda-argument impls of a MUST-INLINE call (`require`/`check`/`error` — a non-public
-/// `@InlineOnly` callee the backend always splices, never invokes) as `inline_only`, so the standalone
-/// `$lambda$N` method is NOT emitted. It is dead: the message lambda is spliced at the call site, so a
-/// leftover impl would only force a spurious facade class (`OrganizationIdKt` holding a dead
-/// `$lambda$0`) that kotlinc never emits. Safe because a `MustInline` callee is guaranteed spliced (or
-/// the whole file is skipped — then nothing is emitted anyway).
-/// Reparent lambda impl methods into the CLASS whose code emits their `invokedynamic`. An impl is
-/// PRIVATE (kotlinc's placement: same class as the call site), so a cross-class method handle would
-/// throw `IllegalAccessError`. Lowering attaches impls per `cur_class`; this pass covers the code
-/// that reaches a class only later: enum-entry constructor arguments (lowered class-less, emitted in
-/// the enum's `<clinit>`) and suspend-lambda state-machine bodies (moved into the machine class).
-/// Transitive: an impl reparented into a class drags the impls of its own nested lambdas along.
-pub fn reparent_lambda_impls(ir: &mut IrFile) {
-    let mut owned: std::collections::HashSet<u32> = ir
-        .classes
-        .iter()
-        .flat_map(|c| c.methods.iter().copied())
-        .collect();
-    // Impls whose `invokedynamic` (also) emits from FACADE code — facade-owned function bodies and
-    // static initializers — must STAY on the facade: a suspend-lambda state machine SHARES its body
-    // exprs with facade code, so a class walk alone would move an impl the facade still references.
-    let facade_reachable: std::collections::HashSet<u32> = {
-        let mut roots: Vec<crate::ir::ExprId> = Vec::new();
-        for (i, f) in ir.functions.iter().enumerate() {
-            // A lambda IMPL's body emits wherever the impl itself lands (facade or a class), so it
-            // is NOT a facade root — its nested lambdas are marked transitively below only when the
-            // impl is genuinely reachable from real facade code.
-            if !owned.contains(&(i as u32))
-                && f.dispatch_receiver.is_none()
-                && !ir.lambda_own_params_from.contains_key(&(i as u32))
-            {
-                if let Some(b) = f.body {
-                    roots.push(b);
-                }
-            }
-        }
-        for st in &ir.statics {
-            roots.extend(st.init);
-        }
-        let mut out = std::collections::HashSet::new();
-        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut stack = roots;
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            if let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[cur as usize] {
-                if out.insert(*impl_fn) {
-                    // Its nested lambdas emit wherever it does — keep the whole chain facade-side.
-                    if let Some(b) = ir.functions.get(*impl_fn as usize).and_then(|f| f.body) {
-                        stack.push(b);
-                    }
-                }
-            }
-            crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
-        }
-        out
-    };
-    for cid in 0..ir.classes.len() {
-        // Class-context roots whose code emits inside this class: member bodies, the instance
-        // initializer, a companion `<clinit>` body, super arguments, and enum-entry arguments.
-        let c = &ir.classes[cid];
-        let mut roots: Vec<crate::ir::ExprId> = Vec::new();
-        for &fid in &c.methods {
-            if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
-                roots.push(b);
-            }
-        }
-        roots.extend(c.init_body);
-        roots.extend(ir.companion_clinit_body(c.fq_name));
-        roots.extend(c.super_arg_prelude.iter().copied());
-        roots.extend(c.super_args.iter().copied());
-        for sc in &c.secondary_ctors {
-            roots.extend(sc.body);
-            roots.extend(sc.defaults.iter().flatten().copied());
-            roots.extend(sc.delegate_prelude.iter().copied());
-            roots.extend(sc.delegate_args.iter().copied());
-        }
-        for en in &c.enum_entries {
-            roots.extend(en.args.iter().copied());
-        }
-        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut stack = roots;
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            if let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[cur as usize] {
-                let fid = *impl_fn;
-                // Only a free (facade-owned) standalone impl moves; one already owned by a class —
-                // including THIS one — stays. A spliced (inline-only) impl never emits a method.
-                if !owned.contains(&fid)
-                    && !facade_reachable.contains(&fid)
-                    && !ir.inline_only_fns.contains(&fid)
-                    && ir
-                        .functions
-                        .get(fid as usize)
-                        .is_some_and(|f| f.dispatch_receiver.is_none())
-                {
-                    owned.insert(fid);
-                    ir.classes[cid].methods.push(fid);
-                    ir.note_class_method(cid as u32, fid);
-                    // The impl's own body now emits in this class too — walk it for nested lambdas.
-                    if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
-                        stack.push(b);
-                    }
-                }
-            }
-            crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
-        }
-    }
-}
-
 pub(crate) fn emit_all_with_checked_classifiers(
     ir: &IrFile,
     (facade_class, facade): (TypeName, &str),

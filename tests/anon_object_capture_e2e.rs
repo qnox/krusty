@@ -49,11 +49,20 @@ fn nested_suspend_crossinline_object_reads_its_direct_capture_field() {
              emit(transformed)\n\
          }\n\
          fun Stream<String>.selected(): Stream<String> = choose { it }\n\
+         fun builder(block: suspend () -> Unit) {\n\
+             block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+         }\n\
          fun box(): String {\n\
-             object : Stream<String> {\n\
-                 override suspend fun collect(sink: Sink<String>) {}\n\
-             }.selected()\n\
-             return \"OK\"\n\
+             var result = \"FAIL\"\n\
+             val source = object : Stream<String> {\n\
+                 override suspend fun collect(sink: Sink<String>) { sink.emit(\"OK\") }\n\
+             }\n\
+             builder {\n\
+                 source.selected().collect(object : Sink<String> {\n\
+                     override suspend fun emit(value: String) { result = value }\n\
+                 })\n\
+             }\n\
+             return result\n\
          }\n",
     );
 }
