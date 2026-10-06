@@ -5725,6 +5725,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `InnerClasses` remain the separately owned enclosure-realization contract.
   Frontend tests assert the exact declaration-to-provenance mapping. End-to-end JVM tests assert the
   complete emitted class set against kotlinc rather than inspecting parser-generated names.
+- **An unbound constructor reference is the lambda of an inline collection transform.**
+  `values.map(::Holder)` does not allocate a function reference. The adapter is a block that
+  returns `new Holder(element)` and captures nothing, so the stdlib `map` plan splices that
+  construction into the destination `add` and drops the adapter. The same template is what an
+  inline iterator body (`forEach`) and any other external inline lambda parameter splice. A
+  constructor reference stored in a variable stays a callable reference. Test:
+  `tests/inline_constructor_reference_e2e.rs`.
 - **A `fun interface` constructor reference is a `FunInterfaceConstructorReference`.** `::Action`
   for `fun interface Action` is not a lambda and not a `FunctionReferenceImpl`. The carrier extends
   `kotlin.jvm.internal.FunInterfaceConstructorReference` and its constructor passes `Action.class`.

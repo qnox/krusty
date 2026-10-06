@@ -1059,6 +1059,8 @@ mod init_block_lines_e2e;
 mod inline_call_operand_spill_e2e;
 #[path = "inline_capture_splice_e2e.rs"]
 mod inline_capture_splice_e2e;
+#[path = "inline_constructor_reference_e2e.rs"]
+mod inline_constructor_reference_e2e;
 #[path = "inline_crossinline_object_e2e.rs"]
 mod inline_crossinline_object_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]

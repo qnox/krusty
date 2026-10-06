@@ -519,16 +519,8 @@ impl BodyLowering<'_> {
             } => lambda,
             _ => return None,
         };
-        let (implementation, captures, inline_body, arity) = match self.ir.expr(lambda).clone() {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                inline_body: Some(inline_body),
-                arity,
-                ..
-            } => (impl_fn, captures, inline_body, arity as usize),
-            _ => return None,
-        };
+        let (implementation, captures, inline_body, arity) =
+            inline_argument_template(self.ir, lambda)?;
         if arity != 1 {
             return None;
         }
@@ -2019,6 +2011,67 @@ impl BodyLowering<'_> {
     fn direct_call_operand(&mut self, value: ExprId, _target: Ty) -> ExprId {
         value
     }
+}
+
+/// The inline template of a lambda, or of an unbound constructor reference whose adapter is
+/// exactly that template. `map(::Holder)` is the second shape: the adapter returns `new Holder`
+/// and has no capture, so the collection transform can splice the construction and drop the
+/// adapter.
+pub(super) fn inline_argument_template(
+    ir: &crate::ir::IrFile,
+    expression: ExprId,
+) -> Option<(u32, Vec<ExprId>, ExprId, usize)> {
+    let constructor_adapter = match ir.expr(expression) {
+        IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body: Some(inline_body),
+            arity,
+            ..
+        } => {
+            return Some((
+                *impl_fn,
+                captures.clone(),
+                *inline_body,
+                usize::from(*arity),
+            ));
+        }
+        IrExpr::CallableReference(reference)
+            if reference.bound_receiver.is_none()
+                && reference.captures.is_empty()
+                && reference.adaptation.is_none()
+                && !reference.declaration_suspend
+                && matches!(
+                    reference.target,
+                    crate::ir::IrCallableReferenceTarget::Constructor { .. }
+                ) =>
+        {
+            reference.adapter
+        }
+        _ => return None,
+    };
+    let (inline_body, arity) = constructor_reference_inline_value(ir, constructor_adapter)?;
+    Some((constructor_adapter, Vec::new(), inline_body, arity))
+}
+
+/// The value a constructor-reference adapter returns. The adapter is a block whose only
+/// statement is that return; the inline splice wants the value, not a transfer out of `map`.
+fn constructor_reference_inline_value(
+    ir: &crate::ir::IrFile,
+    adapter: u32,
+) -> Option<(ExprId, usize)> {
+    let function = ir.functions.get(adapter as usize)?;
+    let body = function.body?;
+    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+        return None;
+    };
+    let [statement] = stmts.as_slice() else {
+        return None;
+    };
+    let IrExpr::Return(Some(value)) = ir.expr(*statement) else {
+        return None;
+    };
+    Some((*value, function.params.len()))
 }
 
 /// Move a lambda's independently numbered value-producing body into its enclosing callable.
