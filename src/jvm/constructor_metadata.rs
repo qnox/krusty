@@ -11,6 +11,7 @@ use crate::types::{Ty, Visibility};
 
 pub(super) struct SecondaryConstructorMetadataShape {
     pub(super) params: Vec<(String, Ty)>,
+    pub(super) param_spellings: Vec<crate::spelling::Spelled>,
     pub(super) param_defaults: Vec<bool>,
     pub(super) descriptor: String,
     pub(super) signature_name: Option<&'static str>,
@@ -38,6 +39,7 @@ pub(super) fn secondary_constructor_shapes(
             .flatten()
             .map(|constructor| SecondaryConstructorMetadataShape {
                 params: constructor.params.clone(),
+                param_spellings: Vec::new(),
                 param_defaults: constructor.param_defaults.clone(),
                 descriptor: constructor.descriptor.clone(),
                 signature_name: Some("constructor-impl"),
@@ -93,6 +95,7 @@ fn secondary_constructor_shape(
     }
     Some(SecondaryConstructorMetadataShape {
         params,
+        param_spellings: constructor.declared_spellings.params.clone(),
         param_defaults: constructor.defaults.iter().map(Option::is_some).collect(),
         descriptor: format!(
             "({owner_prefix}{}{}{})V",
@@ -148,6 +151,7 @@ mod tests {
             lines: crate::ir::IrSecondaryCtorLines::default(),
             prefix_params: vec![Ty::Boolean],
             params: vec![Ty::Int, Ty::obj("kotlin/String")],
+            declared_spellings: crate::spelling::DeclaredSpellings::default(),
             named_params: vec![
                 ("seen0".to_string(), Ty::Int),
                 ("value".to_string(), Ty::obj("kotlin/String")),
