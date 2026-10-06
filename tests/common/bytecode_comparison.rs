@@ -103,7 +103,25 @@ pub fn compare_with_kotlinc_plugin_language_settings(
     jvm_target: &str,
     language_settings: &krusty::language_settings::LanguageSettings,
 ) -> Option<ReferenceComparison> {
-    let mut kotlinc_extra = vec![
+    let kotlinc_extra = kotlinc_language_options(language_settings);
+    let mut krusty_cp = cp_jars.to_vec();
+    krusty_cp.push(super::common_core::jdk_modules());
+    compare_with_kotlinc_plugin_request(ComparisonRequest {
+        name,
+        src,
+        class,
+        cp_jars,
+        krusty_cp_jars: &krusty_cp,
+        jvm_target,
+        kotlinc_extra: &kotlinc_extra,
+        language_settings: Some(language_settings),
+    })
+}
+
+fn kotlinc_language_options(
+    language_settings: &krusty::language_settings::LanguageSettings,
+) -> Vec<String> {
+    let mut options = vec![
         "-language-version".to_owned(),
         language_settings.language_version.to_string(),
         "-api-version".to_owned(),
@@ -120,24 +138,13 @@ pub fn compare_with_kotlinc_plugin_language_settings(
     for feature in feature_names {
         let enabled = language_settings.features.has(feature);
         if enabled != baseline.has(feature) {
-            kotlinc_extra.push(format!(
+            options.push(format!(
                 "-XXLanguage:{}{feature}",
                 if enabled { '+' } else { '-' }
             ));
         }
     }
-    let mut krusty_cp = cp_jars.to_vec();
-    krusty_cp.push(super::common_core::jdk_modules());
-    compare_with_kotlinc_plugin_request(ComparisonRequest {
-        name,
-        src,
-        class,
-        cp_jars,
-        krusty_cp_jars: &krusty_cp,
-        jvm_target,
-        kotlinc_extra: &kotlinc_extra,
-        language_settings: Some(language_settings),
-    })
+    options
 }
 
 /// One class compared against the reference compiler: what to build, the classpaths each side
@@ -761,7 +768,31 @@ pub fn classes_against_kotlinc_lib_target(
     src: &str,
     jvm_target: Option<u16>,
 ) -> Option<ClassSets> {
-    let library = super::common_core::kotlinc_lib_out(lib)?;
+    classes_against_kotlinc_lib_request(name, lib, src, jvm_target, None)
+}
+
+/// [`classes_against_kotlinc_lib`] with the dependency and consumer compiled under the same
+/// explicit public language/API configuration on both compilers.
+pub fn classes_against_kotlinc_lib_language_settings(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+    language_settings: &krusty::language_settings::LanguageSettings,
+) -> Option<ClassSets> {
+    classes_against_kotlinc_lib_request(name, lib, src, None, Some(language_settings))
+}
+
+fn classes_against_kotlinc_lib_request(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+    jvm_target: Option<u16>,
+    language_settings: Option<&krusty::language_settings::LanguageSettings>,
+) -> Option<ClassSets> {
+    let kotlinc_extra = language_settings
+        .map(kotlinc_language_options)
+        .unwrap_or_default();
+    let library = super::common_core::kotlinc_lib_out_with(lib, &kotlinc_extra)?;
     let target = jvm_target
         .map(super::common_core::kotlinc_jvm_target_argument)
         .unwrap_or_else(|| "default".to_string());
@@ -792,6 +823,7 @@ pub fn classes_against_kotlinc_lib_target(
                 arguments.push("-jvm-target".to_string());
                 arguments.push(target.clone());
             }
+            arguments.extend(kotlinc_extra.iter().cloned());
             arguments.push(source.to_string_lossy().into_owned());
             let (code, stderr) = super::common_core::kotlinc_compile(&arguments)?;
             assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
@@ -802,13 +834,24 @@ pub fn classes_against_kotlinc_lib_target(
         },
     )?;
     let classpath = [library, super::common_core::stdlib_jar()];
-    let krusty = super::common_core::compile_in_process_metadata_cp_module_target(
-        src,
-        name,
-        &classpath,
-        "main",
-        jvm_target.map(|target| target + 44),
-    )
+    let class_major = jvm_target.map(|target| target + 44);
+    let krusty = match language_settings {
+        Some(language_settings) => super::common_core::source_set_compile::compile(
+            &[(name, src)],
+            &classpath,
+            None,
+            class_major,
+            Some(language_settings.language_version.metadata_version()),
+            language_settings,
+        ),
+        None => super::common_core::compile_in_process_metadata_cp_module_target(
+            src,
+            name,
+            &classpath,
+            "main",
+            class_major,
+        ),
+    }
     .unwrap_or_else(|| panic!("{name}: krusty failed to compile"))
     .into_iter()
     .collect();

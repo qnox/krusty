@@ -140,3 +140,41 @@ fn a_nullable_nothing_parameter_leaves_the_supertype_raw() {
 fn the_param_fixture_facade_reads_the_instance_fields() {
     assert_identical(NOTHING_PARAM_SRC, "NothingParam", "NothingParamKt");
 }
+
+const CLASSPATH_INLINE_LIB: &str = "package lib\n\
+    public inline fun makeNothingLambda(): (Any?) -> Any? = { null }\n";
+const CLASSPATH_INLINE_USE: &str = "import lib.makeNothingLambda\n\
+    private val VALUE: (Any?) -> Any? = makeNothingLambda()\n\
+    fun box(): String = if (VALUE(\"x\") == null) \"OK\" else \"fail\"\n";
+
+/// A lambda inside a dependency inline body is already class-shaped. The bytecode inliner copies
+/// that class at the call site under both language modes; it is not a source lambda that needs the
+/// pre-2.4 inferred-result fact consumed by `nothing_conflict`.
+#[test]
+fn a_classpath_inline_nothing_lambda_is_regenerated_at_both_language_levels() {
+    for version in [
+        krusty::language_version::LanguageVersion::V2_2,
+        krusty::language_version::LanguageVersion::V2_4,
+    ] {
+        let settings = krusty::language_settings::LanguageSettings::new(version, None, &[])
+            .expect("supported language/API settings");
+        let classes = common::classes_against_kotlinc_lib_language_settings(
+            "Use",
+            &[("Lib.kt", CLASSPATH_INLINE_LIB)],
+            CLASSPATH_INLINE_USE,
+            &settings,
+        )
+        .expect("reference kotlinc is provisioned");
+        assert_eq!(
+            classes.reference.keys().collect::<Vec<_>>(),
+            ["UseKt", "UseKt$special$$inlined$makeNothingLambda$1"],
+            "kotlinc {version} class inventory"
+        );
+        let differences = classes.differences();
+        assert!(
+            differences.is_empty(),
+            "language {version}: {}",
+            differences.join("\n\n")
+        );
+    }
+}

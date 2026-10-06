@@ -506,10 +506,11 @@ fn factory_conflict(
 /// type, but the specialized invoke's RESULT is the body's own inferred type: `{ null }` selected
 /// as `(Any?) -> Any?` still returns `Nothing?`, which maps to `Void` and has no adaptee.
 ///
-/// Limitation: only a lambda lowered through `checked_lambda` has an inferred-result entry, so a
-/// Nothing-inferring lambda regenerated from a plan inside an inlined classpath function keeps an
-/// indy kotlinc would not emit. Callable references have no inferred result in kotlinc either, so
-/// their absence here matches the reference.
+/// Only a source lambda lowered through `checked_lambda` has an inferred-result entry. A lambda
+/// stored in a dependency inline body already has a class-file representation and is regenerated
+/// by the bytecode inliner; it does not pass through this source-lambda classification again.
+/// Callable references have no inferred result in kotlinc either, so their absence here matches
+/// the reference.
 fn nothing_conflict(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> bool {
     fn is_nothing(ty: Ty) -> bool {
         matches!(ty.non_null(), Ty::Nothing | Ty::Null)
