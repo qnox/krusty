@@ -37,7 +37,7 @@ use generic_signatures::{
 };
 use inline_capability::{metadata_inline, property_accessor_inline};
 use java_nullability::{
-    java_result_enhancement, java_type_argument_nullability, java_type_nullability,
+    java_field_type, java_result_enhancement, java_type_argument_nullability, java_type_nullability,
 };
 use mapped_builtin_member_status::{
     mapped_builtin_member_status, retain_joined_mapped_members, MappedBuiltinMemberStatus,
@@ -46,14 +46,14 @@ use mapped_builtin_member_status::{
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
 };
-use super::classreader::{ConstVal, FieldSig, JavaNullability};
+use super::classreader::JavaNullability;
 use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
 use crate::jvm::names::{property_getter_name, type_descriptor};
 use crate::libraries::builtin_top_level_realization::attach_function_realization;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
-    FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind, LibConst,
+    FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind,
     LibraryCallable, LibraryConst, LibraryMember, LibraryType, ParamList, PropKind, PropertyInfo,
     PropertyProducer, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
 };
@@ -928,6 +928,7 @@ impl JvmLibraries {
                 is_const: property.is_const,
                 implicit_integer_coercion: false,
                 compile_time_constant: None,
+                metadata_constant_read: false,
                 visibility: property.visibility,
                 owner,
                 receiver_rank: 0,
@@ -995,33 +996,6 @@ impl JvmLibraries {
             .entry(owner)
             .or_default()
             .insert(name.to_string());
-    }
-
-    fn library_const(value: &ConstVal) -> LibConst {
-        match value {
-            ConstVal::Int(value) => LibConst::Int(*value),
-            ConstVal::Long(value) => LibConst::Long(*value),
-            ConstVal::Float(value) => LibConst::Float(*value),
-            ConstVal::Double(value) => LibConst::Double(*value),
-            ConstVal::Str(value) => LibConst::Str(value.clone()),
-        }
-    }
-
-    fn const_fields<F>(
-        fields: &[FieldSig],
-        mut ty: F,
-    ) -> std::collections::HashMap<String, LibraryConst>
-    where
-        F: FnMut(&FieldSig) -> Option<Ty>,
-    {
-        fields
-            .iter()
-            .filter_map(|f| {
-                let ty = ty(f)?;
-                let value = Self::library_const(f.const_value.as_ref()?);
-                Some((f.name.clone(), LibraryConst { ty, value }))
-            })
-            .collect()
     }
 
     /// The type Kotlin metadata declares for a property named `name` on `internal`, or on its
@@ -1587,6 +1561,7 @@ impl JvmLibraries {
                         &member.params,
                     );
                     member.visibility = declaration.params.visibility;
+                    member.set_is_primary_constructor(declaration.primary);
                     member.call_sig = CallSig::metadata_member(
                         member.params.len(),
                         declaration.params.names.clone(),
@@ -3470,6 +3445,7 @@ impl JvmLibraries {
                         is_const: mp.is_const,
                         implicit_integer_coercion: false,
                         compile_time_constant: None,
+                        metadata_constant_read: false,
                         visibility: mp.visibility,
                         owner: cn,
                         receiver_rank: 0,
@@ -3629,6 +3605,7 @@ impl JvmLibraries {
                     is_const: mp.is_const,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
+                    metadata_constant_read: false,
                     visibility: mp.visibility,
                     owner: cn,
                     receiver_rank: 0,
@@ -3674,7 +3651,7 @@ impl JvmLibraries {
                 let field_ty = if ci.meta.is_present() {
                     field_ty
                 } else {
-                    java_type_nullability(field_ty, field.nullability)
+                    java_field_type(field_ty, field.access, field.nullability)
                 };
                 let visibility = if field.access & 0x0001 != 0 {
                     Visibility::Public
@@ -3745,6 +3722,7 @@ impl JvmLibraries {
                     is_const: false,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
+                    metadata_constant_read: false,
                     visibility,
                     owner: cn,
                     receiver_rank: 0,
@@ -3842,6 +3820,7 @@ impl JvmLibraries {
                         is_const: false,
                         implicit_integer_coercion: false,
                         compile_time_constant: None,
+                        metadata_constant_read: false,
                         visibility,
                         owner,
                         receiver_rank: 0,
@@ -5458,6 +5437,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     is_const: false,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
+                    metadata_constant_read: false,
                     visibility: function.visibility,
                     owner: function.callable.owner,
                     receiver_rank: 0,

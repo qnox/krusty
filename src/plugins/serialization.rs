@@ -14,12 +14,14 @@
 mod cached_serializer;
 mod constructed_standard_serializers;
 mod custom_serializer_class;
+mod declared_serializer;
 mod descriptor_element;
 mod deserialization_constructor;
 mod deserialize_body;
 pub(super) mod element_serializer;
 mod enum_serializer;
 mod external_serializer;
+mod intrinsic_serializer;
 pub use external_serializer::ExternalSerializer;
 pub(crate) use external_serializer::{custom_class_serializer, generated_external_serializer};
 mod generated_classifier;
@@ -31,6 +33,7 @@ mod serial_elements;
 mod serialize_body;
 mod synthesized_accessor;
 mod transient_initializer;
+mod type_argument_serializers;
 mod type_parameter_serializers;
 mod value_class_types;
 
@@ -47,6 +50,7 @@ use crate::plugins::{
 use crate::types::{type_name, Ty, TypeName};
 
 use constructed_standard_serializers::constructed_standard_serializer;
+use declared_serializer::build_field_serializer_instance;
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
 use element_serializer::element_serializer_expr;
@@ -63,6 +67,7 @@ use serial_elements::{SerialElements, SerializedProperties};
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
 use std::sync::Mutex;
+pub(super) use type_argument_serializers::named_serializers;
 use type_parameter_serializers::TypeParameterSerializers;
 use value_class_types::{inline_prim_methods, value_class_underlying};
 
@@ -75,8 +80,8 @@ mod annotations;
 mod signatures;
 
 use annotations::{
-    custom_serializer_of, field_serializer_of, generated_serializer_annotations,
-    property_is_contextual, serial_name_of, type_is_contextual,
+    custom_serializer_of, declared_serializer_of, field_serializer_of,
+    generated_serializer_annotations, property_is_contextual, serial_name_of, type_is_contextual,
 };
 use signatures::generated_serializer_signature;
 
@@ -473,7 +478,7 @@ fn call_external_companion_serializer(
 /// carries, so a deeper nesting (`List<List<Foo>>`) has no spelling here and keeps the generic
 /// inline path.
 fn serialized_type_spelling(
-    ctx: &FrontendExpressionContext,
+    ctx: &FrontendExpressionContext<'_>,
     serializable: TypeName,
     ty: Ty,
 ) -> Option<Vec<TypeName>> {
@@ -557,7 +562,9 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
         let exprs = exprs.clone();
         let data = data.clone();
         let types = types.clone();
-        if descriptor_element::specialize(ir, ctx, mid, kind, &exprs, &types) {
+        if descriptor_element::specialize(ir, mid, kind, &exprs)
+            || intrinsic_serializer::specialize(ir, ctx, mid, kind, &exprs, &data, &types)
+        {
             continue;
         }
         if kind == "serializer" {
@@ -753,26 +760,6 @@ fn is_nullable(ty: &Ty) -> bool {
     ty.is_nullable()
 }
 
-/// An instance of an explicit element serializer `X` (from `@Serializable(with = X::class)` on a
-/// property): an `object` serializer is its `INSTANCE`; a class serializer is `new X()` (no-arg ctor,
-/// as user-defined property serializers in the corpus have). Mirrors `add_custom_serializer_accessor`
-/// but for the no-arg class case.
-fn build_field_serializer_instance(ir: &mut IrFile, classifier: TypeName) -> ExprId {
-    if let Some(oid) = ir
-        .classes
-        .iter()
-        .position(|c| c.fq_name_id() == classifier && c.is_object)
-    {
-        ir.add_expr(IrExpr::StaticInstance {
-            owner: oid as u32,
-            ty: oid as u32,
-            field: "INSTANCE",
-        })
-    } else {
-        ir.new_external(&classifier.render(), "()V", vec![])
-    }
-}
-
 /// Wrap an element serializer in `.nullable` (`BuiltinSerializersKt.getNullable(s)`), the way kotlinc
 /// builds the element serializer for a NULLABLE property carrying an explicit serializer — the nullable
 /// descriptor's `serialName` gains the trailing `?`.
@@ -920,18 +907,28 @@ impl SerializationPlugin {
             // A primary constructor this file declares is realized from its own class; another
             // file's is reached through its declared parameters, as an ordinary module call is.
             let declared_here = ir.class_id_by_name(construction.serializer).is_some();
+            let (target, external_target) = match construction.target {
+                crate::ir::IrCustomSerializerConstructorTarget::Module(target) => {
+                    (Some(target), None)
+                }
+                crate::ir::IrCustomSerializerConstructorTarget::External(target) => {
+                    (None, Some(target.declaration))
+                }
+            };
             let new = ir.add_expr(IrExpr::New {
                 internal: construction.serializer,
                 args,
                 ctor_params: (!declared_here).then(|| construction.parameters.to_vec()),
                 ctor_desc: None,
-                external_target: None,
+                external_target,
                 defaults: Box::new([]),
                 default_prefix_count: 0,
             });
             ir.construction_declared_params
                 .insert(new, construction.parameters.clone());
-            ir.construction_targets.insert(new, construction.target);
+            if let Some(target) = target {
+                ir.construction_targets.insert(new, target);
+            }
             ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::Cast,
                 arg: new,
@@ -1281,14 +1278,14 @@ impl IrPlugin for SerializationPlugin {
 
     fn plan_frontend_expressions(
         &self,
-        ctx: &FrontendExpressionContext,
+        ctx: &FrontendExpressionContext<'_>,
         plans: &mut Vec<(crate::ast::ExprId, PluginExpressionPlan)>,
     ) {
         let serializer_package = type_name("kotlinx/serialization");
         let serializer_type = type_name(KSERIALIZER_FQ);
         let serializable_annotation = type_name(SERIALIZABLE_FQ);
         for call in &ctx.calls {
-            if let Some(plan) = descriptor_element::plan(call) {
+            if let Some(plan) = descriptor_element::plan(ctx, call) {
                 plans.push((call.expression, plan));
                 continue;
             }
@@ -1335,6 +1332,7 @@ impl IrPlugin for SerializationPlugin {
                     types: Vec::new(),
                     implicit_receiver: false,
                     operands: vec![(receiver, receiver_ty), (*argument, call.params[0])],
+                    synthesized: Vec::new(),
                 })
             })();
             if let Some(plan) = round_trip {
@@ -1413,6 +1411,7 @@ impl IrPlugin for SerializationPlugin {
                     types: Vec::new(),
                     implicit_receiver: false,
                     operands,
+                    synthesized: Vec::new(),
                 },
             ));
         }
@@ -2222,6 +2221,7 @@ mod tests {
                 argument_slots: vec![Some(argument)],
             }],
             classifier_annotations: std::collections::HashMap::new(),
+            call_resolver: None,
         };
         let mut plans = Vec::new();
         SerializationPlugin::default().plan_frontend_expressions(&context, &mut plans);
@@ -2270,13 +2270,25 @@ mod tests {
             &FrontendExpressionContext {
                 calls: vec![call.clone()],
                 classifier_annotations: std::collections::HashMap::new(),
+                call_resolver: None,
             },
             &mut plans,
         );
         assert_eq!(plans.len(), 1);
         let plan = &plans[0].1;
         assert_eq!(plan.operation, "descriptorElementDefaultAnnotations");
-        assert_eq!(plan.types, [element]);
+        assert!(plan.types.is_empty());
+        // With no singleton accessor published for it, the element's serializer is the
+        // intrinsic's general lookup over the selected type.
+        assert!(matches!(
+            plan.synthesized.as_slice(),
+            [crate::plugins::PluginSynthesizedOperand::Operation {
+                operation: "typeSerializer",
+                types,
+                operands,
+                ..
+            }] if types.as_slice() == [element] && operands.is_empty()
+        ));
         assert!(plan.implicit_receiver);
         assert_eq!(plan.operands, [(name, Ty::String), (optional, Ty::Boolean)]);
 
@@ -2287,6 +2299,7 @@ mod tests {
             &FrontendExpressionContext {
                 calls: vec![unrelated],
                 classifier_annotations: std::collections::HashMap::new(),
+                call_resolver: None,
             },
             &mut plans,
         );
@@ -2352,7 +2365,9 @@ mod tests {
                 serializer: type_name(serializer),
                 parameters: vec![kserializer("V"), kserializer("K")].into(),
                 operands: vec![1, 0].into(),
-                target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                target: crate::ir::IrCustomSerializerConstructorTarget::Module(
+                    crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                ),
             },
         );
         (ir, id)

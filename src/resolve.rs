@@ -3159,6 +3159,8 @@ struct PropertyReadMemberSelection {
     accessor: Option<Box<crate::libraries::LibraryCallable>>,
     /// Provider-chosen field, Kotlin accessor, or Java accessor. The platform null-check names it.
     producer: crate::libraries::PropertyProducer,
+    /// Provider-published constant-value expression fact for this selected read.
+    metadata_constant_read: bool,
     context_access: Option<Box<ResolvedPropertyAccess>>,
     compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
     compile_time_constant: Option<crate::libraries::LibraryConst>,
@@ -3265,6 +3267,12 @@ pub struct SymbolTable {
     /// producer; a declaration-only support source contributes no declared spellings.
     pub stable_declared_spellings:
         HashMap<crate::fir::DeclarationId, crate::spelling::DeclaredSpellings>,
+    /// Source spans of checked type-use annotations while Pass 1 still owns their occurrences,
+    /// keyed by stable declaration, expanded semantic type path, and resolved annotation identity.
+    /// Constructor-plan diagnostics consume this before `SymbolTable` is destroyed; no coordinate
+    /// crosses into checked FIR or common IR.
+    pub(crate) type_use_annotation_spans:
+        HashMap<(crate::fir::DeclarationId, Box<[u32]>, TypeName), Span>,
     /// How each source `typealias` spelled its own RIGHT-HAND SIDE, keyed by the alias's identity.
     ///
     /// Two things need it. `TypeAlias.underlying_type` (f4) names an alias DIRECTLY when the
@@ -3418,6 +3426,7 @@ impl Default for SymbolTable {
             source_alias_fqns: HashMap::new(),
             source_alias_expansions: HashMap::new(),
             stable_declared_spellings: HashMap::new(),
+            type_use_annotation_spans: HashMap::new(),
             alias_expansion_spellings: HashMap::new(),
             anonymous_object_types: HashMap::new(),
             anonymous_object_captures: HashMap::new(),
@@ -10955,6 +10964,8 @@ pub enum ExprLowering {
         singleton_dispatch: Option<SingletonValue>,
         owner: TypeName,
         name: String,
+        /// Provider-published constant-value expression fact for this selected read.
+        metadata_constant_read: bool,
     },
     /// A property selected on a classifier value rather than an instance or companion. The selected
     /// declaration carries its optional physical getter; absence means the property is valid Kotlin
@@ -11006,6 +11017,8 @@ pub enum ExprLowering {
         /// compiled into the declaring class whose receiver's static type is exactly that
         /// class. A nested class keeps the field's type but calls the getter, so this stays false.
         owner_storage: bool,
+        /// Provider-published constant-value expression fact for this selected read.
+        metadata_constant_read: bool,
     },
     /// A property-read `recv.name` resolved to an extension property. The complete selected property
     /// is retained for every provider; origin affects only local/cross-file/library linkage.
@@ -13350,6 +13363,7 @@ impl<'a> Checker<'a> {
                         getter: None,
                         accessor: None,
                         producer: crate::libraries::PropertyProducer::KotlinAccessor,
+                        metadata_constant_read: false,
                         context_access: None,
                         compiler_intrinsic: None,
                         compile_time_constant: None,
@@ -13454,6 +13468,9 @@ impl<'a> Checker<'a> {
                             crate::libraries::PropertyProducer::KotlinAccessor,
                             |property| property.producer,
                         ),
+                        metadata_constant_read: selected_property
+                            .as_ref()
+                            .is_some_and(|property| property.metadata_constant_read),
                         context_access,
                         compiler_intrinsic: selected_property
                             .as_ref()
@@ -14057,6 +14074,7 @@ impl<'a> Checker<'a> {
                     getter,
                     accessor,
                     producer,
+                    metadata_constant_read,
                     context_access,
                     compiler_intrinsic,
                     compile_time_constant,
@@ -14090,6 +14108,7 @@ impl<'a> Checker<'a> {
                         context_access,
                         compiler_intrinsic,
                         owner_storage: false,
+                        metadata_constant_read,
                     },
                 );
                 if let Some(getter) = getter {
@@ -14403,6 +14422,7 @@ impl<'a> Checker<'a> {
                     ),
                     owner: property.owner,
                     name: property.name,
+                    metadata_constant_read: property.metadata_constant_read,
                 },
             );
         }
@@ -15300,6 +15320,7 @@ impl<'a> Checker<'a> {
                 singleton_dispatch: None,
                 owner: property.property.owner,
                 name: name.to_string(),
+                metadata_constant_read: false,
             }
         } else {
             ExprLowering::TopLevelPropertyGet(property)
@@ -29118,6 +29139,7 @@ fun box(): String {
                             is_const: false,
                             implicit_integer_coercion: false,
                             compile_time_constant: None,
+                            metadata_constant_read: false,
                             visibility: Visibility::Public,
                             owner: foo,
                             receiver_rank: 0,
@@ -37171,6 +37193,16 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             c.type_ref_ty(scope, reference);
         }
     }
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
+        plugin_expression_planning::plan_plugin_expressions(
+            &mut c,
+            plugin_expression_annotations::ClassifierAnnotationInputs {
+                resolved_index,
+                pass_one_symbols: syms.pass_one_symbols(),
+                libraries: syms.libraries(),
+            },
+        );
+    }
     let Checker {
         expr_types,
         callable_reference_types,
@@ -37485,7 +37517,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             .copied()
             .collect(),
     );
-    let mut info = TypeInfo {
+    let info = TypeInfo {
         expr_types,
         callable_reference_types,
         reflective_callable_references,
@@ -37560,18 +37592,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_property_reference_type,
         context_args,
     };
-    if !capture_discovery && !fragment.publishes_annotation_metadata() {
-        plugin_expression_planning::plan_plugin_expressions(
-            file,
-            &mut info,
-            syms.native_plugins(),
-            plugin_expression_annotations::ClassifierAnnotationInputs {
-                resolved_index,
-                pass_one_symbols: syms.pass_one_symbols(),
-                libraries: syms.libraries(),
-            },
-        );
-    }
     info
 }
 
@@ -49457,7 +49477,11 @@ impl<'a> Checker<'a> {
         // A successful cast contributes an intersection with the path's existing stable type; it
         // never widens that type. In particular, evaluating `nonNull as T?` does not make later
         // reads nullable. Preserve the already-more-specific declaration/flow fact and only use
-        // the cast target when it actually narrows it.
+        // the cast target when it actually narrows it. A suspend value is not a subtype of its
+        // continuation-passing carrier, so this read projection is the carrier. `apply_narrowings`
+        // keeps the incomparable suspend constituent beside it. The binding's declared semantic
+        // type remains a separate proof for later type tests, and a non-null cast still drops
+        // nullability from the read projection.
         Some(
             declared
                 .filter(|declared| self.receiver_is_assignable(*declared, narrowed))
@@ -58391,10 +58415,35 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         nominal: Ty,
     ) -> Vec<Ty> {
+        let mut types = Vec::new();
         if let Some(function) = self.expression_function_value_type(scope, expression, nominal) {
-            return vec![function];
+            // Preserve the exact value type. A successful non-null cast records its own non-null
+            // flow constituent; ordinary nullable function values must not acquire that proof just
+            // because a functional expected type asks for their callable shape.
+            types.push(function);
         }
-        self.nominal_function_types(scope, nominal)
+        // A cast expression is the target. Facts proved about its operand belong to a later read
+        // of that stable path; using them here would invoke the pre-cast suspend signature.
+        if !matches!(self.file.expr(expression), Expr::As { .. }) {
+            // The read projection stays first, so invoke keeps the cast carrier. Intersection and
+            // callable-reference facts supply the suspend value the carrier does not subtype.
+            for fact in self.proven_function_value_facts(scope, expression) {
+                if !types.contains(&fact) {
+                    types.push(fact);
+                }
+            }
+        }
+        if types.is_empty() {
+            self.nominal_function_types(scope, nominal)
+                .into_iter()
+                // Callable hierarchy traversal describes the non-null value's invoke shapes.
+                // Contextual assignment must retain the expression's own nullability; merely
+                // discovering a FunctionN supertype is not a successful smart cast.
+                .map(|function| nominal.rewrap_nullability(function))
+                .collect()
+        } else {
+            types
+        }
     }
 
     /// Callable constituent of an expression used for a particular SAM target. A type parameter
@@ -58429,7 +58478,7 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         nominal: Ty,
     ) -> Option<Ty> {
-        if matches!(nominal, Ty::Fun(_)) {
+        if matches!(nominal.non_null(), Ty::Fun(_)) {
             return Some(nominal);
         }
         if let Some(function) = self.callable_reference_types.get(&expression).copied() {
@@ -58452,15 +58501,12 @@ impl<'a> Checker<'a> {
             })
         {
             let nominal = local.ty;
-            if let Some(function) = matches!(nominal, Ty::Fun(_))
+            let stable_reference = (!local.is_var)
+                .then_some(local.callable_reference_type)
+                .flatten();
+            if let Some(function) = matches!(nominal.non_null(), Ty::Fun(_))
                 .then_some(nominal)
-                .or(local.callable_reference_type)
-                .or_else(|| {
-                    crate::symbol_resolver::classifier_callable_signature(
-                        &self.fed_source(),
-                        nominal,
-                    )
-                })
+                .or(stable_reference)
             {
                 return Some(function);
             }

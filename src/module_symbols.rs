@@ -231,6 +231,7 @@ impl<'a> ModuleSymbols<'a> {
                 Ty::Unit,
                 String::new(),
             );
+            constructor.set_is_primary_constructor(true);
             let param_names = c
                 .ctor_param_names
                 .iter()
@@ -848,6 +849,7 @@ impl<'a> ModuleSymbols<'a> {
                 is_const: false,
                 implicit_integer_coercion: false,
                 compile_time_constant: None,
+                metadata_constant_read: false,
                 visibility: declaration.visibility(),
                 owner: internal,
                 receiver_rank: 0,
@@ -1192,6 +1194,7 @@ fn source_property(
         is_const: property.is_const,
         implicit_integer_coercion: false,
         compile_time_constant: None,
+        metadata_constant_read: false,
         visibility: property.visibility,
         owner,
         receiver_rank,
@@ -1440,6 +1443,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 is_const: property.is_const,
                 implicit_integer_coercion: property.implicit_integer_coercion,
                 compile_time_constant: property.compile_time_constant.clone(),
+                metadata_constant_read: false,
                 visibility: property.visibility,
                 owner,
                 receiver_rank: 0,
@@ -1531,6 +1535,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     is_const: false,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
+                    metadata_constant_read: false,
                     visibility: property.visibility,
                     owner,
                     receiver_rank: 0,

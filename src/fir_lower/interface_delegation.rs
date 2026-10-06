@@ -496,6 +496,7 @@ fn materialize_delegation(
                         .or_default()
                         .push(crate::ir::MemberExtProp {
                             name,
+                            source_order: u32::MAX,
                             receiver,
                             ty,
                             is_var: setter.is_some(),
@@ -526,6 +527,7 @@ fn materialize_delegation(
                     is_open: true,
                     modifiers: DELEGATION_PROPERTY_MODIFIERS,
                     delegate_field: None,
+                    has_constant_initializer: false,
                     is_private: false,
                     setter_visibility: crate::types::Visibility::Public,
                     getter: Some(getter),
