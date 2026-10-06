@@ -126,6 +126,10 @@ impl Emitter<'_> {
         if !self.try_emit_duplicated_safe_call(stmts, value, false, code) {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
             for &statement in stmts {
+                // The lambda-frame line owns any caller-stack stores that FixStack inserts at the
+                // opening marker. Emit the line first so those stores, not only the marker local
+                // that follows them, start the mapped inline interval.
+                self.mark_statement_line(statement, code);
                 if normalize_at_lambda_frame
                     && matches!(
                         self.ir.debug_local_provenance(statement),
@@ -135,7 +139,6 @@ impl Emitter<'_> {
                     reserved_inline_stack = Some(self.open_reserved_inline_stack(code));
                     normalize_at_lambda_frame = false;
                 }
-                self.mark_statement_line(statement, code);
                 // A statement nets zero on the operand stack (its value is stored/discarded). Reset the
                 // tracked height to that baseline afterward: raw spliced control flow is opaque to the
                 // builder's linear counter and can leave `cur_stack` drifted above the real,
@@ -257,6 +260,9 @@ impl Emitter<'_> {
         let mut normalize_at_lambda_frame = normalize_at_lambda_frame;
         let mut reserved_inline_stack = None;
         for (index, statement) in stmts.into_iter().enumerate() {
+            // FixStack replaces the opening marker with the saved caller stack. Keep that
+            // generated store inside the lambda frame's mapped line interval.
+            self.mark_statement_line(statement, code);
             if normalize_at_lambda_frame
                 && matches!(
                     self.ir.debug_local_provenance(statement),
@@ -266,7 +272,6 @@ impl Emitter<'_> {
                 reserved_inline_stack = Some(self.open_reserved_inline_stack(code));
                 normalize_at_lambda_frame = false;
             }
-            self.mark_statement_line(statement, code);
             let base = code.stack_height();
             self.terminal_statement_target = (value.is_none() && Some(index) == last_statement)
                 .then_some(terminal_target)
