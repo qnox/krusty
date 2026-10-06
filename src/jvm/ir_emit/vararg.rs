@@ -87,18 +87,56 @@ fn emit_reference_copy(
     code: &mut CodeBuilder,
 ) {
     place_array_and_length(emitter, element, temps, code);
-    let object_array = "[Ljava/lang/Object;";
     let copy = emitter.cw.methodref(
         "java/util/Arrays",
         "copyOf",
         "([Ljava/lang/Object;I)[Ljava/lang/Object;",
     );
     code.invokestatic(copy, 2, 1);
+    let object_array = "[Ljava/lang/Object;";
     let target = type_descriptor(ir_ty_to_jvm(array_type));
     if target != object_array {
         let array_class = emitter.cw.class_ref(&target);
         code.checkcast(array_class);
     }
+}
+
+/// Emit a sole existing reference-array spread at a call boundary. `Arrays.copyOf(Object[], int)`
+/// physically leaves `Object[]`; the call's ordinary operand adapter narrows it only when the
+/// selected descriptor actually requires a more specific array class.
+pub(super) fn emit_consumed_reference_copy(
+    emitter: &mut Emitter<'_>,
+    array_type: &Ty,
+    elements: &[u32],
+    spreads: &[bool],
+    code: &mut CodeBuilder,
+) -> Option<Ty> {
+    let [element] = elements else {
+        return None;
+    };
+    if spreads != [true]
+        || array_jvm_element(array_type).is_jvm_scalar()
+        || matches!(
+            emitter.ir.expr(*element),
+            IrExpr::Vararg { .. } | IrExpr::NewArray { .. }
+        )
+    {
+        return None;
+    }
+    let temps = emitter
+        .spills_operand_prefix(*element)
+        .then(|| emitter.spill_to_temps(elements, code));
+    place_array_and_length(emitter, *element, temps.as_deref(), code);
+    let copy = emitter.cw.methodref(
+        "java/util/Arrays",
+        "copyOf",
+        "([Ljava/lang/Object;I)[Ljava/lang/Object;",
+    );
+    code.invokestatic(copy, 2, 1);
+    if let Some(temps) = temps {
+        emitter.release_operand_spills(&temps);
+    }
+    Some(Ty::obj_args("kotlin/Array", &[Ty::obj("java/lang/Object")]))
 }
 
 fn emit_primitive_spread(
