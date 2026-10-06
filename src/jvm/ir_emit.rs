@@ -5643,6 +5643,10 @@ struct Emitter<'a> {
     /// Incoming definite-assignment state by control-flow label. Union is the verifier lattice:
     /// unassigned on any incoming edge means `top` at the merge.
     label_unassigned_values: HashMap<Label, HashSet<u32>>,
+    /// A semantic value carried on the operand stack by every jump to a label. The value becomes
+    /// stack-resident only when that label is bound; intervening handler emission must not consume
+    /// an earlier jump's value.
+    label_stack_resident_values: HashMap<Label, u32>,
     /// Safe-call guards that share one null exit (`a?.b?.c`), by guard `When`: the label, and whether
     /// this guard is the chain's outermost one, which binds it and yields the null result.
     safe_call_null_exits: HashMap<u32, (Label, bool)>,
@@ -5794,6 +5798,7 @@ impl<'a> Emitter<'a> {
             temporaries: backend_temporaries::BackendTemporaries::default(),
             unassigned_values: HashSet::new(),
             label_unassigned_values: HashMap::new(),
+            label_stack_resident_values: HashMap::new(),
             safe_call_null_exits: HashMap::new(),
             stack_resident_value: None,
             safe_call_exit_temporaries: HashMap::new(),
@@ -7047,6 +7052,13 @@ impl<'a> Emitter<'a> {
     }
 
     fn bind(&mut self, label: Label, code: &mut CodeBuilder) {
+        let resident = self.label_stack_resident_values.remove(&label);
+        let joins_fallthrough = resident.is_some() && !code.is_dead();
+        if joins_fallthrough {
+            self.run.set_emit_error(
+                "a label joins a stack-carried value with a fallthrough edge".to_string(),
+            );
+        }
         if !code.is_dead() {
             self.label_unassigned_values
                 .entry(label)
@@ -7057,6 +7069,11 @@ impl<'a> Emitter<'a> {
             self.unassigned_values.clone_from(unassigned);
         }
         code.bind(label);
+        self.stack_resident_value = if joins_fallthrough {
+            None
+        } else {
+            resident.filter(|_| code.stack_height() > 0)
+        };
     }
 
     /// The definitely-assigned semantic locals, as `(slot, type)`.

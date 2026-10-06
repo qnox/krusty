@@ -570,7 +570,16 @@ impl Emitter<'_> {
                     if let Some(&(value, ty)) = self.inline_return_frame_results.get(label) {
                         let slot = self.activate_inline_return_frame_result(value, ty);
                         load(ty, slot, code);
-                        self.stack_resident_value = Some(value);
+                        if self
+                            .label_stack_resident_values
+                            .insert(target, value)
+                            .is_some_and(|existing| existing != value)
+                        {
+                            self.run.set_emit_error(
+                                "an inline-return label receives different stack-carried values"
+                                    .to_string(),
+                            );
+                        }
                     }
                 }
             }

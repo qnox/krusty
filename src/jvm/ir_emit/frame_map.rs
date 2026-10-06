@@ -25,18 +25,6 @@
 use super::slot_words;
 use crate::types::Ty;
 
-fn range_end(slot: u16, words: u16) -> u16 {
-    slot.checked_add(words)
-        .expect("a local slot index does not fit in u16")
-}
-
-fn ranges_overlap(slot: u16, words: u16, other_slot: u16, other_words: u16) -> bool {
-    words > 0
-        && other_words > 0
-        && slot < range_end(other_slot, other_words)
-        && other_slot < range_end(slot, words)
-}
-
 /// Identity of a keyed local: kotlinc's `IrSymbol` key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum FrameKey {
@@ -97,9 +85,15 @@ struct Entry {
     occupant: Occupant,
     slot: u16,
     words: u16,
-    /// A deferred entry owns its semantic position but does not occupy the cursor until its first
-    /// store. Operand-local scopes may therefore borrow the slot while computing that store.
-    active: bool,
+}
+
+#[derive(Debug)]
+struct DeferredEntry {
+    /// Declaration order controls lexical lifetime even though physical entry happens later.
+    id: u32,
+    key: FrameKey,
+    slot: u16,
+    words: u16,
 }
 
 /// A live unkeyed temporary. Not `Copy`: leaving it consumes it, so it is left at most once.
@@ -128,8 +122,10 @@ pub(super) struct FrameMap {
     size: u16,
     /// The highest `size` has reached.
     max: u16,
-    /// The live entries, oldest first.
+    /// The physically live entries, in entry order.
     entries: Vec<Entry>,
+    /// Keyed locals declared outside the physical frame until their first store.
+    deferred: Vec<DeferredEntry>,
     next_id: u32,
 }
 
@@ -159,45 +155,51 @@ impl FrameMap {
         let id = self.next_id;
         self.next_id += 1;
         let slot = self.size;
-        self.entries.push(Entry {
+        self.deferred.push(DeferredEntry {
             id,
-            occupant: Occupant::Key(key),
+            key,
             slot,
             words: slot_words(ty),
-            active: false,
         });
         slot
     }
 
     /// Make a deferred keyed local occupy a real slot.
     ///
-    /// The reserved slot is used when nothing live still covers it, including when a later local
-    /// remains above a borrower that has already left. A borrower that is still live keeps that
-    /// slot, and the result takes the next free one instead of aliasing it.
+    /// The reserved slot is used only when the physical cursor has returned to it. If any newer
+    /// local remains live, the deferred entry is pushed above it like every ordinary frame entry.
     pub(super) fn activate_deferred(&mut self, key: FrameKey) -> u16 {
-        let occupant = Occupant::Key(key);
-        let index = self
+        if let Some(entry) = self
             .entries
             .iter()
-            .rposition(|entry| entry.occupant == occupant)
-            .unwrap_or_else(|| panic!("deferred frame entry {key:?} was never declared"));
-        let (reserved, words, active) = {
-            let entry = &self.entries[index];
-            (entry.slot, entry.words, entry.active)
-        };
-        if active {
-            return reserved;
+            .rev()
+            .find(|entry| entry.occupant == Occupant::Key(key))
+        {
+            return entry.slot;
         }
-        let overlaps = self
-            .entries
+        let index = self
+            .deferred
             .iter()
-            .any(|entry| entry.active && ranges_overlap(entry.slot, entry.words, reserved, words));
-        let slot = if overlaps { self.size } else { reserved };
-        let end = range_end(slot, words);
-        let entry = &mut self.entries[index];
-        entry.slot = slot;
-        entry.active = true;
-        self.size = self.size.max(end);
+            .rposition(|entry| entry.key == key)
+            .unwrap_or_else(|| panic!("deferred frame entry {key:?} was never declared"));
+        let entry = self.deferred.remove(index);
+        // Reuse the declaration cursor only when the physical frame has returned to it. Otherwise
+        // enter above every still-live value: FrameMap is a stack allocator and must not fabricate
+        // a hole below a newer entry.
+        let slot = if self.size <= entry.slot {
+            entry.slot
+        } else {
+            self.size
+        };
+        self.entries.push(Entry {
+            id: entry.id,
+            occupant: Occupant::Key(entry.key),
+            slot,
+            words: entry.words,
+        });
+        self.size = slot
+            .checked_add(entry.words)
+            .expect("a local slot index does not fit in u16");
         self.max = self.max.max(self.size);
         slot
     }
@@ -217,7 +219,12 @@ impl FrameMap {
             .rposition(|entry| entry.occupant == occupant)
         {
             Some(index) => self.leave_at(index),
-            None => crate::trace_compiler!("slots", "leave {key:?}: never entered"),
+            None => match self.deferred.iter().rposition(|entry| entry.key == key) {
+                Some(index) => {
+                    self.deferred.remove(index);
+                }
+                None => crate::trace_compiler!("slots", "leave {key:?}: never entered"),
+            },
         }
     }
 
@@ -240,13 +247,11 @@ impl FrameMap {
         while index > 0 {
             index -= 1;
             let entry = &self.entries[index];
-            if entry.id < mark.id {
-                break;
-            }
-            if matches!(entry.occupant, Occupant::Key(_)) {
+            if entry.id >= mark.id && matches!(entry.occupant, Occupant::Key(_)) {
                 self.leave_at(index);
             }
         }
+        self.deferred.retain(|entry| entry.id < mark.id);
     }
 
     /// The frame size below call-operand holders that already occupy their target parameter slots.
@@ -257,7 +262,7 @@ impl FrameMap {
     pub(super) fn aligned_call_operand_base(&self, parameters: &[(Option<u32>, u16)]) -> u16 {
         let mut base = self.size;
         let mut holders = Vec::new();
-        for entry in self.entries.iter().rev().filter(|entry| entry.active) {
+        for entry in self.entries.iter().rev() {
             match entry.occupant {
                 Occupant::Key(FrameKey::CallOperand(value))
                     if parameters
@@ -314,6 +319,7 @@ impl FrameMap {
     /// Release every entry made since `mark`, in any order, as kotlinc's `Mark.dropTo` does.
     pub(super) fn drop_to(&mut self, mark: Mark) {
         self.entries.retain(|entry| entry.id < mark.id);
+        self.deferred.retain(|entry| entry.id < mark.id);
     }
 
     /// Release everything entered since `mark` AND move the cursor back to it: the next spliced copy
@@ -323,7 +329,6 @@ impl FrameMap {
         self.size = self
             .entries
             .iter()
-            .filter(|entry| entry.active)
             .map(|entry| entry.slot + entry.words)
             .fold(mark.size, u16::max);
     }
@@ -345,7 +350,6 @@ impl FrameMap {
             occupant,
             slot,
             words,
-            active: true,
         });
         self.size += words;
         self.max = self.max.max(self.size);
@@ -354,23 +358,11 @@ impl FrameMap {
 
     /// Remove one entry. kotlinc throws "Descriptor can be left only if it is last" when it is not
     /// the top one; here that is reported and the cursor is kept. An entry left from the top returns
-    /// the cursor to its slot, unless an earlier entry was activated above that slot.
+    /// the cursor to its slot.
     fn leave_at(&mut self, index: usize) {
         let entry = self.entries.remove(index);
-        if !entry.active {
-            return;
-        }
         match self.entries.get(index) {
-            None => {
-                let occupied = self
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.active)
-                    .map(|entry| range_end(entry.slot, entry.words))
-                    .max()
-                    .unwrap_or(0);
-                self.size = entry.slot.max(occupied);
-            }
+            None => self.size = entry.slot,
             Some(above) => crate::trace_compiler!(
                 "slots",
                 "leave {:?} at slot {} is not last: {:?} at slot {} was entered after it and is live ({} above)",
@@ -440,15 +432,30 @@ mod tests {
     }
 
     #[test]
-    fn a_deferred_entry_reclaims_a_freed_slot_under_a_later_local() {
+    fn a_deferred_entry_stays_above_a_later_live_local() {
         let mut frame = FrameMap::default();
         let result = FrameKey::Value(0);
         assert_eq!(frame.enter_deferred(result, Ty::Int), 0);
         assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 0);
         assert_eq!(frame.enter(FrameKey::Value(2), Ty::Long), 1);
         frame.leave(FrameKey::Value(1));
-        assert_eq!(frame.activate_deferred(result), 0);
-        assert_eq!(frame.size(), 3);
+        assert_eq!(frame.activate_deferred(result), 3);
+        assert_eq!(frame.size(), 4);
+    }
+
+    #[test]
+    fn an_activated_outer_deferred_entry_survives_the_inner_scope() {
+        let mut frame = FrameMap::default();
+        let result = FrameKey::Value(0);
+        assert_eq!(frame.enter_deferred(result, Ty::Int), 0);
+        let inner = frame.mark();
+        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 0);
+        assert_eq!(frame.activate_deferred(result), 1);
+
+        frame.leave_block(inner);
+
+        assert_eq!(frame.size(), 2);
+        assert_eq!(frame.enter(FrameKey::Value(2), Ty::Int), 2);
     }
 
     #[test]
