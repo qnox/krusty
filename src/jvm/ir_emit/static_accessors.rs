@@ -809,7 +809,7 @@ fn field_accessor_shape(
     let property = owner.properties.get(property as usize)?;
     let field = owner.fields.get(property.backing_field? as usize)?;
     let internal = owner.fq_name.render();
-    let field_ty = jvm_declared_ty(&field.ty);
+    let field_ty = jvm_value_ty(&field.ty);
     let field_descriptor = type_descriptor(field_ty);
     let name = if write {
         member_property_accessor_name(&property_setter_name(&property.name), false)
@@ -1099,7 +1099,7 @@ impl Accessor<'_> {
             .expect("a bridged member property has a backing field")
             as usize];
         let internal = owner.fq_name.render();
-        let field_ty = jvm_declared_ty(&field.ty);
+        let field_ty = jvm_value_ty(&field.ty);
         let field_descriptor = type_descriptor(field_ty);
         let ty = declared_property_accessor_jvm(ir, property, field);
         let physical = instance_field_jvm_name(ir, owner, field);

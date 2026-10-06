@@ -1072,8 +1072,8 @@ pub struct IrClass {
     /// Explicit `(constructor parameter index, field index)` stores that must run before the superclass
     /// constructor. This is semantic constructor-order metadata: the JVM backend must not infer it from
     /// a synthetic field spelling or assume the target is a leading property field. Language-level inner
-    /// classes, the values a local class or anonymous object captures, and generated state machines
-    /// each require such a store.
+    /// classes, the values a local class or anonymous object captures, generated state machines, and
+    /// the constructor properties of a full value class each require such a store.
     pub pre_super_param_fields: Vec<(u32, u32)>,
     /// `true` when `init_body` already stores the primary-constructor `val`/`var` params (and inner
     /// `this$0`) to their fields — the desugared form. The JVM backend then must NOT auto-store them (it
