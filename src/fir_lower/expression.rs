@@ -621,8 +621,11 @@ impl BodyLowering<'_> {
                         })
                     }
                     FirUnaryOperation::BitwiseNot => {
+                        // `inv` xors with every bit set in the carrier. `ULong` is that `long`
+                        // carrier, the same width `Long.inv` already uses.
+                        let carrier = expression.ty.get().canonical_semantic().non_null();
                         let all_bits = self.ir.add_expr(IrExpr::Const(
-                            if expression.ty.get().non_null() == crate::types::Ty::Long {
+                            if matches!(carrier, crate::types::Ty::Long | crate::types::Ty::ULong) {
                                 IrConst::Long(-1)
                             } else {
                                 IrConst::Int(-1)
