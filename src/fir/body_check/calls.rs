@@ -2254,6 +2254,16 @@ impl BodyFirChecker<'_> {
         selected: &crate::symbol_resolver::ResolvedMember,
         receiver: FirReceiver,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let cause = self.expression_origin(expression)?;
+        let receiver = FirReceiver {
+            value: receiver.value,
+            conversion: self.receiver_conversion(
+                expression,
+                cause,
+                receiver,
+                Some(selected.receiver),
+            )?,
+        };
         let (target, substitutions) = self.member_call_target(expression, selected)?;
         let parameters = self.selected_call_parameters(
             expression,

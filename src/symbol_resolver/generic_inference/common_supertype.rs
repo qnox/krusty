@@ -18,27 +18,14 @@ pub(super) fn common_super_type(source: &dyn SymbolSource, left: Ty, right: Ty) 
 }
 
 pub(super) fn common_super_types(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty {
-    let nullable = bounds.iter().any(|bound| bound.is_nullable());
-    let bounds = bounds
-        .iter()
-        .map(|bound| bound.non_null())
-        .collect::<Vec<_>>();
-    let result = CommonSupertypeSolver::new(source).common(&bounds);
-    if result == Ty::Error {
-        return Ty::Error;
-    }
-    if nullable {
-        Ty::nullable(result.non_null())
-    } else {
-        result
-    }
+    CommonSupertypeSolver::new(source).common(bounds)
 }
 
 struct CommonSupertypeSolver<'a> {
     source: &'a dyn SymbolSource,
-    active: Vec<(bool, Vec<Ty>)>,
+    active: Vec<(bool, bool, Vec<Ty>)>,
     active_classifiers: Vec<(TypeName, usize)>,
-    completed: Vec<(bool, Vec<Ty>, Ty)>,
+    completed: Vec<(bool, bool, Vec<Ty>, Ty)>,
     invalid_classifier_shape: bool,
 }
 
@@ -69,34 +56,56 @@ impl<'a> CommonSupertypeSolver<'a> {
     /// round. Other shared classifiers still compete, and `Any` remains the sound result when no
     /// acyclic candidate exists.
     fn common_at(&mut self, bounds: &[Ty], permit_intersection: bool) -> Option<Ty> {
+        let nullable = bounds.iter().any(|bound| bound.is_nullable());
+        let preserve_nullability = |result: Ty| {
+            if nullable && result != Ty::Error {
+                Ty::nullable(result.non_null())
+            } else {
+                result
+            }
+        };
         let mut key = Vec::with_capacity(bounds.len());
         for bound in bounds.iter().copied().map(Ty::non_null) {
+            // `Nothing` is the bottom type, so it cannot widen a lower-bound join. This is
+            // particularly visible through covariant producers: `emptySet()` contributes
+            // `Set<Nothing>`, which joined with `Set<String>` remains `Set<String>`.
+            if bound == Ty::Nothing {
+                continue;
+            }
             if !key.contains(&bound) {
                 key.push(bound);
             }
         }
         let Some((&first, rest)) = key.split_first() else {
-            return Some(Ty::obj_name(crate::types::wk::any()));
+            return Some(preserve_nullability(Ty::Nothing));
         };
         if rest.iter().all(|bound| *bound == first) {
-            return Some(first);
+            return Some(preserve_nullability(first));
         }
-        if let Some((_, _, result)) = self.completed.iter().find(|(permit, known, _)| {
-            *permit == permit_intersection && same_bound_set(known, &key)
-        }) {
+        if let Some((_, _, _, result)) =
+            self.completed
+                .iter()
+                .find(|(permit, known_nullable, known, _)| {
+                    *permit == permit_intersection
+                        && *known_nullable == nullable
+                        && same_bound_set(known, &key)
+                })
+        {
             return Some(*result);
         }
-        if self
-            .active
-            .iter()
-            .any(|(permit, active)| *permit == permit_intersection && same_bound_set(active, &key))
-        {
+        if self.active.iter().any(|(permit, known_nullable, active)| {
+            *permit == permit_intersection
+                && *known_nullable == nullable
+                && same_bound_set(active, &key)
+        }) {
             return None;
         }
-        self.active.push((permit_intersection, key.clone()));
-        let result = self.common_active(&key, permit_intersection);
+        self.active
+            .push((permit_intersection, nullable, key.clone()));
+        let result = preserve_nullability(self.common_active(&key, permit_intersection));
         self.active.pop();
-        self.completed.push((permit_intersection, key, result));
+        self.completed
+            .push((permit_intersection, nullable, key, result));
         Some(result)
     }
 
@@ -274,7 +283,7 @@ impl<'a> CommonSupertypeSolver<'a> {
             }
             let readable = projected
                 .iter()
-                .map(|argument| argument.projection_read_ty().non_null())
+                .map(|argument| argument.projection_read_ty())
                 .collect::<Vec<_>>();
             let joined = self.common_at(&readable, true)?;
             combined_arguments.push(if variance == TypeVariance::Out {
@@ -540,6 +549,37 @@ mod tests {
                 right,
             ),
             Ty::obj_args("demo/Inv", &[Ty::star_projection(Ty::nullable(any))])
+        );
+    }
+
+    #[test]
+    fn bottom_does_not_widen_a_covariant_argument() {
+        let string = Ty::obj("kotlin/String");
+        let source = GenericSource {
+            variance: TypeVariance::Out,
+        };
+        assert_eq!(
+            common_super_type(
+                &source,
+                Ty::obj_args("demo/Inv", &[Ty::Nothing]),
+                Ty::obj_args("demo/Inv", &[string]),
+            ),
+            Ty::obj_args("demo/Inv", &[string])
+        );
+    }
+
+    #[test]
+    fn a_nested_covariant_join_preserves_nullability() {
+        let source = GenericSource {
+            variance: TypeVariance::Out,
+        };
+        assert_eq!(
+            common_super_type(
+                &source,
+                Ty::obj_args("demo/Inv", &[Ty::Int]),
+                Ty::obj_args("demo/Inv", &[Ty::nullable(Ty::Int)]),
+            ),
+            Ty::obj_args("demo/Inv", &[Ty::nullable(Ty::Int)])
         );
     }
 

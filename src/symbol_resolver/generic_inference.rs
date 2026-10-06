@@ -1290,6 +1290,12 @@ pub(crate) fn merge_inferred_lower_bounds_from_symbols(
     let Some((&first, rest)) = bounds.split_first() else {
         return Ty::Error;
     };
+    // A one-element constraint set is not a common-type problem. In particular, preserve a Java
+    // flexible wrapper verbatim: normalizing `Map<K, V>!` through the structural solver would turn
+    // it into ordinary `Map<K, V>?` and lose the mutable/read-only expectation bridge.
+    if rest.is_empty() {
+        return first;
+    }
     let same_generic_classifier = bounds
         .iter()
         .copied()

@@ -1045,6 +1045,16 @@ impl BodyFirChecker<'_> {
             FirConversionKind::CoerceToUnit
         } else if target_ty.accepts_numeric(actual_ty) {
             FirConversionKind::NumericWidening { to: target }
+        } else if matches!(
+            actual_ty.non_null(),
+            Ty::Intersection(parts) if parts
+                .iter()
+                .any(|part| part.non_null() == target_ty.non_null())
+        ) {
+            // Resolution has selected the declaration on one exact constituent of a semantic
+            // intersection. Preserve the source value and publish the selected dispatch view as
+            // an explicit checked conversion; lowering must not rediscover the member owner.
+            FirConversionKind::SmartCast { to: target }
         } else if target_ty.is_nullable() || (!actual_ty.is_reference() && target_ty.is_reference())
         {
             FirConversionKind::NullabilityWidening { to: target }
