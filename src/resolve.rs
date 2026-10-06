@@ -120,6 +120,7 @@ mod inspection_analysis;
 mod integer_constants;
 mod interface_delegate_calls;
 mod interface_delegation;
+mod intersection_receiver_selection;
 mod invoke_selection;
 mod lambda_call_shapes;
 mod property_read_selection;
@@ -141,6 +142,7 @@ mod named_class_constructors;
 mod operator_calls;
 mod opt_in_usage;
 use operator_calls::{range_operator, ResolvedInRangeComparison};
+mod enhanced_values;
 mod overload_diagnostics;
 mod override_plans;
 mod platform_value_narrowing;
@@ -174,7 +176,7 @@ use source_fragment::SourceFragmentMode;
 mod scope;
 mod selected_argument_commitment;
 use selected_argument_commitment::{
-    indexed_operator_argument_parameters, indexed_operator_argument_slots,
+    indexed_operator_argument_parameters, indexed_operator_argument_slots, SelectedArgumentBinding,
     SelectedArgumentCommitment,
 };
 mod signature_collection;
@@ -9457,6 +9459,11 @@ pub struct TypeInfo {
     /// the checker resolves through imports (`var res: Result<T>? = null`) keeps its (value-)class type
     /// instead of collapsing to the initializer's type. Absent for an inferred (no-annotation) local.
     pub local_decl_types: HashMap<StmtId, Ty>,
+    /// Every checked lambda body's inferred result before coercion to the selected function type's
+    /// return, keyed by the lambda expression. Checked FIR publishes it with the lambda's callable
+    /// so a target specializing the implementation method's signature reads the body's own type,
+    /// not the caller-facing boundary.
+    pub lambda_body_results: HashMap<ExprId, Ty>,
     /// Checker-resolved property declaration types, keyed by the declaration span. Property lowering
     /// consumes this exact type; it must not re-resolve an annotation or replace it with the getter/body
     /// expression type, because that can change an overriding accessor's JVM descriptor.
@@ -9616,6 +9623,8 @@ pub struct TypeInfo {
     /// SEMANTIC narrowing only; which expression shapes carry a runtime guard, and what its failure
     /// says, is lowering's decision (a call result names its callee, a plain value read has no name).
     pub platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
+    /// Calls whose value carries kotlinc's `EnhancedNullability` (see `enhanced_values`).
+    pub enhanced_values: std::collections::HashSet<ExprId>,
     /// The calls each interface delegation's forwarders make on the delegate value, keyed by that
     /// value; see [`interface_delegate_calls`].
     pub interface_delegate_calls: HashMap<ExprId, Box<[crate::fir::ResolvedDelegateMemberCalls]>>,
@@ -9895,8 +9904,15 @@ pub enum ResolvedConstructor {
         primary: bool,
         /// Already-selected implicit values for the constructor's leading context parameters.
         context_args: Vec<ResolvedContextArgument>,
+        /// Declaration-owned parameter shapes before classifier type-argument substitution.
+        /// Value enhancement consumes these with `argument_bindings`; it never reconstructs the
+        /// constructor mapping from source syntax.
+        declaration_params: Vec<Ty>,
         params: Vec<Ty>,
         argument_slots: Vec<usize>,
+        /// Exact written-argument mapping selected by the frontend, including whether an argument
+        /// is one expanded vararg element or the complete vararg array.
+        argument_bindings: Vec<SelectedArgumentBinding>,
         argument_types: Vec<Ty>,
         omitted: Vec<usize>,
         vararg: Option<usize>,
@@ -10172,6 +10188,8 @@ pub struct IteratorProtocolTarget {
     pub next: Box<ResolvedCall>,
     pub iter_ty: Ty,
     pub elem_ty: Ty,
+    /// Where the `iterator()` and `next()` results carry `EnhancedNullability` for this iterable.
+    pub enhancement: for_loop_iteration::ProtocolEnhancement,
 }
 
 /// Complete semantic plan for a syntactic range loop whose `a..b` is a user-defined operator
@@ -13398,7 +13416,10 @@ impl<'a> Checker<'a> {
                 let checked_ty = selected_property.as_mut().and_then(|property| {
                     self.apply_checked_source_property_result(receiver, property)
                 });
-                let ty = checked_ty.unwrap_or(selected.ty);
+                // A captured invariant argument is an out-projection (`Inv<out (X & Y)>`). The
+                // projection is the argument, not the value a read produces: the read is the upper
+                // bound, which is what exposes `X` and `Y` on `sel(Inv(A), Inv(B)).v`.
+                let ty = checked_ty.unwrap_or(selected.ty).projection_read_ty();
                 // Core property selection already incorporates a nearer covariant accessor override.
                 // The inherited declaration still owns the physical accessor/field shape; its erased
                 // return must not overwrite the selected logical property type.
@@ -14696,6 +14717,12 @@ impl<'a> Checker<'a> {
             }
         };
 
+        let selected_receiver = self
+            // A type parameter's lookup receiver is its complete declared bound intersection;
+            // `rt` remains the source value type so the ordinary no-projection case still records
+            // that value unchanged.
+            .selected_intersection_member_receiver(member_receiver, &selected)
+            .unwrap_or(rt);
         let mut member = self
             .resolver()
             .commit_selected_member_function(member_receiver, selected);
@@ -14704,7 +14731,7 @@ impl<'a> Checker<'a> {
         // checked call still dispatches on the source receiver `F`. In particular, Kotlin protected
         // access permits an inherited call through the subclass receiver and rejects the same call
         // through an arbitrary base-typed value.
-        member.receiver = rt;
+        member.receiver = selected_receiver;
         match self.record_selected_member_call(scope, call, args, member) {
             Some(Ty::Error) => MemberSlotCall::Rejected,
             Some(ret) => MemberSlotCall::Resolved(ret),
@@ -15653,8 +15680,9 @@ impl<'a> Checker<'a> {
     /// the type parameters' declared and already-collected upper bounds.
     ///
     /// A symbolic parameter is not automatically applicable. In `Builder<T : Base>.set(T)`, after
-    /// one call contributes `Value <: T`, a later `set(Other())` would merge the lower bounds to
-    /// `Any`. That violates `T : Base`, so the member is inapplicable and the scope tower must be
+    /// one call contributes `Value <: T`, a later `set(Other())` with an `Other` outside `Base`
+    /// joins the lower bounds to their common supertype `Any`. That violates `T : Base`, so the
+    /// member is inapplicable and the scope tower must be
     /// allowed to consider an extension overload. Deferring this check until the outer call is
     /// solved loses the overload decision and reports the violation at the wrong call.
     fn postponed_argument_constraint_is_satisfiable(&self, expected: Ty, actual: Ty) -> bool {
@@ -15699,7 +15727,13 @@ impl<'a> Checker<'a> {
             collect_declared_bounds(actual, &constraints.formals, &mut declared_bounds);
 
             let mut trial = constraints.clone();
-            trial.constrain_assignable(expected, actual, &inferred, &shadowed_formals);
+            trial.constrain_assignable(
+                &self.fed_source(),
+                expected,
+                actual,
+                &inferred,
+                &shadowed_formals,
+            );
             for (formal, &lower) in &trial.lower {
                 if shadowed_formals.contains(formal)
                     || lower == Ty::Error
@@ -16942,11 +16976,13 @@ impl<'a> Checker<'a> {
             (!inferred.is_empty()).then_some(inferred)
         });
         if let Some(inferred) = expected_bindings.as_ref() {
+            let mut frames = std::mem::take(&mut self.postponed_call_constraints);
             for (formal, actual) in inferred {
-                for frame in &mut self.postponed_call_constraints {
-                    frame.constrain_equal(formal, *actual);
+                for frame in &mut frames {
+                    frame.constrain_equal(&self.fed_source(), formal, *actual);
                 }
             }
+            self.postponed_call_constraints = frames;
         }
         let full_params = self
             .applied_member_call_params(
@@ -17247,6 +17283,24 @@ impl<'a> Checker<'a> {
                 .map(|shapes| shapes.iter().copied().map(|shape| (shape, false)).collect()),
             ResolvedCtorDelegationTarget::Super { .. } => None,
         };
+        let argument_names = self.file.call_arg_names.get(&call.0);
+        let argument_bindings = args
+            .iter()
+            .zip(&selected.argument_slots)
+            .enumerate()
+            .map(|(source, (&argument, &parameter))| {
+                let whole_array = selected.vararg == Some(parameter)
+                    && (self.file.is_spread_arg(argument)
+                        || argument_names
+                            .and_then(|names| names.get(source))
+                            .is_some_and(Option::is_some));
+                SelectedArgumentBinding {
+                    argument,
+                    parameter,
+                    vararg_element: selected.vararg == Some(parameter) && !whole_array,
+                }
+            })
+            .collect::<Vec<_>>();
         let inferred = if parameter_shapes
             .as_ref()
             .is_some_and(|shapes| shapes.len() == declared_params.len())
@@ -17257,24 +17311,19 @@ impl<'a> Checker<'a> {
                 // array shape. Present that source-order semantic view to the same classifier
                 // inference engine used by ordinary constructor parameters; the declaration and
                 // provider origin do not otherwise affect inference.
-                let argument_names = self.file.call_arg_names.get(&call.0);
                 let mut source_shapes = Vec::with_capacity(args.len());
                 let mut source_actuals = arg_tys.to_vec();
                 let mut whole_array_varargs = Vec::with_capacity(args.len());
-                for (source, (&argument, &slot)) in
-                    args.iter().zip(&selected.argument_slots).enumerate()
-                {
+                for (source, binding) in argument_bindings.iter().enumerate() {
+                    let argument = binding.argument;
+                    let slot = binding.parameter;
                     let (mut shape, definitely_non_null) = parameter_shapes
                         .as_deref()
                         .and_then(|shapes| shapes.get(slot))
                         .copied()
                         .unwrap_or((selected.argument_types[source], false));
-                    let whole_array = slot == vararg
-                        && (self.file.is_spread_arg(argument)
-                            || argument_names
-                                .and_then(|names| names.get(source))
-                                .is_some_and(Option::is_some));
-                    if slot == vararg && !whole_array {
+                    let whole_array = slot == vararg && !binding.vararg_element;
+                    if binding.vararg_element {
                         shape = shape.array_read_elem().unwrap_or(shape);
                     } else if whole_array
                         && self.file.is_spread_arg(argument)
@@ -17404,8 +17453,15 @@ impl<'a> Checker<'a> {
                 outer: None,
                 primary,
                 context_args: selected.context_args,
+                declaration_params: parameter_shapes
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|(shape, _)| *shape)
+                    .collect(),
                 params,
                 argument_slots: selected.argument_slots,
+                argument_bindings,
                 argument_types: selected.argument_types,
                 omitted: selected.omitted,
                 vararg: selected.vararg,
@@ -18968,6 +19024,13 @@ impl<'a> Checker<'a> {
                 let (mut rt, argument_scope) =
                     self.check_receiver_before_arguments(scope, receiver);
                 let scope = &argument_scope;
+                let inferred_intersection = self.inferred_expression_intersection(receiver);
+                if inferred_intersection.len() > 1 {
+                    // Keep the expression's denotable/physical type in its own slot. Candidate
+                    // collection sees the complete inferred semantic intersection, and the
+                    // selected declaration records any required receiver conversion.
+                    rt = Ty::intersection(&inferred_intersection);
+                }
                 if let Some(projected) = self
                     .flow_intersection_member_receiver(scope, receiver, &name)
                     .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
@@ -21437,7 +21500,7 @@ impl<'a> Checker<'a> {
                                         inferred.lower,
                                         inferred.upper,
                                     );
-                                    postponed_constraints.merge(inferred);
+                                    postponed_constraints.merge(&self.fed_source(), inferred);
                                 }
                                 return checked;
                             }
@@ -21829,7 +21892,7 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                postponed_constraints.merge(inferred);
+                                postponed_constraints.merge(&self.fed_source(), inferred);
                             }
                             return checked;
                         }
@@ -22105,7 +22168,7 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                postponed_constraints.merge(inferred);
+                                postponed_constraints.merge(&self.fed_source(), inferred);
                             }
                             // `expected_function` was specialized with these bindings before the
                             // lambda was checked. The checked lambda therefore already carries the
@@ -24017,14 +24080,17 @@ impl<'a> Checker<'a> {
         // signature may spell a receiver as its first ordinary parameter (`Foo::Inner`), while the
         // target type spells the same value as `Foo.() -> Inner`. Invocation must consume the binding's
         // type, not reopen the initializer and silently undo that adaptation.
-        if let Some(function_type) = declared
+        let flow_identity = if let Some(function_type) = declared
             .filter(|ty| matches!(ty, Ty::Fun(_)))
             .or_else(|| self.callable_reference_types.get(&init).copied())
             .or_else(|| matches!(bound_ty, Ty::Fun(_)).then_some(bound_ty))
         {
-            self.declare_callable_reference(scope, &name, bound_ty, is_var, function_type);
+            self.declare_callable_reference(scope, &name, bound_ty, is_var, function_type)
         } else {
-            self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance);
+            self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance)
+        };
+        if declared.is_none() {
+            self.record_enhanced_local(flow_identity, init);
         }
         if let Some(origin) = safe_call_origin {
             self.attach_safe_call_origin(scope, &name, origin);
@@ -24643,6 +24709,10 @@ impl<'a> Checker<'a> {
             }
         }
         let mut receiver_ty = self.expr(scope, receiver);
+        let inferred_intersection = self.inferred_expression_intersection(receiver);
+        if inferred_intersection.len() > 1 {
+            receiver_ty = Ty::intersection(&inferred_intersection);
+        }
         if let Some(projected) = self
             .flow_intersection_property_receiver(scope, receiver, &name, true)
             .or_else(|| self.type_parameter_member_receiver(scope, receiver_ty, &name))
@@ -25036,7 +25106,8 @@ impl<'a> Checker<'a> {
         {
             let body_scope = scope.child(ScopeKind::Block);
             let scope = &body_scope;
-            self.declare(scope, &name, elem, false);
+            let flow_identity = self.declare(scope, &name, elem, false);
+            self.record_enhanced_loop_variable(flow_identity, iterable);
             self.check_loop_body(scope, body, &label);
         }
     }
@@ -29232,47 +29303,17 @@ fun box(): String {
             .any(|name| internal.matches(name))
             .then(|| {
                 let companion = if internal.matches("test/Factory") {
-                    let member = |second, descriptor: &str| crate::libraries::LibraryMember {
-                        return_value_status: None,
-                        external_identity: None,
-                        associated_classifier: None,
-                        associated_access_owner: None,
-                        external_default_provider: None,
-                        external_property_identity: None,
-                        semantic_role: None,
-                        singleton_dispatch: None,
-                        name: "make".to_string(),
-                        owner: Some(crate::types::type_name("test/Factory")),
-                        physical_name: None,
-                        physical_params: vec![Ty::obj("Config"), second],
-                        physical_parameter_plan: None,
-                        params: vec![Ty::obj("Config"), second],
-                        ret: Ty::String,
-                        physical_ret: Ty::String,
-                        descriptor: descriptor.to_string(),
-                        realization: crate::libraries::MemberRealization::Dispatch,
-                        signature: None,
-                        generic_sig: None,
-                        projected_return_hazard: false,
-                        flags: crate::libraries::LmFlags::default(),
-                        inline: crate::libraries::InlineKind::None,
-                        reified: false,
-                        inline_body_plan: None,
-                        visibility: crate::types::Visibility::Public,
-                        call_sig: CallSig::default(),
-                        context_count: 0,
-                        annotations: Vec::new(),
-                        contract: None,
-                        equality_bound: None,
-                        default_values: Vec::new(),
-                        default_realization: None,
-                        nonvirtual_realization: None,
-                        declared_ret: None,
-                        overridden_results: Box::new([]),
-                        implicit_classifier_callable: None,
-                        plugin_expression: None,
-                        stable_declaration: None,
-                        source_member: None,
+                    let member = |second, descriptor: &str| {
+                        let mut member = crate::libraries::LibraryMember::new(
+                            "make".to_string(),
+                            vec![Ty::obj("Config"), second],
+                            Ty::String,
+                            descriptor.to_string(),
+                        );
+                        member.owner = Some(crate::types::type_name("test/Factory"));
+                        member.physical_parameter_plan = None;
+                        member.call_sig = CallSig::default();
+                        member
                     };
                     let mut companion = vec![
                         member(
@@ -35823,6 +35864,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_library_default_literals: HashMap::new(),
         resolved_whole_array_vararg_args: std::collections::HashSet::new(),
         platform_narrowings: HashMap::new(),
+        enhanced_locals: Default::default(),
         interface_delegate_calls: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
         delegate_getvalue_targets: HashMap::new(),
@@ -35869,6 +35911,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         loop_depth: 0,
         return_allowed: true,
         lambda_returns: LambdaReturnScopes::default(),
+        lambda_body_results: HashMap::new(),
     };
     if resolved_index.is_none() {
         let (annotations, arguments): (Vec<_>, Vec<_>) =
@@ -37203,6 +37246,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             },
         );
     }
+    let enhanced_values = c.enhanced_value_heads();
     let Checker {
         expr_types,
         callable_reference_types,
@@ -37283,6 +37327,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_local_class_declarations,
         checked_local_classifier_identities,
         checked_local_classifier_type_arguments,
+        lambda_body_results,
         ..
     } = c;
     if !capture_discovery && !fragment.publishes_annotation_metadata() {
@@ -37584,6 +37629,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_library_default_literals,
         resolved_whole_array_vararg_args,
         platform_narrowings,
+        enhanced_values,
         interface_delegate_calls,
         synthetic_ext_calls,
         delegate_getvalue_targets,
@@ -37591,6 +37637,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_provide_targets,
         delegate_property_reference_type,
         context_args,
+        lambda_body_results,
     };
     info
 }
@@ -38536,6 +38583,7 @@ struct Checker<'a> {
     resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     /// See [`TypeInfo::platform_narrowings`].
     platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
+    enhanced_locals: enhanced_values::EnhancedLocals,
     /// See [`TypeInfo::interface_delegate_calls`].
     interface_delegate_calls: HashMap<ExprId, Box<[crate::fir::ResolvedDelegateMemberCalls]>>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
@@ -38645,6 +38693,10 @@ struct Checker<'a> {
     /// Resolver-owned return labels, targets, expected/result types, and active lambda nesting for
     /// the body currently being checked.
     lambda_returns: LambdaReturnScopes,
+    /// Every checked lambda body's inferred result before coercion to the selected function type's
+    /// return, keyed by the lambda expression. A rechecked lambda's committed result overwrites a
+    /// probing one. Body state (`take_body_state`) deliberately does not swap this published fact.
+    lambda_body_results: HashMap<ExprId, Ty>,
 }
 
 /// What a local class reads from its enclosing scope, split by whether the reference is modelled.
@@ -41693,7 +41745,19 @@ impl<'a> Checker<'a> {
                             declared = declared.array_read_elem().unwrap_or(declared);
                         }
                         let mut actual = kind.inference_type(&source, declared);
-                        if !whole_array {
+                        // `@Exact` compares the argument's complete semantic type. Replacing an
+                        // already-recorded intersection with a fresh per-argument witness makes two
+                        // occurrences of the same value look like different types and rejects
+                        // `checkTypeEquality(value, value)`. Flow witnesses are only needed for an
+                        // ordinary parameter that may select one constituent during applicability.
+                        if !whole_array
+                            && !candidate
+                                .call_sig
+                                .exact_params
+                                .get(declaration_parameter)
+                                .copied()
+                                .unwrap_or(false)
+                        {
                             if let Some(Ty::TyParam(formal, _)) = signature
                                 .params
                                 .get(declaration_parameter)
@@ -44851,11 +44915,7 @@ impl<'a> Checker<'a> {
             selected.callable.params.len(),
             "a selected callable's declared and selected parameters line up"
         );
-        let declared_params = shape
-            .parameter_indices
-            .iter()
-            .map(|&parameter| declared_signature.params[parameter])
-            .collect::<Vec<_>>();
+        let declared_params = shape.declared_params(&declared_signature.params);
         // Snapshot postponed producer ownership before selected-argument commitment turns those
         // calls into proper concrete values. Selection has already consumed their declaration
         // signatures; commitment finalizes the nested call and must not reopen the outer winner's
@@ -45910,14 +45970,14 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn declare(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty, is_var: bool) {
+    fn declare(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty, is_var: bool) -> u32 {
         self.declare_with_origin(
             scope,
             name,
             ty,
             is_var,
             ValueBindingDeclaration::ordinary(ReceiverFnValueOrigin::Local, ErrorProvenance::None),
-        );
+        )
     }
 
     fn declare_context_parameter(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty) {
@@ -45937,14 +45997,14 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         error_provenance: ErrorProvenance,
-    ) {
+    ) -> u32 {
         self.declare_with_origin(
             scope,
             name,
             ty,
             is_var,
             ValueBindingDeclaration::ordinary(ReceiverFnValueOrigin::Local, error_provenance),
-        );
+        )
     }
 
     fn declare_callable_reference(
@@ -45954,7 +46014,7 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         function_type: Ty,
-    ) {
+    ) -> u32 {
         let lexical_capture_identity = Some(self.allocate_lexical_capture_identity());
         let flow_identity = self.allocate_flow_identity();
         scope.rebind(
@@ -45976,6 +46036,7 @@ impl<'a> Checker<'a> {
                 safe_call_origin: None,
             }),
         );
+        flow_identity
     }
 
     fn declare_dispatch_property(
@@ -46494,7 +46555,7 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         declaration: ValueBindingDeclaration,
-    ) {
+    ) -> u32 {
         let ValueBindingDeclaration {
             origin,
             error_provenance,
@@ -46533,6 +46594,7 @@ impl<'a> Checker<'a> {
                 safe_call_origin: None,
             }),
         );
+        flow_identity
     }
 
     fn allocate_flow_identity(&mut self) -> u32 {
@@ -50172,208 +50234,6 @@ impl<'a> Checker<'a> {
     /// Record a property-path narrowing in the scope that proved it.
     fn record_path_narrowing(&mut self, scope: &CheckerScope<'_>, path: NarrowPath, ty: Ty) {
         scope.narrow_path(path, ty);
-    }
-
-    /// Project a flow intersection onto the constituent that owns the member being used. Candidate
-    /// collection and overload selection remain the resolver's job; this operation only chooses the
-    /// receiver view exposed by the proven intersection. When two bounds contribute the same
-    /// parameter shape, Kotlin's synthetic intersection override has the covariant result, so the
-    /// bound with the uniquely most-specific result is the correct projection regardless of test
-    /// order (`A.foo(): Any?`, `B.foo(): String`).
-    fn flow_intersection_member_receiver(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: ExprId,
-        name: &str,
-    ) -> Option<Ty> {
-        let path = self.expr_access_path(receiver)?;
-        let bounds = self.lookup_intersection_narrowing(scope, &path);
-        self.intersection_member_receiver(&bounds, name)
-    }
-
-    /// Project a flow intersection onto the constituent that supplies the selected property facet.
-    /// A write requires a setter on that constituent; a read accepts the ordinary getter facet.
-    fn flow_intersection_property_receiver(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: ExprId,
-        name: &str,
-        write: bool,
-    ) -> Option<Ty> {
-        let path = self.expr_access_path(receiver)?;
-        let bounds = self.lookup_intersection_narrowing(scope, &path);
-        self.intersection_property_receiver(&bounds, name, write)
-    }
-
-    /// Select a property fake override inherited through several direct semantic supertypes. The
-    /// nominal receiver remains the runtime value; checked FIR carries the chosen supertype view.
-    fn nominal_intersection_property_receiver(
-        &self,
-        receiver: Ty,
-        name: &str,
-        write: bool,
-    ) -> Option<Ty> {
-        let source = self.fed_source();
-        // A nominal declaration is already Kotlin's selected override. Projecting it onto one of
-        // its direct supertypes discards a covariant result (`B.result: String` would become
-        // `A.result: Any`). Only a classifier with no usable declaration of its own needs the
-        // synthetic intersection/fake-override selection below.
-        let has_declared_facet =
-            crate::symbol_resolver::declared_member_callables(&source, receiver, name)
-                .properties()
-                .iter()
-                .any(|property| {
-                    property.kind == crate::libraries::PropKind::Member
-                        && property.receiver_rank == 0
-                        && (!write || property.setter.is_some())
-                });
-        if has_declared_facet {
-            return None;
-        }
-        let bounds = crate::symbol_resolver::direct_supertypes(&source, receiver);
-        // A fake override may combine a getter inherited from one direct supertype with the sole
-        // compatible setter inherited from another (`A.val x` plus `B.var x`). For a write, the
-        // setter-owning constituent is the semantic receiver view even though it is the only
-        // writable contributor. Reads retain the multi-contributor rule below so an ordinary
-        // single-parent inherited property keeps its nominal receiver and covariant refinements.
-        if write {
-            return self.intersection_property_receiver(&bounds, name, true);
-        }
-        // A single property-bearing parent is ordinary inheritance, not an intersection. Keep the
-        // nominal receiver so `select_member_property` can use nearer accessor overrides to refine
-        // a provider-derived property (for example a Kotlin `getEntries(): Array<Derived>`
-        // overriding Java's synthetic `entries: Array<Base>`). Projecting directly to the Java
-        // parent erases that covariant override before selection sees it.
-        let resolver = self.resolver();
-        let contributors = bounds
-            .iter()
-            .filter(|&&bound| resolver.select_member_property(bound, name).is_some())
-            .count();
-        if contributors < 2 {
-            return None;
-        }
-        self.intersection_property_receiver(&bounds, name, write)
-    }
-
-    /// Project a type-parameter receiver onto the constituent of its declared intersection that
-    /// owns the selected member. The expression keeps no synthetic intersection type: checked FIR
-    /// sees the concrete receiver view whose dispatch target was selected, including the cast that
-    /// an erased first bound may require for a member declared only on a later bound.
-    fn type_parameter_member_receiver(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: Ty,
-        name: &str,
-    ) -> Option<Ty> {
-        let primary = receiver.non_null().ty_param_bound()?;
-        let mut bounds = vec![primary];
-        bounds.extend(self.semantic_tparam_extra_bounds(scope, receiver));
-        self.intersection_member_receiver(&bounds, name)
-    }
-
-    fn intersection_member_receiver(&self, bounds: &[Ty], name: &str) -> Option<Ty> {
-        if bounds.len() < 2 {
-            return None;
-        }
-        let member_families = bounds
-            .iter()
-            .copied()
-            .map(|bound| {
-                let members = self
-                    .stable_receiver_callables(bound, name)
-                    .functions()
-                    .iter()
-                    .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                (bound, members)
-            })
-            .filter(|(_, members)| !members.is_empty())
-            .collect::<Vec<_>>();
-        if let [(bound, _)] = member_families.as_slice() {
-            return Some(*bound);
-        }
-        let single = member_families
-            .iter()
-            .filter_map(|(bound, members)| match members.as_slice() {
-                [member] => Some((*bound, member)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if single.len() == member_families.len() && single.len() > 1 {
-            let same_parameters = single.windows(2).all(|pair| {
-                pair[0].1.semantic_params() == pair[1].1.semantic_params()
-                    && pair[0].1.context_count == pair[1].1.context_count
-            });
-            if same_parameters {
-                let context = crate::assignable::TyCtx::new();
-                let winners = single
-                    .iter()
-                    .filter(|(_, candidate)| {
-                        single.iter().all(|(_, other)| {
-                            crate::assignable::is_subtype(
-                                &context,
-                                self,
-                                candidate.callable.ret,
-                                other.callable.ret,
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                if let [winner] = winners.as_slice() {
-                    return Some(winner.0);
-                }
-            }
-        }
-
-        self.intersection_property_receiver(bounds, name, false)
-    }
-
-    /// Select the concrete receiver view for a synthetic intersection property. Equivalent fake
-    /// overrides may occur on several incomparable bounds; after covariant-result filtering they
-    /// denote the same property contract, so stable bound order breaks that semantic tie.
-    fn intersection_property_receiver(&self, bounds: &[Ty], name: &str, write: bool) -> Option<Ty> {
-        if bounds.len() < 2 {
-            return None;
-        }
-        let resolver = self.resolver();
-        let properties = bounds
-            .iter()
-            .copied()
-            .filter_map(|bound| {
-                let property = resolver.select_member_property(bound, name)?;
-                if write
-                    && !property
-                        .property
-                        .as_ref()
-                        .is_some_and(|property| property.setter.is_some())
-                {
-                    return None;
-                }
-                Some((bound, property.ty))
-            })
-            .collect::<Vec<_>>();
-        if let [(bound, _)] = properties.as_slice() {
-            return Some(*bound);
-        }
-        let context = crate::assignable::TyCtx::new();
-        let winners = properties
-            .iter()
-            .filter(|(_, candidate)| {
-                properties.iter().all(|(_, other)| {
-                    crate::assignable::is_subtype(&context, self, *candidate, *other)
-                })
-            })
-            .collect::<Vec<_>>();
-        match winners.as_slice() {
-            [winner] => Some(winner.0),
-            [] => None,
-            _ if winners.windows(2).all(|pair| pair[0].1 == pair[1].1) => winners
-                .into_iter()
-                .map(|winner| winner.0)
-                .min_by_key(|bound| bound.source_name()),
-            _ => None,
-        }
     }
 
     /// The flow-narrowed type of a stable property READ (`a.b`, `a?.b`, `this.b`): when an
@@ -55407,8 +55267,10 @@ impl<'a> Checker<'a> {
                         outer: None,
                         primary,
                         context_args: selected.context_args,
+                        declaration_params: selected.target.params().to_vec(),
                         params: selected.target.params().to_vec(),
                         argument_slots: selected.argument_slots,
+                        argument_bindings: Vec::new(),
                         argument_types: selected.argument_types,
                         omitted: selected.omitted,
                         vararg: selected.vararg,
@@ -57426,7 +57288,11 @@ impl<'a> Checker<'a> {
             ) {
                 continue;
             }
-            self.expect_call_arg(scope, substituted, argument, actual);
+            // kotlinc reads an argument's implicit not-null cast from the unsubstituted parameter.
+            let declared = parameter_shapes
+                .get(index)
+                .map_or(*expected, |&(shape, _)| shape);
+            self.expect_call_arg_labeled(scope, substituted, declared, argument, actual, None);
         }
         for (index, binding) in bindings.iter_mut().enumerate() {
             if *binding == Ty::Null {
@@ -57670,8 +57536,15 @@ impl<'a> Checker<'a> {
             actual,
         );
         let mut shadowed_formals = std::collections::HashSet::new();
-        for constraints in self.postponed_call_constraints.iter_mut().rev() {
-            constraints.constrain_assignable(expected, actual, &inferred, &shadowed_formals);
+        let mut frames = std::mem::take(&mut self.postponed_call_constraints);
+        for constraints in frames.iter_mut().rev() {
+            constraints.constrain_assignable(
+                &self.fed_source(),
+                expected,
+                actual,
+                &inferred,
+                &shadowed_formals,
+            );
             crate::trace_compiler!(
                 "resolve",
                 "postponed constraint expected={expected:?} actual={actual:?} lower={:?} upper={:?}",
@@ -57680,6 +57553,7 @@ impl<'a> Checker<'a> {
             );
             shadowed_formals.extend(constraints.formals.iter().cloned());
         }
+        self.postponed_call_constraints = frames;
         if postponed_symbolic_constraint || postponed_pending {
             return;
         }
@@ -58587,8 +58461,22 @@ impl<'a> Checker<'a> {
                     .unwrap_or(nominal)
             }
         } else {
-            nominal
+            self.intersection_constituent_for_expected(nominal, expected)
+                .unwrap_or(nominal)
         }
+    }
+
+    /// The constituent of a denotable intersection that is exactly the expected type. Delegation
+    /// and other value boundaries record that constituent rather than the whole intersection.
+    fn intersection_constituent_for_expected(&self, nominal: Ty, expected: Ty) -> Option<Ty> {
+        let Ty::Intersection(parts) = nominal.non_null() else {
+            return None;
+        };
+        let expected = expected.non_null();
+        parts
+            .iter()
+            .copied()
+            .find(|part| part.non_null() == expected)
     }
 
     /// Commit the contextual numeric conversion chosen for a value boundary. Candidate probing uses
@@ -58603,10 +58491,13 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let contextual = self.expression_type_for_expected(scope, expression, nominal, expected);
         let selected_intersection_projection = contextual != nominal
-            && self
+            && (self
                 .expr_access_path(expression)
                 .map(|path| self.lookup_intersection_narrowing(scope, &path))
-                .is_some_and(|constituents| constituents.contains(&contextual));
+                .is_some_and(|constituents| constituents.contains(&contextual))
+                || self
+                    .intersection_constituent_for_expected(nominal, contextual)
+                    .is_some());
         if selected_intersection_projection {
             // This is a committed value boundary, not candidate probing. Publish the exact
             // constituent selected from the proven non-denotable intersection so checked FIR can
@@ -62579,6 +62470,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 crate::trace_compiler!("resolve", "name read {n} origin={:?}", l.origin);
+                self.record_enhanced_local_read(e, &l);
                 if let Some(function) = l.callable_reference_type {
                     // A value bound to a callable reference keeps the reference's exact function
                     // shape beside its nominal reflection type; invoking the read consumes it.
@@ -63706,6 +63598,10 @@ impl<'a> Checker<'a> {
                     self.silent_error_exprs.insert(e);
                 }
                 return self.set(e, Ty::Error);
+            }
+            let inferred_intersection = self.inferred_expression_intersection(receiver);
+            if inferred_intersection.len() > 1 {
+                rt = Ty::intersection(&inferred_intersection);
             }
             if let Some(projected) = self
                 .flow_intersection_property_receiver(scope, receiver, &name, false)
@@ -66550,6 +66446,7 @@ impl<'a> Checker<'a> {
             selected.context_count,
             argument_names,
         )?;
+        let declared_params = shape.declared_params(&selected.semantic_params());
         if !self.expect_selected_call_args(
             scope,
             CallArgs {
@@ -66558,7 +66455,7 @@ impl<'a> Checker<'a> {
                 arg_tys,
             },
             &shape.params,
-            &shape.params,
+            &declared_params,
             &shape.call_sig,
             None,
         ) {
@@ -68917,6 +68814,11 @@ impl<'a> Checker<'a> {
         ) else {
             return false;
         };
+        let declared = member
+            .generic_sig
+            .as_ref()
+            .map(|signature| &signature.params[..]);
+        let declared = declared.filter(|declared| declared.len() == member.params.len());
         self.expect_selected_call_args(
             scope,
             CallArgs {
@@ -68925,7 +68827,7 @@ impl<'a> Checker<'a> {
                 arg_tys: &arg_tys,
             },
             &contextual.params,
-            &contextual.params,
+            &contextual.declared_params(declared.unwrap_or(&member.params)),
             &contextual.call_sig,
             None,
         )

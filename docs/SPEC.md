@@ -2570,12 +2570,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java.lang.annotation.Annotation`) is not a Java declaration in Kotlin's scope — kotlinc's
   `JvmMappedScope` shows the builtin it overrides — so it takes that declaration's rigid result without
   the attribute and is not guarded (`ClassCastException().toString()`). A `@NotNull` Java result is
-  enhanced on its own. Not yet modeled: the attribute travelling through generic inference
-  (`id(sb.toString())`, `sb.toString().also { }`) and through an inferred lambda result, the
-  message-less `checkNotNull` kotlinc puts on an inferred local initialized by an enhanced conditional,
-  type-argument enhancement outside a `for` loop, enhanced Java PROPERTY reads (`map.keys`), and
-  `NULLABLE` enhancement (`HashMap.get` stays `V!`).
+  enhanced on its own. Not yet modeled: the attribute travelling through an inferred lambda result
+  (`sb.toString().also { }`), the message-less `checkNotNull` kotlinc puts on an inferred local
+  initialized by an enhanced conditional, rigid type arguments of an enhanced FUNCTION result (only
+  property reads are made rigid), and `NULLABLE` enhancement (`HashMap.get` stays `V!`).
   Tests: `tests/enhanced_result_null_check_e2e.rs` (per-method differential vs kotlinc and a run).
+- **`EnhancedNullability` travels with the type argument it marks.** `computeIndexedQualifiers`
+  enhances every flexible position of a Java result that an overridden declaration fixes not-null,
+  type arguments included: `HashMap.entrySet()`, read as `entries`, is a rigid set of rigid, marked
+  entries of marked `K` and `V`, and a Java `E` use overriding Kotlin's `E` is marked. `ConeSubstitutor`
+  combines a type argument's attributes into the parameter it replaces, so the mark survives
+  substitution: `entries.iterator().next()`, `entries.firstOf()` (`fun <T> Iterable<T>.firstOf(): T`),
+  an entry's `key`, a `for` variable over `map.keys`, and `Box(map.values.firstOf()).get()` are marked
+  values `insertSpecialCast` guards like any enhanced result, conditional branches included. A type
+  variable fixed from several constraints is marked only where all of them are (`pick(map.keys, set)` is
+  not; `pick(map.keys, map.keys)` is). A local or function whose type is inferred keeps the marks of its
+  type ARGUMENTS but not its head (`val entries = map.entries; entries.firstOf()` checks `firstOf(...)`);
+  a declared type has no marks. A JDK member of a mapped builtin classifier is the builtin's
+  declaration and carries no mark (`charSequence.toString()`, `error.toString()`). The guard reads the UNSUBSTITUTED expected type, so a marked value passed
+  to a parameter of type `T` (a generic constructor's `Box(value: T)`, an extension's `other: B`) is not
+  guarded. krusty carries the marks beside the semantic type as a `TypeEnhancement` layout
+  (`src/libraries/enhanced_nullability.rs`) recorded on the selected declaration, and derives a value's
+  marks from selected call identities and their committed source-argument mappings
+  (`src/resolve/enhanced_values.rs`), including reordered named arguments, omitted defaults, and
+  expanded or whole-array varargs. Not yet modeled: marks through a
+  lambda's inferred result and through an expected type that itself carries the attribute.
+  Tests: `tests/enhanced_type_argument_null_check_e2e.rs` (per-method differential vs kotlinc and a
+  run).
 - **A Java method overriding a builtin property is that property, even under another JVM name.**
   kotlinc's Java scope shows `java.util.HashMap.keySet()` as `Map.keys` and `entrySet()` as
   `Map.entries` (the special realizations of `BuiltinSpecialProperties`), exactly as it shows
@@ -2583,10 +2604,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   realizing method, read through that method, so a read of `hashMap.keys` is the Java result, not the
   builtin declaration, and is guarded with the getter's name (`<get-keys>(...)`) at a declared result,
   an extension receiver (`hashMap.entries.first()`), and an interface-delegation forwarder
-  (`Map<K, V> by HashMap()`). krusty
-  types the read flexible; kotlinc enhances it to the overridden property's not-null type, so an
-  inferred `val keys = hashMap.keys` and the enhanced type arguments (`entries.iterator().next()`)
-  are still unguarded (the enhanced PROPERTY read gap above).
+  (`Map<K, V> by HashMap()`). Like kotlinc, krusty enhances the read to the overridden property's
+  rigid type with marked type arguments (see the `EnhancedNullability` entry above), so an inferred
+  `val keys = hashMap.keys` guards `<get-keys>(...)` at its initializer.
   Tests: `tests/renamed_builtin_property_null_check_e2e.rs` (per-method differential vs kotlinc and a
   run).
 - `try { … } catch (e: E) { … }` (no `finally`): the body value (and each catch value) is stored into a
@@ -2606,12 +2626,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/try_catch_expr_nullable_merge_e2e.rs`, `tests/try_catch_expr_generic_merge_e2e.rs`). A `finally` block is inlined (like kotlinc)
   at each exit: the normal fall-through, the end of each catch, and a synthetic catch-all (any
   throwable) covering the body + catch handlers that runs the `finally` then re-throws. A `try` whose
-  body/catch performs a `return`/`break`/`continue` out of the `try` (which must run `finally` first) is
-  skipped. **Nested `try`/`catch` is supported** (a `try` in another `try`'s body or catch — verified
-  end-to-end), **except when a `finally` is involved in the nesting**: a `finally` is inlined at every
-  exit of its protected region, so when it sits inside (or wraps) another `try` the duplicated code lands
-  in overlapping exception ranges and trips a verify error — so a nesting that involves any `finally` is
-  rejected (skip), never miscompiled (`NestedTry` in `tests/feature_box_e2e.rs`).
+  body/catch performs a `return`/`break`/`continue` out of the `try` runs the required finalizer copies
+  before the transfer. Nested `try`/`catch`/`finally` is supported. A transferred finalizer copy lies
+  outside every protected region the transfer left, while an enclosing region still guards it; this
+  prevents a throw from the copy from re-entering an inner catch or running the same finalizer again
+  (`tests/finally_gap_ranges_e2e.rs`). A `finally` may itself contain a `try`/`catch`, and nested
+  finalizers run innermost first (`tests/nested_try_finally_e2e.rs`,
+  `tests/try_debug_lines_e2e.rs`).
+- **An `inline` function brackets each `finally` copy with `InlineMarker.finallyStart` and
+  `finallyEnd`.** The argument is how many `finally` bodies are open, counting the copy being
+  emitted, so the first is `1` and a `finally` inside a `finally` is `2`. The calls stay in the
+  inline function's own method. A function that is not `inline` emits the same copies without them.
+  Test: `tests/inline_finally_marker_e2e.rs`.
 - `as T` to a non-null reference type throws on `null`: `Intrinsics.checkNotNull(value, "null cannot be
   cast to non-null type <kotlin-name>")` then `checkcast` — matching kotlinc. The same null-check
   applies to a DEFINITELY-NON-NULL type-parameter target `as (T & Any)` — even on an unbounded
@@ -2801,6 +2827,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   does not change the constraint; the box covers it. Tests:
   `tests/delegate_initializer_constraint_e2e.rs`; box:
   `inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt`.
+- **A builder type variable's lower bounds join to their nearest common supertype.**
+  `Shape.Group(buildMap { put("a", Dot(1)); put("b", Line("x")); if (flag) put("c", extra) })`,
+  with `class Group(val entries: Map<String, Shape>)` and `Dot`, `Line`, `Group` subclasses of the
+  sealed `Shape`, compiles under kotlinc: PCLA collects `Dot <: V`, `Line <: V`, `Group <: V` from the
+  `put` calls and fixes `V` to their common supertype `Shape`, which satisfies the expected
+  `Map<String, Shape>`. krusty's postponed-call frame (`PostponedCallConstraints`,
+  `src/resolve/postponed_constraints.rs`) joined two different lower bounds with the
+  hierarchy-blind `merge_inferred_ty`, which erases any pair of distinct classes to `Any`, and then
+  reported `argument type mismatch: actual type is 'Map<String, Any>', but 'Map<String, Shape>'
+  was expected.` Every lower-bound join in that frame — an argument constraint, an expected-result
+  binding, and a finished lambda's constraints merged into the call — now goes through the
+  symbol-aware `merge_inferred_ty_from_symbols`, which returns the nearest shared supertype from
+  the class hierarchy and still falls back to `Any` when the bounds share none. An unqualified
+  constructor call (`Wrapper(buildMap { … })`) already took `V` from the parameter type; the
+  qualified nested-class constructor `Shape.Group(…)` solved the builder from its lower bounds
+  alone, which is where the erased join surfaced. The same holds for a repository-owned
+  `fun <E> collect(block: Collector<E>.() -> Unit): List<E>`, including an inferred enclosing
+  return type. The solver retains all lower inputs and computes their common type together, so
+  reversing three sibling arguments cannot change the inferred signature. Byte gap: for the
+  qualified call kotlinc emits `checkcast Shape` after each discarded `put` result (the solved
+  `V?`), krusty does not; the test compares diagnostics and the run, not the facade's code. Test:
+  `tests/builder_sibling_lower_bounds_e2e.rs`.
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
   (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
   `<T> assertDoesNotThrow(ThrowingSupplier<T>)` (JUnit, imported as a static) both take a `{ … }`
@@ -3954,11 +4002,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   operation/conversion choice (kotlinc hardcodes these intrinsic mappings, so krusty mirrors them). Literals
   `1u`/`0xFFuL`; `+`/`-`/`*`/`==` use the signed two's-complement opcodes; `/`/`%`/`<`/`>` use
   `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for `ULong`); `toString`/templates use
-  `Integer.toUnsignedString`; `UInt.toLong()` zero-extends via `Integer.toUnsignedLong` (not the
+  `Integer.toUnsignedString`. Infix `and`/`or`/`xor` of the same `UInt` or `ULong`, and infix `shl`/`shr`
+  with an `Int` count, are the carrier opcode (`iand`/`ior`/`ixor`/`ishl`, and `iushr`/`lushr` for `shr`)
+  followed by `constructor-impl`. `inv()` is `xor` with all bits set, then `constructor-impl`. A
+  mixed-width overload stays an ordinary call. `UInt.toLong()` zero-extends via `Integer.toUnsignedLong` (not the
   sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into a reference context uses the
   inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and `unbox-impl` on read, `is UInt` →
   `instanceof kotlin/UInt`) — never `Integer`, so identity and large values are preserved.
-  `tests/unsigned_e2e.rs`, `tests/feature_coverage_i_e2e.rs`.
+  `tests/unsigned_e2e.rs`, `tests/unsigned_bitwise_e2e.rs`, `tests/feature_coverage_i_e2e.rs`.
   With `+ImplicitSignedToUnsignedIntegerConversion`, a parameter marked
   `@kotlin.internal.ImplicitIntegerCoercion` also accepts a signed integer literal or another
   `@ImplicitIntegerCoercion` constant and converts that value to the unsigned carrier. `Int` to
@@ -5774,6 +5825,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `InnerClasses` remain the separately owned enclosure-realization contract.
   Frontend tests assert the exact declaration-to-provenance mapping. End-to-end JVM tests assert the
   complete emitted class set against kotlinc rather than inspecting parser-generated names.
+- **A callable reference passed to an inline function parameter is inlined as its invocation.**
+  The adapter is a non-suspend function whose body returns one value. Its leading parameters are
+  the reference's captures followed by its bound receiver, and the remaining parameters are the
+  invocation; the referenced declaration's kind is not part of that contract. `values.map(::Holder)`,
+  `values.map(::makeHolder)`, `applyEach(name, ::makeHolder)`, and `applyEach(name, box::label)`
+  place that returned call at each invoke and emit neither the reference class nor the adapter.
+  The inline marker is named after the class the reference would have been
+  (`$i$a$-map-…$names$1`, `$i$a$-applyEach-…$unbound$1`), and each invocation parameter local is
+  `p0`, `p1`, ….   The spliced call keeps the reference expression's source line, so the
+  frame-closing `nop` returns to the inlined call. Classpath splices such as `let` and `reduce`
+  place that same recorded template. A safe-call receiver duplicated onto the stack stays the
+  caller's value: the spliced body reads its own parameters, then the selector consumes the
+  receiver. `value?.let(::id)` and `value?.let(""::extId)` therefore return that value. A
+  reference whose function type returns `Unit` keeps the invocation as an effect of that
+  returned value (`listOf(...).forEach(b::addFoo)` still calls `addFoo`). A reference whose
+  receiver contains another reference (`create2(create("D")::test)::test`) keeps its own class
+  name for that marker. The receiver and captures of a spliced reference run at that argument,
+  before the next one (`create("C")::test` runs `create` before a later `create("F")`). A
+  copy the inlined body evaluates, such as an object that captures the reference and invokes
+  it, stays a carrier. A reference stored in a variable stays a carrier, including beside
+  another spliced use. A bound reference whose adapter is not that single return stays a
+  carrier. A reified extension reference passed to `let` places the recorded call. Test:
+  `tests/inline_constructor_reference_e2e.rs`.
 - **A `fun interface` constructor reference is a `FunInterfaceConstructorReference`.** `::Action`
   for `fun interface Action` is not a lambda and not a `FunctionReferenceImpl`. The carrier extends
   `kotlin.jvm.internal.FunInterfaceConstructorReference` and its constructor passes `Action.class`.
@@ -9787,9 +9861,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `fir_lower::inlining::escaping_reified_object` (the call-site substitution) and
   `tests/reified_object_type_of_e2e.rs` (those three results against kotlinc).
   Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a
-  reified parameter inside a lambda class regenerated per call site, a reified argument inferred as
-  an intersection type, and a use-site projection written in a typealias
-  (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
+  reified parameter inside a lambda class regenerated per call site, and a use-site projection
+  written in a typealias (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
+- **An invariant instantiation joins at a captured out-projection of the arguments' common supertype.**
+  `sel(Inv(A), Inv(B))`, with `A : X, Y` and `B : X, Y`, has type `Inv<out (X & Y)>` rather than a
+  raw `Inv` or `Any`. Reading `v` produces that captured upper bound, so the value has the members
+  of both `X` and `Y` and not a member declared on only one argument. A call on that intersection
+  records the constituent that declares the member (`x()` sees `X`, `y()` sees `Y`). A reified
+  operation does not reify the intersection: the frontend records its single common supertype on
+  the substitution (`Any` when the components share none, that shared classifier when they do,
+  and the class itself when the captured bound is one class), and `typeOf` encodes that recorded
+  classifier. Corpus: `reflection/typeOf/intersectionType.kt`
+  (`-ProhibitIntersectionReifiedTypeParameter`).
+  Test: `tests/intersection_reified_type_of_e2e.rs`.
 - **A Java member's flexible return keeps the caller's type arguments.** A Java generic class
   applied to the enclosing declaration's own type parameters (`Shelf<X, Y>` inside `fun <X, Y>`,
   or `LinkedHashMap(map)` over a `Map<K, V>`, which infers `LinkedHashMap<K, V>` from the
@@ -10145,6 +10229,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   never an `invokedynamic` that cannot link. Tests: `tests/value_class_lambda_class_e2e.rs` (each class byte for byte
   against kotlinc; the whole source at run time; the exact error for the unrealized shape) and
   `tests/inline_value_class_lambda_e2e.rs`.
+- **A lambda with a `Nothing`/`Nothing?` type the factory cannot adapt is the same class, with a raw
+  supertype.** kotlinc's `computeParameterTypeAdaptationConstraint` also returns CONFLICT when the
+  adaptee type `isNothing() || isNullableNothing()`: a parameter typed `Nothing`/`Nothing?` by the
+  selected function type, or the specialized invoke's RESULT typed by the lambda body's own inferred
+  type — `private val ALWAYS_NULL: (Any?) -> Any? = { null }` selects `(Any?) -> Any?` yet the body
+  infers `Nothing?`, which maps to `Void` and has no adaptee. The lambda then compiles to a
+  captureless singleton (`<Facade>$ALWAYS_NULL$1` with `INSTANCE`, a package-private constructor, the
+  specialized `invoke(Object)Void` and the erased `invoke(Object)Object` bridge), and the facade's
+  field initializer reads `INSTANCE` with a `checkcast Function1` instead of invoking a bootstrap.
+  Whether the class implements the RAW `FunctionN` follows kotlinc's
+  `hasNothingInNonContravariantPosition`, not the conflict itself: a `Nothing?` parameter or a
+  `Nothing`/`Nothing?` inferred result drops the generic `Signature`, while a non-null `Nothing`
+  parameter (an `in` position) keeps `FunctionN<*…>` with a star argument, matching
+  `processUnboundedWildcard`. A lambda class forced by another hazard still follows this rule: at
+  language level 2.4, a selected function result of `Nothing` leaves its `FunctionN` supertype raw.
+  The inferred-result factory conflict itself applies to language levels before 2.4. From 2.4 onward,
+  `ResolveTopLevelLambdasAsSyntheticCallArgument` types the implementation by the expected
+  function result and keeps these lambdas on indy. krusty's checker records every lambda body's inferred result before
+  coercion to the selected function type's return (`TypeInfo::lambda_body_results` → FIR
+  `inferred_result_type` → `IrFile::lambda_inferred_results`); the JVM realization uses it only for
+  this conflict when the finalized public language version requires it, pinning the invoke's result
+  to `Void`/`Void`-nullable and leaving every other lambda on its established typing. The comparison
+  harness sends the same `-language-version`/`-api-version` pair to kotlinc and krusty; the normal
+  language setting also derives the metadata stamp without an internal override. Tests:
+  `tests/indy_lambda_fallback_parity_e2e.rs` (2.2 lambda classes and facade byte for byte, default
+  2.4 facade byte for byte with no generated lambda class, and the source at run time).
 - **Which constructor slots hide a constructor behind `DefaultConstructorMarker`.** kotlinc decides
   it from the slots a constructor has when it lowers value classes: declared parameters, an inner
   class's outer instance (`Z.Inner(y)` of a value class `Z` is `Z$Inner(int, int, DCM)`), and a

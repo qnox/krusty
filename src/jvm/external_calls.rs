@@ -1,7 +1,7 @@
 use super::classpath::{Classpath, ExternalCallableKind};
 use crate::fir::ExternalCallableId;
 use crate::ir::{Callee, IrCheckedOperation, IrExpr, IrFile};
-use crate::types::InlineParameterModifier;
+use crate::types::{InlineParameterModifier, Ty};
 
 use super::default_call_operands::{DefaultCallOperand, DefaultCallOperands};
 
@@ -412,6 +412,10 @@ pub(super) fn realize(
                     .get(&expression)
                     .copied()
                     .ok_or(target)?;
+                // The selected declaration owns the intrinsic's result. A callable-reference
+                // adapter may expose its erased carrier at this call site, but that must not erase
+                // the operation's semantic value-class identity.
+                let result = callable.ret;
                 let operation = super::builtin_member_operations::operation(
                     ir,
                     intrinsic,
@@ -420,12 +424,15 @@ pub(super) fn realize(
                         receiver_ty,
                         arguments: &arguments,
                         parameters: &semantic_params,
-                        result: semantic_ret,
+                        result,
                     },
                 )
                 .ok_or(target)?;
                 ir.ext_call_source_receiver.remove(&expression);
                 operation.commit(ir, expression);
+                if matches!(result.canonical_semantic().non_null(), Ty::UInt | Ty::ULong) {
+                    ir.logical_types.insert(expression, result);
+                }
                 continue;
             }
         }
@@ -1342,10 +1349,14 @@ fn publish_inline_substitutions(
             if declaration != target {
                 return None;
             }
-            signature
-                .formals
-                .get(ordinal as usize)
-                .map(|name| (name.clone(), substitution.value, substitution.reified))
+            signature.formals.get(ordinal as usize).map(|name| {
+                (
+                    name.clone(),
+                    substitution.value,
+                    substitution.reified_runtime,
+                    substitution.reified,
+                )
+            })
         })
         .collect::<Vec<_>>();
     if !bindings.is_empty() {
@@ -1353,12 +1364,12 @@ fn publish_inline_substitutions(
             expression,
             bindings
                 .iter()
-                .map(|(name, value, _)| (name.clone(), *value))
+                .map(|(name, value, _, _)| (name.clone(), *value))
                 .collect(),
         );
         let reified = bindings
             .into_iter()
-            .filter_map(|(name, value, reified)| reified.then_some((name, value)))
+            .filter_map(|(name, _, runtime, reified)| reified.then_some((name, runtime)))
             .collect::<Vec<_>>();
         if !reified.is_empty() {
             ir.reified_call_subst.insert(expression, reified);

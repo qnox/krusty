@@ -20,6 +20,13 @@ pub struct IrLambdaClass {
     pub invoke: FunId,
     /// The lambda's function type: the class's `FunctionN` and its generic supertype.
     pub function_type: Ty,
+    /// The class implements the raw `FunctionN` with no generic `Signature`. kotlinc's
+    /// `IrTypeMapper.writeGenericType` skips the generics when
+    /// `hasNothingInNonContravariantPosition(supertype)` holds: a `Nothing?` argument anywhere, or
+    /// a `Nothing` result (`FunctionN`'s result parameter is `out`; its value parameters are `in`,
+    /// where a non-null `Nothing` keeps the generic supertype, written as a star). See
+    /// `crate::jvm::lambda_classes`.
+    pub raw_supertype: bool,
     /// What each field captures, in field order.
     pub captures: Vec<IrLambdaCapture>,
     /// The origins of the implicit receivers the lambda captured, which

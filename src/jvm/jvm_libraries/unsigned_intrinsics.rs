@@ -1,22 +1,43 @@
 //! The JVM realization of the unsigned member operations the provider-boundary realization layer
 //! classifies (`builtin_member_realization::unsigned_member_operation`).
 //!
-//! On a JDK 8+ target kotlinc does not call or inline these stdlib declarations: a call to
+//! On a JDK 8+ target kotlinc does not call or inline these stdlib declarations. A call to
 //! `UInt.compareTo(UInt)`, `div(UInt)`, `rem(UInt)` or `toString()` (and the `ULong` ones) is the
 //! JDK's own unsigned operation on the carrier, whatever the stdlib's own implementation looks like
-//! (kotlinc's `IntrinsicMethods` maps the declaration, not its body). The stdlib's inline bodies
-//! (`uintCompare`, `uintDivide-*`) are what kotlinc emits only where it builds the call itself, such
-//! as the counted-loop comparator. Which declarations these are is decided by that classification;
-//! this module owns only the JDK owners, names and descriptors, and applies them to every classified
+//! (kotlinc's `IntrinsicMethods` maps the declaration, not its body). The stdlib's inline bodies are what kotlinc emits
+//! only where it builds the call itself, such as the counted-loop comparator. Which declarations these
+//! are is decided by that classification; this module applies the realization to every classified
 //! member, so a classified member can never keep its ordinary stdlib call or inline body.
 
 use crate::libraries::builtin_member_realization::{UnsignedElement, UnsignedMemberOperation};
-use crate::libraries::{InlineKind, LibraryMember, MemberRealization};
+use crate::libraries::{CompilerIntrinsic, InlineKind, LibraryMember, MemberRealization};
 use crate::types::type_name;
+
+/// Realizes `member`, classified as `operation` on `element`. JDK unsigned arithmetic and
+/// `toString` become the JDK method. Bitwise members become the primitive intrinsic and lose the
+/// stdlib inline body; the call-site result type supplies `constructor-impl`.
+pub(super) fn realize_unsigned_member(
+    element: UnsignedElement,
+    operation: UnsignedMemberOperation,
+    member: &mut LibraryMember,
+) {
+    realize_jdk_unsigned_member(element, operation, member);
+}
+
+/// Attach an already classified primitive operation directly to its exact declaration. The source
+/// signature selected the intrinsic; the JVM value-class boundary owns its physical result shape.
+pub(super) fn realize_unsigned_bitwise_member(
+    intrinsic: CompilerIntrinsic,
+    member: &mut LibraryMember,
+) {
+    member.realization = MemberRealization::Intrinsic(intrinsic);
+    member.inline = InlineKind::None;
+    member.inline_body_plan = None;
+}
 
 /// Realizes `member`, classified as `operation` on `element`, as the JDK static method that
 /// implements it on the carrier, with the receiver passed as its first argument.
-pub(super) fn realize_jdk_unsigned_member(
+fn realize_jdk_unsigned_member(
     element: UnsignedElement,
     operation: UnsignedMemberOperation,
     member: &mut LibraryMember,
@@ -64,7 +85,7 @@ mod tests {
         MemberRealization,
         bool,
     ) {
-        realize_jdk_unsigned_member(element, operation, &mut member);
+        realize_unsigned_member(element, operation, &mut member);
         (
             member.owner.map(|owner| owner.render()),
             member.physical_name,
@@ -146,5 +167,45 @@ mod tests {
                 true,
             )
         );
+    }
+
+    #[test]
+    fn a_bitwise_member_becomes_the_primitive_intrinsic_and_drops_its_inline_body() {
+        let mut member = LibraryMember::new(
+            "shr-pVg5ArA".to_owned(),
+            vec![Ty::Int],
+            Ty::UInt,
+            "(II)I".to_owned(),
+        );
+        member.owner = Some(type_name("kotlin/UInt"));
+        member.inline = InlineKind::CanInline;
+        realize_unsigned_bitwise_member(
+            CompilerIntrinsic::PrimitiveUnsignedShiftRight,
+            &mut member,
+        );
+        assert_eq!(
+            member.realization,
+            MemberRealization::Intrinsic(CompilerIntrinsic::PrimitiveUnsignedShiftRight)
+        );
+        assert_eq!(
+            member.owner.map(|owner| owner.render()),
+            Some("kotlin/UInt".to_owned())
+        );
+        assert_eq!(member.descriptor, "(II)I");
+        assert!(member.inline == InlineKind::None && member.inline_body_plan.is_none());
+
+        let mut inverted = LibraryMember::new(
+            "inv-s-VKNKU".to_owned(),
+            Vec::new(),
+            Ty::ULong,
+            "(J)J".to_owned(),
+        );
+        inverted.inline = InlineKind::MustInline;
+        realize_unsigned_bitwise_member(CompilerIntrinsic::PrimitiveBitNot, &mut inverted);
+        assert_eq!(
+            inverted.realization,
+            MemberRealization::Intrinsic(CompilerIntrinsic::PrimitiveBitNot)
+        );
+        assert!(inverted.inline == InlineKind::None && inverted.inline_body_plan.is_none());
     }
 }

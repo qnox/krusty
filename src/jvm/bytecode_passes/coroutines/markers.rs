@@ -122,6 +122,24 @@ pub(crate) fn is_after_inline_marker(node: &Node) -> bool {
     is_inline_marker(node, Some("afterInlineCall"))
 }
 
+/// A declaration-body marker bracketing one emitted copy of a `finally`. Unlike the inline-call
+/// stack markers, this metadata is consumed while copying the body and never executes in the
+/// finished caller.
+pub(crate) fn is_finally_marker(node: &Node) -> bool {
+    matches!(
+        node,
+        Node::Insn(Insn::Method {
+            op: INVOKESTATIC,
+            owner,
+            name,
+            desc,
+            interface: false,
+        }) if owner == INLINE_MARKER_CLASS
+            && matches!(name.as_str(), "finallyStart" | "finallyEnd")
+            && desc == "(I)V"
+    )
+}
+
 /// `isSuspendInlineMarker`: any `mark(I)V` call.
 pub(crate) fn is_suspend_inline_marker(node: &Node) -> bool {
     is_inline_marker(node, Some("mark"))

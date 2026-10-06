@@ -90,7 +90,10 @@ impl Emitter<'_> {
     ) -> R {
         let saved_slots = std::mem::take(&mut self.slots);
         // The body numbers its values from zero again: none of them is a constructor-property
-        // parameter of the class whose initializer hosts the call.
+        // parameter of the class whose initializer hosts the call. A value the caller left on the
+        // stack (a duplicated safe-call receiver) is in that caller's namespace too, so a body
+        // read of the same index must load the body's slot instead of consuming it.
+        let saved_resident = self.stack_resident_value.take();
         let saved_initializer_class = self.constructor_initializer_class.take();
         let saved_var_types = std::mem::replace(
             &mut self.var_types,
@@ -107,6 +110,7 @@ impl Emitter<'_> {
         self.constructor_initializer_class = saved_initializer_class;
         self.slots = saved_slots;
         self.var_types = saved_var_types;
+        self.stack_resident_value = saved_resident;
         result
     }
 }

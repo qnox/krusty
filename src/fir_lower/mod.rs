@@ -668,9 +668,15 @@ impl<'a> BodyLowering<'a> {
         reference_result: crate::types::Ty,
     ) -> ExprId {
         let mut statements = Vec::with_capacity(2);
+        // A `Unit` function type discards the selected result, but the invocation still runs.
+        // Publish that call as an effect of the returned value: the splice emits only this value,
+        // so a bare `Unit` singleton would drop the call.
         let result = if reference_result == crate::types::Ty::Unit {
-            statements.push(value);
-            self.ir.add_expr(crate::ir::IrExpr::UnitInstance)
+            let unit = self.ir.add_expr(crate::ir::IrExpr::UnitInstance);
+            self.ir.add_expr(crate::ir::IrExpr::Block {
+                stmts: vec![value],
+                value: Some(unit),
+            })
         } else if selected_result == reference_result {
             value
         } else {
@@ -681,10 +687,14 @@ impl<'a> BodyLowering<'a> {
             })
         };
         statements.push(self.ir.add_expr(crate::ir::IrExpr::Return(Some(result))));
-        self.ir.add_expr(crate::ir::IrExpr::Block {
+        let body = self.ir.add_expr(crate::ir::IrExpr::Block {
             stmts: statements,
             value: None,
-        })
+        });
+        self.ir
+            .callable_reference_adapter_results
+            .insert(body, result);
+        body
     }
 
     fn value_slot(&self, value: crate::fir::LocalValueId) -> u32 {

@@ -170,7 +170,7 @@ fn checked_substitution_bindings<'a>(
         .filter(|substitution| substitution.reified)
         .filter_map(|substitution| match substitution.parameter {
             FirTypeParameterRef::Module(parameter) => module_parameter_name(parameter)
-                .map(|name| (name.to_owned(), substitution.value.get())),
+                .map(|name| (name.to_owned(), substitution.reified_runtime.get())),
             FirTypeParameterRef::External { .. } => None,
         })
         .collect::<HashMap<_, _>>();
@@ -515,6 +515,7 @@ impl BodyLowering<'_> {
         }
         let mut operand_declarations = Vec::new();
         let mut defaulted = Vec::new();
+        let mut staging_failed = false;
         let operand_slots = plans
             .into_iter()
             .zip(operands.iter())
@@ -522,7 +523,23 @@ impl BodyLowering<'_> {
             .enumerate()
             .map(
                 |(index, ((plan, operand), (specialized_ty, declared_ty)))| match plan {
-                    InlineOperandPlan::Splice => None,
+                    InlineOperandPlan::Splice => {
+                        // A spliced reference is not a value, but its receiver and captures are
+                        // ordinary argument expressions: they run here, before the next argument,
+                        // and the body reads the values.
+                        if let Some(operand) = *operand {
+                            if self
+                                .stage_spliced_reference_operands(
+                                    operand,
+                                    &mut operand_declarations,
+                                )
+                                .is_none()
+                            {
+                                staging_failed = true;
+                            }
+                        }
+                        None
+                    }
                     InlineOperandPlan::Reuse(slot) => Some(slot),
                     InlineOperandPlan::Default => {
                         let slot = self.allocate_temporary();
@@ -556,12 +573,21 @@ impl BodyLowering<'_> {
                 },
             )
             .collect::<Vec<_>>();
+        if staging_failed {
+            return None;
+        }
         let mut inline_lambdas = inline_lambdas.to_vec();
         // A copied lambda is a value. Leaving it in this table would replace every read with a
         // fresh copy of the literal, so `x === x` would compare two objects.
         for (lambda, splice) in inline_lambdas.iter_mut().zip(&splice_lambda) {
             if !splice {
                 *lambda = None;
+            } else if let Some(reference) = *lambda {
+                if matches!(self.ir.expr(reference), IrExpr::CallableReference(_)) {
+                    self.ir
+                        .inline_callable_reference_arguments
+                        .insert(reference);
+                }
             }
         }
         let mut default_lambda_implementations = Vec::new();
@@ -737,11 +763,27 @@ impl BodyLowering<'_> {
             }
             if let IrExpr::GetValue(parameter) = self.ir.expr(source) {
                 if let Some(Some(lambda)) = inline_lambdas.get(*parameter as usize) {
-                    self.ir.exprs[copy as usize] = self.ir.expr(*lambda).clone();
+                    let lambda = *lambda;
+                    self.ir.exprs[copy as usize] = self.ir.expr(lambda).clone();
+                    // The parameter read carried the inline body's line. A callable reference is
+                    // the call site's expression: the spliced invocation keeps that line, and the
+                    // frame-closing nop can then return to the inlined call.
+                    if matches!(self.ir.expr(lambda), IrExpr::CallableReference(_)) {
+                        // A copy that an invocation splices is marked there. A copy the body
+                        // evaluates (an object capturing the reference) stays a carrier.
+                        match self.ir.expr_source_lines.get(&lambda).copied() {
+                            Some(line) => {
+                                self.ir.expr_source_lines.insert(copy, line);
+                            }
+                            None => {
+                                self.ir.expr_source_lines.remove(&copy);
+                            }
+                        }
+                    }
                     substituted_inline_lambdas.insert(copy);
                     self.ir.unmark_inline_copy(copy);
                     self.ir.binding_read_stability.remove(&copy);
-                    if let Some(ty) = self.ir.logical_types.get(lambda).copied() {
+                    if let Some(ty) = self.ir.logical_types.get(&lambda).copied() {
                         self.ir.logical_types.insert(copy, ty);
                     }
                     continue;
@@ -831,10 +873,7 @@ impl BodyLowering<'_> {
                 matches!(
                     self.ir.expr(*expression),
                     IrExpr::InvokeFunction { func, .. }
-                        if matches!(
-                            self.ir.expr(*func),
-                            IrExpr::Lambda { inline_body: Some(_), .. }
-                        )
+                        if lambda_invocation_is_spliceable(self.ir, *expression, *func)
                 )
             })
             .collect::<Vec<_>>();
@@ -995,6 +1034,55 @@ impl BodyLowering<'_> {
         expression
     }
 
+    /// Evaluate a spliced callable reference's receiver and captures before the inline body.
+    ///
+    /// The reference itself is not a value: the body invokes it. The expressions that build it
+    /// are still arguments of the call, so they run in that argument's place and the reference
+    /// reads the stored values. A local read has already run.
+    fn stage_spliced_reference_operands(
+        &mut self,
+        reference: ExprId,
+        declarations: &mut Vec<ExprId>,
+    ) -> Option<()> {
+        let IrExpr::CallableReference(mut callable) = self.ir.expr(reference).clone() else {
+            return Some(());
+        };
+        let mut operands = Vec::new();
+        if let Some(receiver) = callable.bound_receiver {
+            operands.push(receiver);
+        }
+        operands.extend(callable.captures.iter().copied());
+        if operands.is_empty() {
+            return Some(());
+        }
+        let mut staged = Vec::with_capacity(operands.len());
+        for value in operands {
+            if matches!(self.ir.expr(value), IrExpr::GetValue(_)) {
+                staged.push(value);
+                continue;
+            }
+            let ty = self.ir.logical_types.get(&value).copied()?;
+            let slot = self.allocate_temporary();
+            let declaration = self.ir.add_expr(IrExpr::Variable {
+                index: slot,
+                ty: stored_value_ty(ty),
+                init: Some(value),
+                named: false,
+            });
+            declarations.push(declaration);
+            let read = self.ir.add_expr(IrExpr::GetValue(slot));
+            self.ir.logical_types.insert(read, ty);
+            staged.push(read);
+        }
+        let bound = usize::from(callable.bound_receiver.is_some());
+        if bound == 1 {
+            callable.bound_receiver = Some(staged[0]);
+        }
+        callable.captures = staged[bound..].to_vec();
+        self.ir.exprs[reference as usize] = IrExpr::CallableReference(callable);
+        Some(())
+    }
+
     /// Record an inline-depth frame boundary named `callee`, live to the end of the block that
     /// declares it. It is not a value: the JVM debug boundary materializes the slot, the zero
     /// store, and the spelling.
@@ -1022,14 +1110,23 @@ impl BodyLowering<'_> {
         if !lambda_invocation_is_spliceable(self.ir, invocation, func) {
             return None;
         }
-        let IrExpr::Lambda {
-            impl_fn,
-            captures,
-            inline_body: Some(inline_body),
-            ..
-        } = self.ir.expr(func).clone()
-        else {
-            return None;
+        let (impl_fn, captures, inline_body, indexed_parameters) = match self.ir.expr(func).clone()
+        {
+            IrExpr::Lambda {
+                impl_fn,
+                captures,
+                inline_body: Some(inline_body),
+                ..
+            } => (impl_fn, captures, inline_body, false),
+            IrExpr::CallableReference(_) => {
+                let (impl_fn, captures, inline_body, _) =
+                    super::source_calls::inline_argument_template(self.ir, func)?;
+                // This node stays a callable reference after the invocation is replaced. It is
+                // not a value: a carrier for it would keep the adapter off the inline marker.
+                self.ir.inline_callable_reference_arguments.insert(func);
+                (impl_fn, captures, inline_body, true)
+            }
+            _ => return None,
         };
         let parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
 
@@ -1075,17 +1172,26 @@ impl BodyLowering<'_> {
                 declarations.push(declaration);
                 slot
             } else {
-                let source_name = (parameter as usize >= capture_count)
-                    .then(|| {
-                        lambda_parameter_identities
-                            .as_ref()
-                            .and_then(|identities| identities.get(parameter as usize))
-                            .and_then(|identity| identity.source_name.clone())
-                    })
+                let reference_parameter = indexed_parameters
+                    .then(|| (parameter as usize).checked_sub(capture_count))
                     .flatten();
+                let source_name = if reference_parameter.is_some() {
+                    None
+                } else {
+                    (parameter as usize >= capture_count)
+                        .then(|| {
+                            lambda_parameter_identities
+                                .as_ref()
+                                .and_then(|identities| identities.get(parameter as usize))
+                                .and_then(|identity| identity.source_name.clone())
+                        })
+                        .flatten()
+                };
                 match (self.ir.expr(value), &source_name, binding) {
-                    (IrExpr::GetValue(slot), None, _)
-                    | (IrExpr::GetValue(slot), _, LambdaParameterBinding::Remapped) => *slot,
+                    // A callable-reference parameter is `pN` even when the argument already
+                    // lives in a slot. Reusing that slot would drop the local kotlinc writes.
+                    (IrExpr::GetValue(slot), None, _) if reference_parameter.is_none() => *slot,
+                    (IrExpr::GetValue(slot), _, LambdaParameterBinding::Remapped) => *slot,
                     (_, _, LambdaParameterBinding::Remapped) => return None,
                     _ => {
                         let slot = self.allocate_temporary();
@@ -1098,6 +1204,14 @@ impl BodyLowering<'_> {
                         self.ir.call_operand_bindings.insert(declaration);
                         if let Some(name) = source_name {
                             self.ir.value_names.insert(declaration, name);
+                        }
+                        if let Some(ordinal) = reference_parameter {
+                            self.ir.set_debug_local_provenance(
+                                declaration,
+                                IrDebugLocalProvenance::InlineCallableReferenceParameter {
+                                    ordinal: u32::try_from(ordinal).ok()?,
+                                },
+                            );
                         }
                         declarations.push(declaration);
                         slot
@@ -1122,6 +1236,13 @@ impl BodyLowering<'_> {
         }
 
         let (body, _) = crate::ir::clone_expression_dag(self.ir, inline_body);
+        if indexed_parameters {
+            if let Some(line) = self.ir.expr_source_lines.get(&func).copied() {
+                // The adapter was built as its own method and has no source position. The splice
+                // is the reference expression, so this call keeps that line.
+                self.ir.expr_source_lines.insert(body, line);
+            }
+        }
         let local_base = self.next_temporary;
         let local_count = super::source_calls::rehome_inline_body_values(
             self.ir,
@@ -1130,8 +1251,12 @@ impl BodyLowering<'_> {
             local_base,
         )?;
         self.next_temporary = local_base.checked_add(local_count)?;
-        self.ir.inline_only_fns.insert(impl_fn);
-        self.ir.functions.get_mut(impl_fn as usize)?.body = None;
+        // A callable-reference adapter may still be the invoke of a carrier realized for another
+        // use of the same reference. Only a source lambda's implementation is consumed by the splice.
+        if !indexed_parameters {
+            self.ir.inline_only_fns.insert(impl_fn);
+            self.ir.functions.get_mut(impl_fn as usize)?.body = None;
+        }
         self.ir.exprs[invocation as usize] = IrExpr::Block {
             stmts: declarations,
             value: Some(body),
@@ -1154,23 +1279,37 @@ fn lambda_invocation_is_spliceable(
     let IrExpr::InvokeFunction { args, .. } = ir.expr(invocation) else {
         return false;
     };
-    let IrExpr::Lambda {
-        impl_fn,
-        arity,
-        captures,
-        inline_body: Some(_),
-        ..
-    } = ir.expr(lambda)
-    else {
-        return false;
-    };
-    // A suspend lambda's arity counts the continuation its invocation passes implicitly.
-    let suspend = ir.suspend_funs.contains(impl_fn);
-    args.len() + usize::from(suspend) == *arity as usize
-        && ir
-            .functions
-            .get(*impl_fn as usize)
-            .is_some_and(|function| function.params.len() == captures.len() + args.len())
+    let arg_count = args.len();
+    match ir.expr(lambda).clone() {
+        IrExpr::Lambda {
+            impl_fn,
+            arity,
+            captures,
+            inline_body: Some(_),
+            ..
+        } => {
+            // A suspend lambda's arity counts the continuation its invocation passes implicitly.
+            let suspend = ir.suspend_funs.contains(&impl_fn);
+            arg_count + usize::from(suspend) == usize::from(arity)
+                && ir
+                    .functions
+                    .get(impl_fn as usize)
+                    .is_some_and(|function| function.params.len() == captures.len() + arg_count)
+        }
+        IrExpr::CallableReference(_) => {
+            let Some((impl_fn, captures, _, arity)) =
+                super::source_calls::inline_argument_template(ir, lambda)
+            else {
+                return false;
+            };
+            arg_count == arity
+                && ir
+                    .functions
+                    .get(impl_fn as usize)
+                    .is_some_and(|function| function.params.len() == captures.len() + arg_count)
+        }
+        _ => false,
+    }
 }
 
 /// How a spliced lambda's parameters meet the arguments of its invocation.
@@ -1509,6 +1648,7 @@ fn specialize_checked_substitution(
     bindings: &HashMap<String, Ty>,
 ) {
     specialize_ty(&mut substitution.value, bindings);
+    specialize_ty(&mut substitution.reified_runtime, bindings);
     specialize_tys(&mut substitution.additional_bounds, bindings);
 }
 
@@ -1878,12 +2018,14 @@ mod expansion_mode_tests {
                 parameter: FirTypeParameterRef::Module(ordinary),
                 reified: false,
                 value: ResolvedTy::new(Ty::String).unwrap(),
+                reified_runtime: ResolvedTy::new(Ty::String).unwrap(),
                 additional_bounds: Box::new([]),
             },
             FirTypeSubstitution {
                 parameter: FirTypeParameterRef::Module(reified),
                 reified: true,
                 value: ResolvedTy::new(Ty::Int).unwrap(),
+                reified_runtime: ResolvedTy::new(Ty::Int).unwrap(),
                 additional_bounds: Box::new([]),
             },
         ];
