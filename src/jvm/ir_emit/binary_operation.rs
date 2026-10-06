@@ -111,7 +111,11 @@ impl Emitter<'_> {
             BitAnd | BitOr | BitXor => {
                 self.emit_binary_operands_with_live_prefix(lhs, rhs, code);
                 self.mark_expression_start(expression, code);
-                match lt {
+                // A checked unsigned operand can retain its semantic identity after value-class
+                // rewriting even though emission has put its signed carrier on the stack. Opcode
+                // width is a JVM representation decision, so select it from that carrier rather
+                // than treating every non-`Ty::Long` identity as an int-category value.
+                match ir_ty_to_jvm(&lt) {
                     Ty::Long => match op {
                         BitAnd => code.land(),
                         BitOr => code.lor(),
@@ -125,11 +129,12 @@ impl Emitter<'_> {
                         _ => unreachable!(),
                     },
                 }
+                self.rebuild_unsigned_bitwise_result(expression, code);
             }
             Shl | Shr | Ushr => {
                 self.emit_operands(&[lhs, rhs], code); // shift amount is an `Int`
                 self.mark_expression_start(expression, code);
-                match lt {
+                match ir_ty_to_jvm(&lt) {
                     Ty::Long => match op {
                         Shl => code.lshl(),
                         Shr => code.lshr(),
@@ -143,8 +148,24 @@ impl Emitter<'_> {
                         _ => unreachable!(),
                     },
                 }
+                self.rebuild_unsigned_bitwise_result(expression, code);
             }
             Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe => self.emit_comparison(expression, code),
         }
+    }
+
+    /// `UInt` and `ULong` bitwise and shift results are the carrier opcode plus `constructor-impl`.
+    /// Checked FIR publishes that result as the operation's logical type. A signed operation, and an
+    /// inlined arithmetic body whose carrier opcode is already the argument of `constructor-impl`,
+    /// keeps the opcode alone.
+    fn rebuild_unsigned_bitwise_result(&mut self, expression: u32, code: &mut CodeBuilder) {
+        let semantic = self
+            .ir
+            .logical_types
+            .get(&expression)
+            .copied()
+            .map(|ty| ty.canonical_semantic().non_null());
+        let Some(semantic) = semantic else { return };
+        super::value_class_adapters::emit_native_value_class_constructor(self.cw, code, semantic);
     }
 }

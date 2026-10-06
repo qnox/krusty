@@ -58,6 +58,10 @@ pub struct BackendCallableFact {
     /// classfile declaration. Backends consume this frozen plan; they do not reconstruct roles
     /// from arity or descriptor spelling.
     pub physical_parameter_plan: Option<Box<[crate::libraries::PhysicalParameterSlot]>>,
+    /// Exact semantic declaration result before target representation. A call site may expose a
+    /// substituted or erased carrier, while intrinsic realization still needs the declaration's
+    /// value-class identity.
+    pub ret: Ty,
     pub physical_ret: Ty,
     pub descriptor: String,
     pub inline: InlineKind,
@@ -232,6 +236,7 @@ impl CheckedBackendCallables {
                     physical_params: callable.physical_params,
                     parameter_identities,
                     physical_parameter_plan: callable.physical_parameter_plan,
+                    ret: callable.ret,
                     physical_ret: callable.physical_ret,
                     descriptor: callable.descriptor,
                     inline: callable.inline,
