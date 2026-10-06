@@ -819,6 +819,8 @@ mod extension_default_stub_e2e;
 mod extension_delegate_fields_e2e;
 #[path = "extension_fun_e2e.rs"]
 mod extension_fun_e2e;
+#[path = "extension_function_value_receiver_e2e.rs"]
+mod extension_function_value_receiver_e2e;
 #[path = "extension_property_e2e.rs"]
 mod extension_property_e2e;
 #[path = "extension_receiver_property_smartcast_e2e.rs"]
@@ -919,6 +921,8 @@ mod front_end_errors_e2e;
 mod front_end_errors_more_e2e;
 #[path = "full_form_destructuring_e2e.rs"]
 mod full_form_destructuring_e2e;
+#[path = "full_value_classes_e2e.rs"]
+mod full_value_classes_e2e;
 #[path = "fun_interface_constructor_reference_e2e.rs"]
 mod fun_interface_constructor_reference_e2e;
 #[path = "fun_interface_value_class_e2e.rs"]
