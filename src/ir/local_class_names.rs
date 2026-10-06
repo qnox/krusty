@@ -1874,13 +1874,11 @@ mod tests {
             }
         );
 
-        ir.superclass_interfaces.insert(source, vec![source]);
         ir.classifier_roles
             .insert(source, crate::types::ClassifierRole::FunctionOfArity(0));
         ir.companion_clinit_bodies.insert(source, expression);
         ir.class_static_local_functions.insert(0, source);
         ir.remap_classifier_identities(&names);
-        assert_eq!(ir.superclass_interfaces[&target], vec![target]);
         assert!(ir.classifier_roles.contains_key(&target));
         assert_eq!(ir.companion_clinit_bodies[&target], expression);
         assert_eq!(ir.class_static_local_functions[&0], target);
@@ -1957,6 +1955,74 @@ mod tests {
         assert!(ir.must_inline_lambdas.contains(&implementation));
         assert!(!ir.inline_only_fns.contains(&detached[0].target));
         assert!(!ir.must_inline_lambdas.contains(&detached[0].target));
+        assert_eq!(
+            ir.functions[detached[0].target as usize].params,
+            vec![Ty::obj_name(target)]
+        );
+        assert_eq!(
+            ir.functions[detached[0].target as usize].ret,
+            Ty::obj_name(target)
+        );
+    }
+
+    #[test]
+    fn reachable_remap_detaches_a_consumed_lambda_direct_call() {
+        let source = crate::types::type_name("sample/Source");
+        let target = crate::types::type_name("sample/Target");
+        let names = HashMap::from([(source, target)]);
+        let mut ir = super::super::IrFile::default();
+        let implementation = ir.add_fun(IrFunction {
+            name: "invoke".to_string(),
+            params: vec![Ty::obj_name(source)],
+            ret: Ty::obj_name(source),
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir.lambda_origins.insert(
+            implementation,
+            crate::ir::IrLambdaOrigin {
+                identity: 0,
+                lexical_owner: None,
+                enclosing_name: "box".to_string(),
+                binding_name: None,
+                ordinal: 0,
+                implementation_name: "box".to_string(),
+                implementation_ordinal: 0,
+                receiver_parameter: None,
+                label: None,
+                form: crate::ir::IrLambdaForm::Literal,
+                class_provenance: None,
+            },
+        );
+        let reachable = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(implementation),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let other = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(implementation),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+
+        let detached =
+            ir.remap_reachable_classifier_identities(&names, [reachable], &mut HashSet::new());
+
+        assert_eq!(detached.len(), 1);
+        assert_eq!(detached[0].source, implementation);
+        assert_eq!(detached[0].order, reachable);
+        assert!(matches!(
+            ir.expr(reachable),
+            IrExpr::Call { callee: Callee::Local(function), .. }
+                if *function == detached[0].target
+        ));
+        assert!(matches!(
+            ir.expr(other),
+            IrExpr::Call { callee: Callee::Local(function), .. }
+                if *function == implementation
+        ));
         assert_eq!(
             ir.functions[detached[0].target as usize].params,
             vec![Ty::obj_name(target)]

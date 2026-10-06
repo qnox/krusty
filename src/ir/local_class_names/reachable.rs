@@ -38,12 +38,18 @@ impl IrFile {
                 Some((index as ClassId, target))
             })
             .collect::<HashMap<_, _>>();
-        let lambda_sites = self
+        let implementation_sites = self
             .exprs
             .iter()
             .enumerate()
             .filter_map(|(index, expr)| match expr {
                 IrExpr::Lambda { impl_fn, .. } => Some((index as ExprId, *impl_fn)),
+                IrExpr::Call {
+                    callee: Callee::Local(function),
+                    ..
+                } if self.lambda_origins.contains_key(function) => {
+                    Some((index as ExprId, *function))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -74,7 +80,7 @@ impl IrFile {
                 let impl_fn = if let Some(existing) = detached_impl(
                     source,
                     expression,
-                    &lambda_sites,
+                    &implementation_sites,
                     &closure,
                     &local_clones,
                     detached_impls,
@@ -117,6 +123,49 @@ impl IrFile {
                             impl_fn,
                         );
                     }
+                }
+                reachable_implementations.insert(impl_fn);
+                if let Some(body) = self.functions[impl_fn as usize].body {
+                    pending.push(body);
+                }
+            } else if let Some(source) = match self.exprs[expression as usize] {
+                IrExpr::Call {
+                    callee: Callee::Local(function),
+                    ..
+                } if self.lambda_origins.contains_key(&function) => Some(function),
+                _ => None,
+            } {
+                // Common inlining can consume the `Lambda` node while retaining a direct call to
+                // its implementation. That call is still an exact semantic implementation edge.
+                // Detach it when the declaration implementation has another site, then remap the
+                // copy's descriptor together with the anonymous class it captures.
+                let impl_fn = if let Some(existing) = detached_impl(
+                    source,
+                    expression,
+                    &implementation_sites,
+                    &closure,
+                    &local_clones,
+                    detached_impls,
+                ) {
+                    existing
+                } else {
+                    let cloned = detach_lambda_impl(self, source);
+                    local_clones.insert(source, cloned);
+                    detached_impls.insert(cloned);
+                    new_detached.push(DetachedLambdaImplementation {
+                        source,
+                        target: cloned,
+                        parent: None,
+                        order: expression,
+                    });
+                    cloned
+                };
+                if impl_fn != source {
+                    retarget_direct_inline_implementation(
+                        &mut self.exprs[expression as usize],
+                        source,
+                        impl_fn,
+                    );
                 }
                 reachable_implementations.insert(impl_fn);
                 if let Some(body) = self.functions[impl_fn as usize].body {
@@ -206,7 +255,7 @@ fn retarget_direct_inline_implementation(expression: &mut IrExpr, source: FunId,
 fn detached_impl(
     impl_fn: FunId,
     expression: ExprId,
-    lambda_sites: &[(ExprId, FunId)],
+    implementation_sites: &[(ExprId, FunId)],
     closure: &HashSet<ExprId>,
     local_clones: &HashMap<FunId, FunId>,
     detached_impls: &HashSet<FunId>,
@@ -217,7 +266,7 @@ fn detached_impl(
     if let Some(cloned) = local_clones.get(&impl_fn).copied() {
         return Some(cloned);
     }
-    let shared = lambda_sites.iter().any(|(site, function)| {
+    let shared = implementation_sites.iter().any(|(site, function)| {
         *function == impl_fn && *site != expression && !closure.contains(site)
     });
     if shared {
