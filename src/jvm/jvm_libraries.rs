@@ -1667,7 +1667,7 @@ impl JvmLibraries {
                         member.realization = realization;
                     }
                     if let Some((element, operation)) = operation {
-                        unsigned_intrinsics::realize_jdk_unsigned_member(
+                        unsigned_intrinsics::realize_unsigned_member(
                             element,
                             operation,
                             &mut member,

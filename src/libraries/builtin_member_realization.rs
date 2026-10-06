@@ -269,14 +269,23 @@ pub(crate) fn unsigned_range_construction(
     .then_some(MemberRealization::RangeConstruction { open_end })
 }
 
-/// A `UInt`/`ULong` member whose JVM realization is the JDK's own unsigned operation on the carrier
-/// (kotlinc's unsigned `IntrinsicMethods` entries) rather than a call of the stdlib declaration.
+/// A `UInt`/`ULong` member kotlinc realizes without calling or inlining the stdlib declaration.
+///
+/// `CompareTo`, `Divide`, `Remainder` and `ToString` are the JDK's unsigned methods on the carrier.
+/// The bitwise members are the carrier primitive opcode. `LogicalShiftRight` is `UInt.shr` /
+/// `ULong.shr`: a logical shift, not the arithmetic `shr` of a signed integer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UnsignedMemberOperation {
     CompareTo,
     Divide,
     Remainder,
     ToString,
+    BitAnd,
+    BitOr,
+    BitXor,
+    ShiftLeft,
+    LogicalShiftRight,
+    Inv,
 }
 
 /// The unsigned value class an [`UnsignedMemberOperation`] is declared on.
@@ -296,8 +305,11 @@ impl UnsignedElement {
 }
 
 /// The unsigned value class and operation of an exact `UInt`/`ULong` declaration:
-/// `compareTo(same): Int`, `div(same): same` and `rem(same): same` as operators, and
-/// `toString(): String`. Any other overload, including the mixed-width ones, stays ordinary.
+/// `compareTo(same): Int`, `div(same): same` and `rem(same): same` as operators, `toString(): String`,
+/// infix `and`/`or`/`xor` of the same unsigned type, infix `shl`/`shr` with an `Int` count, and
+/// `inv()`. `shr` is the logical shift. A property, a mixed-width overload, a `UByte`/`UShort`
+/// member, or a bitwise spelling that is not the infix (or, for `inv`, parameterless) declaration
+/// stays ordinary.
 pub(crate) fn unsigned_member_operation(
     facts: &BuiltinMemberDeclaration<'_>,
 ) -> Option<(UnsignedElement, UnsignedMemberOperation)> {
@@ -309,17 +321,30 @@ pub(crate) fn unsigned_member_operation(
     } else {
         return None;
     };
-    let element = class.ty();
-    if facts.is_property || facts.is_infix {
+    if facts.is_property {
         return None;
     }
-    let binary = facts.is_operator && facts.params == [element];
+    let element = class.ty();
+    let same = facts.params == [element];
+    let binary = facts.is_operator && !facts.is_infix && same;
     let operation = match facts.name {
         "compareTo" if binary && facts.ret == Ty::Int => UnsignedMemberOperation::CompareTo,
         "div" if binary && facts.ret == element => UnsignedMemberOperation::Divide,
         "rem" if binary && facts.ret == element => UnsignedMemberOperation::Remainder,
-        "toString" if facts.params.is_empty() && facts.ret == Ty::String => {
+        "toString" if !facts.is_infix && facts.params.is_empty() && facts.ret == Ty::String => {
             UnsignedMemberOperation::ToString
+        }
+        "and" if facts.is_infix && same && facts.ret == element => UnsignedMemberOperation::BitAnd,
+        "or" if facts.is_infix && same && facts.ret == element => UnsignedMemberOperation::BitOr,
+        "xor" if facts.is_infix && same && facts.ret == element => UnsignedMemberOperation::BitXor,
+        "shl" if facts.is_infix && facts.params == [Ty::Int] && facts.ret == element => {
+            UnsignedMemberOperation::ShiftLeft
+        }
+        "shr" if facts.is_infix && facts.params == [Ty::Int] && facts.ret == element => {
+            UnsignedMemberOperation::LogicalShiftRight
+        }
+        "inv" if !facts.is_infix && facts.params.is_empty() && facts.ret == element => {
+            UnsignedMemberOperation::Inv
         }
         _ => return None,
     };
@@ -694,6 +719,58 @@ mod tests {
         );
         assert_eq!(
             unsigned_member_operation(&facts("kotlin/UInt", "div", &[Ty::UInt], Ty::ULong)),
+            None
+        );
+        assert_eq!(
+            unsigned_member_operation(&BuiltinMemberDeclaration {
+                is_operator: false,
+                is_infix: true,
+                ..facts("kotlin/UInt", "and", &[Ty::UInt], Ty::UInt)
+            }),
+            Some((UnsignedElement::UInt, UnsignedMemberOperation::BitAnd))
+        );
+        assert_eq!(
+            unsigned_member_operation(&BuiltinMemberDeclaration {
+                is_infix: true,
+                ..facts("kotlin/ULong", "shr", &[Ty::Int], Ty::ULong)
+            }),
+            Some((
+                UnsignedElement::ULong,
+                UnsignedMemberOperation::LogicalShiftRight
+            ))
+        );
+        assert_eq!(
+            unsigned_member_operation(&BuiltinMemberDeclaration {
+                is_operator: false,
+                ..facts("kotlin/UInt", "inv", &[], Ty::UInt)
+            }),
+            Some((UnsignedElement::UInt, UnsignedMemberOperation::Inv))
+        );
+        // A non-infix bitwise spelling, a shift whose count is not `Int`, a foreign unsigned
+        // class and a wrong result stay ordinary declarations and therefore keep their inline body.
+        assert_eq!(
+            unsigned_member_operation(&facts("kotlin/UInt", "or", &[Ty::UInt], Ty::UInt)),
+            None
+        );
+        assert_eq!(
+            unsigned_member_operation(&BuiltinMemberDeclaration {
+                is_infix: true,
+                ..facts("kotlin/UInt", "shl", &[Ty::UInt], Ty::UInt)
+            }),
+            None
+        );
+        assert_eq!(
+            unsigned_member_operation(&BuiltinMemberDeclaration {
+                is_infix: true,
+                ..facts("kotlin/UByte", "and", &[Ty::UByte], Ty::UByte)
+            }),
+            None
+        );
+        assert_eq!(
+            unsigned_member_operation(&BuiltinMemberDeclaration {
+                is_infix: true,
+                ..facts("kotlin/UInt", "xor", &[Ty::UInt], Ty::Int)
+            }),
             None
         );
     }
