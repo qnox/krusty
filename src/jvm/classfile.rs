@@ -1246,7 +1246,10 @@ impl ClassWriter {
                 panic!("cannot compute JVM frames for {name}{desc}: {decline:?}")
             })
         });
-        let lvt = if name == "<init>" || name == "<clinit>" {
+        // Constructor locals are reconstructed from the declaration after emission. A static
+        // initializer has no declaration-owned parameter table: any entries it records come from
+        // real initializer code (notably an inlined body's `$i$f$…` frame) and must survive.
+        let lvt = if name == "<init>" {
             Vec::new()
         } else {
             self.local_table(code)
