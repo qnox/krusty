@@ -2,9 +2,10 @@
 //!
 //! kotlinc's serializer sets it for a `const val`, or for a `val` whose declared type can be a
 //! `const val` type and whose initializer passes `FirToConstantValueChecker`: a literal, a string
-//! template or literal concatenation over constants, a read of a `const val`, and a number
-//! conversion (`toByte` … `toDouble`, `toChar`) or `unaryMinus` applied to a constant. Any other
-//! operation over constants (`1 + 2`, `!true`, `'a'.code`) is folded at run time but is not one.
+//! template or literal concatenation over constants, a read whose selected declaration publishes
+//! a constant value, and a number conversion (`toByte` … `toDouble`, `toChar`) or `unaryMinus`
+//! applied to a constant. Any other operation over constants (`1 + 2`, `!true`, `'a'.code`) is
+//! folded at run time but is not one.
 
 use crate::fir::{
     FirBody, FirCallArgument, FirCallTarget, FirConstant, FirConversionKind, FirExprId,
@@ -13,25 +14,13 @@ use crate::fir::{
 use crate::types::Ty;
 
 /// Whether a `val` of `declared` type initialized by `body` records `HAS_CONSTANT`.
-pub(super) fn has_constant_initializer(body: &FirBody, declared: Ty) -> bool {
-    can_be_used_for_const_val(declared)
-        && initializer(body).is_some_and(|initializer| has_constant_value(body, initializer))
-}
-
-/// kotlinc's `canBeUsedForConstVal`: a non-null built-in scalar or `String`.
-fn can_be_used_for_const_val(ty: Ty) -> bool {
-    matches!(
-        ty,
-        Ty::Boolean
-            | Ty::Char
-            | Ty::Byte
-            | Ty::Short
-            | Ty::Int
-            | Ty::Long
-            | Ty::Float
-            | Ty::Double
-            | Ty::String
-    ) || ty.is_unsigned()
+pub(super) fn has_constant_initializer(
+    body: &FirBody,
+    index: &crate::fir::ResolvedModuleIndex,
+    declared: Ty,
+) -> bool {
+    declared.can_be_used_for_const_val()
+        && initializer(body).is_some_and(|initializer| has_constant_value(body, index, initializer))
 }
 
 /// The single expression a property initializer body evaluates.
@@ -45,7 +34,11 @@ fn initializer(body: &FirBody) -> Option<FirExprId> {
     }
 }
 
-fn has_constant_value(body: &FirBody, expression: FirExprId) -> bool {
+fn has_constant_value(
+    body: &FirBody,
+    index: &crate::fir::ResolvedModuleIndex,
+    expression: FirExprId,
+) -> bool {
     let Some(node) = body.expr(expression) else {
         return false;
     };
@@ -55,7 +48,7 @@ fn has_constant_value(body: &FirBody, expression: FirExprId) -> bool {
         FirExprKind::Unary {
             operation: FirUnaryOperation::Negate,
             operand,
-        } => has_constant_value(body, *operand),
+        } => has_constant_value(body, index, *operand),
         // `+3` is a literal to kotlinc's parser; `+X` stays a `unaryPlus` call.
         FirExprKind::Unary {
             operation: FirUnaryOperation::Identity,
@@ -64,22 +57,46 @@ fn has_constant_value(body: &FirBody, expression: FirExprId) -> bool {
         FirExprKind::ImplicitConversion { value, conversion } => match conversion.kind {
             // An explicit `toX()` call; unsigned conversions are extensions, not number conversions.
             FirConversionKind::NumericConversion { to } => {
-                !to.get().canonical_semantic().is_unsigned() && has_constant_value(body, *value)
+                !to.get().canonical_semantic().is_unsigned()
+                    && has_constant_value(body, index, *value)
             }
             FirConversionKind::NumericWidening { .. }
-            | FirConversionKind::NullabilityWidening { .. } => has_constant_value(body, *value),
+            | FirConversionKind::NullabilityWidening { .. }
+            | FirConversionKind::PlatformNarrowing { .. } => {
+                has_constant_value(body, index, *value)
+            }
             _ => false,
         },
-        FirExprKind::StringTemplate(parts) => {
-            parts.iter().all(|part| has_constant_value(body, *part))
-        }
+        FirExprKind::StringTemplate(parts) => parts
+            .iter()
+            .all(|part| has_constant_value(body, index, *part)),
         FirExprKind::Call(_) => string_plus_operands(body, expression).is_some_and(|(lhs, rhs)| {
             is_string_concatenation_operand(body, lhs)
                 && is_string_concatenation_operand(body, rhs)
-                && has_constant_value(body, lhs)
-                && has_constant_value(body, rhs)
+                && has_constant_value(body, index, lhs)
+                && has_constant_value(body, index, rhs)
         }),
+        FirExprKind::PropertyRead { target, .. } => property_has_constant_value(index, target),
         _ => false,
+    }
+}
+
+fn property_has_constant_value(
+    index: &crate::fir::ResolvedModuleIndex,
+    target: &crate::fir::FirPropertyTarget,
+) -> bool {
+    match target {
+        crate::fir::FirPropertyTarget::External {
+            metadata_constant_read,
+            ..
+        } => *metadata_constant_read,
+        crate::fir::FirPropertyTarget::Module { property, .. } => {
+            index.property(*property).is_some_and(|property| {
+                index
+                    .declaration_header(property.declaration)
+                    .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::CONST))
+            })
+        }
     }
 }
 

@@ -74,10 +74,11 @@ fn a_descriptor_element_calls_the_member_with_its_serializer_descriptor() {
             text.contains("StringSerializer.INSTANCE"),
             "{who} must resolve the builtin element serializer:\n{text}"
         );
+        // `serializer<T>()` calls the companion accessor first, never the `$serializer` object.
         assert!(
-            text.contains("Twig$$serializer.INSTANCE")
-                || text.contains("Twig$Companion.serializer"),
-            "{who} must resolve the generated element serializer:\n{text}"
+            text.contains("Twig$Companion.serializer")
+                && !text.contains("Twig$$serializer.INSTANCE"),
+            "{who} must resolve the element serializer through its companion accessor:\n{text}"
         );
     }
 }

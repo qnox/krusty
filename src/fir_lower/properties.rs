@@ -2051,7 +2051,7 @@ pub(super) fn accept_property_body(
         && index
             .property(property_id)
             .is_some_and(|property| !property.mutable)
-        && super::metadata_constants::has_constant_initializer(&body, declared_ty);
+        && super::metadata_constants::has_constant_initializer(&body, index, declared_ty);
     let lowered = lower_body_with_context(body, index, ir, local_callables)
         .map_err(FirFileLoweringFailure::Body)?;
     if !lowered.defaults.is_empty() {
