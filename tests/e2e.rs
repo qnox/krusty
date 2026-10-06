@@ -779,6 +779,8 @@ mod enum_value_of_intrinsic_e2e;
 mod enum_vararg_e2e;
 #[path = "erased_scalar_result_e2e.rs"]
 mod erased_scalar_result_e2e;
+#[path = "erased_type_check_e2e.rs"]
+mod erased_type_check_e2e;
 #[path = "error_branch_join_e2e.rs"]
 mod error_branch_join_e2e;
 #[path = "error_receiver_cascade_e2e.rs"]
@@ -1639,6 +1641,8 @@ mod named_arg_member_e2e;
 mod named_arg_source_order_e2e;
 #[path = "named_args_classpath_e2e.rs"]
 mod named_args_classpath_e2e;
+#[path = "named_argument_operands_e2e.rs"]
+mod named_argument_operands_e2e;
 #[path = "named_ctor_args_e2e.rs"]
 mod named_ctor_args_e2e;
 #[path = "named_super_arg_e2e.rs"]
@@ -1897,6 +1901,8 @@ mod redundant_checkcasts_before_aastore_e2e;
 mod redundant_null_check_e2e;
 #[path = "redundant_null_jumps_e2e.rs"]
 mod redundant_null_jumps_e2e;
+#[path = "reference_consumer_casts_e2e.rs"]
+mod reference_consumer_casts_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]
 mod renamed_builtin_bridge_owner_e2e;
 #[path = "renamed_builtin_property_null_check_e2e.rs"]
@@ -2625,6 +2631,8 @@ mod value_class_param_generic_return_e2e;
 mod value_class_private_init_e2e;
 #[path = "value_class_property_argument_e2e.rs"]
 mod value_class_property_argument_e2e;
+#[path = "value_class_property_entry_e2e.rs"]
+mod value_class_property_entry_e2e;
 #[path = "value_class_property_reference_e2e.rs"]
 mod value_class_property_reference_e2e;
 #[path = "value_class_receiver_capture_debug_names_e2e.rs"]

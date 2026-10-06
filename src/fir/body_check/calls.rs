@@ -21,6 +21,59 @@ pub(super) fn selected_extension_intrinsic(
         })
 }
 
+/// The first non-reified type parameter named by `ty` whose declared bound graph contains a
+/// cycle. Source occurrences are bound in the current declaration scope once; recursive traversal
+/// then follows the stable parameter identities published in the module index.
+fn recursive_type_of_parameter(
+    index: &ResolvedModuleIndex,
+    owner: DeclarationId,
+    ty: Ty,
+) -> Option<crate::fir::TypeParameterId> {
+    let mut names = Vec::new();
+    crate::ir::type_reflection::type_parameters_named_by(ty, &mut names);
+    names.into_iter().find_map(|name| {
+        let parameter = index.type_parameter_in_declaration_scope(owner, name)?;
+        let header = index.type_parameter_header(parameter)?;
+        (!header.flags.is_reified()
+            && parameter_references_recursive_bound(index, parameter, &mut Vec::new()))
+        .then_some(parameter)
+    })
+}
+
+fn parameter_references_recursive_bound(
+    index: &ResolvedModuleIndex,
+    parameter: crate::fir::TypeParameterId,
+    path: &mut Vec<crate::fir::TypeParameterId>,
+) -> bool {
+    if path.contains(&parameter) {
+        return true;
+    }
+    let Some(header) = index.type_parameter_header(parameter) else {
+        return false;
+    };
+    path.push(parameter);
+    let recursive = header
+        .bounds
+        .iter()
+        .any(|bound| type_references_recursive_bound(index, bound.ty.get(), path));
+    path.pop();
+    recursive
+}
+
+fn type_references_recursive_bound(
+    index: &ResolvedModuleIndex,
+    ty: Ty,
+    path: &mut Vec<crate::fir::TypeParameterId>,
+) -> bool {
+    let mut names = Vec::new();
+    crate::ir::type_reflection::type_parameters_named_by(ty, &mut names);
+    names.into_iter().any(|name| {
+        index
+            .type_parameter_by_semantic_name(name)
+            .is_some_and(|parameter| parameter_references_recursive_bound(index, parameter, path))
+    })
+}
+
 fn intrinsic_binary_operation(
     intrinsic: crate::libraries::CompilerIntrinsic,
 ) -> Option<FirBinaryOperation> {
@@ -1741,6 +1794,36 @@ impl BodyFirChecker<'_> {
             selected.callable.ret,
             self.info.resolved_call_type_args.get(&expression),
         );
+        if selected.callable.compiler_intrinsic == Some(crate::libraries::CompilerIntrinsic::TypeOf)
+            && !self.file.recursive_type_of
+        {
+            let ty = self
+                .info
+                .resolved_call_type_args
+                .get(&expression)
+                .and_then(|arguments| arguments.first())
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnsupportedCallShape,
+                    )
+                })?;
+            let owner = DeclarationId::from_raw(self.body.owner().raw());
+            if let Some(parameter) = recursive_type_of_parameter(self.index, owner, ty) {
+                let name = self.index.type_parameter_name(parameter).ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::MissingStableCallTarget,
+                    )
+                })?;
+                return Err(self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::RecursiveTypeOf(name.into()),
+                ));
+            }
+        }
         let dispatch_receiver = selected
             .callable
             .singleton_dispatch

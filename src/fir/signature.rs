@@ -1556,10 +1556,9 @@ pub struct ResolvedModuleIndex {
     /// are semantic declaration headers; target erasure and bridge materialization are absent.
     pub(super) property_overrides: HashMap<DeclarationId, Box<[super::ResolvedPropertyOverride]>>,
     pub(super) function_overrides: HashMap<DeclarationId, Box<[super::ResolvedFunctionOverride]>>,
-    /// Exact interface identities inherited through the direct superclass of each source
-    /// classifier. Pass 1 computes this while the semantic hierarchy provider is live; target
-    /// backends consume it instead of walking superclass declarations again.
-    pub(super) superclass_interfaces: HashMap<DeclarationId, Box<[TypeName]>>,
+    /// The interface defaults each source classifier inherits without overriding, selected while
+    /// the semantic hierarchy provider is live; target backends realize them without a walk.
+    pub(super) inherited_defaults: HashMap<DeclarationId, Box<[super::ResolvedInheritedDefault]>>,
     /// Non-default return-value statuses of module declarations, derived from the frozen edges.
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
     pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
@@ -2114,6 +2113,28 @@ impl ResolvedModuleIndex {
             .get(&classifier)
             .copied()
             .flatten()
+    }
+
+    /// `declaration` and the classifiers that lexically contain it, nearest first.
+    ///
+    /// Non-classifier owners (a function containing a local class, for example) are traversed but
+    /// not returned. The result is declaration identity, not a classifier-name prefix: generated
+    /// local names do not encode lexical ownership.
+    pub fn classifier_and_outer_class_declarations(
+        &self,
+        declaration: DeclarationId,
+    ) -> Vec<DeclarationId> {
+        let mut classifiers = Vec::new();
+        let mut current = Some(declaration);
+        while let Some(owner) = current {
+            if self.classifier_identity(owner).is_some() {
+                classifiers.push(owner);
+            }
+            current = self
+                .declaration_header(owner)
+                .and_then(|header| header.owner);
+        }
+        classifiers
     }
 
     pub fn classifier_hierarchy(
@@ -3224,12 +3245,13 @@ impl ResolvedModuleIndex {
                             .sum::<usize>()
                 })
                 .sum::<usize>()
-            + self.superclass_interfaces.len()
-                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<Box<[TypeName]>>())
             + self
-                .superclass_interfaces
+                .inherited_defaults
                 .values()
-                .map(|interfaces| interfaces.len() * std::mem::size_of::<TypeName>())
+                .map(|defaults| {
+                    std::mem::size_of::<DeclarationId>()
+                        + defaults.len() * std::mem::size_of::<super::ResolvedInheritedDefault>()
+                })
                 .sum::<usize>()
             + self
                 .classifiers

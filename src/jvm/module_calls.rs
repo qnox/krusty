@@ -462,6 +462,7 @@ pub(super) fn realize_super_calls(
     ir: &mut IrFile,
     callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &mut PropertyRealizations,
+    jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 ) -> Result<(), ModuleRealizationTarget> {
     for raw in 0..ir.exprs.len() {
         // `super` dispatch: the checker fixed the supertype declaration, so only the PHYSICAL
@@ -537,10 +538,24 @@ pub(super) fn realize_super_calls(
             if let crate::ir::IrSuperCallKind::PropertyGetter(property) = kind {
                 property_realizations.record_super_getter(raw as ExprId, property);
             }
-            let descriptor = if descriptor.is_empty() {
-                crate::jvm::names::method_descriptor(&params, ret)
-            } else {
-                descriptor
+            // A class that inherits the selected declaration as a specialized default answers the
+            // call with its typed forwarder; its erased entry is a bridge back to that forwarder.
+            let specialized = match (declaration, interface, &realization) {
+                (Some(declaration), false, crate::libraries::MemberRealization::Dispatch) => {
+                    crate::jvm::inherited_default_realization::specialized_super_descriptor(
+                        ir,
+                        callables,
+                        owner,
+                        declaration,
+                        jvm_default,
+                    )
+                }
+                _ => None,
+            };
+            let descriptor = match specialized {
+                Some(specialized) => specialized,
+                None if descriptor.is_empty() => crate::jvm::names::method_descriptor(&params, ret),
+                None => descriptor,
             };
             if enclosing_dispatch {
                 let class = ir
@@ -688,9 +703,10 @@ pub(super) fn realize(
     classifiers: &dyn crate::backend::BackendClassifierSource,
     callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &mut PropertyRealizations,
+    jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 ) -> Result<(), ModuleRealizationTarget> {
     realize_declared_function_names(ir)?;
-    realize_super_calls(ir, callables, property_realizations)?;
+    realize_super_calls(ir, callables, property_realizations, jvm_default)?;
     prepare_inherited_default_calls(ir)?;
     for raw in 0..ir.exprs.len() {
         // A property accessor call keeps its declaration's parameter vector (contexts, receiver,

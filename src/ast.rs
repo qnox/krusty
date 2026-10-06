@@ -1339,6 +1339,13 @@ pub struct ExplicitBackingField {
     pub ty: Option<TypeRef>,
 }
 
+/// Where a property's accessors written with a body start, each a 1-based line (0 = none).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AccessorLines {
+    pub getter: u32,
+    pub setter: u32,
+}
+
 /// A top-level `val`/`var` property: `val name: Type = init`.
 #[derive(Clone, Debug)]
 pub struct PropDecl {
@@ -1353,6 +1360,10 @@ pub struct PropDecl {
     pub context_params: Vec<Param>,
     /// 1-based source line of the declaration, filled by the parser post-pass (0 = unknown).
     pub decl_line: u32,
+    /// 1-based source lines of the headers of a getter and a setter written with a body, filled
+    /// by the same post-pass (0 = none written, or unknown). An accessor is a declaration in its own right, so
+    /// kotlinc anchors what it generates for one (a value class's interface entry) on this line.
+    pub accessor_lines: AccessorLines,
     /// Declaration visibility (`public` by default). A `private set` narrows only the SETTER — that
     /// lives on [`PropAccessor::visibility`]; this is the property's (getter's) visibility.
     pub visibility: Visibility,
@@ -1945,6 +1956,9 @@ pub struct File {
     /// `+EagerLambdaAnalysis`: a lambda that does not discriminate applicable candidates by its
     /// shape is analyzed before the most specific candidate is chosen.
     pub eager_lambda_analysis: bool,
+    /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
+    /// parameters whose declared upper bounds contain a cycle.
+    pub recursive_type_of: bool,
     /// Opt-in markers accepted module-wide (`-opt-in`), as dotted fully qualified names.
     pub opted_in_markers: Vec<String>,
 }
