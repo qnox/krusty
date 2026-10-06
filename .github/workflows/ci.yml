@@ -2,7 +2,8 @@ name: ci
 
 # Build the conformance test binary once. Every supported Kotlin-version lane runs both its box
 # corpus and every other active test in that binary. Publish only after the combined matrix passes
-# and every version matches its exact box fail/not-applicable manifests.
+# and every version matches its exact box fail/not-applicable manifests. `ci-and-conformance` is the
+# one required check over `ci` and that whole matrix.
 # `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
 # match the lists on their own base and still disagree with them once both are on master.
 on:
@@ -267,13 +268,18 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: conformance-bin
+      # pct.txt is the byte-equality report "<pct> <matched> <total>" (class bytes); printing its badge
+      # fields validates it and previews, without publishing, what the master release would show.
       - name: run box conformance ${{ matrix.version }}
+        env:
+          # A first master run may fill missing recorded-byte invocations with live kotlinc. Keep
+          # the repository default strict; only this intentionally cold GHA lane raises it.
+          KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS: 300
         run: |
           set -euo pipefail
           chmod +x conformance-bin krusty
           just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" > pct.txt
-          read -r pct passed applicable < pct.txt
-          echo "pct=$pct passed=$passed applicable=$applicable"
+          bash scripts/conformance-badge.sh fields pct.txt "${{ matrix.version }}"
       - name: run non-box conformance ${{ matrix.version }}
         env:
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
@@ -298,6 +304,28 @@ jobs:
           name: pct-${{ matrix.version }}
           path: pct.txt
           if-no-files-found: error
+
+  # The one check a ruleset requires: its context does not change with the Kotlin version matrix.
+  # A required check that is skipped counts as passing, so this job is always scheduled and fails
+  # itself unless `ci` and the whole matrix (one result over every lane) succeeded. A failed
+  # `build-conformance-bin` or `versions` skips the matrix, which fails it here too.
+  ci-and-conformance:
+    name: ci-and-conformance
+    needs: [ci, conformance]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: require ci and every conformance lane to succeed
+        env:
+          CI_RESULT: ${{ needs.ci.result }}
+          CONFORMANCE_RESULT: ${{ needs.conformance.result }}
+        run: |
+          echo "ci: $CI_RESULT"
+          echo "conformance: $CONFORMANCE_RESULT"
+          if [ "$CI_RESULT" != success ] || [ "$CONFORMANCE_RESULT" != success ]; then
+            echo "ci and every conformance lane must succeed" >&2
+            exit 1
+          fi
 
   # Build the release bytes once. The compatibility matrix below consumes this Maven repository;
   # it never rebuilds the plugin from the checkout.
@@ -526,25 +554,19 @@ jobs:
       - name: record the published commit
         if: steps.tip.outputs.publish == 'true'
         run: scripts/release-publisher.sh record
-      # Badge: read the max version's pct (produced by the conformance matrix) and publish to the gist.
+      # Badge: read the max version's byte-equality report (produced by the conformance matrix) and
+      # publish it to the gist.
       - name: download max-version pct
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: actions/download-artifact@v8
         with:
           name: pct-${{ needs.versions.outputs.max }}
-      - name: compute badge color
+      - name: compute badge payload
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         id: c
-        run: |
-          set -euo pipefail
-          read -r pct passed applicable < pct.txt
-          color=red
-          awk "BEGIN{exit !($pct>=10)}" && color=orange || true
-          awk "BEGIN{exit !($pct>=50)}" && color=yellow || true
-          awk "BEGIN{exit !($pct>=70)}" && color=brightgreen || true
-          {
-            echo "pct=$pct"; echo "passed=$passed"; echo "applicable=$applicable"; echo "color=$color"
-          } >> "$GITHUB_OUTPUT"
+        env:
+          MAX_VERSION: ${{ needs.versions.outputs.max }}
+        run: bash scripts/conformance-badge.sh fields pct.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
       - name: publish conformance badge → gist
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: Schneegans/dynamic-badges-action@v1.9.0
@@ -552,8 +574,8 @@ jobs:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.CONFORMANCE_GIST_ID }}
           filename: krusty-conformance.json
-          label: Kotlin ${{ needs.versions.outputs.max }} conformance
-          message: ${{ steps.c.outputs.pct }}% (${{ steps.c.outputs.passed }}/${{ steps.c.outputs.applicable }})
+          label: ${{ steps.c.outputs.label }}
+          message: ${{ steps.c.outputs.message }}
           color: ${{ steps.c.outputs.color }}
       - name: publish kotlin-version badge → gist
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}

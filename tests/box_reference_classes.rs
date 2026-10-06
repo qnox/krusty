@@ -1,0 +1,906 @@
+//! Reference `.class` collection for the Kotlin box corpus.
+//!
+//! The byte-equality conformance metric measures krusty's emitted classes against the pinned
+//! reference `kotlinc`'s for every applicable box case. This module compiles a case with the
+//! reference compiler, mirroring the exact topology krusty compiled it under — a single file, a
+//! `// FILE:` multi-file set, mixed Kotlin/Java, and a `// MODULE:` multi-module build — and
+//! returns the resulting artifacts keyed by `(module identity, JVM internal class name)`.
+//!
+//! Only `.class` artifacts enter the inventory. `kotlinc`'s `META-INF/<module>.kotlin_module` and
+//! any other non-class output are not part of the compared population. A class name that repeats
+//! across two modules stays two distinct artifacts: the module identity, not the bare internal
+//! name, is the key.
+//!
+//! A reference failure — a compiler rejection, a missing input, an unreadable class — is returned
+//! explicitly as `Err`. No applicable case is dropped from the population by its shape.
+
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use krusty::conformance::{
+    directive, inject_support_module, module_units, split_files, split_modules, BoxJdk,
+    FragmentUnit,
+};
+
+use super::common::{self, language_directives};
+
+/// The stable module identity for every single-module topology (ordinary, `// FILE:` multi-file,
+/// and mixed Java). It matches the module name krusty emits those cases under.
+pub const MAIN_MODULE: &str = "main";
+
+/// A reference `.class` inventory grouped by module identity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReferenceClasses {
+    modules: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
+}
+
+impl ReferenceClasses {
+    fn insert(&mut self, module: &str, name: &str, bytes: Vec<u8>) {
+        self.modules
+            .entry(module.to_string())
+            .or_default()
+            .insert(name.to_string(), bytes);
+    }
+
+    /// Every artifact as `((module, internal name), bytes)`, module- then name-sorted.
+    pub fn qualified(&self) -> impl Iterator<Item = ((&str, &str), &[u8])> {
+        self.modules.iter().flat_map(|(module, classes)| {
+            classes
+                .iter()
+                .map(move |(name, bytes)| ((module.as_str(), name.as_str()), bytes.as_slice()))
+        })
+    }
+
+    /// The classes a single module emitted, keyed by internal name.
+    pub fn module(&self, name: &str) -> Option<&BTreeMap<String, Vec<u8>>> {
+        self.modules.get(name)
+    }
+
+    /// Total number of `.class` artifacts across all modules.
+    pub fn class_count(&self) -> usize {
+        self.modules.values().map(BTreeMap::len).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.class_count() == 0
+    }
+
+    /// Collapse to internal-name → bytes, discarding module identity (first module wins on a
+    /// collision). For the opt-in byte-diff inspection only; byte scoring pairs on the full
+    /// module-qualified identity so distinct-module same-name classes are never merged.
+    pub fn flatten(&self) -> BTreeMap<String, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        for classes in self.modules.values() {
+            for (name, bytes) in classes {
+                out.entry(name.clone()).or_insert_with(|| bytes.clone());
+            }
+        }
+        out
+    }
+}
+
+/// Compile `src` with the reference `kotlinc` into a module-qualified `.class` inventory, mirroring
+/// the topology krusty compiled it under. `coroutine_helpers` is the same generated support source
+/// the production harness injects for `// WITH_COROUTINES` cases; `cp_jars` and `jdk` are the exact
+/// directive-selected classpath and JDK krusty used.
+///
+/// Every kotlinc invocation goes through [`common::kotlinc_compile`], the repository's single
+/// versioned binary recorder. It fingerprints source, flags, toolchain and classpath contents,
+/// replays the GHA-restored archive, and records missing invocations on master. This topology layer
+/// deliberately owns no second cache.
+pub fn reference_compile(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk: BoxJdk<'_>,
+    coroutine_helpers: &str,
+) -> Result<ReferenceClasses, String> {
+    let language_args = reference_directive_args(src)?;
+    let scratch = ScratchDir::new()?;
+    compile_all(
+        src,
+        stem,
+        cp_jars,
+        jdk,
+        coroutine_helpers,
+        &language_args,
+        scratch.path(),
+    )
+}
+
+/// Read every `.class` under `dir` into an internal-name → bytes map (package `/` separators, no
+/// extension). `Err` on any read failure — a concurrently rewritten cache must re-grade as a
+/// reference failure, not compare against truncated bytes.
+pub fn read_class_tree(dir: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let mut out = BTreeMap::new();
+    read_class_tree_in(dir, dir, &mut out)?;
+    Ok(out)
+}
+
+fn read_class_tree_in(
+    root: &Path,
+    dir: &Path,
+    out: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|error| format!("read dir {}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("read dir entry in {}: {error}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            read_class_tree_in(root, &path, out)?;
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "class")
+        {
+            let relative = path
+                .strip_prefix(root)
+                .unwrap()
+                .with_extension("")
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            let bytes =
+                std::fs::read(&path).map_err(|error| format!("cache read {relative}: {error}"))?;
+            out.insert(relative, bytes);
+        }
+    }
+    Ok(())
+}
+
+/// kotlinc "test-only" language features: the compiler rejects `-XXLanguage:+<feature>` for these
+/// from the command line unless the `kotlinc.test.allow.testonly.language.features` JVM property is
+/// set, exactly as kotlinc's own test runner enables them. A corpus case that opts one in through
+/// `// LANGUAGE:` must reference-compile with that property, not be dropped from the population.
+const TEST_ONLY_LANGUAGE_FEATURES: &[&str] = &["ImplicitSignedToUnsignedIntegerConversion"];
+
+/// The reference compiler arguments a case's test directives imply. They are passed to
+/// [`common::kotlinc_compile`], whose recorder fingerprints every entry:
+/// - its `// LANGUAGE:` flags, verbatim;
+/// - `-Dkotlinc.test.allow.testonly.language.features=true` when it opts in a test-only feature,
+///   which the persistent server applies as a JVM property on its own property-keyed pool rather
+///   than passing to the compiler;
+/// - `-Xallow-kotlin-package` for an `// ALLOW_KOTLIN_PACKAGE` case, which declares types under the
+///   otherwise-reserved `kotlin` package;
+/// - `-opt-in=<marker>` for each fully-qualified marker named by an `// OPT_IN:` directive, so a
+///   case using an experimental API (e.g. an `@OptionalExpectation` requires
+///   `kotlin.ExperimentalMultiplatform`) compiles instead of failing the opt-in requirement;
+/// - `-Xreturn-value-checker=<mode>` for a `// RETURN_VALUE_CHECKER_MODE:` case, so the reference
+///   accepts its `@MustUseReturnValues`/`@IgnorableReturnValue` annotations (krusty does not model
+///   the checker, so it never passes this flag to its own compile, but the case's runtime `box()`
+///   is unaffected, leaving it applicable and still requiring a reference compile).
+fn reference_directive_args(src: &str) -> Result<Vec<String>, String> {
+    let mut args = language_directives::kotlinc_args(src);
+    let opts_in_test_only = TEST_ONLY_LANGUAGE_FEATURES.iter().any(|feature| {
+        let enabling = format!("-XXLanguage:+{feature}");
+        args.iter().any(|arg| arg == &enabling)
+    });
+    if opts_in_test_only {
+        args.push("-Dkotlinc.test.allow.testonly.language.features=true".to_string());
+    }
+    // Real kotlinc rejects any source that declares a type under the reserved `kotlin` package
+    // unless `-Xallow-kotlin-package` is set. A case opts in either explicitly with
+    // `// ALLOW_KOTLIN_PACKAGE` or implicitly by declaring such a package in one of its files
+    // (several corpus cases do the latter without the directive). krusty does not enforce the
+    // reservation, so it compiles without the flag; the reference must get it or the applicable
+    // case cannot be scored.
+    if directive(src, "ALLOW_KOTLIN_PACKAGE") || declares_reserved_kotlin_package(src) {
+        args.push("-Xallow-kotlin-package".to_string());
+    }
+    for marker in src
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("// OPT_IN:"))
+        .flat_map(|payload| payload.split([' ', ',', '\t']))
+        .filter(|token| !token.is_empty())
+    {
+        args.push(format!("-opt-in={marker}"));
+    }
+    if let Some(mode) = src.lines().find_map(|line| {
+        line.trim_start()
+            .strip_prefix("// RETURN_VALUE_CHECKER_MODE:")
+    }) {
+        // Map the test directive's enum value to the compiler flag spelling. An unrecognized value
+        // fails closed (REF-FAIL) rather than silently scoring against the wrong invocation.
+        let flag = match mode.trim() {
+            "FULL" => "full",
+            "CHECKER" => "check",
+            "DISABLED" => "disable",
+            unknown => {
+                return Err(format!(
+                    "reference oracle does not support RETURN_VALUE_CHECKER_MODE {unknown}"
+                ));
+            }
+        };
+        args.push(format!("-Xreturn-value-checker={flag}"));
+    }
+    Ok(args)
+}
+
+/// Whether any source file declares a top-level package of `kotlin` or a `kotlin.*` subpackage,
+/// which real kotlinc accepts only under `-Xallow-kotlin-package`.
+fn declares_reserved_kotlin_package(src: &str) -> bool {
+    src.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("package ")
+            .map(str::trim)
+            .is_some_and(|pkg| pkg == "kotlin" || pkg.starts_with("kotlin."))
+    })
+}
+
+fn compile_all(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk: BoxJdk<'_>,
+    coroutine_helpers: &str,
+    language_args: &[String],
+    work: &Path,
+) -> Result<ReferenceClasses, String> {
+    let mut classes = ReferenceClasses::default();
+    if src.contains("// MODULE:") {
+        let Some(mut modules) = split_modules(src) else {
+            return Err("reference oracle does not support this // MODULE: shape".to_string());
+        };
+        if directive(src, "WITH_COROUTINES") {
+            inject_support_module(&mut modules, coroutine_helpers);
+        }
+        let mut outputs: HashMap<String, PathBuf> = HashMap::new();
+        for unit in module_units(&modules) {
+            let mut classpath = cp_jars.to_vec();
+            let mut friends = Vec::new();
+            for dependency in &unit.deps {
+                let Some(output) = outputs.get(dependency) else {
+                    return Err(format!(
+                        "reference module {}: dependency {dependency} was not built",
+                        unit.name
+                    ));
+                };
+                classpath.push(output.clone());
+                if unit.friends.contains(dependency) {
+                    friends.push(output.clone());
+                }
+            }
+            let output = work.join(&unit.name).join("classes");
+            let unit_classes = compile_unit(
+                &Unit {
+                    module: &unit.name,
+                    kotlin: &unit.files,
+                    java: &unit.java_files,
+                    fragments: &unit.fragments,
+                    classpath: &classpath,
+                    friend_paths: &friends,
+                },
+                jdk,
+                language_args,
+                &work.join(&unit.name),
+                &output,
+            )?;
+            for (name, bytes) in unit_classes {
+                classes.insert(&unit.name, &name, bytes);
+            }
+            outputs.insert(unit.name.clone(), output);
+        }
+    } else {
+        let (mut kotlin, java) = if src.contains("// FILE:") {
+            split_files(src)
+        } else {
+            (vec![(stem.to_string(), src.to_string())], Vec::new())
+        };
+        if directive(src, "WITH_COROUTINES") {
+            kotlin.push(("CoroutineUtil".to_string(), coroutine_helpers.to_string()));
+        }
+        let output = work.join(MAIN_MODULE).join("classes");
+        let unit_classes = compile_unit(
+            &Unit {
+                module: MAIN_MODULE,
+                kotlin: &kotlin,
+                java: &java,
+                fragments: &[],
+                classpath: cp_jars,
+                friend_paths: &[],
+            },
+            jdk,
+            language_args,
+            &work.join(MAIN_MODULE),
+            &output,
+        )?;
+        for (name, bytes) in unit_classes {
+            classes.insert(MAIN_MODULE, &name, bytes);
+        }
+    }
+    if classes.is_empty() {
+        return Err("reference compile produced no .class artifacts".to_string());
+    }
+    Ok(classes)
+}
+
+/// One compilation unit handed to the reference compiler. `fragments` is the folded `dependsOn`
+/// chain in dependency-first order (empty for a non-module single-file unit); a multi-fragment unit
+/// compiles as HMPP, each fragment owning a contiguous run of the Kotlin blocks in that same order.
+struct Unit<'a> {
+    module: &'a str,
+    kotlin: &'a [(String, String)],
+    java: &'a [(String, String)],
+    fragments: &'a [FragmentUnit],
+    classpath: &'a [PathBuf],
+    friend_paths: &'a [PathBuf],
+}
+
+/// Compile one unit's Kotlin (with its Java sources visible for resolution), then compile its Java
+/// with javac against the Kotlin output, exactly as kotlinc's own box-test infrastructure does.
+/// Every emitted `.class` — Kotlin and Java — is written under `output` so a dependent module reads
+/// it off the classpath, and returned keyed by internal name.
+fn compile_unit(
+    unit: &Unit<'_>,
+    jdk: BoxJdk<'_>,
+    language_args: &[String],
+    unit_root: &Path,
+    output: &Path,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    std::fs::create_dir_all(output)
+        .map_err(|error| format!("reference module {}: {error}", unit.module))?;
+    if unit.kotlin.is_empty() && unit.java.is_empty() {
+        // A source-less hmpp intermediate: no classes, but dependents still need its (empty)
+        // classpath directory, which the caller recorded.
+        return Ok(BTreeMap::new());
+    }
+
+    let source_root = unit_root.join("sources");
+    let kotlin_paths = write_group(&source_root.join("kotlin"), unit.kotlin)?;
+    let java_paths = write_group(&source_root.join("java"), unit.java)?;
+
+    if !unit.kotlin.is_empty() {
+        // Each unit resolves its Kotlin against the base classpath PLUS its already-built
+        // dependency modules, so the `-classpath`/`-no-jdk` arguments are derived per unit.
+        let classpath_args = jdk.kotlinc_args(unit.classpath)?;
+        let mut args: Vec<String> = vec!["-d".to_string(), output.to_string_lossy().into_owned()];
+        args.extend(classpath_args);
+        args.extend_from_slice(language_args);
+        args.push("-module-name".to_string());
+        args.push(unit.module.to_string());
+        // A folded `dependsOn` chain compiles as hierarchical multiplatform: one fragment per
+        // source set, with `refines` edges, so an `actual` in an intermediate source set matches an
+        // `expect` in a refined-upon one. The flat `-Xcommon-sources` common/platform split cannot
+        // model that and rejects an intermediate `actual` as having no `expect`.
+        if unit.fragments.len() > 1 {
+            args.push("-Xmulti-platform".to_string());
+            let mut offset = 0;
+            for fragment in unit.fragments {
+                args.push(format!("-Xfragments={}", fragment.name));
+                for path in &kotlin_paths[offset..offset + fragment.kotlin_file_count] {
+                    args.push(format!(
+                        "-Xfragment-sources={}:{}",
+                        fragment.name,
+                        path.to_string_lossy()
+                    ));
+                }
+                for refined in &fragment.refines {
+                    args.push(format!("-Xfragment-refines={}:{refined}", fragment.name));
+                }
+                offset += fragment.kotlin_file_count;
+            }
+        }
+        if !unit.friend_paths.is_empty() {
+            let friends = std::env::join_paths(unit.friend_paths)
+                .map_err(|error| format!("reference module {}: {error}", unit.module))?;
+            args.push(format!("-Xfriend-paths={}", friends.to_string_lossy()));
+        }
+        // Java sources are supplementary input so the Kotlin compile resolves Java declarations;
+        // kotlinc emits no `.class` for them (javac does, below).
+        for path in kotlin_paths.iter().chain(&java_paths) {
+            args.push(path.to_string_lossy().into_owned());
+        }
+        let (code, diagnostics) =
+            common::kotlinc_compile(&args).ok_or_else(|| "kotlinc unavailable".to_string())?;
+        if code != 0 {
+            return Err(reference_compile_error(unit.module, &diagnostics));
+        }
+    }
+
+    if !unit.java.is_empty() {
+        let mut javac_cp = unit.classpath.to_vec();
+        javac_cp.push(output.to_path_buf());
+        let (javadir, java_classes) =
+            common::javac_compile(unit.java, &javac_cp).ok_or_else(|| {
+                format!(
+                    "reference module {}: javac rejected the Java sources",
+                    unit.module
+                )
+            })?;
+        if let Some(root) = javadir.parent() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+        for (name, bytes) in &java_classes {
+            let path = output.join(format!("{name}.class"));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("reference module {}: {error}", unit.module))?;
+            }
+            std::fs::write(&path, bytes)
+                .map_err(|error| format!("reference module {}: {error}", unit.module))?;
+        }
+    }
+
+    read_class_tree(output)
+}
+
+/// Extract the first source-anchored kotlinc diagnostic as the explicit failure cause, falling back
+/// to the first `error`/output line so a locationless failure is still reported, never swallowed.
+fn reference_compile_error(module: &str, diagnostics: &str) -> String {
+    let line = diagnostics
+        .lines()
+        .find(|line| line.contains(": error:") && line.contains(".kt:"))
+        .or_else(|| diagnostics.lines().find(|line| line.contains("error")))
+        .or_else(|| diagnostics.lines().next())
+        .unwrap_or("reference compiler rejected the sources");
+    format!("reference module {module}: {}", line.trim())
+}
+
+fn write_group(dir: &Path, blocks: &[(String, String)]) -> Result<Vec<PathBuf>, String> {
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(index, (name, source))| {
+            let block_dir = dir.join(index.to_string());
+            std::fs::create_dir_all(&block_dir)
+                .map_err(|error| format!("cannot create reference source directory: {error}"))?;
+            // The FILE NAME decides kotlinc's facade class name (`arrayElement.kt` →
+            // `ArrayElementKt`) and javac requires it to match the public class, so a Java block's
+            // name already carries `.java` while a Kotlin block carries only its leaf stem.
+            let leaf = name.rsplit('/').next().unwrap_or(name);
+            let (file, contents) = if name.ends_with(".java") {
+                (block_dir.join(leaf), source.clone())
+            } else {
+                // kotlinc rejects the raw diagnostic-test markers krusty's lexer consumes as trivia,
+                // so strip them for the reference exactly as kotlinc's own test runner does.
+                (
+                    block_dir.join(format!("{leaf}.kt")),
+                    strip_diagnostic_markers(source),
+                )
+            };
+            std::fs::write(&file, &contents)
+                .map_err(|error| format!("cannot write reference source: {error}"))?;
+            Ok(file)
+        })
+        .collect()
+}
+
+/// Strip kotlinc diagnostic-test markers — `<!DIAGNOSTIC_NAME!>` (open) and `<!>` (close) — the same
+/// way krusty's lexer consumes them as trivia (`src/lexer.rs`), so the reference compiler sees the
+/// program krusty actually compiled rather than failing on the raw markers (kotlinc's own box-test
+/// runner strips them identically before compiling).
+///
+/// An open marker is recognized only when an upper-snake-case name follows `<!` AND a closing `!>`
+/// appears on the same line, so a real `a < !b` is left intact. Markers never span a line, so
+/// removing them preserves line numbers — and thus `LineNumberTable` bytes — on both sides.
+fn strip_diagnostic_markers(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'<' && i + 2 < b.len() && b[i + 1] == b'!' && b[i + 2] == b'>' {
+            i += 3; // close marker `<!>`
+            continue;
+        }
+        if b[i] == b'<'
+            && i + 2 < b.len()
+            && b[i + 1] == b'!'
+            && (b[i + 2].is_ascii_uppercase() || b[i + 2] == b'_')
+        {
+            let mut j = i + 2;
+            while j + 1 < b.len() && b[j] != b'\n' && !(b[j] == b'!' && b[j + 1] == b'>') {
+                j += 1;
+            }
+            if j + 1 < b.len() && b[j] == b'!' && b[j + 1] == b'>' {
+                i = j + 2; // consume through `!>`
+                continue;
+            }
+        }
+        // A real `<` or any other byte (including UTF-8 continuation bytes, which are never `<`/`!`)
+        // is copied verbatim.
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).expect("stripping ASCII markers preserves UTF-8")
+}
+
+struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    fn new() -> Result<ScratchDir, String> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "krusty_refclasses_{}_{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path)
+            .map_err(|error| format!("cannot create reference scratch directory: {error}"))?;
+        Ok(ScratchDir(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NO_HELPERS: &str = "";
+
+    fn kotlinc_available() -> bool {
+        krusty::toolchain::kotlinc_path().is_some()
+    }
+
+    #[test]
+    fn multi_module_keeps_same_named_classes_per_module() {
+        if !kotlinc_available() {
+            return;
+        }
+        // Two independent modules each declare `p.Foo`; `main` imports `a`'s. The emitted class
+        // `p/Foo` therefore exists in BOTH module `a` and module `b` and must stay two distinct
+        // artifacts under their module identities, never flattened to one.
+        let src = "// MODULE: a\n\
+                   // FILE: a.kt\n\
+                   package p\n\
+                   class Foo { fun v() = \"A\" }\n\
+                   // MODULE: b\n\
+                   // FILE: b.kt\n\
+                   package p\n\
+                   class Foo { fun v() = \"B\" }\n\
+                   // MODULE: main(a)\n\
+                   // FILE: main.kt\n\
+                   import p.Foo\n\
+                   fun box(): String = Foo().v()\n";
+        let reference = compile_or_skip(src, "typeAliasFixture", &[], BoxJdk::Full { root: None });
+        let Some(reference) = reference else {
+            return;
+        };
+        let a = reference.module("a").expect("module a must emit its class");
+        let b = reference.module("b").expect("module b must emit its class");
+        assert!(a.contains_key("p/Foo"), "module a classes: {:?}", a.keys());
+        assert!(b.contains_key("p/Foo"), "module b classes: {:?}", b.keys());
+        assert_ne!(
+            a.get("p/Foo"),
+            b.get("p/Foo"),
+            "the two modules' p/Foo differ in bytes (one returns A, the other B)"
+        );
+        assert!(
+            reference
+                .module("main")
+                .is_some_and(|m| m.contains_key("MainKt")),
+            "module main must emit its facade"
+        );
+        // Flattening collapses the collision; the module-qualified inventory does not.
+        assert!(
+            reference.flatten().len() < reference.class_count(),
+            "the duplicate p/Foo proves module identity is preserved beyond the bare name"
+        );
+    }
+
+    #[test]
+    fn mixed_java_contributes_java_classes_and_excludes_module_metadata() {
+        if !kotlinc_available() {
+            return;
+        }
+        let src = "// FILE: Helper.java\n\
+                   public class Helper { public static String value() { return \"OK\"; } }\n\
+                   // FILE: box.kt\n\
+                   fun box(): String = Helper.value()\n";
+        let reference = compile_or_skip(
+            src,
+            "box",
+            &[common::stdlib_jar()],
+            BoxJdk::Full { root: None },
+        );
+        let Some(reference) = reference else {
+            return;
+        };
+        let main = reference
+            .module(MAIN_MODULE)
+            .expect("the single module must be `main`");
+        assert!(
+            main.contains_key("Helper"),
+            "the javac-emitted Java class must count: {:?}",
+            main.keys()
+        );
+        assert!(
+            main.contains_key("BoxKt"),
+            "the Kotlin facade must count: {:?}",
+            main.keys()
+        );
+        assert!(
+            reference
+                .qualified()
+                .all(|((_, name), _)| !name.ends_with(".kotlin_module")),
+            "non-class artifacts such as .kotlin_module are not in the population"
+        );
+    }
+
+    #[test]
+    fn a_compile_rejection_is_an_explicit_error() {
+        if !kotlinc_available() {
+            return;
+        }
+        let error = reference_compile(
+            "fun box(): String { return 1 }\n",
+            "Broken",
+            &[],
+            BoxJdk::Full { root: None },
+            NO_HELPERS,
+        )
+        .expect_err("invalid Kotlin must be an explicit reference failure, not a dropped case");
+        assert!(
+            error.contains("error") || error.contains("Broken") || error.contains("module"),
+            "the failure must identify a cause: {error}"
+        );
+    }
+
+    #[test]
+    fn diagnostic_markers_are_stripped_but_real_less_than_is_kept() {
+        // Open marker with an upper-snake name and a same-line `!>`, plus a bare close marker.
+        assert_eq!(
+            strip_diagnostic_markers("1 + <!NON_TAIL_RECURSIVE_CALL!>f<!>(x)\n"),
+            "1 + f(x)\n"
+        );
+        // A real `a < !b` (lowercase operand, no same-line `!>`) must survive untouched.
+        assert_eq!(strip_diagnostic_markers("a < !b\n"), "a < !b\n");
+        // Line counts are preserved so LineNumberTable bytes match on both sides.
+        let marked = "val x =\n    <!UNUSED!>y<!>\n";
+        let stripped = strip_diagnostic_markers(marked);
+        assert_eq!(stripped, "val x =\n    y\n");
+        assert_eq!(stripped.matches('\n').count(), marked.matches('\n').count());
+        // Non-ASCII content is preserved verbatim.
+        assert_eq!(
+            strip_diagnostic_markers("val s = \"αβ\" <!FOO!>+ z<!>\n"),
+            "val s = \"αβ\" + z\n"
+        );
+    }
+
+    #[test]
+    fn directive_flags_mirror_the_corpus_reference_options() {
+        // A plain case adds nothing.
+        assert_eq!(
+            reference_directive_args("fun box() = \"OK\"\n"),
+            Ok(Vec::<String>::new())
+        );
+        // `// ALLOW_KOTLIN_PACKAGE` opts in the reserved-`kotlin`-package flag.
+        assert_eq!(
+            reference_directive_args("// ALLOW_KOTLIN_PACKAGE\npackage kotlin.jvm\n"),
+            Ok(vec!["-Xallow-kotlin-package".to_string()])
+        );
+        // A source that declares a `kotlin.*` package opts in the same flag WITHOUT the directive,
+        // as several corpus cases do (e.g. a `// FILE:` block under `package kotlin.internal`).
+        assert_eq!(
+            reference_directive_args(
+                "// FILE: a.kt\npackage kotlin.internal\nannotation class A\n// FILE: b.kt\nfun box() = \"OK\"\n"
+            ),
+            Ok(vec!["-Xallow-kotlin-package".to_string()])
+        );
+        // A package that merely starts with the letters `kotlin` but is not the reserved package is
+        // not matched, so an ordinary case is unaffected.
+        assert_eq!(
+            reference_directive_args("package kotlinx.demo\nfun box() = \"OK\"\n"),
+            Ok(Vec::<String>::new())
+        );
+        // A test-only feature additionally opts in the JVM property.
+        assert_eq!(
+            reference_directive_args(
+                "// LANGUAGE: +ImplicitSignedToUnsignedIntegerConversion\nfun box() = \"OK\"\n"
+            ),
+            Ok(vec![
+                "-XXLanguage:+ImplicitSignedToUnsignedIntegerConversion".to_string(),
+                "-Dkotlinc.test.allow.testonly.language.features=true".to_string(),
+            ])
+        );
+        // A non-test-only feature must NOT drag in the property: that would needlessly spin a
+        // property-keyed compiler server and change the key for an ordinary case.
+        assert_eq!(
+            reference_directive_args("// LANGUAGE: +ContextParameters\nfun box() = \"OK\"\n"),
+            Ok(vec!["-XXLanguage:+ContextParameters".to_string()])
+        );
+        // `// OPT_IN:` markers each become an `-opt-in` flag; multiple markers on one line split.
+        assert_eq!(
+            reference_directive_args(
+                "// OPT_IN: kotlin.ExperimentalMultiplatform, kotlin.contracts.ExperimentalContracts\nfun box() = \"OK\"\n"
+            ),
+            Ok(vec![
+                "-opt-in=kotlin.ExperimentalMultiplatform".to_string(),
+                "-opt-in=kotlin.contracts.ExperimentalContracts".to_string(),
+            ])
+        );
+        // `// RETURN_VALUE_CHECKER_MODE: <MODE>` enables kotlinc's return-value checker so the
+        // reference compile accepts a case's `@MustUseReturnValues`/`@IgnorableReturnValue`; the
+        // directive's enum value maps to the compiler flag's `{check|full|disable}` spelling.
+        assert_eq!(
+            reference_directive_args(
+                "// RETURN_VALUE_CHECKER_MODE: FULL\n// WITH_STDLIB\nfun box() = \"OK\"\n"
+            ),
+            Ok(vec!["-Xreturn-value-checker=full".to_string()])
+        );
+        assert_eq!(
+            reference_directive_args("// RETURN_VALUE_CHECKER_MODE: CHECKER\nfun box() = \"OK\"\n"),
+            Ok(vec!["-Xreturn-value-checker=check".to_string()])
+        );
+        assert_eq!(
+            reference_directive_args(
+                "// RETURN_VALUE_CHECKER_MODE: DISABLED\nfun box() = \"OK\"\n"
+            ),
+            Ok(vec!["-Xreturn-value-checker=disable".to_string()])
+        );
+        assert_eq!(
+            reference_directive_args("// RETURN_VALUE_CHECKER_MODE: UNKNOWN\nfun box() = \"OK\"\n"),
+            Err("reference oracle does not support RETURN_VALUE_CHECKER_MODE UNKNOWN".to_string())
+        );
+        // The real `expectActualTypealiasCoercion` corpus case opts in all three.
+        assert_eq!(
+            reference_directive_args(
+                "// LANGUAGE: +MultiPlatformProjects +ImplicitSignedToUnsignedIntegerConversion\n\
+                 // ALLOW_KOTLIN_PACKAGE\nfun box() = \"OK\"\n"
+            ),
+            Ok(vec![
+                "-XXLanguage:+MultiPlatformProjects".to_string(),
+                "-XXLanguage:+ImplicitSignedToUnsignedIntegerConversion".to_string(),
+                "-Dkotlinc.test.allow.testonly.language.features=true".to_string(),
+                "-Xallow-kotlin-package".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_kotlin_package_case_reference_compiles_with_the_allow_flag() {
+        if !kotlinc_available() {
+            return;
+        }
+        // `package kotlin.jvm` is rejected ("only the Kotlin standard library is allowed to use the
+        // 'kotlin' package") unless `-Xallow-kotlin-package` is passed, which the directive opts in.
+        let src = "// ALLOW_KOTLIN_PACKAGE\n\
+                   // FILE: box.kt\n\
+                   package kotlin.jvm\n\
+                   class Marker\n\
+                   fun box(): String { Marker(); return \"OK\" }\n";
+        let reference = compile_or_skip(
+            src,
+            "box",
+            &[common::stdlib_jar()],
+            BoxJdk::Full { root: None },
+        );
+        let Some(reference) = reference else {
+            return;
+        };
+        let main = reference
+            .module(MAIN_MODULE)
+            .expect("the single module must be `main`");
+        assert!(
+            main.contains_key("kotlin/jvm/Marker"),
+            "the reserved-package class must compile: {:?}",
+            main.keys()
+        );
+        assert!(
+            main.contains_key("kotlin/jvm/BoxKt"),
+            "the Kotlin facade (under the reserved package) must count: {:?}",
+            main.keys()
+        );
+    }
+
+    #[test]
+    fn a_test_only_language_feature_reference_compiles_through_the_property_server() {
+        if !kotlinc_available() {
+            return;
+        }
+        // kotlinc refuses `-XXLanguage:+ImplicitSignedToUnsignedIntegerConversion` from the command
+        // line ("test-only and cannot be enabled from command line") unless the JVM property is set;
+        // the oracle enables it and content-scores the real classes rather than drop the case.
+        let src = "// LANGUAGE: +ImplicitSignedToUnsignedIntegerConversion\n\
+                   // FILE: box.kt\n\
+                   fun box(): String = \"OK\"\n";
+        let reference = compile_or_skip(
+            src,
+            "box",
+            &[common::stdlib_jar()],
+            BoxJdk::Full { root: None },
+        );
+        let Some(reference) = reference else {
+            return;
+        };
+        let main = reference
+            .module(MAIN_MODULE)
+            .expect("the single module must be `main`");
+        assert!(
+            main.contains_key("BoxKt"),
+            "the facade must compile under the test-only feature: {:?}",
+            main.keys()
+        );
+    }
+
+    #[test]
+    fn an_hmpp_intermediate_actual_reference_compiles_as_fragments() {
+        if !kotlinc_available() {
+            return;
+        }
+        // The real `multiplatform/k2/hmpp/inheritanceFromExpectedInApp3-3` topology: a three-level
+        // `dependsOn` hierarchy where an `actual` lives in an INTERMEDIATE source set (lib-inter
+        // actualizes lib-common's `expect LibClass1`). The flat `-Xcommon-sources` common/platform
+        // split rejects that ("has no corresponding 'expect' declaration"); the fragment model
+        // matches `actual` and `expect` across refined source sets.
+        let src = "// LANGUAGE: +MultiPlatformProjects\n\
+                   // MODULE: lib-common\n\
+                   // FILE: lib-common.kt\n\
+                   expect open class LibClass1() { open fun foo(): String }\n\
+                   // MODULE: lib-inter()()(lib-common)\n\
+                   // FILE: lib-inter.kt\n\
+                   expect open class LibInterClass() { open fun foo(): String }\n\
+                   actual open class LibClass1 { actual open fun foo(): String = \"1\"; fun baz() {} }\n\
+                   // MODULE: lib-platform()()(lib-inter)\n\
+                   // FILE: lib-platform.kt\n\
+                   actual open class LibInterClass { actual open fun foo(): String = \"3\"; fun baz() {} }\n\
+                   // MODULE: app-common(lib-common)\n\
+                   // FILE: app-common.kt\n\
+                   class AppLibClass1 : LibClass1() { override fun foo(): String = \"AppCommon1\" }\n\
+                   // MODULE: app-inter(lib-inter)()(app-common)\n\
+                   // FILE: app-inter.kt\n\
+                   class AppInterCommon : LibInterClass() { override fun foo(): String = \"AppInterCommon\" }\n\
+                   // MODULE: app-platform(lib-platform)()(app-inter)\n\
+                   // FILE: app-platform.kt\n\
+                   class AppInterPlatform : LibInterClass() { override fun foo(): String = \"AppInterPlatform\"; fun extra() = baz() }\n\
+                   fun box(): String {\n\
+                       if (LibClass1().foo() != \"1\") return \"FAIL\"\n\
+                       if (LibInterClass().foo() != \"3\") return \"FAIL\"\n\
+                       if (AppLibClass1().foo() != \"AppCommon1\") return \"FAIL\"\n\
+                       if (AppInterCommon().foo() != \"AppInterCommon\") return \"FAIL\"\n\
+                       if (AppInterPlatform().foo() != \"AppInterPlatform\") return \"FAIL\"\n\
+                       return \"OK\"\n\
+                   }\n";
+        let reference = compile_or_skip(
+            src,
+            "box",
+            &[common::stdlib_jar()],
+            BoxJdk::Full { root: None },
+        );
+        let Some(reference) = reference else {
+            return;
+        };
+        // The lib leaf unit folds lib-common + lib-inter + lib-platform; the intermediate `actual
+        // LibClass1` and the leaf `actual LibInterClass` both emit under it.
+        let lib = reference
+            .module("lib-platform")
+            .expect("lib-platform unit must emit classes");
+        assert!(
+            lib.contains_key("LibClass1") && lib.contains_key("LibInterClass"),
+            "intermediate and leaf actuals must compile: {:?}",
+            lib.keys()
+        );
+        // The app leaf unit folds app-common + app-inter + app-platform.
+        let app = reference
+            .module("app-platform")
+            .expect("app-platform unit must emit classes");
+        assert!(
+            app.contains_key("AppLibClass1") && app.contains_key("AppInterPlatform"),
+            "folded app classes must compile: {:?}",
+            app.keys()
+        );
+    }
+
+    fn compile_or_skip(
+        src: &str,
+        stem: &str,
+        cp_jars: &[PathBuf],
+        jdk: BoxJdk<'_>,
+    ) -> Option<ReferenceClasses> {
+        match reference_compile(src, stem, cp_jars, jdk, NO_HELPERS) {
+            Ok(reference) => Some(reference),
+            Err(error) if error == "kotlinc unavailable" => None,
+            Err(error) => panic!("reference compiler rejected a valid fixture: {error}"),
+        }
+    }
+}

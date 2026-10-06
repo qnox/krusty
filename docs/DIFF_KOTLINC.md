@@ -9,7 +9,7 @@ it compiles each corpus source with **krusty** and runs `box()` on the JVM, grad
 ## Run
 
 ```sh
-just conformance          # prints "<pct> <passed> <scanned>"; self-provisions kotlinc + corpus
+just conformance          # prints byte equality "<pct> <matched> <total>"; self-provisions kotlinc + corpus
 just test                 # full suite (the gate + all e2e), the pre-push GATE
 ./harness/run-diff.sh     # thin wrapper around `just conformance`
 ```

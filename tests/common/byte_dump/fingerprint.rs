@@ -171,21 +171,56 @@ pub(super) fn normalize_invocation_flag(arg: &str) -> Result<String, String> {
         }
         return Ok(format!("-Xplugin={}", hashed.join(",")));
     }
-    // A flag whose value is a scratch path (`-Xcommon-sources=/tmp/.../A.kt`) names the same
-    // inputs wherever the files were written. Hash those bytes and keep every other flag literal.
-    let Some((name, value)) = arg.split_once('=') else {
-        return Ok(arg.to_string());
-    };
-    if !matches!(name, "-Xcommon-sources" | "-Xfriend-paths") {
-        return Ok(arg.to_string());
+    // A flag whose value is a scratch path names the same inputs wherever the files or output
+    // directories were written, so the fingerprint must be their CONTENT, never the path. The two
+    // kotlinc multiplatform flags carry different value shapes: `-Xcommon-sources` is a
+    // comma-separated list of common-module source FILES; `-Xfragment-sources` is one stable
+    // fragment identity plus one scratch source FILE; and `-Xfriend-paths` is a
+    // path-separator-joined list of friend-module class roots (as emitted by
+    // `std::env::join_paths`), each either an output DIRECTORY or a JAR FILE such as
+    // `kotlin-stdlib.jar`. Reading a directory as a file (or a jar as a directory) would error and
+    // abort the recorder, so each shape is parsed and content-fingerprinted on its own terms; every
+    // other flag stays literal.
+    if let Some(value) = arg.strip_prefix("-Xcommon-sources=") {
+        let mut hashed = Vec::new();
+        for file in value.split(',').filter(|part| !part.is_empty()) {
+            let bytes = std::fs::read(file)
+                .map_err(|err| format!("unreadable common source {file}: {err}"))?;
+            hashed.push(hex128(fingerprint_parts(&[&bytes])));
+        }
+        return Ok(format!("-Xcommon-sources={}", hashed.join(",")));
     }
-    let mut hashed = Vec::new();
-    for part in value.split(',') {
-        let bytes =
-            std::fs::read(part).map_err(|err| format!("unreadable flag file {part}: {err}"))?;
-        hashed.push(hex128(fingerprint_parts(&[&bytes])));
+    if let Some(value) = arg.strip_prefix("-Xfragment-sources=") {
+        let (fragment, file) = value
+            .split_once(':')
+            .ok_or_else(|| format!("invalid fragment source flag: {arg}"))?;
+        if fragment.is_empty() || file.is_empty() {
+            return Err(format!("invalid fragment source flag: {arg}"));
+        }
+        let bytes = std::fs::read(file)
+            .map_err(|err| format!("unreadable fragment source {file}: {err}"))?;
+        return Ok(format!(
+            "-Xfragment-sources={fragment}:{}",
+            hex128(fingerprint_parts(&[&bytes]))
+        ));
     }
-    Ok(format!("{name}={}", hashed.join(",")))
+    if let Some(value) = arg.strip_prefix("-Xfriend-paths=") {
+        let mut hashed = Vec::new();
+        for root in std::env::split_paths(value).filter(|part| !part.as_os_str().is_empty()) {
+            // A friend-class JAR keeps the original single-value `hex128(bytes)` identity so the
+            // master-recorded dump for a jar friend path still keys the same entry; an output
+            // DIRECTORY, which `std::fs::read` cannot read, hashes its tree content instead.
+            if root.is_dir() {
+                hashed.push(hash_tree(&root)?);
+            } else {
+                let bytes = std::fs::read(&root)
+                    .map_err(|err| format!("unreadable friend path {}: {err}", root.display()))?;
+                hashed.push(hex128(fingerprint_parts(&[&bytes])));
+            }
+        }
+        return Ok(format!("-Xfriend-paths={}", hashed.join(",")));
+    }
+    Ok(arg.to_string())
 }
 
 /// Ambient selected toolchains followed by the explicit classpath entries.

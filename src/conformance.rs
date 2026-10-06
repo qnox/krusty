@@ -710,6 +710,22 @@ pub fn split_files(src: &str) -> (Vec<SourceBlock>, Vec<SourceBlock>) {
     (blocks, java_blocks)
 }
 
+/// One source-set fragment of a folded hierarchical-multiplatform unit, in the unit's
+/// dependency-first chain order. The reference oracle maps these to kotlinc's
+/// `-Xfragments`/`-Xfragment-sources`/`-Xfragment-refines` so an `actual` declared in an
+/// intermediate source set matches its `expect` in a refined-upon one — a hierarchy the flat
+/// `-Xcommon-sources` common/platform split cannot represent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FragmentUnit {
+    pub name: String,
+    /// This fragment's own Kotlin files, as a contiguous count within the unit's `files` (whose
+    /// order is the same dependency-first chain order).
+    pub kotlin_file_count: usize,
+    /// The fragments this one directly refines (`dependsOn`); every name is another fragment of the
+    /// same unit.
+    pub refines: Vec<String>,
+}
+
 /// One module actually BUILT from a `// MODULE:` test: a `dependsOn` target (multiplatform common
 /// source set) folds INTO its dependents rather than building standalone, so a unit's `files` carry
 /// the transitive `dependsOn` chain's sources (dependency-first) ahead of the module's own.
@@ -726,6 +742,10 @@ pub struct ModuleUnit {
     /// module's own files are platform sources.
     pub common_file_count: usize,
     pub java_files: Vec<(String, String)>,
+    /// The folded `dependsOn` chain as HMPP fragments, dependency-first and ending with this unit's
+    /// own leaf fragment. A unit with no `dependsOn` carries exactly one fragment and compiles
+    /// without any multiplatform flag.
+    pub fragments: Vec<FragmentUnit>,
 }
 
 /// Fold [`ModuleBlock`]s into build units in declaration order (kotlinc's JVM MPP model: the
@@ -823,6 +843,14 @@ pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
                     }
                 }
             }
+            let fragments = chain
+                .iter()
+                .map(|m| FragmentUnit {
+                    name: m.name.clone(),
+                    kotlin_file_count: m.files.len(),
+                    refines: m.depends_on.clone(),
+                })
+                .collect();
             ModuleUnit {
                 name: u.name.clone(),
                 deps,
@@ -830,6 +858,7 @@ pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
                 files,
                 common_file_count,
                 java_files,
+                fragments,
             }
         })
         .collect()
@@ -1648,6 +1677,23 @@ fun box(): String = f()
         assert_eq!(units[0].files.len(), 2);
         assert_eq!(units[0].files[0].0, "common");
         assert_eq!(units[0].files[1].0, "platform");
+        // The folded chain becomes two fragments: `common` (refining nothing) then `platform`
+        // refining it, each owning one Kotlin file in chain order.
+        assert_eq!(
+            units[0].fragments,
+            vec![
+                FragmentUnit {
+                    name: "common".to_string(),
+                    kotlin_file_count: 1,
+                    refines: Vec::new(),
+                },
+                FragmentUnit {
+                    name: "platform".to_string(),
+                    kotlin_file_count: 1,
+                    refines: vec!["common".to_string()],
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1759,5 +1805,27 @@ fun box(): String = f()
         let names: Vec<&str> = units[0].files.iter().map(|(n, _)| n.as_str()).collect();
         // `common` appears once (via `mid`'s chain), before `mid`, before the module's own file.
         assert_eq!(names, vec!["common", "mid", "platform"]);
+        // The leaf `platform` refines BOTH `mid` and `common` (its two `dependsOn` targets); `mid`
+        // refines `common`. Each fragment owns one Kotlin file, in the same dependency-first order.
+        assert_eq!(
+            units[0].fragments,
+            vec![
+                FragmentUnit {
+                    name: "common".to_string(),
+                    kotlin_file_count: 1,
+                    refines: Vec::new(),
+                },
+                FragmentUnit {
+                    name: "mid".to_string(),
+                    kotlin_file_count: 1,
+                    refines: vec!["common".to_string()],
+                },
+                FragmentUnit {
+                    name: "platform".to_string(),
+                    kotlin_file_count: 1,
+                    refines: vec!["mid".to_string(), "common".to_string()],
+                },
+            ]
+        );
     }
 }
