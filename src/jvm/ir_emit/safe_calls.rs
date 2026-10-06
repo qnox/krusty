@@ -1,6 +1,6 @@
 //! JVM layout for safe-call guards and chains.
 
-use super::{discard, when, CodeBuilder, Emitter, IrConst, IrExpr, Ty};
+use super::{discard, when, CodeBuilder, Emitter, IrBinOp, IrConst, IrExpr, IrTypeOp, Ty};
 
 impl Emitter<'_> {
     /// Emit a discarded safe call with the discard inside its guard, as kotlinc writes it. The
@@ -136,4 +136,179 @@ impl Emitter<'_> {
             .or_default()
             .push(temporary);
     }
+
+    /// `dup; ifnull; <selector>; goto; pop` for a safe call whose receiver is one word and read
+    /// once, as the call or property receiver. kotlinc never stores that receiver. A chain, a wide
+    /// receiver, or any other use keeps the temporary the lowerer introduced.
+    pub(super) fn try_emit_duplicated_safe_call(
+        &mut self,
+        stmts: &[u32],
+        value: Option<u32>,
+        discarded: bool,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let Some(plan) = duplicated_safe_call(self, stmts, value) else {
+            return false;
+        };
+        let saved_line = self.statement_line;
+        self.emit_value(plan.init, code);
+        if self.diverges(plan.init) {
+            self.statement_line = saved_line;
+            return true;
+        }
+        code.dup();
+        let null_path = code.new_label();
+        let end = code.new_label();
+        code.ifnull(null_path);
+        self.stack_resident_value = Some(plan.temporary);
+        let selector_diverges = if discarded {
+            self.emit_discarding(plan.selector, code);
+            self.discarding_diverges(plan.selector)
+        } else {
+            self.emit_value(plan.selector, code);
+            self.diverges(plan.selector)
+        };
+        if self.stack_resident_value.is_some() {
+            self.run.set_emit_error(
+                "safe-call receiver left on the stack was not consumed by its selector".to_string(),
+            );
+            self.stack_resident_value = None;
+        }
+        if !selector_diverges {
+            code.goto(end);
+        }
+        self.bind(null_path, code);
+        code.pop();
+        if !discarded {
+            self.emit_value(plan.null_result, code);
+        }
+        self.bind(end, code);
+        self.statement_line = saved_line;
+        true
+    }
+}
+
+struct DuplicatedSafeCall {
+    temporary: u32,
+    init: u32,
+    selector: u32,
+    null_result: u32,
+}
+
+fn duplicated_safe_call(
+    emitter: &Emitter<'_>,
+    stmts: &[u32],
+    value: Option<u32>,
+) -> Option<DuplicatedSafeCall> {
+    let [variable] = stmts else {
+        return None;
+    };
+    let IrExpr::Variable {
+        index: temporary,
+        init: Some(init),
+        named: false,
+        ..
+    } = emitter.ir.expr(*variable)
+    else {
+        return None;
+    };
+    let temporary = *temporary;
+    let init = *init;
+    let receiver_ty = emitter.value_ty(init);
+    // `ifnull` consumes a reference. A nullable primitive is unboxed before the
+    // selector, so its one-word value is an `int` and keeps the temporary.
+    if super::slot_words(receiver_ty) != 1 || receiver_ty.is_jvm_scalar() {
+        return None;
+    }
+    let guard = value?;
+    if !emitter.ir.null_guards.contains(&guard) || emitter.safe_call_null_exits.contains_key(&guard)
+    {
+        return None;
+    }
+    let IrExpr::When { branches } = emitter.ir.expr(guard) else {
+        return None;
+    };
+    let [(Some(condition), null_result), (None, selector)] = branches.as_slice() else {
+        return None;
+    };
+    if !is_null_equality(emitter.ir, *condition, temporary) {
+        return None;
+    }
+    selector_reads_temporary_once_as_receiver(emitter.ir, *selector, temporary).then_some(
+        DuplicatedSafeCall {
+            temporary,
+            init,
+            selector: *selector,
+            null_result: *null_result,
+        },
+    )
+}
+
+fn is_null_equality(ir: &crate::ir::IrFile, condition: u32, temporary: u32) -> bool {
+    let IrExpr::PrimitiveBinOp {
+        op: IrBinOp::Eq,
+        lhs,
+        rhs,
+    } = ir.expr(condition)
+    else {
+        return false;
+    };
+    let read = |expression: u32| matches!(ir.expr(expression), IrExpr::GetValue(value) if *value == temporary);
+    let null = |expression: u32| matches!(ir.expr(expression), IrExpr::Const(IrConst::Null));
+    (read(*lhs) && null(*rhs)) || (read(*rhs) && null(*lhs))
+}
+
+fn selector_reads_temporary_once_as_receiver(
+    ir: &crate::ir::IrFile,
+    selector: u32,
+    temporary: u32,
+) -> bool {
+    if value_reads(ir, selector, temporary) != 1 {
+        return false;
+    }
+    let mut expression = selector;
+    loop {
+        match ir.expr(expression) {
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => expression = *arg,
+            IrExpr::Call {
+                dispatch_receiver: Some(receiver),
+                ..
+            } => return reads_temporary(ir, *receiver, temporary),
+            IrExpr::PropertyRead {
+                receiver: Some(receiver),
+                ..
+            } => return reads_temporary(ir, *receiver, temporary),
+            _ => return false,
+        }
+    }
+}
+
+fn reads_temporary(ir: &crate::ir::IrFile, expression: u32, temporary: u32) -> bool {
+    let mut expression = expression;
+    loop {
+        match ir.expr(expression) {
+            IrExpr::GetValue(value) => return *value == temporary,
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => expression = *arg,
+            _ => return false,
+        }
+    }
+}
+
+fn value_reads(ir: &crate::ir::IrFile, root: u32, temporary: u32) -> usize {
+    let mut count = usize::from(matches!(
+        ir.expr(root),
+        IrExpr::GetValue(value) if *value == temporary
+    ));
+    crate::ir::for_each_child(&ir.exprs, root, &mut |child| {
+        count += value_reads(ir, child, temporary);
+    });
+    count
 }

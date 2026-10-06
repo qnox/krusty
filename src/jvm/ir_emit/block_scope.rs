@@ -26,6 +26,9 @@ impl Emitter<'_> {
             return;
         }
         self.link_safe_call_chain(block, code);
+        if self.try_emit_duplicated_safe_call(&stmts, value, true, code) {
+            return;
+        }
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
         let marked_initializer = self.renders_initializer_boundary(block);
@@ -51,6 +54,9 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         self.link_safe_call_chain(block, code);
+        if self.try_emit_duplicated_safe_call(stmts, value, false, code) {
+            return;
+        }
         let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         self.block_depth += 1;
