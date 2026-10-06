@@ -735,11 +735,25 @@ impl BodyLowering<'_> {
             }
             if let IrExpr::GetValue(parameter) = self.ir.expr(source) {
                 if let Some(Some(lambda)) = inline_lambdas.get(*parameter as usize) {
-                    self.ir.exprs[copy as usize] = self.ir.expr(*lambda).clone();
+                    let lambda = *lambda;
+                    self.ir.exprs[copy as usize] = self.ir.expr(lambda).clone();
+                    // The parameter read carried the inline body's line. A callable reference is
+                    // the call site's expression: the spliced invocation keeps that line, and the
+                    // frame-closing nop can then return to the inlined call.
+                    if matches!(self.ir.expr(lambda), IrExpr::CallableReference(_)) {
+                        match self.ir.expr_source_lines.get(&lambda).copied() {
+                            Some(line) => {
+                                self.ir.expr_source_lines.insert(copy, line);
+                            }
+                            None => {
+                                self.ir.expr_source_lines.remove(&copy);
+                            }
+                        }
+                    }
                     substituted_inline_lambdas.insert(copy);
                     self.ir.unmark_inline_copy(copy);
                     self.ir.binding_read_stability.remove(&copy);
-                    if let Some(ty) = self.ir.logical_types.get(lambda).copied() {
+                    if let Some(ty) = self.ir.logical_types.get(&lambda).copied() {
                         self.ir.logical_types.insert(copy, ty);
                     }
                     continue;
@@ -1129,6 +1143,13 @@ impl BodyLowering<'_> {
         }
 
         let (body, _) = crate::ir::clone_expression_dag(self.ir, inline_body);
+        if indexed_parameters {
+            if let Some(line) = self.ir.expr_source_lines.get(&func).copied() {
+                // The adapter was built as its own method and has no source position. The splice
+                // is the reference expression, so this call keeps that line.
+                self.ir.expr_source_lines.insert(body, line);
+            }
+        }
         let local_base = self.next_temporary;
         let local_count = super::source_calls::rehome_inline_body_values(
             self.ir,
