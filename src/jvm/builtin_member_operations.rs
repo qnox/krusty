@@ -12,7 +12,7 @@ use crate::libraries::builtin_member_realization::{
     primitive_binary_operands, primitive_compare_operand,
 };
 use crate::libraries::{CompilerIntrinsic, PrimitiveBinaryIntrinsic, PrimitiveUnaryIntrinsic};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 /// Checked operands of one invocation of a builtin member.
 pub(super) struct BuiltinMemberOperands<'a> {
@@ -174,6 +174,32 @@ fn unary_operation(
         _ => None,
     };
     value.map(BuiltinMemberOperation::Value)
+}
+
+/// The unsigned result of a bitwise intrinsic declared on `kotlin/UInt` or `kotlin/ULong`.
+///
+/// The call that reaches realization often carries only the erased carrier (`Int`/`Long`). The
+/// declaring class is the fact that still names the value class, so the carrier opcode is rebuilt
+/// with that class's `constructor-impl`. A signed owner (`kotlin/Int.inv`) is not rebuilt.
+pub(super) fn unsigned_bitwise_result(owner: TypeName, intrinsic: CompilerIntrinsic) -> Option<Ty> {
+    let unsigned = if owner == crate::types::wk::uint() {
+        Ty::UInt
+    } else if owner == crate::types::wk::ulong() {
+        Ty::ULong
+    } else {
+        return None;
+    };
+    matches!(
+        intrinsic,
+        CompilerIntrinsic::PrimitiveBitAnd
+            | CompilerIntrinsic::PrimitiveBitOr
+            | CompilerIntrinsic::PrimitiveBitXor
+            | CompilerIntrinsic::PrimitiveShiftLeft
+            | CompilerIntrinsic::PrimitiveShiftRight
+            | CompilerIntrinsic::PrimitiveUnsignedShiftRight
+            | CompilerIntrinsic::PrimitiveBitNot
+    )
+    .then_some(unsigned)
 }
 
 /// The unsigned type a bitwise member rebuilds, when the receiver is `UInt` or `ULong` and the

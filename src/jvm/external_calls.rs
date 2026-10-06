@@ -412,6 +412,11 @@ pub(super) fn realize(
                     .get(&expression)
                     .copied()
                     .ok_or(target)?;
+                let result = super::builtin_member_operations::unsigned_bitwise_result(
+                    callable.owner,
+                    intrinsic,
+                )
+                .unwrap_or(semantic_ret);
                 let operation = super::builtin_member_operations::operation(
                     ir,
                     intrinsic,
@@ -420,7 +425,7 @@ pub(super) fn realize(
                         receiver_ty,
                         arguments: &arguments,
                         parameters: &semantic_params,
-                        result: semantic_ret,
+                        result,
                     },
                 )
                 .ok_or(target)?;
