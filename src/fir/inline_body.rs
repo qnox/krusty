@@ -31,6 +31,9 @@ pub struct FirInlineIterationMemberCall {
     pub receiver: ResolvedTy,
     pub parameters: Box<[ResolvedTy]>,
     pub result: ResolvedTy,
+    /// The declaration's ABI result before call-site substitution (a JVM descriptor's erasure):
+    /// the type the inlined frame's raw locals hold, where `result` is the applied selection.
+    pub physical_result: ResolvedTy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,9 +77,36 @@ pub struct FirInlineRecovery {
     pub failure: Box<FirInlineCall>,
 }
 
+/// Checked frame facts of an exact inline declaration: how its expansion's debug surface is
+/// spelled. See [`crate::libraries::InlineBodyFrame`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineBodyFrame {
+    /// Simple source name of the declaration, spelling `$i$f$`/`$i$a$` frame markers.
+    pub callee: Box<str>,
+    /// An `@InlineOnly` declaration contributes no function marker, no named frame locals, and no
+    /// body line mappings: the expansion takes the call site's lines.
+    pub inline_only: bool,
+    /// The declaration body's resolved debug surface; `None` when inline-only.
+    pub source: Option<FirInlineBodySource>,
+}
+
+/// Resolved debug-source identity of a non-inline-only declaration body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineBodySource {
+    /// Source file the body's lines belong to and the path they map under.
+    pub file: Box<str>,
+    pub path: Box<str>,
+    /// Resolved source line of the body's lambda invocation and of its frame's close.
+    pub invoke_line: u16,
+    pub close_line: u16,
+    /// Source name of the body's iteration element local, when it declares one.
+    pub element: Option<Box<str>>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirInlineBodyPlan {
     InvokeLambda {
+        frame: FirInlineBodyFrame,
         lambda_parameter: u32,
         arguments: Box<[FirInlineValue]>,
         prologue: Box<[FirInlineCall]>,
@@ -91,6 +121,7 @@ pub enum FirInlineBodyPlan {
     /// All three convention calls were selected by the checker at the call site; lowering only
     /// splices the checked lambda body into the resulting loop.
     Iteration {
+        frame: FirInlineBodyFrame,
         lambda_parameter: u32,
         element: ResolvedTy,
         index: Option<FirInlineIterationIndex>,
@@ -107,7 +138,7 @@ pub enum FirInlineBodyPlan {
         factory_classifier: crate::types::TypeName,
         factory_parameters: Box<[ResolvedTy]>,
         capacity: Option<FirInlineCollectionCapacity>,
-        append: FirInlineCollectionAppend,
+        append: Box<FirInlineCollectionAppend>,
         accumulator: ResolvedTy,
     },
 }
@@ -141,6 +172,22 @@ pub struct FirInlineCollectionExtensionCall {
     pub source_receiver: ResolvedTy,
     pub parameters: Box<[ResolvedTy]>,
     pub result: ResolvedTy,
+}
+
+impl From<&crate::libraries::InlineBodyFrame> for FirInlineBodyFrame {
+    fn from(frame: &crate::libraries::InlineBodyFrame) -> Self {
+        Self {
+            callee: frame.callee.clone(),
+            inline_only: frame.inline_only,
+            source: frame.source.as_ref().map(|source| FirInlineBodySource {
+                file: source.file.clone(),
+                path: source.path.clone(),
+                invoke_line: source.invoke_line,
+                close_line: source.close_line,
+                element: source.element.clone(),
+            }),
+        }
+    }
 }
 
 impl From<&crate::libraries::InlineCollectionLocalNames> for FirInlineCollectionLocalNames {

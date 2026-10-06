@@ -4028,7 +4028,7 @@ fn suspending_map_publishes_a_complete_provider_owned_collection_plan() {
     else {
         panic!("Map.map must use its structurally decoded member capacity")
     };
-    let crate::fir::FirInlineCollectionAppend::Member(append) = append else {
+    let crate::fir::FirInlineCollectionAppend::Member(append) = append.as_ref() else {
         panic!("Map.map must use its structurally decoded member append")
     };
     let identities = [
@@ -4082,11 +4082,14 @@ fn suspending_flat_map_specializes_every_extension_append_parameter() {
     });
     let Some(FirInlineBodyPlan::CollectionTransform {
         capacity,
-        append: crate::fir::FirInlineCollectionAppend::Extension(append),
+        append,
         accumulator,
         ..
     }) = plan
     else {
+        panic!("selected flatMap call must publish its exact extension append contract")
+    };
+    let crate::fir::FirInlineCollectionAppend::Extension(append) = append.as_ref() else {
         panic!("selected flatMap call must publish its exact extension append contract")
     };
     assert!(capacity.is_none());

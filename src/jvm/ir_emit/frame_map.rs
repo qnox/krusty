@@ -69,6 +69,8 @@ pub(super) enum TempRole {
     CoroutineMachine,
     /// The `$i$f$<name>` inline-depth marker of an emitted inline function.
     InlineDepthMarker,
+    /// Words FixStack will fill with the operand stack saved across an inline lambda body.
+    InlineStackSpill,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

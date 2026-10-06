@@ -140,6 +140,7 @@ pub(super) fn publish(
     };
     Ok(Some(Box::new(match plan {
         crate::libraries::InlineBodyPlan::InvokeLambda {
+            frame,
             lambda_parameter,
             arguments,
             prologue,
@@ -159,6 +160,7 @@ pub(super) fn publish(
                 return Err(MappingFailure::UnsupportedPlan);
             }
             crate::fir::FirInlineBodyPlan::InvokeLambda {
+                frame: frame.into(),
                 lambda_parameter: map_parameter(*lambda_parameter, receiver_parameter)?,
                 arguments: arguments
                     .iter()
@@ -216,6 +218,7 @@ pub(super) fn publish(
 }
 
 pub(super) struct PublishedIteration {
+    pub(super) frame: crate::fir::FirInlineBodyFrame,
     pub(super) lambda_parameter: u32,
     pub(super) index: Option<crate::fir::FirInlineIterationIndex>,
     pub(super) traversal: crate::fir::FirInlineIterationTraversal,
@@ -240,6 +243,8 @@ fn publish_iteration_member(
             .map_err(|_| MappingFailure::UnsupportedPlan)?
             .into_boxed_slice(),
         result: crate::fir::ResolvedTy::new(member.ret)
+            .map_err(|_| MappingFailure::UnsupportedPlan)?,
+        physical_result: crate::fir::ResolvedTy::new(member.physical_ret)
             .map_err(|_| MappingFailure::UnsupportedPlan)?,
     })
 }
@@ -312,6 +317,7 @@ pub(super) fn publish_iteration(
     element: crate::types::Ty,
 ) -> Result<PublishedIteration, MappingFailure> {
     let crate::libraries::InlineBodyPlan::Iteration {
+        frame,
         lambda_parameter,
         index,
         traversal,
@@ -343,6 +349,7 @@ pub(super) fn publish_iteration(
         .transpose()?;
     let traversal = publish_traversal(traversal, receiver, element)?;
     Ok(PublishedIteration {
+        frame: frame.into(),
         lambda_parameter: map_parameter(*lambda_parameter, receiver_parameter)?,
         index,
         traversal,
@@ -389,6 +396,7 @@ pub(super) fn publish_extension_iteration(
         return Err(MappingFailure::UnsupportedPlan);
     }
     Ok(crate::fir::FirInlineBodyPlan::Iteration {
+        frame: published.frame,
         lambda_parameter: published.lambda_parameter,
         element: crate::fir::ResolvedTy::new(element)
             .map_err(|_| MappingFailure::UnsupportedPlan)?,
@@ -548,7 +556,7 @@ pub(super) fn publish_extension_collection_transform(
         factory_classifier,
         factory_parameters,
         capacity,
-        append,
+        append: Box::new(append),
         accumulator: crate::fir::ResolvedTy::new(accumulator_ty)
             .map_err(|_| MappingFailure::UnsupportedPlan)?,
     })
@@ -777,6 +785,7 @@ mod tests {
             recovery: None,
             defaults,
             result,
+            ..
         }) = plan
         else {
             panic!("withLock must publish its selected structural plan in checked FIR")
@@ -851,6 +860,7 @@ mod tests {
             recovery: None,
             defaults,
             result,
+            ..
         }) = plan
         else {
             panic!("Closeable.use must publish its complete plan in checked FIR")
@@ -897,6 +907,11 @@ mod tests {
         )
         .callable;
         let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
+            frame: crate::libraries::InlineBodyFrame {
+                callee: "enter".into(),
+                inline_only: true,
+                source: None,
+            },
             lambda_parameter: 0,
             arguments: Vec::new(),
             prologue: vec![crate::libraries::InlineBodyCall {
@@ -932,6 +947,11 @@ mod tests {
         );
         cleanup.external_identity = Some(crate::fir::ExternalCallableId::from_raw(7));
         let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
+            frame: crate::libraries::InlineBodyFrame {
+                callee: "cleanup".into(),
+                inline_only: true,
+                source: None,
+            },
             lambda_parameter: 1,
             arguments: vec![crate::libraries::InlineBodyValue::Parameter(0)],
             prologue: Vec::new(),

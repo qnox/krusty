@@ -121,6 +121,29 @@ impl Emitter<'_> {
         if line == 0 {
             return;
         }
+        // A line of an external inline declaration's own body maps through the class's SMAP under
+        // the call that expanded it (kotlinc's `mapLineNumber` for the inline interval).
+        if let Some(frame) = self.ir.external_frame_lines.get(&expression).cloned() {
+            let line = self.map_external_frame_line(&frame);
+            code.mark_line(line);
+            return;
+        }
+        // An `@InlineOnly` expansion's lambda marker separates the call's line from a lambda body
+        // starting on that same line with the target's synthetic inline line (kotlinc's
+        // `mapSyntheticLineNumber(1)`, recorded as `fake.kt`).
+        if self.ir.inline_synthetic_lines.contains(&expression) {
+            let claimable = u16::try_from(self.ir.source_line_count)
+                .unwrap_or(u16::MAX)
+                .max(1);
+            if let Some(synthetic) = self
+                .cw
+                .source_map_for_inlining(claimable)
+                .and_then(|map| map.map_synthetic_line(1))
+            {
+                code.mark_line(u32::from(synthetic));
+                return;
+            }
+        }
         let Some(provenance) = self.ir.inline_copy_provenance(expression) else {
             code.mark_line(line);
             return;
@@ -152,6 +175,28 @@ impl Emitter<'_> {
             Some(line) => code.mark_line(line.into()),
             None => code.mark_line(line),
         }
+    }
+
+    /// Map a line of an external inline declaration's body through the class's source map, under
+    /// the call that expanded it; the raw line when no map answers.
+    pub(super) fn map_external_frame_line(
+        &mut self,
+        frame: &crate::ir::IrExternalFrameLine,
+    ) -> u32 {
+        let claimable = u16::try_from(self.ir.source_line_count)
+            .unwrap_or(u16::MAX)
+            .max(1);
+        self.cw
+            .source_map_for_inlining(claimable)
+            .and_then(|map| {
+                map.map_line(
+                    &frame.file,
+                    &frame.path,
+                    u16::try_from(frame.line).unwrap_or(u16::MAX),
+                    u16::try_from(frame.call_line).unwrap_or(u16::MAX),
+                )
+            })
+            .map_or(frame.line, u32::from)
     }
 
     pub(super) fn has_retained_mapped_inline_unit_line(&self, expression: ExprId) -> bool {
@@ -256,19 +301,24 @@ impl Emitter<'_> {
     }
 
     /// kotlinc's `markLineNumberAfterInlineIfNeeded`, after a node that realizes an inlined call in
-    /// place (`SyntheticOriginKind::InlinedCall`).
+    /// place (`SyntheticOriginKind::InlinedCall`), and after an external-inline expansion lowered
+    /// from its declaration plan.
     ///
     /// Inside a condition the line in effect is written again at once, for the jump that follows;
     /// anywhere else it is forgotten, so the next mark of any line is written — kotlinc resets its
     /// last line number after an inlined body, which ran under the callee's lines.
     pub(super) fn mark_after_inlined_call(&self, expression: ExprId, code: &mut CodeBuilder) {
-        let Some(IrNodeOrigin::Synthetic {
-            kind: SyntheticOriginKind::InlinedCall,
-            ..
-        }) = self.ir.fir_origins.get(&expression)
-        else {
+        let inlined = self.ir.external_inline_expansions.contains(&expression)
+            || matches!(
+                self.ir.fir_origins.get(&expression),
+                Some(IrNodeOrigin::Synthetic {
+                    kind: SyntheticOriginKind::InlinedCall,
+                    ..
+                })
+            );
+        if !inlined {
             return;
-        };
+        }
         match code.current_line() {
             Some(line) if self.inside_condition => code.inlined_line(line),
             _ => code.forget_line(),

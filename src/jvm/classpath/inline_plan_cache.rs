@@ -491,6 +491,11 @@ mod tests {
     fn plan_memo_is_scoped_to_the_complete_semantic_view_and_overlay() {
         let owner = type_name("p/Widget");
         let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
+            frame: crate::libraries::InlineBodyFrame {
+                callee: "run".into(),
+                inline_only: true,
+                source: None,
+            },
             lambda_parameter: 0,
             arguments: Vec::new(),
             prologue: Vec::new(),
@@ -600,6 +605,11 @@ mod tests {
     fn plan_memo_distinguishes_physical_parameters_and_complete_default_realization() {
         let owner = type_name("p/CompleteInlinePlanKey");
         let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
+            frame: crate::libraries::InlineBodyFrame {
+                callee: "run".into(),
+                inline_only: true,
+                source: None,
+            },
             lambda_parameter: 0,
             arguments: Vec::new(),
             prologue: Vec::new(),

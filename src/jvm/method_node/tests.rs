@@ -665,6 +665,7 @@ fn a_codegen_marker_reads_as_the_inline_marker_call_it_stands_for() {
         (1, "mark", "(I)V"),
         (2, "beforeInlineCall", "()V"),
         (3, "afterInlineCall", "()V"),
+        (4, "beforeInlineCallWithReservedLocals", "()V"),
     ] {
         assert_eq!(
             Insn::decode(&[CODEGEN_MARKER_OP, operand], &pool),

@@ -310,6 +310,8 @@ mod classpath_function_reference_e2e;
 mod classpath_hidden_deprecated_e2e;
 #[path = "classpath_inline_lambda_route_e2e.rs"]
 mod classpath_inline_lambda_route_e2e;
+#[path = "classpath_inline_plan_parity_e2e.rs"]
+mod classpath_inline_plan_parity_e2e;
 #[path = "classpath_inline_splice_e2e.rs"]
 mod classpath_inline_splice_e2e;
 #[path = "classpath_inline_splice_parity_e2e.rs"]

@@ -94,6 +94,42 @@ pub enum InlineCollectionAppend {
     Extension(Box<LibraryCallable>),
 }
 
+/// The inline declaration's own frame facts: the part of kotlinc's inline debug surface the
+/// expansion must reproduce. Providers normalize these from the exact declaration's compiled
+/// body; a backend formats them for its target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InlineBodyFrame {
+    /// Simple source name of the declaration (`apply`, `forEach`). It spells the frame's
+    /// `$i$f$<name>` function marker and each lambda argument's `$i$a$-<name>-…` marker.
+    pub callee: Box<str>,
+    /// The declaration is `@InlineOnly`: its body carries no function marker, no named frame
+    /// locals, and no mappable lines of its own, which is exactly why its decode template has no
+    /// `iconst_0; istore` marker store. The expansion takes the call site's lines; only the
+    /// lambda argument marker takes the target's synthetic inline line.
+    pub inline_only: bool,
+    /// The declaration body's own debug surface. `None` for an inline-only declaration, whose
+    /// lines and locals are dropped at the call site.
+    pub source: Option<InlineBodySource>,
+}
+
+/// Debug-source identity of a non-inline-only declaration body, resolved through the body's own
+/// debug mapping at the provider boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InlineBodySource {
+    /// Source file the body's lines belong to (`_Collections.kt`) and the path they map under
+    /// (the class its code was read from, or the class its own debug mapping retargets).
+    pub file: Box<str>,
+    pub path: Box<str>,
+    /// Resolved source line of the body's lambda invocation — the `for` line of an iteration
+    /// body, covering its traversal, element store, and invoke.
+    pub invoke_line: u16,
+    /// Resolved source line the body's frame closes on (the declaration's closing line).
+    pub close_line: u16,
+    /// Source name of the body's iteration element local (`element`), when it declares one. The
+    /// extension receiver's local is named from `callee` by the target backend, not stored here.
+    pub element: Option<Box<str>>,
+}
+
 /// A declaration-defined inline body whose source-independent control-flow shape must be expanded
 /// before backend coroutine lowering. Providers decode this from the exact selected declaration's
 /// compiled inline body; source spelling never participates.
@@ -102,6 +138,7 @@ pub enum InlineBodyPlan {
     /// Invoke one function-typed parameter, optionally entering a region before it and leaving the
     /// region from `finally`.
     InvokeLambda {
+        frame: InlineBodyFrame,
         lambda_parameter: usize,
         arguments: Vec<InlineBodyValue>,
         prologue: Vec<InlineBodyCall>,
@@ -120,6 +157,7 @@ pub enum InlineBodyPlan {
     /// declaration-owned argument order. An indexed declaration supplies its normalized overflow
     /// call when the source loop is not statically bounded.
     Iteration {
+        frame: InlineBodyFrame,
         lambda_parameter: usize,
         index: Option<InlineIterationIndex>,
         traversal: InlineIterationTraversal,

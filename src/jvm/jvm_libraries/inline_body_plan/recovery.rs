@@ -151,6 +151,7 @@ pub(super) fn normalize(
         Vec::new()
     };
     Some(InlineBodyPlan::InvokeLambda {
+        frame: super::invoke_lambda_frame(callable),
         lambda_parameter,
         arguments,
         prologue: Vec::new(),
@@ -525,6 +526,7 @@ mod tests {
             recovery: Some(recovery),
             defaults,
             result: None,
+            ..
         }) = callable.inline_body_plan.as_deref()
         else {
             panic!("kotlin.runCatching must publish its exact recovery plan")

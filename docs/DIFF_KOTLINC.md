@@ -84,6 +84,14 @@ left of the sample. A user `inline fun` shows it too, plus an inline-marker loca
 (`iconst_0; istore_1`) and krusty does not. This is the broadest remaining divergence and touches the
 inliner rather than an emitter.
 
+One piece is closed: a classpath inline function expanded by the bytecode inliner now carries
+kotlinc's `InlineMarker.beforeInlineCall`/`afterInlineCall` around each expanded lambda
+(`src/jvm/inliner.rs`, `lambda_expansion::Context::inline_markers`), and the method pipeline runs the
+ported FixStack normalization over those markers before optimization
+(`src/jvm/classfile/method_rewrite.rs::fix_stack_around_inlined_lambdas`), so a value live across the
+lambda is spilled to a fresh local exactly as the reference compiler does. The source-level argument
+spilling above remains open.
+
 ### Smaller, self-contained
 
 - **Annotation implementation attributes.** All five methods and the access word match after #691–#695,

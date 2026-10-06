@@ -39,6 +39,10 @@ mod try_blocks;
 mod tests;
 
 use crate::jvm::method_node::{Insn, MethodNode, Node, ShapeError};
+use crate::jvm::{
+    bytecode_passes::fix_stack::{fix_stack, FixStackError},
+    bytecode_passes::insn_list::EditableMethod,
+};
 
 pub(crate) use anonymous_object::{regenerate, CallSite, Regeneration, RegenerationError};
 pub(crate) use callee_shape::{
@@ -74,6 +78,9 @@ pub(crate) enum InlineError {
     MissingReifiedArgument(String),
     /// The body's data flow could not be followed (`markPlacesForInlineAndRemoveInlinable`).
     Analysis(String),
+    /// An inline-call stack already present in the body could not be normalized before this body
+    /// entered its caller's local-variable sorter.
+    FixStack(FixStackError),
     /// The body reads an inline lambda parameter as a value rather than invoking it.
     LambdaParameterAccess,
     /// An `invoke` passes a lambda more or fewer arguments than it takes.
@@ -116,6 +123,7 @@ pub(in crate::jvm) fn inline(
     reified::specialize(&mut node, reified_arguments)?;
     let mut node = preparation::prepare(&node, inline_only, parameters);
     try_blocks::move_try_starts_to_their_first_instruction(&mut node)?;
+    let mut node = preprocess_node_before_inline(node)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node)?;
     let constructors = object_regeneration::regenerate_objects(
@@ -144,6 +152,18 @@ pub(in crate::jvm) fn inline(
     finally_markers::remove(&mut node)?;
     node.nodes.insert(0, Node::Insn(Insn::Op(NOP)));
     Ok(node)
+}
+
+/// Normalize inline-call stack brackets that were already in a body before that body is inlined.
+///
+/// This is kotlinc's `FixStackWithLabelNormalizationMethodTransformer` in
+/// `preprocessNodeBeforeInline`: its synthetic spill accesses must reach the enclosing
+/// `LocalVariablesSorter` before the body's own locals do. Brackets introduced while expanding
+/// this body remain for the finished caller's FixStack pass.
+fn preprocess_node_before_inline(node: MethodNode) -> Result<MethodNode, InlineError> {
+    let mut editable = EditableMethod::new(node);
+    fix_stack(&mut editable, "fake").map_err(InlineError::FixStack)?;
+    Ok(editable.finish())
 }
 
 const NOP: u8 = 0x00;
