@@ -56,6 +56,9 @@ pub struct IrCheckedProperty {
     pub visibility: crate::types::Visibility,
     pub flags: crate::fir::DeclarationFlags,
     pub initializer: Option<ExprId>,
+    /// Kotlin metadata's `HAS_CONSTANT`: an immutable property of a `const val` type whose checked
+    /// initializer is a constant to kotlinc's serializer (see `fir_lower::metadata_constants`).
+    pub has_constant_initializer: bool,
     pub delegate: Option<ExprId>,
     pub delegate_plan: Option<crate::fir::FirPropertyDelegatePlan>,
     pub getter: Option<ExprId>,
@@ -182,6 +185,8 @@ pub struct IrProperty {
     /// A `private` property. kotlinc emits NO accessor for one — in-class reads go straight to the
     /// backing field — so a use from outside the declaring class has nothing to call, and whichever
     /// path is lowering it does not own the access.
+    /// See [`IrCheckedProperty::has_constant_initializer`].
+    pub has_constant_initializer: bool,
     pub is_private: bool,
     /// The resolved visibility of a `var`'s setter: its own modifier (`private set`, `protected set`),
     /// else the property's. This is declaration visibility, not a JVM flag: every backend must

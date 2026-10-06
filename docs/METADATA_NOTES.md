@@ -247,7 +247,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   order, the primary-constructor properties first and enum entries at their declaration position
   (so after those properties and before the body's other members), then the members the compiler
   generates: `componentN`, `copy`, `equals`, `hashCode`, `toString` for a data class and `equals`,
-  `hashCode`, `toString` for a value class. The visit order is the order strings enter `d2` and the
+  `hashCode`, `toString` for a value class. A value class's override that source declares is one of
+  its declarations instead: `override fun toString()` is a declared `Function` (realized as
+  `toString-impl`) and the generated list keeps only the members source left out. The visit order is the order strings enter `d2` and the
   order within each protobuf list (`function`, `property`, `enum_entry`); the lists themselves stay
   in field-number order. Test: `tests/metadata_member_order_e2e.rs`.
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
@@ -506,7 +508,61 @@ The recorded `ValueParameter.type` of a `vararg` is `Array<out E>`, not the inva
 checker carries — the array's `Argument.projection` is `1` (OUT). The element travels separately and
 UNPROJECTED as `ValueParameter.vararg_element_type` (f4). `metadata::vararg_recorded_type` applies
 the projection at the encode seam only, so nothing upstream of metadata sees a type source never
-wrote. A primitive specialized array has no type argument and is recorded unchanged.
+wrote. Package functions, member functions, constructors (annotation classes included) and a
+`vararg val` constructor property all record the projected array. A primitive specialized array has no type argument and is recorded unchanged.
+
+## `Property.flags` HAS_CONSTANT
+
+Read from kotlinc 2.4.20's `FirElementSerializer.propertyProto`:
+`isConst || (!isVar && canBeUsedForConstVal(fullyExpandedType(returnType)) && hasConstantValue(initializer))`.
+`hasConstantValue` (`FirToConstantValueChecker`) accepts a supported literal, a string
+concatenation whose arguments are constants, a `const val` (or Java `final` field) read, an enum
+entry, an annotation constructor, `arrayOf` over constants, and a call in package `kotlin` named
+in `NUMBER_CONVERSIONS` or `unaryMinus` whose dispatch receiver is constant. kotlinc's parser folds
+`-3`, `+3` and `"a" + "b"` into literals before that. Measured the same in classes and at top level:
+
+| initializer | HAS_CONSTANT |
+| --- | --- |
+| `val s: String = "s"`, `val u: UInt = 1u`, `val n: Int = -X` | yes |
+| `X.toLong()`, `(-3).toLong()`, `0.toDouble()`, `1.0.toInt()`, `65.toChar()` | yes |
+| `"$X"`, `"a${S}b"`, `"a" + "b" + "c"`, `+3`, a bare `S` | yes |
+| `val a: Any = "t"`, `val c: CharSequence = "abcd"`, `val m: String? = "m"` | no |
+| `(1 + 2).toLong()`, `1 + 2`, `!true`, `"a" + 1`, `"a" + S`, `S + "a"`, `+X`, `3u.toUInt()` | no |
+
+## Accessors, setter parameters and member list order
+
+Measured against kotlinc 2.4.20:
+
+- `JvmPropertySignature.getter`/`setter` name the property's own accessor methods. A private
+  property with default accessors has no accessor method, so it records the field alone, even when
+  the class declares `getValue(reference, property)` or an exact `fun getCount(): Int` /
+  `fun setCount(next: Int)`. Those stay `Function` records.
+- `Property.setter_value_parameter`'s type addresses the property's own type parameters by id
+  (`Type.type_parameter`), while the return type and receiver name them
+  (`Type.type_parameter_name`). The setter is a declaration of its own. This holds for package and
+  class properties alike.
+- `Class.property`, `Class.function` and `Class.type_alias` serialize in the order the records were
+  built, which is the d2 interning order. With `var <M> Slot<M>.member` declared before
+  `val later`, both lists put `member` first.
+
+## `Property.flags` HAS_CONSTANT
+
+Read from kotlinc 2.4.20's `FirElementSerializer.propertyProto`:
+`isConst || (!isVar && canBeUsedForConstVal(fullyExpandedType(returnType)) && hasConstantValue(initializer))`.
+`hasConstantValue` (`FirToConstantValueChecker`) accepts a supported literal, a string
+concatenation whose arguments are constants, a `const val` read, a provider-published Java `final`
+field read (including one without a `ConstantValue` attribute), an enum entry, an annotation
+constructor, `arrayOf` over constants, and a call in package `kotlin` named
+in `NUMBER_CONVERSIONS` or `unaryMinus` whose dispatch receiver is constant. kotlinc's parser folds
+`-3`, `+3` and `"a" + "b"` into literals before that. Measured the same in classes and at top level:
+
+| initializer | HAS_CONSTANT |
+| --- | --- |
+| `val s: String = "s"`, `val u: UInt = 1u`, `val n: Int = -X` | yes |
+| `X.toLong()`, `(-3).toLong()`, `0.toDouble()`, `1.0.toInt()`, `65.toChar()` | yes |
+| `"$X"`, `"a${S}b"`, `"a" + "b" + "c"`, `+3`, a bare `S` | yes |
+| `val a: Any = "t"`, `val c: CharSequence = "abcd"`, `val m: String? = "m"` | no |
+| `(1 + 2).toLong()`, `1 + 2`, `!true`, `"a" + 1`, `"a" + S`, `S + "a"`, `+X`, `3u.toUInt()` | no |
 
 ## Class supertypes: only what source declared
 
