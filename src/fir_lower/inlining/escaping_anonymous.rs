@@ -869,6 +869,7 @@ fn retarget_copied_property_calls(
     source_name: TypeName,
     clones: &HashMap<FunId, FunId>,
 ) -> Result<(), super::super::FirLoweringFailure> {
+    let lineage = specialization_lineage(ir, source);
     let mut roots = ir.classes[copy_id as usize]
         .methods
         .iter()
@@ -894,7 +895,15 @@ fn retarget_copied_property_calls(
         }
     }
     for expression in operations {
-        retarget_property_operation(ir, expression, copy_id, source, source_name, clones)?;
+        retarget_property_operation(
+            ir,
+            expression,
+            copy_id,
+            source,
+            source_name,
+            &lineage,
+            clones,
+        )?;
     }
     Ok(())
 }
@@ -905,6 +914,7 @@ fn retarget_property_operation(
     copy_id: ClassId,
     source: ClassId,
     source_name: TypeName,
+    lineage: &[(ClassId, TypeName)],
     clones: &HashMap<FunId, FunId>,
 ) -> Result<(), super::super::FirLoweringFailure> {
     let IrExpr::Checked(operation) = ir.expr(expression).clone() else {
@@ -941,18 +951,47 @@ fn retarget_property_operation(
         ),
         _ => return Ok(()),
     };
-    let Some(layout) = copied_property_layout(ir, target, source, source_name) else {
+    let Some(layout) = copied_property_layout(ir, target, lineage) else {
         return Ok(());
     };
-    let accessor = match (&layout, value) {
-        (CopiedPropertyLayout::Member { setter, .. }, Some(_))
-        | (CopiedPropertyLayout::Extension { setter, .. }, Some(_)) => *setter,
-        (CopiedPropertyLayout::Member { getter, .. }, None)
-        | (CopiedPropertyLayout::Extension { getter, .. }, None) => *getter,
+    let (declaring_class, accessor) = match (&layout, value) {
+        (
+            CopiedPropertyLayout::Member {
+                declaring_class,
+                setter,
+                ..
+            },
+            Some(_),
+        )
+        | (
+            CopiedPropertyLayout::Extension {
+                declaring_class,
+                setter,
+                ..
+            },
+            Some(_),
+        ) => (*declaring_class, *setter),
+        (
+            CopiedPropertyLayout::Member {
+                declaring_class,
+                getter,
+                ..
+            },
+            None,
+        )
+        | (
+            CopiedPropertyLayout::Extension {
+                declaring_class,
+                getter,
+                ..
+            },
+            None,
+        ) => (*declaring_class, *getter),
     };
     let receiver = dispatch_receiver.ok_or_else(|| malformed(source_name))?;
     if let Some(function) = accessor {
-        let cloned = require_clone(function, clones, source_name)?;
+        let cloned =
+            cloned_lineage_method(ir, function, declaring_class, source, clones, source_name)?;
         let index = ir.classes[copy_id as usize]
             .methods
             .iter()
@@ -1012,6 +1051,7 @@ fn retarget_property_operation(
 
 enum CopiedPropertyLayout {
     Member {
+        declaring_class: ClassId,
         backing_field: bool,
         getter: Option<FunId>,
         setter: Option<FunId>,
@@ -1020,6 +1060,7 @@ enum CopiedPropertyLayout {
         interface: bool,
     },
     Extension {
+        declaring_class: ClassId,
         getter: Option<FunId>,
         setter: Option<FunId>,
     },
@@ -1028,8 +1069,7 @@ enum CopiedPropertyLayout {
 fn copied_property_layout(
     ir: &crate::ir::IrFile,
     property: crate::fir::PropertyId,
-    source: ClassId,
-    source_name: TypeName,
+    lineage: &[(ClassId, TypeName)],
 ) -> Option<CopiedPropertyLayout> {
     match ir.local_property_layouts.get(&property)? {
         crate::ir::IrLocalPropertyLayout::Member {
@@ -1042,25 +1082,87 @@ fn copied_property_layout(
             ty,
             interface,
             ..
-        } if *class == source || *owner == source_name => Some(CopiedPropertyLayout::Member {
-            backing_field: backing_field.is_some(),
-            getter: *getter,
-            setter: *setter,
-            name: name.clone(),
-            ty: *ty,
-            interface: *interface,
-        }),
+        } => {
+            let declaring_class = lineage.iter().find_map(|(candidate, name)| {
+                (*candidate == *class || *name == *owner).then_some(*candidate)
+            })?;
+            Some(CopiedPropertyLayout::Member {
+                declaring_class,
+                backing_field: backing_field.is_some(),
+                getter: *getter,
+                setter: *setter,
+                name: name.clone(),
+                ty: *ty,
+                interface: *interface,
+            })
+        }
         crate::ir::IrLocalPropertyLayout::MemberExtension {
             owner,
             getter,
             setter,
             ..
-        } if *owner == source_name => Some(CopiedPropertyLayout::Extension {
-            getter: Some(*getter),
-            setter: *setter,
-        }),
+        } => {
+            let declaring_class = lineage
+                .iter()
+                .find_map(|(candidate, name)| (*name == *owner).then_some(*candidate))?;
+            Some(CopiedPropertyLayout::Extension {
+                declaring_class,
+                getter: Some(*getter),
+                setter: *setter,
+            })
+        }
         _ => None,
     }
+}
+
+/// Map a declaration method through every anonymous-class copy between its declaring class and the
+/// immediate source, then through the copy currently being published.
+fn cloned_lineage_method(
+    ir: &crate::ir::IrFile,
+    mut method: FunId,
+    declaring_class: ClassId,
+    source: ClassId,
+    clones: &HashMap<FunId, FunId>,
+    source_name: TypeName,
+) -> Result<FunId, super::super::FirLoweringFailure> {
+    let mut current = source;
+    let mut steps = Vec::new();
+    let mut seen = HashSet::new();
+    while current != declaring_class {
+        if !seen.insert(current) {
+            return Err(malformed(source_name));
+        }
+        let specialization = ir
+            .specialized_anonymous_classes
+            .get(&current)
+            .ok_or_else(|| malformed(source_name))?;
+        steps.push(&specialization.method_clones);
+        current = specialization.source;
+    }
+    for mapping in steps.into_iter().rev() {
+        method = mapping
+            .get(&method)
+            .copied()
+            .ok_or_else(|| malformed(source_name))?;
+    }
+    require_clone(method, clones, source_name)
+}
+
+fn specialization_lineage(ir: &crate::ir::IrFile, from: ClassId) -> Vec<(ClassId, TypeName)> {
+    let mut lineage = Vec::new();
+    let mut current = from;
+    let mut seen = HashSet::new();
+    while seen.insert(current) {
+        let Some(class) = ir.classes.get(current as usize) else {
+            break;
+        };
+        lineage.push((current, class.fq_name));
+        let Some(specialization) = ir.specialized_anonymous_classes.get(&current) else {
+            break;
+        };
+        current = specialization.source;
+    }
+    lineage
 }
 
 fn clone_member_function(
@@ -1234,19 +1336,11 @@ fn remap_owned_class(
     // property access realized after the earlier copy was created. Every such ancestor denotes the
     // same receiver now owned by `to`; remap the whole identity chain rather than only its most
     // recent spelling.
-    let mut source_classes = vec![from];
-    let mut source_names = vec![from_name];
-    let mut current = from;
-    let mut seen = HashSet::new();
-    while seen.insert(current) {
-        let Some(specialization) = ir.specialized_anonymous_classes.get(&current) else {
-            break;
-        };
-        current = specialization.source;
-        source_classes.push(current);
-        if let Some(class) = ir.classes.get(current as usize) {
-            source_names.push(class.fq_name);
-        }
+    let lineage = specialization_lineage(ir, from);
+    let source_classes = lineage.iter().map(|(class, _)| *class).collect::<Vec<_>>();
+    let mut source_names = lineage.iter().map(|(_, name)| *name).collect::<Vec<_>>();
+    if !source_names.contains(&from_name) {
+        source_names.push(from_name);
     }
     for &expression in owned {
         if let Some(node) = ir.exprs.get_mut(expression as usize) {

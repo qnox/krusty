@@ -512,6 +512,51 @@ fun box(): String {
     run_ok("NestedCrossinlineObject", SOURCE);
 }
 
+/// A copied anonymous object can be copied again while its checked member-property read still
+/// names the original declaration. The terminal class owns the capture field; it must not call an
+/// accessor on the original class with the terminal instance as its receiver.
+#[test]
+fn a_retransformed_crossinline_object_reads_its_terminal_capture_field() {
+    const SOURCE: &str = r#"
+import kotlin.coroutines.*
+
+interface FlowCollector<T> {
+    suspend fun emit(value: T)
+}
+
+interface Flow<T : Any> {
+    suspend fun collect(collector: FlowCollector<T>)
+}
+
+inline fun <T : Any> flow(
+    crossinline block: suspend FlowCollector<T>.() -> Unit,
+): Flow<T> = object : Flow<T> {
+    override suspend fun collect(collector: FlowCollector<T>) = collector.block()
+}
+
+inline fun <T : Any, R : Any> Flow<T>.flowWith(
+    crossinline builderBlock: suspend Flow<T>.() -> Flow<R>,
+): Flow<T> = flow { builderBlock() }
+
+fun builder(block: suspend () -> Unit) {
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+}
+
+fun box(): String {
+    builder {
+        flow<Int> { emit(1) }
+            .flowWith { this }
+            .collect(object : FlowCollector<Int> {
+                override suspend fun emit(value: Int) {}
+            })
+    }
+    return "OK"
+}
+"#;
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("RetransformedCrossinlineObjectCapture", SOURCE);
+}
+
 /// A `by lazy { object : … { override fun f() = property } }` delegate. The lambda's result type is
 /// inferred from the object, so the construction is visited again once the `lazy` call settles.
 /// The member's inferred result was completed on the first visit; the revisit must still read its
