@@ -138,7 +138,11 @@ fn a_java_bridge_names_an_unnamed_parameter_positionally() {
         ],
         "kotlinc bridge locals"
     );
-    assert_eq!(local_variables(&built.krusty, member), reference, member);
+    assert_eq!(
+        local_variables(&built.krusty, member),
+        reference,
+        "{member}"
+    );
 }
 
 #[test]
