@@ -9,6 +9,35 @@
 use super::*;
 
 impl JvmLibraries {
+    pub(super) fn library_const(value: &crate::jvm::classreader::ConstVal) -> LibConst {
+        use crate::jvm::classreader::ConstVal;
+
+        match value {
+            ConstVal::Int(value) => LibConst::Int(*value),
+            ConstVal::Long(value) => LibConst::Long(*value),
+            ConstVal::Float(value) => LibConst::Float(*value),
+            ConstVal::Double(value) => LibConst::Double(*value),
+            ConstVal::Str(value) => LibConst::Str(value.clone()),
+        }
+    }
+
+    pub(super) fn const_fields<F>(
+        fields: &[crate::jvm::classreader::FieldSig],
+        mut ty: F,
+    ) -> std::collections::HashMap<String, LibraryConst>
+    where
+        F: FnMut(&crate::jvm::classreader::FieldSig) -> Option<Ty>,
+    {
+        fields
+            .iter()
+            .filter_map(|field| {
+                let ty = ty(field)?;
+                let value = Self::library_const(field.const_value.as_ref()?);
+                Some((field.name.clone(), LibraryConst { ty, value }))
+            })
+            .collect()
+    }
+
     /// The receiver-less property `internal.name` names, published in `internal`'s namespace: a
     /// `companion { … }` block property, or a static field (a Java static, or the outer-class
     /// storage of a companion `@JvmField`).

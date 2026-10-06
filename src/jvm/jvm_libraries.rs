@@ -46,14 +46,14 @@ use mapped_builtin_member_status::{
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
 };
-use super::classreader::{ConstVal, FieldSig, JavaNullability};
+use super::classreader::JavaNullability;
 use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
 use crate::jvm::names::{property_getter_name, type_descriptor};
 use crate::libraries::builtin_top_level_realization::attach_function_realization;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
-    FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind, LibConst,
+    FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind,
     LibraryCallable, LibraryConst, LibraryMember, LibraryType, ParamList, PropKind, PropertyInfo,
     PropertyProducer, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
 };
@@ -996,33 +996,6 @@ impl JvmLibraries {
             .entry(owner)
             .or_default()
             .insert(name.to_string());
-    }
-
-    fn library_const(value: &ConstVal) -> LibConst {
-        match value {
-            ConstVal::Int(value) => LibConst::Int(*value),
-            ConstVal::Long(value) => LibConst::Long(*value),
-            ConstVal::Float(value) => LibConst::Float(*value),
-            ConstVal::Double(value) => LibConst::Double(*value),
-            ConstVal::Str(value) => LibConst::Str(value.clone()),
-        }
-    }
-
-    fn const_fields<F>(
-        fields: &[FieldSig],
-        mut ty: F,
-    ) -> std::collections::HashMap<String, LibraryConst>
-    where
-        F: FnMut(&FieldSig) -> Option<Ty>,
-    {
-        fields
-            .iter()
-            .filter_map(|f| {
-                let ty = ty(f)?;
-                let value = Self::library_const(f.const_value.as_ref()?);
-                Some((f.name.clone(), LibraryConst { ty, value }))
-            })
-            .collect()
     }
 
     /// The type Kotlin metadata declares for a property named `name` on `internal`, or on its
