@@ -77,7 +77,7 @@ const NESTED_STEP: &str = r#"fun box(): String =
 fn nested_neutral_inline_plans_are_the_reference_compilers_class() {
     let lib = common::kotlinc_lib_out(&[("NestedStepLib.kt", NESTED_STEP_LIB)])
         .expect("reference kotlinc is provisioned");
-    common::assert_classes_identical_to_kotlinc_against(
+    common::assert_classes_identical_to_kotlinc_against_jdk(
         "PlanNestedStep",
         NESTED_STEP,
         &["PlanNestedStepKt"],

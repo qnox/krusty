@@ -25,8 +25,9 @@ impl Emitter<'_> {
             self.emit_discarding(block, code);
             return;
         }
+        let inline_stack_height = code.stack_height();
         let normalizes_inline_stack =
-            self.ir.external_inline_expansions.contains(&block) && code.stack_height() != 0;
+            self.ir.external_inline_expansions.contains(&block) && inline_stack_height != 0;
         // A spliced lambda's marker follows evaluation of the inline call's ordinary operands.
         // Preserve the caller stack there so argument temporaries keep kotlinc's slot order. An
         // expansion without a lambda marker (for example an iteration plan) still starts at the
@@ -68,6 +69,7 @@ impl Emitter<'_> {
                 value,
                 terminal_target,
                 delays_stack_normalization,
+                inline_stack_height,
                 code,
             )
         };
@@ -105,8 +107,9 @@ impl Emitter<'_> {
         // External inline plans record only their semantic boundary in common IR. When evaluation
         // begins with caller operands already live, the finished-method FixStack pass derives and
         // restores their complete JVM representation from these markers.
+        let inline_stack_height = code.stack_height();
         let normalizes_inline_stack =
-            self.ir.external_inline_expansions.contains(&block) && code.stack_height() != 0;
+            self.ir.external_inline_expansions.contains(&block) && inline_stack_height != 0;
         let delays_stack_normalization = normalizes_inline_stack
             && stmts.iter().any(|&statement| {
                 matches!(
@@ -136,7 +139,8 @@ impl Emitter<'_> {
                         Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
                     )
                 {
-                    reserved_inline_stack = Some(self.open_reserved_inline_stack(code));
+                    reserved_inline_stack =
+                        Some(self.open_reserved_inline_stack(inline_stack_height, code));
                     normalize_at_lambda_frame = false;
                 }
                 // A statement nets zero on the operand stack (its value is stored/discarded). Reset the
@@ -241,6 +245,7 @@ impl Emitter<'_> {
         value: Option<u32>,
         terminal_target: Option<Label>,
         normalize_at_lambda_frame: bool,
+        inline_stack_height: i32,
         code: &mut CodeBuilder,
     ) -> EmittedBlock {
         let enclosing_statement_line = self.statement_line;
@@ -269,7 +274,8 @@ impl Emitter<'_> {
                     Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
                 )
             {
-                reserved_inline_stack = Some(self.open_reserved_inline_stack(code));
+                reserved_inline_stack =
+                    Some(self.open_reserved_inline_stack(inline_stack_height, code));
                 normalize_at_lambda_frame = false;
             }
             let base = code.stack_height();
@@ -307,10 +313,17 @@ impl Emitter<'_> {
     }
 
     /// Claim the words FixStack will use before the inline lambda's own frame marker claims its
-    /// slot. The emitted marker preserves that allocation boundary until the finished method is
-    /// normalized; the reservations themselves keep subsequent frame-map entries above it.
-    fn open_reserved_inline_stack(&mut self, code: &mut CodeBuilder) -> Vec<TempSlot> {
-        let Ok(words) = u16::try_from(code.stack_height()) else {
+    /// slot. `inline_stack_height` is captured at the expansion boundary: declarations before the
+    /// delayed marker are stack-neutral, while their nested emission may make the builder's linear
+    /// counter drift from that verified boundary. The emitted marker preserves the allocation
+    /// boundary until the finished method is normalized; the reservations themselves keep
+    /// subsequent frame-map entries above it.
+    fn open_reserved_inline_stack(
+        &mut self,
+        inline_stack_height: i32,
+        code: &mut CodeBuilder,
+    ) -> Vec<TempSlot> {
+        let Ok(words) = u16::try_from(inline_stack_height) else {
             self.run.set_emit_error(
                 "the operand stack at an inline lambda boundary exceeds the JVM limit".to_string(),
             );

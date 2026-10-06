@@ -908,6 +908,18 @@ pub fn assert_classes_identical_to_kotlinc_against(
     assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, false);
 }
 
+/// [`assert_classes_identical_to_kotlinc_against`] with the JDK modules on krusty's classpath.
+/// Dependency fixtures that expose an inline body using a JDK classifier need both inputs: the
+/// repository-built dependency and the platform declarations its copied body resolves against.
+pub fn assert_classes_identical_to_kotlinc_against_jdk(
+    stem: &str,
+    src: &str,
+    classes: &[&str],
+    libraries: &[std::path::PathBuf],
+) {
+    assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, true);
+}
+
 /// [`assert_classes_identical_to_kotlinc`] with the JDK modules beside the stdlib on the KRUSTY
 /// side only, as [`compare_with_kotlinc_plugin_jdk`] arranges: a fixture naming a JDK-hierarchy
 /// type (the `StringBuilder` typealias) does not resolve for krusty without them, while the
