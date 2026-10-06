@@ -11,9 +11,10 @@
 //! **Where the initializers run.** On the JVM they run in `<clinit>`, when the facade class is
 //! first touched. A program touches the facade by calling its `main`, so running them at process
 //! start — in declaration order, before the entry function — is observationally the same thing for
-//! a program whose entry lives in the file that declares them. That is every program the generator
-//! accepts today, because a cross-file call is still declined; when files start calling each other,
-//! this becomes a real initialization-order question and is answered then, not guessed at now.
+//! a program whose entry lives in the file that declares them. A call into another file does not
+//! run that file's initializers: each file's initializer runs only from the entry it itself
+//! defines, and a file that is not the entry defines none. Cross-file initialization order is a
+//! separate question and is not guessed at here.
 //!
 //! **The collector has to be told.** A freestanding program cannot find its own data section, so a
 //! reference-typed slot is registered with `kt_gc_add_global_root` — and registered BEFORE the

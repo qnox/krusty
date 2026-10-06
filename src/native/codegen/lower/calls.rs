@@ -7,6 +7,29 @@
 use super::*;
 
 impl BodyLowering<'_, '_, '_> {
+    /// A top-level function defined in another file of this module: an import of the symbol
+    /// `module_function_symbol` and a direct call. The defining file exports that same symbol.
+    fn module_call(
+        &mut self,
+        symbol: &str,
+        params: &[Ty],
+        ret: Ty,
+        dispatch_receiver: Option<u32>,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        if dispatch_receiver.is_some() {
+            return Err(format!("a cross-file call with a receiver (`{symbol}`)"));
+        }
+        let id = self.file.import(symbol, params, ret)?;
+        let arguments = self.arguments(args, params)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &arguments)?;
+        Ok(self.builder.inst_results(call).first().copied())
+    }
+
     pub(super) fn call(
         &mut self,
         site: u32,
@@ -544,6 +567,33 @@ impl BodyLowering<'_, '_, '_> {
                     }
                 }
             }
+            Callee::Module {
+                target,
+                params,
+                ret,
+                ..
+            } => self.module_call(
+                &super::super::super::symbols::module_function_symbol(*target),
+                params,
+                *ret,
+                dispatch_receiver,
+                args,
+            ),
+            // A JVM realization may already have rewritten the same edge. The callable id is still
+            // the symbol; the facade name is not.
+            Callee::CrossFile {
+                module_target: Some(target),
+                params,
+                ret,
+                module_default_call: false,
+                ..
+            } => self.module_call(
+                &super::super::super::symbols::module_function_symbol(*target),
+                params,
+                *ret,
+                dispatch_receiver,
+                args,
+            ),
             other => Err(format!("a {} call", callee_kind(other))),
         }
     }

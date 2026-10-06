@@ -51,6 +51,32 @@ pub(super) fn also_run_natively(src: &str, stem: &str, expected: &str) {
     }
 }
 
+/// Require a multi-file module to lower and answer `expected`. `sources` is `(stem, text)`.
+///
+/// Same rule as [`expect_native_box`]: a decline fails the test, and a build that cannot reach
+/// the host target skips.
+#[allow(dead_code)]
+pub fn expect_native_sources(sources: &[(&str, &str)], expected: &str) {
+    let Some(target) = krusty::native::NativeTarget::host() else {
+        return;
+    };
+    if !krusty::native::can_link(target) {
+        return;
+    }
+    let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
+    match native_sources_outcome(sources, target) {
+        NativeBox::Unavailable => {}
+        NativeBox::Answered(answer) => assert_eq!(answer, expected, "{stem}"),
+        NativeBox::Declined(reason) => {
+            panic!("{stem}: the native backend must lower this program — {reason}")
+        }
+        failure => panic!(
+            "{stem}: the native backend ran it wrong — {}",
+            failure.as_failure()
+        ),
+    }
+}
+
 /// Require the native backend to LOWER `src` and answer `expected`: a decline fails the test.
 ///
 /// [`cross_check_backends`] treats a decline as a skip, which is right for the suite at large — a
@@ -189,6 +215,15 @@ impl NativeBox {
 
 #[allow(dead_code)]
 fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarget) -> NativeBox {
+    native_sources_outcome(&[(stem, src)], target)
+}
+
+/// `sources` is `(file stem, text)` in the order the module is compiled. One of the files holds
+/// `box` or `main`; the rest are the declarations it calls.
+fn native_sources_outcome(
+    sources: &[(&str, &str)],
+    target: krusty::native::NativeTarget,
+) -> NativeBox {
     use krusty::diag::DiagSink;
     use krusty::native::{CraneliftBackend, Entry};
     use krusty::source::SourceInput;
@@ -214,10 +249,18 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
     );
-    let inputs = vec![SourceInput::kotlin(src).with_file_stem(stem)];
-    let stems = vec![stem.to_string()];
+    let inputs: Vec<_> = sources
+        .iter()
+        .map(|(stem, src)| SourceInput::kotlin(src).with_file_stem(stem))
+        .collect();
+    let stems: Vec<String> = sources
+        .iter()
+        .map(|(stem, _)| (*stem).to_string())
+        .collect();
     let mut features = krusty::features::LangFeatures::new();
-    features.apply_source_directives(src);
+    for (_, src) in sources {
+        features.apply_source_directives(src);
+    }
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
@@ -227,13 +270,15 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     }
     // A conformance case answers through `box`; a program without one starts at Kotlin's `main`,
     // which is how a test pins what the backend does with that entry.
-    let entry = if src.contains("fun box(") {
+    let entry = if sources.iter().any(|(_, src)| src.contains("fun box(")) {
         Entry::Box
     } else {
         Entry::Main
     };
     let backend = CraneliftBackend::new(target).with_entry(entry);
-    let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, stem, &mut diags);
+    let module_name = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
+    let artifacts =
+        krusty::compiler::emit_analyzed(analysis, &stems, &backend, module_name, &mut diags);
     if let Some(decline) = diags
         .diags
         .iter()
@@ -244,10 +289,12 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     if let Some(refusal) = diags.diags.first() {
         return NativeBox::Declined(refusal.msg.clone());
     }
-    let Some((_, object)) = artifacts.into_iter().next() else {
+    if artifacts.is_empty() {
         return NativeBox::Declined("the backend emitted nothing".to_string());
-    };
-    let image = match krusty::native::link_program(&[&object], target) {
+    }
+    let objects: Vec<Vec<u8>> = artifacts.into_iter().map(|(_, object)| object).collect();
+    let object_refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+    let image = match krusty::native::link_program(&object_refs, target) {
         Ok(image) => image,
         Err(error) => return NativeBox::Failed(format!("link: {error}")),
     };
@@ -259,7 +306,7 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     if std::fs::create_dir_all(&directory).is_err() {
         return NativeBox::Unavailable;
     }
-    let executable = directory.join(stem);
+    let executable = directory.join(sources.first().map(|(stem, _)| *stem).unwrap_or("program"));
     if let Err(error) = std::fs::write(&executable, &image) {
         return NativeBox::Failed(format!("writing the executable: {error}"));
     }

@@ -4480,6 +4480,11 @@ each one lowering more and declining less:
   object), function types with a fixed `invoke` slot, SAM conversions, callable references to
   functions and properties including bound ones and dependency members, default arguments through
   one wrapper per omission shape, local functions, and the stdlib scope functions.
+- **Cross-file calls.** A top-level function is exported as `kt_mod_<callable id>`, the checked
+  callable identity, so the defining file and a caller in another file of the module name the same
+  symbol without seeing each other's lowering. `Callee::Module`, and a `CrossFile` edge that still
+  carries that id, imports it and calls it directly. The module's objects are linked together.
+  A file that is not the entry does not run its top-level initializers; that order is not guessed.
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host
