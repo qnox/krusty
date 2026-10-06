@@ -149,7 +149,10 @@ impl JvmLibraries {
                 let ty = if ci.meta.is_present() {
                     ty
                 } else {
-                    java_type_nullability(ty, f.nullability)
+                    java_type_nullability(
+                        ty,
+                        super::java_nullability::java_field_nullability(f.access, f.nullability),
+                    )
                 };
                 let constant = f.const_value.as_ref().map(|value| LibraryConst {
                     ty,

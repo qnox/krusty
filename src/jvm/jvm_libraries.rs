@@ -37,7 +37,8 @@ use generic_signatures::{
 };
 use inline_capability::{metadata_inline, property_accessor_inline};
 use java_nullability::{
-    java_result_enhancement, java_type_argument_nullability, java_type_nullability,
+    java_field_nullability, java_result_enhancement, java_type_argument_nullability,
+    java_type_nullability,
 };
 use mapped_builtin_member_status::{
     mapped_builtin_member_status, retain_joined_mapped_members, MappedBuiltinMemberStatus,
@@ -3674,7 +3675,10 @@ impl JvmLibraries {
                 let field_ty = if ci.meta.is_present() {
                     field_ty
                 } else {
-                    java_type_nullability(field_ty, field.nullability)
+                    java_type_nullability(
+                        field_ty,
+                        java_field_nullability(field.access, field.nullability),
+                    )
                 };
                 let visibility = if field.access & 0x0001 != 0 {
                     Visibility::Public
