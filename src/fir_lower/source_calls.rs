@@ -1841,6 +1841,24 @@ impl BodyLowering<'_> {
         // kotlinc passes in place may stay there.
         passable: bool,
     ) -> Option<NormalizedCheckedArguments> {
+        // Once an allocation-free inline template has a capture whose value must be frozen here,
+        // every argument of the expanded call must cross an ordered temporary boundary. Otherwise
+        // ordinary operands stay embedded in the cloned body while the capture is emitted before
+        // it, changing `a(), b()::f, c()` from source order into `b(), a(), c()`.
+        let orders_inline_captures = matches!(
+            policy,
+            CheckedArgumentPolicy::SameFileInline { inline: true, .. }
+        ) && arguments.iter().any(|argument| {
+            let IrCheckedArgument::Expression { value, .. } = argument else {
+                return false;
+            };
+            inline_argument_template(self.ir, *value).is_some_and(|(_, captures, _, _)| {
+                captures
+                    .into_iter()
+                    .any(|capture| !self.passes_reordered_operand_in_place(capture))
+            })
+        });
+        let direct = direct && !orders_inline_captures;
         let mut statements = Vec::new();
         let mut inline_lambdas = vec![None; parameter_types.len()];
         let mut defaults = Vec::new();
@@ -1861,6 +1879,9 @@ impl BodyLowering<'_> {
                                 inline && inline_argument_stays(self.ir, value)
                             }
                         };
+                        if preserve {
+                            self.spill_inline_argument_inputs(value, &mut statements)?;
+                        }
                         if matches!(policy, CheckedArgumentPolicy::SameFileInline { .. })
                             && preserve
                         {
@@ -1987,6 +2008,82 @@ impl BodyLowering<'_> {
         read
     }
 
+    /// Evaluate an inline template's non-reusable captures where the argument is written, even when
+    /// expansion consumes the template without allocating its carrier. Delaying these expressions
+    /// until the spliced invocation moves them past later call arguments; spilling the whole
+    /// template would instead allocate the carrier that inline placement is meant to omit.
+    fn spill_inline_argument_inputs(
+        &mut self,
+        value: ExprId,
+        statements: &mut Vec<ExprId>,
+    ) -> Option<()> {
+        match self.ir.expr(value).clone() {
+            IrExpr::CallableReference(mut reference) => {
+                let parameter_types = self
+                    .ir
+                    .functions
+                    .get(reference.adapter as usize)?
+                    .params
+                    .clone();
+                for (ordinal, capture) in reference.captures.iter_mut().enumerate() {
+                    if self.passes_reordered_operand_in_place(*capture) {
+                        continue;
+                    }
+                    let ty = self
+                        .ir
+                        .logical_types
+                        .get(capture)
+                        .copied()
+                        .or_else(|| parameter_types.get(ordinal).copied())?;
+                    *capture = self.spill_call_operand(*capture, ty, statements);
+                }
+                if let Some(bound) = reference.bound_receiver.as_mut() {
+                    if !self.passes_reordered_operand_in_place(*bound) {
+                        let ordinal = reference.captures.len();
+                        let ty = self
+                            .ir
+                            .logical_types
+                            .get(bound)
+                            .copied()
+                            .or_else(|| parameter_types.get(ordinal).copied())?;
+                        *bound = self.spill_call_operand(*bound, ty, statements);
+                    }
+                }
+                self.ir.exprs[value as usize] = IrExpr::CallableReference(reference);
+            }
+            IrExpr::Lambda {
+                impl_fn,
+                arity,
+                mut captures,
+                sam,
+                inline_body,
+            } if inline_argument_template(self.ir, value).is_some() => {
+                let parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
+                for (ordinal, capture) in captures.iter_mut().enumerate() {
+                    if self.passes_reordered_operand_in_place(*capture) {
+                        continue;
+                    }
+                    let ty = self
+                        .ir
+                        .logical_types
+                        .get(capture)
+                        .copied()
+                        .or_else(|| parameter_types.get(ordinal).copied())?;
+                    *capture = self.spill_call_operand(*capture, ty, statements);
+                }
+                self.ir.exprs[value as usize] = IrExpr::Lambda {
+                    impl_fn,
+                    arity,
+                    captures,
+                    sam,
+                    inline_body,
+                };
+            }
+            _ => {}
+        }
+        Some(())
+    }
+
     /// Preserve the checker-selected logical operand type on the allocation-free ordered path.
     /// Any representation-changing conversion is already explicit on the checked FIR receiver or
     /// argument and was lowered before this point. The consumer's selected parameter is already on
@@ -2000,14 +2097,7 @@ impl BodyLowering<'_> {
 /// A lambda literal, or a callable reference whose adapter is that literal, stays in the argument
 /// position. Spilling either would be the function object the splice is there to avoid.
 fn inline_argument_stays(ir: &crate::ir::IrFile, value: ExprId) -> bool {
-    match ir.expr(value) {
-        IrExpr::Lambda {
-            inline_body: Some(_),
-            ..
-        } => true,
-        IrExpr::CallableReference(_) => inline_argument_template(ir, value).is_some(),
-        _ => false,
-    }
+    inline_argument_template(ir, value).is_some()
 }
 
 /// The inline template of a lambda, or of a non-suspend callable reference whose adapter is that
