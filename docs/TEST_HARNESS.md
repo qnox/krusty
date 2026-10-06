@@ -293,8 +293,10 @@ binary, e2e shard planning, each e2e shard, and each coverage report. Cargo's ow
 stays on stderr for those builds. The run ends with `coverage: phases` repeating every finished
 phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
-`conformance-run: phase box-shard-N-of-M <seconds>s`. The conformance binary job prints
-`conformance-build: phase conformance-test-binary` and `conformance-build: phase krusty-cli`.
+`conformance-run: phase box-shard-N-of-M <seconds>s`. The shared binary job prints
+`shared-bins: phase conformance-test-binary`, `shared-bins: phase krusty-cli`, and
+`shared-bins: phase krusty-build-tests`. Conformance lanes and Gradle lanes run those binaries. A
+Gradle lane does not compile krusty.
 
 Performance-relevant harness state:
 
