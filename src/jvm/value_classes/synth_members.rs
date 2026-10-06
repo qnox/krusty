@@ -26,6 +26,9 @@ pub(super) struct SynthesizedValueMembers {
     /// Exact synthesized expressions that have already rendered a nested value-class carrier to a
     /// String while retaining the nested class as their logical concat-boundary type.
     pub(super) rendered_value_class_text: HashSet<ExprId>,
+    /// Exact generated instance methods that delegate Kotlin `Any` members to their static
+    /// carrier implementations. A same-spelled source overload is not one of these functions.
+    pub(super) any_delegators: HashSet<u32>,
 }
 
 impl SynthesizedValueMembers {
@@ -525,6 +528,7 @@ pub(super) fn synth_value_members(
         });
         let ibody = ret_block(ir, call);
         let fid = add_inst(ir, "toString", vec![], str_ir, ibody);
+        realized.any_delegators.insert(fid);
         ir.open_methods.insert(fid);
         if !custom_to_string {
             ir.jvm_nullability_unannotated_methods.insert(fid);
@@ -560,6 +564,7 @@ pub(super) fn synth_value_members(
         });
         let ibody = ret_block(ir, call);
         let fid = add_inst(ir, "hashCode", vec![], int_ir, ibody);
+        realized.any_delegators.insert(fid);
         ir.open_methods.insert(fid);
         if !custom_hash_code {
             ir.jvm_nullability_unannotated_methods.insert(fid);
@@ -655,6 +660,7 @@ pub(super) fn synth_value_members(
         });
         let ibody = ret_block(ir, call);
         let fid = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody);
+        realized.any_delegators.insert(fid);
         crate::jvm::method_parameters::record_function(ir, fid, &["other"], &[]);
         ir.open_methods.insert(fid);
         if !custom_equals {

@@ -424,7 +424,7 @@ pub(super) fn add_deserialization_constructor(
             prefix_params: Vec::new(),
             vararg_index: None,
             params,
-            declared_spellings: crate::spelling::DeclaredSpellings::default(),
+            declared_spellings: Default::default(),
             named_params: (0..mask_count)
                 .map(|word| (format!("seen{word}"), Ty::Int))
                 .chain(element_fields.iter().cloned())

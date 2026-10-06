@@ -738,11 +738,9 @@ pub(crate) fn lower_value_classes(
                 | "equals-impl"
                 | "hashCode-impl"
                 | "toString-impl"
-                | "equals"
-                | "hashCode"
-                | "toString"
                 | "<init>"
-        ) || is_divergent_override_getter;
+        ) || is_divergent_override_getter
+            || realized_members.any_delegators.contains(&(fid as u32));
         let vc_member = !synthesized && vc_methods.contains(&(fid as u32));
         let source_name = f.name.clone();
         // Mangle a USER function whose (pre-erasure) signature mentions a value class — kotlinc's

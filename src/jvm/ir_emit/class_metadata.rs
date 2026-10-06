@@ -819,8 +819,8 @@ pub(super) fn build_class_metadata_with_facts(
                 );
                 let vararg_index = ir.fn_varargs.get(&fid).map(|vararg| vararg.index);
                 let jvm_sig_name = (name != f.name).then(|| f.name.clone());
-                let jvm_sig = (jvm_sig_name.is_some()
-                    || super::super::metadata_method_signatures::requires_function_signature(
+                let jvm_sig =
+                    super::super::metadata_method_signatures::requires_function_signature(
                         receiver,
                         logical_params
                             .iter()
@@ -833,8 +833,8 @@ pub(super) fn build_class_metadata_with_facts(
                         metadata_ret,
                         &physical,
                         &local_classifiers,
-                    ))
-                .then_some(physical);
+                    )
+                    .then_some(physical);
                 Some(FnMeta {
                     // How SOURCE spelled this member's declared types — carried on the IR because
                     // class metadata is built without the AST (see `IrFile::fn_declared_spellings`).
