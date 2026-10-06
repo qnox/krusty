@@ -781,75 +781,52 @@ fn realize_own_invoke(
     reference.invoke = Some(adapter);
 }
 
-/// Whether emitting `expression` would evaluate the callable reference as a value. An inline
-/// argument does not: the splice places the adapter's returned call and drops the carrier. A
-/// reference no live root reaches does not either; same-file inlining has already consumed it.
-fn reference_needs_carrier(
-    ir: &IrFile,
-    callables: &crate::backend::CheckedBackendCallables,
-    expression: u32,
-    parents: &std::collections::HashMap<u32, Vec<u32>>,
-    roots: &std::collections::HashSet<u32>,
-) -> bool {
-    if roots.contains(&expression) {
-        return true;
-    }
-    let Some(users) = parents.get(&expression) else {
-        return false;
-    };
-    users
-        .iter()
-        .any(|user| !is_inlined_call_argument(ir, callables, *user, expression))
-}
-
-/// Whether `call` passes `argument` to an inline function parameter. The argument list is the
-/// pre-realization value-parameter list: an extension receiver is still the call's dispatch
-/// receiver, and `inline_modifiers` lines up with these parameters.
-fn is_inlined_call_argument(
-    ir: &IrFile,
-    callables: &crate::backend::CheckedBackendCallables,
-    call: u32,
-    argument: u32,
-) -> bool {
-    let IrExpr::Call { callee, args, .. } = ir.expr(call) else {
-        return false;
-    };
-    if !args.contains(&argument) || !ir.inline_call_sites.contains(&call) {
-        return false;
-    }
-    let crate::ir::Callee::External { target, params, .. } = callee else {
-        return false;
-    };
-    let Some(position) = args.iter().position(|candidate| *candidate == argument) else {
-        return false;
-    };
-    let Some(callable) = callables.callable(*target) else {
-        return false;
-    };
-    callable.inline.can_inline()
-        && matches!(params.get(position), Some(Ty::Fun(_)))
-        && callable
-            .inline_modifiers
-            .get(position)
-            .is_some_and(|modifier| *modifier != crate::types::InlineParameterModifier::Noinline)
-}
-
-fn expression_parents(ir: &IrFile) -> std::collections::HashMap<u32, Vec<u32>> {
-    let mut parents = std::collections::HashMap::<u32, Vec<u32>>::new();
-    for index in 0..ir.exprs.len() {
-        let index = u32::try_from(index).expect("an expression index fits ExprId");
-        crate::ir::for_each_child(&ir.exprs, index, &mut |child| {
-            parents.entry(child).or_default().push(index);
-        });
-    }
-    parents
-}
-
 pub(super) fn realize(
     ir: &mut IrFile,
     callables: &crate::backend::CheckedBackendCallables,
     facades: Facades<'_>,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
+    // Join each dependency inline call with the exact selected declaration while its argument
+    // vector is still semantic. This publishes consumption once; carrier planning below does not
+    // scan expression parents or infer inline-parameter roles from syntax.
+    let mut consumed_references = Vec::new();
+    for raw in 0..ir.exprs.len() {
+        let call = raw as u32;
+        let IrExpr::Call {
+            callee: crate::ir::Callee::External { target, params, .. },
+            args,
+            ..
+        } = &ir.exprs[raw]
+        else {
+            continue;
+        };
+        if !ir.inline_call_sites.contains(&call) {
+            continue;
+        }
+        let callable = callables
+            .callable(*target)
+            .ok_or(FunctionReferenceRealizationTarget::External(*target))?;
+        if !callable.inline.can_inline() {
+            continue;
+        }
+        for (parameter, &argument) in args.iter().enumerate() {
+            let inline = matches!(params.get(parameter), Some(Ty::Fun(_)))
+                && callable
+                    .inline_modifiers
+                    .get(parameter)
+                    .is_some_and(|modifier| {
+                        *modifier != crate::types::InlineParameterModifier::Noinline
+                    });
+            if inline
+                && matches!(ir.expr(argument), IrExpr::CallableReference(_))
+                && ir.callable_reference_inline_template(argument).is_some()
+            {
+                consumed_references.push(argument);
+            }
+        }
+    }
+    ir.inline_callable_reference_arguments
+        .extend(consumed_references);
     let adapter_owners = ir
         .classes
         .iter()
@@ -870,18 +847,15 @@ pub(super) fn realize(
         }
     }
     let expression_count = ir.exprs.len();
-    let parents = expression_parents(ir);
-    let roots = super::lambda_classes::emitted_roots(ir, true)
-        .into_iter()
-        .collect::<std::collections::HashSet<_>>();
     let mut carrier_adapters = std::collections::HashSet::new();
     for raw in 0..expression_count {
         let adapter = match &ir.exprs[raw] {
             IrExpr::CallableReference(reference) => reference.adapter,
             _ => continue,
         };
-        if crate::fir_lower::inline_argument_template(ir, raw as u32).is_some()
-            && reference_needs_carrier(ir, callables, raw as u32, &parents, &roots)
+        if !ir
+            .inline_callable_reference_arguments
+            .contains(&(raw as u32))
         {
             carrier_adapters.insert(adapter);
         }
@@ -895,8 +869,9 @@ pub(super) fn realize(
         // reference would have been. A use that still evaluates the reference keeps the carrier,
         // and with it the adapter.
         let sole = adapter_uses.get(&reference.adapter) == Some(&1);
-        if crate::fir_lower::inline_argument_template(ir, raw as u32).is_some()
-            && !reference_needs_carrier(ir, callables, raw as u32, &parents, &roots)
+        if ir
+            .inline_callable_reference_arguments
+            .contains(&(raw as u32))
         {
             if !carrier_adapters.contains(&reference.adapter) {
                 if let Some(name) =

@@ -16,7 +16,7 @@ use super::*;
 
 mod lambda_node;
 mod lambda_route;
-use lambda_node::constructor_reference_template;
+use lambda_node::callable_reference_template;
 mod regenerated_objects;
 use crate::jvm::bytecode_passes::coroutines::markers::{
     is_after_inline_marker, is_before_inline_marker,
@@ -155,7 +155,7 @@ impl Emitter<'_> {
         } else {
             let has_lambda_arg = args.iter().any(|&argument| {
                 matches!(self.ir.expr(argument), IrExpr::Lambda { .. })
-                    || constructor_reference_template(self.ir, argument).is_some()
+                    || callable_reference_template(self.ir, argument).is_some()
                     || self.function_ref_class_and_captures(argument).is_some()
                     || self.property_ref_class_and_captures(argument).is_some()
             });
@@ -901,7 +901,7 @@ impl Emitter<'_> {
                 inline_body: Some(_),
                 ..
             }
-        ) || constructor_reference_template(self.ir, argument).is_some()
+        ) || callable_reference_template(self.ir, argument).is_some()
     }
 
     /// Whether argument `index` of `call_expression` is a literal lambda the inline body's invokes

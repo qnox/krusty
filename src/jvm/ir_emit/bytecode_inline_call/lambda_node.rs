@@ -111,15 +111,14 @@ struct LiteralLambda {
 /// A callable reference the bytecode inliner can place as a lambda: its adapter returns one value.
 /// The capture prefix is the reference's captures followed by its bound receiver. `None` for a
 /// reference that stays a carrier.
-pub(super) fn constructor_reference_template(
+pub(super) fn callable_reference_template(
     ir: &IrFile,
     argument: u32,
 ) -> Option<(u32, Vec<u32>, u32, Ty)> {
     let IrExpr::CallableReference(reference) = ir.expr(argument) else {
         return None;
     };
-    let (adapter, captures, inline_body, _) =
-        crate::fir_lower::inline_argument_template(ir, argument)?;
+    let (adapter, captures, inline_body, _) = ir.callable_reference_inline_template(argument)?;
     Some((adapter, captures, inline_body, reference.function_type))
 }
 
@@ -129,14 +128,9 @@ impl Emitter<'_> {
     /// for it.
     fn literal_lambda(&self, argument: u32) -> Result<(LiteralLambda, usize), &'static str> {
         if let Some((impl_fn, captures, inline_body, function_type)) =
-            constructor_reference_template(self.ir, argument)
+            callable_reference_template(self.ir, argument)
         {
-            return self.constructor_reference_literal(
-                impl_fn,
-                captures,
-                inline_body,
-                function_type,
-            );
+            return self.callable_reference_literal(impl_fn, captures, inline_body, function_type);
         }
         let IrExpr::Lambda {
             impl_fn,
@@ -186,7 +180,7 @@ impl Emitter<'_> {
 
     /// A callable reference as the lambda an inline call places: the adapter's returned call, with
     /// the reference's captures and bound receiver ahead of its function parameters.
-    fn constructor_reference_literal(
+    fn callable_reference_literal(
         &self,
         impl_fn: u32,
         captures: Vec<u32>,
@@ -633,7 +627,6 @@ impl Emitter<'_> {
                 local.record(Some(length), &mut scratch);
             }
             let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
-            let constructor_reference = constructor_reference_template(self.ir, argument).is_some();
             for (index, &ty) in parameter_types.iter().enumerate() {
                 let name = identities
                     .and_then(|identities| identities.get(captures.len() + index))
@@ -648,9 +641,8 @@ impl Emitter<'_> {
                                 }),
                             )
                         }
-                        _ => identity.source_name.clone(),
-                    })
-                    .or_else(|| constructor_reference.then(|| format!("p{index}")));
+                        _ => crate::jvm::parameter_names::local_variable(identity, ""),
+                    });
                 if let Some(name) = name {
                     let (slot, _) = parameter_slots[captures.len() + index];
                     scratch.add_local_entry(0, Some(end), slot, &name, &type_descriptor(ty));

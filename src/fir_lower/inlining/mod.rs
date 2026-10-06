@@ -560,6 +560,12 @@ impl BodyLowering<'_> {
         for (lambda, splice) in inline_lambdas.iter_mut().zip(&splice_lambda) {
             if !splice {
                 *lambda = None;
+            } else if let Some(reference) = *lambda {
+                if matches!(self.ir.expr(reference), IrExpr::CallableReference(_)) {
+                    self.ir
+                        .inline_callable_reference_arguments
+                        .insert(reference);
+                }
             }
         }
         let mut default_lambda_implementations = Vec::new();
@@ -1090,10 +1096,11 @@ impl BodyLowering<'_> {
                 declarations.push(declaration);
                 slot
             } else {
-                let source_name = if indexed_parameters && parameter as usize >= capture_count {
-                    // kotlinc names the invocation parameters of an inlined callable reference
-                    // `p0`, `p1`, … rather than the referenced declaration's source names.
-                    Some(format!("p{}", parameter as usize - capture_count))
+                let reference_parameter = indexed_parameters
+                    .then(|| (parameter as usize).checked_sub(capture_count))
+                    .flatten();
+                let source_name = if reference_parameter.is_some() {
+                    None
                 } else {
                     (parameter as usize >= capture_count)
                         .then(|| {
@@ -1119,6 +1126,14 @@ impl BodyLowering<'_> {
                         self.ir.call_operand_bindings.insert(declaration);
                         if let Some(name) = source_name {
                             self.ir.value_names.insert(declaration, name);
+                        }
+                        if let Some(ordinal) = reference_parameter {
+                            self.ir.set_debug_local_provenance(
+                                declaration,
+                                IrDebugLocalProvenance::InlineCallableReferenceParameter {
+                                    ordinal: u32::try_from(ordinal).ok()?,
+                                },
+                            );
                         }
                         declarations.push(declaration);
                         slot

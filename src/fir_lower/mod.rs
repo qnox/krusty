@@ -682,10 +682,14 @@ impl<'a> BodyLowering<'a> {
             })
         };
         statements.push(self.ir.add_expr(crate::ir::IrExpr::Return(Some(result))));
-        self.ir.add_expr(crate::ir::IrExpr::Block {
+        let body = self.ir.add_expr(crate::ir::IrExpr::Block {
             stmts: statements,
             value: None,
-        })
+        });
+        self.ir
+            .callable_reference_adapter_results
+            .insert(body, result);
+        body
     }
 
     fn value_slot(&self, value: crate::fir::LocalValueId) -> u32 {

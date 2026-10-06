@@ -2036,57 +2036,18 @@ pub(crate) fn inline_argument_template(
             == Some(crate::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter) =>
         {
             let arity = usize::from(arity);
-            let (inline_body, body_arity) = adapter_returned_value(ir, impl_fn)?;
+            let function = ir.functions.get(impl_fn as usize)?;
+            let body = function.body?;
+            let inline_body = *ir.callable_reference_adapter_results.get(&body)?;
+            let body_arity = function.params.len();
             if body_arity != arity + captures.len() {
                 return None;
             }
             Some((impl_fn, captures, inline_body, arity))
         }
-        IrExpr::CallableReference(reference) => callable_reference_inline_template(ir, &reference),
+        IrExpr::CallableReference(_) => ir.callable_reference_inline_template(expression),
         _ => None,
     }
-}
-
-/// The invocation a callable-reference adapter places at an inline argument. The capture prefix is
-/// the reference's captures followed by its bound receiver, which is the order the adapter's
-/// parameters record them; the remaining parameters are the call.
-fn callable_reference_inline_template(
-    ir: &crate::ir::IrFile,
-    reference: &crate::ir::IrCallableReference,
-) -> Option<(u32, Vec<ExprId>, ExprId, usize)> {
-    let crate::types::Ty::Fun(signature) = reference.function_type.non_null() else {
-        return None;
-    };
-    if signature.suspend || reference.declaration_suspend {
-        return None;
-    }
-    let (inline_body, parameter_count) = adapter_returned_value(ir, reference.adapter)?;
-    let mut captures = reference.captures.clone();
-    if let Some(receiver) = reference.bound_receiver {
-        captures.push(receiver);
-    }
-    let arity = parameter_count.checked_sub(captures.len())?;
-    if signature.params.len() != arity {
-        return None;
-    }
-    Some((reference.adapter, captures, inline_body, arity))
-}
-
-/// The value an adapter returns. The adapter is a block whose only statement is that return; the
-/// inline splice wants the value, not a transfer out of the caller.
-fn adapter_returned_value(ir: &crate::ir::IrFile, adapter: u32) -> Option<(ExprId, usize)> {
-    let function = ir.functions.get(adapter as usize)?;
-    let body = function.body?;
-    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
-        return None;
-    };
-    let [statement] = stmts.as_slice() else {
-        return None;
-    };
-    let IrExpr::Return(Some(value)) = ir.expr(*statement) else {
-        return None;
-    };
-    Some((*value, function.params.len()))
 }
 
 /// Move a lambda's independently numbered value-producing body into its enclosing callable.
