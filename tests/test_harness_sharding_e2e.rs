@@ -50,6 +50,18 @@ fn compact_skip_patterns(plan: &Path, listing: &Path, shard: usize) -> std::proc
         .expect("generate compact shard skip patterns")
 }
 
+fn without_phase_timing(stderr: &str) -> String {
+    let mut kept = String::new();
+    for line in stderr.lines() {
+        if line.contains(": phase") {
+            continue;
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    kept
+}
+
 fn parse_plan(output: &[u8]) -> Vec<(usize, usize, String)> {
     String::from_utf8(output.to_vec())
         .expect("planner output is UTF-8")
@@ -197,8 +209,17 @@ fn prebuilt_conformance_runner_enforces_its_configured_deadline() {
 
     assert_eq!(output.status.code(), Some(124));
     assert_eq!(output.stdout, b"");
+    let stderr = String::from_utf8(output.stderr).expect("deadline stderr is UTF-8");
+    assert!(
+        stderr.contains("conformance-run: phase start box-shard-1-of-4"),
+        "missing shard phase start: {stderr}"
+    );
+    assert!(
+        !stderr.contains("box-shard-2-of-4"),
+        "a later shard started after the deadline: {stderr}"
+    );
     assert_eq!(
-        String::from_utf8(output.stderr).expect("deadline stderr is UTF-8"),
+        without_phase_timing(&stderr),
         "conformance-run: timed out after 1s: Kotlin 2.4.10, shard 1/4\n"
     );
     assert!(elapsed.as_secs() < 5, "deadline took {elapsed:?}");
@@ -236,8 +257,21 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"62.5 20 32\n");
+    let stderr = String::from_utf8(output.stderr).expect("report stderr is UTF-8");
+    assert!(
+        stderr.contains("conformance-run: phase start box-shard-1-of-4"),
+        "missing first shard phase: {stderr}"
+    );
+    assert!(
+        stderr.contains("conformance-run: phase start box-shard-4-of-4"),
+        "missing last shard phase: {stderr}"
+    );
+    assert!(
+        stderr.contains("conformance-run: phase total "),
+        "missing phase total: {stderr}"
+    );
     assert_eq!(
-        String::from_utf8(output.stderr).expect("report stderr is UTF-8"),
+        without_phase_timing(&stderr),
         format!(
             "2.4.10|/bin/reference-kotlinc|{0}|kotlin_codegen_box_conformance|--nocapture|0/4\n\
              2.4.10|/bin/reference-kotlinc|{0}|kotlin_codegen_box_conformance|--nocapture|1/4\n\
@@ -281,8 +315,9 @@ fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
 
     assert_eq!(output.status.code(), Some(101));
     assert_eq!(output.stdout, b"50.0 4 8\n");
+    let stderr = String::from_utf8(output.stderr).expect("failing-shard stderr is UTF-8");
     assert_eq!(
-        String::from_utf8(output.stderr).expect("failing-shard stderr is UTF-8"),
+        without_phase_timing(&stderr),
         "shard 0\nshard 1\nshard 2\nshard 3\n"
     );
     fs::remove_dir_all(temp).expect("remove failing-shard test directory");
@@ -829,6 +864,12 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
         "the matrix reuses one CLI build"
     );
     assert!(
+        workflow.contains("phase_log_prefix=conformance-build")
+            && workflow.contains("phase_begin conformance-test-binary")
+            && workflow.contains("phase_begin krusty-cli"),
+        "the conformance binary job must time its two compiles"
+    );
+    assert!(
         workflow.contains(
             "\nconcurrency:\n  group: ci-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}\n"
         ),
@@ -1052,4 +1093,167 @@ slow-test: 201ms bin=sample test=boundary::over
     let invalid = run_slow_tests(&log, "200ms");
     assert_eq!(invalid.status.code(), Some(2));
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_timing_records_start_duration_and_summary() {
+    let helper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("phase-timing.sh");
+    let temp = std::env::temp_dir().join(format!("krusty-phase-timing-{}", std::process::id()));
+    fs::create_dir_all(&temp).expect("create phase timing directory");
+    let log = temp.join("phases.tsv");
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; phase_log_prefix=coverage; PHASE_TIMING_LOG=\"$2\"; phase_begin provision; phase_end provision; phase_begin build-cli; phase_end build-cli; phase_report",
+            "phase-timing-test",
+        ])
+        .arg(&helper)
+        .arg(&log)
+        .output()
+        .expect("run phase timing helper");
+    assert!(
+        output.status.success(),
+        "phase timing failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "phase timing writes durations to stderr"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("phase timing stderr is UTF-8");
+    let lines = stderr.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            "coverage: phase start provision",
+            "coverage: phase provision 0s",
+            "coverage: phase start build-cli",
+            "coverage: phase build-cli 0s",
+            "coverage: phases",
+            "coverage: phase provision 0s",
+            "coverage: phase build-cli 0s",
+            "coverage: phase total 0s",
+        ],
+        "phase timing lines: {stderr}"
+    );
+    fs::remove_dir_all(temp).expect("remove phase timing directory");
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_timing_coverage_run_prints_every_phase() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp = std::env::temp_dir().join(format!("krusty-coverage-phases-{}", std::process::id()));
+    fs::create_dir_all(&temp).expect("create coverage phase directory");
+    let bin_dir = temp.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create stub directory");
+    let e2e_bin = temp.join("e2e");
+    let unit_bin = temp.join("lsp-unit");
+    let target = temp.join("target");
+    let summary = temp.join("summary.json");
+    let compiler_json = temp.join("compiler.json");
+    let lsp_json = temp.join("lsp.json");
+    fs::write(
+        &e2e_bin,
+        "#!/usr/bin/env bash\nif [ \"${1:-}\" = --list ]; then printf '%s\\n' 'alpha::one: test' '' '1 test, 0 benchmarks'; exit 0; fi\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
+    )
+    .expect("write e2e stub");
+    fs::write(
+        &unit_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
+    )
+    .expect("write unit stub");
+    fs::write(bin_dir.join("just"), "#!/bin/sh\nexit 0\n").expect("write just stub");
+    fs::write(
+        bin_dir.join("cargo"),
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == +* ]]; then shift; fi\ncmd=\"${1:-}\"; shift || true\ncase \"$cmd\" in\n  llvm-cov)\n    sub=\"${1:-}\"; shift || true\n    case \"$sub\" in\n      --version) exit 0 ;;\n      show-env) printf '%s\\n' true ;;\n      report)\n        out=\"\"\n        while [ $# -gt 0 ]; do\n          if [ \"$1\" = --output-path ]; then out=\"$2\"; shift 2; else shift; fi\n        done\n        mkdir -p \"$(dirname \"$out\")\"\n        printf '%s\\n' '{\"data\":[{\"totals\":{\"regions\":{\"covered\":1,\"count\":2},\"functions\":{\"covered\":1,\"count\":2},\"lines\":{\"covered\":1,\"count\":2},\"branches\":{\"covered\":1,\"count\":2}}}]}' >\"$out\"\n        ;;\n      *) echo \"unexpected llvm-cov $sub\" >&2; exit 2 ;;\n    esac\n    ;;\n  build)\n    pkg=\"\"\n    prev=\"\"\n    for arg in \"$@\"; do\n      if [ \"$prev\" = -p ]; then pkg=\"$arg\"; fi\n      prev=\"$arg\"\n    done\n    mkdir -p \"$CARGO_TARGET_DIR/coverage\"\n    case \"$pkg\" in\n      krusty-cli) bin=\"$CARGO_TARGET_DIR/coverage/krusty\" ;;\n      krusty-lsp) bin=\"$CARGO_TARGET_DIR/coverage/krusty-lsp\" ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$bin\"\n    chmod +x \"$bin\"\n    ;;\n  test)\n    echo \"cargo: visible stderr $*\" >&2\n    if [[ \" $* \" == *\" --test e2e \"* ]]; then\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$E2E_BIN\\\"}\"\n    else\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$UNIT_BIN\\\"}\"\n    fi\n    ;;\n  *) echo \"unexpected cargo $cmd $*\" >&2; exit 2 ;;\nesac\n",
+    )
+    .expect("write cargo stub");
+    for name in ["e2e", "lsp-unit", "just", "cargo"] {
+        let path = if name == "just" || name == "cargo" {
+            bin_dir.join(name)
+        } else if name == "e2e" {
+            e2e_bin.clone()
+        } else {
+            unit_bin.clone()
+        };
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("make stub executable");
+    }
+
+    let output = Command::new("bash")
+        .arg(root.join("scripts").join("coverage.sh"))
+        .arg(&summary)
+        .env("HOME", &temp)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+        .env("CARGO_TARGET_DIR", &target)
+        .env("KRUSTY_COVERAGE_TARGET_DIR", &target)
+        .env("KRUSTY_COVERAGE_COMPILER_JSON", &compiler_json)
+        .env("KRUSTY_COVERAGE_LSP_JSON", &lsp_json)
+        .env("KRUSTY_COVERAGE_E2E_SHARDS", "1")
+        .env("KRUSTY_TEST_JOBS", "1")
+        .env("KRUSTY_TEST_THREADS", "1")
+        .env("E2E_BIN", &e2e_bin)
+        .env("UNIT_BIN", &unit_bin)
+        .output()
+        .expect("run coverage with stubbed toolchain");
+    let stderr = String::from_utf8(output.stderr).expect("coverage stderr is UTF-8");
+    assert!(
+        output.status.success(),
+        "coverage stub run failed: {stderr}"
+    );
+    assert!(
+        stderr.contains("cargo: visible stderr"),
+        "compiler test build hid cargo stderr: {stderr}"
+    );
+    let starts = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("coverage: phase start "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts,
+        [
+            "provision",
+            "instrument",
+            "build-cli",
+            "build-lsp",
+            "build-compiler-tests",
+            "build-lsp-tests",
+            "test-lsp-unit",
+            "plan-e2e-shards",
+            "e2e-shard-1-of-1",
+            "report-compiler",
+            "report-lsp",
+        ],
+        "phase starts: {stderr}"
+    );
+    for name in starts {
+        assert!(
+            stderr.contains(&format!("coverage: phase {name} "))
+                && stderr
+                    .lines()
+                    .any(|line| line.starts_with(&format!("coverage: phase {name} "))
+                        && line.rsplit_once(' ').is_some_and(|(_, seconds)| {
+                            seconds.ends_with('s')
+                                && seconds[..seconds.len() - 1]
+                                    .chars()
+                                    .all(|ch| ch.is_ascii_digit())
+                        })),
+            "missing duration for {name}: {stderr}"
+        );
+    }
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with("coverage: phase total ")
+                && line
+                    .rsplit_once(' ')
+                    .is_some_and(|(_, seconds)| seconds.ends_with('s'))),
+        "missing phase total: {stderr}"
+    );
+    assert!(summary.is_file(), "coverage summary was not written");
+    fs::remove_dir_all(temp).expect("remove coverage phase directory");
 }

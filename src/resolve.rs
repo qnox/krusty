@@ -141,6 +141,7 @@ mod named_class_constructors;
 mod operator_calls;
 mod opt_in_usage;
 use operator_calls::{range_operator, ResolvedInRangeComparison};
+mod enhanced_values;
 mod overload_diagnostics;
 mod override_plans;
 mod platform_value_narrowing;
@@ -174,7 +175,7 @@ use source_fragment::SourceFragmentMode;
 mod scope;
 mod selected_argument_commitment;
 use selected_argument_commitment::{
-    indexed_operator_argument_parameters, indexed_operator_argument_slots,
+    indexed_operator_argument_parameters, indexed_operator_argument_slots, SelectedArgumentBinding,
     SelectedArgumentCommitment,
 };
 mod signature_collection;
@@ -9621,6 +9622,8 @@ pub struct TypeInfo {
     /// SEMANTIC narrowing only; which expression shapes carry a runtime guard, and what its failure
     /// says, is lowering's decision (a call result names its callee, a plain value read has no name).
     pub platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
+    /// Calls whose value carries kotlinc's `EnhancedNullability` (see `enhanced_values`).
+    pub enhanced_values: std::collections::HashSet<ExprId>,
     /// The calls each interface delegation's forwarders make on the delegate value, keyed by that
     /// value; see [`interface_delegate_calls`].
     pub interface_delegate_calls: HashMap<ExprId, Box<[crate::fir::ResolvedDelegateMemberCalls]>>,
@@ -9900,8 +9903,15 @@ pub enum ResolvedConstructor {
         primary: bool,
         /// Already-selected implicit values for the constructor's leading context parameters.
         context_args: Vec<ResolvedContextArgument>,
+        /// Declaration-owned parameter shapes before classifier type-argument substitution.
+        /// Value enhancement consumes these with `argument_bindings`; it never reconstructs the
+        /// constructor mapping from source syntax.
+        declaration_params: Vec<Ty>,
         params: Vec<Ty>,
         argument_slots: Vec<usize>,
+        /// Exact written-argument mapping selected by the frontend, including whether an argument
+        /// is one expanded vararg element or the complete vararg array.
+        argument_bindings: Vec<SelectedArgumentBinding>,
         argument_types: Vec<Ty>,
         omitted: Vec<usize>,
         vararg: Option<usize>,
@@ -10177,6 +10187,8 @@ pub struct IteratorProtocolTarget {
     pub next: Box<ResolvedCall>,
     pub iter_ty: Ty,
     pub elem_ty: Ty,
+    /// Where the `iterator()` and `next()` results carry `EnhancedNullability` for this iterable.
+    pub enhancement: for_loop_iteration::ProtocolEnhancement,
 }
 
 /// Complete semantic plan for a syntactic range loop whose `a..b` is a user-defined operator
@@ -17252,6 +17264,24 @@ impl<'a> Checker<'a> {
                 .map(|shapes| shapes.iter().copied().map(|shape| (shape, false)).collect()),
             ResolvedCtorDelegationTarget::Super { .. } => None,
         };
+        let argument_names = self.file.call_arg_names.get(&call.0);
+        let argument_bindings = args
+            .iter()
+            .zip(&selected.argument_slots)
+            .enumerate()
+            .map(|(source, (&argument, &parameter))| {
+                let whole_array = selected.vararg == Some(parameter)
+                    && (self.file.is_spread_arg(argument)
+                        || argument_names
+                            .and_then(|names| names.get(source))
+                            .is_some_and(Option::is_some));
+                SelectedArgumentBinding {
+                    argument,
+                    parameter,
+                    vararg_element: selected.vararg == Some(parameter) && !whole_array,
+                }
+            })
+            .collect::<Vec<_>>();
         let inferred = if parameter_shapes
             .as_ref()
             .is_some_and(|shapes| shapes.len() == declared_params.len())
@@ -17262,24 +17292,19 @@ impl<'a> Checker<'a> {
                 // array shape. Present that source-order semantic view to the same classifier
                 // inference engine used by ordinary constructor parameters; the declaration and
                 // provider origin do not otherwise affect inference.
-                let argument_names = self.file.call_arg_names.get(&call.0);
                 let mut source_shapes = Vec::with_capacity(args.len());
                 let mut source_actuals = arg_tys.to_vec();
                 let mut whole_array_varargs = Vec::with_capacity(args.len());
-                for (source, (&argument, &slot)) in
-                    args.iter().zip(&selected.argument_slots).enumerate()
-                {
+                for (source, binding) in argument_bindings.iter().enumerate() {
+                    let argument = binding.argument;
+                    let slot = binding.parameter;
                     let (mut shape, definitely_non_null) = parameter_shapes
                         .as_deref()
                         .and_then(|shapes| shapes.get(slot))
                         .copied()
                         .unwrap_or((selected.argument_types[source], false));
-                    let whole_array = slot == vararg
-                        && (self.file.is_spread_arg(argument)
-                            || argument_names
-                                .and_then(|names| names.get(source))
-                                .is_some_and(Option::is_some));
-                    if slot == vararg && !whole_array {
+                    let whole_array = slot == vararg && !binding.vararg_element;
+                    if binding.vararg_element {
                         shape = shape.array_read_elem().unwrap_or(shape);
                     } else if whole_array
                         && self.file.is_spread_arg(argument)
@@ -17409,8 +17434,15 @@ impl<'a> Checker<'a> {
                 outer: None,
                 primary,
                 context_args: selected.context_args,
+                declaration_params: parameter_shapes
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|(shape, _)| *shape)
+                    .collect(),
                 params,
                 argument_slots: selected.argument_slots,
+                argument_bindings,
                 argument_types: selected.argument_types,
                 omitted: selected.omitted,
                 vararg: selected.vararg,
@@ -24022,14 +24054,17 @@ impl<'a> Checker<'a> {
         // signature may spell a receiver as its first ordinary parameter (`Foo::Inner`), while the
         // target type spells the same value as `Foo.() -> Inner`. Invocation must consume the binding's
         // type, not reopen the initializer and silently undo that adaptation.
-        if let Some(function_type) = declared
+        let flow_identity = if let Some(function_type) = declared
             .filter(|ty| matches!(ty, Ty::Fun(_)))
             .or_else(|| self.callable_reference_types.get(&init).copied())
             .or_else(|| matches!(bound_ty, Ty::Fun(_)).then_some(bound_ty))
         {
-            self.declare_callable_reference(scope, &name, bound_ty, is_var, function_type);
+            self.declare_callable_reference(scope, &name, bound_ty, is_var, function_type)
         } else {
-            self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance);
+            self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance)
+        };
+        if declared.is_none() {
+            self.record_enhanced_local(flow_identity, init);
         }
         if let Some(origin) = safe_call_origin {
             self.attach_safe_call_origin(scope, &name, origin);
@@ -25041,7 +25076,8 @@ impl<'a> Checker<'a> {
         {
             let body_scope = scope.child(ScopeKind::Block);
             let scope = &body_scope;
-            self.declare(scope, &name, elem, false);
+            let flow_identity = self.declare(scope, &name, elem, false);
+            self.record_enhanced_loop_variable(flow_identity, iterable);
             self.check_loop_body(scope, body, &label);
         }
     }
@@ -29237,47 +29273,17 @@ fun box(): String {
             .any(|name| internal.matches(name))
             .then(|| {
                 let companion = if internal.matches("test/Factory") {
-                    let member = |second, descriptor: &str| crate::libraries::LibraryMember {
-                        return_value_status: None,
-                        external_identity: None,
-                        associated_classifier: None,
-                        associated_access_owner: None,
-                        external_default_provider: None,
-                        external_property_identity: None,
-                        semantic_role: None,
-                        singleton_dispatch: None,
-                        name: "make".to_string(),
-                        owner: Some(crate::types::type_name("test/Factory")),
-                        physical_name: None,
-                        physical_params: vec![Ty::obj("Config"), second],
-                        physical_parameter_plan: None,
-                        params: vec![Ty::obj("Config"), second],
-                        ret: Ty::String,
-                        physical_ret: Ty::String,
-                        descriptor: descriptor.to_string(),
-                        realization: crate::libraries::MemberRealization::Dispatch,
-                        signature: None,
-                        generic_sig: None,
-                        projected_return_hazard: false,
-                        flags: crate::libraries::LmFlags::default(),
-                        inline: crate::libraries::InlineKind::None,
-                        reified: false,
-                        inline_body_plan: None,
-                        visibility: crate::types::Visibility::Public,
-                        call_sig: CallSig::default(),
-                        context_count: 0,
-                        annotations: Vec::new(),
-                        contract: None,
-                        equality_bound: None,
-                        default_values: Vec::new(),
-                        default_realization: None,
-                        nonvirtual_realization: None,
-                        declared_ret: None,
-                        overridden_results: Box::new([]),
-                        implicit_classifier_callable: None,
-                        plugin_expression: None,
-                        stable_declaration: None,
-                        source_member: None,
+                    let member = |second, descriptor: &str| {
+                        let mut member = crate::libraries::LibraryMember::new(
+                            "make".to_string(),
+                            vec![Ty::obj("Config"), second],
+                            Ty::String,
+                            descriptor.to_string(),
+                        );
+                        member.owner = Some(crate::types::type_name("test/Factory"));
+                        member.physical_parameter_plan = None;
+                        member.call_sig = CallSig::default();
+                        member
                     };
                     let mut companion = vec![
                         member(
@@ -35828,6 +35834,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_library_default_literals: HashMap::new(),
         resolved_whole_array_vararg_args: std::collections::HashSet::new(),
         platform_narrowings: HashMap::new(),
+        enhanced_locals: Default::default(),
         interface_delegate_calls: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
         delegate_getvalue_targets: HashMap::new(),
@@ -37209,6 +37216,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             },
         );
     }
+    let enhanced_values = c.enhanced_value_heads();
     let Checker {
         expr_types,
         callable_reference_types,
@@ -37591,6 +37599,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_library_default_literals,
         resolved_whole_array_vararg_args,
         platform_narrowings,
+        enhanced_values,
         interface_delegate_calls,
         synthetic_ext_calls,
         delegate_getvalue_targets,
@@ -38544,6 +38553,7 @@ struct Checker<'a> {
     resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     /// See [`TypeInfo::platform_narrowings`].
     platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
+    enhanced_locals: enhanced_values::EnhancedLocals,
     /// See [`TypeInfo::interface_delegate_calls`].
     interface_delegate_calls: HashMap<ExprId, Box<[crate::fir::ResolvedDelegateMemberCalls]>>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
@@ -44863,11 +44873,7 @@ impl<'a> Checker<'a> {
             selected.callable.params.len(),
             "a selected callable's declared and selected parameters line up"
         );
-        let declared_params = shape
-            .parameter_indices
-            .iter()
-            .map(|&parameter| declared_signature.params[parameter])
-            .collect::<Vec<_>>();
+        let declared_params = shape.declared_params(&declared_signature.params);
         // Snapshot postponed producer ownership before selected-argument commitment turns those
         // calls into proper concrete values. Selection has already consumed their declaration
         // signatures; commitment finalizes the nested call and must not reopen the outer winner's
@@ -45922,14 +45928,14 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn declare(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty, is_var: bool) {
+    fn declare(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty, is_var: bool) -> u32 {
         self.declare_with_origin(
             scope,
             name,
             ty,
             is_var,
             ValueBindingDeclaration::ordinary(ReceiverFnValueOrigin::Local, ErrorProvenance::None),
-        );
+        )
     }
 
     fn declare_context_parameter(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty) {
@@ -45949,14 +45955,14 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         error_provenance: ErrorProvenance,
-    ) {
+    ) -> u32 {
         self.declare_with_origin(
             scope,
             name,
             ty,
             is_var,
             ValueBindingDeclaration::ordinary(ReceiverFnValueOrigin::Local, error_provenance),
-        );
+        )
     }
 
     fn declare_callable_reference(
@@ -45966,7 +45972,7 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         function_type: Ty,
-    ) {
+    ) -> u32 {
         let lexical_capture_identity = Some(self.allocate_lexical_capture_identity());
         let flow_identity = self.allocate_flow_identity();
         scope.rebind(
@@ -45988,6 +45994,7 @@ impl<'a> Checker<'a> {
                 safe_call_origin: None,
             }),
         );
+        flow_identity
     }
 
     fn declare_dispatch_property(
@@ -46506,7 +46513,7 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         declaration: ValueBindingDeclaration,
-    ) {
+    ) -> u32 {
         let ValueBindingDeclaration {
             origin,
             error_provenance,
@@ -46545,6 +46552,7 @@ impl<'a> Checker<'a> {
                 safe_call_origin: None,
             }),
         );
+        flow_identity
     }
 
     fn allocate_flow_identity(&mut self) -> u32 {
@@ -55419,8 +55427,10 @@ impl<'a> Checker<'a> {
                         outer: None,
                         primary,
                         context_args: selected.context_args,
+                        declaration_params: selected.target.params().to_vec(),
                         params: selected.target.params().to_vec(),
                         argument_slots: selected.argument_slots,
+                        argument_bindings: Vec::new(),
                         argument_types: selected.argument_types,
                         omitted: selected.omitted,
                         vararg: selected.vararg,
@@ -57438,7 +57448,11 @@ impl<'a> Checker<'a> {
             ) {
                 continue;
             }
-            self.expect_call_arg(scope, substituted, argument, actual);
+            // kotlinc reads an argument's implicit not-null cast from the unsubstituted parameter.
+            let declared = parameter_shapes
+                .get(index)
+                .map_or(*expected, |&(shape, _)| shape);
+            self.expect_call_arg_labeled(scope, substituted, declared, argument, actual, None);
         }
         for (index, binding) in bindings.iter_mut().enumerate() {
             if *binding == Ty::Null {
@@ -62591,6 +62605,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 crate::trace_compiler!("resolve", "name read {n} origin={:?}", l.origin);
+                self.record_enhanced_local_read(e, &l);
                 if let Some(function) = l.callable_reference_type {
                     // A value bound to a callable reference keeps the reference's exact function
                     // shape beside its nominal reflection type; invoking the read consumes it.
@@ -66562,6 +66577,7 @@ impl<'a> Checker<'a> {
             selected.context_count,
             argument_names,
         )?;
+        let declared_params = shape.declared_params(&selected.semantic_params());
         if !self.expect_selected_call_args(
             scope,
             CallArgs {
@@ -66570,7 +66586,7 @@ impl<'a> Checker<'a> {
                 arg_tys,
             },
             &shape.params,
-            &shape.params,
+            &declared_params,
             &shape.call_sig,
             None,
         ) {
@@ -68929,6 +68945,11 @@ impl<'a> Checker<'a> {
         ) else {
             return false;
         };
+        let declared = member
+            .generic_sig
+            .as_ref()
+            .map(|signature| &signature.params[..]);
+        let declared = declared.filter(|declared| declared.len() == member.params.len());
         self.expect_selected_call_args(
             scope,
             CallArgs {
@@ -68937,7 +68958,7 @@ impl<'a> Checker<'a> {
                 arg_tys: &arg_tys,
             },
             &contextual.params,
-            &contextual.params,
+            &contextual.declared_params(declared.unwrap_or(&member.params)),
             &contextual.call_sig,
             None,
         )

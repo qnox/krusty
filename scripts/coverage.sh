@@ -33,8 +33,8 @@ cd "$(dirname "$0")/.."
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}" # 128 MiB
 
 summary_out="${1:-target/coverage/summary.json}"
-compiler_raw_out="target/coverage/compiler-full.json"
-lsp_raw_out="target/coverage/lsp-full.json"
+compiler_raw_out="${KRUSTY_COVERAGE_COMPILER_JSON:-target/coverage/compiler-full.json}"
+lsp_raw_out="${KRUSTY_COVERAGE_LSP_JSON:-target/coverage/lsp-full.json}"
 jobs="${KRUSTY_TEST_JOBS:-1}"
 # Default the per-binary thread count to the host's cores: the e2e binary IS the coverage workload
 # (measured 244s of a ~11min CI job at the old fixed 3), and its tests mostly wait on pooled JVMs,
@@ -49,6 +49,13 @@ test_timeout="${KRUSTY_COVERAGE_TEST_TIMEOUT_SECONDS:-120}"
 e2e_timeout="${KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS:-300}"
 source scripts/test-deadline.sh
 source scripts/libtest-shards.sh
+source scripts/phase-timing.sh
+phase_log_prefix=coverage
+export phase_log_prefix
+PHASE_TIMING_LOG="$(mktemp)"
+export PHASE_TIMING_LOG
+export -f phase_begin phase_end
+trap 'phase_report || true' EXIT
 # The e2e binary is the coverage workload, and one process of it outgrew the e2e deadline once the
 # native code generator's tests joined it. It is divided rather than given a longer deadline: whole
 # top-level modules are balanced into shards as run-tests.sh balances them, and each shard runs
@@ -58,11 +65,13 @@ libtest_require_positive_shard_count "$e2e_shards" "coverage: KRUSTY_COVERAGE_E2
 
 # Self-provision the reference kotlinc + box corpus exactly like run-tests.sh, so the kept e2e
 # suites (which need the stdlib jar / JVM runtime) don't silently skip and undercount coverage.
+phase_begin provision
 if command -v just >/dev/null 2>&1; then
   v="$(just max-version)"
   just kotlinc "$v" >/dev/null
   just box-corpus "$v" >/dev/null
 fi
+phase_end provision
 
 is_excluded() { local n="$1" e; for e in "${EXCLUDE[@]}"; do [ "$n" = "$e" ] && return 0; done; return 1; }
 
@@ -72,6 +81,7 @@ if ! "${coverage_cargo[@]}" llvm-cov --version >/dev/null 2>&1; then
   echo "coverage: pinned nightly llvm-tools are also required: \`rustup component add llvm-tools-preview --toolchain ${coverage_toolchain}\`" >&2
   exit 2
 fi
+phase_begin instrument
 # Keep instrumented coverage builds isolated from normal `target/debug` artifacts. `llvm-cov report`
 # discovers coverage mappings from the instrumented binaries in the active target dir; reusing the
 # normal target can accidentally include stale mappings from previous local runs or overlapping hooks.
@@ -84,13 +94,26 @@ mkdir -p target/coverage
 # target/ it didn't create (missing CACHEDIR.TAG — e.g. a worktree whose target was set up by hand),
 # so remove the raw/merged coverage files directly instead; profraw names carry a %p pid slot.
 rm -f "$coverage_target"/*.profraw target/coverage/*.profdata target/coverage/*.profraw
+phase_end instrument
 
 # Compile the compiler and LSP coverage workloads without running them, then read each test
 # executable's path from Cargo's JSON build output. The dedicated `coverage` profile (Cargo.toml)
 # builds at opt-level 1 with gate-matching checks: the e2e suite runs krusty in-process for every
 # dependency-lib fixture, and instrumenting that at `dev` made the coverage run dominate CI.
-"${coverage_cargo[@]}" build --profile coverage -p krusty-cli
-"${coverage_cargo[@]}" build --profile coverage -p krusty-lsp --bin krusty-lsp
+run_phase() {
+  local name="$1"
+  shift
+  phase_begin "$name"
+  if "$@"; then
+    phase_end "$name"
+  else
+    local status=$?
+    phase_end "$name"
+    exit "$status"
+  fi
+}
+run_phase build-cli "${coverage_cargo[@]}" build --profile coverage -p krusty-cli
+run_phase build-lsp "${coverage_cargo[@]}" build --profile coverage -p krusty-lsp --bin krusty-lsp
 export KRUSTY_BIN="$coverage_target/coverage/krusty"
 # Bin unit tests exec the supervisor. `cargo test --bin` builds the harness only, so publish the
 # uplifted binary the same way integration tests do.
@@ -103,12 +126,36 @@ if [ ! -x "$KRUSTY_LSP_BIN" ]; then
   echo "coverage: language server binary missing after workspace build: $KRUSTY_LSP_BIN" >&2
   exit 1
 fi
-mapfile -t bins < <(
-  {
-    "${coverage_cargo[@]}" test --no-run --profile coverage --lib --test e2e --message-format=json 2>/dev/null
-    "${coverage_cargo[@]}" test --no-run --profile coverage -p krusty-lsp --all-targets --message-format=json 2>/dev/null
-  } | jq -r 'select(.profile.test == true and .executable != null) | .executable'
-)
+# Each test-binary build is its own phase, and cargo's progress stays on stderr. Folding both into
+# one pipeline whose stderr was discarded left a multi-minute gap with no name in the CI log.
+read_test_executables() {
+  jq -r 'select(.profile.test == true and .executable != null) | .executable'
+}
+phase_begin build-compiler-tests
+compiler_json="$(mktemp)"
+if "${coverage_cargo[@]}" test --no-run --profile coverage --lib --test e2e --message-format=json >"$compiler_json"; then
+  phase_end build-compiler-tests
+else
+  status="$?"
+  phase_end build-compiler-tests
+  rm -f "$compiler_json"
+  exit "$status"
+fi
+mapfile -t compiler_bins < <(read_test_executables <"$compiler_json")
+rm -f "$compiler_json"
+phase_begin build-lsp-tests
+lsp_json="$(mktemp)"
+if "${coverage_cargo[@]}" test --no-run --profile coverage -p krusty-lsp --all-targets --message-format=json >"$lsp_json"; then
+  phase_end build-lsp-tests
+else
+  status="$?"
+  phase_end build-lsp-tests
+  rm -f "$lsp_json"
+  exit "$status"
+fi
+mapfile -t lsp_bins < <(read_test_executables <"$lsp_json")
+rm -f "$lsp_json"
+bins=("${compiler_bins[@]}" "${lsp_bins[@]}")
 
 # Keep the lib/bin unit-test executables and every integration binary except the excluded suites.
 run=()
@@ -142,14 +189,19 @@ export -f record_coverage_slow_tests
 
 run_coverage_test_binary() {
   local binary="$1" status_root="$2" threads="$3" seconds="$4"
-  local name="$(basename "$binary")"
-  local result="$status_root/$name"
+  local raw name phase result status
+  raw="$(basename "$binary")"
+  name="$(printf '%s\n' "$raw" | sed 's/-[0-9a-f]*$//')"
+  phase="test-$name"
+  result="$status_root/$raw"
   mkdir -p "$result"
-  local status=0
+  status=0
+  phase_begin "$phase"
   if ! run_with_deadline "$seconds" "$binary" -Z unstable-options --report-time --color never \
       --test-threads="$threads" >"$result/output.log" 2>&1; then
     status="$?"
   fi
+  phase_end "$phase"
   record_coverage_slow_tests "$result/output.log" "$name"
   if [ "$status" -eq 0 ]; then
     rm -rf "$result"
@@ -172,8 +224,10 @@ printf '%s\0' "${run[@]}" | xargs -0 -P "$jobs" -I{} \
 # The e2e shards, one at a time: the binary is internally parallel and each shard owns the cores.
 if [ -n "$e2e_bin" ]; then
   plan_dir="$(mktemp -d)"
+  phase_begin plan-e2e-shards
   libtest_write_shard_plan \
     "$e2e_bin" "$e2e_shards" "$plan_dir/e2e.list" "$plan_dir/e2e.plan" "$test_timeout"
+  phase_end plan-e2e-shards
   for ((shard = 0; shard < e2e_shards; shard++)); do
     label="e2e-shard-$((shard + 1))-of-$e2e_shards"
     result="$status_dir/$label"
@@ -195,10 +249,16 @@ if [ -n "$e2e_bin" ]; then
       skip_args+=(--skip "$pattern")
     done <"$plan_dir/skips-$shard"
     echo "coverage: $label: $expected tests" >&2
-    if run_with_deadline "$e2e_timeout" "$e2e_bin" -Z unstable-options --report-time --color never \
+    phase_begin "$label"
+    status=0
+    if ! run_with_deadline "$e2e_timeout" "$e2e_bin" -Z unstable-options --report-time --color never \
         --test-threads="$test_threads" "${skip_args[@]}" >"$result/output.log" 2>&1; then
+      status="$?"
+    fi
+    phase_end "$label"
+    record_coverage_slow_tests "$result/output.log" "$label"
+    if [ "$status" -eq 0 ]; then
       selected="$(libtest_selected_tests "$result/output.log" || echo 0)"
-      record_coverage_slow_tests "$result/output.log" "$label"
       if [ "$selected" = "$expected" ]; then
         rm -rf "$result"
       else
@@ -206,8 +266,6 @@ if [ -n "$e2e_bin" ]; then
         echo "coverage: $label ran $selected tests; its plan assigned $expected" >>"$result/output.log"
       fi
     else
-      status="$?"
-      record_coverage_slow_tests "$result/output.log" "$label"
       printf '%s\n' "$status" >"$result/status"
       if [ "$status" -eq 124 ]; then
         printf 'coverage: TIMEOUT after %ss: %s\n' "$e2e_timeout" "$label" >>"$result/output.log"
@@ -237,9 +295,11 @@ rm -rf "$status_dir"
 # Cargo package selection also controls which instrumented objects `llvm-cov report` discovers.
 # Export each product package separately, then combine their totals for the repository gate.
 IGNORE='(^|/)tests/|(^|/)src/main\.rs|(^|/)src/bin/'
-"${coverage_cargo[@]}" llvm-cov report --branch --profile coverage --ignore-filename-regex "$IGNORE" \
+run_phase report-compiler \
+  "${coverage_cargo[@]}" llvm-cov report --branch --profile coverage --ignore-filename-regex "$IGNORE" \
   --json --output-path "$compiler_raw_out"
-"${coverage_cargo[@]}" llvm-cov report --branch --profile coverage -p krusty-lsp --ignore-filename-regex "$IGNORE" \
+run_phase report-lsp \
+  "${coverage_cargo[@]}" llvm-cov report --branch --profile coverage -p krusty-lsp --ignore-filename-regex "$IGNORE" \
   --json --output-path "$lsp_raw_out"
 
 # Reduce both exports to the combined totals the gate compares against.

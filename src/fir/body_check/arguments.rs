@@ -448,10 +448,15 @@ impl BodyFirChecker<'_> {
                     .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
                 physical_parameter,
             )?;
-            return Ok(FirCallArgument::Expression {
+            return Ok(FirCallArgument::Vararg {
                 parameter: parameter_id,
-                value,
-                conversion: self.selected_value_conversion(argument, value, target, cause)?,
+                origin: cause,
+                elements: vec![FirVarargElement {
+                    value,
+                    spread: true,
+                    conversion: self.selected_value_conversion(argument, value, target, cause)?,
+                }]
+                .into_boxed_slice(),
             });
         }
         let expected = if self.file.is_spread_arg(argument) {
@@ -838,8 +843,29 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         target: ResolvedTy,
     ) -> Option<FirConversion> {
-        let message = self.platform_narrowing_message(source)?;
-        Some(self.platform_narrowing_conversion(Some(message), cause, target))
+        // Reordered named arguments make the call a composite expression: their values are
+        // evaluated in source order into temporaries before the invocation. The check still
+        // exists, but cannot name that composite producer, so kotlinc uses `checkNotNull(Object)`.
+        let message = if self.call_reorders_arguments(source) {
+            None
+        } else {
+            Some(self.platform_narrowing_message(source)?)
+        };
+        Some(self.platform_narrowing_conversion(message, cause, target))
+    }
+
+    fn call_reorders_arguments(&self, source: ExprId) -> bool {
+        matches!(self.file.expr(source), Expr::Call { .. })
+            && self
+                .info
+                .resolved_call_arg_slots
+                .get(&source)
+                .is_some_and(|commitment| {
+                    commitment
+                        .argument_bindings
+                        .windows(2)
+                        .any(|pair| pair[0].parameter > pair[1].parameter)
+                })
     }
 
     fn platform_narrowing_conversion(
