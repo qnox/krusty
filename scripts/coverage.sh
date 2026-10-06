@@ -50,6 +50,8 @@ e2e_timeout="${KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS:-300}"
 source scripts/test-deadline.sh
 source scripts/libtest-shards.sh
 source scripts/phase-timing.sh
+coverage_slow_test_threshold="$(libtest_slow_test_threshold "${KRUSTY_SLOW_TEST_MS:-200}")"
+export KRUSTY_COVERAGE_SLOW_TEST_THRESHOLD="$coverage_slow_test_threshold"
 phase_log_prefix=coverage
 export phase_log_prefix
 PHASE_TIMING_LOG="$(mktemp)"
@@ -179,11 +181,11 @@ echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs, --test-t
 # `--quiet` hides the per-test duration, so coverage keeps the listing and records tests over the
 # slow threshold before a passing log is deleted.
 record_coverage_slow_tests() {
-  local log="$1" label="$2"
+  local log="$1" label="$2" storage_key="${3:-$2}"
   [ -n "${KRUSTY_SLOW_TEST_DIR:-}" ] && [ -f "$log" ] || return 0
-  libtest_slow_tests "$log" "${KRUSTY_SLOW_TEST_MS:-200}" | while IFS=$'\t' read -r ms test_name; do
+  libtest_slow_tests "$log" "$KRUSTY_COVERAGE_SLOW_TEST_THRESHOLD" | while IFS=$'\t' read -r ms test_name; do
     printf '%s\t%s\t%s\n' "$ms" "$label" "$test_name"
-  done >"$KRUSTY_SLOW_TEST_DIR/$label.tsv"
+  done >"$KRUSTY_SLOW_TEST_DIR/$storage_key.tsv"
 }
 export -f record_coverage_slow_tests
 
@@ -204,7 +206,9 @@ run_coverage_test_binary() {
     status="$?"
   fi
   phase_end "$phase"
-  record_coverage_slow_tests "$result/output.log" "$name"
+  # Two Cargo targets can have the same hash-stripped name (`krusty_lsp`). Keep their readable
+  # labels, but write through the unique executable basename so concurrent records never overwrite.
+  record_coverage_slow_tests "$result/output.log" "$name" "$raw"
   if [ "$status" -eq 0 ]; then
     rm -rf "$result"
     return 0
@@ -260,7 +264,7 @@ if [ -n "$e2e_bin" ]; then
       status="$?"
     fi
     phase_end "$label"
-    record_coverage_slow_tests "$result/output.log" "$label"
+    record_coverage_slow_tests "$result/output.log" "$label" "$label"
     if [ "$status" -eq 0 ]; then
       selected="$(libtest_selected_tests "$result/output.log" || echo 0)"
       if [ "$selected" = "$expected" ]; then
@@ -282,7 +286,7 @@ slow_combined="$(mktemp)"
 if compgen -G "$slow_dir/*.tsv" >/dev/null; then
   cat "$slow_dir"/*.tsv >"$slow_combined"
 fi
-libtest_print_slow_records "${KRUSTY_SLOW_TEST_MS:-200}" "$slow_combined"
+libtest_print_slow_records "$coverage_slow_test_threshold" "$slow_combined"
 rm -f "$slow_combined"
 rm -rf "$slow_dir"
 if compgen -G "$status_dir/*" >/dev/null; then
