@@ -314,7 +314,12 @@ fn selector_reads_temporary_once_as_receiver(
                                 }
                                 _ => None,
                             }?;
-                            ir.extension_receiver_fns.contains(&function).then_some(0)
+                            ir.extension_receiver_fns.contains(&function).then(|| {
+                                ir.fn_context_counts
+                                    .get(&function)
+                                    .copied()
+                                    .unwrap_or_default()
+                            })
                         })?;
                     args.get(position).copied()
                 });
