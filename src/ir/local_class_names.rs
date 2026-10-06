@@ -1998,6 +1998,50 @@ mod tests {
     }
 
     #[test]
+    fn reachable_remap_detaches_an_implementation_owned_by_the_remapped_class() {
+        let source = crate::types::type_name("sample/Source");
+        let target = crate::types::type_name("sample/Target");
+        let names = HashMap::from([(source, target)]);
+        let mut ir = super::super::IrFile::default();
+        let implementation = ir.add_fun(IrFunction {
+            name: "invoke".to_string(),
+            params: vec![Ty::obj_name(source)],
+            ret: Ty::obj_name(source),
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let mut declaration = crate::plugins::synthetic_class("sample/Source");
+        declaration.methods.push(implementation);
+        let declaration = ir.add_class(declaration);
+        ir.note_class_method(declaration, implementation);
+        ir.add_class(crate::plugins::synthetic_class("sample/Target"));
+        let reachable = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: None,
+        });
+
+        let detached =
+            ir.remap_reachable_classifier_identities(&names, [reachable], &mut HashSet::new());
+
+        assert_eq!(detached.len(), 1);
+        assert_eq!(detached[0].source, implementation);
+        assert!(matches!(
+            ir.expr(reachable),
+            IrExpr::Lambda { impl_fn, .. } if *impl_fn == detached[0].target
+        ));
+        assert!(!ir.class_method_owners.contains_key(&detached[0].target));
+        assert_eq!(
+            ir.functions[detached[0].target as usize].params,
+            vec![Ty::obj_name(target)]
+        );
+    }
+
+    #[test]
     fn reachable_remap_detaches_a_consumed_lambda_direct_call() {
         let source = crate::types::type_name("sample/Source");
         let target = crate::types::type_name("sample/Target");

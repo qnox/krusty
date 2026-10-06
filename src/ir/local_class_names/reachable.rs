@@ -85,6 +85,9 @@ impl IrFile {
                     &closure,
                     &local_clones,
                     detached_impls,
+                    self.class_method_owners.get(&source).is_some_and(|owners| {
+                        owners.iter().any(|owner| class_ids.contains_key(owner))
+                    }),
                 ) {
                     existing
                 } else {
@@ -148,6 +151,9 @@ impl IrFile {
                     &closure,
                     &local_clones,
                     detached_impls,
+                    self.class_method_owners.get(&source).is_some_and(|owners| {
+                        owners.iter().any(|owner| class_ids.contains_key(owner))
+                    }),
                 ) {
                     existing
                 } else {
@@ -262,6 +268,7 @@ fn detached_impl(
     closure: &HashSet<ExprId>,
     local_clones: &HashMap<FunId, FunId>,
     detached_impls: &HashSet<FunId>,
+    owned_by_remapped_class: bool,
 ) -> Option<FunId> {
     if detached_impls.contains(&impl_fn) {
         return Some(impl_fn);
@@ -272,7 +279,10 @@ fn detached_impl(
     let shared = implementation_sites.iter().any(|(site, function)| {
         *function == impl_fn && *site != expression && !closure.contains(site)
     });
-    if shared {
+    // A private implementation physically owned by the declaration class cannot serve the
+    // copied class even when this is its only remaining expression site. Detach it just as we do
+    // for a shared site; the target backend can then place the copy with its emitting class.
+    if shared || owned_by_remapped_class {
         None
     } else {
         Some(impl_fn)
