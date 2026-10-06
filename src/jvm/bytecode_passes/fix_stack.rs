@@ -327,6 +327,10 @@ pub(crate) fn fix_stack(method: &mut EditableMethod, owner: &str) -> Result<(), 
     let mut live: Vec<(NodeId, SavedStack)> = Vec::new();
     let live_first_unused = |live: &[(NodeId, SavedStack)]| {
         live.iter()
+            // An enclosing bracket whose opening stack was empty owns no local range. In
+            // particular, the suspend-call bracket around an inline argument may be live while
+            // the argument's reserved bracket uses locals below `initial_max_locals`.
+            .filter(|(_, saved)| !saved.values.is_empty())
             .map(|(_, saved)| saved.first_unused_local())
             .max()
             .unwrap_or(0)
@@ -497,6 +501,51 @@ mod tests {
                 }),
                 Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
                 Node::Insn(Insn::Op(IRETURN)),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_enclosing_bracket_does_not_occupy_the_reserved_local_range() {
+        let mut method = MethodNode::new(0x0008, "f", "()V");
+        method.max_locals = 2;
+        method.nodes = vec![
+            marker("beforeInlineCall"),
+            Node::Insn(Insn::Op(ICONST_1)),
+            marker("beforeInlineCallWithReservedLocals"),
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Var {
+                op: ISTORE,
+                slot: 1,
+            }),
+            marker("afterInlineCall"),
+            Node::Insn(Insn::Op(POP)),
+            marker("afterInlineCall"),
+            Node::Insn(Insn::Op(RETURN)),
+        ];
+        let mut editable = EditableMethod::new(method);
+
+        fix_stack(&mut editable, "T")
+            .expect("an empty outer save does not overlap the inner reserved spill");
+        let finished = editable.finish();
+
+        assert_eq!(finished.max_locals, 2);
+        assert_eq!(
+            finished.nodes,
+            vec![
+                Node::Insn(Insn::Op(ICONST_1)),
+                Node::Insn(Insn::Var {
+                    op: ISTORE,
+                    slot: 0,
+                }),
+                Node::Insn(Insn::Op(ICONST_0)),
+                Node::Insn(Insn::Var {
+                    op: ISTORE,
+                    slot: 1,
+                }),
+                Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+                Node::Insn(Insn::Op(POP)),
+                Node::Insn(Insn::Op(RETURN)),
             ]
         );
     }
