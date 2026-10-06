@@ -1217,18 +1217,62 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
         return merged;
     }
-    // Two invariant instantiations (`Inv<A>` and `Inv<B>`) are not a raw classifier and not `Any`.
-    // Their common supertype keeps the classifier and captures the arguments' own common supertype,
-    // so `sel(Inv(A), Inv(B))` is `Inv<out (X & Y)>` when `A` and `B` share `X` and `Y`.
-    let supertype =
-        common_supertype::common_super_type(source, current.non_null(), actual.non_null());
-    if supertype.is_erased_top() {
-        return merged;
+    let same_generic_classifier = match (current.non_null(), actual.non_null()) {
+        (Ty::Obj(left, left_arguments), Ty::Obj(right, right_arguments)) => {
+            left == right
+                && !left_arguments.is_empty()
+                && left_arguments.len() == right_arguments.len()
+        }
+        _ => false,
+    };
+    if same_generic_classifier {
+        // Two invariant instantiations (`Inv<A>` and `Inv<B>`) are not a raw classifier and not
+        // `Any`. Their common supertype keeps the classifier and captures the arguments' own common
+        // supertype. Do not apply this structural join to unrelated top-level classifiers: ordinary
+        // inference already has a stable nearest-hierarchy rule, and replacing it changes such
+        // established results as mixed scalar varargs and Java flexible collection expectations.
+        let supertype =
+            common_supertype::common_super_type(source, current.non_null(), actual.non_null());
+        if !supertype.is_erased_top() {
+            return if current.is_nullable() || actual.is_nullable() {
+                Ty::nullable(supertype.non_null())
+            } else {
+                supertype
+            };
+        }
     }
+
+    let left = receiver_hierarchy(source, current.non_null());
+    let right = receiver_hierarchy(source, actual.non_null());
+    let mut common = left
+        .iter()
+        .flat_map(|(left_ty, left_depth)| {
+            right.iter().filter_map(move |(right_ty, right_depth)| {
+                let left_name = left_ty.obj_internal()?;
+                let right_name = right_ty.obj_internal()?;
+                (left_name == right_name).then_some((
+                    left_depth + right_depth,
+                    if left_ty == right_ty {
+                        *left_ty
+                    } else {
+                        Ty::obj_name(left_name)
+                    },
+                ))
+            })
+        })
+        .collect::<Vec<_>>();
+    let Some(nearest) = common.iter().map(|(distance, _)| *distance).min() else {
+        return merged;
+    };
+    common.retain(|(distance, ty)| *distance == nearest && !ty.is_erased_top());
+    common.dedup_by(|left, right| left.1 == right.1);
+    let [(_, common)] = common.as_slice() else {
+        return merged;
+    };
     if current.is_nullable() || actual.is_nullable() {
-        Ty::nullable(supertype.non_null())
+        Ty::nullable(common.non_null())
     } else {
-        supertype
+        *common
     }
 }
 
@@ -1246,14 +1290,29 @@ pub(crate) fn merge_inferred_lower_bounds_from_symbols(
     let Some((&first, rest)) = bounds.split_first() else {
         return Ty::Error;
     };
-    let nominal = |ty: Ty| match ty.non_null() {
-        Ty::Obj(..) => true,
-        Ty::Intersection(parts) => parts
-            .iter()
-            .all(|part| matches!(part.non_null(), Ty::Obj(..))),
-        _ => false,
-    };
-    if bounds.iter().copied().all(nominal) {
+    let same_generic_classifier = bounds
+        .iter()
+        .copied()
+        .map(Ty::non_null)
+        .try_fold(None, |known, bound| {
+            let Ty::Obj(owner, arguments) = bound else {
+                return Err(());
+            };
+            if arguments.is_empty() {
+                return Err(());
+            }
+            match known {
+                None => Ok(Some((owner, arguments.len()))),
+                Some((known_owner, known_arity))
+                    if known_owner == owner && known_arity == arguments.len() =>
+                {
+                    Ok(known)
+                }
+                _ => Err(()),
+            }
+        })
+        .is_ok();
+    if same_generic_classifier {
         return common_supertype::common_super_types(source, &bounds);
     }
     rest.iter().copied().fold(first, |known, actual| {
