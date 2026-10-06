@@ -23,6 +23,4 @@ fullValueClasses/vararg.kt
 reflection/properties/genericOverriddenProperty.kt
 reflection/typeOf/intersectionType.kt
 reflection/typeOf/localClass.kt
-reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithInline.kt
-reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithoutInline.kt
 reflection/typeOf/typeAliasedType.kt
