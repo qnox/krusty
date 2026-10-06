@@ -62,16 +62,21 @@ pub(super) fn bind_spliced_captures(
     slot_of: &dyn Fn(u32) -> Option<u16>,
     materialize: &mut dyn FnMut(ExprId, Ty) -> u16,
 ) -> Result<CaptureBindings, &'static str> {
-    let IrExpr::Lambda {
-        impl_fn,
-        captures,
-        inline_body: Some(_),
-        ..
-    } = ir.expr(lambda)
-    else {
-        return Err("a placed lambda is not a literal inline lambda");
-    };
-    let physical = jvm_function_params(ir, *impl_fn);
+    let (impl_fn, captures) =
+        if let Some((adapter, captures, _, _, _)) = ir.callable_reference_inline_template(lambda) {
+            (adapter, captures)
+        } else {
+            match ir.expr(lambda) {
+                IrExpr::Lambda {
+                    impl_fn,
+                    captures,
+                    inline_body: Some(_),
+                    ..
+                } => (*impl_fn, captures.clone()),
+                _ => return Err("a placed lambda is not a literal inline lambda"),
+            }
+        };
+    let physical = jvm_function_params(ir, impl_fn);
     if physical.len() < captures.len() {
         return Err("a placed lambda's method takes fewer parameters than it has captures");
     }
@@ -124,16 +129,22 @@ pub(super) fn aliased_invocation(
     params: &[Ty],
     arguments: usize,
 ) -> Result<AliasedInvocation, &'static str> {
-    let IrExpr::Lambda {
-        impl_fn,
-        captures,
-        inline_body: Some(inline_body),
-        ..
-    } = ir.expr(lambda)
-    else {
-        return Err("an aliased lambda is not a literal inline lambda");
+    let (impl_fn, captures, inline_body) = if let Some((adapter, captures, returned, _, _)) =
+        ir.callable_reference_inline_template(lambda)
+    {
+        (adapter, captures, returned)
+    } else {
+        match ir.expr(lambda) {
+            IrExpr::Lambda {
+                impl_fn,
+                captures,
+                inline_body: Some(inline_body),
+                ..
+            } => (*impl_fn, captures.clone(), *inline_body),
+            _ => return Err("an aliased lambda is not a literal inline lambda"),
+        }
     };
-    let physical = jvm_function_params(ir, *impl_fn);
+    let physical = jvm_function_params(ir, impl_fn);
     let Some(parameter_types) = physical.get(captures.len()..) else {
         return Err("an aliased lambda's method takes fewer parameters than it has captures");
     };
@@ -143,11 +154,11 @@ pub(super) fn aliased_invocation(
     if params.len() != arguments {
         return Err("an aliased lambda's invocation has no semantic type for each argument");
     }
-    let Some(&result) = ir.logical_types.get(inline_body) else {
+    let Some(&result) = ir.logical_types.get(&inline_body) else {
         return Err("an aliased lambda's body has no checked result type");
     };
     Ok(AliasedInvocation {
-        inline_body: *inline_body,
+        inline_body,
         captures: captures.len(),
         physical: parameter_types.to_vec(),
         semantic: params.to_vec(),
