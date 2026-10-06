@@ -144,14 +144,18 @@ pub(super) fn accept_active_debug_metadata(
         // included. Only it does — a body property's initializer store stays on its own `val` line,
         // measured against kotlinc — so the start line is accepted from that arm alone.
         let constructor_parameter = active.constructor_parameter(file, declaration);
-        let property_line = active
-            .property(file, declaration)
+        let body_property = active.property(file, declaration);
+        let property_line = body_property
             .map(|property| property.decl_line)
             .or_else(|| constructor_parameter.map(|property| property.decl_line));
+        let accessor_lines = body_property.map(|property| property.accessor_lines);
         if let Some(line) = property_line.filter(|line| *line != 0) {
             if let Some(property) = index.property_for_declaration(declaration) {
                 if let Some(property) = ir.checked_properties.get_mut(&property) {
                     property.decl_line = line;
+                    let accessor_lines = accessor_lines.unwrap_or_default();
+                    property.getter_decl_line = accessor_lines.getter;
+                    property.setter_decl_line = accessor_lines.setter;
                     property.decl_start_line = constructor_parameter
                         .map(|parameter| parameter.decl_start_line)
                         .unwrap_or(0);
@@ -371,22 +375,23 @@ pub(super) fn attach_checked_declaration_metadata(
             .insert(classifier, header.clone());
     }
 
-    let mut attach_property_spelling = |property: Option<DeclarationId>, name: &str| {
-        if let Some(spelling) = property.and_then(|property| index.declaration_spellings(property))
-        {
+    let mut attach_property_spelling = |property: Option<DeclarationId>| {
+        if let Some((source_order, spelling)) = property.and_then(|property| {
+            Some((
+                index.source_order(property)?,
+                index.declaration_spellings(property)?,
+            ))
+        }) {
             ir.prop_declared_spellings
-                .insert((classifier, name.to_owned()), spelling.clone());
+                .insert((classifier, source_order), spelling.clone());
         }
     };
     for (property_index, property) in class.props.iter().enumerate() {
         if property.is_property {
-            attach_property_spelling(
-                active.constructor_property_declaration(
-                    source_class,
-                    u32::try_from(property_index).expect("too many constructor properties"),
-                ),
-                &property.name,
-            );
+            attach_property_spelling(active.constructor_property_declaration(
+                source_class,
+                u32::try_from(property_index).expect("too many constructor properties"),
+            ));
         }
     }
     let body_property_declaration = |property_index: usize| {
@@ -395,8 +400,8 @@ pub(super) fn attach_checked_declaration_metadata(
             u32::try_from(property_index).expect("too many class properties"),
         )
     };
-    for (property_index, property) in class.body_props.iter().enumerate() {
-        attach_property_spelling(body_property_declaration(property_index), &property.name);
+    for property_index in 0..class.body_props.len() {
+        attach_property_spelling(body_property_declaration(property_index));
     }
     for (property_index, property) in class.body_props.iter().enumerate() {
         if let Some(declaration) = body_property_declaration(property_index) {

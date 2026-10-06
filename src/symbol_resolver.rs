@@ -42,6 +42,7 @@ pub(crate) use selected_call_instantiation::selected_default_callable;
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
 mod source_view;
+mod statically_known_subtype;
 pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
@@ -85,6 +86,7 @@ pub(crate) use overload_selection::{CandidateSelectionWithTies, ReceiverFunction
 pub(crate) use receiver_mro::{function_shape_matches, ReceiverMro};
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
 use scope_level_callables::{function_set_from_symbols, level_functions, level_properties};
+pub(crate) use statically_known_subtype::{nominal_type, statically_known_subtype};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CallableImport {
@@ -111,22 +113,6 @@ pub(crate) struct FunctionImportScope {
     /// Classifier precedence. Builtin classifiers outrank explicit stars; see
     /// [`classifier_scope::classifier_precedence_levels`].
     classifier_levels: Vec<classifier_scope::ClassifierImportLevel>,
-}
-
-/// Classifier candidates contributed by one star-import precedence level. A star owner may denote
-/// either a package (`import sample.*`) or a classifier (`import sample.Outer.*`); the retained level
-/// stores its stable name, and the source's semantic facet decides which namespace it contributes.
-/// Callables have their own namespace traversal, but classifier resolution in both signature and
-/// body checking shares this operation so a compiled nested class cannot disappear between passes.
-pub(crate) fn classifier_candidates_at_scope_level<S: SymbolSource + ?Sized>(
-    source: &S,
-    name: &str,
-    owners: &[TypeName],
-) -> Vec<TypeName> {
-    classifier_scope::scoped_classifier_candidates_at_scope_level(source, name, owners)
-        .into_iter()
-        .map(|candidate| candidate.classifier)
-        .collect()
 }
 
 impl FunctionImportScope {

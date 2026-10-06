@@ -379,9 +379,11 @@ impl<'a> CommonIrBodySink<'a> {
         self.predeclare_inline_payload(index, declaration, &body)?;
         let mut dependencies = std::collections::HashSet::new();
         body.collect_referenced_module_callables(&mut dependencies);
-        let defaults = bodies.defaults(callable).cloned();
+        let defaults = bodies.defaults(callable).map(<[FirBody]>::to_vec);
         if let Some(defaults) = &defaults {
-            defaults.collect_referenced_module_callables(&mut dependencies);
+            for default in defaults {
+                default.collect_referenced_module_callables(&mut dependencies);
+            }
         }
         let mut dependencies = dependencies.into_iter().collect::<Vec<_>>();
         dependencies.sort_unstable_by_key(|dependency| dependency.raw());
@@ -417,7 +419,9 @@ impl<'a> CommonIrBodySink<'a> {
             .get(&callable)
             .is_some_and(|function| self.ir.has_param_defaults(*function));
         if let Some(defaults) = defaults.filter(|_| !defaults_attached) {
-            self.accept_body(index, defaults.owner(), defaults)?;
+            for default in defaults {
+                self.accept_body(index, default.owner(), default)?;
+            }
         }
         self.materialized_inline_callables.insert(callable);
         Ok(())
@@ -672,6 +676,38 @@ impl<'a> CommonIrBodySink<'a> {
         index: &ResolvedModuleIndex,
         allow_deferred_body_local: bool,
     ) -> Result<(), FirFileLoweringFailure> {
+        for (&key, construction) in index.serialization_type_use_serializer_constructors() {
+            let target = match construction.target {
+                crate::fir::ResolvedCustomSerializerConstructorTarget::Module(declaration) => {
+                    crate::ir::IrCustomSerializerConstructorTarget::Module(
+                        super::constructors::module_constructor_target(index, declaration)
+                            .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?,
+                    )
+                }
+                crate::fir::ResolvedCustomSerializerConstructorTarget::External(declaration) => {
+                    crate::ir::IrCustomSerializerConstructorTarget::External(
+                        crate::ir::IrExternalConstructorTarget::unresolved(declaration),
+                    )
+                }
+            };
+            let lowered = crate::ir::IrCustomSerializerConstruction {
+                serializer: construction.serializer,
+                parameters: construction
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect(),
+                operands: construction.operands.clone(),
+                target,
+            };
+            if let Some(existing) = self.ir.type_use_serializer_constructions.get(&key) {
+                assert_eq!(existing, &lowered, "one checked type-use constructor plan");
+            } else {
+                self.ir
+                    .type_use_serializer_constructions
+                    .insert(key, lowered);
+            }
+        }
         let mut newly_declared = std::collections::HashSet::new();
         let mut pending_local_names = Vec::new();
         for raw in 0..index.declaration_count() {
@@ -710,10 +746,10 @@ impl<'a> CommonIrBodySink<'a> {
                         .classifier_header(declaration)
                         .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?
                         .classifier;
-                    if let Some(interfaces) = index.superclass_interfaces(declaration) {
+                    if let Some(defaults) = index.inherited_defaults(declaration) {
                         self.ir
-                            .superclass_interfaces
-                            .insert(classifier_identity, interfaces.to_vec());
+                            .inherited_defaults
+                            .insert(classifier_identity, defaults.to_vec());
                     }
                     // A local classifier may have a stable skeleton before an inferred member is
                     // checked. Refresh only the semantic override payload once Pass 2 marks both
@@ -785,13 +821,13 @@ impl<'a> CommonIrBodySink<'a> {
                     .is_none(),
                 "a source classifier may publish one applied hierarchy per IR file"
             );
-            if let Some(interfaces) = index.superclass_interfaces(declaration) {
+            if let Some(defaults) = index.inherited_defaults(declaration) {
                 assert!(
                     self.ir
-                        .superclass_interfaces
-                        .insert(classifier_identity, interfaces.to_vec())
+                        .inherited_defaults
+                        .insert(classifier_identity, defaults.to_vec())
                         .is_none(),
-                    "a source classifier may publish superclass interface facts once"
+                    "a source classifier may publish its inherited defaults once"
                 );
             }
             let property_overrides = lower_property_override_plans(index, declaration);
@@ -826,8 +862,10 @@ impl<'a> CommonIrBodySink<'a> {
                         .map(|parameter| parameter.get())
                         .collect(),
                     operands: operands.into(),
-                    target: super::constructors::module_constructor_target(index, constructor)
-                        .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?,
+                    target: crate::ir::IrCustomSerializerConstructorTarget::Module(
+                        super::constructors::module_constructor_target(index, constructor)
+                            .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?,
+                    ),
                 };
                 self.ir
                     .custom_serializer_constructions
@@ -1650,16 +1688,11 @@ impl<'a> CommonIrBodySink<'a> {
         if lowered.is_empty() {
             return Ok(());
         }
-        if self
-            .ir
-            .fn_params
-            .get(&function)
-            .is_some_and(|parameters| parameters.defaults.is_some())
-        {
-            return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
-        }
         let physical_count = self.ir.functions[function as usize].params.len();
-        let mut defaults = vec![None; physical_count];
+        let info = self.ir.fn_params.entry(function).or_default();
+        let defaults = info
+            .defaults
+            .get_or_insert_with(|| vec![None; physical_count]);
         for (parameter, value) in lowered {
             let mut position = parameter as usize;
             if callable.shape.extension_receiver.is_some()
@@ -1673,11 +1706,11 @@ impl<'a> CommonIrBodySink<'a> {
                     callable.declaration,
                 ));
             };
-            *slot = Some(value);
+            if slot.replace(value).is_some() {
+                return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
+            }
         }
-        let info = self.ir.fn_params.entry(function).or_default();
-        info.defaults = Some(defaults);
-        info.defaults_inherited = defaults_inherited;
+        info.defaults_inherited |= defaults_inherited;
         Ok(())
     }
 }

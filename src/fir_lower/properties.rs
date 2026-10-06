@@ -182,6 +182,8 @@ pub(super) fn predeclare_properties(
                         source_order,
                         decl_line: 0,
                         decl_start_line: 0,
+                        getter_decl_line: 0,
+                        setter_decl_line: 0,
                         initialization_order: header.initialization_order,
                         class,
                         name,
@@ -321,6 +323,7 @@ pub(super) fn finalize_properties(
         let declaration = property.declaration;
         let decl_line = property.decl_line;
         let decl_start_line = property.decl_start_line;
+        let accessor_lines = (property.getter_decl_line, property.setter_decl_line);
         let shape = index
             .property(property_id)
             .ok_or(FirFileLoweringFailure::MissingProperty(
@@ -389,7 +392,7 @@ pub(super) fn finalize_properties(
                 .get(&property_id)
                 .cloned()
                 .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
-            apply_property_decl_line(ir, &layout, decl_line);
+            apply_property_decl_line(ir, &layout, decl_line, accessor_lines);
             // A constructor property additionally publishes where its declaration STARTS, which is
             // the line the constructor's store of it maps to. Attach the role to the exact backing
             // field selected above; emission must not rediscover it from the field's spelling.
@@ -421,8 +424,15 @@ pub(super) fn finalize_properties(
     Ok(())
 }
 
-pub(super) fn apply_property_decl_line(ir: &mut IrFile, layout: &IrLocalPropertyLayout, line: u32) {
-    match layout {
+/// Anchor `layout`'s storage and accessors on the property's line, and an accessor written with a
+/// body of its own on that accessor's line (`accessor_lines`, getter then setter; 0 when none).
+pub(super) fn apply_property_decl_line(
+    ir: &mut IrFile,
+    layout: &IrLocalPropertyLayout,
+    line: u32,
+    accessor_lines: (u32, u32),
+) {
+    let (getter, setter) = match layout {
         IrLocalPropertyLayout::TopLevelStorage {
             storage,
             getter,
@@ -432,16 +442,10 @@ pub(super) fn apply_property_decl_line(ir: &mut IrFile, layout: &IrLocalProperty
             if let Some(storage) = ir.statics.get_mut(*storage as usize) {
                 storage.line = line;
             }
-            for function in getter.iter().chain(setter.iter()) {
-                ir.fn_decl_lines.insert(*function, line);
-            }
+            (*getter, *setter)
         }
-        IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => {
-            ir.fn_decl_lines.insert(*getter, line);
-            if let Some(setter) = setter {
-                ir.fn_decl_lines.insert(*setter, line);
-            }
-        }
+        IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. }
+        | IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => (Some(*getter), *setter),
         IrLocalPropertyLayout::Member {
             class,
             owner,
@@ -458,15 +462,19 @@ pub(super) fn apply_property_decl_line(ir: &mut IrFile, layout: &IrLocalProperty
             {
                 property.decl_line = line;
             }
-            for function in getter.iter().chain(setter.iter()) {
-                ir.fn_decl_lines.insert(*function, line);
-            }
+            (*getter, *setter)
         }
-        IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => {
-            ir.fn_decl_lines.insert(*getter, line);
-            if let Some(setter) = setter {
-                ir.fn_decl_lines.insert(*setter, line);
-            }
+    };
+    let own = |accessor_line: u32| {
+        if accessor_line == 0 {
+            line
+        } else {
+            accessor_line
+        }
+    };
+    for (function, accessor_line) in [(getter, accessor_lines.0), (setter, accessor_lines.1)] {
+        if let Some(function) = function {
+            ir.fn_decl_lines.insert(function, own(accessor_line));
         }
     }
 }
@@ -601,6 +609,7 @@ fn materialize_member_extension_property(
         .or_default()
         .push(crate::ir::MemberExtProp {
             name: property.name.clone(),
+            source_order,
             receiver,
             ty: property.ty,
             is_var: mutable,

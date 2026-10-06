@@ -6,10 +6,10 @@ use crate::types::{Ty, TypeName, Visibility};
 use super::header::{
     next_id, CallableId, DeclarationFlags, DeclarationId, DeclarationIds, DeclarationKind,
     DeclarationNameId, DeclarationStub, DeferredCallableSelectionId, DeferredMemberSelectionId,
-    DeferredValueSelectionId, DiagnosticId, HeaderDeclaration, HeaderDeclarationKind,
-    HeaderScopeArena, HeaderSyntaxArena, HeaderTypeId, LookupNames, OriginId, PropertyId,
-    SigExprId, SigNameId, SignatureScopeId, SourceFileId, SourceMap, StableDeclarationAnchor,
-    TypeParameterId,
+    DeferredValueSelectionId, DiagnosticId, ExternalCallableId, HeaderDeclaration,
+    HeaderDeclarationKind, HeaderScopeArena, HeaderSyntaxArena, HeaderTypeId, LookupNames,
+    OriginId, PropertyId, SigExprId, SigNameId, SignatureScopeId, SourceFileId, SourceMap,
+    StableDeclarationAnchor, TypeParameterId,
 };
 use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
@@ -26,6 +26,24 @@ mod classifier_headers;
 mod declaration_metadata;
 mod result_expectation;
 mod source_packages;
+
+/// Exact constructor declaration selected for a serializer class named by a checked type-use
+/// annotation. Module and dependency declarations share the same semantic payload; only their
+/// stable identity carrier differs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedCustomSerializerConstructorTarget {
+    Module(DeclarationId),
+    External(ExternalCallableId),
+}
+
+/// Frontend-selected construction of a serializer class for an annotated type occurrence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedTypeUseSerializerConstruction {
+    pub serializer: TypeName,
+    pub parameters: Box<[ResolvedTy]>,
+    pub operands: Box<[u32]>,
+    pub target: ResolvedCustomSerializerConstructorTarget,
+}
 
 /// A half-open slice in the signature graph's shared operand arena.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1526,6 +1544,11 @@ pub struct ResolvedModuleIndex {
     /// the generated accessor's operand ordinal passed to each constructor parameter.
     serialization_custom_serializer_constructors:
         HashMap<DeclarationId, (DeclarationId, Box<[u32]>)>,
+    /// Constructor plans selected for serializer classes named on declared type occurrences, keyed
+    /// by serializer identity and the annotated type's semantic argument count. This is independent
+    /// of source property spelling and can be reused by every equal checked occurrence.
+    serialization_type_use_serializer_constructors:
+        HashMap<(TypeName, u32), ResolvedTypeUseSerializerConstruction>,
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
@@ -1556,10 +1579,9 @@ pub struct ResolvedModuleIndex {
     /// are semantic declaration headers; target erasure and bridge materialization are absent.
     pub(super) property_overrides: HashMap<DeclarationId, Box<[super::ResolvedPropertyOverride]>>,
     pub(super) function_overrides: HashMap<DeclarationId, Box<[super::ResolvedFunctionOverride]>>,
-    /// Exact interface identities inherited through the direct superclass of each source
-    /// classifier. Pass 1 computes this while the semantic hierarchy provider is live; target
-    /// backends consume it instead of walking superclass declarations again.
-    pub(super) superclass_interfaces: HashMap<DeclarationId, Box<[TypeName]>>,
+    /// The interface defaults each source classifier inherits without overriding, selected while
+    /// the semantic hierarchy provider is live; target backends realize them without a walk.
+    pub(super) inherited_defaults: HashMap<DeclarationId, Box<[super::ResolvedInheritedDefault]>>,
     /// Non-default return-value statuses of module declarations, derived from the frozen edges.
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
     pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
@@ -2116,6 +2138,28 @@ impl ResolvedModuleIndex {
             .flatten()
     }
 
+    /// `declaration` and the classifiers that lexically contain it, nearest first.
+    ///
+    /// Non-classifier owners (a function containing a local class, for example) are traversed but
+    /// not returned. The result is declaration identity, not a classifier-name prefix: generated
+    /// local names do not encode lexical ownership.
+    pub fn classifier_and_outer_class_declarations(
+        &self,
+        declaration: DeclarationId,
+    ) -> Vec<DeclarationId> {
+        let mut classifiers = Vec::new();
+        let mut current = Some(declaration);
+        while let Some(owner) = current {
+            if self.classifier_identity(owner).is_some() {
+                classifiers.push(owner);
+            }
+            current = self
+                .declaration_header(owner)
+                .and_then(|header| header.owner);
+        }
+        classifiers
+    }
+
     pub fn classifier_hierarchy(
         &self,
         declaration: DeclarationId,
@@ -2663,6 +2707,9 @@ impl ResolvedModuleIndex {
             && self.generated_classifiers.is_empty()
             && self.serialization_companion_accessors.is_empty()
             && self.serialization_custom_serializer_constructors.is_empty()
+            && self
+                .serialization_type_use_serializer_constructors
+                .is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
@@ -3156,6 +3203,17 @@ impl ResolvedModuleIndex {
                 .values()
                 .map(|(_, operands)| std::mem::size_of_val(operands.as_ref()))
                 .sum::<usize>()
+            + self.serialization_type_use_serializer_constructors.len()
+                * (std::mem::size_of::<(TypeName, u32)>()
+                    + std::mem::size_of::<ResolvedTypeUseSerializerConstruction>())
+            + self
+                .serialization_type_use_serializer_constructors
+                .values()
+                .map(|construction| {
+                    std::mem::size_of_val(construction.parameters.as_ref())
+                        + std::mem::size_of_val(construction.operands.as_ref())
+                })
+                .sum::<usize>()
             + (self.invisible_reference_suppressions.len()
                 + self.invisible_member_suppressions.len()
                 + self.optional_declaration_usage_suppressions.len())
@@ -3209,12 +3267,13 @@ impl ResolvedModuleIndex {
                             .sum::<usize>()
                 })
                 .sum::<usize>()
-            + self.superclass_interfaces.len()
-                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<Box<[TypeName]>>())
             + self
-                .superclass_interfaces
+                .inherited_defaults
                 .values()
-                .map(|interfaces| interfaces.len() * std::mem::size_of::<TypeName>())
+                .map(|defaults| {
+                    std::mem::size_of::<DeclarationId>()
+                        + defaults.len() * std::mem::size_of::<super::ResolvedInheritedDefault>()
+                })
                 .sum::<usize>()
             + self
                 .classifiers

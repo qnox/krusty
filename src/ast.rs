@@ -1116,9 +1116,13 @@ pub struct ClassDecl {
     pub singleton: bool,
     /// `data class` — synthesizes equals/hashCode/toString/componentN/copy.
     pub is_data: bool,
-    /// `@JvmInline value class` — an inline class. krusty currently compiles it as a regular final
-    /// single-field class (self-consistent, box-OK) rather than kotlinc's unboxed `-impl` form.
+    /// `inline class` or `value class`. A legacy `inline class`, and a `value class` whose
+    /// resolved annotation is `kotlin.jvm.JvmInline`, is unboxed. A `value class` without that
+    /// annotation is a boxed class when `FullValueClasses` is enabled.
     pub is_value: bool,
+    /// Span of the `value` keyword. Absent for a legacy `inline class` and for an ordinary class.
+    /// The missing-`@JvmInline` diagnostic points here.
+    pub value_modifier_span: Option<Span>,
     /// `enum class Name { A, B }` — the entries in declaration order (extends `java/lang/Enum`). Each
     /// [`AstEnumEntry`] carries its own name / constructor args / body methods / body properties.
     pub enum_entries: Vec<AstEnumEntry>,
@@ -1339,6 +1343,13 @@ pub struct ExplicitBackingField {
     pub ty: Option<TypeRef>,
 }
 
+/// Where a property's accessors written with a body start, each a 1-based line (0 = none).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AccessorLines {
+    pub getter: u32,
+    pub setter: u32,
+}
+
 /// A top-level `val`/`var` property: `val name: Type = init`.
 #[derive(Clone, Debug)]
 pub struct PropDecl {
@@ -1353,6 +1364,10 @@ pub struct PropDecl {
     pub context_params: Vec<Param>,
     /// 1-based source line of the declaration, filled by the parser post-pass (0 = unknown).
     pub decl_line: u32,
+    /// 1-based source lines of the headers of a getter and a setter written with a body, filled
+    /// by the same post-pass (0 = none written, or unknown). An accessor is a declaration in its own right, so
+    /// kotlinc anchors what it generates for one (a value class's interface entry) on this line.
+    pub accessor_lines: AccessorLines,
     /// Declaration visibility (`public` by default). A `private set` narrows only the SETTER — that
     /// lives on [`PropAccessor::visibility`]; this is the property's (getter's) visibility.
     pub visibility: Visibility,
@@ -1850,26 +1865,18 @@ pub struct File {
     /// Declared visibility of a `typealias` when NON-public (`internal typealias A = …`) — public
     /// aliases are absent. Feeds `@Metadata` `TypeAlias.flags`.
     pub type_alias_visibility: std::collections::HashMap<String, Visibility>,
-    /// The `typealias` spelling each declared type had BEFORE the parse seam expanded it away,
-    /// keyed by the span of the node that was rewritten — kept only so `@Metadata` can record
-    /// `Type.abbreviated_type` (see [`crate::spelling`]).
-    ///
-    /// `expand_fun_type_aliases` rewrites a same-file alias reference INTO its target shape, which
-    /// is what every semantic consumer wants and which destroys the one thing metadata needs. The
-    /// entry holds the pre-expansion node — its name and its AS-SPELLED type arguments, whose arity
-    /// may differ from the expansion's. It lives HERE rather than on [`TypeRef`] because `TypeRef`
-    /// is embedded by value in the expression arena, where eight more bytes per node is a real
-    /// cost the arena's size guard enforces.
-    ///
-    /// The rewrite preserves the original node's span, so the span is a stable key. Only the
-    /// OUTERMOST alias of a chain is recorded, matching kotlinc: `typealias Chain = Cargo` spelled
-    /// as `Chain` records `Chain`, not `Cargo`. A reference to an alias declared ELSEWHERE (a
-    /// sibling file or the classpath) is never rewritten and so still spells the alias in
-    /// [`TypeRef::name`]; it has no entry here.
+    /// The `typealias` spelling recorded for a rewritten reference, keyed by that reference's span.
+    /// Resolution does not consult this map: a use stays written, and the checker applies the alias
+    /// selected by the classifier tower. Metadata abbreviation still accepts a spelling parked here
+    /// when a later pass rewrites a target for its own template. A reference with no entry keeps
+    /// [`TypeRef::name`].
     pub alias_spellings: std::collections::HashMap<Span, TypeRef>,
+    /// Exact `in`/`out` keyword span for a projected type argument, keyed by that argument's type
+    /// span. Diagnostics consume this parser-owned source fact instead of guessing an offset from
+    /// the referenced type, which may be separated from the keyword by trivia.
+    pub type_projection_spans: std::collections::HashMap<Span, Span>,
     /// Every `typealias Name<T…> = Target`: the alias name, its declared type-parameter names, and
-    /// the complete source target shape. Resolution binds this once for semantic use and metadata;
-    /// the parser's same-file structural expansion also uses it for function-type aliases.
+    /// the complete source target shape. Resolution binds this once for semantic use and metadata.
     pub type_alias_fun: Vec<(String, Vec<String>, TypeRef)>,
     /// File-scope type-alias declarations with their complete syntax and exact declaration spans.
     /// The parallel semantic tables above are retained for existing consumers.
@@ -1945,6 +1952,12 @@ pub struct File {
     /// `+EagerLambdaAnalysis`: a lambda that does not discriminate applicable candidates by its
     /// shape is analyzed before the most specific candidate is chosen.
     pub eager_lambda_analysis: bool,
+    /// `+FullValueClasses`: a `value class` without `@JvmInline` is a boxed class with structural
+    /// `equals`/`hashCode`/`toString`. Without the feature that declaration is an error.
+    pub full_value_classes: bool,
+    /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
+    /// parameters whose declared upper bounds contain a cycle.
+    pub recursive_type_of: bool,
     /// Opt-in markers accepted module-wide (`-opt-in`), as dotted fully qualified names.
     pub opted_in_markers: Vec<String>,
 }

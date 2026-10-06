@@ -457,7 +457,9 @@ keeps abbreviation off type equality for the same reason). The spelling therefor
   `member_spellings`.
 - Class metadata is built from the IR alone, so the spelling reaches it on IR side tables
   (`fn_declared_spellings`, `class_declared_spellings`, `prop_declared_spellings`), filled at
-  lowering — the same mechanism `fn_param_declared_nullable` already used.
+  lowering — the same mechanism `fn_param_declared_nullable` already used. Property spellings use
+  `(classifier identity, stable declaration order)`, not `(classifier, source name)`: ordinary and
+  member-extension properties may legally share a name.
 
 ### Reading it back
 

@@ -933,6 +933,7 @@ pub(super) fn finalize_constructor_field_indices(
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
     let mut edges = Vec::new();
+    let mut pre_super = Vec::new();
     for (property_id, property) in &ir.checked_properties {
         if !property
             .flags
@@ -982,6 +983,27 @@ pub(super) fn finalize_constructor_field_indices(
         }
         argument.field_index = Some(field);
         ir.classes[class as usize].fields[field as usize].default = default;
+        // A full value class initializes constructor properties before `super(…)`. A superclass
+        // `init` block and an overridden member it calls (including `toString`) then read the
+        // values the subclass constructor received. Abstract and sealed value classes cannot
+        // declare those properties, so only a class that published `FULL_VALUE` records them.
+        let full_value = index
+            .declaration_anchor(declaration)
+            .and_then(|anchor| anchor.owner)
+            .and_then(|owner| index.declaration_header(owner))
+            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::FULL_VALUE));
+        if full_value {
+            pre_super.push((class, parameter, field));
+        }
+    }
+    // Property iteration order is not declaration order. Stores still all run before `super`,
+    // but parameter order keeps the constructor layout stable.
+    pre_super.sort();
+    for (class, parameter, field) in pre_super {
+        let slots = &mut ir.classes[class as usize].pre_super_param_fields;
+        if !slots.iter().any(|pair| *pair == (parameter, field)) {
+            slots.push((parameter, field));
+        }
     }
     Ok(())
 }

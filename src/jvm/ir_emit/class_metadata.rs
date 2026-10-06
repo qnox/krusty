@@ -308,7 +308,7 @@ pub(super) fn build_class_metadata_with_facts(
                 .and_then(|i| c.fields.get(i as usize));
             let mut spellings = ir
                 .prop_declared_spellings
-                .get(&(c.fq_name_id(), property.name.clone()))
+                .get(&(c.fq_name_id(), property.source_order))
                 .cloned()
                 .unwrap_or_default();
             let constructor_vararg = c.ctor_args.iter().any(|arg| {
@@ -484,7 +484,7 @@ pub(super) fn build_class_metadata_with_facts(
             return_value_status: Default::default(),
             spellings: ir
                 .prop_declared_spellings
-                .get(&(c.fq_name_id(), ext.name.clone()))
+                .get(&(c.fq_name_id(), ext.source_order))
                 .cloned()
                 .unwrap_or_default(),
             name: ext.name.clone(),
