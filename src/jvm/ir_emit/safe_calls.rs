@@ -1,6 +1,6 @@
 //! JVM layout for safe-call guards and chains.
 
-use super::{discard, when, CodeBuilder, Emitter, IrConst, IrExpr, Ty};
+use super::{discard, when, CodeBuilder, Emitter, IrBinOp, IrConst, IrExpr, IrTypeOp, Ty};
 
 impl Emitter<'_> {
     /// Emit a discarded safe call with the discard inside its guard, as kotlinc writes it. The
@@ -135,5 +135,254 @@ impl Emitter<'_> {
             .entry(label)
             .or_default()
             .push(temporary);
+    }
+
+    /// `dup; ifnull; <selector>; goto; pop` for a safe call whose receiver is one word and read
+    /// once, as the call or property receiver. kotlinc never stores that receiver. A chain, a wide
+    /// receiver, or any other use keeps the temporary the lowerer introduced.
+    pub(super) fn try_emit_duplicated_safe_call(
+        &mut self,
+        stmts: &[u32],
+        value: Option<u32>,
+        discarded: bool,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let Some(plan) = duplicated_safe_call(self, stmts, value) else {
+            return false;
+        };
+        self.mark_statement_line(plan.declaration, code);
+        let source = self.emit_consumed_operand(plan.init, code);
+        if self.diverges(plan.init) {
+            return true;
+        }
+        let semantic = self
+            .ir
+            .logical_types
+            .get(&plan.init)
+            .copied()
+            .unwrap_or(source);
+        self.adapt_physical_operand(source, semantic, Some(plan.semantic_ty), plan.slot_ty, code);
+        code.dup();
+        let null_path = code.new_label();
+        let end = code.new_label();
+        self.mark_statement_line(plan.guard, code);
+        code.ifnull(null_path);
+        self.stack_resident_value = Some(plan.temporary);
+        let selector_diverges = if discarded {
+            self.emit_discarding(plan.selector, code);
+            self.discarding_diverges(plan.selector)
+        } else {
+            self.emit_value(plan.selector, code);
+            self.diverges(plan.selector)
+        };
+        if self.stack_resident_value.is_some() {
+            self.run.set_emit_error(
+                "safe-call receiver left on the stack was not consumed by its selector".to_string(),
+            );
+            self.stack_resident_value = None;
+        }
+        if !selector_diverges {
+            code.goto(end);
+        }
+        self.bind(null_path, code);
+        code.pop();
+        if !discarded {
+            self.emit_value(plan.null_result, code);
+        }
+        self.bind(end, code);
+        true
+    }
+}
+
+struct DuplicatedSafeCall {
+    declaration: u32,
+    temporary: u32,
+    init: u32,
+    semantic_ty: Ty,
+    slot_ty: Ty,
+    guard: u32,
+    selector: u32,
+    null_result: u32,
+}
+
+fn duplicated_safe_call(
+    emitter: &Emitter<'_>,
+    stmts: &[u32],
+    value: Option<u32>,
+) -> Option<DuplicatedSafeCall> {
+    let [variable] = stmts else {
+        return None;
+    };
+    let IrExpr::Variable {
+        index: temporary,
+        ty: semantic_ty,
+        init: Some(init),
+        named: false,
+        ..
+    } = emitter.ir.expr(*variable)
+    else {
+        return None;
+    };
+    let temporary = *temporary;
+    let init = *init;
+    let semantic_ty = *semantic_ty;
+    let slot_ty =
+        super::local_variable_representation::slot_type(emitter.ir, *variable, semantic_ty);
+    // `ifnull` consumes a reference. A nullable primitive is unboxed before the
+    // selector, so its one-word value is an `int` and keeps the temporary.
+    if !duplicable_receiver_slot(slot_ty) {
+        return None;
+    }
+    let guard = value?;
+    if !emitter.ir.null_guards.contains(&guard) || emitter.safe_call_null_exits.contains_key(&guard)
+    {
+        return None;
+    }
+    let IrExpr::When { branches } = emitter.ir.expr(guard) else {
+        return None;
+    };
+    let [(Some(condition), null_result), (None, selector)] = branches.as_slice() else {
+        return None;
+    };
+    if !is_null_equality(emitter.ir, *condition, temporary) {
+        return None;
+    }
+    selector_reads_temporary_once_as_receiver(emitter.ir, *selector, temporary).then_some(
+        DuplicatedSafeCall {
+            declaration: *variable,
+            temporary,
+            init,
+            semantic_ty,
+            slot_ty,
+            guard,
+            selector: *selector,
+            null_result: *null_result,
+        },
+    )
+}
+
+fn duplicable_receiver_slot(slot_ty: Ty) -> bool {
+    super::slot_words(slot_ty) == 1 && !slot_ty.is_jvm_scalar()
+}
+
+fn is_null_equality(ir: &crate::ir::IrFile, condition: u32, temporary: u32) -> bool {
+    let IrExpr::PrimitiveBinOp {
+        op: IrBinOp::Eq,
+        lhs,
+        rhs,
+    } = ir.expr(condition)
+    else {
+        return false;
+    };
+    let read = |expression: u32| matches!(ir.expr(expression), IrExpr::GetValue(value) if *value == temporary);
+    let null = |expression: u32| matches!(ir.expr(expression), IrExpr::Const(IrConst::Null));
+    (read(*lhs) && null(*rhs)) || (read(*rhs) && null(*lhs))
+}
+
+fn selector_reads_temporary_once_as_receiver(
+    ir: &crate::ir::IrFile,
+    selector: u32,
+    temporary: u32,
+) -> bool {
+    if value_reads(ir, selector, temporary) != 1 {
+        return false;
+    }
+    let mut expression = selector;
+    loop {
+        match ir.expr(expression) {
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => expression = *arg,
+            IrExpr::Call {
+                dispatch_receiver,
+                args,
+                ..
+            } => {
+                let receiver = match dispatch_receiver {
+                    Some(receiver) => Some(*receiver),
+                    None => ir
+                        .static_extension_receivers
+                        .get(&expression)
+                        .copied()
+                        .and_then(|position| args.get(position as usize).copied()),
+                };
+                return receiver.is_some_and(|receiver| reads_temporary(ir, receiver, temporary));
+            }
+            IrExpr::PropertyRead {
+                receiver: Some(receiver),
+                ..
+            } => return reads_temporary(ir, *receiver, temporary),
+            _ => return false,
+        }
+    }
+}
+
+fn reads_temporary(ir: &crate::ir::IrFile, expression: u32, temporary: u32) -> bool {
+    let mut expression = expression;
+    loop {
+        match ir.expr(expression) {
+            IrExpr::GetValue(value) => return *value == temporary,
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => expression = *arg,
+            _ => return false,
+        }
+    }
+}
+
+fn value_reads(ir: &crate::ir::IrFile, root: u32, temporary: u32) -> usize {
+    let mut count = usize::from(matches!(
+        ir.expr(root),
+        IrExpr::GetValue(value) if *value == temporary
+    ));
+    crate::ir::for_each_child(&ir.exprs, root, &mut |child| {
+        count += value_reads(ir, child, temporary);
+    });
+    count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{duplicable_receiver_slot, selector_reads_temporary_once_as_receiver};
+    use crate::ir::{Callee, IrExpr, IrFile};
+
+    #[test]
+    fn only_a_one_word_reference_receiver_can_stay_on_the_stack() {
+        assert!(duplicable_receiver_slot(crate::types::Ty::obj("app/Host")));
+        assert!(!duplicable_receiver_slot(crate::types::Ty::Int));
+        assert!(!duplicable_receiver_slot(crate::types::Ty::Long));
+    }
+
+    #[test]
+    fn a_selector_with_a_second_receiver_read_keeps_the_temporary() {
+        let mut ir = IrFile::default();
+        let receiver = ir.add_expr(IrExpr::GetValue(7));
+        let argument = ir.add_expr(IrExpr::GetValue(7));
+        let selector = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(0),
+            dispatch_receiver: Some(receiver),
+            args: vec![argument],
+        });
+
+        assert!(!selector_reads_temporary_once_as_receiver(&ir, selector, 7));
+    }
+
+    #[test]
+    fn a_static_call_requires_the_recorded_extension_receiver_position() {
+        let mut ir = IrFile::default();
+        let receiver = ir.add_expr(IrExpr::GetValue(7));
+        let selector = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(0),
+            dispatch_receiver: None,
+            args: vec![receiver],
+        });
+
+        assert!(!selector_reads_temporary_once_as_receiver(&ir, selector, 7));
+        ir.static_extension_receivers.insert(selector, 0);
+        assert!(selector_reads_temporary_once_as_receiver(&ir, selector, 7));
     }
 }

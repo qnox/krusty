@@ -291,6 +291,8 @@ impl BodyFirChecker<'_> {
                     parameters: Vec::new(),
                     result: member.ty,
                     extension_receiver_parameter: None,
+
+                    metadata_constant_read: false,
                 }),
                 false,
                 &[],

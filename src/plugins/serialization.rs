@@ -21,6 +21,7 @@ mod deserialize_body;
 pub(super) mod element_serializer;
 mod enum_serializer;
 mod external_serializer;
+mod intrinsic_serializer;
 pub use external_serializer::ExternalSerializer;
 pub(crate) use external_serializer::{custom_class_serializer, generated_external_serializer};
 mod generated_classifier;
@@ -477,7 +478,7 @@ fn call_external_companion_serializer(
 /// carries, so a deeper nesting (`List<List<Foo>>`) has no spelling here and keeps the generic
 /// inline path.
 fn serialized_type_spelling(
-    ctx: &FrontendExpressionContext,
+    ctx: &FrontendExpressionContext<'_>,
     serializable: TypeName,
     ty: Ty,
 ) -> Option<Vec<TypeName>> {
@@ -561,7 +562,9 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
         let exprs = exprs.clone();
         let data = data.clone();
         let types = types.clone();
-        if descriptor_element::specialize(ir, ctx, mid, kind, &exprs, &types) {
+        if descriptor_element::specialize(ir, mid, kind, &exprs)
+            || intrinsic_serializer::specialize(ir, ctx, mid, kind, &exprs, &data, &types)
+        {
             continue;
         }
         if kind == "serializer" {
@@ -1275,14 +1278,14 @@ impl IrPlugin for SerializationPlugin {
 
     fn plan_frontend_expressions(
         &self,
-        ctx: &FrontendExpressionContext,
+        ctx: &FrontendExpressionContext<'_>,
         plans: &mut Vec<(crate::ast::ExprId, PluginExpressionPlan)>,
     ) {
         let serializer_package = type_name("kotlinx/serialization");
         let serializer_type = type_name(KSERIALIZER_FQ);
         let serializable_annotation = type_name(SERIALIZABLE_FQ);
         for call in &ctx.calls {
-            if let Some(plan) = descriptor_element::plan(call) {
+            if let Some(plan) = descriptor_element::plan(ctx, call) {
                 plans.push((call.expression, plan));
                 continue;
             }
@@ -1329,6 +1332,7 @@ impl IrPlugin for SerializationPlugin {
                     types: Vec::new(),
                     implicit_receiver: false,
                     operands: vec![(receiver, receiver_ty), (*argument, call.params[0])],
+                    synthesized: Vec::new(),
                 })
             })();
             if let Some(plan) = round_trip {
@@ -1407,6 +1411,7 @@ impl IrPlugin for SerializationPlugin {
                     types: Vec::new(),
                     implicit_receiver: false,
                     operands,
+                    synthesized: Vec::new(),
                 },
             ));
         }
@@ -2216,6 +2221,7 @@ mod tests {
                 argument_slots: vec![Some(argument)],
             }],
             classifier_annotations: std::collections::HashMap::new(),
+            call_resolver: None,
         };
         let mut plans = Vec::new();
         SerializationPlugin::default().plan_frontend_expressions(&context, &mut plans);
@@ -2264,13 +2270,25 @@ mod tests {
             &FrontendExpressionContext {
                 calls: vec![call.clone()],
                 classifier_annotations: std::collections::HashMap::new(),
+                call_resolver: None,
             },
             &mut plans,
         );
         assert_eq!(plans.len(), 1);
         let plan = &plans[0].1;
         assert_eq!(plan.operation, "descriptorElementDefaultAnnotations");
-        assert_eq!(plan.types, [element]);
+        assert!(plan.types.is_empty());
+        // With no singleton accessor published for it, the element's serializer is the
+        // intrinsic's general lookup over the selected type.
+        assert!(matches!(
+            plan.synthesized.as_slice(),
+            [crate::plugins::PluginSynthesizedOperand::Operation {
+                operation: "typeSerializer",
+                types,
+                operands,
+                ..
+            }] if types.as_slice() == [element] && operands.is_empty()
+        ));
         assert!(plan.implicit_receiver);
         assert_eq!(plan.operands, [(name, Ty::String), (optional, Ty::Boolean)]);
 
@@ -2281,6 +2299,7 @@ mod tests {
             &FrontendExpressionContext {
                 calls: vec![unrelated],
                 classifier_annotations: std::collections::HashMap::new(),
+                call_resolver: None,
             },
             &mut plans,
         );

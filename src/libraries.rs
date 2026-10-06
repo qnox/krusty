@@ -2181,6 +2181,10 @@ pub struct PropertyInfo {
     /// Declaration-owned compile-time payload. Providers normalize source/classfile storage into
     /// this common semantic fact; a selected read consumes it without another field/classpath query.
     pub compile_time_constant: Option<LibraryConst>,
+    /// Whether a read of this declaration is a constant-value expression for Kotlin metadata.
+    /// Providers publish the semantic fact at their boundary; consumers must not rediscover it
+    /// from an origin, owner, field shape, or spelling.
+    pub metadata_constant_read: bool,
     /// The property's Kotlin visibility.
     pub visibility: Visibility,
     /// The declaring type's internal name — for the resolver's access check (`protected`/`private`).
