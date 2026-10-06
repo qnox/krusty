@@ -82,7 +82,6 @@ mod with_index_loops;
 
 pub use error::*;
 pub use sink::*;
-pub(crate) use source_calls::inline_argument_template;
 
 use crate::fir::{BodyOwnerId, FirBody, FirExprId, FirStatementId, ResolvedModuleIndex};
 use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin, IrTypeOp};
