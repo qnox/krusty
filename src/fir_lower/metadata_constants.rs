@@ -61,7 +61,8 @@ fn has_constant_value(
                     && has_constant_value(body, index, *value)
             }
             FirConversionKind::NumericWidening { .. }
-            | FirConversionKind::NullabilityWidening { .. } => {
+            | FirConversionKind::NullabilityWidening { .. }
+            | FirConversionKind::PlatformNarrowing { .. } => {
                 has_constant_value(body, index, *value)
             }
             _ => false,
