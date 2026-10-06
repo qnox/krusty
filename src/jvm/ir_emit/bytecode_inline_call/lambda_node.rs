@@ -627,22 +627,37 @@ impl Emitter<'_> {
                 local.record(Some(length), &mut scratch);
             }
             let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
+            let reference_parameters = callable_reference_template(self.ir, argument).is_some();
             for (index, &ty) in parameter_types.iter().enumerate() {
-                let name = identities
-                    .and_then(|identities| identities.get(captures.len() + index))
-                    .and_then(|identity| match identity.role {
-                        // kotlinc names an extension lambda's receiver after the lambda.
-                        crate::ir::IrParameterRole::ExtensionReceiver => {
-                            crate::jvm::debug_local_names::render(
-                                self.ir,
-                                None,
-                                Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver {
-                                    implementation: impl_fn,
-                                }),
-                            )
-                        }
-                        _ => crate::jvm::parameter_names::local_variable(identity, ""),
-                    });
+                let name = if reference_parameters {
+                    let ordinal = u32::try_from(index)
+                        .map_err(|_| "a callable reference has too many parameters")?;
+                    crate::jvm::debug_local_names::render(
+                        self.ir,
+                        None,
+                        Some(
+                            crate::ir::IrDebugLocalProvenance::InlineCallableReferenceParameter {
+                                ordinal,
+                            },
+                        ),
+                    )
+                } else {
+                    identities
+                        .and_then(|identities| identities.get(captures.len() + index))
+                        .and_then(|identity| match identity.role {
+                            // kotlinc names an extension lambda's receiver after the lambda.
+                            crate::ir::IrParameterRole::ExtensionReceiver => {
+                                crate::jvm::debug_local_names::render(
+                                    self.ir,
+                                    None,
+                                    Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver {
+                                        implementation: impl_fn,
+                                    }),
+                                )
+                            }
+                            _ => crate::jvm::parameter_names::local_variable(identity, ""),
+                        })
+                };
                 if let Some(name) = name {
                     let (slot, _) = parameter_slots[captures.len() + index];
                     scratch.add_local_entry(0, Some(end), slot, &name, &type_descriptor(ty));

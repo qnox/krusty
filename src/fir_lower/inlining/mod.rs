@@ -1116,8 +1116,10 @@ impl BodyLowering<'_> {
                         .flatten()
                 };
                 match (self.ir.expr(value), &source_name, binding) {
-                    (IrExpr::GetValue(slot), None, _)
-                    | (IrExpr::GetValue(slot), _, LambdaParameterBinding::Remapped) => *slot,
+                    // A callable-reference parameter is `pN` even when the argument already
+                    // lives in a slot. Reusing that slot would drop the local kotlinc writes.
+                    (IrExpr::GetValue(slot), None, _) if reference_parameter.is_none() => *slot,
+                    (IrExpr::GetValue(slot), _, LambdaParameterBinding::Remapped) => *slot,
                     (_, _, LambdaParameterBinding::Remapped) => return None,
                     _ => {
                         let slot = self.allocate_temporary();
