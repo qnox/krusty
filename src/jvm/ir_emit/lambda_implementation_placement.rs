@@ -24,7 +24,11 @@ fn implementation_edge(ir: &IrFile, expression: ExprId) -> Option<FunId> {
     }
 }
 
-fn reachable_implementations(ir: &IrFile, roots: Vec<ExprId>) -> Vec<FunId> {
+fn reachable_implementations(
+    ir: &IrFile,
+    roots: Vec<ExprId>,
+    include_direct_specializations: bool,
+) -> Vec<FunId> {
     let mut implementations = Vec::new();
     let mut found = HashSet::new();
     let mut seen = HashSet::new();
@@ -33,7 +37,12 @@ fn reachable_implementations(ir: &IrFile, roots: Vec<ExprId>) -> Vec<FunId> {
         if !seen.insert(expression) {
             continue;
         }
-        if let Some(implementation) = implementation_edge(ir, expression) {
+        let implementation = match ir.expr(expression) {
+            IrExpr::Lambda { impl_fn, .. } => Some(*impl_fn),
+            _ if include_direct_specializations => implementation_edge(ir, expression),
+            _ => None,
+        };
+        if let Some(implementation) = implementation {
             if found.insert(implementation) {
                 implementations.push(implementation);
                 // Nested lambda implementations emit wherever their owning implementation does.
@@ -79,7 +88,12 @@ pub(crate) fn reparent_lambda_impls(ir: &mut IrFile) {
     for property in &ir.statics {
         facade_roots.extend(property.init);
     }
-    let facade_reachable = reachable_implementations(ir, facade_roots)
+    // A direct specialized call is not an implementation-value site. In particular, a consumed
+    // inline body may retain that call in a facade DAG while an actual lambda value is emitted from
+    // a suspend class. Treating the direct call as facade ownership would veto the class placement
+    // required by the lambda metafactory handle and leave the referenced private method absent.
+    // Real lambda values remain facade protection, exactly as before direct-call placement existed.
+    let facade_reachable = reachable_implementations(ir, facade_roots, false)
         .into_iter()
         .collect::<HashSet<_>>();
 
@@ -107,7 +121,7 @@ pub(crate) fn reparent_lambda_impls(ir: &mut IrFile) {
             roots.extend(entry.args.iter().copied());
         }
 
-        for implementation in reachable_implementations(ir, roots) {
+        for implementation in reachable_implementations(ir, roots, true) {
             // Only a free standalone implementation moves. A spliced inline-only implementation
             // has no method, and one referenced by facade code must remain accessible there.
             if !owned.contains(&implementation)
@@ -227,6 +241,54 @@ mod tests {
 
         assert_eq!(ir.classes[class_id as usize].methods, vec![method]);
         assert!(!ir.class_method_owners.contains_key(&implementation));
+    }
+
+    #[test]
+    fn a_facade_direct_copy_does_not_veto_a_class_lambda_value() {
+        let mut ir = IrFile::default();
+        let unit = ir.add_expr(IrExpr::UnitInstance);
+        let implementation = ir.add_fun(function("lambda", unit, None));
+        source_lambda(&mut ir, implementation);
+        ir.specialized_functions.insert(
+            implementation,
+            crate::ir::IrSpecializedFunction {
+                source: implementation,
+                caller_declaration: crate::fir::DeclarationId::from_raw(0),
+                caller: Some(crate::ir::IrEnclosure::File),
+                caller_is_default: false,
+                caller_source_name: "run".to_string(),
+                inline_callee: crate::fir::CallableId::from_raw(0),
+                inline_callee_source_name: "inlineCall".to_string(),
+                parent: None,
+            },
+        );
+        let direct = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(implementation),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        ir.add_fun(function("facade", direct, None));
+        let lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: None,
+        });
+        let owner = crate::types::type_name("sample/Owner");
+        let method = ir.add_fun(function("run", lambda, Some(owner)));
+        let mut class = crate::plugins::synthetic_class("sample/Owner");
+        class.methods.push(method);
+        let class_id = ir.add_class(class);
+        ir.note_class_method(class_id, method);
+
+        reparent_lambda_impls(&mut ir);
+
+        assert_eq!(
+            ir.classes[class_id as usize].methods,
+            vec![method, implementation]
+        );
+        assert_eq!(ir.class_method_owners[&implementation], vec![class_id]);
     }
 
     #[test]

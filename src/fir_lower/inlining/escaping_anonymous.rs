@@ -1229,20 +1229,39 @@ fn remap_owned_class(
     from_name: TypeName,
     to_name: TypeName,
 ) {
+    // A construction can be specialized repeatedly while nested inline bodies expand. Its copied
+    // body may still carry any earlier classifier in that exact specialization chain, especially a
+    // property access realized after the earlier copy was created. Every such ancestor denotes the
+    // same receiver now owned by `to`; remap the whole identity chain rather than only its most
+    // recent spelling.
+    let mut source_classes = vec![from];
+    let mut source_names = vec![from_name];
+    let mut current = from;
+    let mut seen = HashSet::new();
+    while seen.insert(current) {
+        let Some(specialization) = ir.specialized_anonymous_classes.get(&current) else {
+            break;
+        };
+        current = specialization.source;
+        source_classes.push(current);
+        if let Some(class) = ir.classes.get(current as usize) {
+            source_names.push(class.fq_name);
+        }
+    }
     for &expression in owned {
         if let Some(node) = ir.exprs.get_mut(expression as usize) {
-            remap_class(node, from, to, from_name, to_name);
+            remap_class(node, &source_classes, to, &source_names, to_name);
         }
         // A property read records the classifier its receiver statically has. Cloning the
         // expression keeps the declaration class, so the copy would invoke that class's accessor
         // with its own receiver.
         if let Some(owner) = ir.dispatch_classes.get_mut(&expression) {
-            if *owner == from_name {
+            if source_names.contains(owner) {
                 *owner = to_name;
             }
         }
         if let Some(owner) = ir.expression_owners.get_mut(&expression) {
-            if *owner == from_name {
+            if source_names.contains(owner) {
                 *owner = to_name;
             }
         }
@@ -1251,18 +1270,18 @@ fn remap_owned_class(
 
 fn remap_class(
     node: &mut IrExpr,
-    from: ClassId,
+    from: &[ClassId],
     to: ClassId,
-    from_name: TypeName,
+    from_name: &[TypeName],
     to_name: TypeName,
 ) {
     let class_id = |class: &mut ClassId| {
-        if *class == from {
+        if from.contains(class) {
             *class = to;
         }
     };
     let name = |name: &mut TypeName| {
-        if *name == from_name {
+        if from_name.contains(name) {
             *name = to_name;
         }
     };
