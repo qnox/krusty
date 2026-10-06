@@ -66,6 +66,7 @@ const OBSERVED_FEATURES: &[(&str, Option<(u16, u16)>)] = &[
     ("ExplicitBackingFields", Some((2, 4))),
     ("ExplicitContextArguments", Some((2, 5))),
     ("ImplicitSignedToUnsignedIntegerConversion", None),
+    ("JvmSupportRecursiveTypeOf", None),
     ("MultiDollarInterpolation", Some((2, 2))),
     ("MultiPlatformProjects", None),
     ("NameBasedDestructuring", Some((2, 5))),

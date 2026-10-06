@@ -133,6 +133,10 @@ impl ReparseSource {
         self.kind == SourceKind::Java
     }
 
+    pub(crate) fn recursive_type_of(&self) -> bool {
+        self.features.has("JvmSupportRecursiveTypeOf")
+    }
+
     /// Run the ordinary checker during Pass 2 when Pass 1 published only a partial semantic index.
     /// Invalid modules never enter FIR/lowering, but Kotlin still requires diagnostics from every
     /// independently checkable body. This is still the second source parse and the transient file
