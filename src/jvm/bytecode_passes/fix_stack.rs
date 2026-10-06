@@ -16,7 +16,7 @@ use super::analysis::{
 use super::insn_list::{EditableMethod, NodeId};
 use super::opcodes::*;
 use crate::jvm::bytecode_passes::coroutines::markers::{
-    is_after_inline_marker, is_before_inline_marker, is_inline_marker,
+    has_reserved_inline_locals, is_after_inline_marker, is_before_inline_marker, is_inline_marker,
 };
 use crate::jvm::method_node::{Insn, Node};
 
@@ -220,6 +220,9 @@ pub(crate) enum FixStackError {
     ResultShape(usize),
     /// An uninitialized value on the stack an opening marker saves.
     UninitializedValue(usize),
+    /// A reserved opening marker is not followed by the inline-frame local whose slot bounds the
+    /// reservation, or that reservation overlaps another saved stack.
+    ReservedLocalLayout(usize),
 }
 
 /// A saved stack: its values bottom-first and the first local they are stored from
@@ -243,6 +246,26 @@ impl SavedStack {
 
 /// A change to the body, made once the analysis that decided it is no longer read.
 type DeferredAction = Box<dyn FnOnce(&mut EditableMethod)>;
+
+/// The first word reserved for a stack spill. A reserved opening marker is emitted immediately
+/// before the inline-frame marker's `iconst_0; istore`: the frame map placed that local after one
+/// word per word on the operand stack, so subtracting the spill width recovers the reservation.
+fn reserved_first_local(method: &EditableMethod, opening: NodeId, words: u16) -> Option<u16> {
+    let mut cursor = method.insns.next(opening);
+    let mut saw_zero = false;
+    while let Some(id) = cursor {
+        match method.insns.node(id) {
+            Node::Insn(Insn::Op(ICONST_0)) if !saw_zero => saw_zero = true,
+            Node::Insn(Insn::Var { op: ISTORE, slot }) if saw_zero => {
+                return slot.checked_sub(words);
+            }
+            Node::Insn(_) => return None,
+            Node::Label(_) | Node::Line { .. } => {}
+        }
+        cursor = method.insns.next(id);
+    }
+    None
+}
 
 /// `FixStackMethodTransformer.transform`, for the inline-call markers.
 pub(crate) fn fix_stack(method: &mut EditableMethod, owner: &str) -> Result<(), FixStackError> {
@@ -302,11 +325,18 @@ pub(crate) fn fix_stack(method: &mut EditableMethod, owner: &str) -> Result<(), 
     // LocalVariablesManager: a saved stack takes locals above every stack still saved.
     let initial_max_locals = method.method.max_locals;
     let mut live: Vec<(NodeId, SavedStack)> = Vec::new();
-    let first_unused = |live: &[(NodeId, SavedStack)]| {
+    let live_first_unused = |live: &[(NodeId, SavedStack)]| {
         live.iter()
+            // An enclosing bracket whose opening stack was empty owns no local range. In
+            // particular, the suspend-call bracket around an inline argument may be live while
+            // the argument's reserved bracket uses locals below `initial_max_locals`.
+            .filter(|(_, saved)| !saved.values.is_empty())
             .map(|(_, saved)| saved.first_unused_local())
-            .fold(initial_max_locals, u16::max)
+            .max()
+            .unwrap_or(0)
     };
+    let first_unused =
+        |live: &[(NodeId, SavedStack)]| initial_max_locals.max(live_first_unused(live));
     let mut actions: Vec<DeferredAction> = Vec::new();
     for id in ids {
         let node = method.insns.node(id).clone();
@@ -317,9 +347,24 @@ pub(crate) fn fix_stack(method: &mut EditableMethod, owner: &str) -> Result<(), 
             if values.contains(&FixStackValue::Uninitialized) {
                 return Err(FixStackError::UninitializedValue(index));
             }
+            let words = values.iter().map(|value| value.size() as u16).sum::<u16>();
+            let first_local = if has_reserved_inline_locals(&node) {
+                let Some(reserved) = reserved_first_local(method, id, words) else {
+                    return Err(FixStackError::ReservedLocalLayout(index));
+                };
+                if reserved < live_first_unused(&live)
+                    || reserved.checked_add(words).is_none()
+                    || reserved + words > initial_max_locals
+                {
+                    return Err(FixStackError::ReservedLocalLayout(index));
+                }
+                reserved
+            } else {
+                first_unused(&live)
+            };
             let saved = SavedStack {
                 values,
-                first_local: first_unused(&live),
+                first_local,
             };
             method.method.max_locals = method.method.max_locals.max(saved.first_unused_local());
             live.push((id, saved.clone()));
@@ -403,4 +448,105 @@ fn loads(saved: &SavedStack) -> Vec<Node> {
             node
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jvm::method_node::MethodNode;
+
+    fn marker(name: &str) -> Node {
+        Node::Insn(Insn::Method {
+            op: INVOKESTATIC,
+            owner: "kotlin/jvm/internal/InlineMarker".to_string(),
+            name: name.to_string(),
+            desc: "()V".to_string(),
+            interface: false,
+        })
+    }
+
+    #[test]
+    fn a_reserved_spill_precedes_the_inline_frame_local() {
+        let mut method = MethodNode::new(0x0008, "f", "()I");
+        method.max_locals = 2;
+        method.nodes = vec![
+            Node::Insn(Insn::Op(ICONST_1)),
+            marker("beforeInlineCallWithReservedLocals"),
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Var {
+                op: ISTORE,
+                slot: 1,
+            }),
+            marker("afterInlineCall"),
+            Node::Insn(Insn::Op(IRETURN)),
+        ];
+        let mut editable = EditableMethod::new(method);
+
+        fix_stack(&mut editable, "T").expect("the reserved bracket is valid");
+        let finished = editable.finish();
+
+        assert_eq!(finished.max_locals, 2);
+        assert_eq!(
+            finished.nodes,
+            vec![
+                Node::Insn(Insn::Op(ICONST_1)),
+                Node::Insn(Insn::Var {
+                    op: ISTORE,
+                    slot: 0,
+                }),
+                Node::Insn(Insn::Op(ICONST_0)),
+                Node::Insn(Insn::Var {
+                    op: ISTORE,
+                    slot: 1,
+                }),
+                Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+                Node::Insn(Insn::Op(IRETURN)),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_enclosing_bracket_does_not_occupy_the_reserved_local_range() {
+        let mut method = MethodNode::new(0x0008, "f", "()V");
+        method.max_locals = 2;
+        method.nodes = vec![
+            marker("beforeInlineCall"),
+            Node::Insn(Insn::Op(ICONST_1)),
+            marker("beforeInlineCallWithReservedLocals"),
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Var {
+                op: ISTORE,
+                slot: 1,
+            }),
+            marker("afterInlineCall"),
+            Node::Insn(Insn::Op(POP)),
+            marker("afterInlineCall"),
+            Node::Insn(Insn::Op(RETURN)),
+        ];
+        let mut editable = EditableMethod::new(method);
+
+        fix_stack(&mut editable, "T")
+            .expect("an empty outer save does not overlap the inner reserved spill");
+        let finished = editable.finish();
+
+        assert_eq!(finished.max_locals, 2);
+        assert_eq!(
+            finished.nodes,
+            vec![
+                Node::Insn(Insn::Op(ICONST_1)),
+                Node::Insn(Insn::Var {
+                    op: ISTORE,
+                    slot: 0,
+                }),
+                Node::Insn(Insn::Op(ICONST_0)),
+                Node::Insn(Insn::Var {
+                    op: ISTORE,
+                    slot: 1,
+                }),
+                Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+                Node::Insn(Insn::Op(POP)),
+                Node::Insn(Insn::Op(RETURN)),
+            ]
+        );
+    }
 }

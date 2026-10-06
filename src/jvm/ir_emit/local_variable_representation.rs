@@ -130,7 +130,15 @@ impl Emitter<'_> {
                 code.forget_line();
             }
             self.mark_expression_start(initializer, code);
-            debug_lines::mark_statement(self.ir, declaration, code);
+            // A declaration whose line is a mapped body line of an external inline declaration
+            // marks through the class's source map at its store too, like any other line mark.
+            match self.ir.external_frame_lines.get(&declaration).cloned() {
+                Some(frame) => {
+                    let line = self.map_external_frame_line(&frame);
+                    code.mark_line(line);
+                }
+                None => debug_lines::mark_statement(self.ir, declaration, code),
+            }
             let slot = entered
                 .unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand));
             self.unassigned_values.remove(&index);
