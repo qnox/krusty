@@ -467,15 +467,32 @@ pub fn actualization(
         )
         else {
             // `equals`/`hashCode`/`toString` of a data or value class are compiler-generated and
-            // have no compact header. The coarse key already paired them by name; both being
-            // generated is the whole of their shape.
-            let generated = |declaration| {
-                headers.stub(declaration).is_some_and(|stub| {
-                    stub.flags
-                        .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
-                })
+            // have no compact header. Restrict this exception to that declaration-owned trio:
+            // plugin-generated callables are headerless too, but their parameter types still
+            // participate in expect/actual matching.
+            let generated_structural_member = |declaration| {
+                let Some(stub) = headers.stub(declaration) else {
+                    return false;
+                };
+                let structural_name = stub
+                    .lookup_name
+                    .and_then(|name| headers.lookup_names.get(name))
+                    .is_some_and(|name| matches!(name, "equals" | "hashCode" | "toString"));
+                let structural_owner = headers
+                    .declarations
+                    .anchor(declaration)
+                    .and_then(|anchor| anchor.owner)
+                    .and_then(|owner| headers.stub(owner))
+                    .is_some_and(|owner| {
+                        owner.flags.has(crate::fir::DeclarationFlags::DATA)
+                            || owner.flags.has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
+                    });
+                stub.flags
+                    .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                    && structural_name
+                    && structural_owner
             };
-            return generated(expect) && generated(candidate);
+            return generated_structural_member(expect) && generated_structural_member(candidate);
         };
         let expect_type_parameters = headers.syntax.type_parameters(expect_type_parameters);
         let candidate_type_parameters = headers.syntax.type_parameters(candidate_type_parameters);
