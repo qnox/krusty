@@ -11861,14 +11861,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_cross_file_e2e.rs`
   (`a_top_level_property_in_another_file_is_initialized_before_the_call`,
   `a_file_initializer_runs_once_however_many_calls_arrive`).
-- **Native: the public C ABI is primitives, String, and Unit.** A public top-level function whose
-  every parameter and whose result is a primitive, `String`, or `Unit` is declared in the module's
-  C header and exported under that declaration. The export runs the file's initializer before the
-  function, so a C caller sees the same initialized properties a Kotlin caller does. An `internal`
-  function is not declared and is not a dynamic export; a caller in the same module still reaches
-  it. A public function that takes or returns a classifier is named in the header — the sentence
-  is the same decline the backend uses everywhere else — and is not declared. The Kotlin program
-  still compiles and runs: the refusal is the C declaration, not the function.
+- **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
+  function whose parameters are primitives or `String` and whose result is one of those types or
+  `Unit` is declared in the module's C header and exported under that declaration. The export runs
+  the file's initializer before the function, so a C caller sees the same initialized properties
+  a Kotlin caller does. An `internal` function is not declared and is not a dynamic export; a
+  caller in the same module still reaches it. A public function whose name or types cannot be
+  represented safely is named in the header and is not declared. Two Kotlin declarations whose
+  package/name spellings collapse to the same C symbol do not produce duplicate exports: the later
+  declaration is explicitly refused. The Kotlin program still compiles and runs: the refusal is
+  the C declaration, not the function.
   Tests: `tests/native_c_abi_e2e.rs` (`a_public_function_is_exported_and_an_internal_one_is_not`,
   `a_c_caller_sees_the_initialized_value`, `a_public_classifier_parameter_is_declined_by_name`).
 

@@ -180,6 +180,8 @@ pub struct FileInput<'a> {
     /// Every symbol the prebuilt runtime defines, which the program's own names must avoid. Read
     /// once per build by the backend rather than once per file.
     pub runtime_symbols: &'a std::collections::HashSet<String>,
+    /// C export symbols already claimed by earlier files in this module.
+    pub abi_symbols: &'a mut std::collections::HashSet<String>,
     /// This file's identity in the module. Its initializer is exported under it.
     pub source: crate::fir::SourceFileId,
     /// The accessors synthesized for each reference to a dependency property, by site; see
@@ -200,6 +202,7 @@ pub fn lower_file(
         callables,
         dependency_properties,
         runtime_symbols,
+        abi_symbols,
         source,
     } = input;
     let class_model = model::build(ir)?;
@@ -301,7 +304,7 @@ pub fn lower_file(
     {
         return Err("a `main` that takes its arguments".to_string());
     }
-    let abi = super::super::c_abi::file_records(ir);
+    let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
 
     let object = module

@@ -1,9 +1,11 @@
 //! The C header of a native module's public top-level functions.
 //!
-//! A function is declared when it is public and every parameter and the result is a primitive,
-//! `String`, or `Unit`. Anything else public is named in the header and not declared, so a caller
-//! sees the refusal instead of a type this ABI does not have. `internal` and `private` functions
-//! are absent: they are not part of the ABI.
+//! A function is declared when it is public, its name has a collision-free C spelling, every
+//! parameter is a primitive or `String`, and its result is one of those types or `Unit`. Anything
+//! else public is named in the header and not declared, so a caller sees the refusal instead of an
+//! ABI guess. `internal` and `private` functions are absent: they are not part of the ABI.
+
+use std::collections::HashSet;
 
 use crate::ir::IrFile;
 use crate::types::{Ty, Visibility};
@@ -26,8 +28,8 @@ pub(super) fn header(module: &str, records: &[Record]) -> String {
     let guard = format!("KRUSTY_{}_H", c_identifier(module).to_ascii_uppercase());
     let mut out = String::new();
     out.push_str(
-        "/* Public C ABI. A function whose parameters or result are not a primitive, String, or \
-         Unit is named here and not declared. */\n",
+        "/* Public C ABI. A function whose name or types cannot be represented safely is named \
+         here and not declared. */\n",
     );
     out.push_str(&format!("#ifndef {guard}\n#define {guard}\n"));
     out.push_str("#include <stdbool.h>\n#include <stdint.h>\n\n");
@@ -63,7 +65,7 @@ typedef void *kt_ref;
 }
 
 /// File-level functions of one file, public ones only, in source order.
-pub(super) fn file_records(ir: &IrFile) -> Vec<Record> {
+pub(super) fn file_records(ir: &IrFile, symbols: &mut HashSet<String>) -> Vec<Record> {
     let mut indexes: Vec<usize> = (0..ir.functions.len())
         .filter(|index| is_file_level(ir, *index))
         .collect();
@@ -76,7 +78,7 @@ pub(super) fn file_records(ir: &IrFile) -> Vec<Record> {
     indexes
         .into_iter()
         .filter(|index| ir.method_visibility(*index as u32) == Visibility::Public)
-        .map(|index| record(ir, index))
+        .map(|index| record(ir, index, symbols))
         .collect()
 }
 
@@ -100,16 +102,32 @@ pub(super) fn is_file_level(ir: &IrFile, index: usize) -> bool {
     {
         return false;
     }
-    is_c_name(&function.name)
+    true
 }
 
-fn record(ir: &IrFile, index: usize) -> Record {
+fn record(ir: &IrFile, index: usize, symbols: &mut HashSet<String>) -> Record {
     let function = &ir.functions[index];
     if let Some(comment) = refusal(ir, index, &function.name, &function.params, function.ret) {
         return Record::Refusal { comment };
     }
     let tags: Vec<&str> = function.params.iter().map(|ty| type_tag(*ty)).collect();
     let symbol = symbol(ir.package.as_deref(), &function.name, &tags);
+    if !is_c_global_identifier(&symbol) {
+        return Record::Refusal {
+            comment: format!(
+                "krusty: public function `{}` has no safe C identifier",
+                function.name
+            ),
+        };
+    }
+    if !symbols.insert(symbol.clone()) {
+        return Record::Refusal {
+            comment: format!(
+                "krusty: public function `{}` would duplicate C symbol `{symbol}`",
+                function.name
+            ),
+        };
+    }
     let prototype = prototype(&symbol, ir, index as u32, &function.params, function.ret);
     Record::Declaration {
         function: index as u32,
@@ -119,6 +137,11 @@ fn record(ir: &IrFile, index: usize) -> Record {
 }
 
 fn refusal(ir: &IrFile, index: usize, name: &str, params: &[Ty], ret: Ty) -> Option<String> {
+    if !is_c_identifier(name) {
+        return Some(format!(
+            "krusty: public function `{name}` has no safe C identifier"
+        ));
+    }
     if ir.fn_varargs.contains_key(&(index as u32)) {
         return Some(format!(
             "krusty: the native backend does not support a public function `{name}` with a \
@@ -188,7 +211,7 @@ fn parameter_name(ir: &IrFile, function: u32, index: usize) -> String {
         .get(&function)
         .and_then(|info| info.identities.get(index))
         .and_then(|identity| identity.source_name.clone())
-        .filter(|name| is_c_name(name))
+        .filter(|name| is_c_identifier(name))
         .unwrap_or_else(|| format!("p{index}"))
 }
 
@@ -241,11 +264,62 @@ fn describe(ty: Ty) -> String {
     }
 }
 
-fn is_c_name(name: &str) -> bool {
+fn is_c_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
         _ => return false,
     }
     chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+        && !matches!(
+            name,
+            "auto"
+                | "break"
+                | "case"
+                | "char"
+                | "const"
+                | "continue"
+                | "default"
+                | "do"
+                | "double"
+                | "else"
+                | "enum"
+                | "extern"
+                | "float"
+                | "for"
+                | "goto"
+                | "if"
+                | "inline"
+                | "int"
+                | "long"
+                | "register"
+                | "restrict"
+                | "return"
+                | "short"
+                | "signed"
+                | "sizeof"
+                | "static"
+                | "struct"
+                | "switch"
+                | "typedef"
+                | "union"
+                | "unsigned"
+                | "void"
+                | "volatile"
+                | "while"
+                | "_Alignas"
+                | "_Alignof"
+                | "_Atomic"
+                | "_Bool"
+                | "_Complex"
+                | "_Generic"
+                | "_Imaginary"
+                | "_Noreturn"
+                | "_Static_assert"
+                | "_Thread_local"
+        )
+}
+
+fn is_c_global_identifier(name: &str) -> bool {
+    is_c_identifier(name) && !name.starts_with('_')
 }
