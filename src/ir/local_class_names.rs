@@ -1582,8 +1582,8 @@ impl super::IrFile {
                             super::IrEnclosure::Lambda(owner) => local_clones.get(owner).copied(),
                             _ => None,
                         });
-                    let cloned = detach_lambda_impl(self, impl_fn);
-                    local_clones.insert(impl_fn, cloned);
+                    let cloned = detach_lambda_impl(self, source);
+                    local_clones.insert(source, cloned);
                     detached_impls.insert(cloned);
                     new_detached.push(DetachedLambdaImplementation {
                         source,
