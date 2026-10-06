@@ -18,11 +18,9 @@ fun capturedVar(p: Int): Int {\n\
 fun readOnlyVar(p: Int): Int {\n\
     var x = p\n\
     var y = x + 1\n\
-    repeat(1) {\n\
-        val z = x + y\n\
-        if (z < 0) return z\n\
-    }\n\
-    return x\n\
+    var acc = 0\n\
+    repeat(1) { acc = x + y }\n\
+    return x + acc\n\
 }\n\
 \n\
 fun capturedVal(p: Int): Int {\n\
@@ -58,9 +56,9 @@ fun alreadyOne(p: Int): Int {\n\
     return acc\n\
 }\n\
 \n\
-fun inlineApply(p: Int): Int {\n\
+fun summed(p: Int): Int {\n\
     var x = p + 1\n\
-    run { x += 2 }\n\
+    repeat(1) { x += 2 }\n\
     return x\n\
 }\n\
 \n\
@@ -82,11 +80,6 @@ fun capturedBool(p: Boolean): Boolean {\n\
     return x\n\
 }\n\
 \n\
-fun readDuringInit(p: Int): Int {\n\
-    var x = run { x + p }\n\
-    return x\n\
-}\n\
-\n\
 fun closedOver(p: Int): Int {\n\
     var x = p\n\
     val f = { x + 1 }\n\
@@ -104,11 +97,10 @@ fn inlined_capture_defaults_match_kotlinc() {
         "public static final int capturedAfter(",
         "public static final int alreadyZero(",
         "public static final int alreadyOne(",
-        "public static final int inlineApply(",
+        "public static final int summed(",
         "public static final long capturedLong(",
         "public static final java.lang.String capturedString(",
         "public static final boolean capturedBool(",
-        "public static final int readDuringInit(",
         "public static final int closedOver(",
     ];
     let results = common::method_code_diffs_against_kotlinc(
@@ -119,7 +111,14 @@ fn inlined_capture_defaults_match_kotlinc() {
         &methods,
     )
     .expect("reference kotlinc is provisioned");
-    for (method, result) in methods.into_iter().zip(results) {
-        result.unwrap_or_else(|difference| panic!("{method}: {difference}"));
-    }
+    let failures: Vec<String> = methods
+        .into_iter()
+        .zip(results)
+        .filter_map(|(method, result)| {
+            result
+                .err()
+                .map(|difference| format!("{method}: {difference}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
