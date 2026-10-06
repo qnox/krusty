@@ -516,8 +516,12 @@ fn mapped_function(
     }
 }
 
+#[track_caller]
 fn malformed(class: TypeName) -> super::super::FirLoweringFailure {
-    super::super::FirLoweringFailure::MalformedReifiedAnonymousObject { class }
+    super::super::FirLoweringFailure::MalformedReifiedAnonymousObject {
+        class,
+        invariant_line: std::panic::Location::caller().line(),
+    }
 }
 
 fn copy_capture_edges(ir: &mut crate::ir::IrFile, source: ClassId, target: ClassId) {
