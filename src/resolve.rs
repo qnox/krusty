@@ -3265,6 +3265,12 @@ pub struct SymbolTable {
     /// producer; a declaration-only support source contributes no declared spellings.
     pub stable_declared_spellings:
         HashMap<crate::fir::DeclarationId, crate::spelling::DeclaredSpellings>,
+    /// Source spans of checked type-use annotations while Pass 1 still owns their occurrences,
+    /// keyed by stable declaration, expanded semantic type path, and resolved annotation identity.
+    /// Constructor-plan diagnostics consume this before `SymbolTable` is destroyed; no coordinate
+    /// crosses into checked FIR or common IR.
+    pub(crate) type_use_annotation_spans:
+        HashMap<(crate::fir::DeclarationId, Box<[u32]>, TypeName), Span>,
     /// How each source `typealias` spelled its own RIGHT-HAND SIDE, keyed by the alias's identity.
     ///
     /// Two things need it. `TypeAlias.underlying_type` (f4) names an alias DIRECTLY when the
@@ -3418,6 +3424,7 @@ impl Default for SymbolTable {
             source_alias_fqns: HashMap::new(),
             source_alias_expansions: HashMap::new(),
             stable_declared_spellings: HashMap::new(),
+            type_use_annotation_spans: HashMap::new(),
             alias_expansion_spellings: HashMap::new(),
             anonymous_object_types: HashMap::new(),
             anonymous_object_captures: HashMap::new(),

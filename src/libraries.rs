@@ -139,6 +139,10 @@ impl LmFlags {
     /// to the delegate. Providers decide this at their boundary; see
     /// [`LibraryMember::inherited_by_delegation`].
     const INHERITED_BY_DELEGATION: u16 = 1 << 8;
+    /// This constructor is the classifier's primary declaration. Providers retain the metadata
+    /// bit so plugin-generated constructions can select that declaration without assuming list
+    /// order or accepting a same-shaped secondary constructor.
+    const IS_PRIMARY_CONSTRUCTOR: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -189,6 +193,10 @@ impl LmFlags {
     #[inline]
     pub const fn with_inherited_by_delegation(self, on: bool) -> Self {
         self.with(Self::INHERITED_BY_DELEGATION, on)
+    }
+    #[inline]
+    pub const fn with_is_primary_constructor(self, on: bool) -> Self {
+        self.with(Self::IS_PRIMARY_CONSTRUCTOR, on)
     }
 }
 
@@ -767,8 +775,16 @@ impl LibraryMember {
         self.flags.has(LmFlags::IS_EXTENSION)
     }
     #[inline]
+    pub fn is_primary_constructor(&self) -> bool {
+        self.flags.has(LmFlags::IS_PRIMARY_CONSTRUCTOR)
+    }
+    #[inline]
     pub fn set_ret_nullable(&mut self, on: bool) {
         self.flags = self.flags.with_ret_nullable(on);
+    }
+    #[inline]
+    pub fn set_is_primary_constructor(&mut self, on: bool) {
+        self.flags = self.flags.with_is_primary_constructor(on);
     }
     #[inline]
     pub fn set_is_interface(&mut self, on: bool) {

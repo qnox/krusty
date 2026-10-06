@@ -82,6 +82,12 @@ impl ResolvedModuleIndex {
             .map(|(constructor, operands)| (*constructor, operands.as_ref()))
     }
 
+    pub fn serialization_type_use_serializer_constructors(
+        &self,
+    ) -> impl Iterator<Item = (&(TypeName, u32), &ResolvedTypeUseSerializerConstruction)> {
+        self.serialization_type_use_serializer_constructors.iter()
+    }
+
     pub fn publish_declaration_annotations(
         &mut self,
         declaration: DeclarationId,
@@ -205,5 +211,25 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "a source classifier may publish only one custom serializer constructor"
         );
+    }
+
+    pub fn publish_serialization_type_use_serializer_constructor(
+        &mut self,
+        type_argument_count: u32,
+        construction: ResolvedTypeUseSerializerConstruction,
+    ) {
+        let key = (construction.serializer, type_argument_count);
+        if let Some(existing) = self
+            .serialization_type_use_serializer_constructors
+            .get(&key)
+        {
+            assert_eq!(
+                existing, &construction,
+                "equal checked serializer occurrences must select one constructor declaration"
+            );
+            return;
+        }
+        self.serialization_type_use_serializer_constructors
+            .insert(key, construction);
     }
 }

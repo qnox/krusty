@@ -375,22 +375,23 @@ pub(super) fn attach_checked_declaration_metadata(
             .insert(classifier, header.clone());
     }
 
-    let mut attach_property_spelling = |property: Option<DeclarationId>, name: &str| {
-        if let Some(spelling) = property.and_then(|property| index.declaration_spellings(property))
-        {
+    let mut attach_property_spelling = |property: Option<DeclarationId>| {
+        if let Some((source_order, spelling)) = property.and_then(|property| {
+            Some((
+                index.source_order(property)?,
+                index.declaration_spellings(property)?,
+            ))
+        }) {
             ir.prop_declared_spellings
-                .insert((classifier, name.to_owned()), spelling.clone());
+                .insert((classifier, source_order), spelling.clone());
         }
     };
     for (property_index, property) in class.props.iter().enumerate() {
         if property.is_property {
-            attach_property_spelling(
-                active.constructor_property_declaration(
-                    source_class,
-                    u32::try_from(property_index).expect("too many constructor properties"),
-                ),
-                &property.name,
-            );
+            attach_property_spelling(active.constructor_property_declaration(
+                source_class,
+                u32::try_from(property_index).expect("too many constructor properties"),
+            ));
         }
     }
     let body_property_declaration = |property_index: usize| {
@@ -399,8 +400,8 @@ pub(super) fn attach_checked_declaration_metadata(
             u32::try_from(property_index).expect("too many class properties"),
         )
     };
-    for (property_index, property) in class.body_props.iter().enumerate() {
-        attach_property_spelling(body_property_declaration(property_index), &property.name);
+    for property_index in 0..class.body_props.len() {
+        attach_property_spelling(body_property_declaration(property_index));
     }
     for (property_index, property) in class.body_props.iter().enumerate() {
         if let Some(declaration) = body_property_declaration(property_index) {

@@ -244,6 +244,8 @@ const IS_INLINE_BIT: u64 = 1 << 10;
 const IS_OPERATOR_BIT: u64 = 1 << 8;
 /// `IS_INFIX` follows `IS_OPERATOR` in Kotlin metadata's function flags.
 const IS_INFIX_BIT: u64 = 1 << 9;
+/// `IS_SECONDARY` follows constructor visibility in Kotlin metadata's constructor flags.
+const IS_SECONDARY_CONSTRUCTOR_BIT: u64 = 1 << 4;
 
 /// A `JvmMethodSignature`. Both fields are independently optional in the protobuf: an omitted name
 /// means the Kotlin declaration name, while an omitted descriptor is derived from the Kotlin types.
@@ -1159,6 +1161,8 @@ pub struct MetaConstructor {
     pub params: ParamList,
     pub jvm_name: &'static str,
     pub jvm_desc: Option<&'static str>,
+    /// Kotlin metadata's declaration kind, retained independently of constructor order.
+    pub primary: bool,
     /// `@Deprecated(level = HIDDEN)`: binary-compatibility-only, never a resolution candidate.
     /// Stamped from the realization method's `kotlin.Deprecated` annotation after decode.
     pub deprecated_hidden: bool,
@@ -2397,6 +2401,7 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
                     params,
                     jvm_name: intern(jvm_name.as_deref().unwrap_or("<init>")),
                     jvm_desc: jvm_desc.map(|descriptor| intern(&descriptor)),
+                    primary: flags & IS_SECONDARY_CONSTRUCTOR_BIT == 0,
                     deprecated_hidden: false,
                 });
             }

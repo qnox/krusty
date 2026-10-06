@@ -672,6 +672,38 @@ impl<'a> CommonIrBodySink<'a> {
         index: &ResolvedModuleIndex,
         allow_deferred_body_local: bool,
     ) -> Result<(), FirFileLoweringFailure> {
+        for (&key, construction) in index.serialization_type_use_serializer_constructors() {
+            let target = match construction.target {
+                crate::fir::ResolvedCustomSerializerConstructorTarget::Module(declaration) => {
+                    crate::ir::IrCustomSerializerConstructorTarget::Module(
+                        super::constructors::module_constructor_target(index, declaration)
+                            .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?,
+                    )
+                }
+                crate::fir::ResolvedCustomSerializerConstructorTarget::External(declaration) => {
+                    crate::ir::IrCustomSerializerConstructorTarget::External(
+                        crate::ir::IrExternalConstructorTarget::unresolved(declaration),
+                    )
+                }
+            };
+            let lowered = crate::ir::IrCustomSerializerConstruction {
+                serializer: construction.serializer,
+                parameters: construction
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect(),
+                operands: construction.operands.clone(),
+                target,
+            };
+            if let Some(existing) = self.ir.type_use_serializer_constructions.get(&key) {
+                assert_eq!(existing, &lowered, "one checked type-use constructor plan");
+            } else {
+                self.ir
+                    .type_use_serializer_constructions
+                    .insert(key, lowered);
+            }
+        }
         let mut newly_declared = std::collections::HashSet::new();
         let mut pending_local_names = Vec::new();
         for raw in 0..index.declaration_count() {
@@ -826,8 +858,10 @@ impl<'a> CommonIrBodySink<'a> {
                         .map(|parameter| parameter.get())
                         .collect(),
                     operands: operands.into(),
-                    target: super::constructors::module_constructor_target(index, constructor)
-                        .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?,
+                    target: crate::ir::IrCustomSerializerConstructorTarget::Module(
+                        super::constructors::module_constructor_target(index, constructor)
+                            .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?,
+                    ),
                 };
                 self.ir
                     .custom_serializer_constructions

@@ -608,6 +608,7 @@ fn materialize_member_extension_property(
         .or_default()
         .push(crate::ir::MemberExtProp {
             name: property.name.clone(),
+            source_order,
             receiver,
             ty: property.ty,
             is_var: mutable,

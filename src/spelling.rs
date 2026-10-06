@@ -10,8 +10,9 @@
 //! + Hash` and interned, and the whole compiler compares types structurally; an alias slot would
 //! make `Obj(Payload, alias = Cargo) != Obj(Payload, alias = None)` and silently split every type
 //! comparison, interner bucket, and hash lookup on a distinction that is pure surface syntax.
-//! kotlinc keeps abbreviation off type equality for the same reason. Nothing outside metadata
-//! emission may read this: the expanded `Ty` stays the single semantic truth.
+//! kotlinc keeps abbreviation off type equality for the same reason. Alias spelling is metadata
+//! input only; checked annotations on the mirrored occurrences are also semantic plugin input.
+//! The expanded `Ty` remains the single source of type identity and structure.
 //!
 //! Field numbers here were read off kotlinc 2.4.10 output, not recalled — see
 //! `docs/METADATA_NOTES.md`.
