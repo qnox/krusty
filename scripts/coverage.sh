@@ -197,8 +197,10 @@ run_coverage_test_binary() {
   mkdir -p "$result"
   status=0
   phase_begin "$phase"
-  if ! run_with_deadline "$seconds" "$binary" -Z unstable-options --report-time --color never \
+  if run_with_deadline "$seconds" "$binary" -Z unstable-options --report-time --color never \
       --test-threads="$threads" >"$result/output.log" 2>&1; then
+    :
+  else
     status="$?"
   fi
   phase_end "$phase"
@@ -251,8 +253,10 @@ if [ -n "$e2e_bin" ]; then
     echo "coverage: $label: $expected tests" >&2
     phase_begin "$label"
     status=0
-    if ! run_with_deadline "$e2e_timeout" "$e2e_bin" -Z unstable-options --report-time --color never \
+    if run_with_deadline "$e2e_timeout" "$e2e_bin" -Z unstable-options --report-time --color never \
         --test-threads="$test_threads" "${skip_args[@]}" >"$result/output.log" 2>&1; then
+      :
+    else
       status="$?"
     fi
     phase_end "$label"

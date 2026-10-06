@@ -1184,22 +1184,25 @@ fn phase_timing_coverage_run_prints_every_phase() {
             .expect("make stub executable");
     }
 
-    let output = Command::new("bash")
-        .arg(root.join("scripts").join("coverage.sh"))
-        .arg(&summary)
-        .env("HOME", &temp)
-        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
-        .env("CARGO_TARGET_DIR", &target)
-        .env("KRUSTY_COVERAGE_TARGET_DIR", &target)
-        .env("KRUSTY_COVERAGE_COMPILER_JSON", &compiler_json)
-        .env("KRUSTY_COVERAGE_LSP_JSON", &lsp_json)
-        .env("KRUSTY_COVERAGE_E2E_SHARDS", "1")
-        .env("KRUSTY_TEST_JOBS", "1")
-        .env("KRUSTY_TEST_THREADS", "1")
-        .env("E2E_BIN", &e2e_bin)
-        .env("UNIT_BIN", &unit_bin)
-        .output()
-        .expect("run coverage with stubbed toolchain");
+    let run_coverage = || {
+        Command::new("bash")
+            .arg(root.join("scripts").join("coverage.sh"))
+            .arg(&summary)
+            .env("HOME", &temp)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .env("CARGO_TARGET_DIR", &target)
+            .env("KRUSTY_COVERAGE_TARGET_DIR", &target)
+            .env("KRUSTY_COVERAGE_COMPILER_JSON", &compiler_json)
+            .env("KRUSTY_COVERAGE_LSP_JSON", &lsp_json)
+            .env("KRUSTY_COVERAGE_E2E_SHARDS", "1")
+            .env("KRUSTY_TEST_JOBS", "1")
+            .env("KRUSTY_TEST_THREADS", "1")
+            .env("E2E_BIN", &e2e_bin)
+            .env("UNIT_BIN", &unit_bin)
+            .output()
+            .expect("run coverage with stubbed toolchain")
+    };
+    let output = run_coverage();
     let stderr = String::from_utf8(output.stderr).expect("coverage stderr is UTF-8");
     assert!(
         output.status.success(),
@@ -1255,5 +1258,37 @@ fn phase_timing_coverage_run_prints_every_phase() {
         "missing phase total: {stderr}"
     );
     assert!(summary.is_file(), "coverage summary was not written");
+
+    fs::write(
+        &unit_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 7\n",
+    )
+    .expect("write failing unit stub");
+    let failed_unit = run_coverage();
+    assert_eq!(failed_unit.status.code(), Some(1));
+    let failed_unit_stderr =
+        String::from_utf8(failed_unit.stderr).expect("coverage stderr is UTF-8");
+    assert!(
+        failed_unit_stderr.contains("coverage: lsp-unit exited with status 7"),
+        "coverage hid unit failure: {failed_unit_stderr}"
+    );
+
+    fs::write(
+        &unit_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
+    )
+    .expect("restore unit stub");
+    fs::write(
+        &e2e_bin,
+        "#!/usr/bin/env bash\nif [ \"${1:-}\" = --list ]; then printf '%s\\n' 'alpha::one: test' '' '1 test, 0 benchmarks'; exit 0; fi\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 9\n",
+    )
+    .expect("write failing e2e stub");
+    let failed_e2e = run_coverage();
+    assert_eq!(failed_e2e.status.code(), Some(1));
+    let failed_e2e_stderr = String::from_utf8(failed_e2e.stderr).expect("coverage stderr is UTF-8");
+    assert!(
+        failed_e2e_stderr.contains("coverage: e2e-shard-1-of-1 exited with status 9"),
+        "coverage hid e2e failure: {failed_e2e_stderr}"
+    );
     fs::remove_dir_all(temp).expect("remove coverage phase directory");
 }
