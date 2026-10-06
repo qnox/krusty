@@ -183,7 +183,9 @@ impl ClassWriter {
                 if retained[index] {
                     continue;
                 }
-                let present = self.names_class(&spec.inner) || seeded.contains(spec.inner.as_str());
+                let present = self.names_class(&spec.inner)
+                    || seeded.contains(spec.inner.as_str())
+                    || self.unboxed_ref_classes.contains(spec.inner.as_str());
                 if self.retains_inner_class_with_presence(spec, present) {
                     retained[index] = true;
                     grew = true;
@@ -277,6 +279,157 @@ impl ClassWriter {
             self.inner_class_candidates = rows.into_iter().map(|(_, _, spec)| spec).collect();
         }
     }
+
+    /// Forget `Ref` class constants the captured-vars pass is about to remove from every method.
+    ///
+    /// Emission interns the class at the `new`. kotlinc interns it later, when `InnerClasses` is
+    /// written, because that pass has already deleted the box. Releasing the lookup now makes the
+    /// following row intern append a fresh constant at kotlinc's position. A method that still
+    /// names the class, or that cannot be read, keeps the constant where it is.
+    pub(super) fn release_refs_removed_by_unboxing(&mut self) {
+        let pooled = self.cp.class_names();
+        if pooled
+            .iter()
+            .all(|name| !name.starts_with("kotlin/jvm/internal/Ref$"))
+        {
+            return;
+        }
+        let mut live = std::collections::HashSet::new();
+        for index in 0..self.methods.len() {
+            match self.ref_classes_after_unboxing(index) {
+                Some(names) => live.extend(names),
+                None => live.extend(self.ref_classes_named_by_code(index)),
+            }
+        }
+        // A name already released was re-interned for its `InnerClasses` row. Releasing the new
+        // lookup would append yet another constant.
+        live.extend(self.unboxed_ref_classes.iter().cloned());
+        let release: Vec<String> = pooled
+            .into_iter()
+            .filter(|name| name.starts_with("kotlin/jvm/internal/Ref$") && !live.contains(name))
+            .collect();
+        for name in release {
+            self.unboxed_ref_classes.insert(name.clone());
+            self.cp.release_class(&name);
+        }
+    }
+
+    /// `Ref` classes `method` still names once captured variables are unboxed. `None` when the
+    /// body cannot be read or the pass declines it: the caller keeps every `Ref` the raw code names.
+    fn ref_classes_after_unboxing(&self, index: usize) -> Option<Vec<String>> {
+        let method = &self.methods[index];
+        let Some(bytes) = method.code.as_deref() else {
+            return Some(Vec::new());
+        };
+        let name = self.cp.utf8_at(method.name)?.to_string();
+        let desc = self.cp.utf8_at(method.desc)?.to_string();
+        let handlers: Vec<crate::jvm::classreader::ExcEntry> = method
+            .exceptions
+            .iter()
+            .map(
+                |&(start_pc, end_pc, handler_pc, catch_type)| crate::jvm::classreader::ExcEntry {
+                    start_pc,
+                    end_pc,
+                    handler_pc,
+                    catch_type,
+                },
+            )
+            .collect();
+        let code = crate::jvm::method_node::CodeAttribute {
+            max_stack: method.max_stack,
+            max_locals: method.max_locals,
+            code: bytes,
+            handlers: &handlers,
+            lines: &method.lnt,
+            locals: &[],
+        };
+        let mut node = self.read_emitted_code(method.access, &name, &desc, &code)?;
+        if crate::jvm::bytecode_passes::captured_vars::eliminate(&mut node, &self.internal_name)
+            .is_err()
+        {
+            return None;
+        }
+        Some(referenced_ref_classes(&node))
+    }
+
+    /// `Ref` classes the raw code of `method` names, before unboxing. Used when the body cannot be
+    /// read back, so a class that code still mentions is not released.
+    fn ref_classes_named_by_code(&self, index: usize) -> Vec<String> {
+        let Some(bytes) = self.methods[index].code.as_deref() else {
+            return Vec::new();
+        };
+        let mut names = Vec::new();
+        let mut pc = 0;
+        while let Some(length) = crate::jvm::bytecode::instruction_len(bytes, pc) {
+            let operand = bytes
+                .get(pc + 1..pc + 3)
+                .map(|operand| u16::from_be_bytes([operand[0], operand[1]]));
+            let index = match bytes[pc] {
+                0x12 => bytes.get(pc + 1).copied().map(u16::from),
+                0x13 | 0x14 | 0xb2..=0xb8 | 0xb9 | 0xba | 0xbb | 0xbd | 0xc0 | 0xc1 | 0xc5 => {
+                    operand
+                }
+                _ => None,
+            };
+            if let Some(index) = index {
+                names.extend(self.ref_classes_reached(index, &mut Vec::new()));
+            }
+            pc += length;
+        }
+        names
+    }
+
+    fn ref_classes_reached(&self, index: u16, stack: &mut Vec<u16>) -> Vec<String> {
+        if stack.contains(&index) {
+            return Vec::new();
+        }
+        stack.push(index);
+        let mut names = Vec::new();
+        let Some(entry) = self.cp.entry_at(index) else {
+            return names;
+        };
+        match entry {
+            super::Const::Class(name) => {
+                if let Some(text) = self.cp.utf8_at(*name) {
+                    if text.starts_with("kotlin/jvm/internal/Ref$") {
+                        names.push(text.to_string());
+                    }
+                }
+            }
+            super::Const::Fieldref(class, _)
+            | super::Const::Methodref(class, _)
+            | super::Const::InterfaceMethodref(class, _)
+            | super::Const::MethodHandle(_, class) => {
+                names.extend(self.ref_classes_reached(*class, stack));
+            }
+            super::Const::InvokeDynamic(_, signature) => {
+                names.extend(self.ref_classes_reached(*signature, stack));
+            }
+            super::Const::NameAndType(_, desc) => {
+                names.extend(self.ref_classes_reached(*desc, stack));
+            }
+            _ => {}
+        }
+        names
+    }
+}
+
+/// `Ref` classes named by `node`'s instructions.
+fn referenced_ref_classes(node: &crate::jvm::method_node::MethodNode) -> Vec<String> {
+    use crate::jvm::method_node::{Insn, Node};
+    node.nodes
+        .iter()
+        .filter_map(|node| match node {
+            Node::Insn(Insn::Type { class, .. })
+            | Node::Insn(Insn::Field { owner: class, .. })
+            | Node::Insn(Insn::Method { owner: class, .. })
+                if class.starts_with("kotlin/jvm/internal/Ref$") =>
+            {
+                Some(class.clone())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// kotlinc's `fqNameWhenAvailable` of each row's class: from `paths` for a class declared in

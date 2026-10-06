@@ -529,6 +529,10 @@ pub struct ClassWriter {
     /// Candidate `InnerClasses` entries (the file's nested classes). `finish` emits only those whose
     /// `inner` is actually referenced as a class constant — kotlinc's rule.
     inner_class_candidates: Vec<InnerClassSpec>,
+    /// `Ref` classes the captured-vars pass removed from every method. Emission interned each one
+    /// at `new`; forgetting that lookup lets the `InnerClasses` row intern a fresh constant after
+    /// `@Metadata`, which is where kotlinc first meets a box that pass deleted. The row is kept.
+    unboxed_ref_classes: std::collections::HashSet<String>,
     inner_class_resolver: Option<InnerClassResolver>,
     inner_class_table: inner_classes::InnerClassTable,
     value_classes: Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
@@ -615,6 +619,7 @@ impl ClassWriter {
             class_deprecated: false,
             deprecated_methods: std::collections::HashSet::new(),
             inner_class_candidates: Vec::new(),
+            unboxed_ref_classes: std::collections::HashSet::new(),
             inner_class_resolver: None,
             inner_class_table: inner_classes::InnerClassTable::default(),
             value_classes: Rc::default(),
@@ -1379,6 +1384,10 @@ impl ClassWriter {
         self.intern_late_fields();
         self.resolve_inner_classes();
         self.intern_enclosing_method_refs();
+        // After the rewrite, so a `Ref` the captured-vars pass deleted is no longer a code
+        // reference. Releasing it here, before the rows intern, appends its class constant with
+        // the row instead of leaving the `new` that the pass removed.
+        self.release_refs_removed_by_unboxing();
         // Every EMITTED `InnerClasses` entry's refs (outer Class, simple name) intern here — before
         // the `SourceFile` value and the attribute names (kotlinc visits the InnerClasses table
         // ahead of both; a nested class's own entry otherwise interned its outer at serialization,

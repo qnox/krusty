@@ -71,6 +71,21 @@ impl super::ConstPool {
         let utf8 = self.utf8_index.get(mapped)?;
         self.dedup.get(&super::Const::Class(utf8)).copied()
     }
+
+    /// Drop the lookup for `internal_name`'s class constant, leaving its slot in place.
+    ///
+    /// A later `class` call appends a fresh constant. The captured-vars pass deletes the `new` that
+    /// interned a `Ref` early; kotlinc first meets that class while writing `InnerClasses`, after
+    /// `@Metadata`. Forgetting the early lookup lets that write intern it there. The unreferenced
+    /// early slot is dropped when the pool is laid out.
+    pub(super) fn release_class(&mut self, internal_name: &str) {
+        let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal_name);
+        let Some(utf8) = self.utf8_index.get(mapped) else {
+            return;
+        };
+        self.dedup.remove(&super::Const::Class(utf8));
+        self.utf8_index.remove(mapped);
+    }
 }
 
 #[test]
