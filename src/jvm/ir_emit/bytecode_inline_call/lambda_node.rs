@@ -115,11 +115,9 @@ pub(super) fn callable_reference_template(
     ir: &IrFile,
     argument: u32,
 ) -> Option<(u32, Vec<u32>, u32, Ty)> {
-    let IrExpr::CallableReference(reference) = ir.expr(argument) else {
-        return None;
-    };
-    let (adapter, captures, inline_body, _) = ir.callable_reference_inline_template(argument)?;
-    Some((adapter, captures, inline_body, reference.function_type))
+    let (adapter, captures, inline_body, _, function_type) =
+        ir.callable_reference_inline_template(argument)?;
+    Some((adapter, captures, inline_body, function_type))
 }
 
 impl Emitter<'_> {

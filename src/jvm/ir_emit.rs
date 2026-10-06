@@ -330,6 +330,10 @@ pub(crate) struct EmitRun {
     /// (a `require { … }` message, an inlined `flatMap { … }` body) never emits one, so its standalone
     /// `$lambda$N` method is dead — dropped on the re-emit (kotlinc emits neither it nor its facade).
     used_lambdas: std::cell::RefCell<std::collections::HashSet<u32>>,
+    /// Function-reference carrier classes whose value was actually emitted. A reference offered to
+    /// an external inline call keeps its normal carrier through discovery; a successful splice does
+    /// not evaluate it, so the second pass can omit that otherwise dead class.
+    used_function_reference_classes: std::cell::RefCell<std::collections::HashSet<TypeName>>,
     /// Lambda impls proven dead by the discovery emit. Unlike `inline_only_fns`, this is an
     /// emit-run decision: it includes class-owned helpers whose every use was spliced, and is cleared
     /// before the next independent emission of the same IR.
@@ -1565,6 +1569,7 @@ fn emit_all_with_class_meta_impl(
     // actually uses `invokedynamic`. A lambda spliced by the inliner emits neither realization.
     env.run.used_lambdas.borrow_mut().clear();
     env.run.used_indy_lambdas.borrow_mut().clear();
+    env.run.used_function_reference_classes.borrow_mut().clear();
     env.run.dead_lambdas.borrow_mut().clear();
     let empty = std::collections::HashSet::new();
     let first = emit_pass(
@@ -1577,10 +1582,21 @@ fn emit_all_with_class_meta_impl(
         &LambdaSelection {
             dead: &empty,
             rescued: &empty,
+            dead_function_reference_classes: &empty,
         },
     )?;
     let used = env.run.used_lambdas.borrow().clone();
     let used_indy = env.run.used_indy_lambdas.borrow().clone();
+    let used_function_reference_classes = env.run.used_function_reference_classes.borrow().clone();
+    let dead_function_reference_classes = ir
+        .classes
+        .iter()
+        .enumerate()
+        .filter(|(_, class)| {
+            class.func_ref.is_some() && !used_function_reference_classes.contains(&class.fq_name)
+        })
+        .map(|(class, _)| class as ClassId)
+        .collect::<std::collections::HashSet<_>>();
     // `invokedynamic` was added in class-file version 51 (Java 7). Do not return a version-50 class
     // containing an opcode that its declared target cannot represent. This check uses the emitter's
     // discovery result rather than the source/IR lambda count: an inline-only lambda that was fully
@@ -1611,7 +1627,9 @@ fn emit_all_with_class_meta_impl(
     let function_reference_targets: std::collections::HashSet<u32> = ir
         .classes
         .iter()
-        .filter_map(|class| class.func_ref.as_ref())
+        .enumerate()
+        .filter(|(class, _)| !dead_function_reference_classes.contains(&(*class as ClassId)))
+        .filter_map(|(_, class)| class.func_ref.as_ref())
         .filter_map(|reference| function_reference_target(ir, reference))
         .collect();
     let dead: std::collections::HashSet<u32> = ir
@@ -1633,7 +1651,11 @@ fn emit_all_with_class_meta_impl(
     // learned about the post-splice frame: those functions need the re-emit whether or not any
     // lambda turned out dead.
     let machines_to_build = !env.run.machine_plans.borrow().is_empty();
-    if dead.is_empty() && rescued.is_empty() && !machines_to_build {
+    if dead.is_empty()
+        && rescued.is_empty()
+        && dead_function_reference_classes.is_empty()
+        && !machines_to_build
+    {
         return Some(first);
     }
     env.run.dead_lambdas.borrow_mut().clone_from(&dead);
@@ -1650,6 +1672,7 @@ fn emit_all_with_class_meta_impl(
         &LambdaSelection {
             dead: &dead,
             rescued: &rescued,
+            dead_function_reference_classes: &dead_function_reference_classes,
         },
     )
 }
@@ -1659,6 +1682,7 @@ fn emit_all_with_class_meta_impl(
 struct LambdaSelection<'a> {
     dead: &'a std::collections::HashSet<u32>,
     rescued: &'a std::collections::HashSet<u32>,
+    dead_function_reference_classes: &'a std::collections::HashSet<ClassId>,
 }
 
 fn emit_pass(
@@ -1870,6 +1894,9 @@ fn emit_pass(
     // Each class — with its optional `@Metadata` (the provider returns `None` for the default emit).
     for (class_id, c) in ir.classes.iter().enumerate() {
         let class_id = class_id as ClassId;
+        if lambdas.dead_function_reference_classes.contains(&class_id) {
+            continue;
+        }
         let fq_name = c.fq_name();
         // A function whose suspension points all turned out to be tail calls has no machine.
         if let Some(crate::jvm::classfile::CoroutineOutcome::TailCalls) =

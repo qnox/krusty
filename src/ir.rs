@@ -133,6 +133,7 @@ pub use properties::{
     IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers, MemberExtProp,
 };
 pub use property_layouts::IrLocalPropertyLayout;
+pub(crate) use references::IrCallableReferenceInlineTemplate;
 pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, PropRef,
     ReflectedCallable,
@@ -2081,6 +2082,10 @@ pub struct IrFile {
     /// records this while constructing the body, before wrapping it in `return`/`block`; consumers
     /// never inspect the generated body shape to recover the invocation template.
     pub(crate) callable_reference_adapter_results: std::collections::HashMap<ExprId, ExprId>,
+    /// Callable-reference invocation templates retained across target carrier realization. The
+    /// backend keeps the carrier until an actual emission pass proves the value was consumed.
+    pub(crate) callable_reference_inline_templates:
+        std::collections::HashMap<ExprId, references::IrCallableReferenceInlineTemplate>,
     /// Complete evaluation regions for semantically inline calls, including any source-order
     /// operand prelude and any consumed inline-body template. This target-neutral fact survives
     /// provider realization and structural expansion, so backends need not reconstruct an inline

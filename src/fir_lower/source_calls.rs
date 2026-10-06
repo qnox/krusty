@@ -2045,7 +2045,9 @@ pub(crate) fn inline_argument_template(
             }
             Some((impl_fn, captures, inline_body, arity))
         }
-        IrExpr::CallableReference(_) => ir.callable_reference_inline_template(expression),
+        IrExpr::CallableReference(_) => ir
+            .callable_reference_inline_template(expression)
+            .map(|(adapter, captures, body, arity, _)| (adapter, captures, body, arity)),
         _ => None,
     }
 }

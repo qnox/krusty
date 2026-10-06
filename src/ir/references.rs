@@ -83,6 +83,19 @@ pub struct IrCallableReference {
     pub reflection_owner: Option<crate::types::TypeName>,
 }
 
+/// A private copy of a callable reference's invocation adapter retained while a backend realizes
+/// the reference's ordinary value carrier. An inline backend may consume this template; if it
+/// declines, the carrier remains the complete runtime value. Consumption is an emission result,
+/// never inferred from the reference's syntax or its parameter modifier.
+#[derive(Clone, Debug)]
+pub(crate) struct IrCallableReferenceInlineTemplate {
+    pub(crate) adapter: FunId,
+    pub(crate) captures: Vec<ExprId>,
+    pub(crate) returned: ExprId,
+    pub(crate) arity: usize,
+    pub(crate) function_type: Ty,
+}
+
 impl IrFile {
     /// The checked invocation template of a callable reference consumed as an inline argument.
     /// Callable-reference lowering published the returned expression directly; this projection
@@ -91,7 +104,16 @@ impl IrFile {
     pub(crate) fn callable_reference_inline_template(
         &self,
         expression: ExprId,
-    ) -> Option<(FunId, Vec<ExprId>, ExprId, usize)> {
+    ) -> Option<(FunId, Vec<ExprId>, ExprId, usize, Ty)> {
+        if let Some(template) = self.callable_reference_inline_templates.get(&expression) {
+            return Some((
+                template.adapter,
+                template.captures.clone(),
+                template.returned,
+                template.arity,
+                template.function_type,
+            ));
+        }
         let IrExpr::CallableReference(reference) = self.expr(expression) else {
             return None;
         };
@@ -107,7 +129,13 @@ impl IrFile {
         let mut captures = reference.captures.clone();
         captures.extend(reference.bound_receiver);
         let arity = function.params.len().checked_sub(captures.len())?;
-        (signature.params.len() == arity).then_some((reference.adapter, captures, returned, arity))
+        (signature.params.len() == arity).then_some((
+            reference.adapter,
+            captures,
+            returned,
+            arity,
+            reference.function_type,
+        ))
     }
 }
 
