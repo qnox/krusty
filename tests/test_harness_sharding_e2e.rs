@@ -160,7 +160,7 @@ fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
     let output = Command::new("bash")
         .args([
             "-c",
-            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_SHARDS; source \"$1\"; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_SHARDS\" \"$KRUSTY_SCORED_CONFORMANCE_SHARDS\" \"$KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_SHARDS\"",
+            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_SHARDS; source \"$1\"; if [ -n \"${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS+set}\" ]; then echo 'a scored run has no deadline of its own' >&2; exit 1; fi; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_SHARDS\" \"$KRUSTY_SCORED_CONFORMANCE_SHARDS\" \"$KRUSTY_E2E_SHARDS\"",
             "gate-default-test",
         ])
         .arg(defaults)
@@ -176,7 +176,7 @@ fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
         .lines()
         .map(|value| value.parse::<u64>().expect("numeric gate default"))
         .collect::<Vec<_>>();
-    assert_eq!(values, [120, 120, 120, 4, 12, 300, 22]);
+    assert_eq!(values, [120, 120, 120, 4, 12, 22]);
 }
 
 #[cfg(unix)]
@@ -202,7 +202,9 @@ fn prebuilt_conformance_runner_enforces_its_configured_deadline() {
         .arg("2.4.10")
         .env("KRUSTY_KOTLINC", "/bin/true")
         .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
-        .env("KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS", "1")
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "1")
+        // The retired scored-only deadline must not lengthen the canonical one.
+        .env("KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS", "300")
         .output()
         .expect("run delayed conformance fixture");
     let elapsed = started.elapsed();
@@ -251,7 +253,7 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
         .arg("2.4.10")
         .env("KRUSTY_KOTLINC", "/bin/reference-kotlinc")
         .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
-        .env("KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
         .output()
         .expect("run reporting conformance fixture");
 
@@ -321,7 +323,7 @@ fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
         .arg("2.4.10")
         .env("KRUSTY_KOTLINC", "/bin/reference-kotlinc")
         .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
-        .env("KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
         .output()
         .expect("run failing-shard conformance fixture");
 

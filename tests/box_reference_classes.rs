@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use krusty::conformance::{
     directive, inject_support_module, module_units, split_files, split_modules, BoxJdk,
@@ -124,11 +125,20 @@ pub fn reference_compile(
     // A snapshot/dev/beta compiler is not an immutable build, so its output is never cached.
     let cacheable = byte_dump::published_compiler_id().is_some();
     if cacheable {
-        if let Some(cached) = load_cache(&cache) {
+        let lookup = Instant::now();
+        let cached = load_cache(&cache);
+        STATS.cache_read.add_since(lookup);
+        if let Some(cached) = cached {
+            match &cached {
+                Ok(_) => STATS.hits.bump(),
+                Err(_) => STATS.cached_rejections.bump(),
+            }
             return cached;
         }
     }
 
+    STATS.misses.bump();
+    let compiling = Instant::now();
     let scratch = ScratchDir::new()?;
     let result = compile_all(
         src,
@@ -139,10 +149,94 @@ pub fn reference_compile(
         &language_args,
         scratch.path(),
     );
+    STATS.compile.add_since(compiling);
+    let cleanup = Instant::now();
+    drop(scratch);
+    STATS.cleanup.add_since(cleanup);
     if cacheable {
+        let storing = Instant::now();
         store_cache(&cache, fingerprint, &result);
+        STATS.store.add_since(storing);
     }
     result
+}
+
+/// Process-wide reference-inventory cache and compile totals, for telling a cold run's cache misses
+/// and compile cost from a warm run's cache reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReferenceStats {
+    /// Lookups answered by a published inventory.
+    pub hits: u64,
+    /// Lookups answered by a cached deterministic compile rejection.
+    pub cached_rejections: u64,
+    /// Lookups that compiled the case with the reference compiler.
+    pub misses: u64,
+    /// Time spent reading cached entries, hits and misses alike.
+    pub cache_read: Duration,
+    /// Time spent compiling missed cases (writing sources, kotlinc, javac, reading classes).
+    pub compile: Duration,
+    /// Time spent deleting missed cases' scratch directories.
+    pub cleanup: Duration,
+    /// Time spent publishing missed cases' results to the cache.
+    pub store: Duration,
+}
+
+struct Counter(AtomicU64);
+
+impl Counter {
+    const fn new() -> Self {
+        Counter(AtomicU64::new(0))
+    }
+
+    fn bump(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn add_since(&self, since: Instant) {
+        let nanos = u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.0.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    fn count(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn duration(&self) -> Duration {
+        Duration::from_nanos(self.count())
+    }
+}
+
+struct Counters {
+    hits: Counter,
+    cached_rejections: Counter,
+    misses: Counter,
+    cache_read: Counter,
+    compile: Counter,
+    cleanup: Counter,
+    store: Counter,
+}
+
+static STATS: Counters = Counters {
+    hits: Counter::new(),
+    cached_rejections: Counter::new(),
+    misses: Counter::new(),
+    cache_read: Counter::new(),
+    compile: Counter::new(),
+    cleanup: Counter::new(),
+    store: Counter::new(),
+};
+
+/// A snapshot of [`ReferenceStats`] for this process.
+pub fn reference_stats() -> ReferenceStats {
+    ReferenceStats {
+        hits: STATS.hits.count(),
+        cached_rejections: STATS.cached_rejections.count(),
+        misses: STATS.misses.count(),
+        cache_read: STATS.cache_read.duration(),
+        compile: STATS.compile.duration(),
+        cleanup: STATS.cleanup.duration(),
+        store: STATS.store.duration(),
+    }
 }
 
 /// Read every `.class` under `dir` into an internal-name → bytes map (package `/` separators, no
@@ -466,8 +560,10 @@ fn compile_unit(
         for path in kotlin_paths.iter().chain(&java_paths) {
             args.push(path.to_string_lossy().into_owned());
         }
-        let (code, diagnostics) =
-            common::kotlinc_compile(&args).ok_or_else(|| "kotlinc unavailable".to_string())?;
+        // This inventory's own cache is keyed by every input and the exact compiler, so a miss
+        // compiles live rather than also replaying or recording through the recorded-byte archive.
+        let (code, diagnostics) = common::kotlinc_server::kotlinc_compile_unrecorded(&args)
+            .ok_or_else(|| "kotlinc unavailable".to_string())?;
         if code != 0 {
             return Err(reference_compile_error(unit.module, &diagnostics));
         }
@@ -1140,6 +1236,140 @@ mod tests {
             "folded app classes must compile: {:?}",
             app.keys()
         );
+    }
+
+    /// Set only in the child process [`a_reference_miss_compiles_live_without_the_recorded_byte_archive`]
+    /// spawns, naming the empty recorded-byte directory it must leave untouched.
+    const ARCHIVE_PROBE: &str = "KRUSTY_REF_ARCHIVE_PROBE_DIR";
+
+    #[test]
+    fn a_reference_miss_compiles_live_without_the_recorded_byte_archive() {
+        if !kotlinc_available() || std::env::var_os(ARCHIVE_PROBE).is_some() {
+            return;
+        }
+        // A child process keeps the process-wide counters exact and the environment private. It
+        // runs as CI does on a pull request: no recorded-byte entry for this case, no permission to
+        // compile a missing one, and no permission to write the archive.
+        let dumps = std::env::temp_dir().join(format!(
+            "krusty_ref_archive_probe_{}_{}",
+            std::process::id(),
+            staging_sequence()
+        ));
+        let _ = std::fs::remove_dir_all(&dumps);
+        std::fs::create_dir_all(&dumps).expect("create probe recorded-byte directory");
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "box_reference_classes::tests::reference_archive_probe",
+                "--nocapture",
+            ])
+            .env(ARCHIVE_PROBE, &dumps)
+            .env("KRUSTY_CLASS_DUMP_DIR", &dumps)
+            .env("CI", "true")
+            .env_remove("KRUSTY_CLASS_DUMP_COMPILE_MISSING")
+            .env_remove("KRUSTY_CLASS_DUMP_WRITE")
+            .env_remove("KRUSTY_RECORD")
+            .env_remove("KRUSTY_RECORD_CLASS_DUMPS")
+            .output()
+            .expect("run the reference archive probe");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "reference archive probe failed: {}\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let written: Vec<_> = std::fs::read_dir(&dumps)
+            .expect("read probe recorded-byte directory")
+            .map(|entry| entry.expect("probe directory entry").file_name())
+            .collect();
+        assert_eq!(written, Vec::<std::ffi::OsString>::new());
+        std::fs::remove_dir_all(&dumps).expect("remove probe recorded-byte directory");
+    }
+
+    #[test]
+    fn reference_archive_probe() {
+        // Only an immutable release or RC build publishes inventory entries to read back.
+        if std::env::var_os(ARCHIVE_PROBE).is_none() || byte_dump::published_compiler_id().is_none()
+        {
+            return;
+        }
+        // Unique source: the first lookup must miss the reference inventory cache.
+        let src = format!(
+            "// probe {} {:?}\nfun box(): String = \"OK\"\n",
+            std::process::id(),
+            std::time::SystemTime::now()
+        );
+        let jdk = BoxJdk::Full { root: None };
+        let before = (
+            reference_stats(),
+            common::kotlinc_server::kotlinc_server_stats(),
+        );
+        let first = reference_compile(&src, "probe", &[], jdk, NO_HELPERS)
+            .expect("a reference miss compiles live");
+        let after_miss = (
+            reference_stats(),
+            common::kotlinc_server::kotlinc_server_stats(),
+        );
+        let second = reference_compile(&src, "probe", &[], jdk, NO_HELPERS)
+            .expect("the published inventory is read back");
+        let after_hit = (
+            reference_stats(),
+            common::kotlinc_server::kotlinc_server_stats(),
+        );
+
+        assert_eq!(before.0, ReferenceStats::default());
+        assert_eq!(
+            before.1,
+            common::kotlinc_server::KotlincServerStats::default()
+        );
+        assert_eq!(first, second);
+        assert!(first
+            .module(MAIN_MODULE)
+            .is_some_and(|classes| classes.contains_key("ProbeKt")));
+        assert_eq!(
+            (
+                after_miss.0.hits,
+                after_miss.0.cached_rejections,
+                after_miss.0.misses
+            ),
+            (0, 0, 1)
+        );
+        assert_eq!(
+            (
+                after_miss.1.requests,
+                after_miss.1.starts,
+                after_miss.1.restarts
+            ),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            (
+                after_hit.0.hits,
+                after_hit.0.cached_rejections,
+                after_hit.0.misses
+            ),
+            (1, 0, 1)
+        );
+        assert_eq!(
+            after_hit.1, after_miss.1,
+            "a cache hit never reaches kotlinc"
+        );
+
+        let (compiler_id, compiler_len) = compiler_identity();
+        let fingerprint = reference_cache_fingerprint(
+            &src,
+            "probe",
+            NO_HELPERS,
+            &jdk.kotlinc_args(&[]).expect("full JDK arguments"),
+            &reference_directive_args(&src),
+            compiler_id.as_deref(),
+            compiler_len,
+        );
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("target/cache/ref-classes/{fingerprint:032x}"));
+        assert!(cache.join("OK").is_file(), "missing {}", cache.display());
+        std::fs::remove_dir_all(&cache).expect("remove the probe's inventory entry");
     }
 
     fn compile_or_skip(

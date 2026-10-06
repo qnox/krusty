@@ -75,7 +75,7 @@ fn run_scored_shards(name: &str, reports: &[ShardReports], byte_out: bool) -> Sc
             "KRUSTY_SCORED_CONFORMANCE_SHARDS",
             reports.len().to_string(),
         )
-        .env("KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS", "10")
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "10")
         .output()
         .expect("run scored conformance fixture");
     let bytes = byte_out

@@ -196,17 +196,23 @@ PR and merge-group jobs replay every matching entry, compile missing or incomple
 and never save the result. Thus a partial prefix cache is an accelerator, not an authority. A
 successful master job refreshes and saves the cache under the supported Kotlin version and master
 commit. A snapshot, dev, or beta build never reads or writes dumps — that version string is not a
-stable artifact, so it still compiles. All kotlinc calls go through the same archive. A successful
+stable artifact, so it still compiles. Every kotlinc call except a box-corpus reference compile goes
+through the same archive. A successful
 build and a rejected one both keep the exit code and kotlinc's
 diagnostics, and an assert replays them. Locally, a dump that has class files but no exit code or
 diagnostics fails that assert instead of compiling; read-only CI compiles that incomplete entry
 live. The archive is read at runtime and is not compiled into the test binary or committed to the repository.
 The corpus byte-diff cache under `target/cache/ref-classes/` follows
-the same release/RC rule and stays uncached for any other compiler.
+the same release/RC rule and stays uncached for any other compiler. A box-corpus reference compile
+reads and writes only that cache: its key already covers the source, stem, classpath, and compiler
+identity, so a miss compiles live with kotlinc in every environment and never touches the archive.
+Recording each of those compiles into the archive as well rewrote the whole archive per store and
+pushed a cold scored shard past its deadline.
 
-The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
-seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard
-defaults to 295 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.
+The general test-binary deadline defaults to 120 seconds. Each conformance pass, including each
+shard of the scored byte-equality run, defaults to 120 seconds and can be adjusted with
+`KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard defaults to 120 seconds and can be
+adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.
 
 Do not use `--release` for tests. The release build cycle takes longer than it saves at runtime, and
 `run-tests.sh --release` is rejected intentionally.
@@ -355,7 +361,7 @@ KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test conformance kotlin_cod
 
 This skips JVM execution in the conformance test, prints phase timing, and writes
 `target/flamegraph.svg` plus a `top krusty frames` table on stderr. The whole run fits inside the
-harness deadline (`KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`, 295s): the harness symbolizes each sampled
+harness deadline (`KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`, 120s): the harness symbolizes each sampled
 instruction pointer once rather than once per stack, so turning ~80k samples into an SVG costs a
 couple of seconds instead of the ~8 minutes `pprof`'s own `Report::build` takes on a full-corpus
 profile. The SVG covers every sampled stack and runs to tens of megabytes — it is meant to be opened
@@ -400,9 +406,10 @@ Optional profiling knobs:
 
 - `KRUSTY_TEST_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline applied to every test
   binary except conformance and e2e; raise it explicitly on slow systems.
-- `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for each
-  full-suite or focused conformance pass.
-- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for focused e2e runs and
+- `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline for each
+  full-suite or focused conformance pass and for each shard of the scored run
+  (`conformance-run.sh`).
+- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline for focused e2e runs and
   each full-suite e2e shard.
 - `KRUSTY_E2E_SHARDS=<count>` overrides the twenty-two whole-module shards used by the plain full-suite
   run.
@@ -411,11 +418,9 @@ Optional profiling knobs:
 - `KRUSTY_SCORED_CONFORMANCE_SHARDS=<count>` overrides the twelve shards the scored byte-equality run
   (`conformance-run.sh`) partitions the corpus into. That run reference-compiles every applicable
   case with the real kotlinc, so it is partitioned more finely than the plain gate's box pass.
-- `KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 300-second per-shard deadline
-  the scored run (`conformance-run.sh`) applies. Reference-compiling a corpus shard cold (empty
-  ref-class cache on a first run or CI cache miss) plus the JVM/kotlinc-server teardown exceeds the
-  plain gate's unit-test ceiling, so this workload has its own larger deadline. A warm shard finishes
-  in seconds, far inside it, so the ceiling never slows a cached run.
+  The scored run has no deadline of its own: a shard that reference-compiles every applicable case
+  cold (empty ref-class cache on a first run or CI cache miss) still fits the plain conformance
+  deadline.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.
@@ -495,8 +500,12 @@ byte report on stderr (`conformance-run: Kotlin <version> JVM byte equality (mat
 bytes): …`) and to the `BYTES` file when one is given. Either shard report missing or malformed, a
 shard timeout, or a manifest mismatch fails the run; both combined reports are still written after a
 manifest mismatch so the scores stay visible, and a run that stops earlier leaves `BYTES` empty.
-`scripts/conformance-report.sh` owns the shared line format. Set
-`KRUSTY_CLASS_DUMP_COMPILE_MISSING=1` locally so a reference-cache miss compiles live with kotlinc.
+`scripts/conformance-report.sh` owns the shared line format. A reference-cache miss compiles live
+with kotlinc, so no recorded-byte setting is needed. Each scored shard prints a reference profile
+after its timing line: reference-cache hits, cached rejections, and misses with the thread-summed
+cache-read, compile, cleanup, and store time, then the kotlinc server's requests, starts, restarts,
+pool wait, start time, and compile time. A cold shard shows one miss per applicable case; a warm one
+shows hits and no server requests.
 
 `just conformance-badge` renders both reports of the max version's run with
 `scripts/conformance-badge.sh`. `docs/badges/conformance.json` gets the label

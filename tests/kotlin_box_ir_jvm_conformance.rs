@@ -1026,6 +1026,62 @@ fn count_report(count: u64, of: u64) -> String {
     format!("{pct:.1} {count} {of}\n")
 }
 
+/// The scored run's reference-compile profile: inventory cache hits and misses, then the live
+/// compiler server's lifecycle. Durations are summed over worker threads, like the `timing` line.
+fn reference_profile(
+    reference: box_reference_classes::ReferenceStats,
+    server: common::kotlinc_server::KotlincServerStats,
+) -> String {
+    let secs = |duration: Duration| duration.as_secs_f64();
+    format!(
+        "reference profile (thread-sum): cache hit {} | cached rejection {} | miss {} | \
+         read {:.1}s | compile {:.1}s | cleanup {:.1}s | store {:.1}s\n\
+         kotlinc server (thread-sum): requests {} | starts {} | restarts {} | pool wait {:.1}s | \
+         start {:.1}s | compile {:.1}s",
+        reference.hits,
+        reference.cached_rejections,
+        reference.misses,
+        secs(reference.cache_read),
+        secs(reference.compile),
+        secs(reference.cleanup),
+        secs(reference.store),
+        server.requests,
+        server.starts,
+        server.restarts,
+        secs(server.pool_wait),
+        secs(server.start_time),
+        secs(server.compile_time),
+    )
+}
+
+#[test]
+fn reference_profile_reports_cache_and_server_counts() {
+    let reference = box_reference_classes::ReferenceStats {
+        hits: 3,
+        cached_rejections: 1,
+        misses: 596,
+        cache_read: Duration::from_millis(240),
+        compile: Duration::from_millis(140_049),
+        cleanup: Duration::from_millis(1_960),
+        store: Duration::from_millis(1_040),
+    };
+    let server = common::kotlinc_server::KotlincServerStats {
+        requests: 636,
+        starts: 2,
+        restarts: 0,
+        pool_wait: Duration::from_millis(40),
+        start_time: Duration::from_millis(9),
+        compile_time: Duration::from_millis(125_056),
+    };
+    assert_eq!(
+        reference_profile(reference, server),
+        "reference profile (thread-sum): cache hit 3 | cached rejection 1 | miss 596 | read 0.2s | \
+         compile 140.0s | cleanup 2.0s | store 1.0s\n\
+         kotlinc server (thread-sum): requests 636 | starts 2 | restarts 0 | pool wait 0.0s | \
+         start 0.0s | compile 125.1s"
+    );
+}
+
 fn conformance_shard() -> Option<(usize, usize)> {
     match (
         env("KRUSTY_CONFORMANCE_SHARD_INDEX"),
@@ -1828,6 +1884,15 @@ fn kotlin_codegen_box_conformance() {
     let read_ms = t_read.load(Ordering::Relaxed) / 1_000_000;
     let cpjars_ms = t_cpjars.load(Ordering::Relaxed) / 1_000_000;
     eprintln!("timing (wall={total_ms}ms, thread-sum): closure={closure_ms}ms [read={read_ms}ms cpjars={cpjars_ms}ms compile={compile_ms}ms (lex={lex_ms} parse={parse_ms} sigs={sigs_ms} check={check_ms} emit={emit_ms}) jvm={jvm_ms}ms]");
+    if score_on {
+        eprintln!(
+            "{}",
+            reference_profile(
+                box_reference_classes::reference_stats(),
+                common::kotlinc_server::kotlinc_server_stats()
+            )
+        );
+    }
 
     let _ = fs::remove_dir_all(&work);
 
