@@ -48,15 +48,19 @@ impl ClassWriter {
         {
             return;
         }
-        let (needs_lnt, needs_lvt) = match self
+        let (needs_lnt, needs_lvt, suppress_entry_line) = match self
             .methods
             .iter()
             .find(|method| method.name == n && method.desc == d)
         {
-            Some(method) => (method.lnt.is_empty(), method.lvt.is_empty()),
+            Some(method) => (
+                method.lnt.is_empty(),
+                method.lvt.is_empty(),
+                method.suppress_entry_line,
+            ),
             None => return,
         };
-        if !needs_lnt {
+        if !needs_lnt && !suppress_entry_line {
             if let Some((0, line)) = lnt {
                 if let Some(method) = self
                     .methods
@@ -305,6 +309,25 @@ impl CodeBuilder {
                 .is_some_and(|(lpc, _)| *lpc as usize == pc)
         {
             self.line_marks.pop();
+        }
+    }
+
+    /// Withdraw the current `line` mark before an operation emits its receiver. Kotlin's unsigned
+    /// binary members begin their source position between receiver and argument, so their eager
+    /// root-expression boundary does not own the receiver load.
+    pub(crate) fn withdraw_operand_line(&mut self, line: u32) {
+        let line = line.min(u16::MAX as u32) as u16;
+        if self
+            .line_marks
+            .last()
+            .is_some_and(|&(_, marked)| marked == line)
+        {
+            let removed = self.line_marks.len() - 1;
+            self.suppress_entry_line |= self.line_marks[removed].0 == 0;
+            self.line_marks.pop();
+            if self.retained_line_mark == Some(removed) {
+                self.retained_line_mark = None;
+            }
         }
     }
 

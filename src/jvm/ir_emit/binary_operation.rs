@@ -4,6 +4,56 @@ use super::{emit_num_conv, ir_ty_to_jvm, CodeBuilder, Emitter, TempRole, Ty};
 use crate::ir::IrBinOp;
 
 impl Emitter<'_> {
+    fn unsigned_bitwise_operation(&self, mut expression: u32) -> Option<(IrBinOp, u32)> {
+        loop {
+            match self.ir.expr(expression) {
+                crate::ir::IrExpr::TypeOp { arg, .. } => expression = *arg,
+                crate::ir::IrExpr::Block {
+                    stmts,
+                    value: Some(value),
+                } if stmts.is_empty() => {
+                    expression = *value;
+                }
+                crate::ir::IrExpr::PrimitiveBinOp { op, rhs, .. }
+                    if matches!(
+                        op,
+                        IrBinOp::BitAnd
+                            | IrBinOp::BitOr
+                            | IrBinOp::BitXor
+                            | IrBinOp::Shl
+                            | IrBinOp::Shr
+                            | IrBinOp::Ushr
+                    ) && self.is_unsigned_bitwise_result(expression) =>
+                {
+                    return Some((*op, *rhs));
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn is_unsigned_bitwise_result(&self, expression: u32) -> bool {
+        self.ir
+            .logical_types
+            .get(&expression)
+            .is_some_and(|ty| matches!(ty.canonical_semantic().non_null(), Ty::UInt | Ty::ULong))
+    }
+
+    /// Kotlin's primitive unsigned binary members mark their source line after the receiver has
+    /// been loaded. `inv()` is unary despite using xor-with-all-bits-set in IR, so it keeps the
+    /// ordinary expression-entry mark. This is a JVM debug-layout decision over the checked
+    /// operation shape, not dispatch on a library member spelling.
+    pub(super) fn defers_unsigned_bitwise_start_line(&self, expression: u32) -> bool {
+        let Some((op, rhs)) = self.unsigned_bitwise_operation(expression) else {
+            return false;
+        };
+        !(op == IrBinOp::BitXor && self.ir.is_positionless(rhs))
+    }
+
+    pub(super) fn completes_unsigned_bitwise_value(&self, expression: u32) -> bool {
+        self.unsigned_bitwise_operation(expression).is_some()
+    }
+
     pub(super) fn emit_binop(
         &mut self,
         expression: u32,
@@ -109,8 +159,13 @@ impl Emitter<'_> {
                 self.release_temporary(lease);
             }
             BitAnd | BitOr | BitXor => {
-                self.emit_binary_operands_with_live_prefix(lhs, rhs, code);
-                self.mark_expression_start(expression, code);
+                let unsigned = self.is_unsigned_bitwise_result(expression);
+                if unsigned && !self.spills_operand_prefix(rhs) {
+                    self.emit_unsigned_bitwise_operands(expression, lhs, rhs, code);
+                } else {
+                    self.emit_binary_operands_with_live_prefix(lhs, rhs, code);
+                    self.mark_expression_start(expression, code);
+                }
                 // A checked unsigned operand can retain its semantic identity after value-class
                 // rewriting even though emission has put its signed carrier on the stack. Opcode
                 // width is a JVM representation decision, so select it from that carrier rather
@@ -132,8 +187,13 @@ impl Emitter<'_> {
                 self.rebuild_unsigned_bitwise_result(expression, code);
             }
             Shl | Shr | Ushr => {
-                self.emit_operands(&[lhs, rhs], code); // shift amount is an `Int`
-                self.mark_expression_start(expression, code);
+                let unsigned = self.is_unsigned_bitwise_result(expression);
+                if unsigned && !self.spills_operand_prefix(rhs) {
+                    self.emit_unsigned_bitwise_operands(expression, lhs, rhs, code);
+                } else {
+                    self.emit_operands(&[lhs, rhs], code);
+                    self.mark_expression_start(expression, code);
+                }
                 match ir_ty_to_jvm(&lt) {
                     Ty::Long => match op {
                         Shl => code.lshl(),
@@ -165,7 +225,52 @@ impl Emitter<'_> {
             .get(&expression)
             .copied()
             .map(|ty| ty.canonical_semantic().non_null());
-        let Some(semantic) = semantic else { return };
+        let Some(semantic @ (Ty::UInt | Ty::ULong)) = semantic else {
+            return;
+        };
         super::value_class_adapters::emit_native_value_class_constructor(self.cw, code, semantic);
+    }
+
+    fn emit_unsigned_bitwise_operands(
+        &mut self,
+        expression: u32,
+        lhs: u32,
+        rhs: u32,
+        code: &mut CodeBuilder,
+    ) {
+        let literal_argument = self.is_source_literal(rhs);
+        let move_line = literal_argument && self.unsigned_receiver_line_moves.unwrap_or(true);
+        let line = self.ir.expr_source_lines.get(&expression).copied();
+        if move_line {
+            if let Some(line) = line {
+                code.withdraw_operand_line(line);
+            }
+        }
+        let receiver_is_unsigned = self.unsigned_bitwise_operation(lhs).is_some();
+        let outer_receiver =
+            std::mem::replace(&mut self.unsigned_receiver_line_moves, Some(move_line));
+        self.emit_value(lhs, code);
+        self.unsigned_receiver_line_moves = outer_receiver;
+        if move_line && !receiver_is_unsigned {
+            if let Some(line) = line {
+                code.withdraw_operand_line(line);
+            }
+        }
+        if literal_argument {
+            code.forget_line();
+        }
+        self.emit_value(rhs, code);
+    }
+
+    fn is_source_literal(&self, mut expression: u32) -> bool {
+        loop {
+            match self.ir.expr(expression) {
+                crate::ir::IrExpr::TypeOp { arg, .. } => expression = *arg,
+                crate::ir::IrExpr::Const(_) => {
+                    return self.ir.expr_source_lines.contains_key(&expression)
+                }
+                _ => return false,
+            }
+        }
     }
 }

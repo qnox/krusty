@@ -5751,6 +5751,10 @@ struct Emitter<'a> {
     /// kotlinc's `isInsideCondition`: a `when` branch condition is being emitted, so an inlined
     /// call in it marks its own line again after the inlined code.
     inside_condition: bool,
+    /// Whether the unsigned primitive operation whose receiver is currently being emitted moved
+    /// its eager source boundary. A nested operation follows that decision so an explicit outer
+    /// return boundary survives while a local/expression-body boundary moves past the receiver.
+    unsigned_receiver_line_moves: Option<bool>,
     /// Slot 0 remains the verifier's special uninitialized receiver until the constructor delegates.
     this_uninitialized: bool,
     /// Independent realization strategies for plain lambdas and SAM conversions.
@@ -5840,6 +5844,7 @@ impl<'a> Emitter<'a> {
             constructor_initializer_class: None,
             render_initializer_boundaries: false,
             inside_condition: false,
+            unsigned_receiver_line_moves: None,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
@@ -6213,7 +6218,9 @@ impl<'a> Emitter<'a> {
 
     fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
         debug_lines::begin_expression(self.ir, e, code);
-        self.mark_expression_start(e, code);
+        if !self.defers_unsigned_bitwise_start_line(e) {
+            self.mark_expression_start(e, code);
+        }
         // A suspension whose machine emission owns: mark where it landed. The splice decides that
         // position, so an offset recorded before it would be worthless, whereas an instruction
         // travels with the code. Every marker is erased once its answers are read.
