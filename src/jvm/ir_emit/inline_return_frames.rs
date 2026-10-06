@@ -9,36 +9,12 @@
 use super::*;
 
 impl Emitter<'_> {
-    /// Record the semantic value that owns an inline-return frame. Its physical slot is entered at
-    /// the first store, after that store's operand has left any nested local scope.
-    pub(super) fn declare_inline_return_frame(
-        &mut self,
-        declaration: ExprId,
-        value: u32,
-        ty: Ty,
-    ) -> bool {
+    /// Record where the result of an inline-return frame lives, when `declaration` declares one.
+    pub(super) fn open_inline_return_frame(&mut self, declaration: ExprId, slot: u16, ty: Ty) {
         if let Some(frame) = self.ir.inline_return_frames.get(&declaration) {
             self.inline_return_frame_results
-                .insert(frame.clone(), (value, ty));
-            self.unassigned_values.insert(value);
-            return true;
+                .insert(frame.clone(), (slot, ty));
         }
-        false
-    }
-
-    pub(super) fn inline_return_frame_result_type(&self, value: u32) -> Option<Ty> {
-        self.inline_return_frame_results
-            .values()
-            .find_map(|&(candidate, ty)| (candidate == value).then_some(ty))
-    }
-
-    pub(super) fn ensure_inline_return_frame_slot(&mut self, value: u32, ty: Ty) -> u16 {
-        if let Some(&(slot, _)) = self.slots.get(&value) {
-            return slot;
-        }
-        let slot = self.frame.enter(FrameKey::Value(value), ty);
-        self.slots.insert(value, (slot, ty));
-        slot
     }
 
     /// Store `value` as the result of the enclosing inline-return frame `frame`.
@@ -48,7 +24,7 @@ impl Emitter<'_> {
         value: ExprId,
         code: &mut CodeBuilder,
     ) {
-        let Some(&(value_id, ty)) = self.inline_return_frame_results.get(frame) else {
+        let Some(&(slot, ty)) = self.inline_return_frame_results.get(frame) else {
             self.run.set_emit_error(
                 "a nested return stores the result of a frame that was never declared".to_string(),
             );
@@ -57,8 +33,6 @@ impl Emitter<'_> {
         self.emit_value(value, code);
         // Coerced to the result's type as a store in the frame's own body is.
         self.adapt_physical_operand_for(value, self.value_ty(value), ty, code);
-        let slot = self.ensure_inline_return_frame_slot(value_id, ty);
         store(ty, slot, code);
-        self.unassigned_values.remove(&value_id);
     }
 }

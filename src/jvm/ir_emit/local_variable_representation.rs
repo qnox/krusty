@@ -60,13 +60,6 @@ impl Emitter<'_> {
             // only a callable control-flow return uses the JVM void representation.
             .unwrap_or_else(|| slot_type(self.ir, declaration, semantic_ty));
 
-        // An inline-return frame's declaration is a semantic lifetime boundary, not a JVM store.
-        // Enter its physical result slot only after the first returned operand has been emitted;
-        // nested inline-lambda temporaries have left scope by then and kotlinc reuses their slot.
-        if self.declare_inline_return_frame(declaration, index, slot_ty) {
-            return;
-        }
-
         // A spilled local is declared twice with the same value identity. Reuse its slot when the
         // verifier types agree, or when both are references; never alias differing primitives.
         let is_reference = |ty: Ty| matches!(ty, Ty::String | Ty::Obj(..)) || ty.is_array();
@@ -133,6 +126,7 @@ impl Emitter<'_> {
             entered.unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand))
         };
         self.slots.insert(index, (slot, slot_ty));
+        self.open_inline_return_frame(declaration, slot, slot_ty);
         // A `lateinit` declaration emits no store, but its lexical debug lifetime still starts here.
         self.open_declared_local(declaration, slot, slot_ty, code);
     }
