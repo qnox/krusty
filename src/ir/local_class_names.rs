@@ -1559,9 +1559,14 @@ impl super::IrFile {
             if !seen.insert(expression) {
                 continue;
             }
-            if let IrExpr::Lambda { impl_fn, .. } = self.exprs[expression as usize] {
+            if let IrExpr::Lambda {
+                impl_fn: source,
+                inline_body,
+                ..
+            } = self.exprs[expression as usize]
+            {
                 let impl_fn = if let Some(existing) = detached_impl(
-                    impl_fn,
+                    source,
                     expression,
                     &lambda_sites,
                     &closure,
@@ -1570,7 +1575,6 @@ impl super::IrFile {
                 ) {
                     existing
                 } else {
-                    let source = impl_fn;
                     let parent = self
                         .callable_reference_enclosures
                         .get(&expression)
@@ -1591,6 +1595,20 @@ impl super::IrFile {
                 };
                 if let IrExpr::Lambda { impl_fn: slot, .. } = &mut self.exprs[expression as usize] {
                     *slot = impl_fn;
+                }
+                // An anonymous function cannot splice its body directly because its local return
+                // must stay local. Its inline body is therefore a direct call to the same
+                // implementation recorded on the Lambda node. When a shared implementation is
+                // detached for this copy, keep those two stable identity edges together; leaving
+                // the call on the source function gives it the declaration-class descriptor.
+                if impl_fn != source {
+                    if let Some(inline_body) = inline_body {
+                        retarget_direct_inline_implementation(
+                            &mut self.exprs[inline_body as usize],
+                            source,
+                            impl_fn,
+                        );
+                    }
                 }
                 reachable_implementations.insert(impl_fn);
                 if let Some(body) = self.functions[impl_fn as usize].body {
@@ -1660,6 +1678,18 @@ impl super::IrFile {
             remap_expression_facts(self, expression_id, names);
         }
         new_detached
+    }
+}
+
+fn retarget_direct_inline_implementation(expression: &mut IrExpr, source: FunId, target: FunId) {
+    if let IrExpr::Call {
+        callee: Callee::Local(function),
+        ..
+    } = expression
+    {
+        if *function == source {
+            *function = target;
+        }
     }
 }
 
@@ -2221,15 +2251,30 @@ mod tests {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        let lambda = |impl_fn| IrExpr::Lambda {
-            impl_fn,
+        let reachable_inline_body = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(implementation),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let reachable = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
             arity: 0,
             captures: Vec::new(),
             sam: None,
-            inline_body: None,
-        };
-        let reachable = ir.add_expr(lambda(implementation));
-        let other = ir.add_expr(lambda(implementation));
+            inline_body: Some(reachable_inline_body),
+        });
+        let other_inline_body = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(implementation),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let other = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(other_inline_body),
+        });
         ir.inline_only_fns.insert(implementation);
         ir.must_inline_lambdas.insert(implementation);
 
@@ -2247,6 +2292,16 @@ mod tests {
         assert!(matches!(
             ir.expr(other),
             IrExpr::Lambda { impl_fn, .. } if *impl_fn == implementation
+        ));
+        assert!(matches!(
+            ir.expr(reachable_inline_body),
+            IrExpr::Call { callee: Callee::Local(function), .. }
+                if *function == detached[0].target
+        ));
+        assert!(matches!(
+            ir.expr(other_inline_body),
+            IrExpr::Call { callee: Callee::Local(function), .. }
+                if *function == implementation
         ));
         assert!(ir.inline_only_fns.contains(&implementation));
         assert!(ir.must_inline_lambdas.contains(&implementation));
