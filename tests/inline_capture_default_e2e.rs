@@ -89,36 +89,9 @@ fun closedOver(p: Int): Int {\n\
 
 #[test]
 fn inlined_capture_defaults_match_kotlinc() {
-    let methods = [
-        "public static final int capturedVar(",
-        "public static final int readOnlyVar(",
-        "public static final int capturedVal(",
-        "public static final int uncaptured(",
-        "public static final int capturedAfter(",
-        "public static final int alreadyZero(",
-        "public static final int alreadyOne(",
-        "public static final int summed(",
-        "public static final long capturedLong(",
-        "public static final java.lang.String capturedString(",
-        "public static final boolean capturedBool(",
-        "public static final int closedOver(",
-    ];
-    let results = common::method_code_diffs_against_kotlinc(
+    common::assert_classes_identical_to_kotlinc(
         "InlineCaptureDefault",
-        &[],
         SRC,
-        "InlineCaptureDefaultKt",
-        &methods,
-    )
-    .expect("reference kotlinc is provisioned");
-    let failures: Vec<String> = methods
-        .into_iter()
-        .zip(results)
-        .filter_map(|(method, result)| {
-            result
-                .err()
-                .map(|difference| format!("{method}: {difference}"))
-        })
-        .collect();
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+        &["InlineCaptureDefaultKt"],
+    );
 }
