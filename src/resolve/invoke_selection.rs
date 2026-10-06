@@ -164,7 +164,11 @@ impl Checker<'_> {
                 .or_else(|| self.read_callable_reference_types.get(&receiver))
                 .copied();
         }
+        // This is the callable signature selected for invocation, not the receiver's nullability.
+        // `record_invoke` checks the separately narrowed receiver value immediately afterwards, so
+        // a nullable value still errors while a stable property proved non-null remains callable.
         self.expression_function_type(scope, receiver, receiver_ty)
+            .map(Ty::non_null)
     }
 
     /// Whether invoking a type-parameter value selects a function constituent other than the one its
