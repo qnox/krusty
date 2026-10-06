@@ -22,6 +22,10 @@ const NOTHING_RESULT_SRC: &str = "private val ALWAYS_NULL: (Any?) -> Any? = { nu
     private val BOOM: () -> String = { throw IllegalStateException(\"x\") }\n\
     fun box(): String = if (ALWAYS_NULL(\"x\") == null) \"OK\" else \"fail\"\n";
 
+const DECLARED_NOTHING_RESULT_SRC: &str = "@JvmInline value class Token(val text: String)\n\
+    private val FAIL: (Token) -> Nothing = { throw IllegalStateException(\"x\") }\n\
+    fun box(): String = try { FAIL(Token(\"x\")) } catch (_: IllegalStateException) { \"OK\" }\n";
+
 /// kotlinc and krusty write `class` byte for byte alike, the facade included.
 fn assert_identical(src: &str, stem: &str, class: &str) {
     let language_settings = krusty::language_settings::LanguageSettings::new(
@@ -80,6 +84,32 @@ fn current_language_keeps_the_null_returning_lambda_on_indy() {
             .iter()
             .all(|name| !name.contains("$ALWAYS_NULL$") && !name.contains("$BOOM$")),
         "Kotlin 2.4 keeps the Nothing-result lambdas on indy: {class_names:?}"
+    );
+}
+
+/// The current language uses the selected `Nothing` result as the implementation result. A value
+/// class parameter independently forces class materialization; the generated class must therefore
+/// implement raw `Function1`, without a generic `Signature`, just like kotlinc.
+#[test]
+fn current_language_class_fallback_keeps_a_declared_nothing_result_raw() {
+    let settings = krusty::language_settings::LanguageSettings::default();
+    let built = common::compare_with_kotlinc_plugin_language_settings(
+        "DeclaredNothingResult",
+        DECLARED_NOTHING_RESULT_SRC,
+        "DeclaredNothingResultKt$FAIL$1",
+        &[common::stdlib_jar()],
+        "1.8",
+        &settings,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert!(
+        !built.reference_bytes.is_empty(),
+        "kotlinc writes the lambda class"
+    );
+    assert_eq!(
+        built.krusty_bytes, built.reference_bytes,
+        "declared-Nothing lambda class differs:\n{}\n---\n{}",
+        built.krusty, built.reference
     );
 }
 

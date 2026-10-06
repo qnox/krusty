@@ -524,13 +524,25 @@ fn nothing_conflict(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) ->
     signature.params.iter().copied().any(is_nothing) || is_nothing(inferred_result)
 }
 
+/// The result type used by the lambda implementation method. Before language level 2.4 checked
+/// FIR records the body's inferred result; current language levels deliberately omit that fact and
+/// use the selected function signature's result instead.
+fn implementation_result(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> Ty {
+    ir.lambda_inferred_results
+        .get(&fid)
+        .copied()
+        .unwrap_or(signature.ret)
+}
+
 /// Whether the class's `FunctionN` supertype is written raw, without the generic `Signature`.
 /// kotlinc's `IrTypeMapper.writeGenericType` skips the generics when
 /// `hasNothingInNonContravariantPosition(supertype)` holds (`KotlinTypeMapper.kt`): an argument
 /// `isNullableNothing()`, or `isNothing()` where the type parameter's variance is not `IN`.
 /// `FunctionN`'s value parameters are `in` — a non-null `Nothing` there keeps the generic
 /// supertype, its argument written as a star (`Function1<*Lkotlin/Unit;>;`) — while its result is
-/// `out`, so any `Nothing`/`Nothing?` inferred result leaves the supertype raw.
+/// `out`, so a `Nothing`/`Nothing?` implementation result leaves the supertype raw. That result is
+/// the pre-2.4 inferred body result when recorded, otherwise the selected function result; the raw
+/// generic-signature rule is independent of why this lambda was forced to a class.
 fn raw_supertype(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> bool {
     fn is_nothing(ty: Ty) -> bool {
         matches!(ty.non_null(), Ty::Nothing | Ty::Null)
@@ -540,11 +552,7 @@ fn raw_supertype(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> bo
         .iter()
         .copied()
         .any(|ty| is_nothing(ty) && ty.admits_null())
-        || ir
-            .lambda_inferred_results
-            .get(&fid)
-            .copied()
-            .is_some_and(is_nothing)
+        || is_nothing(implementation_result(ir, fid, signature))
 }
 
 /// Whether a value class's declared underlying type admits `null`: a nullable type, or a type
@@ -645,8 +653,8 @@ fn realize_class(
     // boxed, since it overrides the generic `R`. A value class stays its carrier, which the
     // bridge boxes. kotlinc types it by the body's INFERRED result, which a `Nothing`/`Nothing?`
     // body pins to `Void` even when the selected function type's return is wider.
-    let result = match ir.lambda_inferred_results.get(&fid).copied() {
-        Some(inferred) if matches!(inferred.non_null(), Ty::Nothing | Ty::Null) => {
+    let result = match implementation_result(ir, fid, signature) {
+        inferred if matches!(inferred.non_null(), Ty::Nothing | Ty::Null) => {
             if inferred.admits_null() {
                 Ty::nullable(Ty::Nothing)
             } else {

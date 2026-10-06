@@ -10007,8 +10007,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `hasNothingInNonContravariantPosition`, not the conflict itself: a `Nothing?` parameter or a
   `Nothing`/`Nothing?` inferred result drops the generic `Signature`, while a non-null `Nothing`
   parameter (an `in` position) keeps `FunctionN<*…>` with a star argument, matching
-  `processUnboundedWildcard`. A value-class or inlining-hazard class always carries
-  `FunctionN<…>`. This factory conflict applies to language levels before 2.4. From 2.4 onward,
+  `processUnboundedWildcard`. A lambda class forced by another hazard still follows this rule: at
+  language level 2.4, a selected function result of `Nothing` leaves its `FunctionN` supertype raw.
+  The inferred-result factory conflict itself applies to language levels before 2.4. From 2.4 onward,
   `ResolveTopLevelLambdasAsSyntheticCallArgument` types the implementation by the expected
   function result and keeps these lambdas on indy. krusty's checker records every lambda body's inferred result before
   coercion to the selected function type's return (`TypeInfo::lambda_body_results` → FIR
