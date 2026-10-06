@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::TypeRef;
 use crate::diag::{DiagnosticIdentity, Span};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 use super::{definitely_non_null_ty, inaccessible_classifier_message, Checker, CheckerScope};
 
@@ -20,6 +20,140 @@ pub(super) struct AppliedAlias {
 }
 
 impl Checker<'_> {
+    /// Resolve a reference to a scoped source `typealias` by substituting the use's type arguments
+    /// into the collected expansion. Same-file and cross-file spellings use this one semantic
+    /// operation.
+    pub(super) fn scoped_source_alias_ty(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        reference: &TypeRef,
+    ) -> Option<AppliedAlias> {
+        // A detached import selects the alias declaration; it is not an application of a generic
+        // alias with an empty argument list. Ordinary uses of the imported spelling still enter
+        // below and must provide or infer their own arguments.
+        if reference.is_import() {
+            return self
+                .scoped_source_alias_target(scope, &reference.name)
+                .map(|ty| AppliedAlias {
+                    ty,
+                    conflicts: Vec::new(),
+                });
+        }
+        if let Some(alias) = scope.type_alias(&reference.name) {
+            return Some(self.alias_application_ty(
+                scope,
+                alias.formals,
+                alias.expansion,
+                &reference.name,
+                &reference.targs,
+                reference.span,
+            ));
+        }
+        if let Some(alias) = self.qualified_body_local_type_alias(scope, &reference.name) {
+            return Some(self.alias_application_ty(
+                scope,
+                alias.formals,
+                alias.expansion,
+                &reference.name,
+                &reference.targs,
+                reference.span,
+            ));
+        }
+        let identity = self.scoped_source_alias_identity(scope, &reference.name)?;
+        Some(self.source_alias_application_ty(
+            scope,
+            identity,
+            &reference.name,
+            &reference.targs,
+            reference.span,
+        ))
+    }
+
+    /// Apply one already-scoped source alias to use-site type arguments. Type syntax and
+    /// constructor syntax share this exact expansion.
+    pub(super) fn source_alias_application_ty(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        identity: TypeName,
+        display_name: &str,
+        arguments: &[TypeRef],
+        span: Span,
+    ) -> AppliedAlias {
+        let Some((formals, expansion)) = self.source_alias_expansion(identity) else {
+            return AppliedAlias {
+                ty: Ty::Error,
+                conflicts: Vec::new(),
+            };
+        };
+        self.alias_application_ty(scope, formals, expansion, display_name, arguments, span)
+    }
+
+    pub(super) fn alias_application_ty(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        formals: Vec<String>,
+        expansion: Ty,
+        display_name: &str,
+        arguments: &[TypeRef],
+        span: Span,
+    ) -> AppliedAlias {
+        if formals.len() != arguments.len() {
+            self.diags.error(
+                span,
+                format!(
+                    "wrong number of type arguments for type alias '{}': expected {}, found {}.",
+                    display_name,
+                    formals.len(),
+                    arguments.len()
+                ),
+            );
+            return AppliedAlias {
+                ty: Ty::Error,
+                conflicts: Vec::new(),
+            };
+        }
+        if formals.is_empty() {
+            return AppliedAlias {
+                ty: expansion,
+                conflicts: Vec::new(),
+            };
+        }
+        // Preserve use-site projections during substitution. Alias parameters cannot declare a
+        // bound, so a star projection's readable upper bound is always `Any?`.
+        let args = arguments
+            .iter()
+            .map(|argument| {
+                let resolved = if argument.is_star_projection() {
+                    Ty::Error
+                } else {
+                    self.type_ref_ty(scope, argument)
+                };
+                super::projected_typeref_argument(
+                    argument,
+                    resolved,
+                    Ty::nullable(Ty::obj("kotlin/Any")),
+                )
+            })
+            .collect::<Vec<_>>();
+        let bindings = formals
+            .iter()
+            .cloned()
+            .zip(args.iter().copied())
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        let resolved = crate::types::ty_subst_alias_expansion(expansion, &bindings);
+        let conflicts = conflicting_use_site_spans(
+            &formals,
+            arguments,
+            expansion,
+            &bindings,
+            &self.file.type_projection_spans,
+        );
+        AppliedAlias {
+            ty: resolved,
+            conflicts,
+        }
+    }
+
     /// Apply source nullability and record the resolved type.
     pub(super) fn publish_type_ref(
         &mut self,

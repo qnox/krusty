@@ -37,7 +37,6 @@ mod accessor_annotations;
 mod actualization_names;
 mod alias_constructor_application;
 mod alias_projection;
-use alias_projection::{conflicting_use_site_spans, AppliedAlias};
 mod annotation_applications;
 mod annotation_argument_constness;
 mod anonymous_extension_functions;
@@ -49231,50 +49230,6 @@ impl<'a> Checker<'a> {
             .map(|(_, expansion)| expansion)
     }
 
-    /// Resolve a reference to a scoped source `typealias` (see
-    /// [`Self::scoped_source_alias_identity`]) by substituting the use's type arguments into the
-    /// collected expansion. Same-file and cross-file spellings use this one semantic operation.
-    fn scoped_source_alias_ty(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        r: &TypeRef,
-    ) -> Option<AppliedAlias> {
-        // A detached import `import pkg.Owner.Alias` selects the alias declaration; it is not an
-        // application of a generic alias with an empty argument list. Preserve the declaration-
-        // owned expansion only long enough to validate the import. Ordinary uses of the imported
-        // spelling still enter below and must provide or infer their own arguments.
-        if r.is_import() {
-            return self
-                .scoped_source_alias_target(scope, &r.name)
-                .map(|ty| AppliedAlias {
-                    ty,
-                    conflicts: Vec::new(),
-                });
-        }
-        if let Some(alias) = scope.type_alias(&r.name) {
-            return Some(self.alias_application_ty(
-                scope,
-                alias.formals,
-                alias.expansion,
-                &r.name,
-                &r.targs,
-                r.span,
-            ));
-        }
-        if let Some(alias) = self.qualified_body_local_type_alias(scope, &r.name) {
-            return Some(self.alias_application_ty(
-                scope,
-                alias.formals,
-                alias.expansion,
-                &r.name,
-                &r.targs,
-                r.span,
-            ));
-        }
-        let identity = self.scoped_source_alias_identity(scope, &r.name)?;
-        Some(self.source_alias_application_ty(scope, identity, &r.name, &r.targs, r.span))
-    }
-
     /// Resolve the type operand of `is`/`as`. Kotlin permits a generic typealias to be written as a
     /// bare runtime type (`value is Alias`, `value as Alias`): every omitted alias parameter is a
     /// star projection, while fixed components of the expansion remain exact. This is deliberately
@@ -49318,93 +49273,6 @@ impl<'a> Checker<'a> {
                 .insert((reference.span.lo, reference.span.hi), resolved);
         }
         resolved
-    }
-
-    /// Apply one already-scoped source alias to use-site type arguments. Type syntax and constructor
-    /// syntax share this exact expansion so `typealias A<T> = Array<T>; A<Int>(...)` cannot resolve
-    /// the annotation but lose the constructor's semantic array identity.
-    fn source_alias_application_ty(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        identity: TypeName,
-        display_name: &str,
-        arguments: &[TypeRef],
-        span: Span,
-    ) -> AppliedAlias {
-        let Some((formals, expansion)) = self.source_alias_expansion(identity) else {
-            return AppliedAlias {
-                ty: Ty::Error,
-                conflicts: Vec::new(),
-            };
-        };
-        self.alias_application_ty(scope, formals, expansion, display_name, arguments, span)
-    }
-
-    fn alias_application_ty(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        formals: Vec<String>,
-        expansion: Ty,
-        display_name: &str,
-        arguments: &[TypeRef],
-        span: Span,
-    ) -> AppliedAlias {
-        if formals.len() != arguments.len() {
-            self.diags.error(
-                span,
-                format!(
-                    "wrong number of type arguments for type alias '{}': expected {}, found {}.",
-                    display_name,
-                    formals.len(),
-                    arguments.len()
-                ),
-            );
-            return AppliedAlias {
-                ty: Ty::Error,
-                conflicts: Vec::new(),
-            };
-        }
-        if formals.is_empty() {
-            return AppliedAlias {
-                ty: expansion,
-                conflicts: Vec::new(),
-            };
-        }
-        // Use-site projections ride the substituted argument exactly as on a classifier use
-        // (`projected_typeref_argument`): `P<out T>` must reach the expansion as an out-projection
-        // and `P<*>` as a distinct star carrying its upper bound, or metadata/JVM signatures lose
-        // the existential spelling and incorrectly publish an explicit `out` argument. An alias
-        // type parameter cannot declare a bound (kotlinc rejects it), so a star's upper bound is
-        // always `Any?`.
-        let args = arguments
-            .iter()
-            .map(|argument| {
-                let resolved = if argument.is_star_projection() {
-                    // No operand to resolve; `projected_typeref_argument` discards it for a star.
-                    Ty::Error
-                } else {
-                    self.type_ref_ty(scope, argument)
-                };
-                projected_typeref_argument(argument, resolved, Ty::nullable(Ty::obj("kotlin/Any")))
-            })
-            .collect::<Vec<_>>();
-        let bindings = formals
-            .iter()
-            .cloned()
-            .zip(args.iter().copied())
-            .collect::<crate::symbol_resolver::GSigBinds>();
-        let resolved = crate::types::ty_subst_alias_expansion(expansion, &bindings);
-        let conflicts = conflicting_use_site_spans(
-            &formals,
-            arguments,
-            expansion,
-            &bindings,
-            &self.file.type_projection_spans,
-        );
-        AppliedAlias {
-            ty: resolved,
-            conflicts,
-        }
     }
 
     /// True if `t` names a `@JvmInline value class`, independent of which symbol provider owns it.
