@@ -3473,6 +3473,20 @@ pub fn method_code_diff_against_kotlinc(
     class: &str,
     method: &str,
 ) -> Option<Result<(), String>> {
+    method_code_diffs_against_kotlinc(name, lib, src, class, &[method])?.pop()
+}
+
+/// [`method_code_diff_against_kotlinc`] for several methods of one compiled class. The dependency,
+/// source module, and both class files are built once; each requested method still produces its own
+/// exact instruction/local-table result and diagnostic.
+#[allow(dead_code)]
+pub fn method_code_diffs_against_kotlinc(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+    class: &str,
+    methods: &[&str],
+) -> Option<Vec<Result<(), String>>> {
     let libout = if lib.is_empty() {
         None
     } else {
@@ -3507,15 +3521,22 @@ pub fn method_code_diff_against_kotlinc(
     }
     std::fs::write(&krusty_path, krusty_bytes).ok()?;
 
-    let reference = disassembled_method(&kref, class, method)?;
-    let actual = disassembled_method(&kout, class, method)?;
+    let results = methods
+        .iter()
+        .map(|method| {
+            let reference = disassembled_method(&kref, class, method)?;
+            let actual = disassembled_method(&kout, class, method)?;
+            Some(if reference == actual {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{name}/{class}.{method}: instruction sequences differ\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}"
+                ))
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
     let _ = std::fs::remove_dir_all(&dir);
-    if reference == actual {
-        return Some(Ok(()));
-    }
-    Some(Err(format!(
-        "{name}/{class}.{method}: instruction sequences differ\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}"
-    )))
+    Some(results)
 }
 
 /// Whether `bytes` contains a CALL to `callee` — a method reference an instruction names, rather

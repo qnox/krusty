@@ -4,23 +4,6 @@
 
 use super::common;
 
-static FIXTURE_COMPILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn expect_method_matches(name: &str, src: &str, class: &str, method: &str) {
-    // Every assertion below compiles the same intentionally broad fixture. The coverage lane runs
-    // four e2e tests concurrently; compiling this try/finally-heavy source four times at once made
-    // all copies bail while the exact GHA-built compiler accepts it in isolation. Keep the semantic
-    // assertions distinct, but give this one fixture a single compilation slot.
-    let _fixture = FIXTURE_COMPILE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match common::method_code_diff_against_kotlinc(name, &[], src, class, method) {
-        None => panic!("reference kotlinc is provisioned"),
-        Some(Ok(())) => {}
-        Some(Err(difference)) => panic!("{difference}"),
-    }
-}
-
 const SRC: &str = "\
 fun side() {}\n\
 inline fun runFinally(body: () -> Int): Int {\n\
@@ -75,71 +58,32 @@ fun useFinally(): Int = runFinally { 1 }\n\
 ";
 
 #[test]
-fn an_inline_finally_is_bracketed_at_depth_one() {
-    expect_method_matches(
-        "InlineFinally",
-        SRC,
-        "InlineFinallyKt",
+fn inline_finally_markers_match_kotlinc() {
+    let methods = [
+        // An inline finalizer is bracketed at depth one.
         "public static final int runFinally(",
-    );
-}
-
-#[test]
-fn a_non_inline_finally_has_no_marker() {
-    expect_method_matches(
-        "InlineFinally",
-        SRC,
-        "InlineFinallyKt",
+        // A non-inline finalizer has no markers.
         "public static final int plain(",
-    );
-}
-
-#[test]
-fn a_finally_inside_a_finally_uses_the_next_depth() {
-    expect_method_matches(
-        "InlineFinally",
-        SRC,
-        "InlineFinallyKt",
+        // A finalizer nested inside another finalizer uses the next depth.
         "public static final int nested(",
-    );
-}
-
-#[test]
-fn a_returning_finally_has_no_unreachable_end_marker() {
-    expect_method_matches(
-        "InlineFinally",
-        SRC,
-        "InlineFinallyKt",
+        // A returning finalizer has no unreachable end marker.
         "public static final int returnFinally(",
-    );
-}
-
-#[test]
-fn a_throwing_finally_has_no_unreachable_end_marker() {
-    expect_method_matches(
-        "InlineFinally",
-        SRC,
-        "InlineFinallyKt",
+        // A throwing finalizer has no unreachable end marker.
         "public static final int throwFinally(",
-    );
-}
-
-#[test]
-fn a_loop_transfer_from_finally_has_no_unreachable_end_marker() {
-    expect_method_matches(
-        "InlineFinally",
-        SRC,
-        "InlineFinallyKt",
+        // A loop transfer from a finalizer has no unreachable end marker.
         "public static final int continueFinally(",
-    );
-}
-
-#[test]
-fn a_copied_finally_consumes_its_declaration_markers() {
-    expect_method_matches(
+        // A copied finalizer consumes its declaration markers at the call site.
+        "public static final int useFinally(",
+    ];
+    let results = common::method_code_diffs_against_kotlinc(
         "InlineFinally",
+        &[],
         SRC,
         "InlineFinallyKt",
-        "public static final int useFinally(",
-    );
+        &methods,
+    )
+    .expect("reference kotlinc is provisioned");
+    for (method, result) in methods.into_iter().zip(results) {
+        result.unwrap_or_else(|difference| panic!("{method}: {difference}"));
+    }
 }
