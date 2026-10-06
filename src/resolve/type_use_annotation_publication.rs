@@ -10,6 +10,12 @@
 use super::*;
 use crate::spelling::{AnnotationOccurrence, CheckedTypeUseAnnotations};
 
+type TypeUseAnnotationKey = (
+    crate::fir::DeclarationId,
+    Box<[u32]>,
+    crate::types::TypeName,
+);
+
 /// Fold every type-use annotation application of `files` and seal the spellings Pass 1 publishes.
 pub(crate) fn publish_checked_type_use_annotations(
     files: &[File],
@@ -119,14 +125,7 @@ fn collect_annotation_spans(
     spelling: &crate::spelling::Spelled,
     path: &mut Vec<u32>,
     checked: &CheckedTypeUseAnnotations,
-    out: &mut Vec<(
-        (
-            crate::fir::DeclarationId,
-            Box<[u32]>,
-            crate::types::TypeName,
-        ),
-        Span,
-    )>,
+    out: &mut Vec<(TypeUseAnnotationKey, Span)>,
 ) {
     for annotation in spelling
         .annotations

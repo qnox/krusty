@@ -997,7 +997,7 @@ pub(super) fn finalize_constructor_field_indices(
     pre_super.sort();
     for (class, parameter, field) in pre_super {
         let slots = &mut ir.classes[class as usize].pre_super_param_fields;
-        if !slots.iter().any(|pair| *pair == (parameter, field)) {
+        if !slots.contains(&(parameter, field)) {
             slots.push((parameter, field));
         }
     }
