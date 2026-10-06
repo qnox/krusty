@@ -14,11 +14,11 @@ use super::{
     declared_jvm_interface, default_mask_bit, default_mask_count, emit_box_impl,
     emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty,
     jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params, jvm_tys,
-    lambda_class, lambda_class_names, load, method_defaults, native_unsigned_impl_target,
-    parse_descriptor_params, physical_call_result_words, prim_newarray_atype, push_zero, ref_class,
-    signature_formatter::JvmSignatureFormatter, singleton_instance_load, slot_words, try_emission,
-    ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation,
-    LMF_METAFACTORY_DESC,
+    jvm_value_ty, lambda_class, lambda_class_names, load, method_defaults,
+    native_unsigned_impl_target, parse_descriptor_params, physical_call_result_words,
+    prim_newarray_atype, push_zero, ref_class, signature_formatter::JvmSignatureFormatter,
+    singleton_instance_load, slot_words, try_emission, ty_from_descriptor_ret, vararg,
+    JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
 };
 
 impl super::Emitter<'_> {
@@ -193,7 +193,7 @@ impl super::Emitter<'_> {
                 let c = &self.ir.classes[*class as usize];
                 let name = instance_field_jvm_name(self.ir, c, &c.fields[*index as usize]);
                 let fty = c.fields[*index as usize].ty;
-                let jt = jvm_declared_ty(&fty);
+                let jt = jvm_value_ty(&fty);
                 let owner = c.fq_name();
                 self.emit_value(*receiver, code);
                 let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
