@@ -21,8 +21,8 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
-  # Lint + coverage (`just ci`). Conformance is `build-conformance-bin` plus the version matrix.
-  # This job does not compile krusty again for it.
+  # Lint + coverage (`just ci`). Conformance and Gradle both run binaries from `build-shared-bins`.
+  # Neither matrix compiles krusty again.
   ci:
     runs-on: ubuntu-latest
     env:
@@ -164,7 +164,9 @@ jobs:
       - name: decode the Kotlin/Native stdlib through common metadata
         run: just klib-semantics
 
-  build-conformance-bin:
+  # One gate build of the binaries the matrices run. Conformance uses the test binary and the
+  # CLI. Gradle uses the same CLI and the krusty-build test binary; it does not compile krusty.
+  build-shared-bins:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -173,20 +175,33 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - name: build conformance test binary
+      - name: build shared test binaries
         run: |
           set -euo pipefail
+          source scripts/phase-timing.sh
+          phase_log_prefix=shared-bins
+          PHASE_TIMING_LOG="$(mktemp)"
+          trap 'phase_report || true' EXIT
+          phase_begin conformance-test-binary
           bin=$(just conformance-bin)
+          phase_end conformance-test-binary
           cp "$bin" conformance-bin
-          # The non-box tests launch this CLI. The library is already built above.
+          # The non-box tests and every Gradle lane launch this CLI. The library is already built.
+          phase_begin krusty-cli
           cargo build --profile gate -p krusty-cli
+          phase_end krusty-cli
           cp target/gate/krusty krusty
+          phase_begin krusty-build-tests
+          bin=$(just krusty-build-tests)
+          phase_end krusty-build-tests
+          cp "$bin" krusty-build-tests
       - uses: actions/upload-artifact@v7
         with:
-          name: conformance-bin
+          name: shared-bins
           path: |
             conformance-bin
             krusty
+            krusty-build-tests
           if-no-files-found: error
 
   # Supported-version matrix + the max version (for the badge later), from the kotlin-versions manifest.
@@ -206,7 +221,7 @@ jobs:
           echo "max=$(just max-version)" >> "$GITHUB_OUTPUT"
 
   conformance:
-    needs: [build-conformance-bin, versions]
+    needs: [build-shared-bins, versions]
     strategy:
       fail-fast: false
       matrix:
@@ -263,10 +278,10 @@ jobs:
           fi
           echo "write=$write" >> "$GITHUB_OUTPUT"
           echo "compile_missing=$compile_missing" >> "$GITHUB_OUTPUT"
-      - name: download conformance test binary
+      - name: download shared test binaries
         uses: actions/download-artifact@v8
         with:
-          name: conformance-bin
+          name: shared-bins
       - name: run box conformance ${{ matrix.version }}
         run: |
           set -euo pipefail
@@ -333,7 +348,7 @@ jobs:
 
   # Execute the exact release bytes against every supported Kotlin Gradle plugin.
   gradle:
-    needs: [build-conformance-bin, build-gradle-plugin]
+    needs: [build-shared-bins, build-gradle-plugin]
     strategy:
       fail-fast: false
       matrix:
@@ -350,8 +365,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: just
@@ -365,7 +378,7 @@ jobs:
           cache-provider: basic
       - uses: actions/download-artifact@v8
         with:
-          name: conformance-bin
+          name: shared-bins
       - uses: actions/download-artifact@v8
         with:
           name: krusty-gradle-plugin
@@ -383,19 +396,18 @@ jobs:
           KRUSTY_GRADLE_TEST_BIN: ${{ github.workspace }}/krusty
           KRUSTY_GRADLE_KGP_VERSION: ${{ matrix.kotlin }}
           KRUSTY_GRADLE_VERSION: ${{ matrix.gradle }}
-          # Swatinem/rust-cache archives the Cargo target directory and may prune files that are
-          # not Cargo build output. Keep Gradle's mutable Kotlin DSL workspace out of target so a
-          # restored cache cannot contain a script directory without its metadata.bin.
+          # Keep Gradle's mutable Kotlin DSL workspace out of the checkout. A later archive of the
+          # workspace must not retain a script directory without its metadata.bin.
           KRUSTY_GRADLE_USER_HOME: ${{ runner.temp }}/krusty-gradle-user-home
         run: |
-          chmod +x krusty
+          chmod +x krusty krusty-build-tests
           tests="kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty"
           tests="$tests serialization_plugin_compiles_through_krusty"
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
-            cargo test --profile gate -p krusty-build -- --ignored $tests
+            ./krusty-build-tests --ignored $tests
 
   # Build the release binaries per OS/arch (master only). Independent of conformance so it can run in
   # parallel; publishing is what waits on the gate.

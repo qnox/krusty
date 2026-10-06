@@ -60,6 +60,7 @@ fn same_callable(
 }
 
 fn merge_active_constraints(
+    source: &dyn crate::symbol_source::SymbolSource,
     bindings: &mut crate::symbol_resolver::GSigBinds,
     constraints: crate::symbol_resolver::AssignabilityConstraints,
     active: &std::collections::HashSet<&str>,
@@ -76,7 +77,11 @@ fn merge_active_constraints(
             bindings
                 .entry(formal)
                 .and_modify(|known| {
-                    *known = crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
+                    *known = crate::symbol_resolver::merge_inferred_ty_from_symbols(
+                        Some(source),
+                        *known,
+                        actual,
+                    )
                 })
                 .or_insert(actual);
         }
@@ -421,7 +426,6 @@ impl ProductionSignatureSemantics<'_> {
                     .cloned()
             })
             .unwrap_or_default();
-
         let (mut functions, properties) = callables.into_parts();
         let mut recorded = Vec::new();
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
@@ -429,10 +433,7 @@ impl ProductionSignatureSemantics<'_> {
             &module as &dyn crate::symbol_source::SymbolSource,
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
-        let arguments = arguments
-            .iter()
-            .map(|argument| argument.substitute_types(&known))
-            .collect::<Vec<_>>();
+        let arguments = arguments.to_vec();
         for candidate in &mut functions.overloads {
             let Some(mut signature) = candidate.generic_sig.clone() else {
                 // A non-generic extension's receiver still constrains the active variables that
@@ -445,12 +446,34 @@ impl ProductionSignatureSemantics<'_> {
                             declared_receiver,
                             receiver,
                         );
-                    merge_active_constraints(&mut bindings, constraints, &active);
+                    merge_active_constraints(&source, &mut bindings, constraints, &active);
                     recorded.push((candidate.clone(), bindings));
                 }
                 continue;
             };
-            let mut bindings = known.clone();
+            let mut bindings = crate::symbol_resolver::GSigBinds::new();
+            // Active builder variables normally remain lower constraints: seeding every known
+            // value here would let the first nested call reject a later sibling before PCLA sees
+            // the complete set. A result-only nested call is different. It has no input evidence
+            // of its own (`emptyMap()`), so the already-known enclosing expectation is the only
+            // fact that can complete it. Seed exactly the declaration variables used by those
+            // parameter positions and leave every ordinary argument unconstrained.
+            let value_parameter_start = candidate.context_count.min(signature.params.len());
+            for (parameter, argument) in signature.params[value_parameter_start..]
+                .iter()
+                .zip(&arguments)
+            {
+                if !argument.is_expected_type_callable() || argument.result_is_input_constrained() {
+                    continue;
+                }
+                let mut contextual = std::collections::HashSet::new();
+                collect_type_parameters(*parameter, &mut contextual);
+                for formal in contextual {
+                    if let Some(value) = known.get(formal).copied() {
+                        bindings.insert(formal.to_string(), value);
+                    }
+                }
+            }
             let declared_receiver = signature.receiver.or(candidate.receiver);
             if let Some(declared_receiver) = declared_receiver {
                 crate::symbol_resolver::unify_inferred_ty_with_source(
@@ -460,7 +483,6 @@ impl ProductionSignatureSemantics<'_> {
                     &mut bindings,
                 );
             }
-            let value_parameter_start = candidate.context_count.min(signature.params.len());
             for (parameter, argument) in signature.params[value_parameter_start..]
                 .iter()
                 .copied()
@@ -482,7 +504,7 @@ impl ProductionSignatureSemantics<'_> {
                         parameter,
                         argument.type_for(parameter),
                     );
-                merge_active_constraints(&mut bindings, constraints, &active);
+                merge_active_constraints(&source, &mut bindings, constraints, &active);
             }
             if let Some(declared_receiver) = declared_receiver {
                 let expected_receiver =
@@ -493,7 +515,7 @@ impl ProductionSignatureSemantics<'_> {
                         expected_receiver,
                         receiver,
                     );
-                merge_active_constraints(&mut bindings, constraints, &active);
+                merge_active_constraints(&source, &mut bindings, constraints, &active);
             }
             let committed = bindings
                 .iter()
@@ -631,7 +653,7 @@ impl ProductionSignatureSemantics<'_> {
             &source, declared, receiver,
         );
         let mut bindings = crate::symbol_resolver::GSigBinds::new();
-        merge_active_constraints(&mut bindings, constraints, &active);
+        merge_active_constraints(&source, &mut bindings, constraints, &active);
         self.commit_postponed_bindings(scope, bindings);
     }
 
@@ -678,6 +700,13 @@ impl ProductionSignatureSemantics<'_> {
         else {
             return;
         };
-        ProductionSignatureSemantics::merge_scoped_constraints(active, bindings);
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        ProductionSignatureSemantics::merge_scoped_constraints_from_symbols(
+            &source, active, bindings,
+        );
     }
 }

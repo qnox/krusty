@@ -823,7 +823,16 @@ fn selected_sam_recheck_keeps_members_from_every_type_parameter_bound() {
                 .callable(target)
                 .and_then(|callable| index.callable_name(callable.id))?;
             let receiver = call.dispatch_receiver.as_ref()?;
-            let receiver_ty = lambda_body.expr(receiver.value)?.ty.get();
+            let receiver_ty = match receiver.conversion {
+                Some(FirConversion {
+                    kind: FirConversionKind::SmartCast { to },
+                    ..
+                }) => to.get(),
+                None => lambda_body.expr(receiver.value)?.ty.get(),
+                Some(conversion) => panic!(
+                    "intersection member receiver must use a smart-cast conversion, got {conversion:?}"
+                ),
+            };
             matches!(name, "foo" | "bar").then_some((name, receiver_ty))
         })
         .collect::<Vec<_>>();

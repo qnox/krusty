@@ -16,7 +16,7 @@ use crate::jvm::classfile::{CodeBuilder, Label};
 use crate::types::Ty;
 
 use super::frame_map::{FrameKey, TempRole, TempSlot};
-use super::{debug_lines, ir_ty_to_jvm, load, local_variable_desc, store, Emitter};
+use super::{debug_lines, ir_ty_to_jvm, load, local_variable_desc, slot_words, store, Emitter};
 
 /// The operands of an IR `try` being emitted, as `IrExpr::Try` holds them.
 pub(super) struct TryParts<'a> {
@@ -92,6 +92,42 @@ impl Emitter<'_> {
     pub(super) fn close_finally_segment(&mut self, finalizer: u32, code: &mut CodeBuilder) {
         let index = self.finally_region(finalizer);
         self.close_region_segment(index, code);
+    }
+
+    /// Emit one copy of a `finally` body. An `inline` function brackets it with
+    /// `InlineMarker.finallyStart(depth)` and `finallyEnd(depth)`, where `depth` counts this copy.
+    pub(super) fn emit_finalizer_copy(&mut self, finalizer: u32, code: &mut CodeBuilder) {
+        if self.finally_markers {
+            self.finally_marker_depth = self
+                .finally_marker_depth
+                .checked_add(1)
+                .expect("finally marker nesting exceeds u32");
+            self.mark_finally(true, code);
+        }
+        self.emit(finalizer, code);
+        if self.finally_markers {
+            // kotlinc has no dead end marker after a finalizer that returns, throws, breaks, or
+            // continues. Apart from matching its marker contract, omitting that instruction keeps
+            // an unreachable call from requiring a verifier frame of its own.
+            if !self.discarding_diverges(finalizer) {
+                self.mark_finally(false, code);
+            }
+            self.finally_marker_depth = self
+                .finally_marker_depth
+                .checked_sub(1)
+                .expect("finally marker nesting underflow");
+        }
+    }
+
+    fn mark_finally(&mut self, start: bool, code: &mut CodeBuilder) {
+        let depth = i32::try_from(self.finally_marker_depth)
+            .expect("finally marker nesting exceeds the JVM Int argument");
+        code.push_int(depth, self.cw);
+        let name = if start { "finallyStart" } else { "finallyEnd" };
+        let method = self
+            .cw
+            .methodref("kotlin/jvm/internal/InlineMarker", name, "(I)V");
+        code.invokestatic(method, 1, 0);
     }
 
     /// End the open segments a transfer leaves ahead of the copy of `finalizer` it is about to
@@ -242,7 +278,7 @@ impl Emitter<'_> {
                 // merge at `after`, which does type it, is rejected as inconsistent. The lease ends
                 // with this copy: the handler copies below are reached on edges that never stored it.
                 let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
-                self.emit(f, code);
+                self.emit_finalizer_copy(f, code);
                 if let Some(parked) = parked {
                     self.release_temporary(parked);
                 }
@@ -368,7 +404,7 @@ impl Emitter<'_> {
                 if let Some(f) = finally {
                     // Same as the normal path: this catch stored the result, and `after` loads it.
                     let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
-                    self.emit(f, code);
+                    self.emit_finalizer_copy(f, code);
                     if let Some(parked) = parked {
                         self.release_temporary(parked);
                     }
@@ -429,7 +465,7 @@ impl Emitter<'_> {
             // `top`. It is a backend temporary, not a value, and holds its own lease: nested
             // catch-all handlers each lease their own, and a lease cannot collide with a value id.
             let parked = self.lease_frame_temporary(parked, thr_ty);
-            self.emit(f, code);
+            self.emit_finalizer_copy(f, code);
             // Re-raise the caught exception after the `finally` — unless the `finally` itself transfers
             // control (`finally { return … }` / `finally { throw … }`), in which case the rethrow is
             // unreachable and emitting it would leave a dead instruction without a stackmap frame.
@@ -523,8 +559,32 @@ impl Emitter<'_> {
         let target = if brk { end } else { cont };
         self.mark_expression_start(transfer, code);
         code.nop();
+        // Every break to an inline-return frame leaves that result on the stack. A path that
+        // skips `finally` and a path that never entered it (`setup() ?: return false` beside
+        // `return block()`) meet at the same label, and kotlinc's landing use is the store, not
+        // another load.
         let survives = self.emit_transfer_finalizers(depth, code);
         if survives {
+            if brk && !code.is_dead() {
+                if let Some(label) = label {
+                    if let Some(&(value, ty)) = self.inline_return_frame_results.get(label) {
+                        if slot_words(ty) > 0 {
+                            let slot = self.activate_inline_return_frame_result(value, ty);
+                            load(ty, slot, code);
+                            if self
+                                .label_stack_resident_values
+                                .insert(target, value)
+                                .is_some_and(|existing| existing != value)
+                            {
+                                self.run.set_emit_error(
+                                    "an inline-return label receives different stack-carried values"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             code.goto(target);
         }
         self.reopen_finally_segments(code);

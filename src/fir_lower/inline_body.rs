@@ -5,7 +5,8 @@ use crate::ir::{Callee, ExprId, IrCheckedArgument, IrConst, IrExpr};
 use crate::types::Ty;
 
 use super::source_calls::{
-    rehome_inline_body_values, SelectedDefaultMode, SelectedOperandMode, SelectedOperandRequest,
+    inline_argument_template, rehome_inline_body_values, SelectedDefaultMode, SelectedOperandMode,
+    SelectedOperandRequest,
 };
 use super::BodyLowering;
 
@@ -382,16 +383,8 @@ impl BodyLowering<'_> {
             } => lambda,
             _ => return None,
         };
-        let (implementation, captures, inline_body, arity) = match self.ir.expr(lambda).clone() {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                inline_body: Some(inline_body),
-                arity,
-                ..
-            } => (impl_fn, captures, inline_body, arity as usize),
-            _ => return None,
-        };
+        let (implementation, captures, inline_body, arity) =
+            inline_argument_template(self.ir, lambda)?;
         if arity != 1 + usize::from(index.is_some()) {
             return None;
         }
@@ -1049,16 +1042,8 @@ impl BodyLowering<'_> {
             } => lambda,
             _ => return None,
         };
-        let (implementation, captures, inline_body, arity) = match self.ir.expr(lambda).clone() {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                inline_body: Some(inline_body),
-                arity,
-                ..
-            } => (impl_fn, captures, inline_body, arity as usize),
-            _ => return None,
-        };
+        let (implementation, captures, inline_body, arity) =
+            inline_argument_template(self.ir, lambda)?;
         if invocation_operands.len() != arity {
             return None;
         }

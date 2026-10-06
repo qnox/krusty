@@ -22,6 +22,7 @@
 mod anonymous_object;
 mod callee_shape;
 mod class_roles;
+mod finally_markers;
 mod functional_arguments;
 mod lambda_expansion;
 mod local_sorter;
@@ -71,6 +72,8 @@ pub(crate) enum InlineError {
     IncrementOfCallerValue,
     /// A reified marker did not have kotlinc's exact operation/name/call shape.
     MalformedReifiedMarker,
+    /// A declaration-body finally marker has no adjacent constant depth argument.
+    MalformedFinallyMarker,
     /// The selected call did not publish the substitution named by a reified marker.
     MissingReifiedArgument(String),
     /// The body's data flow could not be followed (`markPlacesForInlineAndRemoveInlinable`).
@@ -144,6 +147,9 @@ pub(in crate::jvm) fn inline(
     let end = node.new_label();
     node.nodes.push(Node::Label(end));
     returns::process_returns(&mut node, end);
+    // The declaration retains finally markers for an inliner; the finished caller never executes
+    // them as ordinary runtime calls.
+    finally_markers::remove(&mut node)?;
     node.nodes.insert(0, Node::Insn(Insn::Op(NOP)));
     Ok(node)
 }

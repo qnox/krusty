@@ -379,6 +379,11 @@ impl BodyLowering<'_> {
         unit_method: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
         let (function, owner) = self.predeclare_local_function(body, callable)?;
+        if let Some(inferred) = body.inferred_result_type() {
+            self.ir
+                .lambda_inferred_results
+                .insert(function, inferred.get());
+        }
         let unit_as_value = !unit_method
             && body
                 .result_type()

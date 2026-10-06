@@ -526,16 +526,8 @@ impl BodyLowering<'_> {
             } => lambda,
             _ => return None,
         };
-        let (implementation, captures, inline_body, arity) = match self.ir.expr(lambda).clone() {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                inline_body: Some(inline_body),
-                arity,
-                ..
-            } => (impl_fn, captures, inline_body, arity as usize),
-            _ => return None,
-        };
+        let (implementation, captures, inline_body, arity) =
+            inline_argument_template(self.ir, lambda)?;
         if arity != 1 {
             return None;
         }
@@ -1871,25 +1863,9 @@ impl BodyLowering<'_> {
                             CheckedArgumentPolicy::Selected {
                                 preserve_inline_lambdas,
                                 ..
-                            } => {
-                                preserve_inline_lambdas
-                                    && matches!(
-                                        self.ir.expr(value),
-                                        IrExpr::Lambda {
-                                            inline_body: Some(_),
-                                            ..
-                                        }
-                                    )
-                            }
+                            } => preserve_inline_lambdas && inline_argument_stays(self.ir, value),
                             CheckedArgumentPolicy::SameFileInline { inline, .. } => {
-                                inline
-                                    && matches!(
-                                        self.ir.expr(value),
-                                        IrExpr::Lambda {
-                                            inline_body: Some(_),
-                                            ..
-                                        }
-                                    )
+                                inline && inline_argument_stays(self.ir, value)
                             }
                         };
                         if matches!(policy, CheckedArgumentPolicy::SameFileInline { .. })
@@ -2025,6 +2001,59 @@ impl BodyLowering<'_> {
     /// consumed by `compareTo(Int)` must remain `Char`).
     fn direct_call_operand(&mut self, value: ExprId, _target: Ty) -> ExprId {
         value
+    }
+}
+
+/// A lambda literal, or a callable reference whose adapter is that literal, stays in the argument
+/// position. Spilling either would be the function object the splice is there to avoid.
+fn inline_argument_stays(ir: &crate::ir::IrFile, value: ExprId) -> bool {
+    match ir.expr(value) {
+        IrExpr::Lambda {
+            inline_body: Some(_),
+            ..
+        } => true,
+        IrExpr::CallableReference(_) => inline_argument_template(ir, value).is_some(),
+        _ => false,
+    }
+}
+
+/// The inline template of a lambda, or of a non-suspend callable reference whose adapter is that
+/// template. The reference's target is not consulted: the adapter's captures, bound receiver, and
+/// one returned value are the invocation. A stored reference never reaches this helper.
+pub(crate) fn inline_argument_template(
+    ir: &crate::ir::IrFile,
+    expression: ExprId,
+) -> Option<(u32, Vec<ExprId>, ExprId, usize)> {
+    let expression_node = ir.expr(expression).clone();
+    match expression_node {
+        IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body: Some(inline_body),
+            arity,
+            ..
+        } => Some((impl_fn, captures, inline_body, usize::from(arity))),
+        IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body: None,
+            arity,
+            ..
+        } if ir.lambda_class_provenance(impl_fn)
+            == Some(crate::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter) =>
+        {
+            let arity = usize::from(arity);
+            let function = ir.functions.get(impl_fn as usize)?;
+            let body = function.body?;
+            let inline_body = *ir.callable_reference_adapter_results.get(&body)?;
+            let body_arity = function.params.len();
+            if body_arity != arity + captures.len() {
+                return None;
+            }
+            Some((impl_fn, captures, inline_body, arity))
+        }
+        IrExpr::CallableReference(_) => ir.callable_reference_inline_template(expression),
+        _ => None,
     }
 }
 

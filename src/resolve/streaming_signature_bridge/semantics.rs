@@ -287,7 +287,7 @@ impl ProductionSignatureSemantics<'_> {
                 }
             }
             inferred.retain(|formal, _| active_formals.contains(formal.as_str()));
-            Self::merge_scoped_constraints(active, inferred);
+            Self::merge_scoped_constraints_from_symbols(&source, active, inferred);
         }
         crate::trace_compiler!(
             "signature",
@@ -832,6 +832,25 @@ impl ProductionSignatureSemantics<'_> {
                 .entry(formal)
                 .and_modify(|known| {
                     *known = crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
+                })
+                .or_insert(actual);
+        }
+    }
+
+    pub(super) fn merge_scoped_constraints_from_symbols(
+        oracle: &dyn crate::symbol_source::SymbolSource,
+        target: &mut crate::symbol_resolver::GSigBinds,
+        source: crate::symbol_resolver::GSigBinds,
+    ) {
+        for (formal, actual) in source {
+            target
+                .entry(formal)
+                .and_modify(|known| {
+                    *known = crate::symbol_resolver::merge_inferred_ty_from_symbols(
+                        Some(oracle),
+                        *known,
+                        actual,
+                    )
                 })
                 .or_insert(actual);
         }

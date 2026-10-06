@@ -190,6 +190,8 @@ mod build840_mm1_safe_call_lambda_ext_e2e;
 mod build840_nn1_suspend_inline_withlock_e2e;
 #[path = "builder_inference_receivers_e2e.rs"]
 mod builder_inference_receivers_e2e;
+#[path = "builder_sibling_lower_bounds_e2e.rs"]
+mod builder_sibling_lower_bounds_e2e;
 #[path = "builtin_intrinsics_coverage_e2e.rs"]
 mod builtin_intrinsics_coverage_e2e;
 #[path = "builtin_member_realization_e2e.rs"]
@@ -733,6 +735,8 @@ mod empty_loop_body_e2e;
 mod engine_declaration_types_e2e;
 #[path = "enhanced_result_null_check_e2e.rs"]
 mod enhanced_result_null_check_e2e;
+#[path = "enhanced_type_argument_null_check_e2e.rs"]
+mod enhanced_type_argument_null_check_e2e;
 #[path = "enum_body_property_e2e.rs"]
 mod enum_body_property_e2e;
 #[path = "enum_class_signature_e2e.rs"]
@@ -1037,6 +1041,8 @@ mod imported_companion_property_e2e;
 mod increment_statement_e2e;
 #[path = "indy_infra_e2e.rs"]
 mod indy_infra_e2e;
+#[path = "indy_lambda_fallback_parity_e2e.rs"]
+mod indy_lambda_fallback_parity_e2e;
 #[path = "indy_lambda_parity_e2e.rs"]
 mod indy_lambda_parity_e2e;
 #[path = "inferred_alias_abbreviation_e2e.rs"]
@@ -1063,6 +1069,8 @@ mod init_block_lines_e2e;
 mod inline_call_operand_spill_e2e;
 #[path = "inline_capture_splice_e2e.rs"]
 mod inline_capture_splice_e2e;
+#[path = "inline_constructor_reference_e2e.rs"]
+mod inline_constructor_reference_e2e;
 #[path = "inline_crossinline_object_e2e.rs"]
 mod inline_crossinline_object_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]
@@ -1071,6 +1079,8 @@ mod inline_deep_coverage_e2e;
 mod inline_end_branch_e2e;
 #[path = "inline_erased_capture_e2e.rs"]
 mod inline_erased_capture_e2e;
+#[path = "inline_finally_marker_e2e.rs"]
+mod inline_finally_marker_e2e;
 #[path = "inline_lambda_as_value_e2e.rs"]
 mod inline_lambda_as_value_e2e;
 #[path = "inline_lambda_caller_loop_jump_e2e.rs"]
@@ -1181,6 +1191,8 @@ mod interface_supertype_members_e2e;
 mod internal_classpath_access_e2e;
 #[path = "internal_member_names_e2e.rs"]
 mod internal_member_names_e2e;
+#[path = "intersection_reified_type_of_e2e.rs"]
+mod intersection_reified_type_of_e2e;
 #[path = "invariant_argument_wildcards_e2e.rs"]
 mod invariant_argument_wildcards_e2e;
 #[path = "invoke_operator_extension_e2e.rs"]
@@ -2585,6 +2597,8 @@ mod unresolved_label_diagnostic_e2e;
 mod unresolved_supertype_diag_e2e;
 #[path = "unsigned_array_e2e.rs"]
 mod unsigned_array_e2e;
+#[path = "unsigned_bitwise_e2e.rs"]
+mod unsigned_bitwise_e2e;
 #[path = "unsigned_classpath_call_e2e.rs"]
 mod unsigned_classpath_call_e2e;
 #[path = "unsigned_companion_constant_ty_e2e.rs"]

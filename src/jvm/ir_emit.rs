@@ -1138,6 +1138,10 @@ fn emit_jvm_interface_companion_surface(
             Ty::Unit,
             clinit_statics.iter().map(|&(_, _, init)| init),
         );
+        emitter.regeneration_site = Some(
+            bytecode_inline_call::RegenerationSite::class_initializer(env.signature_symbols),
+        );
+        emitter.record_locals = true;
         let mut clinit = CodeBuilder::new(0);
         emitter.emit_delegated_property_array(env, c.fq_name, &fq_name, &mut clinit);
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
@@ -4376,6 +4380,10 @@ fn emit_enum_class(
                 .iter()
                 .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied()),
         );
+        e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
+            env.signature_symbols,
+        ));
+        e.record_locals = true;
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, &fq, &mut clinit);
         // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
@@ -4817,6 +4825,7 @@ fn emit_method_inner_with_holder(
     // public accessors for its private callees, so every copy is legal in another class.
     e.export_private_calls =
         ir.inline_fns.contains(&fid) && !ir.method_visibility(fid).is_private();
+    e.finally_markers = ir.inline_fns.contains(&fid);
     // kotlinc's transformer keeps a suspend body's own local names: they name the spills.
     let transformed = env.emit_time_machines.transformed(fid);
     // Suspend lowering does not preserve source-local expression IDs.
@@ -5352,7 +5361,10 @@ fn parameterized_sig_at(
             let sig = formatter.ty_at(inner, wildcards)?;
             (sig != ir_type_desc(inner)).then_some(sig)
         }
-        Ty::Fun(_) => formatter.ty_at(inner, wildcards),
+        Ty::Fun(_) => {
+            let sig = formatter.ty_at(inner, wildcards)?;
+            (sig != ir_type_desc(inner)).then_some(sig)
+        }
         _ => None,
     }
 }
@@ -5619,6 +5631,12 @@ struct Emitter<'a> {
     /// This method is a non-private `inline` function. Private calls in it name `access$`
     /// accessors, because the splicer copies these instructions into other classes.
     export_private_calls: bool,
+    /// This method is `inline`, so each copy of a `finally` is bracketed by
+    /// `InlineMarker.finallyStart`/`finallyEnd`.
+    finally_markers: bool,
+    /// How many `finally` bodies are currently being emitted. The marker argument is one more
+    /// than the bodies already open, so the outermost copy is `1`.
+    finally_marker_depth: u32,
     /// Interface companion `$$INSTANCE` self-reads for this class, fixed from `static_owner`.
     self_companion: Option<TypeName>,
     /// Checked classifier declarations: which kind of classifier an operand's type names.
@@ -5637,6 +5655,10 @@ struct Emitter<'a> {
     /// Incoming definite-assignment state by control-flow label. Union is the verifier lattice:
     /// unassigned on any incoming edge means `top` at the merge.
     label_unassigned_values: HashMap<Label, HashSet<u32>>,
+    /// A semantic value carried on the operand stack by every jump to a label. The value becomes
+    /// stack-resident only when that label is bound; intervening handler emission must not consume
+    /// an earlier jump's value.
+    label_stack_resident_values: HashMap<Label, u32>,
     /// Safe-call guards that share one null exit (`a?.b?.c`), by guard `When`: the label, and whether
     /// this guard is the chain's outermost one, which binds it and yields the null result.
     safe_call_null_exits: HashMap<u32, (Label, bool)>,
@@ -5662,8 +5684,8 @@ struct Emitter<'a> {
     /// The suspensions of the function being emitted, by call expression, each with the value
     /// class box its resumption unboxes. Empty for every function whose machine the IR pass owns.
     machine_suspensions: HashMap<u32, Option<(TypeName, Ty)>>,
-    /// Where each inline-return frame emitted so far keeps its result, by the frame's label.
-    inline_return_frame_results: HashMap<String, (u16, Ty)>,
+    /// The deferred result value of each inline-return frame, by the frame's label.
+    inline_return_frame_results: HashMap<String, (u32, Ty)>,
     /// The suspension points kotlinc's coroutine transformer takes, when it takes this function.
     transformed_suspensions: transformed_suspensions::TransformedSuspensions,
     /// The declarations that read a suspend lambda's parameters from their fields, in the
@@ -5781,6 +5803,8 @@ impl<'a> Emitter<'a> {
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
             export_private_calls: false,
+            finally_markers: false,
+            finally_marker_depth: 0,
             classifiers: env.signature_symbols,
             dispatch_classifiers: env.dispatch_classifiers.clone(),
             owner: owner.to_string(),
@@ -5789,6 +5813,7 @@ impl<'a> Emitter<'a> {
             temporaries: backend_temporaries::BackendTemporaries::default(),
             unassigned_values: HashSet::new(),
             label_unassigned_values: HashMap::new(),
+            label_stack_resident_values: HashMap::new(),
             safe_call_null_exits: HashMap::new(),
             stack_resident_value: None,
             safe_call_exit_temporaries: HashMap::new(),
@@ -6143,21 +6168,23 @@ impl<'a> Emitter<'a> {
             } => self.emit_local_variable(e, index, ty, init, named, code),
             IrExpr::InlineFrameMarker => self.emit_inline_frame_marker(e, code),
             IrExpr::SetValue { var, value } => {
-                let Some(&(slot, jt)) = self.slots.get(&var) else {
+                let Some(&(_, jt)) = self.slots.get(&var) else {
                     panic!(
                         "malformed IR: assignment target {var} has no allocated JVM slot while emitting {}; known slots: {:?}",
                         self.owner,
                         self.slots.keys().collect::<Vec<_>>()
                     );
                 };
+                let deferred = self.inline_return_frame_result_type(var).is_some();
                 match local_updates::iinc_delta(self.ir, e, var, value, jt) {
-                    Some(delta) => code.iinc(slot, delta),
+                    Some(delta) if !deferred => code.iinc(self.slots[&var].0, delta),
                     _ => {
                         self.emit_value(value, code);
                         // Coerced to the slot's type as the initializer is: a value of another
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back.
                         self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
+                        let slot = self.activate_inline_return_frame_result(var, jt);
                         store(jt, slot, code);
                     }
                 }
@@ -7041,6 +7068,13 @@ impl<'a> Emitter<'a> {
     }
 
     fn bind(&mut self, label: Label, code: &mut CodeBuilder) {
+        let resident = self.label_stack_resident_values.remove(&label);
+        let joins_fallthrough = resident.is_some() && !code.is_dead();
+        if joins_fallthrough {
+            self.run.set_emit_error(
+                "a label joins a stack-carried value with a fallthrough edge".to_string(),
+            );
+        }
         if !code.is_dead() {
             self.label_unassigned_values
                 .entry(label)
@@ -7051,6 +7085,22 @@ impl<'a> Emitter<'a> {
             self.unassigned_values.clone_from(unassigned);
         }
         code.bind(label);
+        // The jump that reaches this label already pushed the result. The linear tracker still
+        // shows the dead path in front of the label (an `athrow` leaves height 0), so the landing
+        // use would load the slot again. A label that does not carry a result leaves whatever
+        // value is already stack-resident: a safe-call receiver can cross an unrelated bind.
+        if let Some(value) = resident {
+            if joins_fallthrough {
+                self.stack_resident_value = None;
+            } else if let Some(words) = self
+                .inline_return_frame_result_type(value)
+                .map(slot_words)
+                .filter(|words| *words > 0)
+            {
+                code.set_stack(words);
+                self.stack_resident_value = Some(value);
+            }
+        }
     }
 
     /// The definitely-assigned semantic locals, as `(slot, type)`.

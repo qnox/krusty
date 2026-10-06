@@ -219,6 +219,9 @@ impl Emitter<'_> {
                     Some(crate::ir::IrDebugLocalProvenance::InlineValue { .. })
                         | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver { .. })
                         | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { .. })
+                        | Some(
+                            crate::ir::IrDebugLocalProvenance::InlineCallableReferenceParameter { .. }
+                        )
                 ),
             table_position,
             inline_frame_entry: provenance.is_some(),
