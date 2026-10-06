@@ -1,12 +1,14 @@
 //! Select and emit one complete serializer for a property element type.
 
 use super::constructed_standard_serializers::constructed_standard_serializer;
+use super::type_argument_serializers::named_serializer;
 use super::type_parameter_serializers::TypeParameterSerializers;
 use super::{
     build_contextual_serializer, build_polymorphic_serializer, class_ty,
     generated_serializer_accessor, is_nullable, kserializer_of, serializer_of_name,
     type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
 };
+use crate::ir::Spelled;
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::plugins::PluginContext;
 
@@ -36,6 +38,12 @@ pub(super) enum ElementSerializerPlan {
     /// An enum that is not `@Serializable`: its serializer is built at the use site.
     PlainEnum(super::enum_serializer::PlainEnumSerializer),
     ExternalSingleton(TypeName),
+    /// A serializer class a type-use `@Serializable(with = …)` names, built through the exact
+    /// primary constructor the frontend selected for this annotated type shape.
+    Constructed {
+        construction: crate::ir::IrCustomSerializerConstruction,
+        arguments: Vec<ElementSerializerPlan>,
+    },
     /// A class type parameter's serializer, which the generic `$serializer` holds in `field`.
     TypeParameter {
         serializer_class: ClassId,
@@ -67,6 +75,7 @@ pub(super) fn child_cache_element_plan(
     ir: &IrFile,
     ctx: &PluginContext,
     ty: &Ty,
+    annotated: &Spelled,
 ) -> Result<Option<ElementSerializerPlan>, UnderivableChildCacheElement> {
     // A static cache cannot hold a serializer built from an instance's type-parameter serializers;
     // kotlinc builds such an element in `childSerializers` itself.
@@ -93,7 +102,7 @@ pub(super) fn child_cache_element_plan(
     if !cacheable {
         return Ok(None);
     }
-    element_serializer_plan(ir, ctx, ty)
+    element_serializer_plan_in(ir, ctx, ty, TypeParameterSerializers::NONE, annotated)
         .map(Some)
         .ok_or(UnderivableChildCacheElement)
 }
@@ -249,23 +258,33 @@ pub(super) fn always_available_builtin_serializer(ty: &Ty) -> Option<TypeName> {
 /// type that isn't (transitively) a value class.
 /// Select one complete serializer plan without mutating IR. Applicability checks and expression
 /// construction consume this same decision, so they cannot drift into parallel overload systems.
+#[cfg(test)]
 pub(super) fn element_serializer_plan(
     ir: &IrFile,
     ctx: &PluginContext,
     ty: &Ty,
 ) -> Option<ElementSerializerPlan> {
-    element_serializer_plan_in(ir, ctx, ty, TypeParameterSerializers::NONE)
+    element_serializer_plan_in(ir, ctx, ty, TypeParameterSerializers::NONE, Spelled::NONE)
 }
 
 /// [`element_serializer_plan`] where the class type parameters in `scope` have serializers: an
 /// element of such a parameter's type reads the one its `$serializer` was constructed with.
+/// `annotated` is `ty`'s checked declared spelling: a `@Serializable(with = S::class)` it records
+/// on `ty` or on a type argument inside it (`List<@Serializable(with = S::class) Item>`) replaces
+/// the serializer that type's own declaration would select.
 pub(super) fn element_serializer_plan_in(
     ir: &IrFile,
     ctx: &PluginContext,
     ty: &Ty,
     scope: TypeParameterSerializers<'_>,
+    annotated: &Spelled,
 ) -> Option<ElementSerializerPlan> {
     let nn = ty.non_null();
+    // A serializer the type itself is annotated with wins over everything the type's own
+    // declaration would select, including a type parameter's supplied serializer.
+    if let Some(custom) = named_serializer(annotated) {
+        return declared_serializer_plan(ir, ctx, custom, ty, scope, annotated);
+    }
     // A type parameter's serializer is the one supplied for it, never its bound's: `T : Base`
     // holds whatever subtype the caller serialized. Outside a scope that supplies one, there is
     // none to use.
@@ -342,7 +361,10 @@ pub(super) fn element_serializer_plan_in(
         }
         let arguments = type_args
             .iter()
-            .map(|argument| type_argument_serializer_plan(ir, ctx, argument, scope))
+            .enumerate()
+            .map(|(index, argument)| {
+                type_argument_serializer_plan(ir, ctx, argument, scope, annotated.arg(index))
+            })
             .collect::<Option<Vec<_>>>()?;
         return Some(ElementSerializerPlan::ConstructedStandard {
             serializer,
@@ -398,8 +420,14 @@ pub(super) fn element_serializer_plan_in(
         // an explicit `out` projection, so consume that semantic read type directly.
         // An in-projection has no readable element type from which a serializer can be derived.
         let mut arguments = Vec::with_capacity(n_tp);
-        for argument in type_args.iter().take(n_tp) {
-            arguments.push(type_argument_serializer_plan(ir, ctx, argument, scope)?);
+        for (index, argument) in type_args.iter().take(n_tp).enumerate() {
+            arguments.push(type_argument_serializer_plan(
+                ir,
+                ctx,
+                argument,
+                scope,
+                annotated.arg(index),
+            )?);
         }
         if arguments.len() != n_tp {
             return None;
@@ -443,7 +471,16 @@ pub(super) fn element_serializer_plan_in(
             {
                 let arguments = type_args
                     .iter()
-                    .map(|argument| type_argument_serializer_plan(ir, ctx, argument, scope))
+                    .enumerate()
+                    .map(|(index, argument)| {
+                        type_argument_serializer_plan(
+                            ir,
+                            ctx,
+                            argument,
+                            scope,
+                            annotated.arg(index),
+                        )
+                    })
                     .collect::<Option<Vec<_>>>()?;
                 return Some(ElementSerializerPlan::Generated {
                     classifier: fq_name,
@@ -483,7 +520,10 @@ pub(super) fn element_serializer_plan_in(
             }
             let arguments = type_args
                 .iter()
-                .map(|argument| type_argument_serializer_plan(ir, ctx, argument, scope))
+                .enumerate()
+                .map(|(index, argument)| {
+                    type_argument_serializer_plan(ir, ctx, argument, scope, annotated.arg(index))
+                })
                 .collect::<Option<Vec<_>>>()?;
             return Some(ElementSerializerPlan::ExternalCompanion {
                 classifier: fq_name,
@@ -516,13 +556,62 @@ fn type_argument_serializer_plan(
     ctx: &PluginContext,
     argument: &Ty,
     scope: TypeParameterSerializers<'_>,
+    annotated: &Spelled,
 ) -> Option<ElementSerializerPlan> {
     let readable = readable_type_argument(argument)?;
-    let plan = element_serializer_plan_in(ir, ctx, &readable, scope)?;
+    let plan = element_serializer_plan_in(ir, ctx, &readable, scope, annotated)?;
     Some(if is_nullable(&readable) {
         ElementSerializerPlan::Nullable(Box::new(plan))
     } else {
         plan
+    })
+}
+
+/// The serializer a type-use `@Serializable(with = S::class)` names for one type. kotlinc reads an
+/// `object` through `INSTANCE` and constructs a class through the primary constructor selected by
+/// checked FIR. A serializer this compilation does not declare is classified by the provider and
+/// its selected external constructor identity is preserved through target realization.
+fn declared_serializer_plan(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    serializer: TypeName,
+    served: &Ty,
+    scope: TypeParameterSerializers<'_>,
+    annotated: &Spelled,
+) -> Option<ElementSerializerPlan> {
+    let class = ir
+        .classes
+        .iter()
+        .position(|class| class.fq_name_id() == serializer);
+    if let Some(class) = class {
+        if ir.classes[class].is_object {
+            return Some(ElementSerializerPlan::LocalSingleton(class as ClassId));
+        }
+    } else if ctx.external_serializer_is_object(serializer) == Some(true) {
+        return Some(ElementSerializerPlan::ExternalSingleton(serializer));
+    }
+    let type_args = served.non_null().type_args();
+    let construction = ir
+        .type_use_serializer_constructions
+        .get(&(serializer, u32::try_from(type_args.len()).ok()?))?
+        .clone();
+    let arguments = construction
+        .operands
+        .iter()
+        .map(|&ordinal| {
+            let ordinal = usize::try_from(ordinal).ok()?;
+            type_argument_serializer_plan(
+                ir,
+                ctx,
+                type_args.get(ordinal)?,
+                scope,
+                annotated.arg(ordinal),
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(ElementSerializerPlan::Constructed {
+        construction,
+        arguments,
     })
 }
 
@@ -658,6 +747,16 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             super::call_external_companion_serializer(ir, classifier, &field, companion, arguments)
                 .expect("a companion is a classifier of its own")
         }
+        ElementSerializerPlan::Constructed {
+            construction,
+            arguments,
+        } => {
+            let args = arguments
+                .into_iter()
+                .map(|argument| emit_narrowed_argument(ir, argument))
+                .collect();
+            super::declared_serializer::emit_selected_construction(ir, construction, args)
+        }
         ElementSerializerPlan::Builtin(serializer) => ir.add_expr(IrExpr::ExternalStaticInstance {
             owner: serializer,
             ty: serializer,
@@ -668,7 +767,7 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
 
 /// An argument serializer of a companion's `serializer(…)`: kotlinc narrows each operand to the
 /// `KSerializer` the callee takes, including the one a `.nullable` wraps and a collection's own.
-fn emit_narrowed_argument(ir: &mut IrFile, plan: ElementSerializerPlan) -> ExprId {
+pub(super) fn emit_narrowed_argument(ir: &mut IrFile, plan: ElementSerializerPlan) -> ExprId {
     let serializer = emit_element_serializer(ir, plan);
     narrow_to_kserializer(ir, serializer)
 }
@@ -691,7 +790,7 @@ pub(super) fn element_serializer_expr(
     ctx: &PluginContext,
     ty: &Ty,
 ) -> Option<ExprId> {
-    element_serializer_expr_in(ir, ctx, ty, TypeParameterSerializers::NONE)
+    element_serializer_expr_in(ir, ctx, ty, TypeParameterSerializers::NONE, Spelled::NONE)
 }
 
 /// [`element_serializer_expr`] inside a generic `$serializer`, whose type-parameter serializers
@@ -701,8 +800,9 @@ pub(super) fn element_serializer_expr_in(
     ctx: &PluginContext,
     ty: &Ty,
     scope: TypeParameterSerializers<'_>,
+    annotated: &Spelled,
 ) -> Option<ExprId> {
-    let plan = element_serializer_plan_in(ir, ctx, ty, scope)?;
+    let plan = element_serializer_plan_in(ir, ctx, ty, scope, annotated)?;
     Some(emit_element_serializer(ir, plan))
 }
 

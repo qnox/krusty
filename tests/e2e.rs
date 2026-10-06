@@ -643,6 +643,8 @@ mod dependency_override_signature_e2e;
 mod dependency_property_reference_name_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
+#[path = "descriptor_element_companion_serializer_e2e.rs"]
+mod descriptor_element_companion_serializer_e2e;
 #[path = "descriptor_element_specialization_e2e.rs"]
 mod descriptor_element_specialization_e2e;
 #[path = "descriptor_inner_classes_e2e.rs"]
@@ -2165,6 +2167,8 @@ mod safe_call_any_member_e2e;
 mod safe_call_argument_list_e2e;
 #[path = "safe_call_collection_transform_e2e.rs"]
 mod safe_call_collection_transform_e2e;
+#[path = "safe_call_dup_e2e.rs"]
+mod safe_call_dup_e2e;
 #[path = "safe_call_e2e.rs"]
 mod safe_call_e2e;
 #[path = "safe_call_generic_field_e2e.rs"]
@@ -2527,6 +2531,8 @@ mod try_catch_expr_nullable_merge_e2e;
 mod try_expected_type_join_e2e;
 #[path = "type_annotation_newline_e2e.rs"]
 mod type_annotation_newline_e2e;
+#[path = "type_argument_serializer_e2e.rs"]
+mod type_argument_serializer_e2e;
 #[path = "type_of_e2e.rs"]
 mod type_of_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
@@ -2549,6 +2555,8 @@ mod typealias_emission_e2e;
 mod typealias_function_type_e2e;
 #[path = "typealias_generic_target_e2e.rs"]
 mod typealias_generic_target_e2e;
+#[path = "typealias_projection_e2e.rs"]
+mod typealias_projection_e2e;
 #[path = "typeparam_cast_e2e.rs"]
 mod typeparam_cast_e2e;
 #[path = "unimported_cross_package_type_e2e.rs"]

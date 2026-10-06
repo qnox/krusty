@@ -20,8 +20,9 @@ mod substitute;
 mod type_parameter_identity;
 
 pub(crate) use substitute::{
-    ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_all, ty_subst_applied_arguments,
-    ty_subst_applied_lookup, ty_subst_keep_unbound, ty_with_param_bounds,
+    ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_alias_expansion, ty_subst_all,
+    ty_subst_applied_arguments, ty_subst_applied_lookup, ty_subst_keep_unbound,
+    ty_with_param_bounds,
 };
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
@@ -1638,14 +1639,28 @@ impl Ty {
                     inner.source_name_with_classifier_in(context, type_parameter, classifier)
                 )
             }
-            Ty::InProjection(inner) => format!(
-                "in {}",
-                inner.source_name_with_classifier_in(context, type_parameter, classifier)
-            ),
-            Ty::OutProjection(inner) => format!(
-                "out {}",
-                inner.source_name_with_classifier_in(context, type_parameter, classifier)
-            ),
+            Ty::InProjection(inner) => match *inner {
+                Ty::OutProjection(conflicting) => format!(
+                    "CONFLICTING-PROJECTION {}",
+                    conflicting
+                        .source_name_with_classifier_in(context, type_parameter, classifier,)
+                ),
+                _ => format!(
+                    "in {}",
+                    inner.source_name_with_classifier_in(context, type_parameter, classifier)
+                ),
+            },
+            Ty::OutProjection(inner) => match *inner {
+                Ty::InProjection(conflicting) => format!(
+                    "CONFLICTING-PROJECTION {}",
+                    conflicting
+                        .source_name_with_classifier_in(context, type_parameter, classifier,)
+                ),
+                _ => format!(
+                    "out {}",
+                    inner.source_name_with_classifier_in(context, type_parameter, classifier)
+                ),
+            },
             Ty::StarProjection(_) => "*".to_string(),
             Ty::DefinitelyNotNull(inner) => format!(
                 "{} & Any",
@@ -1889,6 +1904,26 @@ impl Ty {
     /// True for the unsigned integer types (inline classes over a signed primitive).
     pub fn is_unsigned(self) -> bool {
         matches!(self, Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong)
+    }
+
+    /// Whether a property of this type may carry metadata `HAS_CONSTANT`.
+    ///
+    /// kotlinc's `canBeUsedForConstVal`: the platform lower bound is a primitive, `String`, or an
+    /// unsigned type. A nullable `String?` does not qualify; a platform `String!` does.
+    pub fn can_be_used_for_const_val(self) -> bool {
+        let ty = self.platform_lower_bound().canonical_semantic();
+        matches!(
+            ty,
+            Ty::Boolean
+                | Ty::Byte
+                | Ty::Short
+                | Ty::Int
+                | Ty::Long
+                | Ty::Char
+                | Ty::Float
+                | Ty::Double
+                | Ty::String
+        ) || ty.is_unsigned()
     }
 
     /// The zero-extension mask an unsigned value needs when it leaves its own representation, or

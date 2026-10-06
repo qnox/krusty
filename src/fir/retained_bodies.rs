@@ -12,7 +12,7 @@ pub struct InlineBodyStore {
     bodies: std::collections::BTreeMap<CallableId, FirBody>,
     /// The checked defaults of the retained inline callables. A call from another source expands
     /// them inside the inlined body, after their owning source drained its own default store.
-    defaults: std::collections::BTreeMap<CallableId, FirBody>,
+    defaults: std::collections::BTreeMap<CallableId, Vec<FirBody>>,
     /// The retained inline callables each callable's checked defaults call, by the declaration
     /// that owns those defaults. They must be templates before the defaults are lowered.
     default_dependencies: std::collections::BTreeMap<CallableId, (BodyOwnerId, Vec<CallableId>)>,
@@ -23,7 +23,7 @@ pub struct InlineBodyStore {
 /// need it even when the declaration body is reparsed later.
 #[derive(Debug, Default)]
 pub struct DefaultArgumentStore {
-    bodies: std::collections::BTreeMap<CallableId, FirBody>,
+    bodies: std::collections::BTreeMap<CallableId, Vec<FirBody>>,
 }
 
 impl InlineBodyStore {
@@ -57,12 +57,14 @@ impl InlineBodyStore {
     /// Keep a copy of each retained inline callable's checked defaults, and record the retained
     /// inline callables every default calls.
     pub(crate) fn retain_defaults(&mut self, defaults: &DefaultArgumentStore) {
-        for (callable, body) in &defaults.bodies {
+        for (callable, fragments) in &defaults.bodies {
             if self.bodies.contains_key(callable) {
-                self.defaults.insert(*callable, body.clone());
+                self.defaults.insert(*callable, fragments.clone());
             }
             let mut referenced = std::collections::HashSet::new();
-            body.collect_referenced_module_callables(&mut referenced);
+            for body in fragments {
+                body.collect_referenced_module_callables(&mut referenced);
+            }
             let mut dependencies = referenced
                 .into_iter()
                 .filter(|dependency| self.bodies.contains_key(dependency))
@@ -70,7 +72,7 @@ impl InlineBodyStore {
             if !dependencies.is_empty() {
                 dependencies.sort_unstable_by_key(|dependency| dependency.raw());
                 self.default_dependencies
-                    .insert(*callable, (body.owner(), dependencies));
+                    .insert(*callable, (fragments[0].owner(), dependencies));
             }
         }
     }
@@ -91,8 +93,8 @@ impl InlineBodyStore {
             .flat_map(|(_, dependencies)| dependencies.iter().copied())
     }
 
-    pub(crate) fn defaults(&self, callable: CallableId) -> Option<&FirBody> {
-        self.defaults.get(&callable)
+    pub(crate) fn defaults(&self, callable: CallableId) -> Option<&[FirBody]> {
+        self.defaults.get(&callable).map(Vec::as_slice)
     }
 
     pub(crate) fn attach_nested_declaration_body(&mut self, callable: CallableId, body: FirBody) {
@@ -142,17 +144,24 @@ impl InlineBodyStore {
     }
 
     pub fn storage_payload_bytes(&self) -> usize {
-        self.bodies
+        let bodies = self
+            .bodies
             .values()
-            .chain(self.defaults.values())
             .map(|body| std::mem::size_of::<CallableId>() + body.storage_payload_bytes())
-            .sum()
+            .sum::<usize>();
+        bodies
+            + self
+                .defaults
+                .values()
+                .flatten()
+                .map(|body| std::mem::size_of::<CallableId>() + body.storage_payload_bytes())
+                .sum::<usize>()
     }
 }
 
 impl DefaultArgumentStore {
-    pub(crate) fn body(&self, callable: CallableId) -> Option<&FirBody> {
-        self.bodies.get(&callable)
+    pub(crate) fn bodies(&self, callable: CallableId) -> impl Iterator<Item = &FirBody> {
+        self.bodies.get(&callable).into_iter().flatten()
     }
 
     pub fn insert(&mut self, callable: ResolvedCallableHeader, body: FirBody) {
@@ -169,10 +178,17 @@ impl DefaultArgumentStore {
             BodyOwnerId::from_raw(callable.declaration.raw()),
             "checked defaults must belong to their surviving callable"
         );
-        assert!(
-            self.bodies.insert(callable.id, body).is_none(),
-            "a callable's checked defaults may be inserted only once"
-        );
+        let fragments = self.bodies.entry(callable.id).or_default();
+        for default in body.default_values() {
+            assert!(
+                fragments.iter().all(|fragment| fragment
+                    .default_values()
+                    .iter()
+                    .all(|existing| existing.parameter != default.parameter)),
+                "one callable parameter may have only one checked default provider"
+            );
+        }
+        fragments.push(body);
     }
 
     pub fn take_for_source(
@@ -183,7 +199,8 @@ impl DefaultArgumentStore {
         let selected = self
             .bodies
             .iter()
-            .filter_map(|(callable, body)| {
+            .filter_map(|(callable, bodies)| {
+                let body = bodies.first()?;
                 index
                     .declaration_anchor(DeclarationId::from_raw(body.owner().raw()))
                     .is_some_and(|anchor| anchor.source == source)
@@ -192,7 +209,13 @@ impl DefaultArgumentStore {
             .collect::<Vec<_>>();
         selected
             .into_iter()
-            .filter_map(|callable| self.bodies.remove(&callable).map(|body| (callable, body)))
+            .flat_map(|callable| {
+                self.bodies
+                    .remove(&callable)
+                    .into_iter()
+                    .flatten()
+                    .map(move |body| (callable, body))
+            })
             .collect()
     }
 
@@ -201,7 +224,7 @@ impl DefaultArgumentStore {
         index: &'a ResolvedModuleIndex,
         source: SourceFileId,
     ) -> impl Iterator<Item = &'a FirBody> + 'a {
-        self.bodies.values().filter(move |body| {
+        self.bodies.values().flatten().filter(move |body| {
             index
                 .declaration_anchor(DeclarationId::from_raw(body.owner().raw()))
                 .is_some_and(|anchor| anchor.source == source)
@@ -209,7 +232,7 @@ impl DefaultArgumentStore {
     }
 
     pub fn len(&self) -> usize {
-        self.bodies.len()
+        self.bodies.values().map(Vec::len).sum()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -219,6 +242,7 @@ impl DefaultArgumentStore {
     pub fn storage_payload_bytes(&self) -> usize {
         self.bodies
             .values()
+            .flatten()
             .map(|body| std::mem::size_of::<CallableId>() + body.storage_payload_bytes())
             .sum()
     }

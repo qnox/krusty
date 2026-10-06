@@ -3457,16 +3457,28 @@ pub fn byte_diff_against_kotlinc_cp_target(
     )))
 }
 
-/// Compare several methods' instruction sequences against the reference compiler's, with the
-/// dependencies in `lib` (none when empty) built by the reference compiler. The dependency,
-/// source module, and both class files are built once; each requested method still produces its own
-/// exact instruction/local-table result and diagnostic.
+/// Compare ONE method's instruction sequence against the reference compiler's, with the
+/// dependencies in `lib` (none when empty) built by the reference compiler.
 ///
 /// Whole-class identity also covers the constant pool, the debug tables and `SourceDebugExtension`,
 /// which diverge for reasons of their own; this instrument answers the narrower question a splice
 /// or coroutine change is actually about — whether the emitted code is the same instructions in the
 /// same order, naming the same members, over the same local slots. Pool indices are normalized away
 /// because two pools interned in different orders describe the same references.
+#[allow(dead_code)]
+pub fn method_code_diff_against_kotlinc(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+    class: &str,
+    method: &str,
+) -> Option<Result<(), String>> {
+    method_code_diffs_against_kotlinc(name, lib, src, class, &[method])?.pop()
+}
+
+/// [`method_code_diff_against_kotlinc`] for several methods of one compiled class. The dependency,
+/// source module, and both class files are built once; each requested method still produces its own
+/// exact instruction/local-table result and diagnostic.
 pub fn method_code_diffs_against_kotlinc(
     name: &str,
     lib: &[(&str, &str)],

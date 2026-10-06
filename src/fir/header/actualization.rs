@@ -194,9 +194,9 @@ pub fn actualized_declaration_pairs(
 }
 
 /// Match actualized declaration subtrees from compact Pass-1 headers and already-bound classifier
-/// identities. This is also the authority for expect-owned default expressions: callers publish
-/// their presence on `actual`, but retain `expect` as the stable provider identity for Pass-2
-/// checking.
+/// identities. Callers publish an expect parameter's default on `actual` and retain `expect` as
+/// the Pass-2 provider when the actual left that parameter bare. An actual that writes the default
+/// itself keeps its own expression.
 pub fn actualization(
     headers: &StreamedHeaderModule,
     bindings: &ActualizationTypeBindings,
@@ -467,15 +467,20 @@ pub fn actualization(
         )
         else {
             // `equals`/`hashCode`/`toString` of a data or value class are compiler-generated and
-            // have no compact header. The coarse key already paired them by name; both being
-            // generated is the whole of their shape.
-            let generated = |declaration| {
-                headers.stub(declaration).is_some_and(|stub| {
-                    stub.flags
-                        .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
-                })
+            // have no compact header. Restrict this exception to that declaration-owned trio:
+            // plugin-generated callables are headerless too, but their parameter types still
+            // participate in expect/actual matching.
+            let generated_structural_member = |declaration| {
+                let Some(stub) = headers.stub(declaration) else {
+                    return false;
+                };
+                stub.flags
+                    .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                    && stub
+                        .flags
+                        .has(crate::fir::DeclarationFlags::GENERATED_STRUCTURAL_MEMBER)
             };
-            return generated(expect) && generated(candidate);
+            return generated_structural_member(expect) && generated_structural_member(candidate);
         };
         let expect_type_parameters = headers.syntax.type_parameters(expect_type_parameters);
         let candidate_type_parameters = headers.syntax.type_parameters(candidate_type_parameters);
@@ -1633,6 +1638,12 @@ mod tests {
         };
         let expect_to_string = generated(0, "toString").expect("expect toString");
         let actual_to_string = generated(1, "toString").expect("actual toString");
+        assert!(expect_to_string
+            .flags
+            .has(DeclarationFlags::GENERATED_STRUCTURAL_MEMBER));
+        assert!(actual_to_string
+            .flags
+            .has(DeclarationFlags::GENERATED_STRUCTURAL_MEMBER));
         assert!(
             headers.syntax.declaration(expect_to_string.id).is_none(),
             "a generated value-class member has no compact header"

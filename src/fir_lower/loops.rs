@@ -296,6 +296,8 @@ impl BodyLowering<'_> {
             result,
             extension_receiver_parameter,
             dispatch,
+
+            metadata_constant_read: _,
         } = target
         else {
             return Err(FirLoweringFailure::UnsupportedLoopMember);

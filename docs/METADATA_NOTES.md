@@ -455,7 +455,9 @@ keeps abbreviation off type equality for the same reason). The spelling therefor
   `member_spellings`.
 - Class metadata is built from the IR alone, so the spelling reaches it on IR side tables
   (`fn_declared_spellings`, `class_declared_spellings`, `prop_declared_spellings`), filled at
-  lowering — the same mechanism `fn_param_declared_nullable` already used.
+  lowering — the same mechanism `fn_param_declared_nullable` already used. Property spellings use
+  `(classifier identity, stable declaration order)`, not `(classifier, source name)`: ordinary and
+  member-extension properties may legally share a name.
 
 ### Reading it back
 
@@ -505,6 +507,25 @@ checker carries — the array's `Argument.projection` is `1` (OUT). The element 
 UNPROJECTED as `ValueParameter.vararg_element_type` (f4). `metadata::vararg_recorded_type` applies
 the projection at the encode seam only, so nothing upstream of metadata sees a type source never
 wrote. A primitive specialized array has no type argument and is recorded unchanged.
+
+## `Property.flags` HAS_CONSTANT
+
+Read from kotlinc 2.4.20's `FirElementSerializer.propertyProto`:
+`isConst || (!isVar && canBeUsedForConstVal(fullyExpandedType(returnType)) && hasConstantValue(initializer))`.
+`hasConstantValue` (`FirToConstantValueChecker`) accepts a supported literal, a string
+concatenation whose arguments are constants, a `const val` read, a provider-published Java `final`
+field read (including one without a `ConstantValue` attribute), an enum entry, an annotation
+constructor, `arrayOf` over constants, and a call in package `kotlin` named
+in `NUMBER_CONVERSIONS` or `unaryMinus` whose dispatch receiver is constant. kotlinc's parser folds
+`-3`, `+3` and `"a" + "b"` into literals before that. Measured the same in classes and at top level:
+
+| initializer | HAS_CONSTANT |
+| --- | --- |
+| `val s: String = "s"`, `val u: UInt = 1u`, `val n: Int = -X` | yes |
+| `X.toLong()`, `(-3).toLong()`, `0.toDouble()`, `1.0.toInt()`, `65.toChar()` | yes |
+| `"$X"`, `"a${S}b"`, `"a" + "b" + "c"`, `+3`, a bare `S` | yes |
+| `val a: Any = "t"`, `val c: CharSequence = "abcd"`, `val m: String? = "m"` | no |
+| `(1 + 2).toLong()`, `1 + 2`, `!true`, `"a" + 1`, `"a" + S`, `S + "a"`, `+X`, `3u.toUInt()` | no |
 
 ## Class supertypes: only what source declared
 
