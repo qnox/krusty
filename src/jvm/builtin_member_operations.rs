@@ -89,10 +89,15 @@ pub(super) fn operation(
             }
             let op = binary_operation(intrinsic)?;
             let (lhs_ty, rhs_ty) = primitive_binary_operands(intrinsic, parameter, result)?;
+            // The selected declaration and the operation result stay semantic (`UInt`/`ULong`),
+            // while JVM primitive opcodes consume their physical carriers. Keep that conversion at
+            // this target boundary so opcode selection never sees a value-class identity as an
+            // int-category default.
+            let carrier = |ty: Ty| ty.scalar_value_repr().unwrap_or(ty);
             // JVM arithmetic has no `char` form: `Char.plus(Int)` adds as `int` and narrows the sum.
             let arithmetic = |ty: Ty| if ty == Ty::Char { Ty::Int } else { ty };
-            let lhs = coerce(ir, receiver, receiver_ty, arithmetic(lhs_ty));
-            let rhs = coerce(ir, *argument, parameter, arithmetic(rhs_ty));
+            let lhs = coerce(ir, receiver, receiver_ty, arithmetic(carrier(lhs_ty)));
+            let rhs = coerce(ir, *argument, parameter, arithmetic(carrier(rhs_ty)));
             let value = IrExpr::PrimitiveBinOp { op, lhs, rhs };
             if arithmetic(result) == result {
                 return Some(BuiltinMemberOperation::Value(value));
@@ -297,8 +302,46 @@ mod tests {
             ir.expr(call),
             IrExpr::PrimitiveBinOp {
                 op: IrBinOp::Ushr,
-                ..
-            }
+                lhs,
+                rhs,
+            } if matches!(
+                ir.expr(*lhs),
+                IrExpr::TypeOp { type_operand: Ty::Int, .. }
+            ) && matches!(
+                ir.expr(*rhs),
+                IrExpr::TypeOp { type_operand: Ty::Int, .. }
+            )
+        ));
+
+        let ulong_receiver = ir.add_expr(IrExpr::Const(IrConst::Long(1)));
+        let shift = ir.add_expr(IrExpr::Const(IrConst::Int(3)));
+        let shifted = ir.add_expr(IrExpr::Const(IrConst::Long(0)));
+        operation(
+            &mut ir,
+            CompilerIntrinsic::PrimitiveShiftLeft,
+            BuiltinMemberOperands {
+                receiver: ulong_receiver,
+                receiver_ty: Ty::ULong,
+                arguments: &[shift],
+                parameters: &[Ty::Int],
+                result: Ty::ULong,
+            },
+        )
+        .expect("`ULong.shl` is a scalar operation")
+        .commit(&mut ir, shifted);
+        assert!(matches!(
+            ir.expr(shifted),
+            IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Shl,
+                lhs,
+                rhs,
+            } if matches!(
+                ir.expr(*lhs),
+                IrExpr::TypeOp { type_operand: Ty::Long, .. }
+            ) && matches!(
+                ir.expr(*rhs),
+                IrExpr::TypeOp { type_operand: Ty::Int, .. }
+            )
         ));
 
         let long_receiver = ir.add_expr(IrExpr::Const(IrConst::Long(1)));
