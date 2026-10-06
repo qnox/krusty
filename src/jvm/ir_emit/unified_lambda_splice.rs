@@ -106,9 +106,13 @@ fn literal_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static s
 
 /// A recorded callable-reference template, placed as the literal the host invokes.
 fn callable_reference_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static str> {
-    let (adapter, captures, returned, arity, function_type) = ir
+    let (adapter, captures, returned, arity) = ir
         .callable_reference_inline_template(lambda)
         .ok_or("a placed callable reference has no recorded inline template")?;
+    let IrExpr::CallableReference(reference) = ir.expr(lambda) else {
+        return Err("a placed callable reference has no recorded inline template");
+    };
+    let function_type = reference.function_type;
     let Ty::Fun(signature) = function_type.non_null() else {
         return Err("a placed callable reference has no function type");
     };

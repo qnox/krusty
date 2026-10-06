@@ -63,7 +63,7 @@ pub(super) fn bind_spliced_captures(
     materialize: &mut dyn FnMut(ExprId, Ty) -> u16,
 ) -> Result<CaptureBindings, &'static str> {
     let (impl_fn, captures) =
-        if let Some((adapter, captures, _, _, _)) = ir.callable_reference_inline_template(lambda) {
+        if let Some((adapter, captures, _, _)) = ir.callable_reference_inline_template(lambda) {
             (adapter, captures)
         } else {
             match ir.expr(lambda) {
@@ -129,7 +129,7 @@ pub(super) fn aliased_invocation(
     params: &[Ty],
     arguments: usize,
 ) -> Result<AliasedInvocation, &'static str> {
-    let (impl_fn, captures, inline_body) = if let Some((adapter, captures, returned, _, _)) =
+    let (impl_fn, captures, inline_body) = if let Some((adapter, captures, returned, _)) =
         ir.callable_reference_inline_template(lambda)
     {
         (adapter, captures, returned)
