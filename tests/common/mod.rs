@@ -2839,6 +2839,8 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
         return Some((replayed.code, replayed.stderr));
     }
     let result = kotlinc_compile_live(args)?;
+    // A replay returns above and prints nothing. This line names the test that reached the JVM.
+    byte_dump::report_live_kotlinc(args);
     byte_dump::remember_class_dump(args, result.0, &result.1);
     Some(result)
 }
@@ -3182,37 +3184,30 @@ pub fn javac_run_proc(
 }
 
 /// The `SourceDebugExtension` (SMAP) payload of a compiled class, one entry per line, or an empty
-/// vector when the class carries none. javap renders the attribute as an indented block after a
-/// `SourceDebugExtension:` header; the same text also sits in the constant pool for the
-/// `@SourceDebugExtension` annotation kotlinc attaches, and reading the block compares the attribute
-/// itself rather than that pool entry.
+/// vector when the class carries none. The attribute body is the map; the same text also sits in
+/// the constant pool for the `@SourceDebugExtension` annotation kotlinc attaches, and reading the
+/// attribute compares the map itself rather than that pool entry.
 #[allow(dead_code)]
 pub fn source_debug_extension(class_file: &Path) -> Vec<String> {
-    let dump =
-        javap(&["-v", "-p", &class_file.to_string_lossy()]).expect("pooled JavaRunner unavailable");
-    let mut out = Vec::new();
-    let mut inside = false;
-    for line in dump.lines() {
-        if line.trim() == "SourceDebugExtension:" {
-            inside = true;
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        if !line.starts_with("  ") || line.trim().is_empty() {
-            break;
-        }
-        out.push(line.trim().to_string());
+    let bytes = std::fs::read(class_file)
+        .unwrap_or_else(|error| panic!("read {}: {error}", class_file.display()));
+    match krusty::jvm::classreader::source_debug_extension(&bytes) {
+        Ok(Some(text)) => text.lines().map(str::to_string).collect(),
+        Ok(None) => Vec::new(),
+        Err(error) => panic!(
+            "read SourceDebugExtension of {}: {error:?}",
+            class_file.display()
+        ),
     }
-    out
 }
 
 /// Disassemble via the pooled JavaRunner's in-process `javap` ToolProvider — the same persistent
-/// JVM the driver tests use, so a parity test costs no `javap` process (a full JVM start) per
-/// assertion. `args` is the ordinary javap argv (e.g. `["-c", "-p", "/path/To.class"]`). Returns
-/// the disassembly text; panics on a javap error (a malformed class under test is a failure, not a
-/// skip); `None` = JVM unavailable.
+/// JVM the driver tests use, so this never starts a `javap` process. `args` is the ordinary javap
+/// argv (e.g. `["-c", "-p", "/path/To.class"]`).
+///
+/// A check that can be decided from the class file should do that and call this only to explain a
+/// failure. Returns the disassembly text; panics on a javap error (a malformed class under test is
+/// a failure, not a skip); `None` = JVM unavailable.
 #[allow(dead_code)]
 pub fn javap(args: &[&str]) -> Option<String> {
     let joined = args.join("\n");
@@ -3545,27 +3540,29 @@ pub fn method_code_diffs_against_kotlinc(
 /// A spliced inline function's name still occurs in the class: its inline-depth marker
 /// (`$i$f$<callee>`) is a debug-table entry, and the source map names the file it came from. Those
 /// are not calls, and the reference compiler emits them too, so a byte search for the name answers
-/// a different question from the one a splice test is asking.
+/// a different question from the one a splice test is asking. `invokedynamic` is not a call of
+/// `callee`: its bootstrap name is not the function the splice removed.
 #[allow(dead_code)]
-pub fn class_calls_method(bytes: &[u8], class: &str, callee: &str) -> Option<bool> {
-    let dir = scratch_dir()?;
-    let path = dir.join(format!("{class}.class"));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok()?;
+pub fn class_calls_method(bytes: &[u8], callee: &str) -> Option<bool> {
+    let bodies = krusty::jvm::classreader::ClassBodies::parse(std::sync::Arc::new(bytes.to_vec()))?;
+    let methods = bodies
+        .coded_methods()
+        .map(|(name, descriptor)| (name.to_string(), descriptor.to_string()))
+        .collect::<Vec<_>>();
+    for (name, descriptor) in methods {
+        let code = bodies.method_code(&name, &descriptor)?;
+        let instructions = krusty::jvm::inline::disassemble(&code.code)?;
+        for instruction in &instructions {
+            if let Some((_, method, _, _)) =
+                krusty::jvm::inline::invoked_method(instruction, &code.source_cp)
+            {
+                if method == callee {
+                    return Some(true);
+                }
+            }
+        }
     }
-    std::fs::write(&path, bytes).ok()?;
-    let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
-        .args(["-p", "-c", "-cp"])
-        .arg(&dir)
-        .arg(class.replace('/', "."))
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    let _ = std::fs::remove_dir_all(&dir);
-    Some(
-        text.lines()
-            .any(|line| line.contains("// Method ") && line.contains(&format!(".{callee}:"))),
-    )
+    Some(false)
 }
 
 /// One method's instructions and its `LocalVariableTable`, with constant-pool indices normalized
@@ -3578,13 +3575,11 @@ pub fn class_calls_method(bytes: &[u8], class: &str, callee: &str) -> Option<boo
 /// not measuring.
 #[allow(dead_code)]
 fn disassembled_method(dir: &Path, class: &str, method: &str) -> Option<String> {
-    let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
-        .args(["-p", "-c", "-l", "-cp"])
-        .arg(dir)
-        .arg(class.replace('/', "."))
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
+    // The listing is the comparison and, when the methods differ, the failure text. It comes from
+    // the pooled runner, not a new `javap` process.
+    let classpath = dir.to_string_lossy();
+    let binary_name = class.replace('/', ".");
+    let text = javap(&["-p", "-c", "-l", "-cp", classpath.as_ref(), &binary_name])?;
     let mut body = String::new();
     let mut inside = false;
     let mut skipping_lines = false;

@@ -45,7 +45,7 @@ fn user_inline_functions_are_spliced_not_called() {
         .1;
     for callee in ["triple", "atLeast", "applyIt"] {
         // A CALL, not the name: a spliced body still carries `$i$f$<callee>` in its debug table.
-        if let Some(called) = common::class_calls_method(main_class, "MainKt", callee) {
+        if let Some(called) = common::class_calls_method(main_class, callee) {
             assert!(
                 !called,
                 "MainKt still calls `{callee}` — the inline fn was called, not spliced"
@@ -105,7 +105,7 @@ fn typed_bodies_are_spliced() {
         .expect("no MainTypedKt")
         .1;
     for callee in ["dscale", "lsum", "fbump", "widen"] {
-        if let Some(called) = common::class_calls_method(main_class, "MainTypedKt", callee) {
+        if let Some(called) = common::class_calls_method(main_class, callee) {
             assert!(
                 !called,
                 "MainTypedKt still calls `{callee}` — spliced, not called"
@@ -118,4 +118,33 @@ fn typed_bodies_are_spliced() {
         return;
     };
     assert_eq!(out.trim(), "OK", "typed box() returned {out:?}");
+}
+
+fn facade_bytes(source: &str, stem: &str) -> Vec<u8> {
+    let classes = common::compile_in_process(source, stem, &[], None)
+        .unwrap_or_else(|| panic!("{stem} compiles"));
+    classes
+        .into_iter()
+        .find(|(name, _)| name == &format!("{stem}Kt"))
+        .unwrap_or_else(|| panic!("{stem} emits {stem}Kt"))
+        .1
+}
+
+#[test]
+fn an_invoke_of_the_callee_is_a_call() {
+    let bytes = facade_bytes(
+        "fun callee(): Int = 1\nfun box(): Int = callee()\n",
+        "InvokeCall",
+    );
+    assert_eq!(common::class_calls_method(&bytes, "callee"), Some(true));
+    assert_eq!(common::class_calls_method(&bytes, "box"), Some(false));
+}
+
+#[test]
+fn a_local_named_like_a_function_is_not_a_call() {
+    let bytes = facade_bytes(
+        "fun box(): Int {\n    val callee = 1\n    return callee\n}\n",
+        "LocalName",
+    );
+    assert_eq!(common::class_calls_method(&bytes, "callee"), Some(false));
 }

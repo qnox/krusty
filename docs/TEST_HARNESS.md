@@ -201,6 +201,37 @@ live. The archive is read at runtime and is not compiled into the test binary or
 The corpus byte-diff cache under `target/cache/ref-classes/` follows
 the same release/RC rule and stays uncached for any other compiler.
 
+A live kotlinc invocation writes one line straight to the test process's stderr (libtest's capture
+does not hide it), and a passing replay writes nothing:
+
+```text
+class-dump: live kotlinc cache-miss test=<module>::<case> sources=<files> fingerprint=<hex>
+```
+
+`record` replaces `cache-miss` when `KRUSTY_RECORD_CLASS_DUMPS=1` (or `KRUSTY_RECORD=1`) recompiles
+a stored entry. `uncached-compiler` replaces it when the selected kotlinc is not a release or RC, so
+that compiler never reads the archive. When the process exits, one summary names each test that
+compiled live and how many invocations it made:
+
+```text
+class-dump: live kotlinc summary invocations=<n> tests=<n>
+class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n>
+```
+
+## JVM processes
+
+kotlinc, `javac`, and `java` that the suite runs on every test are pooled. A cache hit does not
+start kotlinc. A miss uses a persistent compiler JVM (`KRUSTY_SERVER_POOL` caps the pool). `box()`
+and Java drivers use persistent `BoxRunner` and `JavaRunner` JVMs; `javac` runs once per runner
+source to compile that helper, then in-process. The conformance box runner is a separate persistent
+JVM per test thread, also compiled once.
+
+`javap` is not a process on that path. Disassembly goes through `JavaRunner`'s in-process tool. A
+well-formedness check reads the class file and disassembles only when that read fails, so the
+listing explains the failure. Method-code comparisons still disassemble on a match: the normalized
+listing is the oracle, and it comes from the pooled tool rather than a new JVM. The survey's
+reference acceptance oracle starts a kotlinc process per case; it is not part of `just ci`.
+
 The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
 seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard
 defaults to 295 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.
