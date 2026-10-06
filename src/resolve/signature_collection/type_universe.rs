@@ -7,6 +7,7 @@
 //! in the same pass, because a source declaration shadows a classpath type of the same simple name.
 
 use super::*;
+use crate::spelling::Spelled;
 
 struct BootstrapSymbolSource<'a> {
     declarations: &'a std::collections::HashSet<TypeName>,
@@ -215,7 +216,11 @@ pub(in crate::resolve) fn source_type_universe(
     // another-file source base and a classpath base must produce the same `super_internal` shape.
     let mut user_base_classes: std::collections::HashSet<TypeName> =
         std::collections::HashSet::new();
-    let mut user_aliases: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
+    let mut source_aliases: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
+    // Class-target aliases also participate in the temporary classifier name map. Structural
+    // aliases do not, but both sets participate in the same scope selection below.
+    let mut classifier_aliases: std::collections::HashSet<TypeName> =
+        std::collections::HashSet::new();
     if let Some(headers) = compact_headers {
         for stub in headers
             .stubs
@@ -245,8 +250,9 @@ pub(in crate::resolve) fn source_type_universe(
                 .map(|file| file.package)
                 .unwrap_or(TypeName::ROOT);
             for (alias, _, target) in aliases {
+                source_aliases.insert(crate::types::type_name_child(package, alias));
                 if target.name != "<fun>" && !target.name.is_empty() {
-                    user_aliases.insert(crate::types::type_name_child(package, alias));
+                    classifier_aliases.insert(crate::types::type_name_child(package, alias));
                 }
             }
         }
@@ -266,8 +272,12 @@ pub(in crate::resolve) fn source_type_universe(
                 }
             }
             let package = source_package_ids[i];
-            for (alias, _) in &file.type_aliases {
-                user_aliases.insert(crate::types::type_name_child(package, alias));
+            for (alias, _, target) in &file_type_aliases[i] {
+                let identity = crate::types::type_name_child(package, alias);
+                source_aliases.insert(identity);
+                if target.name != "<fun>" && !target.name.is_empty() {
+                    classifier_aliases.insert(identity);
+                }
             }
         }
     }
@@ -289,7 +299,7 @@ pub(in crate::resolve) fn source_type_universe(
             HashMap::new();
         let source_count = compact_headers.map_or(files.len(), |headers| headers.sources.len());
         let mut imports_by_file = Vec::with_capacity(source_count);
-        let enclosing_names = bootstrap_enclosing_names(&user_defined, &user_aliases);
+        let enclosing_names = bootstrap_enclosing_names(&user_defined, &source_aliases);
         for file_index in 0..source_count {
             let imap = source_imports[file_index]
                 .iter()
@@ -298,7 +308,7 @@ pub(in crate::resolve) fn source_type_universe(
                 .collect::<HashMap<_, _>>();
             let source = BootstrapSymbolSource {
                 declarations: &user_defined,
-                aliases: &user_aliases,
+                aliases: &source_aliases,
                 enclosing_names: &enclosing_names,
                 libraries,
             };
@@ -329,6 +339,7 @@ pub(in crate::resolve) fn source_type_universe(
             let mut file_imports = HashMap::new();
             let mut file_expansions: HashMap<String, crate::libraries::AliasExpansion> =
                 HashMap::new();
+            let mut file_source_aliases = HashMap::new();
             let mut file_unresolved = HashMap::new();
             let mut file_ambiguous = std::collections::HashSet::new();
             // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
@@ -342,6 +353,11 @@ pub(in crate::resolve) fn source_type_universe(
                 );
             } else {
                 collect_file_type_names(&files[file_index], &mut names);
+            }
+            // An alias template is typed from its declaration file. Its component names (`List` in
+            // `typealias F = (List<String>) -> Unit`) must therefore be import-resolved too.
+            for (_, _, target) in &file_type_aliases[file_index] {
+                collect_typeref_names(target, &mut names);
             }
             names.extend(imap.keys().cloned());
             for name in names {
@@ -392,6 +408,15 @@ pub(in crate::resolve) fn source_type_universe(
                     (classifier, unresolved)
                 };
                 let full = full.map(|full| libraries.canonical_source_type_name(full));
+                if let Some(identity) = full.filter(|identity| source_aliases.contains(identity)) {
+                    file_source_aliases.insert(name.clone(), identity);
+                }
+                // A structural alias has no classifier facet to install in `ClassNames`; its
+                // selected template below is the binding. A class-target alias keeps its temporary
+                // classifier edge so legacy signature collection and the compact graph agree.
+                let full = full.filter(|identity| {
+                    !source_aliases.contains(identity) || classifier_aliases.contains(identity)
+                });
                 if let Some(segment) = unresolved {
                     file_unresolved.insert(name.clone(), segment);
                 }
@@ -504,6 +529,7 @@ pub(in crate::resolve) fn source_type_universe(
             imports_by_file.push((
                 file_imports,
                 file_expansions,
+                file_source_aliases,
                 file_unresolved,
                 file_ambiguous,
             ));
@@ -532,6 +558,8 @@ pub(in crate::resolve) fn source_type_universe(
     for file_index in 0..source_packages.len() {
         let alias_package = &source_packages[file_index];
         for (alias, _, target) in &file_type_aliases[file_index] {
+            // A function-type alias has no classifier to fold into this map. Every alias template
+            // is recorded by `seed_source_alias_expansions` after each file's names exist.
             if target.name == "<fun>" || target.name.is_empty() {
                 continue;
             }
@@ -567,28 +595,38 @@ pub(in crate::resolve) fn source_type_universe(
     }
     expand_type_aliases(&mut class_names, &alias_map);
     let class_names = class_names.into_shared();
-    let file_class_names: Vec<ClassNames> = imports_by_file
+    let mut selected_source_aliases = Vec::with_capacity(imports_by_file.len());
+    let mut file_class_names: Vec<ClassNames> = imports_by_file
         .into_iter()
-        .map(|(imports, expansions, unresolved, ambiguous)| {
-            let mut names = class_names.clone();
-            for (simple, full) in imports {
-                names.insert_name(simple, full);
-            }
-            // Alias templates are per FILE: two files may import different aliases under the same
-            // spelling, and each must expand through its own.
-            for (simple, expansion) in expansions {
-                names.insert_alias_expansion(simple, expansion);
-            }
-            for (spelling, segment) in unresolved {
-                names.insert_unresolved_segment(spelling, segment);
-            }
-            for spelling in ambiguous {
-                names.mark_ambiguous(spelling);
-            }
-            expand_type_aliases(&mut names, &alias_map);
-            names
-        })
+        .map(
+            |(imports, expansions, source_aliases, unresolved, ambiguous)| {
+                selected_source_aliases.push(source_aliases);
+                let mut names = class_names.clone();
+                for (simple, full) in imports {
+                    names.insert_name(simple, full);
+                }
+                // Alias templates are per FILE: two files may import different aliases under the same
+                // spelling, and each must expand through its own.
+                for (simple, expansion) in expansions {
+                    names.insert_alias_expansion(simple, expansion);
+                }
+                for (spelling, segment) in unresolved {
+                    names.insert_unresolved_segment(spelling, segment);
+                }
+                for spelling in ambiguous {
+                    names.mark_ambiguous(spelling);
+                }
+                expand_type_aliases(&mut names, &alias_map);
+                names
+            },
+        )
         .collect();
+    seed_source_alias_expansions(
+        &mut file_class_names,
+        &file_type_aliases,
+        &source_package_ids,
+        &selected_source_aliases,
+    );
     SourceTypeUniverse {
         file_type_aliases,
         source_packages,
@@ -599,6 +637,175 @@ pub(in crate::resolve) fn source_type_universe(
         user_defined,
         user_base_classes,
     }
+}
+
+/// Selected aliases visible while their templates are typed and then published.
+struct SourceAliasModule<'a> {
+    file_type_aliases: &'a [Vec<(String, Vec<String>, TypeRef)>],
+    source_package_ids: &'a [TypeName],
+    selected: &'a [HashMap<String, TypeName>],
+}
+
+enum SourceAliasSeed {
+    Ready(crate::libraries::AliasExpansion),
+    /// The target names another alias that is not seeded yet.
+    Wait,
+    /// The target cannot form a semantic alias expansion.
+    Skip,
+}
+
+/// Record source-alias templates before signature collection types their use sites.
+///
+/// Pass 1 types declared signatures before `source_alias_expansions` exists. A name edge only knows
+/// the target classifier, so attaching the alias's use-site arguments to that classifier loses any
+/// duplicated, fixed, or projected arguments in the right-hand side. Type each template from its
+/// declaring file and install it only under spellings whose ordinary scope lookup selected that
+/// exact alias declaration.
+fn seed_source_alias_expansions(
+    file_class_names: &mut [ClassNames],
+    file_type_aliases: &[Vec<(String, Vec<String>, TypeRef)>],
+    source_package_ids: &[TypeName],
+    selected: &[HashMap<String, TypeName>],
+) {
+    let module = SourceAliasModule {
+        file_type_aliases,
+        source_package_ids,
+        selected,
+    };
+    let mut seeded: Vec<Vec<Option<crate::libraries::AliasExpansion>>> = file_type_aliases
+        .iter()
+        .map(|aliases| vec![None; aliases.len()])
+        .collect();
+    let mut skipped: Vec<Vec<bool>> = file_type_aliases
+        .iter()
+        .map(|aliases| vec![false; aliases.len()])
+        .collect();
+    loop {
+        let mut progressed = false;
+        for file_index in 0..file_type_aliases.len() {
+            let mut names = file_class_names[file_index].clone();
+            module.install_selected(&mut names, file_index, &seeded);
+            for alias_index in 0..file_type_aliases[file_index].len() {
+                if seeded[file_index][alias_index].is_some() || skipped[file_index][alias_index] {
+                    continue;
+                }
+                let (alias, formals, target) = &file_type_aliases[file_index][alias_index];
+                let waits =
+                    module.target_waits_for_alias(file_index, &target.name, &seeded, &skipped);
+                match source_alias_expansion(
+                    &names,
+                    alias,
+                    formals,
+                    target,
+                    source_package_ids[file_index],
+                    waits,
+                ) {
+                    SourceAliasSeed::Ready(expansion) => {
+                        seeded[file_index][alias_index] = Some(expansion);
+                        progressed = true;
+                    }
+                    SourceAliasSeed::Skip => skipped[file_index][alias_index] = true,
+                    SourceAliasSeed::Wait => {}
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    for file_index in 0..file_class_names.len() {
+        module.install_selected(&mut file_class_names[file_index], file_index, &seeded);
+    }
+}
+
+impl SourceAliasModule<'_> {
+    fn target_waits_for_alias(
+        &self,
+        file_index: usize,
+        target_name: &str,
+        seeded: &[Vec<Option<crate::libraries::AliasExpansion>>],
+        skipped: &[Vec<bool>],
+    ) -> bool {
+        let Some(&identity) = self.selected[file_index].get(target_name) else {
+            return false;
+        };
+        self.alias_position(identity)
+            .is_some_and(|(decl_file, index)| {
+                seeded[decl_file][index].is_none() && !skipped[decl_file][index]
+            })
+    }
+
+    fn alias_position(&self, identity: TypeName) -> Option<(usize, usize)> {
+        self.file_type_aliases
+            .iter()
+            .enumerate()
+            .find_map(|(file, aliases)| {
+                aliases
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, (name, _, _))| {
+                        (crate::types::type_name_child(self.source_package_ids[file], name)
+                            == identity)
+                            .then_some((file, index))
+                    })
+            })
+    }
+
+    /// Install only the declaration identity already selected by the file's ordinary classifier
+    /// lookup. A lower imported alias must not become a template for a same-package class merely
+    /// because both denote the same target classifier.
+    fn install_selected(
+        &self,
+        names: &mut ClassNames,
+        file_index: usize,
+        seeded: &[Vec<Option<crate::libraries::AliasExpansion>>],
+    ) {
+        for (spelling, &identity) in &self.selected[file_index] {
+            let Some((decl_file, index)) = self.alias_position(identity) else {
+                continue;
+            };
+            if let Some(expansion) = &seeded[decl_file][index] {
+                names.insert_alias_expansion(spelling.clone(), expansion.clone());
+            }
+        }
+    }
+}
+
+fn source_alias_expansion(
+    names: &ClassNames,
+    alias: &str,
+    formals: &[String],
+    target: &TypeRef,
+    package: TypeName,
+    target_may_be_pending_alias: bool,
+) -> SourceAliasSeed {
+    let function_syntax = target.name == "<fun>" || !target.fun_params.is_empty();
+    let chained = names.alias_expansion(&target.name).is_some();
+    if !function_syntax && !chained && !target_may_be_pending_alias {
+        if names.get_class(&target.name).is_none() && Ty::from_name(&target.name).is_none() {
+            return SourceAliasSeed::Skip;
+        }
+    }
+    let mut diags = DiagSink::new();
+    let symbolic = TParams::symbolic_from_decl_with(formals, &[], &|_| None);
+    let expansion = ty_of_ref(target, names, &symbolic, &mut diags);
+    if expansion == Ty::Error || expansion.contains_error() {
+        return if function_syntax || chained || target_may_be_pending_alias {
+            SourceAliasSeed::Wait
+        } else {
+            SourceAliasSeed::Skip
+        };
+    }
+    let Some(target_classifier) = crate::libraries::type_alias_target_classifier(expansion) else {
+        return SourceAliasSeed::Skip;
+    };
+    SourceAliasSeed::Ready(crate::libraries::AliasExpansion {
+        identity: crate::types::type_name_child(package, alias),
+        target: target_classifier,
+        formals: formals.to_vec(),
+        expansion,
+        expansion_spelling: Spelled::default(),
+    })
 }
 
 #[cfg(test)]

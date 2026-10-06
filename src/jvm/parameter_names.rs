@@ -686,6 +686,29 @@ pub(super) fn resolved_local_variable(
     }
 }
 
+/// Local-variable spellings of a bridge. A named overridden parameter keeps that declaration's
+/// spelling. An unnamed parameter — a Java binary declaration publishes none — is kotlinc's
+/// positional `pN` in this table only. The ordinal is the recorded identity, not a descriptor
+/// reconstruction, and it does not become a source or reflection name.
+pub(super) fn bridge_local_variables(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    semantic_types: &[crate::types::Ty],
+    function_name: &str,
+) -> Vec<Option<String>> {
+    resolved_local_variables(identities, semantic_types, function_name)
+        .into_iter()
+        .zip(identities)
+        .map(|(name, identity)| {
+            name.or_else(|| match identity {
+                crate::fir::ResolvedParameterIdentity::Unnamed { ordinal } => {
+                    Some(format!("p{ordinal}"))
+                }
+                _ => None,
+            })
+        })
+        .collect()
+}
+
 /// Local-variable spellings for a provider-published parameter list. Anonymous context labels are
 /// derived from the declaration's semantic types, never from erased bridge descriptors.
 pub(super) fn resolved_local_variables(
@@ -693,6 +716,11 @@ pub(super) fn resolved_local_variables(
     semantic_types: &[crate::types::Ty],
     function_name: &str,
 ) -> Vec<Option<String>> {
+    assert_eq!(
+        identities.len(),
+        semantic_types.len(),
+        "one semantic type per provider-published parameter identity"
+    );
     let anonymous = if anonymous_context_parameters_are_locals() {
         resolved_anonymous_context_labels(identities, semantic_types)
     } else {
@@ -1168,6 +1196,41 @@ mod tests {
                 Some("p2".to_string()),
                 Some("$completion".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn bridge_locals_format_only_an_unnamed_identity_positionally() {
+        use crate::fir::ResolvedParameterIdentity;
+        use crate::types::Ty;
+
+        assert_eq!(
+            bridge_local_variables(
+                &[
+                    ResolvedParameterIdentity::Source("named".into()),
+                    ResolvedParameterIdentity::Unnamed { ordinal: 1 },
+                ],
+                &[Ty::String, Ty::String],
+                "map",
+            ),
+            vec![Some("named".to_string()), Some("p1".to_string())]
+        );
+        assert_eq!(
+            resolved_local_variable(&ResolvedParameterIdentity::Unnamed { ordinal: 1 }, "map"),
+            None,
+            "the generic provider projection remains unnamed"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "one semantic type per provider-published parameter identity")]
+    fn resolved_provider_parameter_names_reject_a_mismatched_semantic_arity() {
+        resolved_local_variables(
+            &[crate::fir::ResolvedParameterIdentity::Source(
+                "value".into(),
+            )],
+            &[],
+            "inspect",
         );
     }
 }
