@@ -141,6 +141,7 @@ pub(in crate::jvm) fn specialization_ordinal(
     let specialization = ir.specialized_functions.get(&implementation)?;
     let location = specialization_location(ir, specialization, facade, modes)?;
     if specialization.parent.is_none()
+        && ir.specialized_expansion_order.contains_key(&implementation)
         && anonymous_peer(
             ir,
             &location,
@@ -233,14 +234,9 @@ fn expansion_ordinal(
         {
             continue;
         }
-        orders.push(
-            ir.specialized_expansion_order
-                .get(function)
-                .copied()
-                .expect(
-                    "a specialized lambda sharing an anonymous-object expansion records its order",
-                ),
-        );
+        if let Some(order) = ir.specialized_expansion_order.get(function).copied() {
+            orders.push(order);
+        }
     }
     for specialization in ir.specialized_anonymous_classes.values() {
         if specialization.inline_callee_source_name != callee

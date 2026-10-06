@@ -33,7 +33,8 @@ impl IrFile {
             .iter()
             .enumerate()
             .filter_map(|(index, class)| {
-                let target = names.get(&class.fq_name).copied()?;
+                let target = remapped_name(class.fq_name, names);
+                (target != class.fq_name).then_some(())?;
                 let target = self.class_id_by_name(target)?;
                 Some((index as ClassId, target))
             })
@@ -104,6 +105,7 @@ impl IrFile {
                         target: cloned,
                         parent,
                         order: expression,
+                        class_site: true,
                     });
                     cloned
                 };
@@ -157,6 +159,7 @@ impl IrFile {
                         target: cloned,
                         parent: None,
                         order: expression,
+                        class_site: false,
                     });
                     cloned
                 };

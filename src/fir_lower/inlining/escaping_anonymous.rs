@@ -145,7 +145,7 @@ fn remap_reachable_implementations(
                 parent: detached.parent,
             },
         );
-        if detached.parent.is_none() {
+        if detached.parent.is_none() && detached.class_site {
             ir.specialized_expansion_order
                 .entry(detached.target)
                 .or_insert(detached.order);

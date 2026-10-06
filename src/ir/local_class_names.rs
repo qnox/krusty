@@ -14,6 +14,10 @@ pub(crate) struct DetachedLambdaImplementation {
     pub(crate) target: FunId,
     pub(crate) parent: Option<FunId>,
     pub(crate) order: ExprId,
+    /// Whether the detached edge is still a lambda value that may materialize as a class. A direct
+    /// call to a consumed implementation is specialized for ownership/signature purposes but must
+    /// not consume a class ordinal merely because it retains the source lambda identity.
+    pub(crate) class_site: bool,
 }
 
 use super::{
@@ -46,10 +50,25 @@ pub(crate) struct IrLocalClassNameProvenance {
     pub parents: Box<[EnclosingDeclaration]>,
 }
 
-fn name(name: &mut TypeName, names: &HashMap<TypeName, TypeName>) {
-    if let Some(replacement) = names.get(name) {
-        *name = *replacement;
+fn remapped_name(mut value: TypeName, names: &HashMap<TypeName, TypeName>) -> TypeName {
+    for _ in 0..names.len() {
+        let Some(next) = names.get(&value).copied() else {
+            return value;
+        };
+        if next == value {
+            return value;
+        }
+        value = next;
     }
+    assert!(
+        !names.contains_key(&value),
+        "classifier identity remap contains a cycle"
+    );
+    value
+}
+
+fn name(name: &mut TypeName, names: &HashMap<TypeName, TypeName>) {
+    *name = remapped_name(*name, names);
 }
 
 /// A captured enclosing instance names its class by identity, which follows the class's rename.
@@ -67,7 +86,7 @@ fn captured_receiver(
 fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
     match value {
         Ty::Obj(classifier, arguments) => Ty::obj_args_name(
-            names.get(&classifier).copied().unwrap_or(classifier),
+            remapped_name(classifier, names),
             &arguments
                 .iter()
                 .map(|argument| ty(*argument, names))
@@ -808,7 +827,7 @@ fn value_class_suspend_result(
 fn remap_keyed<V>(map: &mut HashMap<TypeName, V>, names: &HashMap<TypeName, TypeName>) {
     *map = std::mem::take(map)
         .into_iter()
-        .map(|(key, value)| (names.get(&key).copied().unwrap_or(key), value))
+        .map(|(key, value)| (remapped_name(key, names), value))
         .collect();
 }
 
@@ -818,7 +837,7 @@ fn remap_first_key<K: Eq + std::hash::Hash, V>(
 ) {
     *map = std::mem::take(map)
         .into_iter()
-        .map(|((owner, key), value)| ((names.get(&owner).copied().unwrap_or(owner), key), value))
+        .map(|((owner, key), value)| ((remapped_name(owner, names), key), value))
         .collect();
 }
 
@@ -906,7 +925,7 @@ fn remap_class(class: &mut super::IrClass, names: &HashMap<TypeName, TypeName>) 
         .for_each(|value| name(value, names));
     class
         .sealed_subclasses
-        .remap(|value| names.get(&value).copied().unwrap_or(value));
+        .remap(|value| remapped_name(value, names));
     name(&mut class.superclass, names);
     tys(&mut class.super_ctor_params, names);
     for entry in &mut class.enum_entries {
@@ -979,9 +998,7 @@ fn remap_class(class: &mut super::IrClass, names: &HashMap<TypeName, TypeName>) 
         bridge.concrete_ret = ty(bridge.concrete_ret, names);
         bridge.target_ret = bridge.target_ret.map(|value| ty(value, names));
     }
-    class
-        .interfaces
-        .remap(|value| names.get(&value).copied().unwrap_or(value));
+    class.interfaces.remap(|value| remapped_name(value, names));
     class
         .companion_class
         .iter_mut()
@@ -1393,7 +1410,7 @@ impl super::IrFile {
             .for_each(|value| *value = ty(*value, names));
         self.dispatch_classes
             .values_mut()
-            .for_each(|value| *value = names.get(value).copied().unwrap_or(*value));
+            .for_each(|value| *value = remapped_name(*value, names));
         self.call_declared_ret
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
@@ -1483,24 +1500,24 @@ impl super::IrFile {
 
         self.synthetic_classes = std::mem::take(&mut self.synthetic_classes)
             .into_iter()
-            .map(|value| names.get(&value).copied().unwrap_or(value))
+            .map(|value| remapped_name(value, names))
             .collect();
         self.deprecated_classes = std::mem::take(&mut self.deprecated_classes)
             .into_iter()
-            .map(|value| names.get(&value).copied().unwrap_or(value))
+            .map(|value| remapped_name(value, names))
             .collect();
         self.public_synthetics = std::mem::take(&mut self.public_synthetics)
             .into_iter()
-            .map(|value| names.get(&value).copied().unwrap_or(value))
+            .map(|value| remapped_name(value, names))
             .collect();
         self.module_source_value_classes = std::mem::take(&mut self.module_source_value_classes)
             .into_iter()
-            .map(|value| names.get(&value).copied().unwrap_or(value))
+            .map(|value| remapped_name(value, names))
             .collect();
         self.module_readable_value_classes =
             std::mem::take(&mut self.module_readable_value_classes)
                 .into_iter()
-                .map(|value| names.get(&value).copied().unwrap_or(value))
+                .map(|value| remapped_name(value, names))
                 .collect();
     }
 }
@@ -1703,6 +1720,20 @@ mod tests {
 
     fn resolved(value: Ty) -> crate::fir::ResolvedTy {
         crate::fir::ResolvedTy::new(value).expect("test type is publishable")
+    }
+
+    #[test]
+    fn classifier_remap_follows_a_specialization_chain_to_its_terminal_identity() {
+        let declaration = crate::types::type_name("sample/Declaration");
+        let intermediate = crate::types::type_name("sample/Intermediate");
+        let terminal = crate::types::type_name("sample/Terminal");
+        let names = HashMap::from([(declaration, intermediate), (intermediate, terminal)]);
+
+        assert_eq!(remapped_name(declaration, &names), terminal);
+        assert_eq!(
+            ty(Ty::obj_name(declaration), &names),
+            Ty::obj_name(terminal)
+        );
     }
 
     #[test]
@@ -1933,6 +1964,7 @@ mod tests {
         assert_eq!(detached[0].source, implementation);
         assert_eq!(detached[0].parent, None);
         assert_eq!(detached[0].order, reachable);
+        assert!(detached[0].class_site);
         assert!(matches!(
             ir.expr(reachable),
             IrExpr::Lambda { impl_fn, .. } if *impl_fn == detached[0].target
@@ -2013,6 +2045,7 @@ mod tests {
         assert_eq!(detached.len(), 1);
         assert_eq!(detached[0].source, implementation);
         assert_eq!(detached[0].order, reachable);
+        assert!(!detached[0].class_site);
         assert!(matches!(
             ir.expr(reachable),
             IrExpr::Call { callee: Callee::Local(function), .. }
