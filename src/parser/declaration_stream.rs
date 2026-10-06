@@ -53,7 +53,6 @@ fn finish_unit(file: &mut File, source: &str, features: &LangFeatures, diags: &m
     hoist_local_classes(file, None);
     fixup_parenless_base_classes(file);
     super::debug_lines::attach(file, source);
-    expand_fun_type_aliases(file);
     if !diags.has_errors() {
         if let Err(error) = file.validate_integrity(source) {
             diags.error(Span::new(0, 0), format!("invalid parser AST: {error}"));

@@ -2547,6 +2547,8 @@ mod typealias_emission_e2e;
 mod typealias_function_type_e2e;
 #[path = "typealias_generic_target_e2e.rs"]
 mod typealias_generic_target_e2e;
+#[path = "typealias_projection_e2e.rs"]
+mod typealias_projection_e2e;
 #[path = "typeparam_cast_e2e.rs"]
 mod typeparam_cast_e2e;
 #[path = "unimported_cross_package_type_e2e.rs"]
