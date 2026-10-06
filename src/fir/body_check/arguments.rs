@@ -838,8 +838,29 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         target: ResolvedTy,
     ) -> Option<FirConversion> {
-        let message = self.platform_narrowing_message(source)?;
-        Some(self.platform_narrowing_conversion(Some(message), cause, target))
+        // Reordered named arguments make the call a composite expression: their values are
+        // evaluated in source order into temporaries before the invocation. The check still
+        // exists, but cannot name that composite producer, so kotlinc uses `checkNotNull(Object)`.
+        let message = if self.call_reorders_arguments(source) {
+            None
+        } else {
+            Some(self.platform_narrowing_message(source)?)
+        };
+        Some(self.platform_narrowing_conversion(message, cause, target))
+    }
+
+    fn call_reorders_arguments(&self, source: ExprId) -> bool {
+        matches!(self.file.expr(source), Expr::Call { .. })
+            && self
+                .info
+                .resolved_call_arg_slots
+                .get(&source)
+                .is_some_and(|commitment| {
+                    commitment
+                        .argument_bindings
+                        .windows(2)
+                        .any(|pair| pair[0].parameter > pair[1].parameter)
+                })
     }
 
     fn platform_narrowing_conversion(
@@ -865,31 +886,10 @@ impl BodyFirChecker<'_> {
     /// A declared Kotlin property is `<get-name>(...)`. A physical field is the bare field name.
     fn platform_narrowing_message(&self, source: ExprId) -> Option<Box<str>> {
         match self.file.expr(source) {
-            Expr::Call { callee, .. } => {
-                // Reordered named arguments make the call a composite expression: their values are
-                // evaluated in source order into temporaries before the invocation. FIR's implicit
-                // cast cannot name that composite producer, so kotlinc stores its result and uses
-                // the unnamed one-argument check instead of `name(...)`.
-                let reorders_arguments = self
-                    .info
-                    .resolved_call_arg_slots
-                    .get(&source)
-                    .is_some_and(|commitment| {
-                        commitment
-                            .argument_bindings
-                            .windows(2)
-                            .any(|pair| pair[0].parameter > pair[1].parameter)
-                    });
-                if reorders_arguments {
-                    return None;
-                }
-                match self.file.expr(*callee) {
-                    Expr::Name(name) | Expr::Member { name, .. } => {
-                        Some(format!("{name}(...)").into())
-                    }
-                    _ => None,
-                }
-            }
+            Expr::Call { callee, .. } => match self.file.expr(*callee) {
+                Expr::Name(name) | Expr::Member { name, .. } => Some(format!("{name}(...)").into()),
+                _ => None,
+            },
             Expr::Index { .. } => self.callable_assertion_name(source),
             Expr::Member { name, .. } | Expr::Name(name) => self
                 .property_assertion_name(source)
