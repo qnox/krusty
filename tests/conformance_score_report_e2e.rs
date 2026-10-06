@@ -59,6 +59,53 @@ fn run_scored_shards(name: &str, reports: &[Option<&str>]) -> std::process::Outp
     output
 }
 
+/// Split the runner's stderr into its phase-timing lines, with each whole-second duration replaced
+/// by `Ns`, and every other diagnostic line.
+#[cfg(unix)]
+fn split_phase_timing(stderr: &[u8]) -> (Vec<String>, String) {
+    let stderr = String::from_utf8(stderr.to_vec()).expect("runner stderr is UTF-8");
+    let mut phases = Vec::new();
+    let mut diagnostics = String::new();
+    for line in stderr.lines() {
+        if let Some(phase) = line.strip_prefix("conformance-run: phase") {
+            let normalized = match phase.rsplit_once(' ') {
+                Some((head, seconds))
+                    if seconds.strip_suffix('s').is_some_and(|n| {
+                        !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+                    }) =>
+                {
+                    format!("conformance-run: phase{head} Ns")
+                }
+                _ => line.to_owned(),
+            };
+            phases.push(normalized);
+        } else {
+            diagnostics.push_str(line);
+            diagnostics.push('\n');
+        }
+    }
+    (phases, diagnostics)
+}
+
+/// The phase-timing lines for a run whose first `ran` of `count` shards started.
+#[cfg(unix)]
+fn expected_phase_timing(ran: usize, count: usize) -> Vec<String> {
+    let labels = (1..=ran)
+        .map(|shard| format!("box-shard-{shard}-of-{count}"))
+        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    for label in &labels {
+        lines.push(format!("conformance-run: phase start {label}"));
+        lines.push(format!("conformance-run: phase {label} Ns"));
+    }
+    lines.push("conformance-run: phases".to_owned());
+    for label in &labels {
+        lines.push(format!("conformance-run: phase {label} Ns"));
+    }
+    lines.push("conformance-run: phase total Ns".to_owned());
+    lines
+}
+
 fn badge(mode: &str, report: &Path, version: &str) -> std::process::Output {
     Command::new("bash")
         .arg(repo_root().join("scripts").join("conformance-badge.sh"))
@@ -89,11 +136,9 @@ fn badge_for(name: &str, mode: &str, report: &str) -> std::process::Output {
 fn scored_shards_sum_byte_counts_before_deriving_the_percentage() {
     // 1/2 bytes (50%) and 2/8 bytes (25%) weigh 3/10 = 30.0%, not the 37.5% shard average.
     let output = run_scored_shards("weighted", &[Some("50.0 1 2\n"), Some("25.0 2 8\n")]);
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "",
-        "weighted shards wrote diagnostics"
-    );
+    let (phases, diagnostics) = split_phase_timing(&output.stderr);
+    assert_eq!(diagnostics, "", "weighted shards wrote diagnostics");
+    assert_eq!(phases, expected_phase_timing(2, 2));
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "30.0 3 10\n");
 }
@@ -102,7 +147,9 @@ fn scored_shards_sum_byte_counts_before_deriving_the_percentage() {
 #[test]
 fn scored_shards_with_no_bytes_report_zero_percent() {
     let output = run_scored_shards("zero", &[Some("0.0 0 0\n"), Some("0.0 0 0\n")]);
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    let (phases, diagnostics) = split_phase_timing(&output.stderr);
+    assert_eq!(diagnostics, "");
+    assert_eq!(phases, expected_phase_timing(2, 2));
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "0.0 0 0\n");
 }
@@ -117,7 +164,9 @@ fn scored_shards_report_real_scale_byte_totals_exactly() {
             Some("52.5 12405762 23645355\n"),
         ],
     );
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    let (phases, diagnostics) = split_phase_timing(&output.stderr);
+    assert_eq!(diagnostics, "");
+    assert_eq!(phases, expected_phase_timing(2, 2));
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
@@ -144,11 +193,13 @@ fn scored_shards_fail_on_a_malformed_byte_report() {
         let output = run_scored_shards("invalid", &[Some("50.0 1 2\n"), Some(report)]);
         assert_eq!(output.status.code(), Some(1), "report {report:?}");
         assert_eq!(output.stdout, b"", "report {report:?}");
+        let (phases, diagnostics) = split_phase_timing(&output.stderr);
         assert_eq!(
-            String::from_utf8(output.stderr).unwrap(),
+            diagnostics,
             "conformance test wrote an invalid byte report (want \"<pct> <matched> <total>\" with matched <= total): shard 2/2\n",
             "report {report:?}"
         );
+        assert_eq!(phases, expected_phase_timing(2, 2), "report {report:?}");
     }
 }
 
@@ -159,11 +210,12 @@ fn scored_shards_fail_when_a_shard_writes_no_report() {
         let output = run_scored_shards("missing", &[Some("50.0 1 2\n"), report]);
         assert_eq!(output.status.code(), Some(1), "report {report:?}");
         assert_eq!(output.stdout, b"", "report {report:?}");
+        let (phases, diagnostics) = split_phase_timing(&output.stderr);
         assert_eq!(
-            String::from_utf8(output.stderr).unwrap(),
-            "conformance test did not write its report: shard 2/2\n",
+            diagnostics, "conformance test did not write its report: shard 2/2\n",
             "report {report:?}"
         );
+        assert_eq!(phases, expected_phase_timing(2, 2), "report {report:?}");
     }
 }
 

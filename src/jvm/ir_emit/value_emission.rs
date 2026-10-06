@@ -98,6 +98,10 @@ impl super::Emitter<'_> {
                 type_argument,
             } => self.emit_kclass_literal(*classifier, *value, *type_argument, code),
             IrExpr::GetValue(i) => {
+                if self.stack_resident_value == Some(*i) {
+                    self.stack_resident_value = None;
+                    return;
+                }
                 let Some(&(slot, jt)) = self.slots.get(i) else {
                     panic!(
                         "malformed IR: value {i} has no allocated JVM slot while emitting {}; known slots: {:?}",

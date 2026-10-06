@@ -109,20 +109,7 @@ impl BodyLowering<'_> {
             _ if folded.is_some() => {
                 let folded = folded.expect("guarded by the arm");
                 let constant = lower_constant(&folded.value, expression.ty.get(), origin)?;
-                let constant = self.ir.add_expr(IrExpr::Const(constant));
-                // A signed literal (`-3`) is still a literal to kotlinc's frontend, which parses
-                // it as one; only a value computed by an operation loses the literal's facts.
-                let signed_literal = matches!(
-                    &expression.kind,
-                    FirExprKind::Unary {
-                        operation: FirUnaryOperation::Negate | FirUnaryOperation::Identity,
-                        operand,
-                    } if matches!(self.body.expr(*operand).map(|operand| &operand.kind), Some(FirExprKind::Constant(_)))
-                );
-                if !signed_literal {
-                    self.ir.folded_constants.insert(constant);
-                }
-                constant
+                self.ir.add_expr(IrExpr::Const(constant))
             }
             FirExprKind::Constant(constant) => {
                 let constant = lower_constant(constant, expression.ty.get(), origin)?;
@@ -634,8 +621,11 @@ impl BodyLowering<'_> {
                         })
                     }
                     FirUnaryOperation::BitwiseNot => {
+                        // `inv` xors with every bit set in the carrier. `ULong` is that `long`
+                        // carrier, the same width `Long.inv` already uses.
+                        let carrier = expression.ty.get().canonical_semantic().non_null();
                         let all_bits = self.ir.add_expr(IrExpr::Const(
-                            if expression.ty.get().non_null() == crate::types::Ty::Long {
+                            if matches!(carrier, crate::types::Ty::Long | crate::types::Ty::ULong) {
                                 IrConst::Long(-1)
                             } else {
                                 IrConst::Int(-1)

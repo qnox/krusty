@@ -849,6 +849,7 @@ impl<'a> ModuleSymbols<'a> {
                 is_const: false,
                 implicit_integer_coercion: false,
                 compile_time_constant: None,
+                metadata_constant_read: false,
                 visibility: declaration.visibility(),
                 owner: internal,
                 receiver_rank: 0,
@@ -1018,6 +1019,7 @@ fn fn_info(
         // sees the declaration itself. The fact exists for callables read back from a class file.
         declared_ret: None,
         overridden_results: Box::new([]),
+        enhanced_result: crate::libraries::EnhancedResult::NONE,
     };
     FunctionInfo {
         receiver_rank: rank,
@@ -1135,6 +1137,7 @@ fn source_callable(
         overridden_call_realizations: Box::new([]),
         // See the note in the builder above: a source callable carries its declaration un-erased.
         declared_ret: None,
+        enhanced_result: crate::libraries::EnhancedResult::NONE,
         overridden_results: Box::new([]),
     }
 }
@@ -1193,6 +1196,7 @@ fn source_property(
         is_const: property.is_const,
         implicit_integer_coercion: false,
         compile_time_constant: None,
+        metadata_constant_read: false,
         visibility: property.visibility,
         owner,
         receiver_rank,
@@ -1441,6 +1445,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 is_const: property.is_const,
                 implicit_integer_coercion: property.implicit_integer_coercion,
                 compile_time_constant: property.compile_time_constant.clone(),
+                metadata_constant_read: false,
                 visibility: property.visibility,
                 owner,
                 receiver_rank: 0,
@@ -1532,6 +1537,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     is_const: false,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
+                    metadata_constant_read: false,
                     visibility: property.visibility,
                     owner,
                     receiver_rank: 0,

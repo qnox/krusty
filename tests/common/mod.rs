@@ -8,6 +8,7 @@ mod metadata_diff;
 mod native_backend;
 pub(crate) mod server_pool;
 pub use kotlinc_lib::kotlinc_lib_out;
+pub(crate) use kotlinc_lib::kotlinc_lib_out_with;
 #[allow(unused_imports)] // conformance never calls these; the e2e crate does.
 pub use metadata_diff::{
     metadata_diff_against_kotlinc_cp, metadata_diff_against_kotlinc_lib,
@@ -3473,6 +3474,19 @@ pub fn method_code_diff_against_kotlinc(
     class: &str,
     method: &str,
 ) -> Option<Result<(), String>> {
+    method_code_diffs_against_kotlinc(name, lib, src, class, &[method])?.pop()
+}
+
+/// [`method_code_diff_against_kotlinc`] for several methods of one compiled class. The dependency,
+/// source module, and both class files are built once; each requested method still produces its own
+/// exact instruction/local-table result and diagnostic.
+pub fn method_code_diffs_against_kotlinc(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+    class: &str,
+    methods: &[&str],
+) -> Option<Vec<Result<(), String>>> {
     let libout = if lib.is_empty() {
         None
     } else {
@@ -3495,7 +3509,7 @@ pub fn method_code_diff_against_kotlinc(
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
 
     let classpath: Vec<PathBuf> = libout.into_iter().chain([stdlib_jar()]).collect();
-    let classes = compile_in_process_metadata_cp(src, name, &classpath)
+    let classes = compile_in_process(src, name, &classpath, None)
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     let (_, krusty_bytes) = classes
         .iter()
@@ -3507,15 +3521,22 @@ pub fn method_code_diff_against_kotlinc(
     }
     std::fs::write(&krusty_path, krusty_bytes).ok()?;
 
-    let reference = disassembled_method(&kref, class, method)?;
-    let actual = disassembled_method(&kout, class, method)?;
+    let results = methods
+        .iter()
+        .map(|method| {
+            let reference = disassembled_method(&kref, class, method)?;
+            let actual = disassembled_method(&kout, class, method)?;
+            Some(if reference == actual {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{name}/{class}.{method}: instruction sequences differ\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}"
+                ))
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
     let _ = std::fs::remove_dir_all(&dir);
-    if reference == actual {
-        return Some(Ok(()));
-    }
-    Some(Err(format!(
-        "{name}/{class}.{method}: instruction sequences differ\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}"
-    )))
+    Some(results)
 }
 
 /// Whether `bytes` contains a CALL to `callee` — a method reference an instruction names, rather

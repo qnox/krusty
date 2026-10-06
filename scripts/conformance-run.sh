@@ -14,6 +14,9 @@ source "$script_dir/test-gate-defaults.sh"
 source "$script_dir/test-deadline.sh"
 source "$script_dir/libtest-shards.sh"
 source "$script_dir/conformance-report.sh"
+source "$script_dir/phase-timing.sh"
+phase_log_prefix=conformance-run
+PHASE_TIMING_LOG="$(mktemp)"
 
 bin="$1"
 v="$2"
@@ -33,7 +36,7 @@ libtest_require_positive_shard_count \
   "$shards" "conformance-run: KRUSTY_SCORED_CONFORMANCE_SHARDS"
 
 report_dir="$(mktemp -d)"
-trap 'rm -rf "$report_dir"' EXIT
+trap 'phase_report || true; rm -rf "$report_dir" "$PHASE_TIMING_LOG"' EXIT
 # Integer byte counts are summed across shards; the percentage is derived once, from the sums, so
 # shards of unequal size are weighted by their bytes rather than averaged.
 matched=0
@@ -43,6 +46,8 @@ total=0
 failed=0
 for ((shard = 0; shard < shards; shard++)); do
   report="$report_dir/shard-$shard.report"
+  label="box-shard-$((shard + 1))-of-$shards"
+  phase_begin "$label"
   set +e
   KRUSTY_CONFORMANCE_SHARD_INDEX="$shard" \
     KRUSTY_CONFORMANCE_SHARD_COUNT="$shards" \
@@ -51,6 +56,7 @@ for ((shard = 0; shard < shards; shard++)); do
     "$bin" kotlin_codegen_box_conformance --nocapture >&2
   status=$?
   set -e
+  phase_end "$label"
   if [ "$status" -eq 124 ]; then
     echo "conformance-run: timed out after ${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS}s: Kotlin $v, shard $((shard + 1))/$shards" >&2
     exit "$status"

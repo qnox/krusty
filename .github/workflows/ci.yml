@@ -177,10 +177,18 @@ jobs:
       - name: build conformance test binary
         run: |
           set -euo pipefail
+          source scripts/phase-timing.sh
+          phase_log_prefix=conformance-build
+          PHASE_TIMING_LOG="$(mktemp)"
+          trap 'phase_report || true' EXIT
+          phase_begin conformance-test-binary
           bin=$(just conformance-bin)
+          phase_end conformance-test-binary
           cp "$bin" conformance-bin
           # The non-box tests launch this CLI. The library is already built above.
+          phase_begin krusty-cli
           cargo build --profile gate -p krusty-cli
+          phase_end krusty-cli
           cp target/gate/krusty krusty
       - uses: actions/upload-artifact@v7
         with:

@@ -1984,10 +1984,6 @@ pub struct IrFile {
     /// type): the value is already known to be a `T`, so a backend narrows it with a plain cast
     /// rather than the checked cast a written `as` needs.
     pub written_casts: std::collections::HashSet<ExprId>,
-    /// Constants that are the value of an operation over constants (`1 + 2`), folded like kotlinc's
-    /// `ConstEvaluationLowering`, rather than a literal the source wrote. Kotlin metadata's
-    /// `HAS_CONSTANT` describes only a literal initializer, so a backend must not read it from these.
-    pub folded_constants: std::collections::HashSet<ExprId>,
     /// The subset of [`Self::null_guards`] introduced by an elvis over a safe call. A backend may
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.
@@ -2173,6 +2169,9 @@ pub struct IrFile {
     /// JVM value-class member implementations whose leading physical carrier parameter realizes a
     /// source dispatch receiver and therefore carries no nullability annotation.
     pub(crate) jvm_value_class_receiver_impls: std::collections::HashSet<u32>,
+    /// The static `-impl` of each `Any` member the JVM value-class synthesis generated, by exact
+    /// identity. A source-declared override is never in it.
+    pub(crate) jvm_value_class_generated_any: std::collections::HashMap<u32, IrValueClassAnyMember>,
     /// Methods kotlinc marks `ACC_BRIDGE` (0x40) — e.g. a `@Serializable` serializer's
     /// `typeParametersSerializers`. The JVM backend ORs `0x40` for a `FunId` in this set.
     pub bridge_methods: std::collections::HashSet<u32>,
@@ -2526,6 +2525,11 @@ pub struct IrFile {
     /// BOXED there — the value-class pass reads this to type such a slot as the boxed value class (so
     /// `it.getOrThrow()` unboxes it), without the lowerer probing value-class-ness itself.
     pub lambda_own_params_from: std::collections::HashMap<u32, u32>,
+    /// Lambda implementation id → the body's own inferred result when the selected language
+    /// level keeps that type as the implementation signature (before 2.4). Absence at current
+    /// levels is the checked decision to use the caller-facing result. A backend consumes this
+    /// semantic fact without receiving a second language-version switch.
+    pub lambda_inferred_results: std::collections::HashMap<FunId, Ty>,
     /// Lifted-lambda function id → the DECLARED parameter types and return type of the user
     /// `fun interface` method the lambda was SAM-converted to. Absent for a plain `FunctionN` lambda,
     /// whose `invoke` slots are all generic. The distinction only matters to a target that erases
@@ -2913,6 +2917,7 @@ pub(crate) use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
+pub(crate) use generated_members::IrValueClassAnyMember;
 pub use generated_members::{
     IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,

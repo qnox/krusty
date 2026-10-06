@@ -647,6 +647,8 @@ mod dependency_override_signature_e2e;
 mod dependency_property_reference_name_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
+#[path = "descriptor_element_companion_serializer_e2e.rs"]
+mod descriptor_element_companion_serializer_e2e;
 #[path = "descriptor_element_specialization_e2e.rs"]
 mod descriptor_element_specialization_e2e;
 #[path = "descriptor_inner_classes_e2e.rs"]
@@ -733,6 +735,8 @@ mod empty_loop_body_e2e;
 mod engine_declaration_types_e2e;
 #[path = "enhanced_result_null_check_e2e.rs"]
 mod enhanced_result_null_check_e2e;
+#[path = "enhanced_type_argument_null_check_e2e.rs"]
+mod enhanced_type_argument_null_check_e2e;
 #[path = "enum_body_property_e2e.rs"]
 mod enum_body_property_e2e;
 #[path = "enum_class_signature_e2e.rs"]
@@ -1037,6 +1041,8 @@ mod imported_companion_property_e2e;
 mod increment_statement_e2e;
 #[path = "indy_infra_e2e.rs"]
 mod indy_infra_e2e;
+#[path = "indy_lambda_fallback_parity_e2e.rs"]
+mod indy_lambda_fallback_parity_e2e;
 #[path = "indy_lambda_parity_e2e.rs"]
 mod indy_lambda_parity_e2e;
 #[path = "inferred_alias_abbreviation_e2e.rs"]
@@ -1429,6 +1435,8 @@ mod member_overloads_e2e;
 mod member_property_inference_e2e;
 #[path = "member_read_on_nullable_call_result_e2e.rs"]
 mod member_read_on_nullable_call_result_e2e;
+#[path = "metadata_accessor_signature_e2e.rs"]
+mod metadata_accessor_signature_e2e;
 #[path = "metadata_array_signature_e2e.rs"]
 mod metadata_array_signature_e2e;
 #[path = "metadata_captured_type_parameters_e2e.rs"]
@@ -2167,6 +2175,8 @@ mod safe_call_any_member_e2e;
 mod safe_call_argument_list_e2e;
 #[path = "safe_call_collection_transform_e2e.rs"]
 mod safe_call_collection_transform_e2e;
+#[path = "safe_call_dup_e2e.rs"]
+mod safe_call_dup_e2e;
 #[path = "safe_call_e2e.rs"]
 mod safe_call_e2e;
 #[path = "safe_call_generic_field_e2e.rs"]
@@ -2372,6 +2382,8 @@ mod suspend_anonymous_object_name_e2e;
 
 #[path = "suspend_bytecode_transformer_e2e.rs"]
 mod suspend_bytecode_transformer_e2e;
+#[path = "suspend_callable_cast_e2e.rs"]
+mod suspend_callable_cast_e2e;
 #[path = "suspend_conversion_e2e.rs"]
 mod suspend_conversion_e2e;
 #[path = "suspend_debug_metadata_e2e.rs"]
@@ -2579,6 +2591,8 @@ mod unresolved_label_diagnostic_e2e;
 mod unresolved_supertype_diag_e2e;
 #[path = "unsigned_array_e2e.rs"]
 mod unsigned_array_e2e;
+#[path = "unsigned_bitwise_e2e.rs"]
+mod unsigned_bitwise_e2e;
 #[path = "unsigned_classpath_call_e2e.rs"]
 mod unsigned_classpath_call_e2e;
 #[path = "unsigned_companion_constant_ty_e2e.rs"]

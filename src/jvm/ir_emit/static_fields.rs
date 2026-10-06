@@ -30,12 +30,6 @@ pub(super) fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool
     )
 }
 
-/// Whether `init` is a literal the source wrote, the only initializer Kotlin metadata's
-/// `HAS_CONSTANT` describes: a value folded from an operation over constants is not one.
-pub(super) fn literal_initializer(ir: &IrFile, init: crate::ir::ExprId) -> bool {
-    const_value_idx_peek(ir, init) && !ir.folded_constants.contains(&init)
-}
-
 /// The initializer `<clinit>` runs for static `s`: its source initializer, unless a `const val`
 /// folds it into a `ConstantValue`. `None` for a static with no initializer (`lateinit var`).
 pub(super) fn clinit_initializer(
@@ -153,6 +147,10 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             .iter()
             .filter_map(|(_, property)| property.init),
     );
+    e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
+        env.signature_symbols,
+    ));
+    e.record_locals = true;
     let mut code = CodeBuilder::new(0);
     e.emit_delegated_property_array(env, env.facade_class, facade, &mut code);
     // Each store maps to its property's declaration line (kotlinc's `<clinit>` LineNumberTable).
@@ -168,6 +166,16 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         e.emit_static_initializer_store(facade, index, init, &mut code);
     }
     code.ret_void();
+    // `<clinit>` normally keeps only its declaration-owned entries, not incidental marks from a
+    // nested initializer expression. A classpath inline call is different: its mapped callee lines
+    // and caller-line restoration are part of kotlinc's public debug surface. Keep only marks that
+    // the inliner explicitly tagged, then merge them with the curated property entries.
+    clinit_lines.extend(
+        code.inlined_line_marks()
+            .map(|(pc, line)| (pc, u32::from(line))),
+    );
+    clinit_lines.sort_by_key(|&(pc, _)| pc);
+    clinit_lines.dedup();
     finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.frame.max());
     if !clinit_lines.is_empty() {
         e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
@@ -691,6 +699,10 @@ pub(super) fn emit_class_static_initializer(
                 .map(|&(_, _, init)| init)
                 .chain(companion_initializer),
         );
+        e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
+            env.signature_symbols,
+        ));
+        e.record_locals = true;
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
         emit_companion_init(e.cw, &mut clinit, fq_name, c);

@@ -1767,6 +1767,12 @@ pub(crate) enum ErrorReceiverSelection<T> {
 }
 
 impl<'a> SymbolResolver<'a> {
+    /// Value receiver denoted by a classifier in call position: the object itself, or its declared
+    /// companion. Synthetic language/plugin calls use this same semantic projection as source calls.
+    pub(crate) fn classifier_value_receiver(&self, classifier: TypeName) -> Option<Ty> {
+        classifier_value_receiver(&self.src, classifier)
+    }
+
     /// Specialize one already-identified constructor declaration for contextual argument checking.
     /// The caller owns source-to-parameter argument mapping; this operation only applies the
     /// constructor's semantic generic signature and deliberately preserves formals owned by
@@ -4795,6 +4801,7 @@ impl ResolvedMember {
         member.inline_body_plan = callable.inline_body_plan;
         member.declared_ret = callable.declared_ret;
         member.overridden_results = callable.overridden_results;
+        member.enhanced_result = callable.enhanced_result;
         member.contract = callable.contract;
         member.default_realization = callable.default_realization;
         member.nonvirtual_realization = callable.nonvirtual_realization;
@@ -6334,7 +6341,7 @@ mod tests {
     use super::*;
     use crate::libraries::{
         CallSig, DefaultCallRealization, FunctionSet, GenericReturnPolicy, LibraryCallable,
-        LibraryMember, LibraryType, Origin, TypeKind,
+        LibraryMember, LibraryType, TypeKind,
     };
     use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
@@ -7973,52 +7980,17 @@ mod tests {
     }
 
     fn top_level_default_uint_info() -> FunctionInfo {
-        let callable = LibraryCallable {
-            external_identity: None,
-            external_default_provider: None,
-            external_property_identity: None,
-            owner: "kotlin/UIntKt".into(),
-            name: "make".to_string(),
-            physical_name: Some("make$default".to_string()),
-            reflection_name: None,
-            compiler_intrinsic: None,
-            semantic_role: None,
-            collection_barrier: None,
-            inline_body_plan: None,
-            plugin_expression: None,
-            params: vec![Ty::Int],
-            physical_params: vec![Ty::Int],
-            physical_parameter_plan: None,
-            ret: Ty::Int,
-            physical_ret: Ty::Int,
-            descriptor: "(I)I".to_string(),
-            suspend: false,
-            is_abstract: false,
-            owner_is_interface: false,
-            visibility: crate::types::Visibility::Public,
-            member_realization: crate::libraries::MemberRealization::Dispatch,
-            inline: crate::libraries::InlineKind::None,
-            default_call: true,
-            vararg_elem: None,
-            vararg_index: None,
-            signature: None,
-            origin: Origin::Library,
-            source_receiver: None,
-            declared_params: None,
-            inline_modifiers: Box::new([]),
-            reified_type_parameter_ordinals: Box::new([]),
-            context_count: 0,
-            contract: None,
-            equality_bound: None,
-            generic_sig: None,
-            singleton_dispatch: None,
-            default_realization: None,
-            nonvirtual_realization: None,
-            overridden_call_realizations: Box::new([]),
-            declared_ret: None,
-            overridden_results: Box::new([]),
-            annotations: Vec::new(),
-        };
+        let mut callable = LibraryCallable::library(
+            "kotlin/UIntKt",
+            "make",
+            vec![Ty::Int],
+            Ty::Int,
+            Ty::Int,
+            "(I)I",
+        );
+        callable.physical_name = Some("make$default".to_string());
+        callable.physical_parameter_plan = None;
+        callable.default_call = true;
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),
             call_sig: CallSig {

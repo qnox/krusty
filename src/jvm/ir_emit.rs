@@ -1138,6 +1138,10 @@ fn emit_jvm_interface_companion_surface(
             Ty::Unit,
             clinit_statics.iter().map(|&(_, _, init)| init),
         );
+        emitter.regeneration_site = Some(
+            bytecode_inline_call::RegenerationSite::class_initializer(env.signature_symbols),
+        );
+        emitter.record_locals = true;
         let mut clinit = CodeBuilder::new(0);
         emitter.emit_delegated_property_array(env, c.fq_name, &fq_name, &mut clinit);
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
@@ -4376,6 +4380,10 @@ fn emit_enum_class(
                 .iter()
                 .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied()),
         );
+        e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
+            env.signature_symbols,
+        ));
+        e.record_locals = true;
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, &fq, &mut clinit);
         // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
@@ -5351,7 +5359,10 @@ fn parameterized_sig_at(
             let sig = formatter.ty_at(inner, wildcards)?;
             (sig != ir_type_desc(inner)).then_some(sig)
         }
-        Ty::Fun(_) => formatter.ty_at(inner, wildcards),
+        Ty::Fun(_) => {
+            let sig = formatter.ty_at(inner, wildcards)?;
+            (sig != ir_type_desc(inner)).then_some(sig)
+        }
         _ => None,
     }
 }
@@ -5639,6 +5650,9 @@ struct Emitter<'a> {
     /// Safe-call guards that share one null exit (`a?.b?.c`), by guard `When`: the label, and whether
     /// this guard is the chain's outermost one, which binds it and yields the null result.
     safe_call_null_exits: HashMap<u32, (Label, bool)>,
+    /// A safe-call receiver already on the operand stack. The one read of this temporary consumes
+    /// it in place (`dup; ifnull`) instead of loading a slot that was never stored.
+    stack_resident_value: Option<u32>,
     /// A chain's receiver temporaries declared after its first guard already jumped to the shared
     /// null exit, by that exit: none of them is assigned on every path into it.
     safe_call_exit_temporaries: HashMap<Label, Vec<u32>>,
@@ -5783,6 +5797,7 @@ impl<'a> Emitter<'a> {
             unassigned_values: HashSet::new(),
             label_unassigned_values: HashMap::new(),
             safe_call_null_exits: HashMap::new(),
+            stack_resident_value: None,
             safe_call_exit_temporaries: HashMap::new(),
             var_types: collect_body_var_types(ir, roots.iter().copied()),
             value_stores: non_null_operands::ValueStores::collect(ir, &roots),

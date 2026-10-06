@@ -48,6 +48,9 @@ pub enum FirPropertyTarget {
         /// Parameter slot occupied by the extension receiver when this accessor belongs to a
         /// member-extension property. Ordinary members and top-level extensions use `None`.
         extension_receiver_parameter: Option<u32>,
+        /// Reading the selected declaration is a constant-value expression for Kotlin metadata.
+        /// The provider computes this semantic fact; later phases do not inspect its origin.
+        metadata_constant_read: bool,
         dispatch: FirPropertyDispatch,
     },
 }
