@@ -154,11 +154,6 @@ fn checked_arguments(values: &mut [IrCheckedArgument], names: &HashMap<TypeName,
     }
 }
 
-fn resolved_ty(value: &mut crate::fir::ResolvedTy, names: &HashMap<TypeName, TypeName>) {
-    *value = crate::fir::ResolvedTy::new(ty(value.get(), names))
-        .expect("renaming a resolved type keeps it resolved");
-}
-
 fn inline_accessor_splice(
     splice: &mut Option<Box<crate::fir::FirInlineAccessorSplice>>,
     names: &HashMap<TypeName, TypeName>,
