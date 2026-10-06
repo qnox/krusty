@@ -231,6 +231,7 @@ impl<'a> ModuleSymbols<'a> {
                 Ty::Unit,
                 String::new(),
             );
+            constructor.set_is_primary_constructor(true);
             let param_names = c
                 .ctor_param_names
                 .iter()

@@ -2513,8 +2513,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   A public Java INSTANCE field read is guarded like any other platform value and names the field
   (`value must not be null`), matching kotlinc. An index `javaList[0]` is the `get` call and is guarded
-  as `get(...)`. Not yet guarded, because the value is not modeled as `T!` today (a front-end gap, not
-  an emitter one): a Java STATIC field read (`System.out` types as `PrintStream`, not `PrintStream!`).
+  as `get(...)`. An ordinary Java static field read is `T!` and is guarded the same way. A Java enum
+  constant (`ACC_ENUM`) is not-null, so `== null` is always false and a non-null use emits no guard.
+  A static field of an enum type that is not itself an enum constant stays `T!` and is guarded.
+  Test: `tests/platform_call_assertions_e2e.rs::java_enum_constant_is_not_a_platform_value`.
   Also unimplemented:
   kotlinc's OTHER form, the message-less `Intrinsics.checkNotNull(Object)V`, which it emits wherever the
   narrowed value has no name to report — a plain read of a platform-typed local, a source-block branch,
@@ -5995,7 +5997,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `invoke(text)` of `(String) -> String` names it `p1`. Each override edge carries the overridden
   declaration's parameter identities beside the implementation's. A builtin member publishes its
   `.kotlin_builtins` parameter names like any other metadata declaration. A Java binary declaration
-  still publishes none, so its bridge has no parameter rows where kotlinc writes `p0`, `p1`.
+  publishes no source name. The bridge `LocalVariableTable` spells that unnamed parameter `pN`
+  from the identity's ordinal (`p0`, `p1`); the ordinal stays out of source identity and reflection
+  names.
   Tests: `tests/bridge_parameter_names_e2e.rs`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
@@ -6823,8 +6827,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of the member-modality rule). Interface bridges synthesize across FILES of one module: a
   cross-file module interface's erased signatures come from the symbol table (generic-iface
   direction only — body-presence isn't recorded there, so the fake-override direction stays
-  same-file). Tests: `mpp_expect_actual_e2e`; corpus `multiplatform/` 75 PASS / 0 FAIL
-  (box total 2744 → 2825).
+  same-file). Default-expression ownership is per parameter: a default written only on the
+  `expect` stays the expression provider for the surviving `actual` (`foo("O")` appends the
+  expect's `"K"`), while an `actual` default owns that parameter even when another parameter still
+  inherits its expression from the expect. Overrides preserve the resulting provider set rather
+  than collapsing it to either declaration. Thus `copyInto` uses `42`, `43`, and `size + 44`, and a
+  call through an override sees the actual interface default `"actual"`. Tests:
+  `mpp_expect_actual_e2e`; corpus `multiplatform/`, including
+  `multiplatform/k2/defaultArguments/bothInExpectAndActual.kt` and `bothInExpectAndActual2.kt`.
 
 - **A folded `dependsOn` file is a common source.** An optional expectation with no JVM actual
   (`kotlin.js.JsStatic`, from the stdlib common-metadata klib) resolves in a common source and is
@@ -8399,6 +8409,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor-alias registration and classifier lookups are keyed by. Tests:
   `tests/feature_coverage_r_e2e.rs::typealias_in_signatures_and_bodies`,
   `tests/feature_coverage_x_e2e.rs::typealias_function_and_generic`.
+- **A typealias keeps variance on the resolved expansion, and composes it with the use site.**
+  The parser leaves the use written. Classifier selection returns the alias that won that spelling,
+  including a nearer local classifier that shadows a file-level alias of the same name.
+  `typealias T3<X, Y> = MutableMap<in Y, X?>` therefore expands to `MutableMap<in Y, X?>`, so
+  `typeOf<T3<Int, String>>()` is `MutableMap<in String, Int?>`. Same-direction projections flatten
+  (`out` of `out X` is `out X`; `in` of `in X` is `in X`). A star argument stays a star. An opposite
+  use-site projection is reported on that keyword, for that application only:
+  `conflicting projection in type alias expansion in intermediate type 'Box<CONFLICTING-PROJECTION String>?'`.
+  Tests: `tests/typealias_projection_e2e.rs`. Corpus: `reflection/typeOf/typeAliasedType.kt`.
 - **Omitted typealias arguments on a constructor call are inferred, not written.** `LinkedHashMap(a)`
   calls the stdlib's `typealias LinkedHashMap<K, V> = java.util.LinkedHashMap<K, V>` without type
   arguments, so the alias's `K`/`V` are type variables of the call, decided by the value arguments and
@@ -8916,14 +8935,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **A qualified `typealias` spelling denotes its TARGET, not the alias.** `app.Cargo` and `Cargo`
   name the same declaration and must resolve identically. A dotted spelling reaches name resolution
-  intact — the parse seam expands only what it can match — and qualified resolution answers it with
-  the alias's own declaration, because an alias declaration IS a name its package contains. That is
-  correct for resolving the NAME and wrong for the TYPE it denotes: an alias is a resolution edge,
-  never a classifier. Resolving it as one made the alias its own type, and the emitted descriptor
-  named `app/Cargo` — a class nothing declares or emits, so the class file would fail to load. The
-  two alias kinds must also agree: a function-type alias has no classifier at all, so the same
-  treatment could only report `unresolved reference`, rejecting valid Kotlin. Both are expanded by
-  matching the alias's own qualified spelling, so neither depends on the alias having a target class.
+  intact, and qualified resolution answers it with the alias's own declaration, because an alias
+  declaration IS a name its package contains. That is correct for resolving the NAME and wrong for
+  the TYPE it denotes: an alias is a resolution edge, never a classifier. Resolving it as one made
+  the alias its own type, and the emitted descriptor named `app/Cargo` — a class nothing declares
+  or emits, so the class file would fail to load. A function-type alias has no classifier at all,
+  so treating the spelling as a class could only report `unresolved reference`. Both spellings
+  select the alias's recorded expansion, arguments included: `app.Handler` for
+  `typealias Handler = (Int) -> String` is `Function1<Int, String>`, not a bare `Function1`.
   Tests: `tests/typealias_abbreviated_type_e2e.rs`.
 
 - **A context parameter precedes the extension receiver in the JVM signature.** Kotlin signs a
@@ -9217,6 +9236,48 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **`@Serializable(with = S::class)` on a property's TYPE ARGUMENT selects that argument's
+  serializer.** `val items: List<@Serializable(with = S::class) Item>` serializes each element with
+  `S` whatever serializer `Item` has, including none: kotlinc builds
+  `ArrayListSerializer(S.INSTANCE)` for an `object` `S` and `new S()` for a class, each narrowed to
+  `KSerializer`, `.nullable` around a nullable element, at any depth (`Map<String, List<@… X>>`),
+  inside the same `$childSerializers` cache an unannotated collection uses. The parser kept the
+  annotation and discarded its argument list, so the element looked for `Item`'s own serializer and
+  the backend declined the file. There is one frontend-owned record of these applications: the
+  property's checked declared spelling (`Spelled`, carried to the IR as
+  `IrFile::prop_declared_spellings`), the same tree whose checked type-use annotations the
+  property's `@Metadata` encodes. The IR side table is keyed by classifier identity and stable
+  declaration order, not property spelling: an ordinary property and member-extension overloads
+  may share a source name without donating annotations to one another. The parser keeps an
+  argument-bearing type annotation's arguments
+  in `File::type_annotation_arguments`, the checker folds them when it publishes checked type-use
+  annotations, and the serialization plugin reads the checked `@Serializable(with = …)` through
+  `PluginContext::property_declared_type`, walking `Spelled::args` in step with the checked type's
+  arguments. Neither the checker nor common IR keeps a second, serialization-only copy. On the
+  declared type itself (`val v: @Serializable(with = S::class) Item`) the annotation is the
+  property's own serializer, without the property-annotation marker kotlinc reserves for a
+  property-level one. A serializer this compilation does not declare is read through `INSTANCE`
+  only when the provider confirms an `object`; this also fixes a property-level
+  `@Serializable(with = DependencyObject::class)`, which was constructed through the object's
+  private constructor. Below a typealias application the spelling already describes the EXPANDED
+  type: a use-site argument's annotations sit at the expansion position the alias substitutes it
+  into (`Swapped<@A Item, String>` with `typealias Swapped<V, K> = Map<K, V>` annotates the map's
+  value), and an annotation the alias's right-hand side writes on its root
+  (`typealias Coded = @Serializable(with = S::class) Item`) is the serializer of every `Coded`
+  occurrence, as kotlinc honours both. A serializer class named on a property or type occurrence is
+  built only through the primary constructor selected and validated while checked declarations and
+  dependency metadata are available. FIR records its stable module/dependency identity, declared
+  parameter types, and the annotated type-argument serializer passed to each parameter; common IR
+  and the JVM backend consume that record without guessing `()V` or recovering a constructor from
+  a name. This supports dependency serializer classes and generic serializers such as
+  `BoxSerializer<T>(KSerializer<T>)`; an unavailable or inaccessible constructor remains an
+  explicit unsupported element instead of becoming a guessed allocation. Known gap: kotlinc caches a CLASS
+  serializer named for a whole property (property-level or on the declared type itself) in
+  `$childSerializers`, where krusty constructs it at each use; the behaviour is identical.
+  Tests: `tests/type_argument_serializer_e2e.rs` (object, class, nullable, nested, declared-type
+  and typealias shapes, dependency objects/classes, and a generic dependency serializer under both
+  compilers; the cache factories and the generated `$serializer` against kotlinc's bytes, with and
+  without typealiases).
 - **A computed property default is an optional element's default too.** A defaulted property is
   written only when the encoder asks for defaults or the value differs from the default:
   `shouldEncodeElementDefault(desc, i) || self.x != <default>`. Only a CONSTANT default was compared,
@@ -13424,15 +13485,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Generic arguments compare by class (the non-null `Obj` rule ignores them too).
   (`assignment_to_nullable_value_class_var_boxes`.)
 
-- **A FUNCTION-type `typealias` expands structurally at the parse seam.** `typealias L = (A) -> R`
-  (incl. `suspend`/`context(...)` forms) records the full target `TypeRef` in `File.type_alias_fun`;
-  a post-parse pass rewrites every `TypeRef` naming the alias into the arrow form, so all downstream
-  raw-`TypeRef` function-type tests (checker invoke detection, lowerer, metadata) see the ordinary
-  shape. Per-file only — a sibling file's alias stays unresolved (skip, never mis-grade); generic
-  function-type aliases are not expanded (use-site substitution unmodeled). The use site's `?`
-  survives expansion (`L?` = nullable function type) and the span stays the use site.
-  (`tests/typealias_function_type_e2e.rs`; corpus `suspendConversion/suspendConversionOfAliasedType.kt`
-  advances from `unresolved` to the separate suspend-conversion gap.)
+- **A FUNCTION-type `typealias` expands when the use is resolved.** `typealias L = (A) -> R`
+  (including `suspend` and `context(...)` forms) leaves the use written as `L`. Signature collection
+  types that alias's template — the function type, with the alias's parameters still open — and
+  publishes it under the spellings that can see the declaration (the file, its package, an import).
+  A use substitutes its arguments into that template, so `typealias Mapper<T, R> = (T) -> R` makes
+  `Mapper<Int, String>` the type `(Int) -> String`. The checker applies the same collected
+  expansion, and a nearer classifier still shadows the alias. The use site's `?` stays on the use
+  (`L?` is the nullable function type).
+  (`tests/typealias_function_type_e2e.rs`.)
 
 - **Function-value conversions: suspend conversion and `UnitConversionsOnArbitraryExpressions`.** A
   regular function value reaching a `suspend` function type converts to it (suspend conversion), and
@@ -15035,18 +15096,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `check_declaration_type` (and the property annotation/receiver channel, `type_ref_ty_reported`)
   now reports `unresolved reference` exactly like `check_type_parameter_bound` — a duplicate of a
   signature-collection report collapses in the sink. (2) That reporting exposed the true intellij
-  root cause: `typealias KotlinDependencyId = Long` used from a SIBLING file. A same-file alias use
-  is rewritten by the parse seam, and an alias to a CLASS answers through its classifier record,
-  but a primitive-/function-type-target alias has no classifier, so a cross-file use had nothing to
-  resolve through. The checker now probes the collected `source_alias_expansions` under Kotlin
+  root cause: `typealias KotlinDependencyId = Long` used from a SIBLING file. An alias to a CLASS
+  answers through its classifier record, but a primitive- or function-type-target alias has no
+  classifier, so a cross-file use had nothing to resolve through until that expansion was recorded.
+  The checker probes the collected `source_alias_expansions` under Kotlin
   scoping — explicit import as the selected root, then the import levels (own package, star
   imports, defaults) with two distinct hits in one level ambiguous — and substitutes the use-site
   type arguments into the expansion (`scoped_source_alias_ty`); an unimported foreign-package alias
   stays unresolved. Use-site projections ride the substituted arguments through
   `projected_typeref_argument`, so `P<out CharSequence>` keeps its `+` marker in the emitted
   generic signature (kotlinc-identical) and `P<*>` keeps the same out-projected-upper-bound form
-  the SAME-FILE spelling produces. Cross-file function-type-target aliases still fail in signature
-  collection (pre-existing, unchanged). KNOWN DIVERGENCE (pre-existing, unchanged by this work):
+  the SAME-FILE spelling produces. Signature collection reads the same function-type template, so a
+  same-package or imported use resolves there too. KNOWN DIVERGENCE (pre-existing, unchanged by this work):
   kotlinc resolves classifiers and typealiases in ONE namespace level-by-level, but krusty's
   checker exhausts every classifier channel before this alias probe runs, so a LOWER-precedence
   classifier still shadows a HIGHER-precedence alias cross-channel — `typealias Sequence = Long` in

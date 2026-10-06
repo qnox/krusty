@@ -645,6 +645,7 @@ pub(super) fn materialize_member_extension_delegate(
         .or_default()
         .push(crate::ir::MemberExtProp {
             name: property.name.clone(),
+            source_order: declaration.source_order,
             receiver: extension_receiver,
             ty: property.ty,
             is_var: property.flags.has(DeclarationFlags::MUTABLE),
