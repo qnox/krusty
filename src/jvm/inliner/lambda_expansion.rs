@@ -493,6 +493,7 @@ fn inline_lambda(
     let parameters = lambda_parameters(lambda, host);
     let mut node = lambda.node.clone();
     super::try_blocks::move_try_starts_to_their_first_instruction(&mut node)?;
+    let mut node = super::preprocess_node_before_inline(node)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node)?;
     let invokes = super::functional_arguments::mark_places(&mut node, &parameters)?;
