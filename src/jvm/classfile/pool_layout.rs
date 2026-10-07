@@ -140,7 +140,7 @@ impl<'a> Layout<'a> {
             reach(read, slot.index, &mut kept);
             let rewritten = match slot.holder {
                 Holder::Code(method, part) => by_method.get(&method).map(|&at| (at, part)),
-                Holder::Class | Holder::AttributeName => None,
+                Holder::Class | Holder::AttributeName | Holder::CodeAttribute(_) => None,
             };
             match rewritten {
                 Some((at, part)) => {
@@ -158,11 +158,8 @@ impl<'a> Layout<'a> {
         let mut visited_first = vec![false; count];
         // Where in kotlinc's visit order each entry is first named, and each method's code begins.
         let mut first_named = vec![usize::MAX; count];
-        let mut code_starts: HashMap<usize, usize> = HashMap::new();
+        let code_starts = method_code_starts(read);
         for (position, slot) in read.visit_order().enumerate() {
-            if let Holder::Code(method, _) = slot.holder {
-                code_starts.entry(method).or_insert(position);
-            }
             let rewritten = matches!(
                 slot.holder,
                 Holder::Code(method, _) if by_method.contains_key(&method)
@@ -329,6 +326,32 @@ impl<'a> Layout<'a> {
         }
         order.push(index);
     }
+}
+
+/// Where each method's code begins in kotlinc's visit order.
+///
+/// A body operand is that boundary. An empty body has none, so its `Code` attribute name stands in.
+/// The attribute name of a method that does have a body sits before the method's own attributes, and
+/// treating it as the boundary moves a parameter annotation — interned ahead of the body — to the
+/// attribute's name.
+fn method_code_starts(read: &ClassSlots) -> HashMap<usize, usize> {
+    let mut body = HashMap::new();
+    let mut attribute = HashMap::new();
+    for (position, slot) in read.visit_order().enumerate() {
+        match slot.holder {
+            Holder::Code(method, _) => {
+                body.entry(method).or_insert(position);
+            }
+            Holder::CodeAttribute(method) => {
+                attribute.entry(method).or_insert(position);
+            }
+            Holder::Class | Holder::AttributeName => {}
+        }
+    }
+    for (method, position) in attribute {
+        body.entry(method).or_insert(position);
+    }
+    body
 }
 
 /// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten code
