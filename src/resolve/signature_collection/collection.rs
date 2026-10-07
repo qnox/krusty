@@ -2768,7 +2768,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .zip(&ctor_param_shapes)
                             .filter(|((property, _), _)| property.is_property)
                             .collect::<Vec<_>>();
-                        for (i, ((_, ty), (shape, _))) in data_properties.iter().enumerate() {
+                        for (i, ((property, ty), (shape, _))) in data_properties.iter().enumerate()
+                        {
                             let generated_name = format!("component{}", i + 1);
                             declared_callable_order.push(generated_name.clone());
                             methods.insert(
@@ -2806,7 +2807,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     lambda_param_types: Vec::new(),
                                     lambda_recv: Vec::new(),
                                     inline_modifiers: Vec::new(),
-                                    visibility: Visibility::Public,
+                                    visibility: property.visibility,
                                     context_count: 0,
                                     source_decl: None,
                                     stable_declaration: compact_generated_member_declaration(

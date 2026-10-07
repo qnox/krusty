@@ -2126,7 +2126,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   value-class mangling (`m-WAeUQJs$lib1`, a value-class member's `m-impl$lib1`) and after lifted
   callable naming, so a lambda inside the member does not carry it. Top-level functions and
   properties, constructors, and private or protected members stay unmangled; fields stay private
-  and unmangled. A same-module override that stays `internal` keeps the mangled name and does not
+  and unmangled. A data-class `componentN` takes that constructor property's visibility. An
+  internal property's component is `componentN$<module>` (`component1$main` under the default
+  module); a private component is `ACC_PRIVATE` and a protected one is `ACC_PROTECTED`, both still
+  named `componentN`. `@PublishedApi` on the property leaves its accessor unmangled and still
+  suffixes the component. `@Metadata` keeps the Kotlin name `componentN`, records the JVM name
+  when it differs, and stores the component's visibility bits. A same-module override that stays
+  `internal` keeps the mangled name and does not
   gain a second method.   A public override keeps the Kotlin name and also emits
   `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` under the mangled name; that bridge `invokevirtual`s the
   public method, so a call through the internal declaration reaches the override. An override that
@@ -2149,7 +2155,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   mangled slot. A module that is not a friend cannot take the slot with `override` either:
   the member is not visible there, so the internal call still reaches the declaring module.
   `@Metadata` keeps the Kotlin name and records the JVM name when it differs.
-  Tests: `tests/internal_member_names_e2e.rs`, and
+  Tests: `tests/internal_member_names_e2e.rs`, `tests/internal_component_names_e2e.rs`, and
   `compiler/testData/codegen/box/bridges/internalMethodOverrideInOtherModule.kt` plus
   `internalMethodOverrideMultipleInheritance.kt`.
 - **Lifted names in a value-class-renamed function.** kotlinc renames a function whose signature
