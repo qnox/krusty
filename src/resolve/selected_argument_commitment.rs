@@ -171,6 +171,11 @@ impl Checker<'_> {
                 declared,
                 argument,
                 actual,
+                call_sig
+                    .lambda_receiver_params
+                    .get(parameter)
+                    .copied()
+                    .unwrap_or(false),
                 implicit_lambda_label.as_deref(),
             );
         }

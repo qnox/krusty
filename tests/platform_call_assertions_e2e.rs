@@ -504,6 +504,70 @@ fn java_enum_constant_is_not_a_platform_value() {
     }
 }
 
+/// `this(...)` and `super(...)` are value arguments. A platform result committed to a declared
+/// non-null parameter is guarded; a type parameter that admits null is not, including after the
+/// superclass applies that parameter as a non-null type.
+const CONSTRUCTOR_DELEGATION: &str = r#"
+class Named(val text: String) {
+    constructor(key: String, marker: Int) : this(System.getenv(key))
+}
+
+class Entry(val path: java.nio.file.Path) {
+    constructor(parent: java.nio.file.Path, child: String) : this(parent.resolve(child))
+}
+
+open class Base(val path: java.nio.file.Path)
+class Child : Base {
+    constructor(parent: java.nio.file.Path, child: String) : super(parent.resolve(child))
+}
+
+class Box<T>(val value: T) {
+    constructor(items: java.util.List<T>) : this(items.get(0))
+}
+
+open class GenericBase<T>(val value: T)
+class GenericChild : GenericBase<String> {
+    constructor(items: java.util.List<String>) : super(items.get(0))
+}
+
+fun box(): String {
+    try {
+        Named("KRUSTY_ABSENT_CTOR", 0)
+        return "missing"
+    } catch (e: NullPointerException) {
+        val message = e.message
+        return if (message == "getenv(...) must not be null") "OK" else message ?: "null"
+    }
+}
+"#;
+
+#[test]
+fn constructor_delegation_guards_a_platform_argument() {
+    let krusty = common::expect_classes_with_stdlib(CONSTRUCTOR_DELEGATION, "CtorDelegation");
+    let reference = compile_reference(CONSTRUCTOR_DELEGATION, "CtorDelegation");
+    let class_bytes = |classes: &[(String, Vec<u8>)]| {
+        classes
+            .iter()
+            .map(|(name, bytes)| (name.clone(), bytes.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        class_bytes(&krusty),
+        class_bytes(&reference),
+        "every emitted constructor-delegation class must be byte-identical to kotlinc"
+    );
+    assert_eq!(
+        assertion_sites(&krusty, "krusty"),
+        assertion_sites(&reference, "kotlinc"),
+        "constructor delegation must guard the same platform arguments as kotlinc"
+    );
+    assert_eq!(
+        run(&krusty),
+        run(&reference),
+        "a null platform value must fail at the delegation, with kotlinc's message"
+    );
+}
+
 #[test]
 fn every_guarded_message_is_derived_from_the_checked_call() {
     let sites = assertion_sites(&positions().krusty, "krusty");
