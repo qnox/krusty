@@ -60,7 +60,12 @@ impl Emitter<'_> {
     /// edge resets kotlinc's last-line state, so the handler keeps an entry even when the normal
     /// copy ended on that same line. Mapping through the first expression's inline provenance also
     /// gives a copied finalizer the caller line that its body uses, rather than the callee's raw line.
-    pub(super) fn mark_finalizer_handler_entry(&mut self, block: ExprId, code: &mut CodeBuilder) {
+    pub(super) fn mark_finalizer_handler_entry(
+        &mut self,
+        try_expression: ExprId,
+        block: ExprId,
+        code: &mut CodeBuilder,
+    ) {
         let mut expression = first_block_expression(self.ir, block);
         let entry = loop {
             if let Some(&line) = self.ir.expr_lines.get(&expression) {
@@ -76,7 +81,17 @@ impl Emitter<'_> {
         };
         if let Some((expression, line)) = entry {
             let line = self.mapped_expression_line(expression, line);
-            code.mark_control_entry_line(line);
+            // A handler reopens the finalizer's line after a preceding, different `try` line even
+            // when the normal-path finalizer left that same line in effect. An entirely one-line
+            // `try { ... } finally { ... }` has no line transition at all, and kotlinc keeps only
+            // the entry at pc 0 instead of repeating it at the catch-all handler.
+            if self.ir.expr_source_lines.get(&try_expression).copied()
+                == self.ir.expr_lines.get(&expression).copied()
+            {
+                code.mark_line(line);
+            } else {
+                code.mark_control_entry_line(line);
+            }
         }
     }
 

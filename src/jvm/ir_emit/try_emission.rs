@@ -451,7 +451,7 @@ impl Emitter<'_> {
             let tslot = parked.slot();
             // The handler's entry belongs to the finalizer copy it introduces, not to the `finally`
             // keyword — mark it before the store so both copies open on the same line.
-            self.mark_finalizer_handler_entry(f, code);
+            self.mark_finalizer_handler_entry(expression, f, code);
             store(thr_ty, tslot, code);
             // kotlinc protects the handler's own entry — everything ahead of the copy of the
             // finalizer it introduces — with a range of its own.
