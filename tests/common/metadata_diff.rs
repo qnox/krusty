@@ -32,6 +32,7 @@ pub fn metadata_diff_against_kotlinc_lib(
         "default",
         &inputs.variant,
         inputs.fingerprint,
+        inputs.legacy_fingerprint,
         &[class],
         || {
             let dir = scratch_dir()?;
@@ -162,6 +163,7 @@ fn compile_classes_with_kotlinc_and_krusty(
         "default",
         &inputs.variant,
         inputs.fingerprint,
+        inputs.legacy_fingerprint,
         classes,
         || {
             let dir = scratch_dir()?;
@@ -224,6 +226,7 @@ pub fn metadata_diff_against_kotlinc_module(
         "default",
         &inputs.variant,
         inputs.fingerprint,
+        inputs.legacy_fingerprint,
         &[class],
         || {
             let dir = scratch_dir()?;

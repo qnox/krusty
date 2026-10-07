@@ -55,6 +55,9 @@ fn record_selected_content_hash(_: &Path) {}
 /// bytes rather than scratch paths.
 pub struct ClassDumpInputs {
     pub fingerprint: u128,
+    /// Fingerprint from before selected-toolchain rows existed. A historical archive is keyed by
+    /// this value; a miss on [`Self::fingerprint`] tries it before compiling.
+    pub legacy_fingerprint: u128,
     pub variant: String,
 }
 
@@ -88,6 +91,10 @@ pub(super) fn class_dump_inputs_with_platform(
         Ok(variant) => variant,
         Err(err) => super::refuse_missing_dump(&err),
     };
+    let legacy_classpath = match legacy_classpath_fingerprint(classpath) {
+        Ok(classpath) => classpath,
+        Err(err) => super::refuse_missing_dump(&err),
+    };
     let classpath =
         match classpath_content_fingerprint_with_platform(classpath, kotlinc_lib, jdk_modules) {
             Ok(classpath) => classpath,
@@ -100,8 +107,65 @@ pub(super) fn class_dump_inputs_with_platform(
             variant.as_bytes(),
             classpath.as_bytes(),
         ]),
+        legacy_fingerprint: fingerprint_parts(&[
+            source.as_bytes(),
+            jvm_target.as_bytes(),
+            variant.as_bytes(),
+            legacy_classpath.as_bytes(),
+        ]),
         variant,
     }
+}
+
+/// Classpath identity used by archives recorded before selected-toolchain rows.
+///
+/// Each explicit entry contributes its own bytes. There is no ambient kotlinc or JDK row, and a
+/// jar inside the selected distribution is not rewritten to a logical path.
+pub(super) fn legacy_classpath_fingerprint(paths: &[PathBuf]) -> Result<String, String> {
+    let mut rows = Vec::new();
+    for path in paths {
+        rows.push(legacy_classpath_row(path)?);
+    }
+    Ok(rows.join("\n"))
+}
+
+fn legacy_classpath_row(path: &Path) -> Result<String, String> {
+    static ROWS: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let rows = ROWS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut rows = rows.lock().expect("legacy classpath fingerprints");
+    if let Some(row) = rows.get(&key) {
+        return Ok(row.clone());
+    }
+    let row = if path.is_dir() {
+        format!("dir:{:016x}", legacy_hash_tree(path)?)
+    } else {
+        let bytes = std::fs::read(path)
+            .map_err(|err| format!("unreadable classpath entry {}: {err}", path.display()))?;
+        format!("file:{:032x}", fingerprint_parts(&[&bytes]))
+    };
+    rows.insert(key, row.clone());
+    Ok(row)
+}
+
+/// Directory identity from the pre-toolchain archive: FNV of each relative path and its bytes.
+fn legacy_hash_tree(root: &Path) -> Result<u64, String> {
+    let mut files = Vec::new();
+    collect_files(root, &mut files)?;
+    files.sort();
+    let mut hash = 0xcbf29ce484222325u64;
+    for path in files {
+        if let Ok(relative) = path.strip_prefix(root) {
+            hash = fnv64(
+                hash,
+                relative.to_string_lossy().replace('\\', "/").as_bytes(),
+            );
+        }
+        let bytes = std::fs::read(&path)
+            .map_err(|err| format!("unreadable file {}: {err}", path.display()))?;
+        hash = fnv64(hash, &bytes);
+    }
+    Ok(hash)
 }
 
 pub(super) fn normalize_args(args: &[String]) -> Result<String, String> {

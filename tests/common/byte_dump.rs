@@ -30,13 +30,23 @@
 //! their logical distribution path. An explicit selected JDK image uses its kind, exact content
 //! identity, and `release` label. Other classpath entries contribute their bytes.
 //!
+//! An archive recorded before those toolchain rows is still replayed. Its index may name an open
+//! range (`2.4.20..`); that line is the recording's own release, not a license for a later
+//! compiler to reuse the bytes. A miss on the current fingerprint tries the earlier classpath
+//! identity, which hashed each explicit entry and did not add a selected-installation row. A file
+//! that does not parse is replaced when this process publishes, instead of being left in place for
+//! every later run to miss.
+//!
 //! The archive is read at runtime and is not compiled into the test binary.
 
 mod fingerprint;
 
 pub use fingerprint::class_dump_inputs;
 pub(crate) use fingerprint::fingerprint_parts;
-use fingerprint::{basename, classpath_content_fingerprint, fnv64, normalize_invocation_flag};
+use fingerprint::{
+    basename, classpath_content_fingerprint, fnv64, legacy_classpath_fingerprint,
+    normalize_invocation_flag,
+};
 #[cfg(test)]
 use fingerprint::{
     class_dump_inputs_with_platform, classpath_content_fingerprint_with_platform, hash_tree,
@@ -161,6 +171,7 @@ pub fn kotlinc_class_dumps(
     jvm_target: &str,
     variant: &str,
     fingerprint: u128,
+    legacy_fingerprint: u128,
     classes: &[&str],
     compile: impl FnOnce() -> Option<BTreeMap<String, Vec<u8>>>,
 ) -> Option<Vec<Vec<u8>>> {
@@ -173,6 +184,7 @@ pub fn kotlinc_class_dumps(
             key: &entry_key(&case, stem, jvm_target, variant, &suffix),
             compiler: compiler_dump_version(),
             fingerprint,
+            legacy_fingerprint,
             force: record_forced(),
             compile_missing: compile_missing_allowed(),
             write: ci_allows_write(),
@@ -196,6 +208,7 @@ pub fn kotlinc_class_tree(
     jvm_target: &str,
     variant: &str,
     fingerprint: u128,
+    legacy_fingerprint: u128,
     compile: impl FnOnce() -> Option<BTreeMap<String, Vec<u8>>>,
 ) -> Option<BTreeMap<String, Vec<u8>>> {
     let (module, case) = running_test();
@@ -206,6 +219,7 @@ pub fn kotlinc_class_tree(
             key: &entry_key(&case, stem, jvm_target, variant, "#tree"),
             compiler: compiler_dump_version(),
             fingerprint,
+            legacy_fingerprint,
             force: record_forced(),
             compile_missing: compile_missing_allowed(),
             write: ci_allows_write(),
@@ -296,6 +310,8 @@ struct Recall<'a> {
     key: &'a str,
     compiler: Option<DumpVersion>,
     fingerprint: u128,
+    /// Tried only after `fingerprint` misses. Equal to `fingerprint` when there is no earlier key.
+    legacy_fingerprint: u128,
     force: bool,
     compile_missing: bool,
     write: bool,
@@ -310,16 +326,14 @@ fn recall(
         return compile();
     };
     if !query.force {
-        if let Some(hit) = load_files(
-            query.root,
-            query.module,
-            query.key,
-            compiler,
-            query.fingerprint,
-        )
-        .filter(|hit| accept(hit))
-        {
+        if let Some(hit) = load_fingerprint(&query, compiler, query.fingerprint, &accept) {
             return Some(hit);
+        }
+        if query.legacy_fingerprint != query.fingerprint {
+            if let Some(hit) = load_fingerprint(&query, compiler, query.legacy_fingerprint, &accept)
+            {
+                return Some(hit);
+            }
         }
         if !query.compile_missing {
             refuse_missing_dump(&format!(
@@ -340,6 +354,15 @@ fn recall(
         );
     }
     Some(produced)
+}
+
+fn load_fingerprint(
+    query: &Recall<'_>,
+    compiler: DumpVersion,
+    fingerprint: u128,
+    accept: &impl Fn(&BTreeMap<String, Vec<u8>>) -> bool,
+) -> Option<BTreeMap<String, Vec<u8>>> {
+    load_files(query.root, query.module, query.key, compiler, fingerprint).filter(|hit| accept(hit))
 }
 
 fn refuse_missing_dump(detail: &str) -> ! {
@@ -704,19 +727,55 @@ fn parse_modules(text: &str) -> Option<BTreeMap<String, BTreeMap<String, Vec<Rec
         if parts.next().is_some() {
             return None;
         }
-        let (channel, version) = parse_bound(version)?;
+        let parsed = if version.contains("..") {
+            legacy_range_entries(version, fingerprint, blob)?
+        } else {
+            let (channel, version) = parse_bound(version)?;
+            vec![RecordedEntry {
+                version,
+                channel,
+                fingerprint,
+                blob,
+            }]
+        };
         let recordings = module
             .as_ref()
             .zip(key.as_ref())
             .and_then(|(module, key)| modules.get_mut(module)?.get_mut(key))?;
-        recordings.push(RecordedEntry {
-            version,
-            channel,
-            fingerprint,
-            blob,
-        });
+        recordings.extend(parsed);
     }
     Some(modules)
+}
+
+/// `2.4.20..` is the release that was current when the line was written. A closed range
+/// (`2.4.0..2.4.10`) names only the supported releases inside it. Neither form extends to a
+/// compiler the recording did not name.
+fn legacy_range_entries(token: &str, fingerprint: u128, blob: u128) -> Option<Vec<RecordedEntry>> {
+    let (lo_token, hi_token) = token.split_once("..")?;
+    let (channel, lo) = parse_bound(lo_token)?;
+    let versions = if hi_token.is_empty() {
+        vec![lo]
+    } else {
+        let (hi_channel, hi) = parse_bound(hi_token)?;
+        if hi_channel != channel || hi < lo {
+            return None;
+        }
+        KotlinVersion::supported()
+            .into_iter()
+            .filter(|version| *version >= lo && *version <= hi)
+            .collect()
+    };
+    Some(
+        versions
+            .into_iter()
+            .map(|version| RecordedEntry {
+                version,
+                channel,
+                fingerprint,
+                blob,
+            })
+            .collect(),
+    )
 }
 
 fn cached_archive<'a>(
@@ -798,8 +857,12 @@ fn reconcile_with(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>, mode: Re
         }
         (_, Some(stamp)) => {
             let Some(archive) = read_archive(path) else {
-                // Do not overwrite an archive that another process replaced with unreadable or
-                // corrupt data. Drop the stale snapshot and its pending publication instead.
+                // The file is not a recording this process can merge. Publication holds the
+                // directory lock, so this is not a partial rename. Keep the in-memory recordings;
+                // the caller replaces the file instead of leaving every later lookup to miss.
+                if !slot.pending.is_empty() {
+                    cache.insert(path.to_path_buf(), slot);
+                }
                 return;
             };
             (Some(stamp), archive)
@@ -1130,6 +1193,7 @@ pub(crate) struct ReplayedClasses {
 struct Invocation {
     out: PathBuf,
     fingerprint: u128,
+    legacy_fingerprint: u128,
     label: String,
 }
 
@@ -1168,30 +1232,40 @@ fn replay_class_dump_with_policy(
         ),
         Err(err) => refuse_missing_dump(&err),
     };
-    let key = hex128(invocation.fingerprint);
-    if let Some(files) = load_files(
-        root,
-        INVOCATION_MODULE,
-        &key,
-        compiler,
-        invocation.fingerprint,
-    ) {
+    let mut saw_incomplete = false;
+    for fingerprint in [invocation.fingerprint, invocation.legacy_fingerprint] {
+        let key = hex128(fingerprint);
+        let Some(files) = load_files(root, INVOCATION_MODULE, &key, compiler, fingerprint) else {
+            if fingerprint == invocation.legacy_fingerprint {
+                break;
+            }
+            continue;
+        };
         let replayed = split_replay(files);
         if diagnostics_required() && !replayed.status {
-            if compile_missing {
-                return None;
+            saw_incomplete = true;
+            if fingerprint == invocation.legacy_fingerprint {
+                break;
             }
-            refuse_missing_dump(&format!(
-                "sources {} fingerprint {} (class files are recorded, but not the exit code and diagnostics)",
-                invocation.label, key
-            ));
+            continue;
         }
         return Some(replayed);
     }
-    if compile_missing {
+    if saw_incomplete && !compile_missing {
+        refuse_missing_dump(&format!(
+            "sources {} fingerprint {} (class files are recorded, but not the exit code and diagnostics)",
+            invocation.label,
+            hex128(invocation.fingerprint)
+        ));
+    }
+    if compile_missing || saw_incomplete {
         return None;
     }
-    refuse_missing_dump(&format!("sources {} fingerprint {}", invocation.label, key));
+    refuse_missing_dump(&format!(
+        "sources {} fingerprint {}",
+        invocation.label,
+        hex128(invocation.fingerprint)
+    ));
 }
 
 /// Write a replayed dump into the invocation's `-d` path.
@@ -1336,11 +1410,16 @@ fn parse_invocation(args: &[String]) -> Result<Option<Invocation>, String> {
         blob.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
         blob.extend_from_slice(bytes);
     }
+    let legacy_classpath = legacy_classpath_fingerprint(&classpath)?;
     let classpath = classpath_content_fingerprint(&classpath)?;
     let flags = flags.join("\n");
+    let fingerprint_of = |classpath: &str| {
+        fingerprint_parts(&[blob.as_slice(), flags.as_bytes(), classpath.as_bytes()])
+    };
     Ok(Some(Invocation {
         out,
-        fingerprint: fingerprint_parts(&[blob.as_slice(), flags.as_bytes(), classpath.as_bytes()]),
+        fingerprint: fingerprint_of(&classpath),
+        legacy_fingerprint: fingerprint_of(&legacy_classpath),
         label,
     }))
 }
