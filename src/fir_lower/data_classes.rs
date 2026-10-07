@@ -15,8 +15,13 @@ pub(super) fn finalize_data_classes(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
-    for raw in 0..index.declaration_count() {
-        let declaration = DeclarationId::from_raw(raw as u32);
+    let mut classifiers = ir
+        .checked_classifier_classes
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    classifiers.sort_by_key(|declaration| declaration.raw());
+    for declaration in classifiers {
         let Some(anchor) = index.declaration_anchor(declaration) else {
             continue;
         };
@@ -114,25 +119,27 @@ fn generated_method(
     name: &str,
     ir: &IrFile,
 ) -> Option<GeneratedMethod> {
-    (0..index.declaration_count()).find_map(|raw| {
-        let declaration = DeclarationId::from_raw(raw as u32);
-        let header = index.declaration_header(declaration)?;
-        let anchor = index.declaration_anchor(declaration)?;
-        (anchor.owner == Some(owner)
-            && header.kind == DeclarationKind::Function
-            && header.flags.has(DeclarationFlags::COMPILER_GENERATED)
-            && index.declaration_name(declaration) == Some(name))
-        .then(|| {
-            if index.is_suppressed_generated_callable(declaration) {
-                return Some(GeneratedMethod::Suppressed);
-            }
-            index
-                .callable_for_declaration(declaration)
-                .and_then(|callable| ir.checked_callable_functions.get(&callable.id).copied())
-                .map(GeneratedMethod::Present)
+    index
+        .owned_declarations(owner)
+        .iter()
+        .copied()
+        .find_map(|declaration| {
+            let header = index.declaration_header(declaration)?;
+            index.declaration_anchor(declaration)?;
+            (header.kind == DeclarationKind::Function
+                && header.flags.has(DeclarationFlags::COMPILER_GENERATED)
+                && index.declaration_name(declaration) == Some(name))
+            .then(|| {
+                if index.is_suppressed_generated_callable(declaration) {
+                    return Some(GeneratedMethod::Suppressed);
+                }
+                index
+                    .callable_for_declaration(declaration)
+                    .and_then(|callable| ir.checked_callable_functions.get(&callable.id).copied())
+                    .map(GeneratedMethod::Present)
+            })
+            .flatten()
         })
-        .flatten()
-    })
 }
 
 fn synthesize_components_and_copy(

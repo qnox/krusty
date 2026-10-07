@@ -1284,6 +1284,32 @@ impl ProductionSignatureSemantics<'_> {
         receivers
     }
 
+    /// Classifier stub positions in one source. Built once: range containment is a per-declaration
+    /// question, and scanning every classifier in the module for it is quadratic.
+    fn classifier_stub_positions(&self, source: crate::fir::SourceFileId) -> Vec<usize> {
+        let missing = self.classifier_stubs_by_source.borrow().is_none();
+        if missing {
+            let mut by_source = Vec::new();
+            for (position, stub) in self.headers.stubs.iter().enumerate() {
+                if stub.kind != crate::fir::DeclarationKind::Classifier {
+                    continue;
+                }
+                let index = stub.source.raw() as usize;
+                if by_source.len() <= index {
+                    by_source.resize(index + 1, Vec::new());
+                }
+                by_source[index].push(position);
+            }
+            *self.classifier_stubs_by_source.borrow_mut() = Some(by_source);
+        }
+        self.classifier_stubs_by_source
+            .borrow()
+            .as_ref()
+            .and_then(|by_source| by_source.get(source.raw() as usize))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Internal names of the classifiers lexically enclosing this scope's declaration, innermost
     /// first. Decided by SOURCE SPAN CONTAINMENT — a nested classifier is inventoried without an
     /// anchor `owner`, so the stable chain stops before reaching the outer class.
@@ -1321,20 +1347,18 @@ impl ProductionSignatureSemantics<'_> {
             current = current_anchor.owner;
         }
         let mut enclosing = self
-            .headers
-            .stubs
-            .iter()
-            .filter(|stub| {
-                stub.source == scope.source
-                    && stub.kind == crate::fir::DeclarationKind::Classifier
-                    && stub.range.lo <= anchor.range.lo
-                    && anchor.range.hi <= stub.range.hi
-            })
-            .filter_map(|stub| {
-                self.classifier_types
-                    .get(&stub.id)
-                    .copied()
-                    .map(|classifier| (stub.range.hi - stub.range.lo, classifier))
+            .classifier_stub_positions(scope.source)
+            .into_iter()
+            .filter_map(|position| {
+                let stub = &self.headers.stubs[position];
+                (stub.range.lo <= anchor.range.lo && anchor.range.hi <= stub.range.hi).then(
+                    || {
+                        self.classifier_types
+                            .get(&stub.id)
+                            .copied()
+                            .map(|classifier| (stub.range.hi - stub.range.lo, classifier))
+                    },
+                )?
             })
             .collect::<Vec<_>>();
         // Innermost first, so lexical scope-tower priority remains source-correct.

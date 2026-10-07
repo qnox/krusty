@@ -58,14 +58,12 @@ pub(super) fn predeclare_interface_delegation_fields(
     inline_payload_declarations: &std::collections::HashSet<DeclarationId>,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
-    for raw in 0..index.declaration_count() {
-        let declaration = DeclarationId::from_raw(raw as u32);
+    for declaration in super::declarations_for_lowering(index, source, inline_payload_declarations)
+    {
         let Some(anchor) = index.declaration_anchor(declaration) else {
             continue;
         };
-        if (anchor.source != source && !inline_payload_declarations.contains(&declaration))
-            || anchor.kind != DeclarationKind::Classifier
-        {
+        if anchor.kind != DeclarationKind::Classifier {
             continue;
         }
         let Some(header) = index.classifier_header(declaration) else {
@@ -113,8 +111,13 @@ pub(super) fn finalize_interface_delegations(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
-    for raw in 0..index.declaration_count() {
-        let declaration = DeclarationId::from_raw(raw as u32);
+    let mut classifiers = ir
+        .checked_classifier_classes
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    classifiers.sort_by_key(|declaration| declaration.raw());
+    for declaration in classifiers {
         let Some(anchor) = index.declaration_anchor(declaration) else {
             continue;
         };

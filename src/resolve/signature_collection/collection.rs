@@ -13,6 +13,20 @@
 
 use super::*;
 
+/// Stub positions grouped by source file. Signature collection used to scan every stub in the
+/// module once per classifier; a file only needs its own declarations.
+fn stub_positions_by_source(headers: &crate::fir::StreamedHeaderModule) -> Vec<Vec<usize>> {
+    let mut by_source = Vec::new();
+    for (position, stub) in headers.stubs.iter().enumerate() {
+        let source = stub.source.raw() as usize;
+        if by_source.len() <= source {
+            by_source.resize(source + 1, Vec::new());
+        }
+        by_source[source].push(position);
+    }
+    by_source
+}
+
 pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,
@@ -21,6 +35,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     compact_headers: Option<&crate::fir::StreamedHeaderModule>,
     compact_local_contexts: Option<&[PassOneLocalClassContext]>,
 ) -> SymbolTable {
+    let stubs_by_source = compact_headers.map(stub_positions_by_source);
     let SourceTypeUniverse {
         file_type_aliases,
         source_packages,
@@ -1071,12 +1086,20 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     let mut referenced_types = std::collections::HashSet::new();
                     if let Some(headers) = compact_headers {
                         let source = crate::fir::SourceFileId::from_raw(i as u32);
-                        for stub in headers.stubs.iter().filter(|stub| {
-                            stub.source == source
-                                && compact_classifier.is_some_and(|classifier| {
+                        let positions = stubs_by_source
+                            .as_ref()
+                            .and_then(|by_source| by_source.get(source.raw() as usize))
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        for stub in positions
+                            .iter()
+                            .map(|&position| &headers.stubs[position])
+                            .filter(|stub| {
+                                compact_classifier.is_some_and(|classifier| {
                                     streamed_declaration_is_within(headers, stub.id, classifier.id)
                                 })
-                        }) {
+                            })
+                        {
                             for root in headers.syntax.declaration_type_roots(stub.id) {
                                 if let Some(reference) = headers
                                     .syntax
@@ -1770,10 +1793,15 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         {
                             if !table.classes.contains_key(&companion_internal) {
                                 let compact_companion = compact_headers.and_then(|headers| {
-                                    headers.stubs.iter().find(|stub| {
-                                        stub.source.raw() == i as u32
-                                            && stub.range == companion.span
-                                            && stub.kind == crate::fir::DeclarationKind::Classifier
+                                    stubs_by_source.as_ref()?.get(i).and_then(|positions| {
+                                        positions
+                                            .iter()
+                                            .map(|&position| &headers.stubs[position])
+                                            .find(|stub| {
+                                                stub.range == companion.span
+                                                    && stub.kind
+                                                        == crate::fir::DeclarationKind::Classifier
+                                            })
                                     })
                                 });
                                 let companion_header = match compact_headers {
@@ -1923,17 +1951,12 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .expect("a production class must have a stable identity")
                             .id;
                         let mut declarations = headers
-                            .stubs
-                            .iter()
+                            .owned_stubs(owner)
                             .filter(|stub| {
                                 stub.kind == crate::fir::DeclarationKind::Property
                                     && !stub
                                         .flags
                                         .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER)
-                                    && headers
-                                        .declarations
-                                        .anchor(stub.id)
-                                        .is_some_and(|anchor| anchor.owner == Some(owner))
                             })
                             .filter_map(|stub| {
                                 headers
