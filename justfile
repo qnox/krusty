@@ -14,7 +14,7 @@
 #   just kotlin-native download+unpack the matching Kotlin/Native distribution; prints root path
 #   just klib-semantics exercise the common KLIB metadata decoder against that distribution
 #   just box-corpus clone+cache the Kotlin codegen/box corpus; prints box dir
-#   just conformance       print box-suite conformance "<pct> <passed> <applicable>"
+#   just conformance       print box-suite conformance "<pct> <passed> <applicable>" (stderr: JVM bytes)
 #   just profile-box [filter]  profile compiler-only box cases; writes target/flamegraph.svg
 #   just install-hooks    lefthook install
 #   just version          krusty release version, e.g. 2.4.20-build.3
@@ -405,7 +405,7 @@ test-all *ARGS:
     done
     exit $rc
 
-# --- Kotlin box-suite conformance (drives the README badge) ---
+# --- Kotlin box-suite conformance (drives the README conformance and JVM byte-equality badges) ---
 
 # Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
 # binary; they do not compile krusty again.
@@ -428,20 +428,24 @@ conformance-bin:
     [ -n "$bin" ] && [ -x "$bin" ] || { echo "could not locate conformance test binary" >&2; exit 1; }
     printf '%s\n' "$bin"
 
-# Run the codegen/box conformance suite and print "<pct> <passed> <applicable>". The suite's native
-# exit status holds every file to the version's exact fail/not-applicable manifests; the report exposes the score.
-conformance VERSION=`just max-version`:
+# Run the codegen/box conformance suite and print the case report "<pct> <passed> <applicable>":
+# applicable cases whose box() returns "OK". The same run's JVM byte report "<pct> <matched> <total>",
+# matching `.class` bytes against the same version's kotlinc over those cases, goes to stderr and,
+# when BYTES names a file, to BYTES (see scripts/conformance-report.sh). The suite's exit status
+# separately holds every file's box() outcome to the version's exact fail/not-applicable manifests.
+conformance VERSION=`just max-version` BYTES="":
     #!/usr/bin/env bash
     set -euo pipefail
-    just conformance-run "$(just conformance-bin)" "{{VERSION}}"
+    just conformance-run "$(just conformance-bin)" "{{VERSION}}" "{{BYTES}}"
 
-# Run a PREBUILT conformance test binary (path BIN) against Kotlin VERSION and print
-# "<pct> <passed> <applicable>". The test writes the report before its assertions, so callers receive
-# the metric even when a file disagrees with the outcome manifests.
-conformance-run BIN VERSION:
+# Run a PREBUILT conformance test binary (path BIN) against Kotlin VERSION and print the case report
+# "<pct> <passed> <applicable>" summed over every shard; the JVM byte report "<pct> <matched> <total>"
+# summed the same way goes to stderr and to BYTES when given. The test writes both reports before its
+# assertions, so callers receive the metrics even when a file disagrees with the outcome manifests.
+conformance-run BIN VERSION BYTES="":
     #!/usr/bin/env bash
     set -euo pipefail
-    bash scripts/conformance-run.sh "{{BIN}}" "{{VERSION}}"
+    bash scripts/conformance-run.sh "{{BIN}}" "{{VERSION}}" "{{BYTES}}"
 
 # Run every non-box conformance test with the binary from `conformance-bin`. CI invokes this beside
 # `conformance-run` in every supported-version lane. A sibling `krusty` next to BIN is the CLI.
@@ -450,22 +454,38 @@ conformance-regressions BIN VERSION:
     set -euo pipefail
     bash scripts/conformance-regressions.sh "{{BIN}}" "{{VERSION}}"
 
-# Write the shields.io endpoint badges (docs/badges/*.json) from current numbers. CI commits these
-# on master; safe to run locally to preview. Color ramps with the conformance percentage.
-conformance-badge:
+# Preview the shields.io endpoint badges in docs/badges/*.json (untracked) for the max version, from
+# one box run: conformance.json (the `krusty-conformance.json` endpoint) from its case report, and
+# jvm-byte-equality.json (the `krusty-jvm-byte-equality.json` endpoint) from its JVM byte report.
+# With no arguments it runs `just conformance`; pass CASES and BYTES together to render existing
+# reports of one run instead, such as a lane's downloaded `pct-<version>` and
+# `jvm-byte-equality-<version>` CI artifacts. The master release job publishes the same payloads
+# (scripts/conformance-badge.sh) to the badge Gist; nothing here publishes.
+conformance-badge CASES="" BYTES="":
     #!/usr/bin/env bash
     set -euo pipefail
-    read -r pct passed applicable < <(just conformance)
-    color=red
-    awk "BEGIN{exit !($pct>=10)}" && color=orange || true
-    awk "BEGIN{exit !($pct>=50)}" && color=yellow || true
-    awk "BEGIN{exit !($pct>=70)}" && color=brightgreen || true
+    v="$(just max-version)"
+    cases='{{CASES}}'
+    bytes='{{BYTES}}'
+    if [ -z "$cases" ] && [ -z "$bytes" ]; then
+      mkdir -p target
+      cases="target/conformance-$v.report"
+      bytes="target/jvm-byte-equality-$v.report"
+      just conformance "$v" "$bytes" > "$cases"
+    elif [ -z "$cases" ] || [ -z "$bytes" ]; then
+      echo "conformance-badge: pass CASES and BYTES from the same box run, or neither" >&2
+      exit 2
+    fi
     mkdir -p docs/badges
-    printf '{"schemaVersion":1,"label":"Kotlin %s conformance","message":"%s%% (%s/%s)","color":"%s"}\n' \
-      "$(just max-version)" "$pct" "$passed" "$applicable" "$color" > docs/badges/conformance.json
+    trap 'rm -f docs/badges/conformance.json.tmp docs/badges/jvm-byte-equality.json.tmp' EXIT
+    bash scripts/conformance-badge.sh json conformance "$cases" "$v" > docs/badges/conformance.json.tmp
+    bash scripts/conformance-badge.sh json jvm-byte-equality "$bytes" "$v" \
+      > docs/badges/jvm-byte-equality.json.tmp
+    mv docs/badges/conformance.json.tmp docs/badges/conformance.json
+    mv docs/badges/jvm-byte-equality.json.tmp docs/badges/jvm-byte-equality.json
     printf '{"schemaVersion":1,"label":"Kotlin","message":"%s","color":"blue"}\n' \
-      "$(just max-version)" > docs/badges/kotlin.json
-    echo "wrote docs/badges/conformance.json + kotlin.json"
+      "$v" > docs/badges/kotlin.json
+    echo "wrote docs/badges/conformance.json + jvm-byte-equality.json + kotlin.json from $cases + $bytes"
 
 # Run the box-corpus survey — the roadmap of why krusty SKIPS a codegen/box test (the unresolved /
 # unsupported buckets, most-frequent first). Provisions the SAME version-matched, cached corpus +

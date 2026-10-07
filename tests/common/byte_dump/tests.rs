@@ -635,6 +635,108 @@ fn a_common_sources_flag_ignores_its_scratch_path() {
 }
 
 #[test]
+fn a_fragment_sources_flag_keeps_the_fragment_and_hashes_the_source() {
+    let root = temp_root("fragment-src");
+    let left_dir = root.join("left");
+    let right_dir = root.join("right");
+    std::fs::create_dir_all(&left_dir).unwrap();
+    std::fs::create_dir_all(&right_dir).unwrap();
+    let left = left_dir.join("Common.kt");
+    let right = right_dir.join("Common.kt");
+    std::fs::write(&left, "expect class A\n").unwrap();
+    std::fs::write(&right, "expect class A\n").unwrap();
+    let flag =
+        |fragment: &str, file: &Path| format!("-Xfragment-sources={fragment}:{}", file.display());
+
+    assert_eq!(
+        normalize_invocation_flag(&flag("common", &left)).unwrap(),
+        normalize_invocation_flag(&flag("common", &right)).unwrap(),
+        "equal fragment source bytes at distinct scratch paths share one recording"
+    );
+    assert_ne!(
+        normalize_invocation_flag(&flag("common", &left)).unwrap(),
+        normalize_invocation_flag(&flag("platform", &left)).unwrap(),
+        "the semantic fragment identity remains part of the key"
+    );
+    std::fs::write(&right, "expect class B\n").unwrap();
+    assert_ne!(
+        normalize_invocation_flag(&flag("common", &left)).unwrap(),
+        normalize_invocation_flag(&flag("common", &right)).unwrap(),
+        "changed fragment source bytes change the recording"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_friend_paths_flag_fingerprints_output_directories_not_their_paths() {
+    let root = temp_root("friend-paths");
+    // Two friend MODULES, each a class OUTPUT DIRECTORY, joined with the platform path separator
+    // exactly as the reference oracle emits `-Xfriend-paths`. Reading a directory as a file would
+    // error and abort the recorder; the flag must hash each directory tree's CONTENT instead, so
+    // the same classes at a different scratch path still key the same recorded entry.
+    let make = |base: &str, bytes: &[u8]| -> PathBuf {
+        let dir = root.join(base).join("classes");
+        std::fs::create_dir_all(dir.join("pkg")).unwrap();
+        std::fs::write(dir.join("pkg").join("A.class"), bytes).unwrap();
+        dir
+    };
+    let left_a = make("left/a", b"AAAA");
+    let left_b = make("left/b", b"BBBB");
+    let right_a = make("right/a", b"AAAA");
+    let right_b = make("right/b", b"BBBB");
+    let flag = |a: &Path, b: &Path| {
+        format!(
+            "-Xfriend-paths={}",
+            std::env::join_paths([a, b]).unwrap().to_string_lossy()
+        )
+    };
+    assert_eq!(
+        normalize_invocation_flag(&flag(&left_a, &left_b)).unwrap(),
+        normalize_invocation_flag(&flag(&right_a, &right_b)).unwrap(),
+        "equal friend-class content at distinct scratch paths must share one key"
+    );
+    assert_ne!(flag(&left_a, &left_b), flag(&right_a, &right_b));
+    std::fs::write(right_a.join("pkg").join("A.class"), b"ZZZZ").unwrap();
+    assert_ne!(
+        normalize_invocation_flag(&flag(&left_a, &left_b)).unwrap(),
+        normalize_invocation_flag(&flag(&right_a, &right_b)).unwrap(),
+        "changed friend-module bytes must change the key"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_mpp_invocation_fingerprints_common_files_and_friend_directories_without_panic() {
+    let root = temp_root("mpp-invocation");
+    let source = root.join("platform.kt");
+    std::fs::write(&source, "fun box() = \"OK\"\n").unwrap();
+    let common = root.join("common.kt");
+    std::fs::write(&common, "expect fun f(): String\n").unwrap();
+    let friend = root.join("friend").join("classes");
+    std::fs::create_dir_all(&friend).unwrap();
+    std::fs::write(friend.join("Dep.class"), b"friend").unwrap();
+    let args = vec![
+        "-d".to_string(),
+        root.join("out").to_string_lossy().into_owned(),
+        "-Xmulti-platform".to_string(),
+        format!("-Xcommon-sources={}", common.to_string_lossy()),
+        format!(
+            "-Xfriend-paths={}",
+            std::env::join_paths([&friend]).unwrap().to_string_lossy()
+        ),
+        source.to_string_lossy().into_owned(),
+    ];
+    // The whole invocation parses: a comma-separated common-source FILE list and a
+    // path-separated friend-class DIRECTORY list are both content-fingerprinted, no panic.
+    let invocation = parse_invocation(&args)
+        .expect("the common-sources and friend-paths flags parse")
+        .expect("the invocation names an output and sources");
+    assert!(invocation.out.ends_with("out"));
+    assert_eq!(invocation.label, "platform.kt");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_panic_inside_recorded_diagnostics_restores_the_previous_flag() {
     REQUIRE_DIAGNOSTICS.with(|flag| flag.set(true));
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

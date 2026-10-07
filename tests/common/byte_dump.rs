@@ -1591,7 +1591,24 @@ fn write_process_stderr(text: &str) {
 
 /// Report that this test just ran kotlinc instead of replaying recorded class files.
 pub(crate) fn report_live_kotlinc(args: &[String]) {
-    let reason = classify_live_kotlinc(compiler_dump_version().is_some(), record_forced());
+    log_live_kotlinc(
+        classify_live_kotlinc(compiler_dump_version().is_some(), record_forced()),
+        args,
+    );
+}
+
+/// Report a live compile for a caller that bypasses the archive and keeps its own cache.
+///
+/// That cache follows the archive's release/RC rule but ignores a forced re-record, so its compile
+/// is a `cache-miss` or `uncached-compiler`, never `record`.
+pub(crate) fn report_unrecorded_kotlinc(args: &[String]) {
+    log_live_kotlinc(
+        classify_live_kotlinc(compiler_dump_version().is_some(), false),
+        args,
+    );
+}
+
+fn log_live_kotlinc(reason: &'static str, args: &[String]) {
     let test = std::thread::current()
         .name()
         .unwrap_or("unknown")
@@ -1609,6 +1626,19 @@ pub(crate) fn report_live_kotlinc(args: &[String]) {
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .push(LiveKotlincUse { reason, test });
+}
+
+/// The reasons logged so far for `test`'s live kotlinc invocations, in invocation order.
+#[cfg(test)]
+pub(crate) fn live_kotlinc_reasons(test: &str) -> Vec<&'static str> {
+    live_kotlinc_log()
+        .uses
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .iter()
+        .filter(|use_| use_.test == test)
+        .map(|use_| use_.reason)
+        .collect()
 }
 
 fn running_test() -> (String, String) {

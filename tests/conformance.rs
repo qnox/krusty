@@ -10,8 +10,12 @@ static DHAT_ALLOC: krusty::dhat::Alloc = krusty::dhat::Alloc;
 
 mod common;
 
+#[path = "box_byte_score.rs"]
+mod box_byte_score;
 #[path = "box_ratchet.rs"]
 mod box_ratchet;
+#[path = "box_reference_classes.rs"]
+mod box_reference_classes;
 #[path = "box_vendored_e2e.rs"]
 mod box_vendored_e2e;
 #[path = "kotlin_box_ir_jvm_conformance.rs"]

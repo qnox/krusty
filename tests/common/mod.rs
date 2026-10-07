@@ -2,14 +2,15 @@
 
 pub(crate) mod byte_dump;
 pub(crate) mod kotlin_metadata;
-mod kotlinc_lib;
+pub(crate) mod kotlinc_lib;
+pub(crate) mod kotlinc_server;
 pub mod language_directives;
 mod metadata_diff;
 mod native_backend;
+pub(crate) mod producing_jdk;
 pub(crate) mod server_pool;
 pub use kotlinc_lib::kotlinc_lib_out;
-#[allow(unused_imports)] // conformance does not call this; the e2e crate does.
-pub(crate) use kotlinc_lib::kotlinc_lib_out_with;
+pub use kotlinc_server::{kotlin_compiler_jar, kotlinc_compile};
 #[allow(unused_imports)] // conformance never calls these; the e2e crate does.
 pub use metadata_diff::{
     metadata_diff_against_kotlinc_cp, metadata_diff_against_kotlinc_lib,
@@ -199,7 +200,6 @@ struct ProfGuard {
     start: Instant,
     on: bool,
 }
-#[allow(dead_code)]
 impl ProfGuard {
     fn new(phase: &'static str) -> Self {
         Self {
@@ -1140,19 +1140,23 @@ class TestClassLoader extends ClassLoader {
 }
 "#;
 
-/// Locate `JAVA_HOME` for the runner JVM (`KRUSTY_REF_JAVA_HOME` overrides). `None` ⇒ skip.
-#[allow(dead_code)]
-pub fn java_home() -> String {
+/// The JDK home the runner JVMs, javac, and the reference kotlinc server run on:
+/// `KRUSTY_REF_JAVA_HOME`, else `JAVA_HOME`. `None` when neither names a home.
+pub fn selected_java_home() -> Option<String> {
     std::env::var("KRUSTY_REF_JAVA_HOME")
         .or_else(|_| std::env::var("JAVA_HOME"))
         .ok()
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| {
-            panic!(
-                "JAVA_HOME is not set, so no JVM-backed test in this suite can run.\n\
-                 There is no fallback to /usr/libexec/java_home — set it explicitly to a JDK 21+ home."
-            )
-        })
+}
+
+/// [`selected_java_home`], which every JVM-backed test requires.
+pub fn java_home() -> String {
+    selected_java_home().unwrap_or_else(|| {
+        panic!(
+            "JAVA_HOME is not set, so no JVM-backed test in this suite can run.\n\
+             There is no fallback to /usr/libexec/java_home — set it explicitly to a JDK 21+ home."
+        )
+    })
 }
 
 /// Compile `BoxRunner.java` once into a stable cache dir keyed by the source hash; return its dir.
@@ -2609,335 +2613,6 @@ pub fn box_corpus_case_backend_outcome(rel: &str) -> Option<BackendOutcome> {
     backend_outcome_in_process(&src, "P", &cp, Some(jdk.as_path()))
 }
 
-// --- Persistent kotlinc compiler server -----------------------------------
-//
-// The reference `kotlinc` is a JVM program; spawning its CLI per test pays a ~2-4s JVM + compiler cold
-// start each time (the dominant cost of the differential e2e). Reusing `K2JVMCompiler.exec()` in one
-// persistent JVM is warm (~0.4s) BUT leaks: the compiler accumulates global caches (its IntelliJ-core
-// application environment + jar-filesystem handlers) across calls, so the 2nd+ compile in one process
-// death-spirals the collector (1st ~4s, 2nd >120s, independent of heap). The official compile daemon
-// avoids this not by magic but by CLEARING those caches between compiles.
-//
-// So this driver does the same, in ONE JVM: it holds a single `URLClassLoader` over the compiler jars
-// (classes loaded ONCE — that is where the warmth is), runs each request through `K2JVMCompiler.exec()`,
-// then resets the leaky global via `KotlinCoreEnvironment.disposeApplicationEnvironment()`. The next
-// compile recreates a fresh application environment, so state never accumulates. Result: ~0.4s warm
-// compiles, STABLE across compiles (measured 3990/417/523/422/400ms), in a single ~1 GB JVM — no second
-// daemon process (fits small/shared RAM), no RMI, no per-compile class reload. The driver uses only JDK
-// APIs (reflection + URLClassLoader), so it needs no compiler jar on its OWN classpath; it builds the
-// loader from the dist lib dir passed as argv[0].
-const KOTLINC_SERVER_SRC: &str = r#"
-import java.io.*;
-import java.net.*;
-import java.util.*;
-import java.lang.reflect.Method;
-
-public class KotlincServer {
-    public static void main(String[] a) throws Exception {
-        // Compiler jars for the loader — drop `-sources`/JS/WASM jars (not needed to compile plain JVM
-        // Kotlin) so the one loader holds less.
-        File[] files = new File(a[0]).listFiles();
-        ArrayList<URL> urls = new ArrayList<>();
-        if (files != null) for (File f : files) {
-            String n = f.getName();
-            if (n.endsWith(".jar") && !n.endsWith("-sources.jar") && !n.contains("-js") && !n.contains("-wasm"))
-                urls.add(f.toURI().toURL());
-        }
-        // ONE loader for the whole session: the compiler classes load once (this is the warmth). Parent is
-        // the platform loader only, so the compiler's classes stay private to it.
-        URLClassLoader cl = new URLClassLoader(urls.toArray(new URL[0]), ClassLoader.getPlatformClassLoader());
-        Class<?> k = cl.loadClass("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler");
-        Method exec = k.getMethod("exec", PrintStream.class, String[].class);
-        // The reset the compile daemon uses: dispose the accumulated global application environment after
-        // each compile so the next one starts clean — without this the reused compiler leaks and stalls.
-        Method disposeAppEnv = cl.loadClass("org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment")
-            .getMethod("disposeApplicationEnvironment");
-
-        // Bind the framed protocol to the RAW stdin/stdout fds, THEN redirect System.out to stderr, so the
-        // compiler's own prints to System.out cannot corrupt a response frame.
-        DataInputStream din = new DataInputStream(new BufferedInputStream(new FileInputStream(FileDescriptor.in), 65536));
-        DataOutputStream dout = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(FileDescriptor.out), 4096));
-        System.setOut(System.err);
-
-        while (true) {
-            int n;
-            try { n = din.readInt(); } catch (EOFException e) { break; }
-            String[] args = new String[n];
-            for (int i = 0; i < n; i++) {
-                int l = din.readUnsignedShort();
-                args[i] = new String(din.readNBytes(l), "UTF-8");
-            }
-            ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
-            PrintStream err = new PrintStream(errBuf, true, "UTF-8");
-            int codeNum;
-            try {
-                Object comp = k.getDeclaredConstructor().newInstance();
-                Object code = exec.invoke(comp, err, (Object) args);
-                codeNum = (int) code.getClass().getMethod("getCode").invoke(code);
-            } catch (Throwable t) {
-                t.printStackTrace(err);
-                codeNum = 2;
-            } finally {
-                // Clear the leaky global compiler state — the key to reusing one JVM without degrading.
-                try { disposeAppEnv.invoke(null); } catch (Throwable ignore) {}
-            }
-            byte[] eb = errBuf.toByteArray();
-            dout.writeInt(codeNum);
-            dout.writeInt(eb.length);
-            dout.write(eb);
-            dout.flush();
-        }
-    }
-}
-"#;
-
-/// The reference compiler's all-in-one jar (`<dist>/lib/kotlin-compiler.jar`), which carries
-/// `K2JVMCompiler`. `None` when the provisioned dist is unavailable.
-#[allow(dead_code)]
-pub fn kotlin_compiler_jar() -> Option<PathBuf> {
-    let p = kotlinc_lib_dir()?.join("kotlin-compiler.jar");
-    p.is_file().then_some(p)
-}
-
-/// Compile the pure-JDK `KotlincServer.java` driver once (via `javac`) into a stable cache dir; return it.
-/// The driver uses only reflection + `URLClassLoader`, so it needs no compiler jar to compile OR to run.
-fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf> {
-    // The JDK is part of the cache key: a class compiled by a NEWER javac (another session's
-    // JAVA_HOME) is unloadable by an older runtime, and the server-spawn failure then reads as
-    // "kotlinc unavailable" — silently disabling every reference compile and cross-check.
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for b in KOTLINC_SERVER_SRC.bytes().chain(java_home.bytes()) {
-        hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
-    }
-    let dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/kotlinc_server_{hash:016x}"));
-    let class = dir.join("KotlincServer.class");
-    if class.is_file() {
-        return Some(dir);
-    }
-    // Coverage runs several test binaries at once. They share this cache, so the first
-    // compile is exclusive; the others wait and reuse the class.
-    std::fs::create_dir_all(&dir).ok()?;
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(dir.join("KotlincServer.lock"))
-        .ok()?;
-    // SAFETY: `flock` on a descriptor this function owns until it returns.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return None;
-    }
-    if class.is_file() {
-        return Some(dir);
-    }
-    let src_path = dir.join("KotlincServer.java");
-    std::fs::write(&src_path, KOTLINC_SERVER_SRC).ok()?;
-    let javac = format!("{java_home}/bin/javac");
-    if !Path::new(&javac).exists() {
-        return None;
-    }
-    let out = Command::new(&javac)
-        .arg("-d")
-        .arg(&dir)
-        .arg(&src_path)
-        .output()
-        .ok()?;
-    if !class.is_file() {
-        eprintln!(
-            "KotlincServer javac failed: status {} {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return None;
-    }
-    Some(dir)
-}
-
-/// The reference compiler dist's lib dir (holds `kotlin-compiler.jar`) — the jars the isolating-loader
-/// driver builds its per-compile `URLClassLoader` from. Passed to the driver as its argv[0].
-#[allow(dead_code)]
-fn kotlinc_lib_of(compiler_jar: &Path) -> Option<PathBuf> {
-    compiler_jar.parent().map(Path::to_path_buf)
-}
-
-/// A persistent JVM running the in-process `KotlincServer` compiler, fed compiler arg-lists over a pipe.
-struct KotlincServer {
-    _child: Child,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
-}
-
-impl KotlincServer {
-    /// `cp` is the driver's run classpath (just its `server_dir` — the driver is pure JDK and loads the
-    /// compiler itself); `lib_dir` is passed as argv[0] so the driver builds its compiler `URLClassLoader`.
-    /// `jvm_properties` are `-D` arguments applied before the compiler class loads.
-    fn new(java: &str, cp: &str, lib_dir: &str, jvm_properties: &[String]) -> Option<Self> {
-        let mut cmd = Command::new(java);
-        // One persistent JVM that compiles in-process. 1 GB holds a single compile's working set (the leaky
-        // global state is reset after each — see the driver), so it stays flat across compiles. Fast-startup
-        // JIT/GC since each compile is short.
-        cmd.args(jvm_gclog_args("kotlinc"));
-        cmd.args(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-Xmx1g"]);
-        cmd.args(jvm_properties);
-        cmd.args(["-cp", cp, "KotlincServer", lib_dir])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        die_with_parent(&mut cmd);
-        let mut child = spawn_owned(cmd).ok()?;
-        let stdin = child.stdin.take()?;
-        let stdout = child.stdout.take()?;
-        Some(KotlincServer {
-            _child: child,
-            stdin,
-            stdout,
-        })
-    }
-
-    fn try_compile(&mut self, args: &[String]) -> std::io::Result<(i32, String)> {
-        self.stdin.write_all(&(args.len() as u32).to_be_bytes())?;
-        for arg in args {
-            self.stdin.write_all(&(arg.len() as u16).to_be_bytes())?;
-            self.stdin.write_all(arg.as_bytes())?;
-        }
-        self.stdin.flush()?;
-        // A compile can take a few seconds (cold) — generous deadline.
-        let deadline = Instant::now() + Duration::from_secs(120);
-        let fd = self.stdout.as_raw_fd();
-        let mut i32_buf = [0u8; 4];
-        read_exact_deadline(fd, &mut i32_buf, deadline)?;
-        let code = i32::from_be_bytes(i32_buf);
-        read_exact_deadline(fd, &mut i32_buf, deadline)?;
-        let elen = u32::from_be_bytes(i32_buf) as usize;
-        let mut err = vec![0u8; elen];
-        read_exact_deadline(fd, &mut err, deadline)?;
-        Ok((code, String::from_utf8_lossy(&err).into_owned()))
-    }
-}
-
-/// Pools of persistent compiler servers, one per classpath and JVM-property set. Callers claim a
-/// server, then compile outside the pool lock, so overlapping compiles use distinct JVMs up to
-/// [`server_pool_cap`].
-type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>>;
-
-/// Compile with the reference compiler via the persistent server. `args` are ordinary `kotlinc` CLI
-/// arguments (`["-d", out, "-cp", cp, "Lib.kt"]`). Returns `(exit_code, stderr)` — `exit_code == 0`
-/// is success — or `None` if the toolchain/JVM is unavailable (caller skips, exactly like a missing
-/// `kotlinc`).
-///
-/// A release or RC replays class files, the exit code, and kotlinc's diagnostics from the
-/// recorded-byte cache, for a successful build and for a rejected one. A test missing from that
-/// archive fails locally. CI compiles it with kotlinc instead. Master stores that recording;
-/// a pull request leaves the restored archive unchanged. A `-D` argument stays in the fingerprint.
-/// On a cache miss the live compiler applies it as a JVM system property, on a server that no
-/// other compile shares, and does not pass it through to the compiler.
-pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
-    if let Some(replayed) = byte_dump::replay_class_dump(args) {
-        if replayed.code == 0 {
-            byte_dump::write_replayed_classes(args, &replayed.files);
-        }
-        return Some((replayed.code, replayed.stderr));
-    }
-    let result = kotlinc_compile_live(args)?;
-    // A replay returns above and prints nothing. This line names the test that reached the JVM.
-    byte_dump::report_live_kotlinc(args);
-    byte_dump::remember_class_dump(args, result.0, &result.1);
-    Some(result)
-}
-
-fn kotlinc_compile_live(args: &[String]) -> Option<(i32, String)> {
-    static POOLS: OnceLock<KotlincPools> = OnceLock::new();
-    let _pg = ProfGuard::new("kotlinc");
-    let java_home = java_home();
-    let java = format!("{java_home}/bin/java");
-    if !Path::new(&java).exists() {
-        return None;
-    }
-    let compiler_jar = kotlin_compiler_jar()?;
-    let server_dir = setup_kotlinc_server(&java_home, &compiler_jar)?;
-    let lib_dir = kotlinc_lib_of(&compiler_jar)?
-        .to_string_lossy()
-        .into_owned();
-    // The driver is pure JDK and loads the compiler itself (from `lib_dir`), so its OWN classpath is just
-    // its `server_dir`.
-    let cp = server_dir.to_string_lossy().into_owned();
-    // `-D` stays in `args` for the invocation fingerprint. The compiler itself rejects it, and a
-    // test-only language feature latches from the JVM property the first time `-XXLanguage` is
-    // parsed, so the property is applied at process start on a server that no other compile shares.
-    let (jvm_properties, compiler_args) = kotlinc_jvm_properties(args);
-    let pool_key = kotlinc_server_key(&cp, &jvm_properties);
-    let pool = {
-        let pools = POOLS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut pools = pools.lock().unwrap_or_else(|err| err.into_inner());
-        pools
-            .entry(pool_key)
-            .or_insert_with(|| Arc::new(server_pool::Pool::new()))
-            .clone()
-    };
-    pool.with_server(
-        server_pool_cap(),
-        || KotlincServer::new(&java, &cp, &lib_dir, &jvm_properties),
-        |server| match server.try_compile(&compiler_args) {
-            Ok(result) => Some(result),
-            Err(_) => {
-                // Server JVM died — restart once and retry.
-                *server = KotlincServer::new(&java, &cp, &lib_dir, &jvm_properties)?;
-                server.try_compile(&compiler_args).ok()
-            }
-        },
-    )
-    .flatten()
-}
-
-/// Split `bin/kotlinc`'s `-D*` JVM system properties out of the compiler argument list.
-///
-/// `-destination` is the compiler's output-directory alias and stays a compiler argument.
-fn kotlinc_jvm_properties(args: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut properties = Vec::new();
-    let mut compiler_args = Vec::new();
-    for arg in args {
-        if arg.starts_with("-D") && arg != "-destination" {
-            properties.push(arg.clone());
-        } else {
-            compiler_args.push(arg.clone());
-        }
-    }
-    (properties, compiler_args)
-}
-
-/// The default server is keyed by its classpath alone. A JVM property gets its own server, created
-/// only when a cache miss reaches the live compiler.
-fn kotlinc_server_key(classpath: &str, properties: &[String]) -> String {
-    if properties.is_empty() {
-        return classpath.to_string();
-    }
-    let mut key = String::from(classpath);
-    for property in properties {
-        key.push('\0');
-        key.push_str(property);
-    }
-    key
-}
-
-/// How many persistent compiler-server JVMs to pool per classpath. Scales with the host — a single
-/// server serializes every kotlinc-dependency compile AND every java-driver test behind one mutex,
-/// which measured as the e2e suite's dominant wall-clock cost (hundreds of ~0.4s warm compiles all
-/// queueing on one JVM while the other N-1 cores idle). Each kotlinc server is capped at `-Xmx1g`
-/// and each JavaRunner at `-Xmx512m`, so the `ncpu/2` default clamped to [1, 6] bounds worst-case
-/// footprint at ~6 GB on big hosts and 2 servers on a 4-core CI runner. `KRUSTY_SERVER_POOL`
-/// overrides in either direction (e.g. 1 on a swapping shared box).
-fn server_pool_cap() -> usize {
-    std::env::var("KRUSTY_SERVER_POOL")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or_else(|| {
-            let ncpu = std::thread::available_parallelism().map_or(1, |n| n.get());
-            (ncpu / 2).clamp(1, 6)
-        })
-}
-
 // --- Persistent javac+run server ------------------------------------------
 //
 // Tests that exercise a hand-written Java driver (e.g. invoking a krusty-compiled `suspend` function
@@ -3054,7 +2729,10 @@ fn setup_java_runner(java_home: &str) -> Option<PathBuf> {
     // JDK in the cache key for the same reason as `setup_kotlinc_server`: a newer-javac class
     // under an older runtime dies at load and the failure masquerades as "toolchain unavailable".
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in JAVA_RUNNER_SRC.bytes().chain(java_home.bytes()) {
+    for b in JAVA_RUNNER_SRC
+        .bytes()
+        .chain(producing_jdk::driver_cache_key(java_home))
+    {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/java_runner_{hash:016x}"));
@@ -3169,7 +2847,7 @@ pub fn javac_run_proc(
     let runner_dir = setup_java_runner(&java_home)?;
     let pool = POOL.get_or_init(server_pool::Pool::new);
     pool.with_server(
-        server_pool_cap(),
+        server_pool::server_pool_cap(),
         || JavaRunner::new(&java, &runner_dir),
         |runner| match runner.try_run(driver_path, cp, outdir, main_class, proc_path) {
             Ok(output) => Some(output),
