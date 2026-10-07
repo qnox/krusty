@@ -230,6 +230,8 @@ mod chained_plus_element_join_e2e;
 mod char_literal_diagnostics_e2e;
 #[path = "checker_operator_methods_e2e.rs"]
 mod checker_operator_methods_e2e;
+#[path = "ci_required_check_e2e.rs"]
+mod ci_required_check_e2e;
 #[path = "class_annotation_attributes_e2e.rs"]
 mod class_annotation_attributes_e2e;
 #[path = "class_body_e2e.rs"]
@@ -490,6 +492,8 @@ mod conditional_block_branch_rebind_e2e;
 mod conditional_branch_inference_e2e;
 #[path = "conditional_sibling_rebind_e2e.rs"]
 mod conditional_sibling_rebind_e2e;
+#[path = "conformance_score_report_e2e.rs"]
+mod conformance_score_report_e2e;
 #[path = "consistent_copy_visibility_e2e.rs"]
 mod consistent_copy_visibility_e2e;
 #[path = "const_bit_operation_folding_e2e.rs"]

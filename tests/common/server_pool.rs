@@ -107,6 +107,24 @@ impl<S> Drop for Claim<'_, S> {
     }
 }
 
+/// How many persistent compiler-server JVMs to pool per classpath. Scales with the host — a single
+/// server serializes every kotlinc-dependency compile AND every java-driver test behind one mutex,
+/// which measured as the e2e suite's dominant wall-clock cost (hundreds of ~0.4s warm compiles all
+/// queueing on one JVM while the other N-1 cores idle). Each kotlinc server is capped at `-Xmx1g`
+/// and each JavaRunner at `-Xmx512m`, so the `ncpu/2` default clamped to [1, 6] bounds worst-case
+/// footprint at ~6 GB on big hosts and 2 servers on a 4-core CI runner. `KRUSTY_SERVER_POOL`
+/// overrides in either direction (e.g. 1 on a swapping shared box).
+pub(crate) fn server_pool_cap() -> usize {
+    std::env::var("KRUSTY_SERVER_POOL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or_else(|| {
+            let ncpu = std::thread::available_parallelism().map_or(1, |n| n.get());
+            (ncpu / 2).clamp(1, 6)
+        })
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|err| err.into_inner())
 }
