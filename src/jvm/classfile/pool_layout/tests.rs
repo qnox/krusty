@@ -71,6 +71,8 @@ fn a_cast_a_rewrite_removes_leaves_no_entry_behind() {
 }
 
 #[test]
+/// A `checkcast` the rewrite removes leaves its class to the `InnerClasses` row, which is interned
+/// before the `Code` attribute name.
 fn a_removed_holder_class_moves_to_its_inner_classes_row() {
     let mut writer = ClassWriter::new("T", "java/lang/Object");
     writer.add_inner_class(crate::jvm::classfile::InnerClassSpec {
@@ -93,9 +95,12 @@ fn a_removed_holder_class_moves_to_its_inner_classes_row() {
             .position(|candidate| candidate == entry)
             .unwrap_or_else(|| panic!("{entry} in {entries:?}"))
     };
-    assert!(position("Code") < position("Class pkg/Ref$LongRef"));
+    // The row is interned before the `Code` attribute name, as kotlinc writes `InnerClasses`
+    // before that name. The removed `checkcast` does not leave the class beside the descriptor.
+    assert!(position("(Lpkg/Ref$LongRef;)Ljava/lang/Object;") < position("Class pkg/Ref$LongRef"));
     assert!(position("Class pkg/Ref$LongRef") < position("Class pkg/Ref"));
     assert!(position("Class pkg/Ref") < position("LongRef"));
+    assert!(position("LongRef") < position("Code"));
 }
 
 #[test]

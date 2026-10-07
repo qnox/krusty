@@ -158,11 +158,8 @@ impl<'a> Layout<'a> {
         let mut visited_first = vec![false; count];
         // Where in kotlinc's visit order each entry is first named, and each method's code begins.
         let mut first_named = vec![usize::MAX; count];
-        let mut code_starts: HashMap<usize, usize> = HashMap::new();
+        let code_starts = method_code_starts(read);
         for (position, slot) in read.visit_order().enumerate() {
-            if let Holder::CodeAttribute(method) | Holder::Code(method, _) = slot.holder {
-                code_starts.entry(method).or_insert(position);
-            }
             let rewritten = matches!(
                 slot.holder,
                 Holder::Code(method, _) if by_method.contains_key(&method)
@@ -309,6 +306,32 @@ impl<'a> Layout<'a> {
     }
 }
 
+/// Where each method's code begins in kotlinc's visit order.
+///
+/// A body operand is that boundary. An empty body has none, so its `Code` attribute name stands in.
+/// The attribute name of a method that does have a body sits before the method's own attributes, and
+/// treating it as the boundary moves a parameter annotation — interned ahead of the body — to the
+/// attribute's name.
+fn method_code_starts(read: &ClassSlots) -> HashMap<usize, usize> {
+    let mut body = HashMap::new();
+    let mut attribute = HashMap::new();
+    for (position, slot) in read.visit_order().enumerate() {
+        match slot.holder {
+            Holder::Code(method, _) => {
+                body.entry(method).or_insert(position);
+            }
+            Holder::CodeAttribute(method) => {
+                attribute.entry(method).or_insert(position);
+            }
+            Holder::Class | Holder::AttributeName => {}
+        }
+    }
+    for (method, position) in attribute {
+        body.entry(method).or_insert(position);
+    }
+    body
+}
+
 /// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten
 /// code no longer names, first named (in kotlinc's visit order) by later code, a later header, or
 /// a class attribute, is placed before the first entry that visit names for the first time with or
@@ -333,17 +356,7 @@ fn orphan_anchors(
             }
         }
     }
-    let code_starts: HashMap<usize, usize> = read
-        .visit_order()
-        .enumerate()
-        .filter_map(|(position, slot)| match slot.holder {
-            Holder::CodeAttribute(method) | Holder::Code(method, _) => Some((method, position)),
-            _ => None,
-        })
-        .fold(HashMap::new(), |mut starts, (method, position)| {
-            starts.entry(method).or_insert(position);
-            starts
-        });
+    let code_starts = method_code_starts(read);
     let mut method = None;
     // The last entry the current method names: its header, then its code.
     let mut named_max = 0;
