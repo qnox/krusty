@@ -195,8 +195,15 @@ fn parse(what: &str, bytes: &[u8]) -> Result<ObjectFile, ProgramLinkError> {
     let file = object::File::parse(bytes).map_err(|error| {
         ProgramLinkError::Parse(format!("{what} is not a Mach-O object ({error})"))
     })?;
-    let mut sections = Vec::new();
-    let mut section_at = HashMap::<SectionIndex, usize>::new();
+    // Mach-O relocations may name their own section or one that occurs later in the object. Build
+    // the complete index before decoding any relocation; an incremental map makes those ordinary
+    // section targets look absent solely because of file order.
+    let section_at = file
+        .sections()
+        .enumerate()
+        .map(|(index, section)| (section.index(), index))
+        .collect::<HashMap<SectionIndex, usize>>();
+    let mut sections = Vec::with_capacity(section_at.len());
     for section in file.sections() {
         let segment = section
             .segment_name()
@@ -286,24 +293,15 @@ fn parse(what: &str, bytes: &[u8]) -> Result<ObjectFile, ProgramLinkError> {
                     "{what} has overlapping relocations in section `{name}` at {offset:#x}"
                 )));
             }
+            let embedded_addend = implicit_relocation_addend(what, &name, kind, data, offset)?;
             let mut addend = reloc.addend();
-            if kind == RelKind::Unsigned && reloc.has_implicit_addend() {
-                let at = usize::try_from(offset).map_err(|_| {
-                    ProgramLinkError::Parse(format!(
-                        "{what} has an absolute relocation past the end of `{name}`"
-                    ))
-                })?;
-                let end = at.checked_add(8).ok_or_else(|| {
-                    ProgramLinkError::Parse(format!(
-                        "{what} has an absolute relocation past the end of `{name}`"
-                    ))
-                })?;
-                let bytes = data.get(at..end).ok_or_else(|| {
-                    ProgramLinkError::Parse(format!(
-                        "{what} has an absolute relocation past the end of `{name}`"
-                    ))
-                })?;
-                addend = i64::from_le_bytes(bytes.try_into().expect("eight bytes"));
+            if reloc.has_implicit_addend() {
+                addend = embedded_addend;
+            } else if addend != 0 && embedded_addend != 0 {
+                return Err(ProgramLinkError::Parse(format!(
+                    "{what} has both paired and embedded addends for a {kind:?} relocation in \
+                     `{name}` at {offset:#x}"
+                )));
             }
             let target = match reloc.target() {
                 RelocationTarget::Symbol(index) => Target::Symbol(index.0),
@@ -332,7 +330,6 @@ fn parse(what: &str, bytes: &[u8]) -> Result<ObjectFile, ProgramLinkError> {
                 target,
             });
         }
-        section_at.insert(section.index(), sections.len());
         sections.push(InSection {
             segment,
             name,
@@ -1268,7 +1265,103 @@ fn validate_relocation_site(
              `{section}`"
         )));
     }
+    if width == 4 && !offset.is_multiple_of(4) {
+        return Err(ProgramLinkError::Parse(format!(
+            "{what} has an instruction relocation at unaligned offset {offset:#x} in `{section}`"
+        )));
+    }
     Ok(())
+}
+
+/// The addend stored at an ARM64 Mach-O relocation site.
+///
+/// `object` exposes whether a preceding `ARM64_RELOC_ADDEND` supplied an explicit addend, but it
+/// deliberately does not decode the ordinary instruction-resident form. Decode it exactly as
+/// LLVM's ARM64 Mach-O linker does, while turning malformed instructions into link errors rather
+/// than assertions.
+fn implicit_relocation_addend(
+    what: &str,
+    section: &str,
+    kind: RelKind,
+    data: &[u8],
+    offset: u64,
+) -> Result<i64, ProgramLinkError> {
+    let (_, _, width) = kind.shape();
+    let at = usize::try_from(offset).map_err(|_| {
+        ProgramLinkError::Parse(format!(
+            "{what} has a {kind:?} relocation past the end of `{section}`"
+        ))
+    })?;
+    let end = at.checked_add(width as usize).ok_or_else(|| {
+        ProgramLinkError::Parse(format!(
+            "{what} has a {kind:?} relocation past the end of `{section}`"
+        ))
+    })?;
+    let bytes = data.get(at..end).ok_or_else(|| {
+        ProgramLinkError::Parse(format!(
+            "{what} has a {kind:?} relocation past the end of `{section}`"
+        ))
+    })?;
+    if kind == RelKind::Unsigned {
+        return Ok(i64::from_le_bytes(
+            bytes
+                .try_into()
+                .expect("validated eight-byte relocation site"),
+        ));
+    }
+    let instruction = u32::from_le_bytes(
+        bytes
+            .try_into()
+            .expect("validated four-byte relocation site"),
+    );
+    let malformed = |expected: &str| {
+        ProgramLinkError::Parse(format!(
+            "{what} has a {kind:?} relocation on {instruction:#010x} in `{section}` at \
+             {offset:#x}; expected {expected}"
+        ))
+    };
+    match kind {
+        RelKind::Unsigned => unreachable!("returned above"),
+        RelKind::Branch26 => {
+            if !matches!(instruction & 0xfc00_0000, 0x1400_0000 | 0x9400_0000) {
+                return Err(malformed("a B or BL instruction"));
+            }
+            Ok(sign_extend(u64::from(instruction & 0x03ff_ffff) << 2, 28))
+        }
+        RelKind::Page21 | RelKind::GotPage21 => {
+            if instruction & 0x9f00_0000 != 0x9000_0000 {
+                return Err(malformed("an ADRP instruction"));
+            }
+            let immediate =
+                u64::from(((instruction & 0x6000_0000) >> 29) | ((instruction & 0x01ff_ffe0) >> 3))
+                    << 12;
+            Ok(sign_extend(immediate, 33))
+        }
+        RelKind::PageOff12 | RelKind::GotPageOff12 => {
+            let load_store = instruction & 0x3b00_0000 == 0x3900_0000;
+            let add_sub = instruction & 0x11c0_0000 == 0x1100_0000;
+            if !load_store && (kind == RelKind::GotPageOff12 || !add_sub) {
+                return Err(malformed(if kind == RelKind::GotPageOff12 {
+                    "a load or store instruction"
+                } else {
+                    "a load, store, add, or sub instruction"
+                }));
+            }
+            let mut shift = 0;
+            if load_store {
+                shift = instruction >> 30;
+                if shift == 0 && instruction & 0x0480_0000 == 0x0480_0000 {
+                    shift = 4;
+                }
+            }
+            Ok(i64::from((instruction & 0x003f_fc00) >> 10) << shift)
+        }
+    }
+}
+
+fn sign_extend(value: u64, bits: u32) -> i64 {
+    let shift = 64 - bits;
+    ((value << shift) as i64) >> shift
 }
 
 enum Resolved {
@@ -1738,7 +1831,80 @@ fn uleb_len(mut value: u64) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_relocation_site, ProgramLinkError, RelKind};
+    use object::write::{Object, Relocation};
+    use object::{Architecture, BinaryFormat, Endianness, RelocationFlags, SectionKind};
+
+    use super::{
+        implicit_relocation_addend, parse, validate_relocation_site, ProgramLinkError, RelKind,
+        Target, ARM64_RELOC_UNSIGNED,
+    };
+
+    #[test]
+    fn a_section_relocation_can_target_a_later_section() {
+        let mut object = Object::new(
+            BinaryFormat::MachO,
+            Architecture::Aarch64,
+            Endianness::Little,
+        );
+        let text = object.add_section(b"__TEXT".to_vec(), b"__text".to_vec(), SectionKind::Text);
+        object.append_section_data(text, &[0; 8], 8);
+        let data = object.add_section(b"__DATA".to_vec(), b"__data".to_vec(), SectionKind::Data);
+        object.append_section_data(data, &[0; 8], 8);
+        let data_symbol = object.section_symbol(data);
+        object
+            .add_relocation(
+                text,
+                Relocation {
+                    offset: 0,
+                    symbol: data_symbol,
+                    addend: 0,
+                    flags: RelocationFlags::MachO {
+                        r_type: ARM64_RELOC_UNSIGNED,
+                        r_pcrel: false,
+                        r_length: 3,
+                    },
+                },
+            )
+            .expect("add relocation");
+
+        let bytes = object.write().expect("write Mach-O fixture");
+        let parsed = parse("fixture", &bytes).expect("parse Mach-O fixture");
+        assert!(matches!(
+            parsed.sections[0].relocs[0].target,
+            Target::Section(1)
+        ));
+    }
+
+    #[test]
+    fn arm64_instruction_relocations_decode_their_embedded_addends() {
+        let decode = |kind, instruction: u32| {
+            implicit_relocation_addend("fixture", "__text", kind, &instruction.to_le_bytes(), 0)
+                .expect("decode embedded addend")
+        };
+
+        assert_eq!(decode(RelKind::Branch26, 0x17ff_ffff), -4);
+        assert_eq!(decode(RelKind::Page21, 0xf0ff_ffe0), -4096);
+        assert_eq!(decode(RelKind::PageOff12, 0xf940_0c00), 24);
+        assert_eq!(decode(RelKind::PageOff12, 0x9104_8c00), 0x123);
+    }
+
+    #[test]
+    fn an_instruction_relocation_rejects_the_wrong_opcode() {
+        assert_eq!(
+            implicit_relocation_addend(
+                "fixture",
+                "__text",
+                RelKind::GotPageOff12,
+                &0x9100_0000u32.to_le_bytes(),
+                0,
+            ),
+            Err(ProgramLinkError::Parse(
+                "fixture has a GotPageOff12 relocation on 0x91000000 in `__text` at 0x0; \
+                 expected a load or store instruction"
+                    .to_string()
+            ))
+        );
+    }
 
     #[test]
     fn a_relocation_must_have_its_kinds_width_and_pc_mode() {
@@ -1786,5 +1952,12 @@ mod tests {
             ),
             Err(ProgramLinkError::Parse(_))
         ));
+        assert_eq!(
+            validate_relocation_site("input", "__text", RelKind::Page21, 2, true, 2, 8),
+            Err(ProgramLinkError::Parse(
+                "input has an instruction relocation at unaligned offset 0x2 in `__text`"
+                    .to_string()
+            ))
+        );
     }
 }
