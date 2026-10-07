@@ -183,6 +183,10 @@ pub struct FirTypeSubstitution {
     /// Whether this exact declaration parameter carries Kotlin's `reified` capability.
     pub reified: bool,
     pub value: ResolvedTy,
+    /// Classifier a reified operation records. Equals [`Self::value`] except when that argument is
+    /// an intersection: the frontend selects the single common supertype, and a backend encodes
+    /// this identity without walking a classifier hierarchy.
+    pub reified_runtime: ResolvedTy,
     /// Additional constituents of an inferred flow-intersection type argument. `value` is the
     /// primary/JVM-erasure constituent; these bounds retain the rest of the checked Kotlin type for
     /// reified inline operations without introducing a lookup-visible synthetic classifier.
@@ -1769,6 +1773,10 @@ pub struct FirBody {
     constructor_context_parameter_count: u32,
     receiver_type: Option<ResolvedTy>,
     result_type: Option<ResolvedTy>,
+    /// A lambda body's own inferred result when the selected language level keeps it as the
+    /// implementation signature (before 2.4). `result_type` is the caller-facing boundary. Its
+    /// absence at current language levels is a checked semantic decision, not missing inference.
+    inferred_result_type: Option<ResolvedTy>,
     implicit_return: bool,
     default_fragment: bool,
     property_storage_type: Option<ResolvedTy>,
@@ -1843,6 +1851,7 @@ impl FirBody {
             constructor_context_parameter_count: 0,
             receiver_type: None,
             result_type: None,
+            inferred_result_type: None,
             implicit_return: false,
             default_fragment: false,
             property_storage_type: None,
@@ -1953,6 +1962,17 @@ impl FirBody {
 
     pub const fn result_type(&self) -> Option<ResolvedTy> {
         self.result_type
+    }
+
+    pub fn set_inferred_result_type(&mut self, result: ResolvedTy) {
+        assert!(
+            self.inferred_result_type.replace(result).is_none(),
+            "a FIR body may publish its language-selected inferred result type only once"
+        );
+    }
+
+    pub const fn inferred_result_type(&self) -> Option<ResolvedTy> {
+        self.inferred_result_type
     }
 
     pub(crate) fn replace_result_type_with_property_storage(&mut self, storage: ResolvedTy) {

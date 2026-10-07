@@ -5,9 +5,41 @@ use crate::ir::{Callee, ExprId, IrCheckedArgument, IrConst, IrExpr};
 use crate::types::Ty;
 
 use super::source_calls::{
-    rehome_inline_body_values, SelectedDefaultMode, SelectedOperandMode, SelectedOperandRequest,
+    inline_argument_template, rehome_inline_body_values, SelectedDefaultMode, SelectedOperandMode,
+    SelectedOperandRequest,
 };
 use super::BodyLowering;
+
+/// The first line a body's emission marks: its own, or the first position a block reaches.
+/// An `@InlineOnly` expansion whose lambda starts on the call's line separates the two with the
+/// synthetic inline line, so the marker's attribution is decided from this line.
+fn first_body_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
+    let mut expression = body;
+    loop {
+        if let Some(&line) = ir.expr_lines.get(&expression) {
+            return (line != 0).then_some(line);
+        }
+        let IrExpr::Block { stmts, value } = ir.expr(expression) else {
+            return None;
+        };
+        expression = *stmts.first().or(value.as_ref())?;
+    }
+}
+
+/// The IR record of one mapped body line of an external inline declaration: the dependency's
+/// line and the call-site line it answers to.
+fn external_frame_line(
+    source: &crate::fir::FirInlineBodySource,
+    line: u32,
+    call_line: u32,
+) -> crate::ir::IrExternalFrameLine {
+    crate::ir::IrExternalFrameLine {
+        file: source.file.clone(),
+        path: source.path.clone(),
+        line,
+        call_line,
+    }
+}
 
 pub(super) struct ExternalInlineCallRequest<'a> {
     pub(super) plan: &'a crate::fir::FirInlineBodyPlan,
@@ -17,6 +49,35 @@ pub(super) struct ExternalInlineCallRequest<'a> {
     pub(super) dispatch_receiver: Option<ExprId>,
     pub(super) extension_receiver: Option<ExprId>,
     pub(super) arguments: &'a [IrCheckedArgument],
+    /// Source line of the expanded call. The frame's marker and frame-closing line attribute to
+    /// it; `None` lowers the same expansion without that attribution.
+    pub(super) source_line: Option<u32>,
+}
+
+/// The declaration-plan inputs of an external inline iteration. They travel together from the
+/// checked plan match to the lowering entry, grouped so neither entry needs an argument-count
+/// suppression.
+pub(super) struct ExternalIterationPlan<'a> {
+    pub(super) frame: &'a crate::fir::FirInlineBodyFrame,
+    pub(super) lambda_parameter: u32,
+    pub(super) element_ty: ResolvedTy,
+    pub(super) index: Option<&'a crate::fir::FirInlineIterationIndex>,
+    pub(super) traversal: &'a crate::fir::FirInlineIterationTraversal,
+    /// Source line of the expanded call; the frame's mapped body lines answer to it.
+    pub(super) source_line: Option<u32>,
+}
+
+/// The declaration-plan inputs of an external inline collection transform.
+pub(super) struct ExternalCollectionTransformPlan<'a> {
+    pub(super) lambda_parameter: u32,
+    pub(super) local_names: &'a crate::fir::FirInlineCollectionLocalNames,
+    pub(super) traversal: &'a crate::fir::FirInlineIterationTraversal,
+    pub(super) factory: crate::fir::ExternalCallableId,
+    pub(super) factory_classifier: crate::types::TypeName,
+    pub(super) factory_parameters: &'a [ResolvedTy],
+    pub(super) capacity: Option<&'a crate::fir::FirInlineCollectionCapacity>,
+    pub(super) append: &'a crate::fir::FirInlineCollectionAppend,
+    pub(super) accumulator_ty: ResolvedTy,
 }
 
 impl BodyLowering<'_> {
@@ -32,8 +93,10 @@ impl BodyLowering<'_> {
             dispatch_receiver,
             extension_receiver,
             arguments,
+            source_line,
         } = request;
         let (
+            frame,
             lambda_parameter,
             invocation_arguments,
             prologue,
@@ -44,16 +107,21 @@ impl BodyLowering<'_> {
             returned_value,
         ) = match plan {
             crate::fir::FirInlineBodyPlan::Iteration {
+                frame,
                 lambda_parameter,
                 element,
                 index,
                 traversal,
             } => {
                 return self.external_inline_iteration(
-                    *lambda_parameter,
-                    *element,
-                    index.as_ref(),
-                    traversal,
+                    ExternalIterationPlan {
+                        frame,
+                        lambda_parameter: *lambda_parameter,
+                        element_ty: *element,
+                        index: index.as_ref(),
+                        traversal,
+                        source_line,
+                    },
                     receiver_ty,
                     parameter_types,
                     dispatch_receiver,
@@ -73,15 +141,17 @@ impl BodyLowering<'_> {
                 accumulator,
             } => {
                 return self.external_inline_collection_transform(
-                    *lambda_parameter,
-                    local_names,
-                    traversal,
-                    *factory,
-                    *factory_classifier,
-                    factory_parameters,
-                    capacity.as_ref(),
-                    append,
-                    *accumulator,
+                    ExternalCollectionTransformPlan {
+                        lambda_parameter: *lambda_parameter,
+                        local_names,
+                        traversal,
+                        factory: *factory,
+                        factory_classifier: *factory_classifier,
+                        factory_parameters,
+                        capacity: capacity.as_ref(),
+                        append: append.as_ref(),
+                        accumulator_ty: *accumulator,
+                    },
                     receiver_ty,
                     parameter_types,
                     dispatch_receiver,
@@ -90,6 +160,7 @@ impl BodyLowering<'_> {
                 );
             }
             crate::fir::FirInlineBodyPlan::InvokeLambda {
+                frame,
                 lambda_parameter,
                 arguments,
                 prologue,
@@ -99,6 +170,7 @@ impl BodyLowering<'_> {
                 defaults,
                 result: returned,
             } => (
+                frame,
                 *lambda_parameter,
                 arguments,
                 prologue,
@@ -167,11 +239,13 @@ impl BodyLowering<'_> {
             .iter()
             .map(|operand| plan_value(self, *operand))
             .collect::<Option<Vec<_>>>()?;
-        let inline_body = self.materialize_external_inline_lambda(
+        let (inline_body, callee_receiver) = self.materialize_external_inline_lambda(
             &mut statements,
             &args,
             lambda_parameter,
             &invocation_operands,
+            frame,
+            source_line,
         )?;
 
         let value = if let Some(recovery) = recovery {
@@ -184,22 +258,36 @@ impl BodyLowering<'_> {
         } else {
             self.guard_inline_body(inline_body, cleanup, cause, result.get(), plan_value)?
         };
-        if let Some(returned_value) = returned_value {
+        let expansion = if let Some(returned_value) = returned_value {
             statements.push(value);
-            let (returned, _) = plan_value(self, returned_value)?;
-            return Some(self.ir.add_expr(IrExpr::Block {
+            // A plan returning its receiver reads the inlined callee's receiver parameter. The
+            // lambda receiver is a separate semantic parameter initialized from that value.
+            let returned = match (returned_value, callee_receiver) {
+                (crate::fir::FirInlineValue::Receiver, Some(receiver)) => (
+                    self.ir.add_expr(IrExpr::GetValue(receiver)),
+                    receiver_ty?.get(),
+                ),
+                _ => plan_value(self, returned_value)?,
+            };
+            self.ir.add_expr(IrExpr::Block {
                 stmts: statements,
-                value: Some(returned),
-            }));
-        }
-        Some(if statements.is_empty() {
+                value: Some(returned.0),
+            })
+        } else if statements.is_empty() {
             value
         } else {
             self.ir.add_expr(IrExpr::Block {
                 stmts: statements,
                 value: Some(value),
             })
-        })
+        };
+        if matches!(self.ir.expr(expansion), IrExpr::Block { .. }) {
+            if let Some(line) = source_line {
+                self.ir.expr_source_lines.insert(expansion, line);
+            }
+        }
+        self.ir.external_inline_expansions.insert(expansion);
+        Some(expansion)
     }
 
     fn recover_inline_body(
@@ -248,19 +336,23 @@ impl BodyLowering<'_> {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn external_inline_iteration(
         &mut self,
-        lambda_parameter: u32,
-        element_ty: ResolvedTy,
-        index: Option<&crate::fir::FirInlineIterationIndex>,
-        traversal: &crate::fir::FirInlineIterationTraversal,
+        plan: ExternalIterationPlan<'_>,
         receiver_ty: Option<ResolvedTy>,
         parameter_types: &[Ty],
         dispatch_receiver: Option<ExprId>,
         extension_receiver: Option<ExprId>,
         arguments: &[IrCheckedArgument],
     ) -> Option<ExprId> {
+        let ExternalIterationPlan {
+            frame,
+            lambda_parameter,
+            element_ty,
+            index,
+            traversal,
+            source_line: call_line,
+        } = plan;
         let (mut statements, receiver, args, defaults) =
             self.selected_semantic_operands(SelectedOperandRequest {
                 receiver_ty,
@@ -274,7 +366,7 @@ impl BodyLowering<'_> {
                 mode: SelectedOperandMode::Materialized,
             })?;
         debug_assert!(defaults.is_empty());
-        let iterable = receiver?;
+        let mut iterable = receiver?;
         let lambda_slot = match self.ir.expr(*args.get(lambda_parameter as usize)?) {
             IrExpr::GetValue(slot) => *slot,
             _ => return None,
@@ -291,16 +383,8 @@ impl BodyLowering<'_> {
             } => lambda,
             _ => return None,
         };
-        let (implementation, captures, inline_body, arity) = match self.ir.expr(lambda).clone() {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                inline_body: Some(inline_body),
-                arity,
-                ..
-            } => (impl_fn, captures, inline_body, arity as usize),
-            _ => return None,
-        };
+        let (implementation, captures, inline_body, arity) =
+            inline_argument_template(self.ir, lambda)?;
         if arity != 1 + usize::from(index.is_some()) {
             return None;
         }
@@ -316,6 +400,13 @@ impl BodyLowering<'_> {
                 let IrExpr::GetValue(slot) = self.ir.expr(capture) else {
                     return None;
                 };
+                formal_slots.push(*slot);
+                continue;
+            }
+            // An inlined lambda's plain-local capture reads the caller's local in place:
+            // kotlinc's inliner remaps the read instead of copying the value into a frame
+            // temporary the loop would have to keep alive.
+            if let IrExpr::GetValue(slot) = self.ir.expr(capture) {
                 formal_slots.push(*slot);
                 continue;
             }
@@ -341,6 +432,60 @@ impl BodyLowering<'_> {
             declaration_position..declaration_position,
             capture_declarations,
         );
+        let capture_count = formal_slots.len();
+
+        let frame_source = frame.source.clone();
+        if frame_source.is_some() {
+            // The expansion reproduces the reference compiler's frame for the call: the receiver
+            // operand's local is the frame's named `$this$` local (the already-declared operand
+            // temp renamed, or a copy where the operand was never spilled), and the function
+            // marker opens the frame once every operand is bound.
+            let role = if extension_receiver.is_some() {
+                crate::ir::IrInlineLocalRole::ExtensionReceiver
+            } else {
+                crate::ir::IrInlineLocalRole::DispatchReceiver
+            };
+            let declared = match self.ir.expr(iterable) {
+                IrExpr::GetValue(slot) => statements.iter().copied().find(|statement| {
+                    matches!(
+                        self.ir.expr(*statement),
+                        IrExpr::Variable { index, .. } if index == slot
+                    )
+                }),
+                _ => None,
+            };
+            let declaration = match declared {
+                Some(declaration) => declaration,
+                None => {
+                    let slot = self.allocate_temporary();
+                    let declaration = self.ir.add_expr(IrExpr::Variable {
+                        index: slot,
+                        ty: receiver_ty?.get(),
+                        init: Some(iterable),
+                        named: true,
+                    });
+                    self.ir.call_operand_bindings.insert(declaration);
+                    statements.push(declaration);
+                    iterable = self.ir.add_expr(IrExpr::GetValue(slot));
+                    declaration
+                }
+            };
+            if let IrExpr::Variable { named, .. } = &mut self.ir.exprs[declaration as usize] {
+                *named = true;
+            }
+            self.ir
+                .value_names
+                .insert(declaration, frame.callee.to_string());
+            self.ir.set_debug_local_provenance(
+                declaration,
+                crate::ir::IrDebugLocalProvenance::inline_value(role, 1),
+            );
+            let marker = self.inline_marker(
+                frame.callee.to_string(),
+                crate::ir::IrDebugLocalProvenance::FunctionFrameMarker,
+            );
+            statements.push(marker);
+        }
 
         let action_index_slot = index.map(|_| self.allocate_temporary());
         let current_index_slot = index.map(|_| self.allocate_temporary());
@@ -348,7 +493,17 @@ impl BodyLowering<'_> {
             formal_slots.push(current_index_slot);
         }
         let element_slot = self.allocate_temporary();
-        formal_slots.push(element_slot);
+        // With a resolved frame the body's invocation operand is the lambda parameter's own
+        // local (`it`), bound from the frame's raw element local inside the lambda's frame; the
+        // legacy shape binds the element local itself.
+        let it_slot = if frame_source.is_some() {
+            let slot = self.allocate_temporary();
+            formal_slots.push(slot);
+            Some(slot)
+        } else {
+            formal_slots.push(element_slot);
+            None
+        };
         let local_base = self.next_temporary;
         let local_count =
             rehome_inline_body_values(self.ir, inline_body, &formal_slots, local_base)?;
@@ -365,7 +520,7 @@ impl BodyLowering<'_> {
                 named: true,
             }));
         }
-        let (condition, element, update, loop_identity) = match traversal {
+        let (condition, element, element_raw_ty, update, loop_identity) = match traversal {
             crate::fir::FirInlineIterationTraversal::Iterator {
                 prepare,
                 has_next,
@@ -377,19 +532,44 @@ impl BodyLowering<'_> {
                 }
                 let iterator_ty = prepare.last()?.result.get();
                 let iterator_slot = self.allocate_temporary();
-                statements.push(self.ir.add_expr(IrExpr::Variable {
+                let iterator_declaration = self.ir.add_expr(IrExpr::Variable {
                     index: iterator_slot,
                     ty: iterator_ty,
                     init: Some(current),
                     named: false,
-                }));
+                });
+                statements.push(iterator_declaration);
+                if let (Some(source), Some(call_line)) = (&frame_source, call_line) {
+                    // The frame's first body statement marks the body's invocation line, mapped
+                    // under the call; the rest of the prelude inherits it until the lambda runs.
+                    let line = u32::from(source.invoke_line);
+                    self.ir.expr_lines.insert(iterator_declaration, line);
+                    self.ir.external_frame_lines.insert(
+                        iterator_declaration,
+                        external_frame_line(source, line, call_line),
+                    );
+                }
                 let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
                 let condition =
                     self.external_inline_iteration_member_call(has_next, iterator_read, &[])?;
                 let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
-                let element =
-                    self.external_inline_iteration_member_call(next, iterator_read, &[])?;
-                (condition, element, None, iterator_slot)
+                // The frame's element local holds the traversal's raw result: the erased
+                // `next()` lands unadapted and the lambda parameter's own local adapts it. The
+                // legacy shape consumes the applied element type at the call.
+                let (element, element_raw) = if frame_source.is_some() {
+                    let element = self.external_inline_iteration_member_call_typed(
+                        next,
+                        iterator_read,
+                        &[],
+                        next.physical_result,
+                    )?;
+                    (element, next.physical_result.get())
+                } else {
+                    let element =
+                        self.external_inline_iteration_member_call(next, iterator_read, &[])?;
+                    (element, element_ty.get())
+                };
+                (condition, element, element_raw, None, iterator_slot)
             }
             crate::fir::FirInlineIterationTraversal::Array
             | crate::fir::FirInlineIterationTraversal::Counted { .. } => {
@@ -477,16 +657,43 @@ impl BodyLowering<'_> {
                     var: cursor_slot,
                     value: incremented,
                 });
-                (condition, element, Some(update), cursor_slot)
+                let element_raw = match traversal {
+                    crate::fir::FirInlineIterationTraversal::Array => element_ty.get(),
+                    crate::fir::FirInlineIterationTraversal::Counted { get, .. } => {
+                        if frame_source.is_some() {
+                            get.physical_result.get()
+                        } else {
+                            element_ty.get()
+                        }
+                    }
+                    crate::fir::FirInlineIterationTraversal::Iterator { .. } => unreachable!(),
+                };
+                (condition, element, element_raw, Some(update), cursor_slot)
             }
         };
         let loop_label = format!("$fir_inline_iteration_{loop_identity}");
         let element_declaration = self.ir.add_expr(IrExpr::Variable {
             index: element_slot,
-            ty: element_ty.get(),
+            ty: element_raw_ty,
             init: Some(element),
             named: true,
         });
+        if let Some(source) = &frame_source {
+            // The frame's element local holds the traversal's raw result (an iterator's erased
+            // `next()`); the lambda parameter's own local adapts it where the lambda binds.
+            if let Some(element) = &source.element {
+                self.ir
+                    .value_names
+                    .insert(element_declaration, element.to_string());
+            }
+            self.ir.set_debug_local_provenance(
+                element_declaration,
+                crate::ir::IrDebugLocalProvenance::inline_value(
+                    crate::ir::IrInlineLocalRole::Value,
+                    1,
+                ),
+            );
+        }
         let mut body_statements = vec![element_declaration];
         if let (Some(action_index_slot), Some(current_index_slot), Some(index)) =
             (action_index_slot, current_index_slot, index)
@@ -523,7 +730,77 @@ impl BodyLowering<'_> {
                 }));
             }
         }
-        body_statements.push(inline_body);
+        let body_tail = match (&frame_source, it_slot) {
+            (Some(source), Some(it_slot)) => {
+                let value_parameter = capture_count + usize::from(index.is_some());
+                let source_name = self
+                    .ir
+                    .function_parameter_identities(implementation)
+                    .and_then(|identities| identities.get(value_parameter))
+                    .and_then(|identity| identity.source_name.clone());
+                let read = self.ir.add_expr(IrExpr::GetValue(element_slot));
+                // The frame's raw element local holds the traversal's erased ABI result; the
+                // lambda parameter's own local consumes it at the applied element type. A
+                // reference element crosses through the class's box — the cast names it, which
+                // is what the value-class representation boundary reads to unbox a value-class
+                // element here — while a scalar element's coercion unboxes directly.
+                let bound = if element_ty.get().is_reference() {
+                    let cast = self.ir.add_expr(IrExpr::TypeOp {
+                        op: crate::ir::IrTypeOp::Cast,
+                        arg: read,
+                        type_operand: element_ty.get(),
+                    });
+                    self.ir.add_expr(IrExpr::TypeOp {
+                        op: crate::ir::IrTypeOp::ImplicitCoercion,
+                        arg: cast,
+                        type_operand: element_ty.get(),
+                    })
+                } else {
+                    self.ir.add_expr(IrExpr::TypeOp {
+                        op: crate::ir::IrTypeOp::ImplicitCoercion,
+                        arg: read,
+                        type_operand: element_ty.get(),
+                    })
+                };
+                let parameter_declaration = self.ir.add_expr(IrExpr::Variable {
+                    index: it_slot,
+                    ty: element_ty.get(),
+                    init: Some(bound),
+                    named: true,
+                });
+                self.ir.call_operand_bindings.insert(parameter_declaration);
+                if let Some(name) = source_name {
+                    self.ir.value_names.insert(parameter_declaration, name);
+                }
+                self.ir.set_debug_local_provenance(
+                    parameter_declaration,
+                    crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { depth: 0 },
+                );
+                let marker = self.inline_marker(
+                    frame.callee.to_string(),
+                    crate::ir::IrDebugLocalProvenance::LambdaFrameMarker {
+                        implementation,
+                        depth: 0,
+                    },
+                );
+                let lambda_frame = self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![parameter_declaration, marker, inline_body],
+                    value: None,
+                });
+                if let Some(call_line) = call_line {
+                    // The lambda frame closes on the body's invocation line, mapped under the
+                    // call; the mark drives the frame's closing `nop`.
+                    let line = u32::from(source.invoke_line);
+                    self.ir.expr_source_lines.insert(lambda_frame, line);
+                    self.ir
+                        .external_frame_lines
+                        .insert(lambda_frame, external_frame_line(source, line, call_line));
+                }
+                lambda_frame
+            }
+            _ => inline_body,
+        };
+        body_statements.push(body_tail);
         let loop_body = self.ir.add_expr(IrExpr::Block {
             stmts: body_statements,
             value: None,
@@ -536,10 +813,20 @@ impl BodyLowering<'_> {
             label: Some(loop_label),
         }));
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
-        Some(self.ir.add_expr(IrExpr::Block {
+        let expansion = self.ir.add_expr(IrExpr::Block {
             stmts: statements,
             value: Some(unit),
-        }))
+        });
+        if let Some(source) = &frame_source {
+            self.ir.external_inline_expansions.insert(expansion);
+            if let Some(call_line) = call_line {
+                self.ir.external_frame_closes.insert(
+                    expansion,
+                    external_frame_line(source, u32::from(source.close_line), call_line),
+                );
+            }
+        }
+        Some(expansion)
     }
 
     pub(super) fn external_inline_iteration_member_call(
@@ -547,6 +834,18 @@ impl BodyLowering<'_> {
         call: &crate::fir::FirInlineIterationMemberCall,
         receiver: ExprId,
         arguments: &[(ExprId, Ty)],
+    ) -> Option<ExprId> {
+        self.external_inline_iteration_member_call_typed(call, receiver, arguments, call.result)
+    }
+
+    /// The same convention call, consumed at `result` rather than at the member's applied result:
+    /// an inlined frame's raw local holds the declaration's erased ABI result.
+    fn external_inline_iteration_member_call_typed(
+        &mut self,
+        call: &crate::fir::FirInlineIterationMemberCall,
+        receiver: ExprId,
+        arguments: &[(ExprId, Ty)],
+        result: ResolvedTy,
     ) -> Option<ExprId> {
         if arguments.len() != call.parameters.len()
             || arguments
@@ -572,7 +871,7 @@ impl BodyLowering<'_> {
             receiver_ty: Some(call.receiver),
             declared_receiver: None,
             parameters: &call.parameters,
-            result: call.result,
+            result,
             declared_result: None,
             overridden_results: &[],
             semantic_role: None,
@@ -585,6 +884,7 @@ impl BodyLowering<'_> {
             dispatch_class: Self::static_class(Some(call.receiver)),
             extension_receiver: None,
             arguments: &arguments,
+            source_line: None,
         })
     }
 
@@ -710,13 +1010,22 @@ impl BodyLowering<'_> {
     /// Replace one already-evaluated lambda operand with its checked inline-body template. Capture
     /// evaluation stays at the lambda's source position, and every external inline shape shares this
     /// single local-slot rebasing path.
+    ///
+    /// The expansion reproduces the reference compiler's frame for the call: each invocation
+    /// operand becomes a local of the frame (the inlined callee's receiver parameter initializes
+    /// the lambda's distinct named `$this$` parameter; a value parameter's operand becomes the
+    /// parameter's named local directly), then the lambda-argument marker opens the frame,
+    /// attributed to the call's line — or to the synthetic inline line of an `@InlineOnly`
+    /// declaration whose lambda body starts on that same line.
     fn materialize_external_inline_lambda(
         &mut self,
         statements: &mut Vec<ExprId>,
         args: &[ExprId],
         lambda_parameter: usize,
         invocation_operands: &[(ExprId, Ty)],
-    ) -> Option<ExprId> {
+        frame: &crate::fir::FirInlineBodyFrame,
+        call_line: Option<u32>,
+    ) -> Option<(ExprId, Option<u32>)> {
         let lambda_slot = match self.ir.expr(*args.get(lambda_parameter)?) {
             IrExpr::GetValue(slot) => *slot,
             _ => return None,
@@ -733,16 +1042,8 @@ impl BodyLowering<'_> {
             } => lambda,
             _ => return None,
         };
-        let (implementation, captures, inline_body, arity) = match self.ir.expr(lambda).clone() {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                inline_body: Some(inline_body),
-                arity,
-                ..
-            } => (impl_fn, captures, inline_body, arity as usize),
-            _ => return None,
-        };
+        let (implementation, captures, inline_body, arity) =
+            inline_argument_template(self.ir, lambda)?;
         if invocation_operands.len() != arity {
             return None;
         }
@@ -783,24 +1084,88 @@ impl BodyLowering<'_> {
             declaration_position..declaration_position,
             capture_declarations,
         );
-        for &(value, ty) in invocation_operands {
-            let slot = match self.ir.expr(value) {
-                IrExpr::GetValue(slot) => *slot,
-                _ => {
+        let capture_count = u32::try_from(formal_slots.len()).ok()?;
+        let mut callee_receiver = None;
+        let receiver_parameter = self
+            .ir
+            .lambda_origins
+            .get(&implementation)
+            .and_then(|origin| origin.receiver_parameter);
+        let parameter_identities = self
+            .ir
+            .function_parameter_identities(implementation)
+            .map(<[crate::ir::IrParameterIdentity]>::to_vec);
+        for (operand, &(value, ty)) in invocation_operands.iter().enumerate() {
+            let parameter = capture_count + u32::try_from(operand).ok()?;
+            if receiver_parameter == Some(parameter) {
+                // The inlined callee's receiver and the invoked extension lambda's receiver are
+                // distinct semantic parameters, even though both receive the same value.
+                let callee_slot = self.allocate_temporary();
+                statements.push(self.ir.add_expr(IrExpr::Variable {
+                    index: callee_slot,
+                    ty,
+                    init: Some(value),
+                    named: false,
+                }));
+                callee_receiver = Some(callee_slot);
+                let slot = self.allocate_temporary();
+                let read = self.ir.add_expr(IrExpr::GetValue(callee_slot));
+                let declaration = self.ir.add_expr(IrExpr::Variable {
+                    index: slot,
+                    ty,
+                    init: Some(read),
+                    named: true,
+                });
+                self.ir.call_operand_bindings.insert(declaration);
+                self.ir.set_debug_local_provenance(
+                    declaration,
+                    crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver { implementation },
+                );
+                statements.push(declaration);
+                formal_slots.push(slot);
+                continue;
+            }
+            let source_name = parameter_identities
+                .as_ref()
+                .and_then(|identities| identities.get(parameter as usize))
+                .and_then(|identity| identity.source_name.clone());
+            match (self.ir.expr(value), source_name) {
+                (IrExpr::GetValue(slot), None) => formal_slots.push(*slot),
+                (_, name) => {
                     let slot = self.allocate_temporary();
                     let declaration = self.ir.add_expr(IrExpr::Variable {
                         index: slot,
                         ty,
                         init: Some(value),
-                        named: false,
+                        named: name.is_some(),
                     });
                     self.ir.call_operand_bindings.insert(declaration);
+                    if let Some(name) = name {
+                        self.ir.value_names.insert(declaration, name);
+                        self.ir.set_debug_local_provenance(
+                            declaration,
+                            crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { depth: 0 },
+                        );
+                    }
                     statements.push(declaration);
-                    slot
+                    formal_slots.push(slot);
                 }
-            };
-            formal_slots.push(slot);
+            }
         }
+        let marker = self.inline_marker(
+            frame.callee.to_string(),
+            crate::ir::IrDebugLocalProvenance::LambdaFrameMarker {
+                implementation,
+                depth: 0,
+            },
+        );
+        if let Some(line) = call_line {
+            self.ir.expr_lines.insert(marker, line);
+            if frame.inline_only && first_body_line(self.ir, inline_body) == Some(line) {
+                self.ir.inline_synthetic_lines.insert(marker);
+            }
+        }
+        statements.push(marker);
 
         let local_base = self.next_temporary;
         let local_count =
@@ -808,6 +1173,6 @@ impl BodyLowering<'_> {
         self.next_temporary = local_base.checked_add(local_count)?;
         self.ir.functions[implementation as usize].body = None;
         self.ir.inline_only_fns.insert(implementation);
-        Some(inline_body)
+        Some((inline_body, callee_receiver))
     }
 }

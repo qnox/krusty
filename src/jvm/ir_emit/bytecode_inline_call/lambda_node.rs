@@ -108,11 +108,30 @@ struct LiteralLambda {
     result_semantic: Ty,
 }
 
+/// A callable reference the bytecode inliner can place as a lambda: its adapter returns one value.
+/// The capture prefix is the reference's captures followed by its bound receiver. `None` for a
+/// reference that stays a carrier.
+pub(super) fn callable_reference_template(
+    ir: &IrFile,
+    argument: u32,
+) -> Option<(u32, Vec<u32>, u32, Ty)> {
+    let IrExpr::CallableReference(reference) = ir.expr(argument) else {
+        return None;
+    };
+    let (adapter, captures, inline_body, _) = ir.callable_reference_inline_template(argument)?;
+    Some((adapter, captures, inline_body, reference.function_type))
+}
+
 impl Emitter<'_> {
     /// The literal lambda `argument` and its source arity, every type read from the checked IR. An
     /// error names the checked fact the literal lacks; the implementation method never stands in
     /// for it.
     fn literal_lambda(&self, argument: u32) -> Result<(LiteralLambda, usize), &'static str> {
+        if let Some((impl_fn, captures, inline_body, function_type)) =
+            callable_reference_template(self.ir, argument)
+        {
+            return self.callable_reference_literal(impl_fn, captures, inline_body, function_type);
+        }
         let IrExpr::Lambda {
             impl_fn,
             arity,
@@ -156,6 +175,49 @@ impl Emitter<'_> {
                 result_semantic,
             },
             arity,
+        ))
+    }
+
+    /// A callable reference as the lambda an inline call places: the adapter's returned call, with
+    /// the reference's captures and bound receiver ahead of its function parameters.
+    fn callable_reference_literal(
+        &self,
+        impl_fn: u32,
+        captures: Vec<u32>,
+        inline_body: u32,
+        function_type: Ty,
+    ) -> Result<(LiteralLambda, usize), &'static str> {
+        let Ty::Fun(signature) = function_type.non_null() else {
+            return Err("a callable reference has no function type");
+        };
+        let physical = jvm_function_params(self.ir, impl_fn);
+        let split = captures.len();
+        if physical.len() != split + signature.params.len() {
+            return Err("a callable reference adapter does not take its captures and parameters");
+        }
+        let (capture_types, physical_parameters) = physical.split_at(split);
+        let result_semantic = self
+            .ir
+            .logical_types
+            .get(&inline_body)
+            .copied()
+            .unwrap_or(signature.ret);
+        let (parameter_types, parameter_coercions) = physical_parameters
+            .iter()
+            .zip(signature.params.iter())
+            .map(|(&physical, &semantic)| self.inline_parameter(semantic, physical))
+            .unzip();
+        Ok((
+            LiteralLambda {
+                impl_fn,
+                captures,
+                inline_body,
+                capture_types: capture_types.to_vec(),
+                parameter_types,
+                parameter_coercions,
+                result_semantic,
+            },
+            signature.params.len(),
         ))
     }
 
@@ -490,6 +552,10 @@ impl Emitter<'_> {
         // to the method's end, as a function's own locals do, and only nested blocks close theirs.
         let caller_depth = std::mem::replace(&mut self.block_depth, 0);
         let caller_locals = std::mem::take(&mut self.open_locals);
+        // The scratch lambda is a separate method with its own local-variable table. Inline-entry
+        // positions recorded while emitting it must start at zero and must not change the caller's
+        // table accounting when the caller state is restored.
+        let caller_inline_entries = std::mem::replace(&mut self.recorded_inline_entries, 0);
         let states_before = self.machine_next_ordinal;
         self.frame.reserve_through(args_size + 1);
         let mut scratch = CodeBuilder::new(args_size);
@@ -501,6 +567,8 @@ impl Emitter<'_> {
         self.frame = caller_frame;
         self.block_depth = caller_depth;
         let body_locals = std::mem::replace(&mut self.open_locals, caller_locals);
+        let mut lambda_inline_entries =
+            std::mem::replace(&mut self.recorded_inline_entries, caller_inline_entries);
         if self.machine_next_ordinal != states_before {
             return Err("a lambda planned for the inliner started a suspension");
         }
@@ -545,6 +613,13 @@ impl Emitter<'_> {
                 .map_err(|_| "an inline lambda's code is too long")?;
             let marker =
                 crate::jvm::debug_local_names::spliced_lambda_marker_name(self.ir, callee, impl_fn)
+                    .or_else(|| {
+                        let class = crate::jvm::local_class_names::callable_reference_name(
+                            self.ir, argument,
+                        )?;
+                        let class = class.segment_ref();
+                        (!class.is_empty()).then(|| format!("$i$a$-{callee}-{class}"))
+                    })
                     .ok_or("a spliced lambda frame has no realized class provenance")?;
             scratch.add_local_entry(
                 marker_start,
@@ -553,27 +628,44 @@ impl Emitter<'_> {
                 &marker,
                 "I",
             );
+            lambda_inline_entries += 1;
             for local in body_locals {
                 let length = end.saturating_sub(local.start);
-                local.record(Some(length), &mut scratch);
+                let inline = local.record(Some(length), &mut scratch, lambda_inline_entries);
+                lambda_inline_entries += usize::from(inline);
             }
             let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
+            let reference_parameters = callable_reference_template(self.ir, argument).is_some();
             for (index, &ty) in parameter_types.iter().enumerate() {
-                let name = identities
-                    .and_then(|identities| identities.get(captures.len() + index))
-                    .and_then(|identity| match identity.role {
-                        // kotlinc names an extension lambda's receiver after the lambda.
-                        crate::ir::IrParameterRole::ExtensionReceiver => {
-                            crate::jvm::debug_local_names::render(
-                                self.ir,
-                                None,
-                                Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver {
-                                    implementation: impl_fn,
-                                }),
-                            )
-                        }
-                        _ => identity.source_name.clone(),
-                    });
+                let name = if reference_parameters {
+                    let ordinal = u32::try_from(index)
+                        .map_err(|_| "a callable reference has too many parameters")?;
+                    crate::jvm::debug_local_names::render(
+                        self.ir,
+                        None,
+                        Some(
+                            crate::ir::IrDebugLocalProvenance::InlineCallableReferenceParameter {
+                                ordinal,
+                            },
+                        ),
+                    )
+                } else {
+                    identities
+                        .and_then(|identities| identities.get(captures.len() + index))
+                        .and_then(|identity| match identity.role {
+                            // kotlinc names an extension lambda's receiver after the lambda.
+                            crate::ir::IrParameterRole::ExtensionReceiver => {
+                                crate::jvm::debug_local_names::render(
+                                    self.ir,
+                                    None,
+                                    Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver {
+                                        implementation: impl_fn,
+                                    }),
+                                )
+                            }
+                            _ => crate::jvm::parameter_names::local_variable(identity, ""),
+                        })
+                };
                 if let Some(name) = name {
                     let (slot, _) = parameter_slots[captures.len() + index];
                     scratch.add_local_entry(0, Some(end), slot, &name, &type_descriptor(ty));

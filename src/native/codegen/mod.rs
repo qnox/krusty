@@ -72,6 +72,9 @@ pub struct CodegenModule {
     runtime_symbols: Option<std::collections::HashSet<String>>,
     /// Public ABI lines, in file order and source order within a file.
     abi: Vec<super::c_abi::Record>,
+    /// Export spellings already claimed by earlier files. The C spelling is intentionally
+    /// human-readable and therefore lossy; a collision is refused rather than emitted twice.
+    abi_symbols: std::collections::HashSet<String>,
 }
 
 impl Backend for CraneliftBackend {
@@ -115,6 +118,7 @@ impl Backend for CraneliftBackend {
                 classifiers: &file.classifiers,
                 callables: &file.callables,
                 runtime_symbols,
+                abi_symbols: &mut state.abi_symbols,
                 dependency_properties: &properties,
                 source: file.source,
             },

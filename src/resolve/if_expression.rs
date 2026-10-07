@@ -46,7 +46,20 @@ impl Checker<'_> {
             let projected =
                 c.recorded_expression_type_for_expected(scope, branch, actual, expected);
             if projected != actual {
-                c.set(branch, projected)
+                // The numeric conversion already records the adaptation. The arithmetic
+                // expression keeps its operand width, so `2147483647 + 1` wraps as `Int`
+                // before that conversion becomes `Long`. Rewriting the expression type
+                // would fold the same addition in 64 bits.
+                let keeps_operand_width = c
+                    .selected_numeric_conversions
+                    .get(&branch)
+                    .is_some_and(|target| *target == expected)
+                    && c.integer_constant_provenance(branch).is_some();
+                if keeps_operand_width {
+                    projected
+                } else {
+                    c.set(branch, projected)
+                }
             } else {
                 actual
             }

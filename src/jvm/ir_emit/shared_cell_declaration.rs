@@ -192,12 +192,13 @@ impl Emitter<'_> {
             return;
         }
         let provenance = self.ir.debug_local_provenance(declaration);
-        // A spliced lambda's marker precedes, in kotlinc's table, every local its body declares.
+        // A spliced lambda's marker precedes, in kotlinc's table, every local its body declares,
+        // and follows the locals of a frame nested inside it.
         let table_position = matches!(
             provenance,
             Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker { .. })
         )
-        .then(|| code.local_entry_count());
+        .then(|| (code.local_entry_count(), self.recorded_inline_entries));
         // A materialized inline parameter executes in a call-site-specialized slot, but kotlinc's
         // LocalVariableTable retains the parameter declaration's erased type. Keep that debug
         // representation separate from the verifier/storage type above.
@@ -217,8 +218,13 @@ impl Emitter<'_> {
                     provenance,
                     Some(crate::ir::IrDebugLocalProvenance::InlineValue { .. })
                         | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver { .. })
+                        | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { .. })
+                        | Some(
+                            crate::ir::IrDebugLocalProvenance::InlineCallableReferenceParameter { .. }
+                        )
                 ),
             table_position,
+            inline_frame_entry: provenance.is_some(),
             explicit_end: None,
         };
         // kotlinc lists an inline frame's marker ahead of the locals binding that frame's operands,

@@ -1,9 +1,9 @@
 //! The public C ABI of a native module.
 //!
-//! A public top-level function whose parameters and result are primitives, `String`, or `Unit` is
-//! declared in a C header and exported under that name. An `internal` function is not declared and
-//! is not a dynamic export. A public function that takes or returns a classifier is named in the
-//! header and not declared: the module still runs, and a C caller has no type to pass.
+//! A public top-level function whose parameters are primitives or `String` and whose result is one
+//! of those types or `Unit` is declared in a C header and exported under that name. An `internal`
+//! function is not declared and is not a dynamic export. A public function whose name or types
+//! cannot be represented safely is named in the header and not declared: the module still runs.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -150,7 +150,7 @@ fun label(): String = \"OK\"
 ";
 
 const HEADER: &str = "\
-/* Public C ABI. A function whose parameters or result are not a primitive, String, or Unit is named here and not declared. */
+/* Public C ABI. A function whose name or types cannot be represented safely is named here and not declared. */
 #ifndef KRUSTY_DEFS_H
 #define KRUSTY_DEFS_H
 #include <stdbool.h>
@@ -273,7 +273,7 @@ fun box(): String = if (take(Point(7)) == 7) \"OK\" else \"FAIL\"
     assert_eq!(
         header(&artifacts, "use"),
         "\
-/* Public C ABI. A function whose parameters or result are not a primitive, String, or Unit is named here and not declared. */
+/* Public C ABI. A function whose name or types cannot be represented safely is named here and not declared. */
 #ifndef KRUSTY_USE_H
 #define KRUSTY_USE_H
 #include <stdbool.h>
@@ -311,6 +311,111 @@ kt_ref demo_box(void);
         .map(|(_, answer)| answer)
         .unwrap_or("");
     assert_eq!(answer, "OK");
+}
+
+#[test]
+fn an_unrepresentable_source_name_is_refused_without_exporting_the_kotlin_symbol() {
+    let Some(_target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    let source = r#"
+        package demo
+        fun `dash-name`(n: Int): Int = n
+        fun box(): String = if (`dash-name`(1) == 1) "OK" else "FAIL"
+    "#;
+    let (artifacts, diagnostics) = compile(&[("names", source)], "names");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        header(&artifacts, "names"),
+        "\
+/* Public C ABI. A function whose name or types cannot be represented safely is named here and not declared. */
+#ifndef KRUSTY_NAMES_H
+#define KRUSTY_NAMES_H
+#include <stdbool.h>
+#include <stdint.h>
+
+typedef int8_t kt_byte;
+typedef int16_t kt_short;
+typedef int32_t kt_int;
+typedef int64_t kt_long;
+typedef uint16_t kt_char;
+typedef float kt_float;
+typedef double kt_double;
+typedef bool kt_boolean;
+typedef void *kt_ref;
+
+/* krusty: public function `dash-name` has no safe C identifier */
+kt_ref demo_box(void);
+#endif
+"
+    );
+    let object = objects(&artifacts)[0];
+    // `box` selects the executable entry mode, whose runtime ABI has always exported
+    // `kt_program_entry`. The rejected backticked declaration contributes no dynamic symbol.
+    assert_eq!(
+        dynamic_text_symbols(object),
+        vec!["demo_box".to_string(), "kt_program_entry".to_string()]
+    );
+    assert!(
+        hidden_text_symbols(object)
+            .iter()
+            .any(|name| name.starts_with("kt_mod_")),
+        "the Kotlin implementation remains link-visible but hidden"
+    );
+}
+
+#[test]
+fn lossy_package_spellings_do_not_emit_duplicate_c_symbols() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    let sources = [
+        ("first", "package a_b\nfun c(): Int = 1"),
+        ("second", "package a\nfun b_c(): Int = 2"),
+        ("box", "fun box(): String = \"OK\""),
+    ];
+    let (artifacts, diagnostics) = compile(&sources, "collision");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        header(&artifacts, "collision"),
+        "\
+/* Public C ABI. A function whose name or types cannot be represented safely is named here and not declared. */
+#ifndef KRUSTY_COLLISION_H
+#define KRUSTY_COLLISION_H
+#include <stdbool.h>
+#include <stdint.h>
+
+typedef int8_t kt_byte;
+typedef int16_t kt_short;
+typedef int32_t kt_int;
+typedef int64_t kt_long;
+typedef uint16_t kt_char;
+typedef float kt_float;
+typedef double kt_double;
+typedef bool kt_boolean;
+typedef void *kt_ref;
+
+kt_int a_b_c(void);
+/* krusty: public function `b_c` would duplicate C symbol `a_b_c` */
+kt_ref box(void);
+#endif
+"
+    );
+    let exported = objects(&artifacts)
+        .into_iter()
+        .flat_map(dynamic_text_symbols)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        exported
+            .iter()
+            .filter(|name| name.as_str() == "a_b_c")
+            .count(),
+        1
+    );
+    let image = krusty::native::link_program(&objects(&artifacts), target).expect("link");
+    assert!(!image.is_empty());
 }
 
 fn c_compiler() -> Option<String> {

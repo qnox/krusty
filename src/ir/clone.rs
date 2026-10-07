@@ -405,6 +405,14 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.call_operand_bindings.contains(&source) {
         ir.call_operand_bindings.insert(target);
     }
+    if ir.inline_synthetic_lines.contains(&source) {
+        ir.inline_synthetic_lines.insert(target);
+    }
+    if ir.external_inline_expansions.contains(&source) {
+        ir.external_inline_expansions.insert(target);
+    }
+    copy_map!(external_frame_lines);
+    copy_map!(external_frame_closes);
     if ir.null_guards.contains(&source) {
         ir.null_guards.insert(target);
     }
@@ -556,6 +564,10 @@ fn copy_function_implementation_facts(
     copy_map!(fn_contracts);
     copy_set!(fn_debug_locals);
     copy_map!(lambda_own_params_from);
+    if let Some(result) = ir.lambda_inferred_results.get(&source).copied() {
+        ir.lambda_inferred_results
+            .insert(target, ty_subst_keep_unbound(result, bindings));
+    }
     copy_map!(lambda_enclosures);
     copy_map!(lambda_sam_signature);
     if let Some((parameters, result)) = ir.lambda_sam_signature.get_mut(&target) {

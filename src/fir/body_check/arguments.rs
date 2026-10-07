@@ -448,10 +448,15 @@ impl BodyFirChecker<'_> {
                     .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
                 physical_parameter,
             )?;
-            return Ok(FirCallArgument::Expression {
+            return Ok(FirCallArgument::Vararg {
                 parameter: parameter_id,
-                value,
-                conversion: self.selected_value_conversion(argument, value, target, cause)?,
+                origin: cause,
+                elements: vec![FirVarargElement {
+                    value,
+                    spread: true,
+                    conversion: self.selected_value_conversion(argument, value, target, cause)?,
+                }]
+                .into_boxed_slice(),
             });
         }
         let expected = if self.file.is_spread_arg(argument) {
@@ -549,10 +554,17 @@ impl BodyFirChecker<'_> {
             .copied()
             == Some(target.get())
         {
-            return Ok(Some(FirConversion {
+            let conversion = FirConversion {
                 origin: cause,
                 kind: FirConversionKind::NumericConversion { to: target },
-            }));
+            };
+            // An expected numeric type reaches every result edge of a conditional. Publish that
+            // topology in checked FIR so constant evaluation can fold each converted constant and
+            // common lowering never has to rediscover an `if`/`when`/block shape.
+            if self.distribute_numeric_conditional(expression, value, target, conversion)? {
+                return Ok(None);
+            }
+            return Ok(Some(conversion));
         }
         if let Some(conversion) = self.selected_argument_conversion(expression, cause)? {
             return Ok(Some(conversion));
@@ -615,6 +627,162 @@ impl BodyFirChecker<'_> {
             }));
         }
         Ok(self.selected_type_conversion(actual, target, cause))
+    }
+
+    /// Put one already-selected numeric conversion on every value edge of a conditional. Returns
+    /// `false` without mutation when `source` is not a supported conditional boundary, so the
+    /// caller can retain the ordinary conversion around the whole value.
+    fn distribute_numeric_conditional(
+        &mut self,
+        source: ExprId,
+        value: crate::fir::FirExprId,
+        target: ResolvedTy,
+        conversion: FirConversion,
+    ) -> Result<bool, BodyCheckFailure> {
+        match self.file.expr(source).clone() {
+            Expr::If {
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            } => {
+                let (then_value, then_conversion, else_value, else_conversion) = match &self
+                    .body
+                    .expr(value)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?
+                    .kind
+                {
+                    FirExprKind::Conditional {
+                        then_branch,
+                        then_conversion,
+                        else_branch,
+                        else_conversion,
+                        ..
+                    } => (
+                        *then_branch,
+                        *then_conversion,
+                        *else_branch,
+                        *else_conversion,
+                    ),
+                    _ => {
+                        return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
+                    }
+                };
+                // A branch conversion to the conditional's original result must happen before a
+                // later conversion of the conditional as a whole. Keep that sequence intact.
+                if then_conversion.is_some() || else_conversion.is_some() {
+                    return Ok(false);
+                }
+                let then_value =
+                    self.numeric_conditional_branch(then_branch, then_value, target, conversion)?;
+                let else_value =
+                    self.numeric_conditional_branch(else_branch, else_value, target, conversion)?;
+                let checked = self
+                    .body
+                    .expr_mut(value)
+                    .expect("the checked conditional expression still exists");
+                let FirExprKind::Conditional {
+                    then_branch,
+                    else_branch,
+                    ..
+                } = &mut checked.kind
+                else {
+                    unreachable!("the checked conditional shape was validated above")
+                };
+                *then_branch = then_value;
+                *else_branch = else_value;
+                checked.ty = target;
+                Ok(true)
+            }
+            Expr::When { arms, .. } => {
+                let values = match &self
+                    .body
+                    .expr(value)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?
+                    .kind
+                {
+                    FirExprKind::When { branches, .. } if branches.len() == arms.len() => branches
+                        .iter()
+                        .map(|branch| branch.result)
+                        .collect::<Vec<_>>(),
+                    _ => {
+                        return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
+                    }
+                };
+                let converted = arms
+                    .iter()
+                    .zip(values)
+                    .map(|(arm, value)| {
+                        self.numeric_conditional_branch(arm.body, value, target, conversion)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let checked = self
+                    .body
+                    .expr_mut(value)
+                    .expect("the checked when expression still exists");
+                let FirExprKind::When { branches, .. } = &mut checked.kind else {
+                    unreachable!("the checked when shape was validated above")
+                };
+                for (branch, converted) in branches.iter_mut().zip(converted) {
+                    branch.result = converted;
+                }
+                checked.ty = target;
+                Ok(true)
+            }
+            Expr::Block {
+                trailing: Some(trailing),
+                ..
+            } => {
+                let result = match &self
+                    .body
+                    .expr(value)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?
+                    .kind
+                {
+                    FirExprKind::Block {
+                        result: Some(result),
+                        ..
+                    } => *result,
+                    _ => {
+                        return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
+                    }
+                };
+                let converted =
+                    self.numeric_conditional_branch(trailing, result, target, conversion)?;
+                let checked = self
+                    .body
+                    .expr_mut(value)
+                    .expect("the checked block expression still exists");
+                let FirExprKind::Block { result, .. } = &mut checked.kind else {
+                    unreachable!("the checked block shape was validated above")
+                };
+                *result = Some(converted);
+                checked.ty = target;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn numeric_conditional_branch(
+        &mut self,
+        source: ExprId,
+        value: crate::fir::FirExprId,
+        target: ResolvedTy,
+        conversion: FirConversion,
+    ) -> Result<crate::fir::FirExprId, BodyCheckFailure> {
+        if self.distribute_numeric_conditional(source, value, target, conversion)? {
+            return Ok(value);
+        }
+        let origin = self.expression_origin(source)?;
+        Ok(self.convert_fir_value(
+            value,
+            target,
+            origin,
+            Some(FirConversion {
+                origin,
+                kind: conversion.kind,
+            }),
+        ))
     }
 
     /// Put a checked platform-type boundary on the producer selected by Kotlin's conditional
@@ -838,8 +1006,29 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         target: ResolvedTy,
     ) -> Option<FirConversion> {
-        let message = self.platform_narrowing_message(source)?;
-        Some(self.platform_narrowing_conversion(Some(message), cause, target))
+        // Reordered named arguments make the call a composite expression: their values are
+        // evaluated in source order into temporaries before the invocation. The check still
+        // exists, but cannot name that composite producer, so kotlinc uses `checkNotNull(Object)`.
+        let message = if self.call_reorders_arguments(source) {
+            None
+        } else {
+            Some(self.platform_narrowing_message(source)?)
+        };
+        Some(self.platform_narrowing_conversion(message, cause, target))
+    }
+
+    fn call_reorders_arguments(&self, source: ExprId) -> bool {
+        matches!(self.file.expr(source), Expr::Call { .. })
+            && self
+                .info
+                .resolved_call_arg_slots
+                .get(&source)
+                .is_some_and(|commitment| {
+                    commitment
+                        .argument_bindings
+                        .windows(2)
+                        .any(|pair| pair[0].parameter > pair[1].parameter)
+                })
     }
 
     fn platform_narrowing_conversion(
@@ -1045,6 +1234,16 @@ impl BodyFirChecker<'_> {
             FirConversionKind::CoerceToUnit
         } else if target_ty.accepts_numeric(actual_ty) {
             FirConversionKind::NumericWidening { to: target }
+        } else if matches!(
+            actual_ty.non_null(),
+            Ty::Intersection(parts) if parts
+                .iter()
+                .any(|part| part.non_null() == target_ty.non_null())
+        ) {
+            // Resolution has selected the declaration on one exact constituent of a semantic
+            // intersection. Preserve the source value and publish the selected dispatch view as
+            // an explicit checked conversion; lowering must not rediscover the member owner.
+            FirConversionKind::SmartCast { to: target }
         } else if target_ty.is_nullable() || (!actual_ty.is_reference() && target_ty.is_reference())
         {
             FirConversionKind::NullabilityWidening { to: target }

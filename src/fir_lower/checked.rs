@@ -677,6 +677,7 @@ impl BodyLowering<'_> {
                     dispatch_class,
                     extension_receiver,
                     arguments: &arguments,
+                    source_line: Some(source_line),
                 })
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration))
             }
@@ -1377,6 +1378,7 @@ pub(super) fn lower_substitutions(values: &[FirTypeSubstitution]) -> Vec<IrCheck
             parameter: substitution.parameter,
             reified: substitution.reified,
             value: substitution.value.get(),
+            reified_runtime: substitution.reified_runtime.get(),
             additional_bounds: substitution
                 .additional_bounds
                 .iter()

@@ -14,6 +14,7 @@ mod classifier_role;
 mod compiler_intrinsic;
 mod core_builtins;
 mod default_value;
+mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
@@ -35,6 +36,7 @@ pub use classifier_callables::BoundInnerConstructor;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
 pub use default_value::DefaultValue;
+pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
@@ -50,9 +52,10 @@ pub use compiler_intrinsic::CompilerIntrinsic;
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
 pub use inline_body::{
-    InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan, InlineBodyRecovery,
-    InlineBodyValue, InlineCollectionAppend, InlineCollectionCapacity, InlineCollectionLocalNames,
-    InlineIterationIndex, InlineIterationTraversal,
+    InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyFrame, InlineBodyPlan,
+    InlineBodyRecovery, InlineBodySource, InlineBodyValue, InlineCollectionAppend,
+    InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
+    InlineIterationTraversal,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -330,6 +333,8 @@ pub struct LibraryMember {
     pub declared_ret: Option<Ty>,
     /// See [`LibraryCallable::overridden_results`].
     pub overridden_results: Box<[Ty]>,
+    /// See [`LibraryCallable::enhanced_result`].
+    pub enhanced_result: EnhancedResult,
     /// Language-defined classifier callable synthesized for this declaration (`None` for an ordinary
     /// one): a semantic identity, each backend deciding how the selected operation is realized.
     pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
@@ -741,6 +746,7 @@ impl LibraryMember {
             nonvirtual_realization: None,
             declared_ret: None,
             overridden_results: Box::new([]),
+            enhanced_result: EnhancedResult::NONE,
             implicit_classifier_callable: None,
             associated_classifier: None,
             associated_access_owner: None,
@@ -1018,6 +1024,9 @@ pub struct LibraryCallable {
     /// hierarchy found them, nearest first; empty for a non-suspend one. A backend decides from them
     /// how the callable's own result crosses its continuation boundary.
     pub overridden_results: Box<[Ty]>,
+    /// Where the declared result carries kotlinc's `EnhancedNullability`: the positions a Java
+    /// result's overridden declarations fix not-null, with the result they were read from.
+    pub enhanced_result: EnhancedResult,
     /// Number of LEADING context parameters (`context(a: A) fun f()`) in `params` — supplied
     /// implicitly by the caller, not positionally, so arity checks and argument mapping skip them.
     pub context_count: usize,
@@ -1915,6 +1924,7 @@ impl FunctionInfo {
         // the operator-invoke path included, would unbox a real carrier as though it were a box.
         member.declared_ret = self.callable.declared_ret;
         member.overridden_results = self.callable.overridden_results.clone();
+        member.enhanced_result = self.callable.enhanced_result.clone();
         member.signature = self.callable.signature.clone();
         member.default_values = self.default_values.clone();
         member.default_realization = self.callable.default_realization.clone();

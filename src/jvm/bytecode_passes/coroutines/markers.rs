@@ -101,13 +101,19 @@ pub(crate) fn is_inline_marker(node: &Node, name: Option<&str>) -> bool {
         }) if owner == INLINE_MARKER_CLASS => {
             let expected = match called.as_str() {
                 "mark" => "(I)V",
-                "beforeInlineCall" | "afterInlineCall" => "()V",
+                "beforeInlineCall" | "beforeInlineCallWithReservedLocals" | "afterInlineCall" => {
+                    "()V"
+                }
                 _ => return false,
             };
             desc == expected
                 && match name {
                     Some(name) => called == name,
-                    None => called == "beforeInlineCall" || called == "afterInlineCall",
+                    None => {
+                        called == "beforeInlineCall"
+                            || called == "beforeInlineCallWithReservedLocals"
+                            || called == "afterInlineCall"
+                    }
                 }
         }
         _ => false,
@@ -116,10 +122,34 @@ pub(crate) fn is_inline_marker(node: &Node, name: Option<&str>) -> bool {
 
 pub(crate) fn is_before_inline_marker(node: &Node) -> bool {
     is_inline_marker(node, Some("beforeInlineCall"))
+        || is_inline_marker(node, Some("beforeInlineCallWithReservedLocals"))
+}
+
+/// An opening marker whose stack spill words were reserved before the next inline-frame local.
+pub(crate) fn has_reserved_inline_locals(node: &Node) -> bool {
+    is_inline_marker(node, Some("beforeInlineCallWithReservedLocals"))
 }
 
 pub(crate) fn is_after_inline_marker(node: &Node) -> bool {
     is_inline_marker(node, Some("afterInlineCall"))
+}
+
+/// A declaration-body marker bracketing one emitted copy of a `finally`. Unlike the inline-call
+/// stack markers, this metadata is consumed while copying the body and never executes in the
+/// finished caller.
+pub(crate) fn is_finally_marker(node: &Node) -> bool {
+    matches!(
+        node,
+        Node::Insn(Insn::Method {
+            op: INVOKESTATIC,
+            owner,
+            name,
+            desc,
+            interface: false,
+        }) if owner == INLINE_MARKER_CLASS
+            && matches!(name.as_str(), "finallyStart" | "finallyEnd")
+            && desc == "(I)V"
+    )
 }
 
 /// `isSuspendInlineMarker`: any `mark(I)V` call.

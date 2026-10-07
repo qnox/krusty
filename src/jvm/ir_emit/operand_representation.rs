@@ -57,6 +57,22 @@ impl Emitter<'_> {
         expression: crate::ir::ExprId,
         code: &mut CodeBuilder,
     ) -> Ty {
+        if let IrExpr::Vararg {
+            array_type,
+            elements,
+            spreads,
+        } = self.ir.expr(expression).clone()
+        {
+            if let Some(physical) = super::vararg::emit_consumed_reference_copy(
+                self,
+                &array_type,
+                &elements,
+                &spreads,
+                code,
+            ) {
+                return physical;
+            }
+        }
         match self.erased_reference_result(expression) {
             Some(ErasedResult::Coerced { call, slot }) => {
                 self.emit_value(call, code);

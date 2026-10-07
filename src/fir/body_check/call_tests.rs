@@ -3748,7 +3748,7 @@ fn omitted_source_call_vararg_is_an_explicit_empty_pack() {
 }
 
 #[test]
-fn named_whole_array_vararg_is_not_repacked() {
+fn named_whole_array_vararg_is_one_spread_array() {
     let (body, _) = checked_function_body(
         "fun join(vararg values: String): Int = 0\n\
          fun read(values: Array<String>): Int = join(values = values)\n",
@@ -3763,7 +3763,11 @@ fn named_whole_array_vararg_is_not_repacked() {
     };
     assert!(matches!(
         call.arguments.as_ref(),
-        [FirCallArgument::Expression { parameter: 0, .. }]
+        [FirCallArgument::Vararg {
+            parameter: 0,
+            elements,
+            ..
+        }] if matches!(elements.as_ref(), [element] if element.spread)
     ));
 }
 
@@ -4024,7 +4028,7 @@ fn suspending_map_publishes_a_complete_provider_owned_collection_plan() {
     else {
         panic!("Map.map must use its structurally decoded member capacity")
     };
-    let crate::fir::FirInlineCollectionAppend::Member(append) = append else {
+    let crate::fir::FirInlineCollectionAppend::Member(append) = append.as_ref() else {
         panic!("Map.map must use its structurally decoded member append")
     };
     let identities = [
@@ -4078,11 +4082,14 @@ fn suspending_flat_map_specializes_every_extension_append_parameter() {
     });
     let Some(FirInlineBodyPlan::CollectionTransform {
         capacity,
-        append: crate::fir::FirInlineCollectionAppend::Extension(append),
+        append,
         accumulator,
         ..
     }) = plan
     else {
+        panic!("selected flatMap call must publish its exact extension append contract")
+    };
+    let crate::fir::FirInlineCollectionAppend::Extension(append) = append.as_ref() else {
         panic!("selected flatMap call must publish its exact extension append contract")
     };
     assert!(capacity.is_none());
@@ -4427,6 +4434,40 @@ fn flow_intersection_type_argument_preserves_all_bounds_in_checked_fir() {
         panic!("the argument must retain its primary intersection projection")
     };
     assert_eq!(to.get(), Ty::obj("A"));
+}
+
+#[test]
+fn reified_intersection_argument_records_its_common_supertype() {
+    let (body, index) = checked_function_body(
+        "// LANGUAGE: -ProhibitIntersectionReifiedTypeParameter\n\
+         interface X\n\
+         interface Y\n\
+         object A : X, Y\n\
+         object B : X, Y\n\
+         fun <T> sel(left: T, right: T): T = left\n\
+         inline fun <reified T> T.keep(): T = this\n\
+         fun run() { sel(A, B).keep() }\n",
+        "run",
+    );
+    let call = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("keep")).then_some(call)
+        })
+        .expect("reified extension call");
+    let [substitution] = call.substitutions.as_ref() else {
+        panic!("keep must publish its reified type argument")
+    };
+    assert!(substitution.reified);
+    assert!(
+        matches!(substitution.value.get(), Ty::Intersection(parts) if parts.len() == 2),
+        "the semantic argument stays the intersection, got {:?}",
+        substitution.value.get()
+    );
+    assert_eq!(substitution.reified_runtime.get(), Ty::obj("kotlin/Any"));
 }
 
 #[test]

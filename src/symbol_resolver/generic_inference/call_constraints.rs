@@ -422,10 +422,10 @@ impl CallInferenceConstraints {
                 // applicable, while the VALUE read out of it is approximated where it is recorded.
                 // A second, concrete constraint merges as before, which strips the projection and
                 // widens — an invariant occurrence then rejects the write, exactly as kotlinc does.
-                let merged = match self.lower.get(name).copied() {
-                    None => actual,
-                    Some(current) => merge_inferred_ty_from_symbols(Some(source), current, actual),
-                };
+                let merged = merge_inferred_lower_bounds_from_symbols(
+                    source,
+                    &inputs.iter().map(|(actual, _)| *actual).collect::<Vec<_>>(),
+                );
                 self.lower.insert(name.to_string(), merged);
             }
             ConstraintPosition::Upper => {

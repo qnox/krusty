@@ -621,8 +621,11 @@ impl BodyLowering<'_> {
                         })
                     }
                     FirUnaryOperation::BitwiseNot => {
+                        // `inv` xors with every bit set in the carrier. `ULong` is that `long`
+                        // carrier, the same width `Long.inv` already uses.
+                        let carrier = expression.ty.get().canonical_semantic().non_null();
                         let all_bits = self.ir.add_expr(IrExpr::Const(
-                            if expression.ty.get().non_null() == crate::types::Ty::Long {
+                            if matches!(carrier, crate::types::Ty::Long | crate::types::Ty::ULong) {
                                 IrConst::Long(-1)
                             } else {
                                 IrConst::Int(-1)
@@ -1468,14 +1471,21 @@ impl BodyLowering<'_> {
         expression_id: crate::fir::FirExprId,
         first_generated: usize,
     ) {
+        // A receiver that is itself a reference (`create2(create("D")::test)::test`) is lowered
+        // first and already owns its node. This expression owns the reference that is still unnamed.
         let mut references = (first_generated..self.ir.exprs.len()).filter(|&raw| {
-            matches!(
-                self.ir.exprs[raw],
-                crate::ir::IrExpr::CallableReference(_)
-                    | crate::ir::IrExpr::Checked(
-                        crate::ir::IrCheckedOperation::PropertyReference { .. }
-                    )
-            )
+            let unnamed = !self
+                .ir
+                .callable_reference_provenance
+                .contains_key(&(raw as u32));
+            unnamed
+                && matches!(
+                    self.ir.exprs[raw],
+                    crate::ir::IrExpr::CallableReference(_)
+                        | crate::ir::IrExpr::Checked(
+                            crate::ir::IrCheckedOperation::PropertyReference { .. }
+                        )
+                )
         });
         let (Some(reference), None) = (references.next(), references.next()) else {
             return;
@@ -1557,12 +1567,12 @@ impl BodyLowering<'_> {
         expression: FirExprId,
         conversion: Option<FirConversion>,
     ) -> Result<ExprId, FirLoweringFailure> {
-        let source_type = self
+        let checked = self
             .body
             .expr(expression)
-            .ok_or(FirLoweringFailure::MissingExpression(expression))?
-            .ty
-            .get();
+            .ok_or(FirLoweringFailure::MissingExpression(expression))?;
+        let source_type = checked.ty.get();
+        let origin = checked.origin;
         let value = expression;
         if let Some(FirConversionKind::Sam(sam)) = conversion.map(|conversion| conversion.kind) {
             let unit_method = self.body.sam_conversion(sam).is_some_and(|conversion| {
@@ -1575,6 +1585,26 @@ impl BodyLowering<'_> {
             if unit_method && literal {
                 self.unit_method_lambda = Some(value);
             }
+        }
+        if let Some(folded) = conversion
+            .and_then(|conversion| self.constants.fold_conversion(self.body, value, conversion))
+        {
+            let first_generated = self.ir.exprs.len();
+            let constant = lower_constant(&folded.value, folded.ty, origin)?;
+            let lowered = self.ir.add_expr(IrExpr::Const(constant));
+            self.ir.logical_types.insert(lowered, folded.ty);
+            let debug = self.body.expression_debug_lines(value);
+            if debug.positionless {
+                self.ir.mark_positionless(lowered);
+            }
+            if debug.source != 0 {
+                self.ir.expr_source_lines.insert(lowered, debug.source);
+            }
+            if debug.end != 0 {
+                self.ir.expr_end_lines.insert(lowered, debug.end);
+            }
+            self.record_expression_origins(first_generated, lowered, origin);
+            return Ok(lowered);
         }
         let expression = self.expression(value)?;
         let converted = self.lowered_with_conversion(expression, source_type, conversion)?;

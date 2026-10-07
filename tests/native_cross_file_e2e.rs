@@ -113,6 +113,42 @@ fn a_file_initializer_runs_once_however_many_calls_arrive() {
 }
 
 #[test]
+fn call_arguments_are_evaluated_before_the_defining_file_is_initialized() {
+    expect_native_sources(
+        &[
+            (
+                "defs",
+                r#"
+                    package demo
+                    val initialized: Int = observeInitialization()
+                    fun consume(value: Int): Int = value + initialized
+                "#,
+            ),
+            (
+                "box",
+                r#"
+                    package demo
+                    var order: Int = 0
+                    fun argument(): Int {
+                        order = order * 10 + 1
+                        return 7
+                    }
+                    fun observeInitialization(): Int {
+                        order = order * 10 + 2
+                        return 0
+                    }
+                    fun box(): String {
+                        consume(argument())
+                        return if (order == 12) "OK" else "FAIL: $order"
+                    }
+                "#,
+            ),
+        ],
+        "OK",
+    );
+}
+
+#[test]
 fn a_string_returned_from_another_file_is_that_string() {
     expect_native_sources(
         &[

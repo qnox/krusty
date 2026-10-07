@@ -4490,12 +4490,13 @@ each one lowering more and declining less:
   file is not the entry. The flag is set before the initializers run: a re-entrant use sees the
   default and does not recurse. `kt_mod_<id>` and `kt_fileinit_<id>` are hidden: the module link
   resolves them, and they are not dynamic exports.
-- **Public C ABI.** A public top-level function whose parameters and result are primitives,
-  `String`, or `Unit` is declared in `<module>.h` and exported under `package_name`, with a
-  `__Type` suffix when it has parameters. The wrapper runs the file initializer, then the
-  function. An `internal` function is neither declared nor exported. A public function that takes
-  or returns a classifier — or any other type this ABI cannot spell — is named in the header and
-  not declared, and the Kotlin program still runs.
+- **Public C ABI.** A public top-level function whose parameters are primitives or `String` and
+  whose result is one of those types or `Unit` is declared in `<module>.h` and exported under
+  `package_name`, with a `__Type` suffix when it has parameters. The wrapper runs the file
+  initializer, then the function. An `internal` function is neither declared nor exported. A
+  public function whose name or types this ABI cannot represent safely is named in the header and
+  not declared; colliding C spellings are likewise refused rather than emitted twice. The Kotlin
+  program still runs.
   Tests: `tests/native_c_abi_e2e.rs`.
 - **iOS simulator.** `ios-simulator-aarch64` is an unsigned arm64 `MH_DYLIB`, not a static ELF.
   Codegen is position-independent and uses the ISA's default call convention, Apple AArch64.
