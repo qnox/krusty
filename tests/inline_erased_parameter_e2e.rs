@@ -7,8 +7,6 @@
 //! reference, so `String.length` has no cast.
 
 use super::common;
-use super::common::{compare_with_kotlinc_plugin_jdk, method_instructions};
-use super::temporary_elimination_e2e::stack_map;
 
 const SOURCE: &str = "inline fun <T : java.lang.AutoCloseable?, R> T.use(block: (T) -> R): R {\n\
     \x20   var closed = false\n\
@@ -44,93 +42,11 @@ const SOURCE: &str = "inline fun <T : java.lang.AutoCloseable?, R> T.use(block: 
 
 #[test]
 fn an_inlined_type_parameter_is_stored_as_its_erased_bound() {
-    let Some(built) = compare_with_kotlinc_plugin_jdk(
+    common::assert_classes_identical_to_kotlinc_jdk(
         "InlineErasedParameter",
         SOURCE,
-        "InlineErasedParameterKt",
-        "25",
-        &[],
-    ) else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
-    for member in ["int go(java.lang.String)", "int plain(java.lang.String)"] {
-        let reference = method_instructions(&built.reference, member);
-        assert!(!reference.is_empty(), "{member} not found");
-        assert_eq!(
-            method_instructions(&built.krusty, member),
-            reference,
-            "{member}"
-        );
-        assert_eq!(
-            stack_map(&built.krusty, member),
-            stack_map(&built.reference, member),
-            "{member} frames"
-        );
-    }
-    for member in [
-        "void load(java.io.BufferedReader)",
-        "void loadNull(java.io.BufferedReader)",
-    ] {
-        let reference = close_sites(&method_instructions(&built.reference, member));
-        assert!(!reference.is_empty(), "{member} has no close");
-        assert_eq!(
-            close_sites(&method_instructions(&built.krusty, member)),
-            reference,
-            "{member} close"
-        );
-    }
-}
-
-/// Each `AutoCloseable.close` together with the instructions after the preceding `aload`.
-/// Jump offsets are not part of the cast shape.
-fn close_sites(instructions: &[String]) -> Vec<String> {
-    let mut sites = Vec::new();
-    for (index, instruction) in instructions.iter().enumerate() {
-        let Some((_, op)) = instruction.split_once(": ") else {
-            continue;
-        };
-        if !op.contains("invokeinterface") || !op.contains("close:") {
-            continue;
-        }
-        let start = instructions[..index]
-            .iter()
-            .rposition(|earlier| {
-                earlier
-                    .split_once(": ")
-                    .is_some_and(|(_, op)| op.starts_with("aload"))
-            })
-            .unwrap_or(index);
-        let site = instructions[start..=index]
-            .iter()
-            .map(|instruction| {
-                normalize_jump(
-                    instruction
-                        .split_once(": ")
-                        .map(|(_, op)| op)
-                        .unwrap_or(instruction),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        sites.push(site);
-    }
-    sites
-}
-
-fn normalize_jump(op: &str) -> String {
-    let mut tokens = op.split_whitespace().collect::<Vec<_>>();
-    if tokens
-        .first()
-        .is_some_and(|op| op.starts_with("if") || *op == "goto")
-        && tokens
-            .last()
-            .is_some_and(|token| token.parse::<u32>().is_ok())
-    {
-        let last = tokens.len() - 1;
-        tokens[last] = "L";
-    }
-    tokens.join(" ")
+        &["InlineErasedParameterKt"],
+    );
 }
 
 #[test]
