@@ -54,6 +54,9 @@ jobs:
           chmod +x "$dest/kotlinc/bin/"*
           echo "KOTLINC=$dest/kotlinc/bin/kotlinc" >> "$GITHUB_ENV"
           echo "KOTLIN_STDLIB=$dest/kotlinc/lib/kotlin-stdlib.jar" >> "$GITHUB_ENV"
+          # krusty loads kotlin-stdlib and kotlin-reflect from the distribution named by
+          # KRUSTY_KOTLINC. The bench's -cp jar is not that distribution.
+          echo "KRUSTY_KOTLINC=$dest/kotlinc/bin/kotlinc" >> "$GITHUB_ENV"
       - name: fetch the benchmark generator
         run: |
           set -euo pipefail
