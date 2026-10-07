@@ -1819,6 +1819,22 @@ impl BodyLowering<'_> {
                 let IrExpr::GetValue(value) = self.ir.expr(operand) else {
                     return false;
                 };
+                // Anonymous-object and local-class members own their capture directly. Their
+                // checked body retains the exact receiver provenance and the lifted parameter
+                // slot even though they are not themselves lambda declarations.
+                if self
+                    .implicit_receiver_capture_slots
+                    .iter()
+                    .any(|(capture, slot)| {
+                        *slot == *value
+                            && matches!(
+                                &capture.receiver,
+                                crate::fir::FirCapturedReceiver::Context { .. }
+                            )
+                    })
+                {
+                    return true;
+                }
                 let Some(parameters) = self
                     .declaration_lambda
                     .and_then(|function| self.ir.fn_params.get(&function))

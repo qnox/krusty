@@ -823,6 +823,14 @@ impl Emitter<'_> {
         self.mark_expression_start(call_expression, code);
         let caller_line = code.current_line();
         let call_line = caller_line.unwrap_or(1);
+        // An `@InlineOnly` body whose ordinary arguments are movable evaluates them where the
+        // copied body first loads their temporary. The eager expression boundary above exists so
+        // the call line can anchor the body's source-map interval, but it must not claim the
+        // generated prefix before that first source argument. Withdrawing it leaves the enclosing
+        // inline line in effect until emitting the in-place operand marks the call-site line.
+        if supplies.contains(&Supply::InPlace) {
+            code.withdraw_line();
+        }
         let claimable = self.claimable_lines();
         let bodies = self.bodies;
         let mut lines = CallLines {

@@ -195,7 +195,16 @@ pub(super) fn seed_value_class_method_locals(
             Some(0) => vec![(field.name.as_str(), carrier.as_str())],
             Some(1) => vec![("v", carrier.as_str())],
             Some(2) => vec![("this", this_desc.as_str())],
-            Some(3) => vec![("p1", carrier.as_str()), ("p2", carrier.as_str())],
+            Some(3) => vec![
+                (
+                    crate::jvm::parameter_names::value_class_equals_operand(1),
+                    carrier.as_str(),
+                ),
+                (
+                    crate::jvm::parameter_names::value_class_equals_operand(2),
+                    carrier.as_str(),
+                ),
+            ],
             _ => return,
         }
     };

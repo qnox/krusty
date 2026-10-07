@@ -80,21 +80,37 @@ fn assert_identical(stem: &str, source: &str, classes: &[&str]) {
 
     let emitted = common::compile_in_process_metadata_cp(source, stem, &[common::stdlib_jar()])
         .expect("krusty compiles the fixture");
-    let differing: Vec<&str> = classes
+    let differing: Vec<String> = classes
         .iter()
         .copied()
-        .filter(|class| {
+        .filter_map(|class| {
             let expected = std::fs::read(reference.join(format!("{class}.class")))
                 .unwrap_or_else(|error| panic!("kotlinc did not emit {class}: {error}"));
             let (_, actual) = emitted
                 .iter()
                 .find(|(name, _)| name == class)
                 .unwrap_or_else(|| panic!("krusty did not emit {class}"));
-            *actual != expected
+            if *actual == expected {
+                return None;
+            }
+            let offset = actual
+                .iter()
+                .zip(&expected)
+                .position(|(actual, expected)| actual != expected)
+                .unwrap_or_else(|| actual.len().min(expected.len()));
+            Some(format!(
+                "{class}: bytes differ at offset {offset} (krusty {} B, kotlinc {} B)",
+                actual.len(),
+                expected.len()
+            ))
         })
         .collect();
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(differing, Vec::<&str>::new(), "classes differ from kotlinc");
+    assert_eq!(
+        differing,
+        Vec::<String>::new(),
+        "classes differ from kotlinc"
+    );
 }
 
 #[test]

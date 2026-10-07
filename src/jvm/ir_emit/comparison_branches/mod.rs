@@ -20,6 +20,7 @@ impl Emitter<'_> {
             IrExpr::Equality { op, mode, lhs, rhs } => {
                 self.unsigned_mixed_equality_branches(*op, *lhs, *rhs)
                     || (*mode != crate::ir::EqualityMode::Structural
+                        && !self.primitive_equality_has_erased_operand(Some(*mode), *lhs, *rhs)
                         && matches!(op, Eq | Ne)
                         && self.value_ty(*lhs).is_jvm_scalar())
                     || (matches!(op, Eq | Ne)
@@ -358,7 +359,12 @@ impl Emitter<'_> {
         }
         // A recorded structural equality stays `Intrinsics.areEqual` even when inline substitution
         // stored both operands as scalars. Null and enum comparisons above keep their own shape.
-        if recorded_structural && matches!(op, Eq | Ne) {
+        // Primitive equality also uses that reference form when one of its operands still occupies
+        // the wrapper in an erased generic slot. This is physical JVM adaptation, not a semantic
+        // reclassification: the frontend-selected mode is unchanged.
+        if matches!(op, Eq | Ne)
+            && (recorded_structural || self.primitive_equality_has_erased_operand(mode, lhs, rhs))
+        {
             return false;
         }
         // Structural equality's value result has different optimal consumers: value position can use it
