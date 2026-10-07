@@ -3,8 +3,10 @@
 //! Those members are inline-only. kotlinc drops the callee's own line numbers and, after the
 //! body, either writes the caller's line again (inside a condition, on the jump) or forgets it so
 //! the next mark of that line survives: a literal argument, the store, or the return. A literal
-//! argument owns the line when the receiver is a plain local; a local receiver of an outer call
-//! keeps the line when the other argument does not.
+//! argument owns the line when the receiver is a plain local of a declaration or expression. A
+//! condition keeps the line on the first instruction, and an assignment keeps it on the receiver
+//! load and writes it again at the store. The other argument, when it is a plain local, records
+//! no line of its own.
 
 use super::common;
 

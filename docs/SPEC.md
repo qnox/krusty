@@ -4019,9 +4019,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   followed by `constructor-impl`. That call ends the inline-only member: inside a condition the
   line in effect is written again immediately, on the following jump, and anywhere else it is
   forgotten so the next mark of the same line — the literal argument of an outer `or`, the store
-  of the result, or the `return` — is kept. A literal argument already takes the line off a plain
-  local receiver. `inv()` is `xor` with all bits set, then `constructor-impl`, and keeps the mark
-  on the operation because its mask is positionless. A mixed-width overload stays an ordinary call. `UInt.toLong()` zero-extends via `Integer.toUnsignedLong` (not the
+  of the result, or the `return` — is kept. A literal argument takes the line off a plain local
+  receiver of a declaration or expression. A condition keeps that line on the first instruction
+  instead, and an assignment keeps it on the receiver load and writes it again at the store.
+  Otherwise the receiver load keeps its line. The other argument, when it is a plain local,
+  records no line of its own, including a local on a later source line. A call in operand
+  position (`toUInt()`, `g()`) keeps the line it wrote. `inv()` is
+  `xor` with all bits set, then `constructor-impl`, and keeps the mark on the operation because
+  its mask is positionless. A mixed-width overload stays an ordinary call. `UInt.toLong()` zero-extends via `Integer.toUnsignedLong` (not the
   sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into a reference context uses the
   inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and `unbox-impl` on read, `is UInt` →
   `instanceof kotlin/UInt`) — never `Integer`, so identity and large values are preserved.
