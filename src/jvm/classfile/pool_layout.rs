@@ -191,13 +191,35 @@ impl<'a> Layout<'a> {
                 }
             }
         }
+        // A declaration/header or earlier body really interns an owned entry first only when its
+        // visit precedes the owning rewrite's code. A later holder merely reuses the stale entry
+        // krusty's original body interned. If the rewrite removed that use, kotlinc first interns
+        // it at the later holder instead (notably an `InnerClasses` row for a removed capture).
+        let mut owner_code_start = vec![usize::MAX; count];
+        for method in relaid {
+            let start = code_starts
+                .get(&method.index)
+                .copied()
+                .unwrap_or(usize::MAX);
+            for index in method.added.clone().chain(method.interned.clone()) {
+                if let Some(owner) = owner_code_start.get_mut(usize::from(index)) {
+                    *owner = (*owner).min(start);
+                }
+            }
+        }
         for index in 0..count {
-            if rewritten_reach[index] {
-                fixed[index] = visited_first[index];
+            if owned[index] {
+                fixed[index] = visited_first[index] && first_named[index] < owner_code_start[index];
             }
         }
         let orphaned: Vec<bool> = (0..count)
-            .map(|index| owned[index] && kept[index] && !rewritten_reach[index] && !leading[index])
+            .map(|index| {
+                owned[index]
+                    && kept[index]
+                    && !fixed[index]
+                    && !rewritten_reach[index]
+                    && !leading[index]
+            })
             .collect();
         let anchored = orphan_anchors(read, &by_method, &orphaned);
         if unnamed == Unnamed::Kept {
@@ -309,11 +331,10 @@ impl<'a> Layout<'a> {
     }
 }
 
-/// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten
-/// code no longer names, first named (in kotlinc's visit order) by the code of a method emitted
-/// as it was, is placed before the first entry that code names for the first time with or after
-/// it, or right after the last entry that method names when none follows. An entry some other
-/// slot names first stays where it is.
+/// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten code
+/// no longer names is placed where the first later holder actually names it. That may be another
+/// method's code or a class-level structure such as `InnerClasses`. It precedes the first fresh
+/// entry that holder names after it, or follows the last entry named when none does.
 fn orphan_anchors(
     read: &ClassSlots,
     by_method: &HashMap<usize, usize>,
@@ -325,11 +346,7 @@ fn orphan_anchors(
         return anchored;
     }
     let mut seen = vec![false; count];
-    let mut method = None;
-    // The last entry the current method names: its header, then its code.
     let mut named_max = 0;
-    // The last entry the slots since the last code slot name: the next method's header.
-    let mut header_max = 0;
     let mut pending: Vec<usize> = Vec::new();
     let settle = |pending: &mut Vec<usize>, anchor: usize, anchored: &mut [Option<usize>]| {
         for orphan in pending.drain(..) {
@@ -339,29 +356,17 @@ fn orphan_anchors(
         }
     };
     for slot in read.visit_order() {
-        let code = match slot.holder {
-            Holder::Code(at, _) if !by_method.contains_key(&at) => Some(at),
-            _ => None,
-        };
+        if matches!(slot.holder, Holder::AttributeName) {
+            continue;
+        }
+        let rewritten = matches!(slot.holder, Holder::Code(at, _) if by_method.contains_key(&at));
         let reached = reached_from(read, slot.index);
-        let Some(at) = code else {
+        if rewritten {
             for &index in &reached {
                 seen[index] = true;
-                if !orphaned[index] && slot.holder == Holder::Class {
-                    header_max = header_max.max(index);
-                }
-            }
-            if matches!(slot.holder, Holder::Code(..)) {
-                header_max = 0;
             }
             continue;
-        };
-        if method != Some(at) {
-            settle(&mut pending, named_max + 1, &mut anchored);
-            method = Some(at);
-            named_max = header_max;
         }
-        header_max = 0;
         for &index in &reached {
             if orphaned[index] && !seen[index] {
                 pending.push(index);
