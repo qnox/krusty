@@ -397,8 +397,14 @@ impl Emitter<'_> {
             if index == 0 {
                 // A dispatch receiver is materialized at the class the call names only out of an
                 // erased `Object`: kotlinc names the receiver's own class, so it never widens one,
-                // and an `invokespecial` must see the current class, not the interface it calls.
-                let target = if source.is_reference()
+                // and an `invokespecial` must see the current class, not the interface it calls. A
+                // generated property-reference value is the exception: kotlinc's StackValue
+                // boundary coerces its concrete carrier to the selected KProperty interface before
+                // `invokeinterface`. The IR class identity supplies that fact; the member spelling
+                // does not.
+                let property_reference = this.property_ref_class_and_captures(operand).is_some();
+                let target = if !property_reference
+                    && source.is_reference()
                     && !super::jvm_is_erased_top(super::ir_ty_to_jvm(&source))
                 {
                     source
