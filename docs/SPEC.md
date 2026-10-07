@@ -2483,8 +2483,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   Measured against kotlinc 2.4.10, the GUARDED positions are: a property with an explicit type (member
   or top-level — the top-level one runs in `<clinit>`), a local with an explicit type, a value
-  argument (including the parameter of a non-null-typed lambda, which is an `invoke` argument), a
-  `return` / expression body, an assignment to a non-null target, and the explicit receiver of a
+  argument (including the parameter of a non-null-typed lambda, which is an `invoke` argument, and a
+  constructor-delegation argument — `this(parent.resolve(child))` and `super(parent.resolve(child))`
+  guard `resolve(...)` when the target parameter rejects null, while `class Box<T>(value: T)` does
+  not), a `return` / expression body, an assignment to a non-null target, and the explicit receiver of a
   Kotlin extension call whose DECLARED receiver rejects null (`getenv(..).trim()`; not a `T.ext()`
   whose `T` admits null, and not a safe call). A MEMBER extension's explicit receiver is the same
   receiver argument under the same exclusions: a class's or a companion's `String.shout()` invoked
@@ -2524,8 +2526,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   only, so a narrowing it
   cannot name stays unguarded rather than guarded under an invented name.
   Tests: `tests/platform_call_assertions_e2e.rs` (per-position `checkNotNullExpressionValue` call-site
-  and message differential vs kotlinc, every guarded position run for its exception and message, and
-  the top-level `<clinit>` repro).
+  and message differential vs kotlinc, every guarded position run for its exception and message, the
+  top-level `<clinit>` repro, and constructor delegation, including a generic parameter that admits
+  null).
 
   Measured over the 2.4.10 box corpus (per-file class-byte hashes with and without the guard, 3355
   files krusty compiles): 46 files change, none flips compile status, and 38 of them place the same
@@ -2534,13 +2537,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   gaps, not to the guard rule — in both directions the guard follows krusty's own type, so it is never
   wrong, only in a different place than kotlinc's:
   * A member kotlinc resolves on a Kotlin BUILTIN, which krusty resolves on the mapped Java class and
-    therefore types `T!`: `toString()` reached through a `CharSequence`/`Throwable`/`Comparable`
-    receiver (kotlinc: `kotlin.Any.toString(): String`), `Enum.name` (kotlinc: `kotlin.Enum.name:
-    String`), and `MutableMap.put` (kotlinc's non-null builtin parameters). krusty guards a value
-    kotlinc already knows is non-null (`kt42137.kt`, `kt65197.kt`, `kt15806.kt`,
-    `nestedClassesInAnnotations.kt`, `eagerLambdaAnalysisWithNoExpectedType.kt`,
-    `funWithTypeParameterWithUpperBound.kt`), or skips a narrowing kotlinc's builtin parameter creates
-    (`forInArrayListIndices.kt`).
+    therefore types `T!`: `Enum.name` (kotlinc: `kotlin.Enum.name: String`) and `MutableMap.put`
+    (kotlinc's non-null builtin parameters). krusty guards a value kotlinc already knows is non-null
+    (`kt42137.kt`, `kt65197.kt`, `kt15806.kt`, `nestedClassesInAnnotations.kt`,
+    `eagerLambdaAnalysisWithNoExpectedType.kt`, `funWithTypeParameterWithUpperBound.kt`), or skips a
+    narrowing kotlinc's builtin parameter creates (`forInArrayListIndices.kt`). `toString()` on a
+    `CharSequence`, `Throwable`, or other interface receiver is not this gap: an interface
+    redeclaration is not a member, and a mapped class such as `Throwable` keeps the builtin result.
   * An INFERRED declaration type: kotlinc commits an expression-body function's inferred return to the
     NON-NULL bound of a flexible body, so the guard lands inside that function; krusty keeps `T!`
     there and guards at the caller's declared type instead (`collectionAssignGetMultiIndex.kt`). This
@@ -2569,12 +2572,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   not-null. A JDK method of a MAPPED builtin classifier (`java.lang.Throwable` for `kotlin.Throwable`,
   `java.lang.annotation.Annotation`) is not a Java declaration in Kotlin's scope — kotlinc's
   `JvmMappedScope` shows the builtin it overrides — so it takes that declaration's rigid result without
-  the attribute and is not guarded (`ClassCastException().toString()`). A `@NotNull` Java result is
+  the attribute and is not guarded (`ClassCastException().toString()`). A Java interface method that
+  only redeclares `Object.toString()`, `hashCode()`, or `equals(Object)` is not a member
+  (`JavaMember.isObjectMethodInInterface`): `Path.toString()`, `CharSequence.toString()`, and the
+  same call on an interface that declares those methods resolve to `kotlin.Any` and compile as
+  `invokevirtual java/lang/Object.*` with no expression check. A class keeps a method it declares,
+  so `StringBuilder.toString()` and `File.toString()` are enhanced and checked, while an inherited
+  call such as `Number.toString()` names the receiver class (`invokevirtual Number.toString`) and is
+  not checked. A `@NotNull` Java result is
   enhanced on its own. Not yet modeled: the attribute travelling through an inferred lambda result
   (`sb.toString().also { }`), the message-less `checkNotNull` kotlinc puts on an inferred local
   initialized by an enhanced conditional, rigid type arguments of an enhanced FUNCTION result (only
   property reads are made rigid), and `NULLABLE` enhancement (`HashMap.get` stays `V!`).
-  Tests: `tests/enhanced_result_null_check_e2e.rs` (per-method differential vs kotlinc and a run).
+  Tests: `tests/enhanced_result_null_check_e2e.rs` (per-method differential vs kotlinc and a run);
+  `tests/interface_object_method_e2e.rs` (an interface's `Object` redeclaration versus a class that
+  declares or inherits the method).
 - **`EnhancedNullability` travels with the type argument it marks.** `computeIndexedQualifiers`
   enhances every flexible position of a Java result that an overridden declaration fixes not-null,
   type arguments included: `HashMap.entrySet()`, read as `entries`, is a rigid set of rigid, marked
@@ -4004,12 +4016,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for `ULong`); `toString`/templates use
   `Integer.toUnsignedString`. Infix `and`/`or`/`xor` of the same `UInt` or `ULong`, and infix `shl`/`shr`
   with an `Int` count, are the carrier opcode (`iand`/`ior`/`ixor`/`ishl`, and `iushr`/`lushr` for `shr`)
-  followed by `constructor-impl`. `inv()` is `xor` with all bits set, then `constructor-impl`. A
-  mixed-width overload stays an ordinary call. `UInt.toLong()` zero-extends via `Integer.toUnsignedLong` (not the
+  followed by `constructor-impl`. That call ends the inline-only member: inside a condition the
+  line in effect is written again immediately, on the following jump, and anywhere else it is
+  forgotten so the next mark of the same line — the literal argument of an outer `or`, the store
+  of the result, or the `return` — is kept. A literal argument takes the line off a plain local
+  receiver of a declaration or expression. A condition keeps that line on the first instruction
+  instead, and an assignment keeps it on the receiver load and writes it again at the store.
+  A nested assignment `x = (x and 0x7fu) or 0x80u` keeps that line on the inner receiver; the
+  inner literal shares the entry. The outer literal is marked after the inner `constructor-impl`,
+  and the store after the outer one. The assignment state covers the whole right-hand side, so
+  the inner operation does not hand its line to its own literal.
+  Otherwise the receiver load keeps its line. The other argument, when it is a plain local,
+  records no line of its own, including a local on a later source line. A call in operand
+  position (`toUInt()`, `g()`) keeps the line it wrote. `inv()` is
+  `xor` with all bits set, then `constructor-impl`, and keeps the mark on the operation because
+  its mask is positionless. A mixed-width overload stays an ordinary call. `UInt.toLong()` zero-extends via `Integer.toUnsignedLong` (not the
   sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into a reference context uses the
   inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and `unbox-impl` on read, `is UInt` →
   `instanceof kotlin/UInt`) — never `Integer`, so identity and large values are preserved.
-  `tests/unsigned_e2e.rs`, `tests/unsigned_bitwise_e2e.rs`, `tests/feature_coverage_i_e2e.rs`.
+  `tests/unsigned_e2e.rs`, `tests/unsigned_bitwise_e2e.rs`,
+  `tests/unsigned_bitwise_lines_e2e.rs`, `tests/feature_coverage_i_e2e.rs`.
   With `+ImplicitSignedToUnsignedIntegerConversion`, a parameter marked
   `@kotlin.internal.ImplicitIntegerCoercion` also accepts a signed integer literal or another
   `@ImplicitIntegerCoercion` constant and converts that value to the unsigned carrier. `Int` to
@@ -6603,9 +6629,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   sees it. A CONSTRUCTOR parameter is a parameter position even when the same declaration also backs a
   field: `class Box(val c: Container<Number>)` with `class Container<out T>` signs its `<init>`
   `(LContainer<+Ljava/lang/Number;>;)V`, its field `LContainer<Ljava/lang/Number;>;` and its getter
-  `()LContainer<Ljava/lang/Number;>;`. A suspend function's return travels as a `Continuation<-RET>`
+  `()LContainer<Ljava/lang/Number;>;`. A Java type does not inherit that variance from the Kotlin
+  declaration it maps to: `java.util.List<T>` and `java.lang.Comparable<T>` stay invariant
+  (`Ljava/util/List<TT;>;`, `Ljava/lang/Comparable<TT;>;`), while `List<T>` is `out` and
+  `Comparable<T>` is `in`. A suspend function's return travels as a `Continuation<-RET>`
   PARAMETER and wildcards inside it. Realized as a `Wildcards` mode threaded through the signature formatter. Test:
-  `tests/generic_signature_e2e.rs::declaration_site_wildcards_appear_in_parameter_positions_only`.
+  `tests/generic_signature_e2e.rs::declaration_site_wildcards_appear_in_parameter_positions_only`
+  and `tests/generic_signature_e2e.rs::a_java_type_keeps_invariant_parameters`.
 
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell

@@ -217,6 +217,41 @@ still recompiles. Set `KRUSTY_SECOND_JAVA_HOME` to a JDK of another feature rele
 Recording each of those compiles into the archive as well rewrote the whole archive per store and
 pushed a cold scored shard past its deadline.
 
+A live kotlinc invocation writes one line straight to the test process's stderr (libtest's capture
+does not hide it), and a passing replay writes nothing:
+
+```text
+class-dump: live kotlinc cache-miss test=<module>::<case> sources=<files> fingerprint=<hex>
+```
+
+`record` replaces `cache-miss` when `KRUSTY_RECORD_CLASS_DUMPS=1` (or `KRUSTY_RECORD=1`) recompiles
+a stored entry. `uncached-compiler` replaces it when the selected kotlinc is not a release or RC, so
+that compiler never reads the archive. A box-corpus reference compile reports the same line on each
+`target/cache/ref-classes/` miss; that cache ignores a forced re-record, so its reason is `cache-miss`
+or `uncached-compiler`, and its `test` is `unknown` because box cases compile on unnamed worker
+threads (`sources` names the case's files). When the process exits, one summary names each test that
+compiled live and how many invocations it made:
+
+```text
+class-dump: live kotlinc summary invocations=<n> tests=<n>
+class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n>
+```
+
+## JVM processes
+
+kotlinc, `javac`, and `java` that the suite runs on every test are pooled. A cache hit does not
+start kotlinc. A miss uses a persistent compiler JVM (`KRUSTY_SERVER_POOL` caps the pool). `box()`
+and Java drivers use persistent `BoxRunner` and `JavaRunner` JVMs; `javac` runs once per runner
+source to compile that helper, then in-process. The conformance box runner is a separate persistent
+JVM per test thread, also compiled once.
+
+`javap` is not a process on that path. Disassembly goes through `JavaRunner`'s in-process tool, and
+only to explain a failure. The oracle for a class is byte-for-byte equality with kotlinc's class
+file. A well-formedness check reads the class file and disassembles when that read fails. A
+method-code comparison passes when the class files are identical and disassembles them only when
+they are not. The survey's reference acceptance oracle starts a kotlinc process per case; it is not
+part of `just ci`.
+
 The general test-binary deadline defaults to 120 seconds. Each conformance pass, including each
 shard of the scored byte-equality run, defaults to 120 seconds and can be adjusted with
 `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard defaults to 120 seconds and can be
@@ -362,7 +397,16 @@ For full-suite performance work, run:
 ```
 
 The final `SLOWEST TEST BINARIES` table is the first profiling signal. Use it before changing tests
-or inventing custom loops.
+or inventing custom loops. A nightly run also prints each test slower than 200ms:
+
+```text
+slow-test: summary count=<n> threshold=200ms
+slow-test: <ms>ms bin=<invocation> test=<module>::<case>
+```
+
+`KRUSTY_SLOW_TEST_MS` changes the threshold. The duration is libtest's `--report-time`. A stable
+compiler rejects that flag, so a stable run keeps the binary table and does not print per-test lines.
+Coverage always builds with the pinned nightly, so its log includes the same lines.
 
 For compiler-only conformance profiling, use:
 
@@ -384,11 +428,13 @@ wait, `box` JVM round-trip) to stderr — run the e2e binary with `--nocapture` 
 
 `just coverage` prints a wall-clock line for every phase of that job, in whole seconds:
 `coverage: phase start <name>` when the phase begins and `coverage: phase <name> <seconds>s` when it
-finishes. The phases are toolchain provision, instrumentation, the CLI build, the language-server
-build, the compiler test-binary build, the language-server test-binary build, each non-e2e test
-binary, e2e shard planning, each e2e shard, and each coverage report. Cargo's own compile progress
-stays on stderr for those builds. The run ends with `coverage: phases` repeating every finished
-phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
+finishes. The phases are toolchain provision, instrumentation, the CLI and language-server build
+(`build-bins`), the compiler test-binary build, the language-server test-binary build, each non-e2e
+test binary, e2e shard planning, each e2e shard, and each coverage report. Cargo's own compile
+progress stays on stderr for those builds. `build-bins` is one cargo invocation, so krusty is
+compiled once for both binaries, and nightly rustc is asked to run one frontend job per core
+(`-Z threads`). The run ends with `coverage: phases` repeating every
+finished phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
 `conformance-run: phase box-shard-N-of-M <seconds>s`. The shared binary job prints
 `shared-bins: phase conformance-test-binary`, `shared-bins: phase krusty-cli`, and

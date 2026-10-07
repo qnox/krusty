@@ -80,7 +80,7 @@ const SEALED: &str = "package store\n\
 
 #[test]
 fn a_discarded_exhaustive_when_without_else_pops_its_joined_value_like_kotlinc() {
-    common::method_code_diff_against_kotlinc(
+    common::class_bytes_diff_against_kotlinc(
         "DiscardedSealed",
         &[],
         SEALED,
@@ -112,7 +112,7 @@ const UNIT_BRANCHES: &str = "package store\n\
 
 #[test]
 fn a_unit_valued_exhaustive_when_without_else_keeps_its_no_match_failure_like_kotlinc() {
-    common::method_code_diff_against_kotlinc(
+    common::class_bytes_diff_against_kotlinc(
         "UnitBranches",
         &[],
         UNIT_BRANCHES,

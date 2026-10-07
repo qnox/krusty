@@ -75,7 +75,7 @@ fn inline_finally_markers_match_kotlinc() {
         // A copied finalizer consumes its declaration markers at the call site.
         "public static final int useFinally(",
     ];
-    let results = common::method_code_diffs_against_kotlinc(
+    let results = common::class_bytes_diffs_against_kotlinc(
         "InlineFinally",
         &[],
         SRC,

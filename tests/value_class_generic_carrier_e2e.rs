@@ -27,7 +27,7 @@ const SRC: &str = "@JvmInline value class R<T>(val a: T)\n\
 
 /// The source file is `Main.kt`, so the functions live in the facade `MainKt`.
 fn assert_same_method(method: &str) {
-    match common::method_code_diff_against_kotlinc("Main", &[], SRC, "MainKt", method) {
+    match common::class_bytes_diff_against_kotlinc("Main", &[], SRC, "MainKt", method) {
         Some(Ok(())) => {}
         Some(Err(diff)) => panic!("{diff}"),
         None => panic!("{method}: reference toolchain unavailable"),

@@ -144,9 +144,57 @@ impl Emitter<'_> {
         else {
             return None;
         };
+        // The coroutine transformer closes a suspension point at its declared result before the
+        // comparison consumes it. A primitive result is therefore already unboxed here even
+        // though the call's original descriptor returned `Object`; preserving that erased slot
+        // would make `areEqual(Object, Object)` consume a scalar.
+        if self.transformed_result(*arg).is_some() {
+            return None;
+        }
         let slot = *self.ir.physical_types.get(arg)?;
         (jvm_is_erased_top(ir_ty_to_jvm(&slot)) && ir_ty_to_jvm(type_operand).is_jvm_scalar())
             .then_some((*arg, slot))
+    }
+
+    /// Whether checked primitive equality consumes an ordinary JVM wrapper retained by an exact
+    /// value-class underlying-property read. The frontend's equality mode remains authoritative;
+    /// this is only the JVM representation choice for those already-selected operands. An
+    /// ordinary generic call result and an unsigned/value-class box must be unboxed instead, even
+    /// though all three producers have an erased `Object` descriptor.
+    pub(super) fn primitive_equality_uses_erased_wrapper(
+        &self,
+        mode: Option<crate::ir::EqualityMode>,
+        lhs: crate::ir::ExprId,
+        rhs: crate::ir::ExprId,
+    ) -> bool {
+        mode == Some(crate::ir::EqualityMode::Primitive)
+            && [lhs, rhs].into_iter().any(|operand| {
+                self.erased_scalar_result(operand).is_some()
+                    && self.erased_wrapper_property_coercion(operand)
+            })
+    }
+
+    /// Whether an implicit-coercion chain contains the exact generic-property read that retained
+    /// an ordinary JVM wrapper. Checked lowering can add one coercion and value-class realization
+    /// another; neither changes which recorded producer occupies the erased slot.
+    fn erased_wrapper_property_coercion(&self, mut expression: crate::ir::ExprId) -> bool {
+        loop {
+            if self
+                .ir
+                .jvm_erased_primitive_wrapper_values
+                .contains(&expression)
+            {
+                return true;
+            }
+            match self.ir.expr(expression) {
+                crate::ir::IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => expression = *arg,
+                _ => return false,
+            }
+        }
     }
 
     /// Whether `ty` names a `@JvmInline value class`, whose values use a backend-owned carrier.

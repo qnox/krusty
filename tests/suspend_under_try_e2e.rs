@@ -5,7 +5,7 @@
 use super::common;
 
 fn expect_method_matches(name: &str, src: &str, class: &str, method: &str) {
-    match common::method_code_diff_against_kotlinc(name, &[], src, class, method) {
+    match common::class_bytes_diff_against_kotlinc(name, &[], src, class, method) {
         None => panic!("reference kotlinc is provisioned"),
         Some(Ok(())) => {}
         Some(Err(difference)) => panic!("{difference}"),

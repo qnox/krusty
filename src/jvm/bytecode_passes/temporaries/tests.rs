@@ -413,6 +413,15 @@ fn a_line_mark_between_store_and_load_does_not_intervene() {
 }
 
 #[test]
+fn another_locals_range_end_between_store_and_load_intervenes() {
+    // A catch variable ending between a `try` result's store and load leaves a label in kotlinc's
+    // instruction list. That label keeps the result in its temporary even though the catch local
+    // occupies another slot and no branch targets the boundary.
+    let code = Code::new(&[op(ICONST_0), var(0x36, 1), var(0x15, 1), op(IRETURN)]).local(0, 2, 2);
+    assert_eq!(code.run(), None);
+}
+
+#[test]
 fn a_named_local_initializer_is_found_past_non_intervening_instructions() {
     let code = Code::new(&[aload(0), astore(1), op(ICONST_0), op(POP), op(RETURN)])
         .line(3)

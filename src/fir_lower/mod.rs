@@ -138,6 +138,31 @@ pub(super) fn resolved_parameter_identity(
     crate::ir::IrParameterIdentity::resolved(identity)
 }
 
+/// Declarations a per-file lowering pass must visit: this source's anchors, in declaration-id
+/// order, plus inline-payload declarations copied in from another source. Scanning the whole
+/// module for each file was quadratic.
+pub(super) fn declarations_for_lowering(
+    index: &ResolvedModuleIndex,
+    source: crate::fir::SourceFileId,
+    inline_payload: &std::collections::HashSet<crate::fir::DeclarationId>,
+) -> Vec<crate::fir::DeclarationId> {
+    let mut ids = index.declarations_in_source(source).to_vec();
+    if inline_payload.is_empty() {
+        return ids;
+    }
+    for &declaration in inline_payload {
+        let Some(anchor) = index.declaration_anchor(declaration) else {
+            continue;
+        };
+        if anchor.source != source {
+            ids.push(declaration);
+        }
+    }
+    ids.sort_by_key(|declaration| declaration.raw());
+    ids.dedup();
+    ids
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LoweringState {
     Uncomputed,
@@ -945,15 +970,23 @@ fn finish_callable_body(
         let return_value = ir.add_expr(crate::ir::IrExpr::Return(Some(value)));
         // A block's value is what returns: a lambda body's block ends at its closing `}`, which
         // kotlinc does not mark for the value it returns. The innermost value that records an end
-        // line gives it.
+        // line gives it. A same-module inline expansion is different: its outer region carries the
+        // call expression's end, while its nested values retain declaration/lambda ends for SMAP.
+        // The caller's generated return belongs to that call expression, so keep the region's end.
         let mut end = ir.expr_end_lines.get(&value).copied();
+        let inline_call_end = ir.inline_regions.contains(&value);
         let mut returned = value;
         while let crate::ir::IrExpr::Block {
             value: Some(inner), ..
         } = ir.expr(returned)
         {
             returned = *inner;
-            end = ir.expr_end_lines.get(&returned).copied().or(end);
+            let inner_end = ir.expr_end_lines.get(&returned).copied();
+            end = if inline_call_end {
+                end.or(inner_end)
+            } else {
+                inner_end.or(end)
+            };
         }
         if let Some(end) = end {
             ir.mark_implicit_return_end_line(return_value, end);

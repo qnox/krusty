@@ -20,16 +20,12 @@ pub(super) fn predeclare_constructors(
     ir: &mut IrFile,
     allow_deferred_body_local: bool,
 ) -> Result<(), FirFileLoweringFailure> {
-    for raw in 0..index.declaration_count() {
-        let declaration = DeclarationId::from_raw(
-            u32::try_from(raw).expect("too many stable declarations for a packed id"),
-        );
+    for declaration in super::declarations_for_lowering(index, source, inline_payload_declarations)
+    {
         let Some(anchor) = index.declaration_anchor(declaration) else {
             continue;
         };
-        if (anchor.source != source && !inline_payload_declarations.contains(&declaration))
-            || anchor.kind != crate::fir::DeclarationKind::Constructor
-        {
+        if anchor.kind != crate::fir::DeclarationKind::Constructor {
             continue;
         }
         if ir.checked_constructor_bodies.contains_key(&declaration) {
@@ -451,8 +447,13 @@ pub(super) fn finalize_constructors(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
-    for raw in 0..index.declaration_count() {
-        let classifier = DeclarationId::from_raw(raw as u32);
+    let mut classifiers = ir
+        .checked_classifier_classes
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    classifiers.sort_by_key(|declaration| declaration.raw());
+    for classifier in classifiers {
         let Some(anchor) = index.declaration_anchor(classifier) else {
             continue;
         };
@@ -462,17 +463,18 @@ pub(super) fn finalize_constructors(
         let Some(class) = ir.checked_classifier_classes.get(&classifier).copied() else {
             continue;
         };
-        let primary = (0..index.declaration_count()).find_map(|raw| {
-            let declaration = DeclarationId::from_raw(raw as u32);
-            index
-                .declaration_anchor(declaration)
-                .is_some_and(|constructor| {
-                    constructor.kind == crate::fir::DeclarationKind::Constructor
-                        && constructor.owner == Some(classifier)
-                        && constructor.sibling == 0
-                })
-                .then_some(declaration)
-        });
+        let primary = index
+            .owned_declarations(classifier)
+            .iter()
+            .copied()
+            .find(|declaration| {
+                index
+                    .declaration_anchor(*declaration)
+                    .is_some_and(|constructor| {
+                        constructor.kind == crate::fir::DeclarationKind::Constructor
+                            && constructor.sibling == 0
+                    })
+            });
         ir.classes[class as usize].has_primary_ctor = primary.is_some();
         if let Some(visibility) = primary
             .and_then(|declaration| index.declaration_header(declaration))

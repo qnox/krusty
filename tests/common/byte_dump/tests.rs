@@ -1809,3 +1809,35 @@ fn make_cached_metadata_equal_but_keep_prior_identity(path: &Path) {
         ..replacement
     });
 }
+
+#[test]
+fn a_live_kotlinc_line_names_the_test_sources_and_fingerprint() {
+    let root = temp_root("live-line");
+    let src = root.join("Naming.kt");
+    std::fs::write(&src, "fun box() = 1\n").unwrap();
+    let args = vec![
+        "-d".to_string(),
+        root.join("out").display().to_string(),
+        src.display().to_string(),
+    ];
+    let invocation = parse_invocation(&args)
+        .expect("readable invocation")
+        .expect("output directory and source");
+    let line = format_live_kotlinc_line(
+        "cache-miss",
+        "naming::box",
+        &invocation.label,
+        &hex128(invocation.fingerprint),
+    );
+    assert_eq!(
+        line,
+        format!(
+            "class-dump: live kotlinc cache-miss test=naming::box sources=Naming.kt fingerprint={}\n",
+            hex128(invocation.fingerprint)
+        )
+    );
+    assert_eq!(classify_live_kotlinc(false, true), "uncached-compiler");
+    assert_eq!(classify_live_kotlinc(true, true), "record");
+    assert_eq!(classify_live_kotlinc(true, false), "cache-miss");
+    let _ = std::fs::remove_dir_all(&root);
+}

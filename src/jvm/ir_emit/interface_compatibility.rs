@@ -124,16 +124,17 @@ pub(super) fn emit_inherited_default_surface(
             0
         };
         if matches!(target, JdHolderTarget::AccessBridge) {
-            emit_jd_access_bridge(
+            access_bridges::emit_jd_access_bridge(
                 cw,
                 c.fq_name,
                 c.decl_line,
-                JdAccessBridgeMember {
+                access_bridges::JdAccessBridgeMember {
                     name: &name,
                     param_tys: &param_tys,
                     parameter_names: &local_variable_names,
                     ret: physical_ret,
                     varargs,
+                    suspend: default.suspend,
                 },
             );
         }

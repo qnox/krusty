@@ -6,9 +6,9 @@ use super::*;
 impl ClassWriter {
     /// Pre-intern the primary constructor's HEADER in kotlinc/ASM's visit order: name, descriptor,
     /// generic `Signature`, its own annotations, then its parameter annotations. ASM interns a
-    /// method's header before its body, while krusty builds the body first; the body itself then
-    /// interns naturally, since the constructor is the first method krusty emits. Call BEFORE any
-    /// `add_field`/`add_method` for the class.
+    /// method's header before its body, while krusty builds the body first. Call at the constructor's
+    /// actual method-schedule position: before all methods for ordinary classes, but after the
+    /// declared methods that precede a value class's private constructor.
     pub fn seed_plain_class_pool(
         &mut self,
         ctor_desc: &str,

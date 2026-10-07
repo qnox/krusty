@@ -121,6 +121,7 @@ impl ClassWriter {
             max_locals: 0,
             code: None,
             implicit_void_return_pc: None,
+            suppress_entry_line: false,
             rewrite_source: None,
             exceptions: Vec::new(),
             stackmap: None,

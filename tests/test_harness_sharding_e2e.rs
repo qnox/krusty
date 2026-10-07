@@ -1061,6 +1061,90 @@ fn a_panicking_caller_releases_its_server_claim() {
     assert_eq!(next_id.load(Ordering::Relaxed), 1);
 }
 
+fn slow_test_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("libtest-shards.sh")
+}
+
+fn run_slow_tests(log: &Path, threshold: &str) -> std::process::Output {
+    Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; libtest_slow_tests \"$2\" \"$3\"",
+            "slow-tests",
+        ])
+        .arg(slow_test_script())
+        .arg(log)
+        .arg(threshold)
+        .output()
+        .expect("list slow tests")
+}
+
+#[test]
+fn slow_tests_are_those_over_the_threshold() {
+    let dir = std::env::temp_dir().join(format!("krusty-slow-tests-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("slow-test fixture dir");
+    let log = dir.join("sample.log");
+    fs::write(
+        &log,
+        "\
+running 5 tests
+test fast::one ... ok <0.001s>
+test boundary::exact ... ok <0.200s>
+test boundary::over ... ok <0.201s>
+test slow::fails ... FAILED <1.500s>
+test slow::skipped ... ignored
+test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.70s
+",
+    )
+    .expect("write sample log");
+
+    let listed = run_slow_tests(&log, "200");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(listed.stdout).expect("utf-8"),
+        "1500\tslow::fails\n201\tboundary::over\n"
+    );
+
+    let shard = dir.join("shard-1-of-2.log");
+    fs::write(&shard, "test other::case ... ok <0.250s>\n").expect("write shard log");
+    let printed = Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; KRUSTY_SLOW_TEST_MS=200 libtest_print_slow_tests \"$2\" \"$3\"",
+            "print-slow-tests",
+        ])
+        .arg(slow_test_script())
+        .arg(&log)
+        .arg(&shard)
+        .output()
+        .expect("print slow tests");
+    assert!(
+        printed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(printed.stdout).expect("utf-8"),
+        "\
+slow-test: summary count=3 threshold=200ms
+slow-test: 1500ms bin=sample test=slow::fails
+slow-test: 250ms bin=shard-1-of-2 test=other::case
+slow-test: 201ms bin=sample test=boundary::over
+"
+    );
+
+    let invalid = run_slow_tests(&log, "200ms");
+    assert_eq!(invalid.status.code(), Some(2));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn phase_timing_records_start_duration_and_summary() {
@@ -1134,12 +1218,23 @@ fn phase_timing_coverage_run_prints_every_phase() {
     .expect("write unit stub");
     fs::write(bin_dir.join("just"), "#!/bin/sh\nexit 0\n").expect("write just stub");
     fs::write(
+        bin_dir.join("nproc"),
+        "#!/bin/sh\n[ \"${STUB_CPU_SOURCE:-}\" = nproc ] || exit 1\nprintf '%s\\n' 7\n",
+    )
+    .expect("write nproc stub");
+    fs::write(
+        bin_dir.join("sysctl"),
+        "#!/bin/sh\n[ \"${STUB_CPU_SOURCE:-}\" = sysctl ] || exit 1\n[ \"$*\" = '-n hw.ncpu' ] || exit 2\nprintf '%s\\n' 5\n",
+    )
+    .expect("write sysctl stub");
+    let build_log = temp.join("builds.txt");
+    fs::write(
         bin_dir.join("cargo"),
-        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == +* ]]; then shift; fi\ncmd=\"${1:-}\"; shift || true\ncase \"$cmd\" in\n  llvm-cov)\n    sub=\"${1:-}\"; shift || true\n    case \"$sub\" in\n      --version) exit 0 ;;\n      show-env) printf '%s\\n' true ;;\n      report)\n        out=\"\"\n        while [ $# -gt 0 ]; do\n          if [ \"$1\" = --output-path ]; then out=\"$2\"; shift 2; else shift; fi\n        done\n        mkdir -p \"$(dirname \"$out\")\"\n        printf '%s\\n' '{\"data\":[{\"totals\":{\"regions\":{\"covered\":1,\"count\":2},\"functions\":{\"covered\":1,\"count\":2},\"lines\":{\"covered\":1,\"count\":2},\"branches\":{\"covered\":1,\"count\":2}}}]}' >\"$out\"\n        ;;\n      *) echo \"unexpected llvm-cov $sub\" >&2; exit 2 ;;\n    esac\n    ;;\n  build)\n    pkg=\"\"\n    prev=\"\"\n    for arg in \"$@\"; do\n      if [ \"$prev\" = -p ]; then pkg=\"$arg\"; fi\n      prev=\"$arg\"\n    done\n    mkdir -p \"$CARGO_TARGET_DIR/coverage\"\n    case \"$pkg\" in\n      krusty-cli) bin=\"$CARGO_TARGET_DIR/coverage/krusty\" ;;\n      krusty-lsp) bin=\"$CARGO_TARGET_DIR/coverage/krusty-lsp\" ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$bin\"\n    chmod +x \"$bin\"\n    ;;\n  test)\n    echo \"cargo: visible stderr $*\" >&2\n    if [[ \" $* \" == *\" --test e2e \"* ]]; then\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$E2E_BIN\\\"}\"\n    else\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$UNIT_BIN\\\"}\"\n    fi\n    ;;\n  *) echo \"unexpected cargo $cmd $*\" >&2; exit 2 ;;\nesac\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == +* ]]; then shift; fi\ncmd=\"${1:-}\"; shift || true\ncase \"$cmd\" in\n  llvm-cov)\n    sub=\"${1:-}\"; shift || true\n    case \"$sub\" in\n      --version) exit 0 ;;\n      show-env) printf '%s\\n' true ;;\n      report)\n        out=\"\"\n        while [ $# -gt 0 ]; do\n          if [ \"$1\" = --output-path ]; then out=\"$2\"; shift 2; else shift; fi\n        done\n        mkdir -p \"$(dirname \"$out\")\"\n        printf '%s\\n' '{\"data\":[{\"totals\":{\"regions\":{\"covered\":1,\"count\":2},\"functions\":{\"covered\":1,\"count\":2},\"lines\":{\"covered\":1,\"count\":2},\"branches\":{\"covered\":1,\"count\":2}}}]}' >\"$out\"\n        ;;\n      *) echo \"unexpected llvm-cov $sub\" >&2; exit 2 ;;\n    esac\n    ;;\n  build)\n    printf '%s\\n' \"$*\" >>\"$STUB_BUILD_LOG\"\n    echo \"cargo-rustflags:${RUSTFLAGS-}\" >&2\n    case \" $* \" in\n      *\" -p krusty-cli \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" -p krusty-lsp \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" --bin krusty \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" --bin krusty-lsp \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    mkdir -p \"$CARGO_TARGET_DIR/coverage\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    chmod +x \"$CARGO_TARGET_DIR/coverage/krusty\" \"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    ;;\n  test)\n    echo \"cargo: visible stderr $*\" >&2\n    if [[ \" $* \" == *\" --test e2e \"* ]]; then\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$E2E_BIN\\\"}\"\n    else\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$UNIT_BIN\\\"}\"\n    fi\n    ;;\n  *) echo \"unexpected cargo $cmd $*\" >&2; exit 2 ;;\nesac\n",
     )
     .expect("write cargo stub");
-    for name in ["e2e", "lsp-unit", "just", "cargo"] {
-        let path = if name == "just" || name == "cargo" {
+    for name in ["e2e", "lsp-unit", "just", "cargo", "nproc", "sysctl"] {
+        let path = if matches!(name, "just" | "cargo" | "nproc" | "sysctl") {
             bin_dir.join(name)
         } else if name == "e2e" {
             e2e_bin.clone()
@@ -1150,22 +1245,28 @@ fn phase_timing_coverage_run_prints_every_phase() {
             .expect("make stub executable");
     }
 
-    let output = Command::new("bash")
-        .arg(root.join("scripts").join("coverage.sh"))
-        .arg(&summary)
-        .env("HOME", &temp)
-        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
-        .env("CARGO_TARGET_DIR", &target)
-        .env("KRUSTY_COVERAGE_TARGET_DIR", &target)
-        .env("KRUSTY_COVERAGE_COMPILER_JSON", &compiler_json)
-        .env("KRUSTY_COVERAGE_LSP_JSON", &lsp_json)
-        .env("KRUSTY_COVERAGE_E2E_SHARDS", "1")
-        .env("KRUSTY_TEST_JOBS", "1")
-        .env("KRUSTY_TEST_THREADS", "1")
-        .env("E2E_BIN", &e2e_bin)
-        .env("UNIT_BIN", &unit_bin)
-        .output()
-        .expect("run coverage with stubbed toolchain");
+    let run_coverage = |cpu_source: &str| {
+        Command::new("bash")
+            .arg(root.join("scripts").join("coverage.sh"))
+            .arg(&summary)
+            .env("HOME", &temp)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .env("CARGO_TARGET_DIR", &target)
+            .env("KRUSTY_COVERAGE_TARGET_DIR", &target)
+            .env("KRUSTY_COVERAGE_COMPILER_JSON", &compiler_json)
+            .env("KRUSTY_COVERAGE_LSP_JSON", &lsp_json)
+            .env("KRUSTY_COVERAGE_E2E_SHARDS", "1")
+            .env("KRUSTY_TEST_JOBS", "1")
+            .env("KRUSTY_TEST_THREADS", "1")
+            .env("RUSTFLAGS", "-Z threads=4")
+            .env("E2E_BIN", &e2e_bin)
+            .env("UNIT_BIN", &unit_bin)
+            .env("STUB_BUILD_LOG", &build_log)
+            .env("STUB_CPU_SOURCE", cpu_source)
+            .output()
+            .expect("run coverage with stubbed toolchain")
+    };
+    let output = run_coverage("nproc");
     let stderr = String::from_utf8(output.stderr).expect("coverage stderr is UTF-8");
     assert!(
         output.status.success(),
@@ -1174,6 +1275,36 @@ fn phase_timing_coverage_run_prints_every_phase() {
     assert!(
         stderr.contains("cargo: visible stderr"),
         "compiler test build hid cargo stderr: {stderr}"
+    );
+    let builds = fs::read_to_string(&build_log).unwrap_or_default();
+    assert_eq!(
+        builds.lines().count(),
+        1,
+        "CLI and language server must be one cargo build: {builds}"
+    );
+    assert_eq!(
+        stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("cargo-rustflags:"))
+            .collect::<Vec<_>>(),
+        ["-Z threads=4 -Z threads=7"],
+        "nproc frontend threads were not appended: {stderr}"
+    );
+    fs::write(&build_log, "").expect("reset build log");
+    let fallback_output = run_coverage("sysctl");
+    let fallback_stderr =
+        String::from_utf8(fallback_output.stderr).expect("fallback coverage stderr is UTF-8");
+    assert!(
+        fallback_output.status.success(),
+        "coverage sysctl fallback run failed: {fallback_stderr}"
+    );
+    assert_eq!(
+        fallback_stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("cargo-rustflags:"))
+            .collect::<Vec<_>>(),
+        ["-Z threads=4 -Z threads=5"],
+        "sysctl frontend threads were not appended: {fallback_stderr}"
     );
     let starts = stderr
         .lines()
@@ -1184,8 +1315,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
         [
             "provision",
             "instrument",
-            "build-cli",
-            "build-lsp",
+            "build-bins",
             "build-compiler-tests",
             "build-lsp-tests",
             "test-lsp-unit",
@@ -1221,5 +1351,37 @@ fn phase_timing_coverage_run_prints_every_phase() {
         "missing phase total: {stderr}"
     );
     assert!(summary.is_file(), "coverage summary was not written");
+
+    fs::write(
+        &unit_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 7\n",
+    )
+    .expect("write failing unit stub");
+    let failed_unit = run_coverage("nproc");
+    assert_eq!(failed_unit.status.code(), Some(1));
+    let failed_unit_stderr =
+        String::from_utf8(failed_unit.stderr).expect("coverage stderr is UTF-8");
+    assert!(
+        failed_unit_stderr.contains("coverage: lsp-unit exited with status 7"),
+        "coverage hid unit failure: {failed_unit_stderr}"
+    );
+
+    fs::write(
+        &unit_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
+    )
+    .expect("restore unit stub");
+    fs::write(
+        &e2e_bin,
+        "#!/usr/bin/env bash\nif [ \"${1:-}\" = --list ]; then printf '%s\\n' 'alpha::one: test' '' '1 test, 0 benchmarks'; exit 0; fi\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 9\n",
+    )
+    .expect("write failing e2e stub");
+    let failed_e2e = run_coverage("nproc");
+    assert_eq!(failed_e2e.status.code(), Some(1));
+    let failed_e2e_stderr = String::from_utf8(failed_e2e.stderr).expect("coverage stderr is UTF-8");
+    assert!(
+        failed_e2e_stderr.contains("coverage: e2e-shard-1-of-1 exited with status 9"),
+        "coverage hid e2e failure: {failed_e2e_stderr}"
+    );
     fs::remove_dir_all(temp).expect("remove coverage phase directory");
 }

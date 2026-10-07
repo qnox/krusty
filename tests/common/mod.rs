@@ -2863,37 +2863,30 @@ pub fn javac_run_proc(
 }
 
 /// The `SourceDebugExtension` (SMAP) payload of a compiled class, one entry per line, or an empty
-/// vector when the class carries none. javap renders the attribute as an indented block after a
-/// `SourceDebugExtension:` header; the same text also sits in the constant pool for the
-/// `@SourceDebugExtension` annotation kotlinc attaches, and reading the block compares the attribute
-/// itself rather than that pool entry.
+/// vector when the class carries none. The attribute body is the map; the same text also sits in
+/// the constant pool for the `@SourceDebugExtension` annotation kotlinc attaches, and reading the
+/// attribute compares the map itself rather than that pool entry.
 #[allow(dead_code)]
 pub fn source_debug_extension(class_file: &Path) -> Vec<String> {
-    let dump =
-        javap(&["-v", "-p", &class_file.to_string_lossy()]).expect("pooled JavaRunner unavailable");
-    let mut out = Vec::new();
-    let mut inside = false;
-    for line in dump.lines() {
-        if line.trim() == "SourceDebugExtension:" {
-            inside = true;
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        if !line.starts_with("  ") || line.trim().is_empty() {
-            break;
-        }
-        out.push(line.trim().to_string());
+    let bytes = std::fs::read(class_file)
+        .unwrap_or_else(|error| panic!("read {}: {error}", class_file.display()));
+    match krusty::jvm::classreader::source_debug_extension(&bytes) {
+        Ok(Some(text)) => text.lines().map(str::to_string).collect(),
+        Ok(None) => Vec::new(),
+        Err(error) => panic!(
+            "read SourceDebugExtension of {}: {error:?}",
+            class_file.display()
+        ),
     }
-    out
 }
 
 /// Disassemble via the pooled JavaRunner's in-process `javap` ToolProvider — the same persistent
-/// JVM the driver tests use, so a parity test costs no `javap` process (a full JVM start) per
-/// assertion. `args` is the ordinary javap argv (e.g. `["-c", "-p", "/path/To.class"]`). Returns
-/// the disassembly text; panics on a javap error (a malformed class under test is a failure, not a
-/// skip); `None` = JVM unavailable.
+/// JVM the driver tests use, so this never starts a `javap` process. `args` is the ordinary javap
+/// argv (e.g. `["-c", "-p", "/path/To.class"]`).
+///
+/// A check that can be decided from the class file should do that and call this only to explain a
+/// failure. Returns the disassembly text; panics on a javap error (a malformed class under test is
+/// a failure, not a skip); `None` = JVM unavailable.
 #[allow(dead_code)]
 pub fn javap(args: &[&str]) -> Option<String> {
     let joined = args.join("\n");
@@ -3139,29 +3132,26 @@ pub fn byte_diff_against_kotlinc_cp_target(
     )))
 }
 
-/// Compare ONE method's instruction sequence against the reference compiler's, with the
-/// dependencies in `lib` (none when empty) built by the reference compiler.
+/// Compile `src` with kotlinc and krusty and require `class` to be the same bytes.
 ///
-/// Whole-class identity also covers the constant pool, the debug tables and `SourceDebugExtension`,
-/// which diverge for reasons of their own; this instrument answers the narrower question a splice
-/// or coroutine change is actually about — whether the emitted code is the same instructions in the
-/// same order, naming the same members, over the same local slots. Pool indices are normalized away
-/// because two pools interned in different orders describe the same references.
+/// `method` is named in the failure text. The pass condition is the class file, so a match does
+/// not disassemble anything. Dependencies in `lib` (none when empty) are built by the reference
+/// compiler.
 #[allow(dead_code)]
-pub fn method_code_diff_against_kotlinc(
+pub fn class_bytes_diff_against_kotlinc(
     name: &str,
     lib: &[(&str, &str)],
     src: &str,
     class: &str,
     method: &str,
 ) -> Option<Result<(), String>> {
-    method_code_diffs_against_kotlinc(name, lib, src, class, &[method])?.pop()
+    class_bytes_diffs_against_kotlinc(name, lib, src, class, &[method])?.pop()
 }
 
-/// [`method_code_diff_against_kotlinc`] for several methods of one compiled class. The dependency,
-/// source module, and both class files are built once; each requested method still produces its own
-/// exact instruction/local-table result and diagnostic.
-pub fn method_code_diffs_against_kotlinc(
+/// [`class_bytes_diff_against_kotlinc`] for several members of one class. The dependency and both
+/// class files are built once. A byte match passes every member without disassembly. A mismatch
+/// fails every member with that class-file difference.
+pub fn class_bytes_diffs_against_kotlinc(
     name: &str,
     lib: &[(&str, &str)],
     src: &str,
@@ -3207,21 +3197,43 @@ pub fn method_code_diffs_against_kotlinc(
         std::fs::create_dir_all(parent).ok()?;
     }
     std::fs::write(&krusty_path, krusty_bytes).ok()?;
+    let reference_bytes = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
 
-    let results = methods
-        .iter()
-        .map(|method| {
-            let reference = disassembled_method(&kref, class, method)?;
-            let actual = disassembled_method(&kout, class, method)?;
-            Some(if reference == actual {
-                Ok(())
-            } else {
+    let results = if reference_bytes == *krusty_bytes {
+        methods.iter().map(|_| Ok(())).collect()
+    } else {
+        let offset = reference_bytes
+            .iter()
+            .zip(krusty_bytes.iter())
+            .position(|(left, right)| left != right)
+            .unwrap_or_else(|| reference_bytes.len().min(krusty_bytes.len()));
+        let window = |bytes: &[u8]| {
+            let start = offset.saturating_sub(8);
+            let end = offset.saturating_add(8).min(bytes.len());
+            format!("{:02x?}", &bytes[start..end])
+        };
+        let listing = |dir: &Path| {
+            let classpath = dir.to_string_lossy();
+            let binary_name = class.replace('/', ".");
+            javap(&["-p", "-c", "-l", "-cp", classpath.as_ref(), &binary_name])
+                .unwrap_or_else(|| "(javap unavailable)".to_string())
+        };
+        let reference = listing(&kref);
+        let actual = listing(&kout);
+        methods
+            .iter()
+            .map(|method| {
                 Err(format!(
-                    "{name}/{class}.{method}: instruction sequences differ\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}"
+                    "{name}/{class}: bytes differ at offset {offset} (kotlinc {} B, krusty {} B)\n\
+                     kotlinc {}\nkrusty  {}\n{method}\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}",
+                    reference_bytes.len(),
+                    krusty_bytes.len(),
+                    window(&reference_bytes),
+                    window(krusty_bytes)
                 ))
             })
-        })
-        .collect::<Option<Vec<_>>>()?;
+            .collect()
+    };
     let _ = std::fs::remove_dir_all(&dir);
     Some(results)
 }
@@ -3232,91 +3244,33 @@ pub fn method_code_diffs_against_kotlinc(
 /// A spliced inline function's name still occurs in the class: its inline-depth marker
 /// (`$i$f$<callee>`) is a debug-table entry, and the source map names the file it came from. Those
 /// are not calls, and the reference compiler emits them too, so a byte search for the name answers
-/// a different question from the one a splice test is asking.
+/// a different question from the one a splice test is asking. `invokedynamic` is not a call of
+/// `callee`: its bootstrap name is not the function the splice removed.
 #[allow(dead_code)]
-pub fn class_calls_method(bytes: &[u8], class: &str, callee: &str) -> Option<bool> {
-    let dir = scratch_dir()?;
-    let path = dir.join(format!("{class}.class"));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok()?;
-    }
-    std::fs::write(&path, bytes).ok()?;
-    let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
-        .args(["-p", "-c", "-cp"])
-        .arg(&dir)
-        .arg(class.replace('/', "."))
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    let _ = std::fs::remove_dir_all(&dir);
-    Some(
-        text.lines()
-            .any(|line| line.contains("// Method ") && line.contains(&format!(".{callee}:"))),
-    )
-}
-
-/// One method's instructions and its `LocalVariableTable`, with constant-pool indices normalized
-/// away and the entry each one names kept (`invokestatic # // Method Boxing.boxInt:(I)…`), so a
-/// call to a different member is a difference.
-///
-/// The `LineNumberTable` is deliberately excluded: a spliced body's line numbers are output lines
-/// that only a `SourceDebugExtension` gives meaning to, and krusty does not emit one yet
-/// (`docs/JVM_INLINE_BEFORE_CPS.md` a5/a6). Including it would fail for a reason this instrument is
-/// not measuring.
-#[allow(dead_code)]
-fn disassembled_method(dir: &Path, class: &str, method: &str) -> Option<String> {
-    let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
-        .args(["-p", "-c", "-l", "-cp"])
-        .arg(dir)
-        .arg(class.replace('/', "."))
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    let mut body = String::new();
-    let mut inside = false;
-    let mut skipping_lines = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(method) && trimmed.contains('(') {
-            inside = true;
-            continue;
-        }
-        if inside {
-            if trimmed.is_empty() {
-                break;
+pub fn class_calls_method(bytes: &[u8], callee: &str) -> bool {
+    let bodies = krusty::jvm::classreader::ClassBodies::parse(std::sync::Arc::new(bytes.to_vec()))
+        .expect("class under call inspection parses");
+    let methods = bodies
+        .coded_methods()
+        .map(|(name, descriptor)| (name.to_string(), descriptor.to_string()))
+        .collect::<Vec<_>>();
+    for (name, descriptor) in methods {
+        let code = bodies
+            .method_code(&name, &descriptor)
+            .unwrap_or_else(|| panic!("coded method {name}{descriptor} has no readable body"));
+        let instructions = krusty::jvm::inline::disassemble(&code.code)
+            .unwrap_or_else(|| panic!("coded method {name}{descriptor} does not disassemble"));
+        for instruction in &instructions {
+            if let Some((_, method, _, _)) =
+                krusty::jvm::inline::invoked_method(instruction, &code.source_cp)
+            {
+                if method == callee {
+                    return true;
+                }
             }
-            if trimmed == "Code:" {
-                continue;
-            }
-            if trimmed == "LineNumberTable:" {
-                skipping_lines = true;
-                continue;
-            }
-            if trimmed == "LocalVariableTable:" {
-                skipping_lines = false;
-                body.push_str("LocalVariableTable\n");
-                continue;
-            }
-            if skipping_lines {
-                continue;
-            }
-            // `12: invokestatic  #23    // Method one:(I)I` → `12: invokestatic #`
-            let mut parts = trimmed.splitn(2, "//");
-            let code = parts.next().unwrap_or(trimmed).trim();
-            let normalized = code
-                .split_whitespace()
-                .map(|token| if token.starts_with('#') { "#" } else { token })
-                .collect::<Vec<_>>()
-                .join(" ");
-            body.push_str(normalized.trim_end_matches(','));
-            if let Some(reference) = parts.next() {
-                body.push_str(" // ");
-                body.push_str(reference.trim());
-            }
-            body.push('\n');
         }
     }
-    (!body.is_empty()).then_some(body)
+    false
 }
 
 #[cfg(test)]

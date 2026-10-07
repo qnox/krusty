@@ -155,8 +155,9 @@ mod value_class_override_metadata;
 mod value_class_signatures;
 use crate::jvm::private_static_access::StaticOwner;
 use class_pool_seed::{
-    seed_accessor_locals, seed_enum_constructor_locals, seed_plain_class_pool,
-    seed_plain_constructor_tail, PlainClassPoolSeed,
+    seed_accessor_locals, seed_ctor_before_members, seed_enum_constructor_locals,
+    seed_plain_constructor_tail, seed_value_class_method_locals, seed_value_ctor_after_members,
+    PlainClassPoolSeed,
 };
 pub(super) use enclosure::{class_enclosure, property_accessor_function};
 use primary_constructor_parameters::{
@@ -2246,6 +2247,7 @@ struct ScheduledMemberEmission<'a> {
     param_assertions: bool,
     env: &'a EmitEnv<'a>,
     markers: &'a std::collections::HashSet<u32>,
+    byte_parity: bool,
 }
 
 /// Emit one member of the class's source schedule: a property's accessors (and its annotation
@@ -2264,6 +2266,7 @@ fn emit_scheduled_member(
         param_assertions,
         env,
         markers,
+        byte_parity,
     } = *emission;
     let fid = match member {
         SourceOrderedMember::Property(property) => {
@@ -2361,6 +2364,7 @@ fn emit_scheduled_member(
             !f.is_static,
             env,
         );
+        seed_value_class_method_locals(byte_parity, ir, c, fid, cw);
         if ir.function_reference_access_bridges.contains(&fid) {
             access_bridges::emit_function_reference_access_bridge(
                 ir,
@@ -2594,9 +2598,7 @@ fn emit_class(
         fq_name: &fq_name,
         ctor_signature: ctor_signature.as_deref(),
     };
-    if byte_parity && c.has_primary_ctor {
-        seed_plain_class_pool(pool_seed(), &mut cw);
-    }
+    seed_ctor_before_members(byte_parity, pool_seed(), &mut cw);
     // Access: an extended or abstract class must not be `final`; a class with an emitted abstract
     // method is `ACC_ABSTRACT`. An inline-splice implementation is deliberately body-less after its
     // checked body has been consumed, but it is not a JVM method declaration at all.
@@ -2805,6 +2807,7 @@ fn emit_class(
         param_assertions: opts.param_assertions,
         env,
         markers: &markers,
+        byte_parity,
     };
     // A value class's declared members and `Any` overrides precede its private primary `<init>`,
     // which its generated representation members follow; every other class starts with `<init>`.
@@ -2819,6 +2822,7 @@ fn emit_class(
     if c.is_value {
         inherited_default_forwarders::emit_value_class_inherited_defaults(ir, c, &mut cw, env);
     }
+    seed_value_ctor_after_members(byte_parity, pool_seed(), &mut cw);
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
@@ -3244,11 +3248,18 @@ fn emit_class(
             &mut cw,
         );
     }
-    cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
         .then(|| build_class_metadata(ir, c, opts, env))
         .flatten();
+    // kotlinc visits a value class's generated field/method nullability before its class-level
+    // `@JvmInline`. Preserve that physical writer order without changing ordinary-class emission.
+    let early_value_nullability =
+        c.is_value && computed.is_some() && !is_coroutine_state_machine(c);
+    if early_value_nullability {
+        attach_synth_nullability(ir, c, &mut cw);
+    }
+    cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
     // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
     // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
@@ -3269,29 +3280,50 @@ fn emit_class(
             },
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
-        attach_synth_nullability(ir, c, &mut cw);
+        if !early_value_nullability {
+            attach_synth_nullability(ir, c, &mut cw);
+        }
     }
     if continuation_metadata.is_some() {
+        let invoke_suspend = c
+            .methods
+            .iter()
+            .copied()
+            .find(|&fid| {
+                ir.function_parameter_identities(fid)
+                    .is_some_and(|identities| {
+                        matches!(
+                            identities,
+                            [crate::ir::IrParameterIdentity {
+                                role: crate::ir::IrParameterRole::Generated(
+                                    crate::ir::IrGeneratedParameterRole::ContinuationResult
+                                ),
+                                ..
+                            }]
+                        )
+                    })
+            })
+            .expect("a continuation class owns its recorded resume method");
+        let function = &ir.functions[invoke_suspend as usize];
+        let parameters = jvm_function_params(ir, invoke_suspend);
+        let descriptor = method_descriptor(
+            &parameters,
+            jvm_declared_ty(&env.override_results.physical_result(ir, invoke_suspend)),
+        );
+        let result_name =
+            crate::jvm::parameter_names::function_locals(ir, invoke_suspend, &parameters)
+                .and_then(|names| names.into_iter().next().flatten())
+                .expect("a continuation result has a JVM local name");
         let self_desc = format!("L{fq_name};");
         cw.set_method_debug(
-            "invokeSuspend",
-            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            &function.name,
+            &descriptor,
             None,
             &[
                 ("this".to_string(), self_desc, 0),
-                ("$result".to_string(), "Ljava/lang/Object;".to_string(), 1),
+                (result_name, "Ljava/lang/Object;".to_string(), 1),
             ],
         );
-        // A continuation's `invokeSuspend` is compiler-manufactured, but kotlinc still names its
-        // parameter under `-java-parameters`. (Its `<init>` is named where that constructor's own
-        // debug tables are attached, with the descriptor in scope there.)
-        if env.java_parameters {
-            cw.set_method_parameters(
-                "invokeSuspend",
-                "(Ljava/lang/Object;)Ljava/lang/Object;",
-                &super::method_parameters::continuation_invoke_suspend(),
-            );
-        }
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
@@ -3616,16 +3648,21 @@ fn emit_interface_class(
             crate::jvm::parameter_names::function_locals(ir, fid, &physical_params),
         )
         .expect("an access bridge carries exact declaration parameter identities");
-        emit_jd_access_bridge(
+        access_bridges::emit_jd_access_bridge(
             &mut cw,
             c.fq_name,
             c.decl_line,
-            JdAccessBridgeMember {
+            access_bridges::JdAccessBridgeMember {
                 name: &f.name,
                 param_tys: &physical_params,
                 parameter_names: &parameter_names,
                 ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
                 varargs: method_access::varargs_access(ir, fid),
+                // A split interface member's source declaration is the trampoline, while
+                // `suspend_funs` stays with the `$suspendImpl` body carrier that the coroutine
+                // transformer owns. The copied declared signature is the exact semantic fact
+                // this declaration-side bridge needs; do not recover it from the CPS descriptor.
+                suspend: ir.suspend_declared_sigs.contains_key(&fid),
             },
         );
     }
@@ -4579,81 +4616,6 @@ fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
         .collect()
 }
 
-/// The member shape carried through an `access$<name>$jd` bridge. The vararg bit is a recorded
-/// declaration fact, not inferred from an array descriptor.
-pub(super) struct JdAccessBridgeMember<'a> {
-    pub(super) name: &'a str,
-    pub(super) param_tys: &'a [Ty],
-    pub(super) parameter_names: &'a [Option<String>],
-    pub(super) ret: Ty,
-    pub(super) varargs: u16,
-}
-
-/// The `access$<name>$jd` bridge kotlinc puts on an `enable`-mode interface for each of its
-/// non-private default methods: a `public static synthetic` whose body makes the NON-VIRTUAL call
-/// (`invokespecial` on the interface's own method) that the `$DefaultImpls` forward and legacy
-/// `super`-callers need. Its `LineNumberTable` is one entry at the invoke instruction, on the
-/// interface's declaration line — measured, not inferred.
-fn emit_jd_access_bridge(
-    cw: &mut ClassWriter,
-    interface: crate::types::TypeName,
-    decl_line: u32,
-    member: JdAccessBridgeMember<'_>,
-) {
-    let JdAccessBridgeMember {
-        name: member_name,
-        param_tys,
-        parameter_names,
-        ret,
-        varargs,
-    } = member;
-    assert_eq!(
-        parameter_names.len(),
-        param_tys.len(),
-        "an access bridge needs every declaration parameter identity"
-    );
-    let fq = interface.render();
-    let member_desc = method_descriptor(param_tys, ret);
-    let mut with_receiver = vec![Ty::obj_name(interface)];
-    with_receiver.extend_from_slice(param_tys);
-    let bridge_desc = method_descriptor(&with_receiver, ret);
-    let name = format!("access${member_name}$jd");
-    cw.reserve_method_name(&name);
-    cw.reserve_descriptor(&bridge_desc);
-    let argument_words = 1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>();
-    let mut code = CodeBuilder::new(argument_words);
-    code.aload(0);
-    let mut slot = 1u16;
-    for ty in param_tys {
-        load(*ty, slot, &mut code);
-        slot += slot_words(*ty);
-    }
-    if decl_line != 0 {
-        code.mark_line(decl_line);
-    }
-    let target = cw.interface_methodref(&fq, member_name, &member_desc);
-    code.invokespecial(target, argument_words as i32, slot_words(ret) as i32);
-    emit_return(ret, &mut code);
-    code.ensure_locals(argument_words);
-    code.link();
-    // PUBLIC | STATIC | SYNTHETIC, plus the selected member's own ACC_VARARGS when its last
-    // physical parameter is the declared vararg.
-    cw.add_method_sig(0x1009 | varargs, &name, &bridge_desc, &code, None);
-    let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
-    let mut slot = 1u16;
-    for (index, parameter) in param_tys.iter().enumerate() {
-        if let Some(parameter_name) = &parameter_names[index] {
-            locals.push((
-                parameter_name.clone(),
-                local_variable_desc(*parameter),
-                slot,
-            ));
-        }
-        slot += slot_words(*parameter);
-    }
-    cw.set_method_debug(&name, &bridge_desc, None, &locals);
-}
-
 /// Where an `enable`-mode holder forward sends its call.
 enum JdHolderTarget<'a> {
     /// The interface's own `access$<name>$jd` bridge (the member is a default method here).
@@ -5140,7 +5102,36 @@ fn emit_method_inner_with_holder(
     // Suspend rewriting invalidates source-local expression ids, but its physical parameters remain
     // stable and reflection/debug tooling still expects `$completion` (plus the declared receiver and
     // arguments) in the LocalVariableTable.
-    if e.record_locals || ir.suspend_funs.contains(&fid) || holder_receiver.is_some() {
+    let continuation_result = ir
+        .function_parameter_identities(fid)
+        .is_some_and(|identities| {
+            matches!(
+                identities,
+                [crate::ir::IrParameterIdentity {
+                    role: crate::ir::IrParameterRole::Generated(
+                        crate::ir::IrGeneratedParameterRole::ContinuationResult
+                    ),
+                    ..
+                }]
+            )
+        });
+    if continuation_result {
+        assert!(
+            instance,
+            "a continuation's invokeSuspend is an instance method"
+        );
+        assert_eq!(
+            param_tys.len(),
+            1,
+            "a continuation's invokeSuspend has exactly its resume result"
+        );
+        let result_name = crate::jvm::parameter_names::function_locals(ir, fid, &param_tys)
+            .and_then(|names| names.into_iter().next().flatten())
+            .expect("a continuation result has a JVM local name");
+        let this_desc = format!("L{owner};");
+        code.add_local_entry(0, None, 0, "this", &this_desc);
+        code.add_local_entry(0, None, 1, &result_name, "Ljava/lang/Object;");
+    } else if e.record_locals || ir.suspend_funs.contains(&fid) || holder_receiver.is_some() {
         let parameter_identities = ir.function_parameter_identities(fid);
         if let Some(identities) = parameter_identities {
             assert_eq!(
@@ -5631,6 +5622,13 @@ struct Emitter<'a> {
     /// kotlinc's `isInsideCondition`: a `when` branch condition is being emitted, so an inlined
     /// call in it marks its own line again after the inlined code.
     inside_condition: bool,
+    /// The enclosing unsigned operation's decision to move its eager source boundary.
+    unsigned_receiver_line_moves: Option<bool>,
+    /// A plain local operand of an unsigned bitwise member is being loaded, so it records no line.
+    suppress_unsigned_local_line: bool,
+    /// An assignment of an unsigned bitwise value keeps its line on the receiver load. The store
+    /// writes that line again after `constructor-impl`.
+    unsigned_assignment_line: bool,
     /// Slot 0 remains the verifier's special uninitialized receiver until the constructor delegates.
     this_uninitialized: bool,
     /// Independent realization strategies for plain lambdas and SAM conversions.
@@ -5720,6 +5718,9 @@ impl<'a> Emitter<'a> {
             constructor_initializer_class: None,
             render_initializer_boundaries: false,
             inside_condition: false,
+            unsigned_receiver_line_moves: None,
+            suppress_unsigned_local_line: false,
+            unsigned_assignment_line: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
@@ -6054,12 +6055,25 @@ impl<'a> Emitter<'a> {
                 match local_updates::iinc_delta(self.ir, e, var, value, jt) {
                     Some(delta) if !deferred => code.iinc(self.slots[&var].0, delta),
                     _ => {
+                        // `visitSetValue` marks the assignment before the value, so a literal
+                        // argument does not take the line the way a declaration initializer's does.
+                        // The store writes the line again once `constructor-impl` has forgotten it.
+                        let unsigned = self.completes_unsigned_bitwise_value(value);
+                        let saved_assignment = self.unsigned_assignment_line;
+                        if unsigned {
+                            self.unsigned_assignment_line = true;
+                        }
                         self.emit_value(value, code);
+                        self.unsigned_assignment_line = saved_assignment;
                         // Coerced to the slot's type as the initializer is: a value of another
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back.
                         self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
                         let slot = self.activate_inline_return_frame_result(var, jt);
+                        if unsigned {
+                            code.forget_line();
+                            debug_lines::mark_statement(self.ir, e, code);
+                        }
                         store(jt, slot, code);
                     }
                 }
@@ -6093,10 +6107,8 @@ impl<'a> Emitter<'a> {
 
     fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
         debug_lines::begin_expression(self.ir, e, code);
-        self.mark_expression_start(e, code);
-        // A suspension whose machine emission owns: mark where it landed. The splice decides that
-        // position, so an offset recorded before it would be worthless, whereas an instruction
-        // travels with the code. Every marker is erased once its answers are read.
+        self.mark_value_expression_start(e, code);
+        // Mark a machine-owned suspension at its post-splice location.
         let suspension = self.machine_before(e, code);
         self.open_transformed_suspension(e, code);
         let node = self.ir.expr(e).clone();

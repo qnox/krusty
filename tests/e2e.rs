@@ -1189,6 +1189,8 @@ mod interface_delegation_expr_e2e;
 mod interface_factory_function_e2e;
 #[path = "interface_nested_classifier_e2e.rs"]
 mod interface_nested_classifier_e2e;
+#[path = "interface_object_method_e2e.rs"]
+mod interface_object_method_e2e;
 #[path = "interface_static_member_refs_e2e.rs"]
 mod interface_static_member_refs_e2e;
 #[path = "interface_supertype_members_e2e.rs"]
@@ -2611,6 +2613,8 @@ mod unresolved_supertype_diag_e2e;
 mod unsigned_array_e2e;
 #[path = "unsigned_bitwise_e2e.rs"]
 mod unsigned_bitwise_e2e;
+#[path = "unsigned_bitwise_lines_e2e.rs"]
+mod unsigned_bitwise_lines_e2e;
 #[path = "unsigned_classpath_call_e2e.rs"]
 mod unsigned_classpath_call_e2e;
 #[path = "unsigned_companion_constant_ty_e2e.rs"]

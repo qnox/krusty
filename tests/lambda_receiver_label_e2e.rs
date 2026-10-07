@@ -21,7 +21,7 @@ fun use(host: Host) {\n\
 }\n";
 
 fn expect_method_matches(class: &str, method: &str) {
-    match common::method_code_diff_against_kotlinc("ReceiverLabels", &[], SRC, class, method) {
+    match common::class_bytes_diff_against_kotlinc("ReceiverLabels", &[], SRC, class, method) {
         None => panic!("reference kotlinc is provisioned"),
         Some(Ok(())) => {}
         Some(Err(difference)) => panic!("{difference}"),

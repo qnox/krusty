@@ -260,6 +260,8 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
         return Some((replayed.code, replayed.stderr));
     }
     let result = kotlinc_compile_live(args)?;
+    // A replay returns above and prints nothing. This line names the test that reached the JVM.
+    byte_dump::report_live_kotlinc(args);
     byte_dump::remember_class_dump(args, result.0, &result.1);
     Some(result)
 }
@@ -269,8 +271,12 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
 /// compiler identity, so a second archive layer would only duplicate its entries — and the archive
 /// rewrites its whole in-memory body per stored entry and recompresses it at exit, which grows with
 /// every entry a corpus-sized caller adds.
+///
+/// Every call reaches the JVM, so every completed compile is reported like a recorded-path miss.
 pub fn kotlinc_compile_unrecorded(args: &[String]) -> Option<(i32, String)> {
-    kotlinc_compile_live(args)
+    let result = kotlinc_compile_live(args)?;
+    byte_dump::report_unrecorded_kotlinc(args);
+    Some(result)
 }
 
 /// Process-wide totals for the live compiler server, across every pool.
@@ -444,5 +450,40 @@ mod stats_tests {
         assert!(after.starts >= 1 && after.start_time > std::time::Duration::ZERO);
         assert!(after.restarts >= before.restarts);
         assert!(after.pool_wait >= before.pool_wait);
+    }
+
+    // A forced re-record (`KRUSTY_RECORD=1`) does not apply to a caller-owned cache, so the reason
+    // is the same whether or not the variable is set.
+    #[test]
+    fn an_unrecorded_compile_reports_one_live_kotlinc_cache_miss_for_its_test() {
+        let test = std::thread::current()
+            .name()
+            .expect("libtest names the test thread")
+            .to_string();
+        let root = super::super::scratch_dir().expect("allocate a compile directory");
+        let source = root.join("Reported.kt");
+        std::fs::write(&source, "fun reported() = 1\n").expect("write the source");
+        let args = [
+            "-d".to_string(),
+            root.join("classes").to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
+        ];
+        assert_eq!(
+            super::byte_dump::live_kotlinc_reasons(&test),
+            Vec::<&str>::new()
+        );
+        let (code, diagnostics) =
+            kotlinc_compile_unrecorded(&args).expect("reference compiler is provisioned");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!((code, diagnostics.as_str()), (0, ""));
+        let expected = if super::byte_dump::published_compiler_id().is_some() {
+            "cache-miss"
+        } else {
+            "uncached-compiler"
+        };
+        assert_eq!(
+            super::byte_dump::live_kotlinc_reasons(&test),
+            vec![expected]
+        );
     }
 }

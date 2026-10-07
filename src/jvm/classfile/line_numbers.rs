@@ -48,15 +48,19 @@ impl ClassWriter {
         {
             return;
         }
-        let (needs_lnt, needs_lvt) = match self
+        let (needs_lnt, needs_lvt, suppress_entry_line) = match self
             .methods
             .iter()
             .find(|method| method.name == n && method.desc == d)
         {
-            Some(method) => (method.lnt.is_empty(), method.lvt.is_empty()),
+            Some(method) => (
+                method.lnt.is_empty(),
+                method.lvt.is_empty(),
+                method.suppress_entry_line,
+            ),
             None => return,
         };
-        if !needs_lnt {
+        if !needs_lnt && !suppress_entry_line {
             if let Some((0, line)) = lnt {
                 if let Some(method) = self
                     .methods
@@ -195,6 +199,22 @@ impl CodeBuilder {
         let _ = self.record_line(line);
     }
 
+    /// Record a source line at a control-flow entry even when the same line was in effect on the
+    /// preceding linear path. Exception handlers start a distinct execution path, and kotlinc
+    /// retains their entry in the line table rather than deduplicating it against unreachable
+    /// fall-through state.
+    pub(crate) fn mark_control_entry_line(&mut self, line: u32) {
+        if self.dead || self.bytes.len() > u16::MAX as usize {
+            return;
+        }
+        let line = line.min(u16::MAX as u32) as u16;
+        let pc = self.bytes.len() as u16;
+        match self.line_marks.last_mut() {
+            Some((last_pc, last_line)) if *last_pc == pc => *last_line = line,
+            _ => self.line_marks.push((pc, line)),
+        }
+    }
+
     /// [`Self::mark_line`], reporting the index of the entry left in effect AT THE CURRENT pc —
     /// `None` when this call wrote none there.
     ///
@@ -305,6 +325,29 @@ impl CodeBuilder {
                 .is_some_and(|(lpc, _)| *lpc as usize == pc)
         {
             self.line_marks.pop();
+        }
+    }
+
+    /// Withdraw `line` when it was marked at the current offset and no instruction occupies it yet.
+    ///
+    /// Kotlin's unsigned binary members begin their source position between a plain receiver and a
+    /// literal argument, so that eager boundary does not own the receiver load. A mark at an earlier
+    /// offset stays: a call such as `toUInt()` has already written its own line there, and a
+    /// zero-initializer on the same line is not the literal's to take.
+    pub(crate) fn withdraw_operand_line(&mut self, line: u32) {
+        let line = line.min(u16::MAX as u32) as u16;
+        let pc = self.bytes.len();
+        if self
+            .line_marks
+            .last()
+            .is_some_and(|&(marked_pc, marked)| marked == line && marked_pc as usize == pc)
+        {
+            let removed = self.line_marks.len() - 1;
+            self.suppress_entry_line |= self.line_marks[removed].0 == 0;
+            self.line_marks.pop();
+            if self.retained_line_mark == Some(removed) {
+                self.retained_line_mark = None;
+            }
         }
     }
 

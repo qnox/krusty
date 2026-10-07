@@ -52,29 +52,16 @@ fn serializer_object_emits_wellformed_bytecode() {
             )
         });
 
-    // Write it and run `javap` — a malformed classfile fails to parse.
-    let out = std::env::temp_dir().join(format!("krusty_seremit_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&out);
-    std::fs::create_dir_all(&out).unwrap();
-    let p = out.join("Foo$$serializer.class");
-    std::fs::write(&p, &ser.1).unwrap();
-    let javap = std::env::var("JAVA_HOME")
-        .map(|j| PathBuf::from(j).join("bin/javap"))
-        .unwrap_or_else(|_| PathBuf::from("javap"));
-    let o = Command::new(javap)
-        .arg("-p")
-        .arg(&p)
-        .output()
-        .expect("run javap");
-    assert!(
-        o.status.success(),
-        "emitted Foo$$serializer.class is malformed (javap failed):\n{}",
-        String::from_utf8_lossy(&o.stderr)
-    );
-    eprintln!(
-        "gap #7 emit OK — Foo$$serializer.class is well-formed:\n{}",
-        String::from_utf8_lossy(&o.stdout)
-    );
+    if let Err(error) = krusty::jvm::classreader::parse_class(&ser.1) {
+        let out = std::env::temp_dir().join(format!("krusty_seremit_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let path = out.join("Foo$$serializer.class");
+        std::fs::write(&path, &ser.1).unwrap();
+        let listing = common::javap(&["-p", &path.to_string_lossy()])
+            .unwrap_or_else(|| "(javap unavailable)".to_string());
+        panic!("emitted Foo$$serializer.class is malformed: {error:?}\n{listing}");
+    }
 }
 
 fn runtime_jars() -> Option<(PathBuf, PathBuf, PathBuf)> {

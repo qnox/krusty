@@ -83,7 +83,7 @@ impl<'a> StreamedModuleSymbols<'a> {
 
     pub(crate) fn declares_top_level(&self, name: &str) -> bool {
         self.index
-            .declarations_named(name)
+            .top_level_declarations_named(name)
             .iter()
             .any(|declaration| {
                 self.index
@@ -1098,11 +1098,23 @@ impl<'a> StreamedModuleSymbols<'a> {
             .index
             .declaration_header(owner)
             .is_some_and(|header| header.flags.has(DeclarationFlags::ANNOTATION_CLASS));
-        for &declaration in self.index.declarations_named(name) {
+        // Both tables answer; walk the shorter one. A common spelling (`value`, `name`) is
+        // declared module-wide, an owner declares a bounded member list.
+        let named = self.index.declarations_named(name);
+        let owned = self.index.owned_declarations(owner);
+        let candidates = if owned.len() < named.len() {
+            owned
+        } else {
+            named
+        };
+        for &declaration in candidates {
             let Some(header) = self.index.declaration_header(declaration) else {
                 continue;
             };
-            if header.kind != DeclarationKind::Property || header.owner != Some(owner) {
+            if header.kind != DeclarationKind::Property
+                || header.owner != Some(owner)
+                || self.index.declaration_name(declaration) != Some(name)
+            {
                 continue;
             }
             let property = self
@@ -1330,7 +1342,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             SymbolNamespace::Package(_) => None,
         };
         let mut functions = Vec::new();
-        for &declaration in self.index.declarations_named(name) {
+        for &declaration in self.index.top_level_declarations_named(name) {
             let Some(header) = self.index.declaration_header(declaration) else {
                 continue;
             };
@@ -1484,7 +1496,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             SymbolNamespace::Package(_) => None,
         };
         let mut properties = Vec::new();
-        for &declaration in self.index.declarations_named(name) {
+        for &declaration in self.index.top_level_declarations_named(name) {
             let Some(header) = self.index.declaration_header(declaration) else {
                 continue;
             };

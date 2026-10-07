@@ -401,6 +401,11 @@ pub(super) fn synth_value_members(
         stmts.push(ir.add_expr(IrExpr::Return(Some(arg))));
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
+        ir.functions[cfid as usize].param_checks = vec![ir.classes[class_id as usize]
+            .ctor_args
+            .first()
+            .and_then(|argument| argument.check.as_ref())
+            .map(|_| crate::ir::IrParameterCheck::NonNull)];
         let declared = [ir.classes[class_id as usize].fields[0].ty];
         member_signatures::record(ir, class_id, cfid, Constructor(&declared));
         ir.jvm_value_class_representation_order.insert(cfid, 0);
@@ -529,6 +534,8 @@ pub(super) fn synth_value_members(
         let ibody = ret_block(ir, call);
         let fid = add_inst(ir, "toString", vec![], str_ir, ibody);
         realized.any_delegators.insert(fid);
+        ir.jvm_value_class_any_delegators
+            .insert(fid, crate::ir::IrValueClassAnyMember::ToString);
         ir.open_methods.insert(fid);
         if !custom_to_string {
             ir.jvm_nullability_unannotated_methods.insert(fid);
@@ -565,6 +572,8 @@ pub(super) fn synth_value_members(
         let ibody = ret_block(ir, call);
         let fid = add_inst(ir, "hashCode", vec![], int_ir, ibody);
         realized.any_delegators.insert(fid);
+        ir.jvm_value_class_any_delegators
+            .insert(fid, crate::ir::IrValueClassAnyMember::HashCode);
         ir.open_methods.insert(fid);
         if !custom_hash_code {
             ir.jvm_nullability_unannotated_methods.insert(fid);
@@ -661,6 +670,8 @@ pub(super) fn synth_value_members(
         let ibody = ret_block(ir, call);
         let fid = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody);
         realized.any_delegators.insert(fid);
+        ir.jvm_value_class_any_delegators
+            .insert(fid, crate::ir::IrValueClassAnyMember::Equals);
         crate::jvm::method_parameters::record_function(ir, fid, &["other"], &[]);
         ir.open_methods.insert(fid);
         if !custom_equals {
@@ -786,6 +797,11 @@ pub(super) fn synth_value_members(
             stmts.push(fall_through);
             let body = ir.add_expr(IrExpr::Block { stmts, value: None });
             let constructor = add_static(ir, "constructor-impl", sc.params.clone(), u_ir, body);
+            // Preserve the source constructor's entry contract on its static JVM realization.
+            // The later representation pass removes a guard when the selected carrier is
+            // primitive or admits null; a non-null reference parameter keeps the same guard and
+            // source name kotlinc gives the declared constructor.
+            ir.functions[constructor as usize].param_checks = sc.param_checks.clone();
             member_signatures::record(ir, class_id, constructor, Constructor(&sc.params));
             if sc.lines.decl_line != 0 {
                 ir.fn_decl_lines.insert(constructor, sc.lines.decl_line);

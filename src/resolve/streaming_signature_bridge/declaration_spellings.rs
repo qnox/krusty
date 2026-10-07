@@ -202,6 +202,9 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
         selected_calls: Default::default(),
         source_contracts: std::cell::RefCell::new(std::collections::HashMap::new()),
         file_import_scopes: super::file_import_scopes::FileImportScopes::default(),
+        classifier_stubs_by_source: std::cell::RefCell::new(None),
+        extension_receivers_by_declaration: std::cell::RefCell::new(None),
+        property_type_parameters_by_declaration: std::cell::RefCell::new(None),
     };
     let mut records = Vec::new();
     for stub in &headers.stubs {
