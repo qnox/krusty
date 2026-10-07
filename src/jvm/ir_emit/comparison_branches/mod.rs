@@ -21,7 +21,6 @@ impl Emitter<'_> {
                 self.unsigned_mixed_equality_branches(*op, *lhs, *rhs)
                     || (*mode != crate::ir::EqualityMode::Structural
                         && matches!(op, Eq | Ne)
-                        && !self.scalar_equality_uses_erased_reference(*mode, *lhs, *rhs)
                         && self.value_ty(*lhs).is_jvm_scalar())
                     || (matches!(op, Eq | Ne)
                         && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
@@ -310,8 +309,6 @@ impl Emitter<'_> {
         }
         let recorded_ieee = mode == Some(crate::ir::EqualityMode::Ieee754);
         let recorded_structural = mode == Some(crate::ir::EqualityMode::Structural);
-        let erased_scalar =
-            mode.is_some_and(|mode| self.scalar_equality_uses_erased_reference(mode, lhs, rhs));
         if matches!(op, Eq | Ne)
             && (recorded_ieee || (mode.is_none() && self.is_ieee754_equality(lhs, rhs)))
         {
@@ -361,7 +358,7 @@ impl Emitter<'_> {
         }
         // A recorded structural equality stays `Intrinsics.areEqual` even when inline substitution
         // stored both operands as scalars. Null and enum comparisons above keep their own shape.
-        if (recorded_structural || erased_scalar) && matches!(op, Eq | Ne) {
+        if recorded_structural && matches!(op, Eq | Ne) {
             return false;
         }
         // Structural equality's value result has different optimal consumers: value position can use it
@@ -423,19 +420,5 @@ impl Emitter<'_> {
             "(Ljava/lang/Object;Ljava/lang/Object;)Z",
         );
         code.invokestatic(m, 2, 1);
-    }
-
-    /// Equality over a scalar represented by an ordinary JVM wrapper whose value still occupies an
-    /// erased generic reference slot. The checker owns the equality semantics; this backend fact
-    /// selects the JVM operation that consumes the representation without an unbox/rebox round trip.
-    fn scalar_equality_uses_erased_reference(
-        &self,
-        mode: crate::ir::EqualityMode,
-        lhs: ExprId,
-        rhs: ExprId,
-    ) -> bool {
-        mode == crate::ir::EqualityMode::Primitive
-            && (self.erased_jvm_wrapper_result(lhs).is_some()
-                || self.erased_jvm_wrapper_result(rhs).is_some())
     }
 }

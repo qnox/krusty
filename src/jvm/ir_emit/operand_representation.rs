@@ -156,24 +156,6 @@ impl Emitter<'_> {
             .then_some((*arg, slot))
     }
 
-    /// An erased scalar result whose reference representation is an ordinary JVM wrapper.
-    /// Unsigned and value-class scalars have backend-owned box/carrier rules and must not use this
-    /// path merely because their carrier occupies a JVM scalar slot.
-    pub(super) fn erased_jvm_wrapper_result(
-        &self,
-        expression: crate::ir::ExprId,
-    ) -> Option<(crate::ir::ExprId, Ty)> {
-        let result = self.erased_scalar_result(expression)?;
-        let crate::ir::IrExpr::TypeOp { type_operand, .. } = self.ir.expr(expression) else {
-            unreachable!("erased scalar result is an implicit coercion")
-        };
-        type_operand
-            .non_null()
-            .canonical_semantic()
-            .jvm_boxed_ref()
-            .map(|_| result)
-    }
-
     /// Whether `ty` names a `@JvmInline value class`, whose values use a backend-owned carrier.
     pub(super) fn is_value_class_ty(&self, ty: &Ty) -> bool {
         ty.non_null().obj_internal().is_some_and(|fq_name| {
