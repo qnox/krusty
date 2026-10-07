@@ -425,9 +425,9 @@ impl Emitter<'_> {
         code.invokestatic(m, 2, 1);
     }
 
-    /// Equality over a Kotlin scalar type whose value still occupies an erased generic reference
-    /// slot. The checker owns the equality semantics; this backend fact selects the JVM operation
-    /// that consumes the representation without an unbox/rebox round trip.
+    /// Equality over a scalar represented by an ordinary JVM wrapper whose value still occupies an
+    /// erased generic reference slot. The checker owns the equality semantics; this backend fact
+    /// selects the JVM operation that consumes the representation without an unbox/rebox round trip.
     fn scalar_equality_uses_erased_reference(
         &self,
         mode: crate::ir::EqualityMode,
@@ -435,7 +435,7 @@ impl Emitter<'_> {
         rhs: ExprId,
     ) -> bool {
         mode == crate::ir::EqualityMode::Primitive
-            && (self.erased_scalar_result(lhs).is_some()
-                || self.erased_scalar_result(rhs).is_some())
+            && (self.erased_jvm_wrapper_result(lhs).is_some()
+                || self.erased_jvm_wrapper_result(rhs).is_some())
     }
 }
