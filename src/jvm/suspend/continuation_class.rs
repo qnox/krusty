@@ -180,6 +180,13 @@ pub(super) fn build_continuation_class(
         dispatch_receiver: Some(type_name(internal)),
         param_checks: vec![None],
     });
+    ir.fn_params.insert(
+        inv_fid,
+        crate::ir::FnParamInfo::identities(vec![crate::ir::IrParameterIdentity::generated(
+            crate::ir::IrGeneratedParameterRole::ContinuationResult,
+            None,
+        )]),
+    );
 
     // State-machine fields: `result`/`label`/`L$i` are mutable and non-private (read/written
     // cross-class by the resume machinery).

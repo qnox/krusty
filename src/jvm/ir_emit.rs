@@ -3285,26 +3285,45 @@ fn emit_class(
         }
     }
     if continuation_metadata.is_some() {
+        let invoke_suspend = c
+            .methods
+            .iter()
+            .copied()
+            .find(|&fid| {
+                ir.function_parameter_identities(fid)
+                    .is_some_and(|identities| {
+                        matches!(
+                            identities,
+                            [crate::ir::IrParameterIdentity {
+                                role: crate::ir::IrParameterRole::Generated(
+                                    crate::ir::IrGeneratedParameterRole::ContinuationResult
+                                ),
+                                ..
+                            }]
+                        )
+                    })
+            })
+            .expect("a continuation class owns its recorded resume method");
+        let function = &ir.functions[invoke_suspend as usize];
+        let parameters = jvm_function_params(ir, invoke_suspend);
+        let descriptor = method_descriptor(
+            &parameters,
+            jvm_declared_ty(&env.override_results.physical_result(ir, invoke_suspend)),
+        );
+        let result_name =
+            crate::jvm::parameter_names::function_locals(ir, invoke_suspend, &parameters)
+                .and_then(|names| names.into_iter().next().flatten())
+                .expect("a continuation result has a JVM local name");
         let self_desc = format!("L{fq_name};");
         cw.set_method_debug(
-            "invokeSuspend",
-            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            &function.name,
+            &descriptor,
             None,
             &[
                 ("this".to_string(), self_desc, 0),
-                ("$result".to_string(), "Ljava/lang/Object;".to_string(), 1),
+                (result_name, "Ljava/lang/Object;".to_string(), 1),
             ],
         );
-        // A continuation's `invokeSuspend` is compiler-manufactured, but kotlinc still names its
-        // parameter under `-java-parameters`. (Its `<init>` is named where that constructor's own
-        // debug tables are attached, with the descriptor in scope there.)
-        if env.java_parameters {
-            cw.set_method_parameters(
-                "invokeSuspend",
-                "(Ljava/lang/Object;)Ljava/lang/Object;",
-                &super::method_parameters::continuation_invoke_suspend(),
-            );
-        }
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
@@ -5083,7 +5102,36 @@ fn emit_method_inner_with_holder(
     // Suspend rewriting invalidates source-local expression ids, but its physical parameters remain
     // stable and reflection/debug tooling still expects `$completion` (plus the declared receiver and
     // arguments) in the LocalVariableTable.
-    if e.record_locals || ir.suspend_funs.contains(&fid) || holder_receiver.is_some() {
+    let continuation_result = ir
+        .function_parameter_identities(fid)
+        .is_some_and(|identities| {
+            matches!(
+                identities,
+                [crate::ir::IrParameterIdentity {
+                    role: crate::ir::IrParameterRole::Generated(
+                        crate::ir::IrGeneratedParameterRole::ContinuationResult
+                    ),
+                    ..
+                }]
+            )
+        });
+    if continuation_result {
+        assert!(
+            instance,
+            "a continuation's invokeSuspend is an instance method"
+        );
+        assert_eq!(
+            param_tys.len(),
+            1,
+            "a continuation's invokeSuspend has exactly its resume result"
+        );
+        let result_name = crate::jvm::parameter_names::function_locals(ir, fid, &param_tys)
+            .and_then(|names| names.into_iter().next().flatten())
+            .expect("a continuation result has a JVM local name");
+        let this_desc = format!("L{owner};");
+        code.add_local_entry(0, None, 0, "this", &this_desc);
+        code.add_local_entry(0, None, 1, &result_name, "Ljava/lang/Object;");
+    } else if e.record_locals || ir.suspend_funs.contains(&fid) || holder_receiver.is_some() {
         let parameter_identities = ir.function_parameter_identities(fid);
         if let Some(identities) = parameter_identities {
             assert_eq!(
