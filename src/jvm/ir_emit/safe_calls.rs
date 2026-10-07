@@ -165,12 +165,11 @@ impl Emitter<'_> {
         // bound (`T : AutoCloseable?` is `AutoCloseable`). Narrowing the duplicate to the call-site
         // class and widening it again for the member leaves a pair of `checkcast`s kotlinc never
         // writes; the null check and the call both see the bound.
-        let slot_ty =
-            super::local_variable_representation::erased_inline_parameter_read(self.ir, plan.init)
-                .filter(|erased| {
-                    plan.slot_ty.is_reference() && erased.is_reference() && *erased != plan.slot_ty
-                })
-                .unwrap_or(plan.slot_ty);
+        let slot_ty = body_local_read_slot(self, plan.init)
+            .filter(|slot| {
+                plan.slot_ty.is_reference() && slot.is_reference() && *slot != plan.slot_ty
+            })
+            .unwrap_or(plan.slot_ty);
         let erased_receiver = slot_ty != plan.slot_ty;
         self.adapt_physical_operand(source, semantic, Some(plan.semantic_ty), slot_ty, code);
         code.dup();
@@ -215,6 +214,25 @@ impl Emitter<'_> {
         }
         self.bind(end, code);
         true
+    }
+}
+
+/// The physical slot read by `expression` in the body currently owned by `emitter`.
+///
+/// Value indices restart for every inline body. `Emitter::var_types` is replaced when entering one,
+/// so it is the ownership-safe source of a read's representation; scanning the file's declarations
+/// by numeric index can bind an unrelated declaration from an adjacent or nested body.
+fn body_local_read_slot(emitter: &Emitter<'_>, mut expression: u32) -> Option<Ty> {
+    loop {
+        match emitter.ir.expr(expression) {
+            IrExpr::GetValue(value) => return emitter.var_types.get(value).copied(),
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => expression = *arg,
+            _ => return None,
+        }
     }
 }
 

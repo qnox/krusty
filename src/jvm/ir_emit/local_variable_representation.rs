@@ -49,38 +49,6 @@ fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) 
     }
 }
 
-/// The erased bound of the inlined type parameter `expression` reads, when that parameter is stored
-/// as its bound. A coercion wrapped around the read does not change the slot the value comes from.
-pub(super) fn erased_inline_parameter_read(ir: &IrFile, mut expression: ExprId) -> Option<Ty> {
-    loop {
-        match ir.expr(expression) {
-            IrExpr::GetValue(value) => return inline_parameter_erased_slot(ir, *value),
-            IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::ImplicitCoercion,
-                arg,
-                ..
-            } => expression = *arg,
-            _ => return None,
-        }
-    }
-}
-
-fn inline_parameter_erased_slot(ir: &IrFile, value: u32) -> Option<Ty> {
-    for id in 0..ir.exprs.len() {
-        let (index, ty) = match &ir.exprs[id] {
-            IrExpr::Variable { index, ty, .. } => (*index, *ty),
-            _ => continue,
-        };
-        if index != value {
-            continue;
-        }
-        if let Some(erased) = erased_inline_parameter_slot(ir, id as ExprId, ty) {
-            return Some(erased);
-        }
-    }
-    None
-}
-
 fn emit_deferred_zero(
     ir: &IrFile,
     declaration: ExprId,
