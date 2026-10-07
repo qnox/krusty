@@ -156,12 +156,12 @@ fn a_constant_the_last_later_code_names_moves_to_the_end_of_that_code() {
 }
 
 #[test]
-fn a_removed_capture_class_moves_to_its_late_inner_class_row() {
+fn a_removed_body_class_moves_to_its_late_inner_class_row() {
     let mut writer = ClassWriter::new("T", "java/lang/Object");
     let before = writer.cp.slot_count();
     writer.reserve_method_name("f");
     writer.reserve_descriptor("()V");
-    writer.seed_class("kotlin/jvm/internal/Ref$IntRef");
+    writer.seed_class("sample/Holder$Removed");
     add_static(&mut writer, "f", "()V", |code, writer| {
         code.push_string("body", writer);
         code.pop();
@@ -169,9 +169,9 @@ fn a_removed_capture_class_moves_to_its_late_inner_class_row() {
     });
     let after = writer.cp.slot_count();
     writer.add_inner_class(crate::jvm::classfile::InnerClassSpec {
-        inner: "kotlin/jvm/internal/Ref$IntRef".to_string(),
-        outer: Some("kotlin/jvm/internal/Ref".to_string()),
-        name: Some("IntRef".to_string()),
+        inner: "sample/Holder$Removed".to_string(),
+        outer: Some("sample/Holder".to_string()),
+        name: Some("Removed".to_string()),
         access: 0x0019,
     });
     let class = writer.finish();
@@ -191,11 +191,8 @@ fn a_removed_capture_class_moves_to_its_late_inner_class_row() {
             .position(|candidate| candidate == entry)
             .unwrap_or_else(|| panic!("{entry} in {entries:?}"))
     };
-    assert!(position("String body") < position("Class kotlin/jvm/internal/Ref$IntRef"));
-    assert!(
-        position("Class kotlin/jvm/internal/Ref$IntRef")
-            < position("Class kotlin/jvm/internal/Ref")
-    );
+    assert!(position("String body") < position("Class sample/Holder$Removed"));
+    assert!(position("Class sample/Holder$Removed") < position("Class sample/Holder"));
 }
 
 #[test]
