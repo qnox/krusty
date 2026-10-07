@@ -349,29 +349,6 @@ impl ConstPool {
 /// `(name_idx, desc_idx, slot, start, length)` for `LocalVariableTable`.
 type LvtEntry = (u16, u16, u16, Option<u16>, Option<u16>);
 
-/// How many parameters a JVM method descriptor `(…)ret` declares — one per top-level type, an
-/// `L…;` or `[…` counting as one.
-fn descriptor_param_count(descriptor: &str) -> usize {
-    let bytes = descriptor.as_bytes();
-    let Some(end) = descriptor.find(')') else {
-        return 0;
-    };
-    let (mut i, mut count) = (1, 0);
-    while i < end {
-        while i < end && bytes[i] == b'[' {
-            i += 1;
-        }
-        if i < end && bytes[i] == b'L' {
-            while i < end && bytes[i] != b';' {
-                i += 1;
-            }
-        }
-        i += 1;
-        count += 1;
-    }
-    count
-}
-
 struct MethodInfo {
     access: u16,
     name: u16,
