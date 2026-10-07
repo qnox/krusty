@@ -1686,6 +1686,23 @@ pub(crate) fn lower_value_classes(
     // Ascending ExprId order rewrites a child before its parent, so `prop_access` sees the rewritten child.
     let mut targets: Vec<ExprId> = target_slots.keys().copied().collect();
     targets.sort_unstable();
+    // Exact declaration-call identity → its checked substituted result. Common lowering records
+    // this edge separately because the call itself retains the declaration result (`T`) while the
+    // coercion carries the applied result (`Int`). Value-class property realization needs both:
+    // the declaration result selects the erased slot, and the applied result selects the wrapper
+    // that physically occupies that slot.
+    let applied_declaration_results = ir
+        .declaration_result_coercions
+        .iter()
+        .filter_map(|&coercion| match ir.expr(coercion) {
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                type_operand,
+            } => Some((*arg, *type_operand)),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
     // Exact identities of coercions created below to expose a value class's sole underlying
     // property. Their operand is the value-class carrier itself, but the coercion denotes property
     // extraction rather than an ordinary `X -> U` value conversion. Keep this backend-local origin
@@ -2303,12 +2320,14 @@ pub(crate) fn lower_value_classes(
                 owner,
                 result,
             }) => {
-                // The checked expression retains the applied property result (`R<Int>.a: Int`),
-                // while `result` is the declaration result (`T`). Capture the applied identity
-                // before publishing the declaration shape below: the JVM wrapper carried by an
-                // erased generic slot is selected by the applied primitive, not by spelling or by
-                // re-inferring a substitution after this boundary.
-                let applied_result = ir.logical_types.get(&id).copied().unwrap_or(result);
+                // The property call retains the declaration result (`T`); the exact checked
+                // declaration-result coercion retains its applied result (`R<Int>.a: Int`). The JVM
+                // wrapper carried by the erased slot is selected by that applied primitive, not by
+                // spelling or by re-inferring a substitution after this boundary.
+                let applied_result = applied_declaration_results
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(result);
                 sole_property_coercions.insert(id);
                 ir.logical_types.insert(id, result);
                 if let Repr::Unboxed(nested) = repr_of_ty(&result, &under) {
