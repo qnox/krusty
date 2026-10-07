@@ -26,9 +26,6 @@ pub(super) fn specialize(
     inline_callee: crate::fir::CallableId,
     inline_callee_source_name: &str,
 ) {
-    if reified_bindings.is_empty() {
-        return;
-    }
     let mut replacements = HashMap::<u32, u32>::new();
     let mut decisions = HashMap::<u32, bool>::new();
     let mut state = Specialization {
@@ -156,14 +153,18 @@ fn specialized_lambda_function(
     // Only a reified argument is a runtime class. Cloning for an ordinary parameter would turn an
     // erased `as? T` into a check of whatever this call inferred. A use that exists only in a nested
     // implementation still counts: that implementation is a separate function, not an expression child.
-    if !function_uses_binding(
+    // A lambda whose signature names an anonymous class is copied for the same reason as that class:
+    // the capture's class is a different one at each call.
+    let uses_reified = function_uses_binding(
         ir,
         function,
         reified_bindings,
         state.decisions,
         &mut HashSet::new(),
         &mut HashSet::new(),
-    ) {
+    );
+    let captures_anonymous = function_mentions_anonymous_class(ir, function);
+    if !uses_reified && !captures_anonymous {
         return None;
     }
     let body = ir.functions.get(function as usize)?.body?;
@@ -185,8 +186,14 @@ fn specialized_lambda_function(
     // Every source implementation that executes a reified operation is a class, including one
     // nested in another lambda. kotlinc writes that declaration class (`defineNested$1$nested$1`)
     // as well as the specialized copy at the call site. Leaving the nested declaration as an
-    // invokedynamic would erase the reified check.
-    ir.runtime_reified_lambda_implementations.insert(function);
+    // invokedynamic would erase the reified check. A lambda that captures an anonymous class is a
+    // class for the same call-site split, without claiming its body reifies a type parameter.
+    if uses_reified {
+        ir.runtime_reified_lambda_implementations.insert(function);
+    }
+    if captures_anonymous {
+        ir.inline_anonymous_lambdas.insert(function);
+    }
     let specialized = crate::ir::clone_function_implementation(
         ir,
         function,
@@ -203,8 +210,13 @@ fn specialized_lambda_function(
             parent,
         },
     );
-    ir.runtime_reified_lambda_implementations
-        .insert(specialized);
+    if uses_reified {
+        ir.runtime_reified_lambda_implementations
+            .insert(specialized);
+    }
+    if captures_anonymous {
+        ir.inline_anonymous_lambdas.insert(specialized);
+    }
     for expression in cloned.values() {
         let Some(enclosure) = ir.callable_reference_enclosures.get_mut(expression) else {
             continue;
@@ -239,6 +251,55 @@ fn specialized_lambda_function(
     }
     remap_implementation_provenance(ir, cloned_body, state.replacements);
     Some(specialized)
+}
+
+fn function_mentions_anonymous_class(ir: &crate::ir::IrFile, function: u32) -> bool {
+    let Some(shape) = ir.functions.get(function as usize) else {
+        return false;
+    };
+    shape
+        .params
+        .iter()
+        .copied()
+        .chain(std::iter::once(shape.ret))
+        .any(|ty| type_mentions_anonymous_class(ir, ty))
+        || ir.exprs.iter().enumerate().any(|(index, expr)| {
+            matches!(expr, IrExpr::Lambda { impl_fn, .. } if *impl_fn == function)
+                && ir
+                    .logical_types
+                    .get(&(index as u32))
+                    .is_some_and(|ty| type_mentions_anonymous_class(ir, *ty))
+        })
+}
+
+fn type_mentions_anonymous_class(ir: &crate::ir::IrFile, ty: Ty) -> bool {
+    match ty {
+        Ty::Obj(name, arguments) => {
+            ir.classes
+                .iter()
+                .any(|class| class.is_anonymous_object && class.fq_name == name)
+                || arguments
+                    .iter()
+                    .any(|argument| type_mentions_anonymous_class(ir, *argument))
+        }
+        Ty::Fun(signature) => signature
+            .params
+            .iter()
+            .copied()
+            .chain(std::iter::once(signature.ret))
+            .any(|part| type_mentions_anonymous_class(ir, part)),
+        Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::DefinitelyNotNull(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner)
+        | Ty::StarProjection(inner)
+        | Ty::TyParam(_, inner) => type_mentions_anonymous_class(ir, *inner),
+        Ty::Intersection(parts) => parts
+            .iter()
+            .any(|part| type_mentions_anonymous_class(ir, *part)),
+        Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => false,
+    }
 }
 
 fn function_uses_binding(

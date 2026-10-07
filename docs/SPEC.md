@@ -9835,6 +9835,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `Any`, which also changed the generic `Signature` attribute (`<Y:TX;>`).
   Tests: `tests/type_of_e2e.rs` (cross-checked against the reference compiler with kotlin-reflect)
   and `jvm::type_of::tests`; the corpus's `reflection/typeOf`, `ktype` and `typeErasure` cases.
+  An anonymous object declared in an inline function and capturing one of that function's
+  `crossinline` lambdas is a separate class at each call (`<caller>$$inlined$<callee>$N`).
+  `typeOf` of the instance names that copy, so two call sites compare unequal. A parameter-free,
+  non-suspend lambda whose body needs no value remapping is inlined into the copy's methods and is
+  not a constructor argument; the declaration class still takes the lambda. Every other lambda
+  stays the copy's initialized constructor argument until the ordinary inline-body splicer can
+  bind it. A lambda in that inline function whose result is the object is part of the same copy:
+  its implementation result type is the call-site class, so `typeOf` of the value the lambda
+  returns names that class. The lambda is a class of that call (`<caller>$$inlined$<callee>$N`),
+  as is the declaration lambda. Tests: `fir_lower::inlining::escaping_inline_object` and
+  `tests/local_object_type_of_e2e.rs`. Corpus: `reflection/typeOf/localClass.kt`.
   With `+JvmSupportRecursiveTypeOf`, recursive non-reified bounds are supported as well, including
   `reflection/typeOf/nonReifiedTypeParameters/recursiveBound{With,Without}Inline.kt`.
   A member-extension call publishes its solved method type arguments the same way an ordinary

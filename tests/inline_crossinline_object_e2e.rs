@@ -228,3 +228,56 @@ fn a_lambda_declaring_a_caller_member_stays_on_the_bridge() {
         .expect("reference kotlinc is provisioned");
     assert_eq!(output, "OK");
 }
+
+const SUSPENDING_NESTED_HELPER: &str = r#"
+import kotlin.coroutines.*
+
+private var parked: Continuation<*>? = null
+
+private suspend fun <T> park(value: () -> T): T = suspendCoroutine {
+    parked = it
+    value()
+}
+
+private object Marker
+
+private interface Caller {
+    suspend fun call(index: Int)
+}
+
+private inline fun wrap(crossinline action: suspend () -> Unit): Caller = object : Caller {
+    override suspend fun call(index: Int) {
+        action()
+    }
+}
+
+private var answer: Any? = null
+
+private fun launch(block: suspend () -> Unit) {
+    block.startCoroutine(object : Continuation<Unit> {
+        override val context: CoroutineContext = EmptyCoroutineContext
+        override fun resumeWith(result: Result<Unit>) {
+            result.getOrThrow()
+        }
+    })
+}
+
+fun box(): String {
+    launch {
+        answer = wrap {
+            park<Marker> { Marker }
+        }.call(1)
+    }
+    @Suppress("UNCHECKED_CAST")
+    (parked as Continuation<Marker>).resume(Marker)
+    return if (answer == Unit) "OK" else "FAIL: $answer"
+}
+"#;
+
+/// A suspend helper whose lambda value is emitted from the enclosing suspend-lambda class must
+/// move with that value. Its generated continuation re-enters through an accessor on the moved
+/// helper's physical owner, never through a stale facade owner.
+#[test]
+fn a_nested_suspending_helper_reenters_its_physical_owner() {
+    common::expect_box_ok_with_stdlib(SUSPENDING_NESTED_HELPER, "SuspendingNestedHelper");
+}

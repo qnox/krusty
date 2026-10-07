@@ -325,17 +325,18 @@ fn publish_checked_local_signatures_selected(
         declaration: DeclarationId,
         active: bool,
     ) -> Option<(&'a Signature, Option<Ty>)> {
+        // An anonymous object's own method is recorded on its stable declaration during the
+        // full check. The retained-analysis path has no active parser binding, so that
+        // declaration is the identity. A source-member coordinate remains for classifiers
+        // whose signature was published from the parser graph before a stable id existed.
         if method.receiver.is_some() {
             class
                 .member_ext_funs
                 .get(&method.name)?
                 .iter()
                 .find(|candidate| {
-                    if active {
-                        candidate.signature.stable_declaration == Some(declaration)
-                    } else {
-                        candidate.signature.source_member == Some(source)
-                    }
+                    candidate.signature.stable_declaration == Some(declaration)
+                        || (!active && candidate.signature.source_member == Some(source))
                 })
                 .map(|candidate| (&candidate.signature, Some(candidate.receiver_ty)))
         } else {
@@ -344,11 +345,8 @@ fn publish_checked_local_signatures_selected(
                 .get(&method.name)?
                 .iter()
                 .find(|candidate| {
-                    if active {
-                        candidate.stable_declaration == Some(declaration)
-                    } else {
-                        candidate.source_member == Some(source)
-                    }
+                    candidate.stable_declaration == Some(declaration)
+                        || (!active && candidate.source_member == Some(source))
                 })
                 .map(|candidate| (candidate, None))
         }

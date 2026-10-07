@@ -1581,6 +1581,10 @@ pub struct IrSpecializedAnonymousClass {
     /// Later materialization appends backing fields and accessors past these prefixes.
     pub field_count: u32,
     pub property_count: u32,
+    /// Capture fields removed from this copy because their `crossinline` lambda was inlined into
+    /// the copy's methods. `field_count` still counts them on the declaration, so later fields
+    /// appended to the declaration stay past that prefix.
+    pub omitted_capture_fields: u32,
     /// Property reads and writes in the inlined caller whose receiver is this copy's construction.
     /// Accessor functions are not available when the construction is retargeted, so the read is
     /// rebound once the copy's properties exist.
@@ -1943,6 +1947,10 @@ pub struct IrFile {
     /// semantically. A backend independently chooses the physical closure representation needed
     /// to realize that operation.
     pub(crate) runtime_reified_lambda_implementations: std::collections::HashSet<FunId>,
+    /// A lambda declared in an inline function whose signature names an anonymous class. The
+    /// declaration is a class, and each call copies it when that class is copied with the
+    /// expansion. This is independent of a reified operation in the body.
+    pub(crate) inline_anonymous_lambdas: std::collections::HashSet<FunId>,
     /// Class index of a function already published as that class's method.
     pub(crate) class_method_owners: std::collections::HashMap<FunId, Vec<u32>>,
     /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by

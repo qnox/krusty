@@ -5,6 +5,69 @@ fn run_ok(stem: &str, body: &str) {
 }
 
 #[test]
+fn copied_anonymous_object_keeps_a_consumed_member_lambda_elided() {
+    run_ok(
+        "CopiedAnonymousConsumedLambda",
+        "interface Source<out E> { suspend fun consume(sink: Sink<E>) }\n\
+         interface Sink<in E> { suspend fun send(item: E); fun close(cause: Throwable?) }\n\
+         suspend inline fun <E> Source<E>.consumeEach(crossinline action: suspend (E) -> Unit) {\n\
+             consume(object : Sink<E> {\n\
+                 override suspend fun send(item: E) = action(item)\n\
+                 override fun close(cause: Throwable?) { cause?.let { throw it } }\n\
+             })\n\
+         }\n\
+         suspend inline fun <E, R> Source<E>.fold(\n\
+             initial: R,\n\
+             crossinline operation: suspend (R, E) -> R,\n\
+         ): R {\n\
+             var accumulator = initial\n\
+             consumeEach { accumulator = operation(accumulator, it) }\n\
+             return accumulator\n\
+         }\n\
+         fun box(): String = \"OK\"\n",
+    );
+}
+
+#[test]
+fn nested_suspend_crossinline_object_reads_its_direct_capture_field() {
+    run_ok(
+        "NestedSuspendCrossinlineCapture",
+        "import kotlin.coroutines.*\n\
+         interface Stream<out E> { suspend fun collect(sink: Sink<E>) }\n\
+         fun interface Sink<in E> { suspend fun emit(value: E) }\n\
+         inline fun <E, R> Stream<E>.transform(\n\
+             crossinline operation: suspend Sink<R>.(E) -> Unit,\n\
+         ): Stream<R> = object : Stream<R> {\n\
+             override suspend fun collect(sink: Sink<R>) {\n\
+                 this@transform.collect { value -> sink.operation(value) }\n\
+             }\n\
+         }\n\
+         inline fun <E, R : Any> Stream<E>.choose(\n\
+             crossinline operation: suspend (E) -> R?,\n\
+         ): Stream<R> = transform { value ->\n\
+             val transformed = operation(value) ?: return@transform\n\
+             emit(transformed)\n\
+         }\n\
+         fun Stream<String>.selected(): Stream<String> = choose { it }\n\
+         fun builder(block: suspend () -> Unit) {\n\
+             block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+         }\n\
+         fun box(): String {\n\
+             var result = \"FAIL\"\n\
+             val source = object : Stream<String> {\n\
+                 override suspend fun collect(sink: Sink<String>) { sink.emit(\"OK\") }\n\
+             }\n\
+             builder {\n\
+                 source.selected().collect(object : Sink<String> {\n\
+                     override suspend fun emit(value: String) { result = value }\n\
+                 })\n\
+             }\n\
+             return result\n\
+         }\n",
+    );
+}
+
+#[test]
 fn captures_read_parameter() {
     run_ok(
         "AnonRead",
@@ -409,6 +472,89 @@ fn an_inlined_suspend_lambda_capture_is_initialized() {
          }\n";
     assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
     run_ok("AnonInlineSuspendLambdaCapture", SOURCE);
+}
+
+/// A construction inside one retained inline body can be specialized again when another inline
+/// body expands around it. The terminal copy owns the constructor descriptor; an intermediate copy
+/// must neither overwrite that descriptor nor reject the construction after ownership moves.
+#[test]
+fn a_nested_crossinline_object_has_one_terminal_constructor_owner() {
+    const SOURCE: &str = r#"
+fun interface Receiver<in T> {
+    fun accept(value: T)
+}
+
+interface Producer<out T> {
+    fun produce(receiver: Receiver<T>)
+}
+
+inline fun <T> producer(crossinline block: Receiver<T>.() -> Unit): Producer<T> =
+    object : Producer<T> {
+        override fun produce(receiver: Receiver<T>) {
+            receiver.block()
+        }
+    }
+
+inline fun <T, R> Producer<T>.convert(
+    crossinline transform: Receiver<R>.(T) -> Unit
+): Producer<R> = producer {
+    produce { value -> transform(value) }
+}
+
+fun box(): String {
+    val source = producer<String> { accept("OK") }
+    var result = "FAIL"
+    source.convert<String, String> { accept(it) }.produce { result = it }
+    return result
+}
+"#;
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("NestedCrossinlineObject", SOURCE);
+}
+
+/// A copied anonymous object can be copied again while its checked member-property read still
+/// names the original declaration. The terminal class owns the capture field; it must not call an
+/// accessor on the original class with the terminal instance as its receiver.
+#[test]
+fn a_retransformed_crossinline_object_reads_its_terminal_capture_field() {
+    const SOURCE: &str = r#"
+import kotlin.coroutines.*
+
+interface FlowCollector<T> {
+    suspend fun emit(value: T)
+}
+
+interface Flow<T : Any> {
+    suspend fun collect(collector: FlowCollector<T>)
+}
+
+inline fun <T : Any> flow(
+    crossinline block: suspend FlowCollector<T>.() -> Unit,
+): Flow<T> = object : Flow<T> {
+    override suspend fun collect(collector: FlowCollector<T>) = collector.block()
+}
+
+inline fun <T : Any, R : Any> Flow<T>.flowWith(
+    crossinline builderBlock: suspend Flow<T>.() -> Flow<R>,
+): Flow<T> = flow { builderBlock() }
+
+fun builder(block: suspend () -> Unit) {
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+}
+
+fun box(): String {
+    builder {
+        flow<Int> { emit(1) }
+            .flowWith { this }
+            .collect(object : FlowCollector<Int> {
+                override suspend fun emit(value: Int) {}
+            })
+    }
+    return "OK"
+}
+"#;
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("RetransformedCrossinlineObjectCapture", SOURCE);
 }
 
 /// A `by lazy { object : … { override fun f() = property } }` delegate. The lambda's result type is
