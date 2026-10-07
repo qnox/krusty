@@ -85,9 +85,7 @@ is time since the first phase, so overlapping phases are not added together. The
 build and the language-server test build are separate phases, and cargo's compile progress stays on
 stderr, so a long build is a named phase instead of a gap in the log. The CLI and the language
 server are one phase, `build-bins`: one cargo invocation compiles krusty once and links both
-binaries. That link uses the nightly toolchain's `ld.lld` when the toolchain ships it. Under
-`[profile.coverage]` the krusty package uses 16 codegen units, matching gate, rather than the 256
-inherited from dev.
+binaries. Nightly rustc is also asked to run one frontend job per core (`-Z threads`).
 
 ## Performance
 

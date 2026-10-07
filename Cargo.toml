@@ -110,12 +110,6 @@ codegen-units = 16
 # compiler's `debug_assert!` invariants — turning them off here would leave them dead in every CI
 # and local harness path. The coverage target dir is rebuilt from scratch each run, so incremental
 # only adds overhead.
-#
-# Dev's 256 codegen units are inherited by this profile. An instrumented krusty split into that
-# many objects spent minutes in the linker on CI (the CLI link alone was about two and a half
-# minutes after rustc had finished the crate). Sixteen, the same as gate, keeps codegen parallel
-# on a four-core runner and gives the linker far fewer objects. scripts/coverage.sh also selects
-# the nightly toolchain's ld.lld when that linker is shipped with rustc.
 [profile.coverage]
 inherits = "dev"
 opt-level = 1
@@ -123,9 +117,6 @@ overflow-checks = false
 debug-assertions = true
 debug = false
 incremental = false
-
-[profile.coverage.package.krusty]
-codegen-units = 16
 
 # Integration test binaries are explicit because Cargo otherwise treats every tests/*.rs file
 # as a separate executable. Product e2e tests are grouped into one e2e binary, while external
