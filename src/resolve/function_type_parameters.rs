@@ -31,18 +31,42 @@ pub(crate) fn publish_local_function_type_parameters(
     source_file: u32,
     classifiers: &[DeclarationId],
 ) {
+    if classifiers.is_empty() {
+        return;
+    }
     let callables = {
         let module = crate::fir::StreamedModuleSymbols::for_file(index, source_file);
         let source = CompositeSource::new(vec![
             &module as &dyn SymbolSource,
             platform as &dyn SymbolSource,
         ]);
-        function_typed(index, &source, |header| {
-            index
-                .declaration_anchor(header.declaration)
-                .and_then(|anchor| anchor.owner)
-                .is_some_and(|owner| classifiers.contains(&owner))
-        })
+        let mut callables = Vec::new();
+        for classifier in classifiers {
+            for declaration in index.owned_declarations(*classifier) {
+                let Some(header) = index.callable_for_declaration(*declaration) else {
+                    continue;
+                };
+                let Some(signature) = index.signature(header.declaration) else {
+                    continue;
+                };
+                let function_typed = signature
+                    .parameters
+                    .iter()
+                    .skip(header.shape.context_parameter_count as usize)
+                    .map(|parameter| parameter.get())
+                    .chain(
+                        header
+                            .shape
+                            .extension_receiver
+                            .map(|receiver| receiver.get()),
+                    )
+                    .any(|ty| is_some_function_type(&source, ty));
+                if function_typed {
+                    callables.push(header.id);
+                }
+            }
+        }
+        callables
     };
     for callable in callables {
         index.publish_function_typed_parameter(callable);

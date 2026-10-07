@@ -36351,17 +36351,8 @@ fn selected_inline_owned_anonymous_classes(
             // the latter has the repaired lexical owner. Follow that stable alias before walking
             // outward; otherwise nested work appears orphaned before reaching its inline owner.
             if candidate_anchor.kind == crate::fir::DeclarationKind::Classifier {
-                if let Some(canonical) = (0..index.declaration_count())
-                    .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
-                    .find(|other| {
-                        *other != candidate
-                            && active.is_some_and(|active| {
-                                active.same_parser_declaration(*other, candidate)
-                            })
-                            && index.declaration_header(*other).is_some_and(|header| {
-                                header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                            })
-                    })
+                if let Some(canonical) =
+                    active.and_then(|active| active.same_parser_local_class(candidate, index))
                 {
                     current = Some(canonical);
                     continue;

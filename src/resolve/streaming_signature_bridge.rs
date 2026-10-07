@@ -35,6 +35,7 @@ mod selected_call_facts;
 mod semantics;
 mod source_contracts;
 mod stable_function_index;
+mod stable_property_index;
 mod top_level_call;
 mod type_parameter_publication;
 mod value_parameter_publication;
@@ -86,9 +87,24 @@ struct ProductionSignatureSemantics<'a> {
     source_contracts:
         RefCell<HashMap<crate::fir::DeclarationId, std::sync::Arc<crate::contracts::Contract>>>,
     file_import_scopes: file_import_scopes::FileImportScopes,
+    /// Classifier stubs partitioned by source. Lexical enclosure walks one file's classifiers,
+    /// not every classifier in the module.
+    classifier_stubs_by_source: RefCell<Option<Vec<Vec<usize>>>>,
+    /// Extension receivers keyed by stable declaration. Resolving one header type used to scan
+    /// every class's member-extension table.
+    extension_receivers_by_declaration: RefCell<Option<HashMap<crate::fir::DeclarationId, Ty>>>,
+    /// Property type parameters keyed by stable declaration. A signature type scope used to walk
+    /// every class looking for a member-extension property that almost never matched.
+    property_type_parameters_by_declaration:
+        RefCell<Option<HashMap<crate::fir::DeclarationId, DeclarationTypeParameters>>>,
 }
 
 #[derive(Clone)]
+struct DeclarationTypeParameters {
+    formals: Vec<String>,
+    bounds: Vec<Vec<Ty>>,
+}
+
 struct ProductionSignatureDiagnostic {
     declaration: crate::fir::DeclarationId,
     file: u32,
@@ -342,24 +358,35 @@ impl ProductionSignatureSemantics<'_> {
     }
 
     fn declaration_extension_receiver(&self, declaration: crate::fir::DeclarationId) -> Option<Ty> {
-        self.callable_signature(declaration)
+        if let Some(receiver) = self
+            .callable_signature(declaration)
             .and_then(|signature| signature.source_receiver)
-            .or_else(|| {
-                self.table
-                    .ext_props
-                    .values()
-                    .flatten()
-                    .find(|property| property.stable_declaration == Some(declaration))
-                    .map(|property| property.receiver)
-            })
-            .or_else(|| {
-                self.table
-                    .classes
-                    .values()
-                    .flat_map(|class| class.member_ext_props.values().flatten())
-                    .find(|property| property.stable_declaration() == Some(declaration))
-                    .map(|property| property.receiver_ty())
-            })
+        {
+            return Some(receiver);
+        }
+        let missing = self.extension_receivers_by_declaration.borrow().is_none();
+        if missing {
+            let mut receivers = HashMap::new();
+            for property in self.table.ext_props.values().flatten() {
+                if let Some(declaration) = property.stable_declaration {
+                    receivers.entry(declaration).or_insert(property.receiver);
+                }
+            }
+            for class in self.table.classes.values() {
+                for property in class.member_ext_props.values().flatten() {
+                    if let Some(declaration) = property.stable_declaration() {
+                        receivers
+                            .entry(declaration)
+                            .or_insert_with(|| property.receiver_ty());
+                    }
+                }
+            }
+            *self.extension_receivers_by_declaration.borrow_mut() = Some(receivers);
+        }
+        self.extension_receivers_by_declaration
+            .borrow()
+            .as_ref()
+            .and_then(|receivers| receivers.get(&declaration).copied())
     }
 
     fn header_type_parameters(
@@ -3699,195 +3726,6 @@ pub(crate) fn finalized_streamed_signature_index(
         stable_function_signature(table, headers, classifier_types, declaration)
     }
 
-    fn stable_property(
-        table: &SymbolTable,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<(Vec<Ty>, Ty, Option<Ty>)> {
-        if let Some(property) = table
-            .source_props
-            .values()
-            .find(|property| property.stable_declaration == Some(declaration))
-        {
-            return Some((property.context_params.clone(), property.ty, None));
-        }
-        if let Some(property) = table
-            .ext_props
-            .values()
-            .flatten()
-            .find(|property| property.stable_declaration == Some(declaration))
-        {
-            return Some((
-                property.context_params.clone(),
-                property.ty,
-                Some(property.receiver),
-            ));
-        }
-        for class in table.classes.values() {
-            if let Some((name, property)) = class
-                .declared_props
-                .iter()
-                .find(|(_, property)| property.stable_declaration == Some(declaration))
-            {
-                let ty = class
-                    .generic_property_shapes
-                    .get(name)
-                    .copied()
-                    // Direct nullable type parameters use the legacy class signature's dedicated
-                    // nullable-parameter table rather than `generic_property_shapes`. Stable FIR
-                    // must nevertheless publish the same symbolic type as the primary constructor,
-                    // not the erased `Any?` member-selection view. The constructor's declaration
-                    // shape is the authoritative source for a property parameter.
-                    .or_else(|| {
-                        class
-                            .ctor_param_names
-                            .iter()
-                            .position(|(parameter, _)| parameter == name)
-                            .and_then(|ordinal| class.ctor_param_shapes.get(ordinal))
-                            .map(|(shape, _)| *shape)
-                    })
-                    .unwrap_or(property.ty);
-                return Some((property.context_params.clone(), ty, None));
-            }
-            if let Some(property) = class
-                .contextual_props
-                .values()
-                .flatten()
-                .find(|property| property.stable_declaration == Some(declaration))
-            {
-                return Some((property.context_params.clone(), property.ty, None));
-            }
-            if let Some(property) = class
-                .member_ext_props
-                .values()
-                .flatten()
-                .find(|property| property.stable_declaration() == Some(declaration))
-            {
-                return Some((
-                    property.context_params().to_vec(),
-                    property.ret(),
-                    Some(property.receiver_ty()),
-                ));
-            }
-        }
-        None
-    }
-
-    fn stable_property_annotations(
-        table: &SymbolTable,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<&[TypeName]> {
-        if let Some(property) = table
-            .source_props
-            .values()
-            .find(|property| property.stable_declaration == Some(declaration))
-        {
-            return Some(&property.annotations);
-        }
-        if let Some(property) = table
-            .ext_props
-            .values()
-            .flatten()
-            .find(|property| property.stable_declaration == Some(declaration))
-        {
-            return Some(&property.annotations);
-        }
-        for class in table.classes.values() {
-            if let Some(property) = class
-                .declared_props
-                .values()
-                .find(|property| property.stable_declaration == Some(declaration))
-            {
-                return Some(&property.annotations);
-            }
-            if let Some(property) = class
-                .contextual_props
-                .values()
-                .flatten()
-                .find(|property| property.stable_declaration == Some(declaration))
-            {
-                return Some(&property.annotations);
-            }
-            // A member extension property lives in its own table because its selection key is the
-            // extension receiver, not the member name. Its annotations publish like any other
-            // declared property's.
-            if let Some(property) = class
-                .member_ext_props
-                .values()
-                .flatten()
-                .find(|property| property.stable_declaration == Some(declaration))
-            {
-                return Some(&property.annotations);
-            }
-        }
-        None
-    }
-
-    fn stable_constructor(
-        table: &SymbolTable,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<(Vec<Ty>, Ty, Option<Ty>)> {
-        table.classes.values().find_map(|class| {
-            if class.primary_constructor_declaration == Some(declaration) {
-                return Some((
-                    class
-                        .ctor_param_shapes
-                        .iter()
-                        .map(|(parameter, _)| *parameter)
-                        .collect(),
-                    semantic_classifier_self(class),
-                    None,
-                ));
-            }
-            class
-                .secondary_constructor_declarations
-                .iter()
-                .position(|candidate| *candidate == Some(declaration))
-                .and_then(|ordinal| class.secondary_ctor_shapes.get(ordinal).cloned())
-                .map(|parameters| (parameters, semantic_classifier_self(class), None))
-        })
-    }
-
-    fn stable_constructor_annotations(
-        table: &SymbolTable,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<&[TypeName]> {
-        table.classes.values().find_map(|class| {
-            if class.primary_constructor_declaration == Some(declaration) {
-                return Some(class.primary_constructor_annotations.as_slice());
-            }
-            class
-                .secondary_constructor_declarations
-                .iter()
-                .position(|candidate| *candidate == Some(declaration))
-                .and_then(|ordinal| class.secondary_constructor_annotations.get(ordinal))
-                .map(Vec::as_slice)
-        })
-    }
-
-    fn stable_constructor_implicit_integer_coercion(
-        table: &SymbolTable,
-        declaration: crate::fir::DeclarationId,
-        ordinal: usize,
-    ) -> bool {
-        table.classes.values().any(|class| {
-            if class.primary_constructor_declaration == Some(declaration) {
-                return class
-                    .ctor_implicit_integer_coercion
-                    .get(ordinal)
-                    .copied()
-                    .unwrap_or(false);
-            }
-            class
-                .secondary_constructor_declarations
-                .iter()
-                .position(|candidate| *candidate == Some(declaration))
-                .and_then(|constructor| class.secondary_ctor_call_sigs.get(constructor))
-                .and_then(|signature| signature.implicit_integer_coercion.get(ordinal))
-                .copied()
-                .unwrap_or(false)
-        })
-    }
-
     fn generated_function<'a>(
         table: &'a SymbolTable,
         headers: &crate::fir::StreamedHeaderModule,
@@ -4104,7 +3942,11 @@ pub(crate) fn finalized_streamed_signature_index(
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
         source_contracts: RefCell::new(HashMap::new()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
+        classifier_stubs_by_source: RefCell::new(None),
+        extension_receivers_by_declaration: RefCell::new(None),
+        property_type_parameters_by_declaration: RefCell::new(None),
     };
+    let stable_members = stable_property_index::StableMemberIndex::build(table);
     for stub in &headers.stubs {
         if suppressed_generated_callables.contains(&stub.id) {
             continue;
@@ -4223,10 +4065,10 @@ pub(crate) fn finalized_streamed_signature_index(
                     if enum_entry.is_some() {
                         compact_header_seed(headers, stub.id)
                     } else {
-                        stable_property(table, stub.id)
+                        stable_members.property(stub.id)
                     }
                 }
-                DeclarationKind::Constructor => stable_constructor(table, stub.id).or_else(|| {
+                DeclarationKind::Constructor => stable_members.constructor(stub.id).or_else(|| {
                     (anchor.sibling == 0)
                         .then_some(anchor.owner)
                         .flatten()
@@ -4647,9 +4489,9 @@ pub(crate) fn finalized_streamed_signature_index(
                 stable_function(table, headers, &classifier_types, stub.id)
                     .map(|(signature, _)| semantic_parameters(signature))
             }
-            DeclarationKind::Property => {
-                stable_property(table, stub.id).map(|(parameters, _, _)| parameters)
-            }
+            DeclarationKind::Property => stable_members
+                .property(stub.id)
+                .map(|(parameters, _, _)| parameters),
             DeclarationKind::Classifier
             | DeclarationKind::EnumEntry
             | DeclarationKind::TypeAlias
@@ -4765,6 +4607,9 @@ pub(crate) fn finalized_streamed_signature_index(
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
         source_contracts: RefCell::new(HashMap::new()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
+        classifier_stubs_by_source: RefCell::new(None),
+        extension_receivers_by_declaration: RefCell::new(None),
+        property_type_parameters_by_declaration: RefCell::new(None),
     };
     // A source contract shapes the solver's own block evaluation (`ensure(x)` and then `x.p`),
     // so resolve it once before solving. Publication and failure accounting consume this same
@@ -4902,12 +4747,11 @@ pub(crate) fn finalized_streamed_signature_index(
                 stable_function(table, headers, &classifier_types, stub.id)
                     .map(|(signature, _)| signature.annotations.as_slice())
             }
-            DeclarationKind::Property => stable_property_annotations(table, stub.id),
-            DeclarationKind::Constructor => stable_constructor_annotations(table, stub.id),
-            DeclarationKind::Classifier => table
-                .classes
-                .values()
-                .find(|class| class.stable_declaration == Some(stub.id))
+            DeclarationKind::Property => stable_members.property_annotations(stub.id),
+            DeclarationKind::Constructor => stable_members.constructor_annotations(stub.id),
+            DeclarationKind::Classifier => classifier_types
+                .get(&stub.id)
+                .and_then(|name| table.class_by_type_name(*name))
                 .map(|class| class.annotations.as_slice()),
             _ => None,
         };
@@ -4967,7 +4811,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 .flags
                 .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
     }) {
-        let Some((parameters, result, receiver)) = stable_property(table, stub.id) else {
+        let Some((parameters, result, receiver)) = stable_members.property(stub.id) else {
             stop_with_failure!(stub.id);
         };
         if receiver.is_some()
@@ -5946,8 +5790,8 @@ pub(crate) fn finalized_streamed_signature_index(
                                 name,
                                 value_parameter_publication::published_flags(parameter)
                                     .with_implicit_integer_coercion(
-                                        stable_constructor_implicit_integer_coercion(
-                                            table, stub.id, ordinal,
+                                        stable_members.constructor_implicit_integer_coercion(
+                                            stub.id, ordinal,
                                         ),
                                     ),
                             )
