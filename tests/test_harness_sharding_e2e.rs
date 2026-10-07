@@ -1082,14 +1082,14 @@ fn phase_timing_coverage_run_prints_every_phase() {
     .expect("restore unit stub");
     fs::write(
         &e2e_bin,
-        "#!/usr/bin/env bash\nif [ \"${1:-}\" = --list ]; then printf '%s\\n' 'alpha::one: test' '' '1 test, 0 benchmarks'; exit 0; fi\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 9\n",
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 9\n",
     )
     .expect("write failing e2e stub");
     let failed_e2e = run_coverage("nproc");
     assert_eq!(failed_e2e.status.code(), Some(1));
     let failed_e2e_stderr = String::from_utf8(failed_e2e.stderr).expect("coverage stderr is UTF-8");
     assert!(
-        failed_e2e_stderr.contains("coverage: e2e-shard-1-of-1 exited with status 9"),
+        failed_e2e_stderr.contains("coverage: e2e exited with status 9"),
         "coverage hid e2e failure: {failed_e2e_stderr}"
     );
     fs::remove_dir_all(temp).expect("remove coverage phase directory");
