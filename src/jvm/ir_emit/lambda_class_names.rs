@@ -244,8 +244,19 @@ fn expansion_ordinal(
 ) -> Option<u32> {
     let mut orders = Vec::new();
     for (function, specialization) in &ir.specialized_functions {
+        // A representation pass can consume the source Lambda node after publishing its concrete
+        // IrClass. Keep that class in the expansion's shared artifact sequence: asking only whether
+        // the now-absent expression would use class strategy would make a later anonymous object
+        // reuse its ordinal.
+        let materialized = ir.classes.iter().any(|class| {
+            class
+                .lambda
+                .as_ref()
+                .is_some_and(|lambda| lambda.invoke == *function)
+        });
         if specialization.parent.is_some()
             || (current_lambda_class != Some(*function)
+                && !materialized
                 && !super::method_access::lambda_impl_uses_class_strategy(ir, *function, modes))
             || specialization.inline_callee_source_name != callee
             || specialization_location(ir, specialization, facade, modes).as_ref() != Some(location)
