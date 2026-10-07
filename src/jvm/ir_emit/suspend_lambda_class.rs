@@ -295,6 +295,24 @@ pub(super) fn emit_suspend_lambda_class(
         true,
         env,
     );
+    // A lambda value created inside this state machine may retain a standalone implementation.
+    // Placement attaches that private static to this exact class so its metafactory handle has
+    // legal access. Emit those attached helpers beside invokeSuspend; a continuation generated
+    // while emitting one re-enters through the access bridge emitted on this same writer.
+    for &method in &c.methods {
+        if method != lambda.invoke_suspend {
+            emit_method(
+                ir,
+                method,
+                StaticOwner::Class(c.fq_name),
+                &shape.class,
+                facade,
+                &mut cw,
+                false,
+                env,
+            );
+        }
+    }
     cw.set_method_debug(
         "invokeSuspend",
         INVOKE_SUSPEND_DESC,
@@ -317,6 +335,18 @@ pub(super) fn emit_suspend_lambda_class(
         env.java_parameters,
     );
     emit_bridge(ir, &mut cw, &shape, lambda);
+    // A continuation may have been built before JVM lambda placement attached its private static
+    // helper to this class. Its exact function identity now resolves through the physical-owner
+    // table, and the cross-class re-entry therefore needs the same synthetic accessor ordinary
+    // classifier emission writes on the declaration owner.
+    static_accessors::emit(
+        ir,
+        &env.run.static_accessor_plan.borrow(),
+        StaticOwner::Class(c.fq_name),
+        facade,
+        c.decl_start_line.max(c.decl_line),
+        &mut cw,
+    );
     // A lambda class is local to the scope it was written in.
     let (d1, d2) = match lambda_metadata(ir, lambda, &formatter) {
         Ok(metadata) => metadata,

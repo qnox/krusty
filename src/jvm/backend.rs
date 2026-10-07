@@ -1929,7 +1929,11 @@ mod tests {
             ),
             (
                 "reparent_lambda_impls(",
-                &["src/jvm/ir_emit.rs", "src/jvm/backend.rs"],
+                &[
+                    "src/jvm/ir_emit.rs",
+                    "src/jvm/ir_emit/lambda_implementation_placement.rs",
+                    "src/jvm/backend.rs",
+                ],
             ),
             (
                 "run_enabled(",
