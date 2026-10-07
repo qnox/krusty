@@ -45,9 +45,8 @@ pub(super) fn first_error(output: &str) -> Option<ObservedError> {
     errors(output).into_iter().next()
 }
 
-/// Compare a bounded semantic family serially. The e2e planner assigns each caller's top-level
-/// module independently, so expensive families run in separate test processes. Krusty itself
-/// stays in-process and reuses the shared classpath index.
+/// Compare a bounded semantic family serially. Each case is its own compilation because the
+/// fixtures share top-level names. Krusty stays in-process and reuses the shared classpath index.
 pub(super) fn assert_error_parity(cases: &[&str]) {
     let stdlib = common::stdlib_jar();
     let mut mismatches = Vec::new();

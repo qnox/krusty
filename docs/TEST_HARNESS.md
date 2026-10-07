@@ -85,9 +85,9 @@ argument, member, initializer, or assignment location is a test failure.
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
 binaries once with Cargo's `gate` profile, runs the conformance binary alone in two passes (box
-corpus, then everything else), then runs twenty-two balanced whole-module shards of the internally
-parallel e2e binary, then runs the remaining small test binaries in parallel. `KRUSTY_E2E_SHARDS`
-overrides the shard count.
+corpus, then everything else), then runs the internally parallel e2e binary once, then runs the
+remaining small test binaries in parallel. The e2e suite is one process under
+`KRUSTY_E2E_TIMEOUT_SECONDS`.
 
 Each scheduled invocation owns its log. An unfiltered binary keeps the plain `<binary>.log` name; a
 filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the two conformance logs are
@@ -96,9 +96,8 @@ filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the t
 `--test-threads=<count>` arguments do not change identity. Because slugging is deliberately lossy,
 `run_one` adds `#2`, `#3`, and so on if a derived name is already present instead of overwriting an
 earlier run. The failure report reads the exact invocation's log, and the timing table lists each
-invocation separately because each is a separate process with its own wall time. E2e shard logs use
-the explicit labels `shard-1-of-22`, and so on; every shard's reported selected-test count must equal
-the planner's count, so filtering cannot silently reduce coverage.
+invocation separately because each is a separate process with its own wall time. The e2e log is the
+unfiltered binary name.
 
 CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` runs both the
 box corpus and every active non-box conformance test from those artifacts. `KRUSTY_LANGUAGE_VERSION`,
@@ -238,9 +237,9 @@ method-code comparison passes when the class files are identical and disassemble
 they are not. The survey's reference acceptance oracle starts a kotlinc process per case; it is not
 part of `just ci`.
 
-The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
-seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard
-defaults to 295 seconds and can be adjusted independently with `KRUSTY_E2E_TIMEOUT_SECONDS`.
+The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 120
+seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`. The product e2e suite is one
+process and defaults to 1800 seconds (`KRUSTY_E2E_TIMEOUT_SECONDS`).
 
 Do not use `--release` for tests. The release build cycle takes longer than it saves at runtime, and
 `run-tests.sh --release` is rejected intentionally.
@@ -321,7 +320,7 @@ KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test conformance kotlin_cod
 
 This skips JVM execution in the conformance test, prints phase timing, and writes
 `target/flamegraph.svg` plus a `top krusty frames` table on stderr. The whole run fits inside the
-harness deadline (`KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`, 295s): the harness symbolizes each sampled
+harness deadline (`KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`, 120s): the harness symbolizes each sampled
 instruction pointer once rather than once per stack, so turning ~80k samples into an SVG costs a
 couple of seconds instead of the ~8 minutes `pprof`'s own `Report::build` takes on a full-corpus
 profile. The SVG covers every sampled stack and runs to tens of megabytes — it is meant to be opened
@@ -334,8 +333,8 @@ wait, `box` JVM round-trip) to stderr — run the e2e binary with `--nocapture` 
 `just coverage` prints a wall-clock line for every phase of that job, in whole seconds:
 `coverage: phase start <name>` when the phase begins and `coverage: phase <name> <seconds>s` when it
 finishes. The phases are toolchain provision, instrumentation, the CLI and language-server build
-(`build-bins`), the compiler test-binary build, the language-server test-binary build, each non-e2e
-test binary, e2e shard planning, each e2e shard, and each coverage report. Cargo's own compile
+(`build-bins`), the compiler test-binary build, the language-server test-binary build, each test
+binary (including `test-e2e`), and each coverage report. Cargo's own compile
 progress stays on stderr for those builds. `build-bins` is one cargo invocation, so krusty is
 compiled once for both binaries, and nightly rustc is asked to run one frontend job per core
 (`-Z threads`). The run ends with `coverage: phases` repeating every
@@ -370,12 +369,10 @@ Optional profiling knobs:
 
 - `KRUSTY_TEST_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline applied to every test
   binary except conformance and e2e; raise it explicitly on slow systems.
-- `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for each
+- `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline for each
   full-suite or focused conformance pass.
-- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 295-second deadline for focused e2e runs and
-  each full-suite e2e shard.
-- `KRUSTY_E2E_SHARDS=<count>` overrides the twenty-two whole-module shards used by the plain full-suite
-  run.
+- `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 1800-second deadline for the e2e suite,
+  including a focused e2e run.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.

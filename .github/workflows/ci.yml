@@ -109,12 +109,9 @@ jobs:
           echo "compile_missing=$compile_missing" >> "$GITHUB_OUTPUT"
       - name: just ci
         env:
-          # The instrumented e2e run costs ~2x the normal gate under [profile.coverage] (opt 1
-          # with branch counters). Keep the local default strict; only this intentionally slower
-          # environment raises it. A loaded runner was killed at fifteen minutes with about
-          # 6500 of 7105 tests finished, so the budget is twenty minutes: a hung binary still
-          # fails, a slow runner does not.
-          KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1200
+          # The e2e suite is one process. An instrumented run is about seventeen minutes; thirty
+          # minutes leaves room for a slow runner and still fails a hung binary.
+          KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1800
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           # This job's archive only. The conformance job publishes a separate one.
           KRUSTY_RECORD_CLASS_DUMPS: ${{ steps.recorded-mode.outputs.record }}
