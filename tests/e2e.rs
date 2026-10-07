@@ -2609,6 +2609,8 @@ mod unresolved_supertype_diag_e2e;
 mod unsigned_array_e2e;
 #[path = "unsigned_bitwise_e2e.rs"]
 mod unsigned_bitwise_e2e;
+#[path = "unsigned_bitwise_lines_e2e.rs"]
+mod unsigned_bitwise_lines_e2e;
 #[path = "unsigned_classpath_call_e2e.rs"]
 mod unsigned_classpath_call_e2e;
 #[path = "unsigned_companion_constant_ty_e2e.rs"]
