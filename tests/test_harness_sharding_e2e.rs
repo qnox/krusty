@@ -1107,12 +1107,22 @@ fn phase_timing_coverage_run_prints_every_phase() {
     .expect("write unit stub");
     fs::write(bin_dir.join("just"), "#!/bin/sh\nexit 0\n").expect("write just stub");
     fs::write(
+        bin_dir.join("rustc"),
+        "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --print) printf '%s\\n' \"$STUB_SYSROOT\"; exit 0 ;;\n    -vV) printf '%s\\n' 'host: x86_64-unknown-linux-gnu'; exit 0 ;;\n  esac\n  shift\ndone\nexit 2\n",
+    )
+    .expect("write rustc stub");
+    let lld = temp.join("sysroot/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld/ld.lld");
+    fs::create_dir_all(lld.parent().expect("lld parent")).expect("create stub lld directory");
+    fs::write(&lld, "").expect("write stub lld");
+    fs::write(
         bin_dir.join("cargo"),
-        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == +* ]]; then shift; fi\ncmd=\"${1:-}\"; shift || true\ncase \"$cmd\" in\n  llvm-cov)\n    sub=\"${1:-}\"; shift || true\n    case \"$sub\" in\n      --version) exit 0 ;;\n      show-env) printf '%s\\n' true ;;\n      report)\n        out=\"\"\n        while [ $# -gt 0 ]; do\n          if [ \"$1\" = --output-path ]; then out=\"$2\"; shift 2; else shift; fi\n        done\n        mkdir -p \"$(dirname \"$out\")\"\n        printf '%s\\n' '{\"data\":[{\"totals\":{\"regions\":{\"covered\":1,\"count\":2},\"functions\":{\"covered\":1,\"count\":2},\"lines\":{\"covered\":1,\"count\":2},\"branches\":{\"covered\":1,\"count\":2}}}]}' >\"$out\"\n        ;;\n      *) echo \"unexpected llvm-cov $sub\" >&2; exit 2 ;;\n    esac\n    ;;\n  build)\n    pkg=\"\"\n    prev=\"\"\n    for arg in \"$@\"; do\n      if [ \"$prev\" = -p ]; then pkg=\"$arg\"; fi\n      prev=\"$arg\"\n    done\n    mkdir -p \"$CARGO_TARGET_DIR/coverage\"\n    case \"$pkg\" in\n      krusty-cli) bin=\"$CARGO_TARGET_DIR/coverage/krusty\" ;;\n      krusty-lsp) bin=\"$CARGO_TARGET_DIR/coverage/krusty-lsp\" ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$bin\"\n    chmod +x \"$bin\"\n    ;;\n  test)\n    echo \"cargo: visible stderr $*\" >&2\n    if [[ \" $* \" == *\" --test e2e \"* ]]; then\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$E2E_BIN\\\"}\"\n    else\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$UNIT_BIN\\\"}\"\n    fi\n    ;;\n  *) echo \"unexpected cargo $cmd $*\" >&2; exit 2 ;;\nesac\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == +* ]]; then shift; fi\ncmd=\"${1:-}\"; shift || true\ncase \"$cmd\" in\n  llvm-cov)\n    sub=\"${1:-}\"; shift || true\n    case \"$sub\" in\n      --version) exit 0 ;;\n      show-env) printf '%s\\n' \"export RUSTFLAGS='-C instrument-coverage'\" ;;\n      report)\n        out=\"\"\n        while [ $# -gt 0 ]; do\n          if [ \"$1\" = --output-path ]; then out=\"$2\"; shift 2; else shift; fi\n        done\n        mkdir -p \"$(dirname \"$out\")\"\n        printf '%s\\n' '{\"data\":[{\"totals\":{\"regions\":{\"covered\":1,\"count\":2},\"functions\":{\"covered\":1,\"count\":2},\"lines\":{\"covered\":1,\"count\":2},\"branches\":{\"covered\":1,\"count\":2}}}]}' >\"$out\"\n        ;;\n      *) echo \"unexpected llvm-cov $sub\" >&2; exit 2 ;;\n    esac\n    ;;\n  build)\n    echo \"cargo-rustflags:${RUSTFLAGS-}\" >&2\n    case \" $* \" in\n      *\" -p krusty-cli \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" -p krusty-lsp \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" --bin krusty \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" --bin krusty-lsp \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    mkdir -p \"$CARGO_TARGET_DIR/coverage\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    chmod +x \"$CARGO_TARGET_DIR/coverage/krusty\" \"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    ;;\n  test)\n    echo \"cargo: visible stderr $*\" >&2\n    if [[ \" $* \" == *\" --test e2e \"* ]]; then\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$E2E_BIN\\\"}\"\n    else\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$UNIT_BIN\\\"}\"\n    fi\n    ;;\n  *) echo \"unexpected cargo $cmd $*\" >&2; exit 2 ;;\nesac\n",
     )
     .expect("write cargo stub");
-    for name in ["e2e", "lsp-unit", "just", "cargo"] {
-        let path = if name == "just" || name == "cargo" {
+    for name in ["e2e", "lsp-unit", "just", "cargo", "rustc", "ld.lld"] {
+        let path = if name == "ld.lld" {
+            lld.clone()
+        } else if name == "just" || name == "cargo" || name == "rustc" {
             bin_dir.join(name)
         } else if name == "e2e" {
             e2e_bin.clone()
@@ -1137,6 +1147,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
         .env("KRUSTY_TEST_THREADS", "1")
         .env("E2E_BIN", &e2e_bin)
         .env("UNIT_BIN", &unit_bin)
+        .env("STUB_SYSROOT", temp.join("sysroot"))
         .output()
         .expect("run coverage with stubbed toolchain");
     let stderr = String::from_utf8(output.stderr).expect("coverage stderr is UTF-8");
@@ -1148,6 +1159,14 @@ fn phase_timing_coverage_run_prints_every_phase() {
         stderr.contains("cargo: visible stderr"),
         "compiler test build hid cargo stderr: {stderr}"
     );
+    assert!(
+        stderr.contains("coverage: linking with lld"),
+        "coverage did not select lld: {stderr}"
+    );
+    assert!(
+        stderr.contains("cargo-rustflags:-C instrument-coverage -C link-arg=-fuse-ld=lld"),
+        "lld was not appended to the instrumented rustflags: {stderr}"
+    );
     let starts = stderr
         .lines()
         .filter_map(|line| line.strip_prefix("coverage: phase start "))
@@ -1157,8 +1176,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
         [
             "provision",
             "instrument",
-            "build-cli",
-            "build-lsp",
+            "build-bins",
             "build-compiler-tests",
             "build-lsp-tests",
             "test-lsp-unit",
@@ -1194,5 +1212,40 @@ fn phase_timing_coverage_run_prints_every_phase() {
         "missing phase total: {stderr}"
     );
     assert!(summary.is_file(), "coverage summary was not written");
+
+    fs::remove_file(&lld).expect("remove stub lld");
+    let fallback = Command::new("bash")
+        .arg(root.join("scripts").join("coverage.sh"))
+        .arg(&summary)
+        .env("HOME", &temp)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+        .env("CARGO_TARGET_DIR", &target)
+        .env("KRUSTY_COVERAGE_TARGET_DIR", &target)
+        .env("KRUSTY_COVERAGE_COMPILER_JSON", &compiler_json)
+        .env("KRUSTY_COVERAGE_LSP_JSON", &lsp_json)
+        .env("KRUSTY_COVERAGE_E2E_SHARDS", "1")
+        .env("KRUSTY_TEST_JOBS", "1")
+        .env("KRUSTY_TEST_THREADS", "1")
+        .env("E2E_BIN", &e2e_bin)
+        .env("UNIT_BIN", &unit_bin)
+        .env("STUB_SYSROOT", temp.join("sysroot"))
+        .output()
+        .expect("run coverage without lld");
+    let fallback_stderr = String::from_utf8(fallback.stderr).expect("fallback stderr is UTF-8");
+    assert!(
+        fallback.status.success(),
+        "coverage without lld failed: {fallback_stderr}"
+    );
+    assert!(
+        fallback_stderr.contains("coverage: linking with the system linker"),
+        "missing system-linker fallback: {fallback_stderr}"
+    );
+    assert!(
+        fallback_stderr
+            .lines()
+            .any(|line| line == "cargo-rustflags:-C instrument-coverage"),
+        "system linker changed rustflags: {fallback_stderr}"
+    );
+
     fs::remove_dir_all(temp).expect("remove coverage phase directory");
 }

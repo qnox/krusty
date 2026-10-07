@@ -287,11 +287,14 @@ wait, `box` JVM round-trip) to stderr — run the e2e binary with `--nocapture` 
 
 `just coverage` prints a wall-clock line for every phase of that job, in whole seconds:
 `coverage: phase start <name>` when the phase begins and `coverage: phase <name> <seconds>s` when it
-finishes. The phases are toolchain provision, instrumentation, the CLI build, the language-server
-build, the compiler test-binary build, the language-server test-binary build, each non-e2e test
-binary, e2e shard planning, each e2e shard, and each coverage report. Cargo's own compile progress
-stays on stderr for those builds. The run ends with `coverage: phases` repeating every finished
-phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
+finishes. The phases are toolchain provision, instrumentation, the CLI and language-server build
+(`build-bins`), the compiler test-binary build, the language-server test-binary build, each non-e2e
+test binary, e2e shard planning, each e2e shard, and each coverage report. Cargo's own compile
+progress stays on stderr for those builds. `build-bins` is one cargo invocation, so krusty is
+compiled once for both binaries, and it links with the nightly toolchain's `ld.lld` when rustc
+ships that linker. The krusty package uses 16 codegen units under `[profile.coverage]`, matching
+gate, rather than the 256 inherited from dev. The run ends with `coverage: phases` repeating every
+finished phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
 `conformance-run: phase box-shard-N-of-M <seconds>s`. The shared binary job prints
 `shared-bins: phase conformance-test-binary`, `shared-bins: phase krusty-cli`, and

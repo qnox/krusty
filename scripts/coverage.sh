@@ -89,6 +89,30 @@ rm -rf "$coverage_target"
 export CARGO_TARGET_DIR="$coverage_target"
 # Instrument the whole build (source-based coverage) for the rest of this script's cargo invocations.
 source <("${coverage_cargo[@]}" llvm-cov show-env --sh --branch 2>/dev/null)
+# The instrumented compiler is one crate. On CI the system linker then spent about two and a half
+# minutes on the CLI binary and three on the language server, after rustc had already produced the
+# objects. The pinned nightly ships ld.lld next to rustc; a host without it keeps its system linker.
+use_coverage_lld() {
+  local sysroot host lld_dir
+  sysroot="$(rustc "+${coverage_toolchain}" --print sysroot 2>/dev/null || true)"
+  host="$(rustc "+${coverage_toolchain}" -vV 2>/dev/null | awk -F': ' '/^host: /{print $2; exit}')"
+  lld_dir=""
+  if [ -n "$sysroot" ] && [ -n "$host" ]; then
+    lld_dir="$sysroot/lib/rustlib/$host/bin/gcc-ld"
+  fi
+  if [ -n "$lld_dir" ] && [ -x "$lld_dir/ld.lld" ]; then
+    export PATH="$lld_dir:$PATH"
+    if [ -n "${RUSTFLAGS:-}" ]; then
+      export RUSTFLAGS="$RUSTFLAGS -C link-arg=-fuse-ld=lld"
+    else
+      export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+    fi
+    echo "coverage: linking with lld" >&2
+  else
+    echo "coverage: linking with the system linker" >&2
+  fi
+}
+use_coverage_lld
 mkdir -p target/coverage
 # Prune stale counters so this run measures only the tests it runs. `cargo llvm-cov clean` refuses a
 # target/ it didn't create (missing CACHEDIR.TAG — e.g. a worktree whose target was set up by hand),
@@ -100,6 +124,10 @@ phase_end instrument
 # executable's path from Cargo's JSON build output. The dedicated `coverage` profile (Cargo.toml)
 # builds at opt-level 1 with gate-matching checks: the e2e suite runs krusty in-process for every
 # dependency-lib fixture, and instrumenting that at `dev` made the coverage run dominate CI.
+# Both product binaries are one cargo build. Separate invocations recompiled krusty: the CLI
+# package set and the language-server package set do not unify features the same way, so the
+# second build compiled krusty again and then linked. One invocation compiles that library once
+# and links both binaries from it.
 run_phase() {
   local name="$1"
   shift
@@ -112,8 +140,8 @@ run_phase() {
     exit "$status"
   fi
 }
-run_phase build-cli "${coverage_cargo[@]}" build --profile coverage -p krusty-cli
-run_phase build-lsp "${coverage_cargo[@]}" build --profile coverage -p krusty-lsp --bin krusty-lsp
+run_phase build-bins "${coverage_cargo[@]}" build --profile coverage \
+  -p krusty-cli -p krusty-lsp --bin krusty --bin krusty-lsp
 export KRUSTY_BIN="$coverage_target/coverage/krusty"
 # Bin unit tests exec the supervisor. `cargo test --bin` builds the harness only, so publish the
 # uplifted binary the same way integration tests do.
