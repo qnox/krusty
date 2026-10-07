@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::null_check_folds::{analysis_within_limit, ANALYSIS_COMPLEXITY_LIMIT};
 use super::shapes::is_expression_null_check;
@@ -186,7 +186,7 @@ impl Code {
     /// The rewritten instructions, or `None` when the pass declined and left the body alone.
     fn run(mut self) -> Option<Vec<Insn>> {
         let before = self.method.clone();
-        let outcome = eliminate(&mut self.method);
+        let outcome = eliminate(&mut self.method, &BTreeSet::new());
         if outcome.is_none() {
             assert_eq!(
                 self.method, before,
@@ -198,7 +198,15 @@ impl Code {
 
     /// The instructions left, whether or not the pass itself changed anything.
     fn run_after_earlier_passes(mut self) -> Vec<Insn> {
-        eliminate(&mut self.method);
+        eliminate(&mut self.method, &BTreeSet::new());
+        self.method.instructions().cloned().collect()
+    }
+
+    /// Run with the exact labels a preceding constant-condition pass retained while deleting
+    /// unreachable instructions.
+    fn run_with_preserved_labels(mut self, at: &[usize]) -> Vec<Insn> {
+        let labels = at.iter().map(|&index| self.labels[index]).collect();
+        eliminate(&mut self.method, &labels);
         self.method.instructions().cloned().collect()
     }
 }
@@ -782,6 +790,181 @@ fn null_checks_sharing_a_target_all_keep_their_values() {
 }
 
 #[test]
+fn a_preserved_unreachable_label_keeps_the_safe_call_temporary() {
+    // Constant-condition elimination deleted the unreachable `goto` after `athrow` but retained
+    // its label immediately before the `ifnull` target. That exact boundary defeats the fold.
+    let insns = [
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 9),
+        aload(1),
+        op(ATHROW),
+        jump(GOTO, 9),
+        op(RETURN),
+    ];
+    let code = Code::new(&insns).line(8).without(&[8]);
+    let expected = code.insns(&[
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 9),
+        aload(1),
+        op(ATHROW),
+        op(RETURN),
+    ]);
+    assert_eq!(code.run_with_preserved_labels(&[8]), expected);
+}
+
+#[test]
+fn an_unused_preserved_label_does_not_keep_the_safe_call_temporary() {
+    // kotlinc's processLabels removes an unreachable label that no jump or table uses before the
+    // temporary pass. It therefore cannot interrupt the safe-call adjacency match.
+    let insns = [
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 9),
+        aload(1),
+        op(ATHROW),
+        jump(GOTO, 9),
+        op(RETURN),
+    ];
+    let code = Code::new(&insns).without(&[8]);
+    let expected = code.insns(&[
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        op(DUP),
+        jump(IFNULL, 9),
+        op(ATHROW),
+        op(POP),
+        op(RETURN),
+    ]);
+    assert_eq!(code.run_with_preserved_labels(&[8]), expected);
+}
+
+#[test]
+fn an_athrow_without_an_int_jump_still_keeps_the_value_on_the_stack() {
+    let code = Code::new(&[
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 6),
+        aload(1),
+        op(ATHROW),
+        op(RETURN),
+    ]);
+    let expected = code.insns(&[
+        aload(0),
+        op(DUP),
+        jump(IFNULL, 6),
+        op(ATHROW),
+        op(POP),
+        op(RETURN),
+    ]);
+    assert_eq!(code.run(), Some(expected));
+}
+
+#[test]
+fn an_int_jump_without_an_int_constant_still_folds_the_throwing_safe_call() {
+    let code = Code::new(&[
+        aload(0),
+        jump(IFEQ, 2),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 7),
+        aload(1),
+        op(ATHROW),
+        op(RETURN),
+    ]);
+    let expected = code.insns(&[
+        aload(0),
+        jump(IFEQ, 2),
+        op(DUP),
+        jump(IFNULL, 7),
+        op(ATHROW),
+        op(POP),
+        op(RETURN),
+    ]);
+    assert_eq!(code.run(), Some(expected));
+}
+
+#[test]
+fn a_live_continuation_still_folds_when_the_method_has_an_int_jump() {
+    // The `goto` joins after the null result, so it is not a predecessor of the `ifnull` target.
+    let code = Code::new(&[
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 9),
+        aload(1),
+        call("touch"),
+        jump(GOTO, 10),
+        op(ACONST_NULL),
+        op(RETURN),
+    ]);
+    let expected = code.insns(&[
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        op(DUP),
+        jump(IFNULL, 9),
+        call("touch"),
+        jump(GOTO, 10),
+        op(POP),
+        op(ACONST_NULL),
+        op(RETURN),
+    ]);
+    assert_eq!(code.run(), Some(expected));
+}
+
+#[test]
+fn keeping_the_throwing_safe_call_still_folds_another_temporary() {
+    let insns = [
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        astore(1),
+        aload(1),
+        string(),
+        expression_check(),
+        aload(1),
+        astore(2),
+        aload(2),
+        jump(IFNULL, 14),
+        aload(2),
+        op(ATHROW),
+        jump(GOTO, 14),
+        op(RETURN),
+    ];
+    let code = Code::new(&insns).line(13).without(&[13]);
+    let expected = code.insns(&[
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        op(DUP),
+        string(),
+        expression_check(),
+        astore(2),
+        aload(2),
+        jump(IFNULL, 14),
+        aload(2),
+        op(ATHROW),
+        op(RETURN),
+    ]);
+    assert_eq!(code.run_with_preserved_labels(&[13]), expected);
+}
+
+#[test]
 fn a_null_target_also_reached_by_falling_through_is_left_alone() {
     // `if (x != null) x.run()`: the call falls into the target the check jumps to.
     let code = Code::new(&[aload(0), jump(IFNULL, 4), aload(0), call("run"), op(RETURN)]);
@@ -841,7 +1024,7 @@ fn statement_safe_call(line: bool) -> StatementSafeCall {
             *target = if *op == IFNULL { null_target } else { join };
         }
     }
-    let outcome = eliminate(&mut code.method);
+    let outcome = eliminate(&mut code.method, &BTreeSet::new());
     StatementSafeCall {
         method: code.method,
         labels: [code.labels[7], null_target, join],

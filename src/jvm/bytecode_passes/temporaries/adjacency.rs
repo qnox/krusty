@@ -178,7 +178,18 @@ impl Body {
     pub(super) fn labelled(&self, id: NodeId) -> bool {
         self.labels_before(id)
             .iter()
-            .any(|label| self.arrivals.contains(label) || self.marks.contains(label))
+            .any(|label| self.kept_by_process_labels(*label))
+    }
+
+    /// Whether kotlinc's `processLabels` keeps this label before temporary elimination. Labels
+    /// used by control flow, debug tables or protected ranges remain in the raw instruction list;
+    /// an unused label is removed and cannot interrupt an adjacency match.
+    pub(super) fn kept_by_process_labels(&self, label: LabelId) -> bool {
+        self.arrivals.contains(&label)
+            || self.marks.contains(&label)
+            || self.label_nodes.get(&label).is_some_and(|&node| {
+                Some(node) == self.list.first() || Some(node) == self.list.last()
+            })
     }
 
     /// Whether a label with non-trivial predecessors stands in front of instruction `id`.
