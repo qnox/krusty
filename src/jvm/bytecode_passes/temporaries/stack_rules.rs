@@ -49,7 +49,10 @@ fn keep_single_load(body: &mut Body, store: NodeId, load: NodeId, kind: Kind) ->
         let mut adjacent = true;
         let mut cursor = body.next_insn(store);
         while let Some(next) = cursor {
-            if body.arrived(next) || (next != load && !is_op(body.insn(next), NOP)) {
+            if body.arrived(next)
+                || body.local_marked(next)
+                || (next != load && !is_op(body.insn(next), NOP))
+            {
                 adjacent = false;
                 break;
             }
