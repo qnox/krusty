@@ -189,6 +189,42 @@ fn a_constant_the_last_later_code_names_moves_to_the_end_of_that_code() {
 }
 
 #[test]
+fn an_orphaned_descriptor_keeps_name_and_type_component_order() {
+    // A removed instruction originally interned `()V`. The later EnclosingMethod is its first
+    // remaining user, and ASM visits that NameAndType as name, descriptor, composite. Relayout
+    // must not put the orphaned descriptor ahead of the fresh method name merely because its old
+    // pool index is lower.
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    let before = writer.cp.slot_count();
+    writer.reserve_descriptor("()V");
+    add_static(&mut writer, "f", "()I", |code, writer| {
+        code.push_int(1, writer);
+        code.ireturn();
+    });
+    let after = writer.cp.slot_count();
+    writer.set_enclosing_method("Owner", "outer", "()V");
+    let class = writer.finish();
+    let relaid = [RelaidMethod {
+        index: 0,
+        added: before + 1..after + 1,
+        leading: Vec::new(),
+        interned: after + 1..after + 1,
+    }];
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
+        .expect("the class reads")
+        .expect("the orphan moves to EnclosingMethod");
+    let entries = pool(&laid_out);
+    let position = |entry: &str| {
+        entries
+            .iter()
+            .position(|candidate| candidate == entry)
+            .unwrap_or_else(|| panic!("{entry} in {entries:?}"))
+    };
+    assert!(position("outer") < position("()V"));
+    assert!(position("()V") < position("tag 12"));
+}
+
+#[test]
 fn a_removed_body_class_moves_to_its_late_inner_class_row() {
     let mut writer = ClassWriter::new("T", "java/lang/Object");
     writer.reserve_method_name("f");
