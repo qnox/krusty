@@ -2483,8 +2483,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   Measured against kotlinc 2.4.10, the GUARDED positions are: a property with an explicit type (member
   or top-level — the top-level one runs in `<clinit>`), a local with an explicit type, a value
-  argument (including the parameter of a non-null-typed lambda, which is an `invoke` argument), a
-  `return` / expression body, an assignment to a non-null target, and the explicit receiver of a
+  argument (including the parameter of a non-null-typed lambda, which is an `invoke` argument, and a
+  constructor-delegation argument — `this(parent.resolve(child))` and `super(parent.resolve(child))`
+  guard `resolve(...)` when the target parameter rejects null, while `class Box<T>(value: T)` does
+  not), a `return` / expression body, an assignment to a non-null target, and the explicit receiver of a
   Kotlin extension call whose DECLARED receiver rejects null (`getenv(..).trim()`; not a `T.ext()`
   whose `T` admits null, and not a safe call). A MEMBER extension's explicit receiver is the same
   receiver argument under the same exclusions: a class's or a companion's `String.shout()` invoked
@@ -2524,8 +2526,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   only, so a narrowing it
   cannot name stays unguarded rather than guarded under an invented name.
   Tests: `tests/platform_call_assertions_e2e.rs` (per-position `checkNotNullExpressionValue` call-site
-  and message differential vs kotlinc, every guarded position run for its exception and message, and
-  the top-level `<clinit>` repro).
+  and message differential vs kotlinc, every guarded position run for its exception and message, the
+  top-level `<clinit>` repro, and constructor delegation, including a generic parameter that admits
+  null).
 
   Measured over the 2.4.10 box corpus (per-file class-byte hashes with and without the guard, 3355
   files krusty compiles): 46 files change, none flips compile status, and 38 of them place the same

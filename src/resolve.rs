@@ -48165,6 +48165,12 @@ impl<'a> Checker<'a> {
                 self.check_argument_expected(scope, argument, expected, has_receiver, None);
                 continue;
             }
+            // A delegation argument is a value argument. `this(parent.resolve(child))` commits
+            // the platform result to the target parameter the same way an ordinary call does:
+            // a declared non-null parameter is guarded, and `class Box<T>(value: T)` is not.
+            if !expected.upper_bound_admits_null() {
+                self.narrow_platform_value(expected, argument, PlatformNarrowing::Argument);
+            }
             let constraint = selected
                 .argument_slots
                 .get(index)
