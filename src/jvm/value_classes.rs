@@ -1699,7 +1699,8 @@ pub(crate) fn lower_value_classes(
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
-            } => Some((*arg, *type_operand)),
+            } => crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, *arg)
+                .map(|call| (call, *type_operand)),
             _ => None,
         })
         .collect::<HashMap<_, _>>();
