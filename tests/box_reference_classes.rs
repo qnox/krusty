@@ -17,11 +17,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use krusty::conformance::{
-    directive, inject_support_module, module_units, split_files, split_modules, BoxJdk,
-    FragmentUnit,
+    directive, inject_support_module, module_units, split_files, split_modules,
+    unsupported_codegen_mode_directive, BoxJdk, FragmentUnit, UnitCodegenModes,
 };
 
 use super::common::{self, byte_dump, language_directives};
@@ -35,10 +36,12 @@ pub const MAIN_MODULE: &str = "main";
 /// `v3` strips kotlinc diagnostic-test markers from the reference source, so marker-bearing cases
 /// that `v2` cached as FAILED must recompile. `v4` compiles folded multiplatform units as HMPP
 /// fragments instead of a flat `-Xcommon-sources` split (changing even a successful MPP case's
-/// bytes-exact invocation), so cases that `v3` cached must recompile. The directive flags
-/// (`// ALLOW_KOTLIN_PACKAGE`, test-only features, `// OPT_IN:`) ride `language_args` and so already
-/// re-key themselves.
-const REF_CACHE_SALT: &str = "ref-classes-v4-directives-and-fragments";
+/// bytes-exact invocation), so cases that `v3` cached must recompile. `v5` compiles each unit under
+/// its own `// LAMBDAS:`/`// SAM_CONVERSIONS:`/`// JVM_DEFAULT_MODE:` modes and keys on the producing
+/// JDK, so a `v4` entry compiled under kotlinc's default modes or another JDK is never replayed. The
+/// directive flags (`// ALLOW_KOTLIN_PACKAGE`, test-only features, `// OPT_IN:`) ride `language_args`
+/// and so already re-key themselves.
+const REF_CACHE_SALT: &str = "ref-classes-v5-unit-modes-and-producing-jdk";
 
 /// A reference `.class` inventory grouped by module identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -97,10 +100,11 @@ impl ReferenceClasses {
 /// directive-selected classpath and JDK krusty used.
 ///
 /// Results — success and a deterministic, source-anchored compile rejection — are cached on disk
-/// keyed by every input (source, stem, helpers, classpath/JDK arguments, and the exact compiler
-/// identity), so a re-run pays only for cases whose inputs changed and never replays one exact
-/// version's bytes for another. A transient failure (driver crash, work-dir clobber) and a
-/// snapshot/dev/beta compiler are not cached.
+/// keyed by every input (source, stem, helpers, classpath/JDK arguments, each unit's code-generation
+/// modes, the exact compiler identity, and the producing JDK's identity), so a re-run pays only for
+/// cases whose inputs changed and never replays one exact version's or one JDK's bytes for another.
+/// A transient failure (driver crash, work-dir clobber) and a snapshot/dev/beta compiler are not
+/// cached.
 pub fn reference_compile(
     src: &str,
     stem: &str,
@@ -108,20 +112,18 @@ pub fn reference_compile(
     jdk: BoxJdk<'_>,
     coroutine_helpers: &str,
 ) -> Result<ReferenceClasses, String> {
-    let base_args = jdk.kotlinc_args(cp_jars)?;
     let language_args = reference_directive_args(src)?;
-    let (compiler_id, compiler_len) = compiler_identity();
-    let fingerprint = reference_cache_fingerprint(
+    let units = plan_units(src, stem, coroutine_helpers)?;
+    let fingerprint = cache_key(
         src,
         stem,
+        cp_jars,
+        jdk,
         coroutine_helpers,
-        &base_args,
         &language_args,
-        compiler_id.as_deref(),
-        compiler_len,
-    );
-    let cache = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("target/cache/ref-classes/{fingerprint:032x}"));
+        &units,
+    )?;
+    let cache = reference_cache_dir(fingerprint);
     // A snapshot/dev/beta compiler is not an immutable build, so its output is never cached.
     let cacheable = byte_dump::published_compiler_id().is_some();
     if cacheable {
@@ -140,15 +142,7 @@ pub fn reference_compile(
     STATS.misses.bump();
     let compiling = Instant::now();
     let scratch = ScratchDir::new()?;
-    let result = compile_all(
-        src,
-        stem,
-        cp_jars,
-        jdk,
-        coroutine_helpers,
-        &language_args,
-        scratch.path(),
-    );
+    let result = compile_all(&units, cp_jars, jdk, &language_args, scratch.path());
     STATS.compile.add_since(compiling);
     let cleanup = Instant::now();
     drop(scratch);
@@ -159,6 +153,78 @@ pub fn reference_compile(
         STATS.store.add_since(storing);
     }
     result
+}
+
+/// The cache key [`reference_compile`] files this case's inventory under.
+pub fn reference_cache_key(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk: BoxJdk<'_>,
+    coroutine_helpers: &str,
+) -> Result<u128, String> {
+    let language_args = reference_directive_args(src)?;
+    let units = plan_units(src, stem, coroutine_helpers)?;
+    cache_key(
+        src,
+        stem,
+        cp_jars,
+        jdk,
+        coroutine_helpers,
+        &language_args,
+        &units,
+    )
+}
+
+fn cache_key(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk: BoxJdk<'_>,
+    coroutine_helpers: &str,
+    language_args: &[String],
+    units: &[PlannedUnit],
+) -> Result<u128, String> {
+    let base_args = jdk.kotlinc_args(cp_jars)?;
+    let unit_codegen_args: Vec<(&str, &[String])> = units
+        .iter()
+        .map(|unit| (unit.module.as_str(), unit.codegen_args.as_slice()))
+        .collect();
+    let (compiler_id, compiler_len) = compiler_identity();
+    let producing_jdk = producing_jdk_identity()?;
+    Ok(ReferenceCacheInputs {
+        src,
+        stem,
+        coroutine_helpers,
+        base_args: &base_args,
+        language_args,
+        unit_codegen_args: &unit_codegen_args,
+        compiler_id: compiler_id.as_deref(),
+        compiler_len,
+        producing_jdk,
+    }
+    .fingerprint())
+}
+
+/// The selected producing JDK's identity, read once per process: the reference kotlinc servers and
+/// javac this process starts all run on that one installation.
+fn producing_jdk_identity() -> Result<&'static [u8], String> {
+    static IDENTITY: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+    IDENTITY
+        .get_or_init(|| {
+            let home = common::selected_java_home().ok_or_else(|| {
+                "no reference JDK is selected: set KRUSTY_REF_JAVA_HOME or JAVA_HOME".to_string()
+            })?;
+            common::producing_jdk::jdk_identity(Path::new(&home))
+        })
+        .as_deref()
+        .map_err(Clone::clone)
+}
+
+/// The on-disk directory of one reference inventory cache entry.
+pub fn reference_cache_dir(fingerprint: u128) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("target/cache/ref-classes/{fingerprint:032x}"))
 }
 
 /// Process-wide reference-inventory cache and compile totals, for telling a cold run's cache misses
@@ -279,33 +345,60 @@ fn read_class_tree_in(
     Ok(())
 }
 
-/// The pure cache key over every input that can change the reference bytes. Kept free of I/O so
-/// version isolation (a different compiler identity yields a different key) is directly testable.
-pub fn reference_cache_fingerprint(
-    src: &str,
-    stem: &str,
-    coroutine_helpers: &str,
-    base_args: &[String],
-    language_args: &[String],
-    compiler_id: Option<&str>,
-    compiler_len: u64,
-) -> u128 {
-    let mut parts: Vec<Vec<u8>> = vec![
-        REF_CACHE_SALT.as_bytes().to_vec(),
-        src.as_bytes().to_vec(),
-        stem.as_bytes().to_vec(),
-        coroutine_helpers.as_bytes().to_vec(),
-    ];
-    for arg in base_args.iter().chain(language_args) {
-        parts.push(arg.as_bytes().to_vec());
+/// Every input that can change one case's reference bytes. [`Self::fingerprint`] is free of I/O so
+/// version, mode, and JDK isolation are directly testable.
+#[derive(Clone, Copy)]
+pub struct ReferenceCacheInputs<'a> {
+    pub src: &'a str,
+    pub stem: &'a str,
+    pub coroutine_helpers: &'a str,
+    /// The case's classpath and JDK arguments.
+    pub base_args: &'a [String],
+    /// The case-wide directive flags.
+    pub language_args: &'a [String],
+    /// Each compilation unit's module and its code-generation mode arguments, in build order.
+    pub unit_codegen_args: &'a [(&'a str, &'a [String])],
+    pub compiler_id: Option<&'a str>,
+    pub compiler_len: u64,
+    /// The JDK the reference kotlinc and javac run on, from
+    /// [`common::producing_jdk::jdk_identity`].
+    pub producing_jdk: &'a [u8],
+}
+
+impl ReferenceCacheInputs<'_> {
+    /// The cache key.
+    pub fn fingerprint(&self) -> u128 {
+        let mut parts: Vec<&[u8]> = vec![
+            REF_CACHE_SALT.as_bytes(),
+            self.src.as_bytes(),
+            self.stem.as_bytes(),
+            self.coroutine_helpers.as_bytes(),
+        ];
+        let base_count = (self.base_args.len() as u64).to_le_bytes();
+        parts.push(&base_count);
+        parts.extend(self.base_args.iter().map(|arg| arg.as_bytes()));
+        let language_count = (self.language_args.len() as u64).to_le_bytes();
+        parts.push(&language_count);
+        parts.extend(self.language_args.iter().map(|arg| arg.as_bytes()));
+        let unit_counts: Vec<[u8; 8]> = self
+            .unit_codegen_args
+            .iter()
+            .map(|(_, args)| (args.len() as u64).to_le_bytes())
+            .collect();
+        for ((module, args), count) in self.unit_codegen_args.iter().zip(&unit_counts) {
+            parts.push(module.as_bytes());
+            parts.push(count);
+            parts.extend(args.iter().map(|arg| arg.as_bytes()));
+        }
+        // The exact compiler identity isolates one release/RC's bytes from another's; the jar length
+        // guards a same-identity rebuild. An unpublished compiler never reaches the cache, but still
+        // contributes a stable key so an in-run second lookup matches.
+        parts.push(self.compiler_id.unwrap_or("").as_bytes());
+        let compiler_len = self.compiler_len.to_le_bytes();
+        parts.push(&compiler_len);
+        parts.push(self.producing_jdk);
+        byte_dump::fingerprint_parts(&parts)
     }
-    // The exact compiler identity isolates one release/RC's bytes from another's; the jar length
-    // guards a same-identity rebuild. An unpublished compiler never reaches the cache, but still
-    // contributes a stable key so an in-run second lookup matches.
-    parts.push(compiler_id.unwrap_or("").as_bytes().to_vec());
-    parts.push(compiler_len.to_le_bytes().to_vec());
-    let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
-    byte_dump::fingerprint_parts(&refs)
 }
 
 /// kotlinc "test-only" language features: the compiler rejects `-XXLanguage:+<feature>` for these
@@ -314,9 +407,10 @@ pub fn reference_cache_fingerprint(
 /// `// LANGUAGE:` must reference-compile with that property, not be dropped from the population.
 const TEST_ONLY_LANGUAGE_FEATURES: &[&str] = &["ImplicitSignedToUnsignedIntegerConversion"];
 
-/// The reference compiler arguments a case's test directives imply, each of which the cache key
-/// already folds in (every entry rides `language_args`, which [`reference_cache_fingerprint`]
-/// hashes):
+/// The case-wide reference compiler arguments a case's test directives imply, each of which the
+/// cache key already folds in (every entry rides `language_args`, which
+/// [`ReferenceCacheInputs::fingerprint`] hashes). Code-generation modes are per unit, so they are
+/// selected by [`plan_units`] instead; a mode directive with an unknown value fails closed here.
 /// - its `// LANGUAGE:` flags, verbatim;
 /// - `-Dkotlinc.test.allow.testonly.language.features=true` when it opts in a test-only feature,
 ///   which the persistent server applies as a JVM property on its own property-keyed pool rather
@@ -331,6 +425,11 @@ const TEST_ONLY_LANGUAGE_FEATURES: &[&str] = &["ImplicitSignedToUnsignedIntegerC
 ///   the checker, so it never passes this flag to its own compile, but the case's runtime `box()`
 ///   is unaffected, leaving it applicable and still requiring a reference compile).
 fn reference_directive_args(src: &str) -> Result<Vec<String>, String> {
+    if let Some(directive) = unsupported_codegen_mode_directive(src) {
+        return Err(format!(
+            "reference oracle does not support the code-generation mode `{directive}`"
+        ));
+    }
     let mut args = language_directives::kotlinc_args(src);
     let opts_in_test_only = TEST_ONLY_LANGUAGE_FEATURES.iter().any(|feature| {
         let enabling = format!("-XXLanguage:+{feature}");
@@ -398,16 +497,29 @@ fn compiler_identity() -> (Option<String>, u64) {
     }
 }
 
-fn compile_all(
-    src: &str,
-    stem: &str,
-    cp_jars: &[PathBuf],
-    jdk: BoxJdk<'_>,
-    coroutine_helpers: &str,
-    language_args: &[String],
-    work: &Path,
-) -> Result<ReferenceClasses, String> {
-    let mut classes = ReferenceClasses::default();
+/// One reference compilation unit of a case, in build order: its module identity, sources, the
+/// earlier units it reads, and the code-generation mode arguments its own Kotlin sources select.
+/// `fragments` is the folded `dependsOn` chain in dependency-first order (empty for a single-module
+/// case); a multi-fragment unit compiles as HMPP, each fragment owning a contiguous run of the
+/// Kotlin blocks in that same order.
+struct PlannedUnit {
+    module: String,
+    kotlin: Vec<(String, String)>,
+    java: Vec<(String, String)>,
+    fragments: Vec<FragmentUnit>,
+    deps: Vec<String>,
+    friends: Vec<String>,
+    codegen_args: Vec<String>,
+}
+
+/// Split a case into the units krusty compiles it as: a `// MODULE:` build's folded units, else
+/// one `main` unit of its `// FILE:` blocks or of the whole source. `// WITH_COROUTINES` adds the
+/// generated helpers exactly where krusty does. Each unit selects its modes from its own Kotlin
+/// sources through [`UnitCodegenModes::of_unit`], the selection the gate's compile uses.
+fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<PlannedUnit>, String> {
+    let codegen_args = |kotlin: &[(String, String)]| {
+        UnitCodegenModes::of_unit(kotlin.iter().map(|(_, source)| source.as_str())).kotlinc_args()
+    };
     if src.contains("// MODULE:") {
         let Some(mut modules) = split_modules(src) else {
             return Err("reference oracle does not support this // MODULE: shape".to_string());
@@ -415,69 +527,82 @@ fn compile_all(
         if directive(src, "WITH_COROUTINES") {
             inject_support_module(&mut modules, coroutine_helpers);
         }
-        let mut outputs: HashMap<String, PathBuf> = HashMap::new();
-        for unit in module_units(&modules) {
-            let mut classpath = cp_jars.to_vec();
-            let mut friends = Vec::new();
-            for dependency in &unit.deps {
-                let Some(output) = outputs.get(dependency) else {
-                    return Err(format!(
-                        "reference module {}: dependency {dependency} was not built",
-                        unit.name
-                    ));
-                };
-                classpath.push(output.clone());
-                if unit.friends.contains(dependency) {
-                    friends.push(output.clone());
-                }
-            }
-            let output = work.join(&unit.name).join("classes");
-            let unit_classes = compile_unit(
-                &Unit {
-                    module: &unit.name,
-                    kotlin: &unit.files,
-                    java: &unit.java_files,
-                    fragments: &unit.fragments,
-                    classpath: &classpath,
-                    friend_paths: &friends,
-                },
-                jdk,
-                language_args,
-                &work.join(&unit.name),
-                &output,
-            )?;
-            for (name, bytes) in unit_classes {
-                classes.insert(&unit.name, &name, bytes);
-            }
-            outputs.insert(unit.name.clone(), output);
-        }
+        return Ok(module_units(&modules)
+            .into_iter()
+            .map(|unit| PlannedUnit {
+                codegen_args: codegen_args(&unit.files),
+                module: unit.name,
+                kotlin: unit.files,
+                java: unit.java_files,
+                fragments: unit.fragments,
+                deps: unit.deps,
+                friends: unit.friends,
+            })
+            .collect());
+    }
+    let (mut kotlin, java) = if src.contains("// FILE:") {
+        split_files(src)
     } else {
-        let (mut kotlin, java) = if src.contains("// FILE:") {
-            split_files(src)
-        } else {
-            (vec![(stem.to_string(), src.to_string())], Vec::new())
-        };
-        if directive(src, "WITH_COROUTINES") {
-            kotlin.push(("CoroutineUtil".to_string(), coroutine_helpers.to_string()));
+        (vec![(stem.to_string(), src.to_string())], Vec::new())
+    };
+    if directive(src, "WITH_COROUTINES") {
+        kotlin.push(("CoroutineUtil".to_string(), coroutine_helpers.to_string()));
+    }
+    Ok(vec![PlannedUnit {
+        codegen_args: codegen_args(&kotlin),
+        module: MAIN_MODULE.to_string(),
+        kotlin,
+        java,
+        fragments: Vec::new(),
+        deps: Vec::new(),
+        friends: Vec::new(),
+    }])
+}
+
+fn compile_all(
+    units: &[PlannedUnit],
+    cp_jars: &[PathBuf],
+    jdk: BoxJdk<'_>,
+    language_args: &[String],
+    work: &Path,
+) -> Result<ReferenceClasses, String> {
+    let mut classes = ReferenceClasses::default();
+    let mut outputs: HashMap<&str, PathBuf> = HashMap::new();
+    for unit in units {
+        let mut classpath = cp_jars.to_vec();
+        let mut friends = Vec::new();
+        for dependency in &unit.deps {
+            let Some(output) = outputs.get(dependency.as_str()) else {
+                return Err(format!(
+                    "reference module {}: dependency {dependency} was not built",
+                    unit.module
+                ));
+            };
+            classpath.push(output.clone());
+            if unit.friends.contains(dependency) {
+                friends.push(output.clone());
+            }
         }
-        let output = work.join(MAIN_MODULE).join("classes");
+        let output = work.join(&unit.module).join("classes");
         let unit_classes = compile_unit(
             &Unit {
-                module: MAIN_MODULE,
-                kotlin: &kotlin,
-                java: &java,
-                fragments: &[],
-                classpath: cp_jars,
-                friend_paths: &[],
+                module: &unit.module,
+                kotlin: &unit.kotlin,
+                java: &unit.java,
+                fragments: &unit.fragments,
+                codegen_args: &unit.codegen_args,
+                classpath: &classpath,
+                friend_paths: &friends,
             },
             jdk,
             language_args,
-            &work.join(MAIN_MODULE),
+            &work.join(&unit.module),
             &output,
         )?;
         for (name, bytes) in unit_classes {
-            classes.insert(MAIN_MODULE, &name, bytes);
+            classes.insert(&unit.module, &name, bytes);
         }
+        outputs.insert(&unit.module, output);
     }
     if classes.is_empty() {
         return Err("reference compile produced no .class artifacts".to_string());
@@ -485,14 +610,14 @@ fn compile_all(
     Ok(classes)
 }
 
-/// One compilation unit handed to the reference compiler. `fragments` is the folded `dependsOn`
-/// chain in dependency-first order (empty for a non-module single-file unit); a multi-fragment unit
-/// compiles as HMPP, each fragment owning a contiguous run of the Kotlin blocks in that same order.
+/// One planned unit handed to the reference compiler with the classpath its built dependencies
+/// resolved to.
 struct Unit<'a> {
     module: &'a str,
     kotlin: &'a [(String, String)],
     java: &'a [(String, String)],
     fragments: &'a [FragmentUnit],
+    codegen_args: &'a [String],
     classpath: &'a [PathBuf],
     friend_paths: &'a [PathBuf],
 }
@@ -527,6 +652,7 @@ fn compile_unit(
         let mut args: Vec<String> = vec!["-d".to_string(), output.to_string_lossy().into_owned()];
         args.extend(classpath_args);
         args.extend_from_slice(language_args);
+        args.extend_from_slice(unit.codegen_args);
         args.push("-module-name".to_string());
         args.push(unit.module.to_string());
         // A folded `dependsOn` chain compiles as hierarchical multiplatform: one fragment per
@@ -795,79 +921,138 @@ mod tests {
         krusty::toolchain::kotlinc_path().is_some()
     }
 
+    /// A plain case's key inputs, which each test varies one field of.
+    fn key_inputs<'a>(
+        base_args: &'a [String],
+        unit_codegen_args: &'a [(&'a str, &'a [String])],
+    ) -> ReferenceCacheInputs<'a> {
+        ReferenceCacheInputs {
+            src: "fun box() = \"OK\"",
+            stem: "Box",
+            coroutine_helpers: NO_HELPERS,
+            base_args,
+            language_args: &[],
+            unit_codegen_args,
+            compiler_id: Some("2.4.20"),
+            compiler_len: 100,
+            producing_jdk: b"JAVA_VERSION=\"21.0.12\"",
+        }
+    }
+
+    fn classpath(jar: &str) -> Vec<String> {
+        vec!["-classpath".to_string(), jar.to_string()]
+    }
+
+    const PLAIN_UNIT: &[(&str, &[String])] = &[(MAIN_MODULE, &[])];
+
     #[test]
     fn cache_key_isolates_version_source_and_classpath() {
-        let base = reference_cache_fingerprint(
-            "fun box() = \"OK\"",
-            "Box",
-            NO_HELPERS,
-            &["-classpath".to_string(), "/a.jar".to_string()],
-            &[],
-            Some("2.4.20"),
-            100,
-        );
+        let a_jar = classpath("/a.jar");
+        let base = key_inputs(&a_jar, PLAIN_UNIT);
         // Same inputs → same key.
         assert_eq!(
-            base,
-            reference_cache_fingerprint(
-                "fun box() = \"OK\"",
-                "Box",
-                NO_HELPERS,
-                &["-classpath".to_string(), "/a.jar".to_string()],
-                &[],
-                Some("2.4.20"),
-                100,
-            )
+            base.fingerprint(),
+            key_inputs(&a_jar, PLAIN_UNIT).fingerprint()
         );
         // A different exact compiler version must not replay the first version's bytes.
         assert_ne!(
-            base,
-            reference_cache_fingerprint(
-                "fun box() = \"OK\"",
-                "Box",
-                NO_HELPERS,
-                &["-classpath".to_string(), "/a.jar".to_string()],
-                &[],
-                Some("2.4.10"),
-                100,
-            )
+            base.fingerprint(),
+            ReferenceCacheInputs {
+                compiler_id: Some("2.4.10"),
+                ..base
+            }
+            .fingerprint()
         );
         // A changed source, classpath, or jar length each changes the key.
         assert_ne!(
-            base,
-            reference_cache_fingerprint(
-                "fun box() = \"FAIL\"",
-                "Box",
-                NO_HELPERS,
-                &["-classpath".to_string(), "/a.jar".to_string()],
-                &[],
-                Some("2.4.20"),
-                100,
-            )
+            base.fingerprint(),
+            ReferenceCacheInputs {
+                src: "fun box() = \"FAIL\"",
+                ..base
+            }
+            .fingerprint()
+        );
+        let b_jar = classpath("/b.jar");
+        assert_ne!(
+            base.fingerprint(),
+            key_inputs(&b_jar, PLAIN_UNIT).fingerprint()
         );
         assert_ne!(
-            base,
-            reference_cache_fingerprint(
-                "fun box() = \"OK\"",
-                "Box",
-                NO_HELPERS,
-                &["-classpath".to_string(), "/b.jar".to_string()],
-                &[],
-                Some("2.4.20"),
-                100,
-            )
+            base.fingerprint(),
+            ReferenceCacheInputs {
+                compiler_len: 101,
+                ..base
+            }
+            .fingerprint()
         );
+    }
+
+    #[test]
+    fn cache_key_isolates_unit_modes_and_the_producing_jdk() {
+        let a_jar = classpath("/a.jar");
+        let base = key_inputs(&a_jar, PLAIN_UNIT);
+        let class_lambdas = ["-Xlambdas=class".to_string()];
+        let no_compatibility = ["-jvm-default".to_string(), "no-compatibility".to_string()];
+        // A unit compiled under a non-default mode is a different reference compile.
+        for unit_codegen_args in [
+            &[(MAIN_MODULE, class_lambdas.as_slice())][..],
+            &[(MAIN_MODULE, no_compatibility.as_slice())][..],
+        ] {
+            assert_ne!(
+                base.fingerprint(),
+                key_inputs(&a_jar, unit_codegen_args).fingerprint()
+            );
+        }
+        // The same mode on a different unit of the same build is a different reference compile.
+        let on_lib: &[(&str, &[String])] = &[("lib", &no_compatibility), ("main", &[])];
+        let on_main: &[(&str, &[String])] = &[("lib", &[]), ("main", &no_compatibility)];
         assert_ne!(
-            base,
-            reference_cache_fingerprint(
-                "fun box() = \"OK\"",
-                "Box",
-                NO_HELPERS,
-                &["-classpath".to_string(), "/a.jar".to_string()],
-                &[],
-                Some("2.4.20"),
-                101,
-            )
+            key_inputs(&a_jar, on_lib).fingerprint(),
+            key_inputs(&a_jar, on_main).fingerprint()
+        );
+        // Another producing JDK never replays this JDK's Java classes.
+        assert_ne!(
+            base.fingerprint(),
+            ReferenceCacheInputs {
+                producing_jdk: b"JAVA_VERSION=\"25.0.4\"",
+                ..base
+            }
+            .fingerprint()
+        );
+    }
+
+    #[test]
+    fn each_planned_unit_selects_its_own_codegen_modes() {
+        let args = |src: &str, stem: &str| {
+            plan_units(src, stem, NO_HELPERS)
+                .expect("a supported shape")
+                .into_iter()
+                .map(|unit| (unit.module, unit.codegen_args))
+                .collect::<Vec<_>>()
+        };
+        let strings = |args: &[&str]| args.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            args("// LAMBDAS: CLASS\nfun box() = \"OK\"\n", "box"),
+            vec![(MAIN_MODULE.to_string(), strings(&["-Xlambdas=class"]))]
+        );
+        assert_eq!(
+            args(
+                "// FILE: a.kt\n// SAM_CONVERSIONS: CLASS\nfun a() {}\n// FILE: b.kt\nfun box() = \"OK\"\n",
+                "box"
+            ),
+            vec![(MAIN_MODULE.to_string(), strings(&["-Xsam-conversions=class"]))]
+        );
+        // A module's directive stays with the unit whose sources carry it.
+        assert_eq!(
+            args(
+                "// MODULE: lib\n// FILE: lib.kt\n// JVM_DEFAULT_MODE: disable\ninterface I\n\
+                 // MODULE: main(lib)\n// FILE: main.kt\nfun box() = \"OK\"\n",
+                "main"
+            ),
+            vec![
+                ("lib".to_string(), strings(&["-jvm-default", "disable"])),
+                ("main".to_string(), Vec::new()),
+            ]
         );
     }
 
@@ -1073,6 +1258,26 @@ mod tests {
             reference_directive_args("// RETURN_VALUE_CHECKER_MODE: UNKNOWN\nfun box() = \"OK\"\n"),
             Err("reference oracle does not support RETURN_VALUE_CHECKER_MODE UNKNOWN".to_string())
         );
+        // A recognized code-generation mode is a per-unit argument, not a case-wide one; an
+        // unrecognized one cannot be mirrored and fails closed rather than compiling the default.
+        assert_eq!(
+            reference_directive_args("// JVM_DEFAULT_MODE: no-compatibility\nfun box() = \"OK\"\n"),
+            Ok(Vec::<String>::new())
+        );
+        assert_eq!(
+            reference_directive_args("// FILE: a.kt\n// LAMBDAS: SIDEWAYS\nfun box() = \"OK\"\n"),
+            Err(
+                "reference oracle does not support the code-generation mode `// LAMBDAS: SIDEWAYS`"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            reference_directive_args("// JVM_DEFAULT_MODE: all\nfun box() = \"OK\"\n"),
+            Err(
+                "reference oracle does not support the code-generation mode `// JVM_DEFAULT_MODE: all`"
+                    .to_string()
+            )
+        );
         // The real `expectActualTypealiasCoercion` corpus case opts in all three.
         assert_eq!(
             reference_directive_args(
@@ -1092,16 +1297,14 @@ mod tests {
     fn directive_reference_options_change_the_cache_key() {
         // Both corpus directive options ride `language_args`, so they must move the reference cache
         // key: a cached plain compile can never be replayed as the directive-enabled one.
+        let a_jar = classpath("/a.jar");
         let key = |language_args: &[String]| {
-            reference_cache_fingerprint(
-                "package kotlin.jvm\nfun box() = \"OK\"\n",
-                "Box",
-                NO_HELPERS,
-                &["-classpath".to_string(), "/a.jar".to_string()],
+            ReferenceCacheInputs {
+                src: "package kotlin.jvm\nfun box() = \"OK\"\n",
                 language_args,
-                Some("2.4.20"),
-                100,
-            )
+                ..key_inputs(&a_jar, PLAIN_UNIT)
+            }
+            .fingerprint()
         };
         let plain = key(&[]);
         assert_ne!(plain, key(&["-Xallow-kotlin-package".to_string()]));
@@ -1363,20 +1566,188 @@ mod tests {
             "a cache hit never reaches kotlinc"
         );
 
-        let (compiler_id, compiler_len) = compiler_identity();
-        let fingerprint = reference_cache_fingerprint(
-            &src,
-            "probe",
-            NO_HELPERS,
-            &jdk.kotlinc_args(&[]).expect("full JDK arguments"),
-            &reference_directive_args(&src).expect("supported probe directives"),
-            compiler_id.as_deref(),
-            compiler_len,
+        let cache = reference_cache_dir(
+            reference_cache_key(&src, "probe", &[], jdk, NO_HELPERS).expect("probe cache key"),
         );
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(format!("target/cache/ref-classes/{fingerprint:032x}"));
         assert!(cache.join("OK").is_file(), "missing {}", cache.display());
         std::fs::remove_dir_all(&cache).expect("remove the probe's inventory entry");
+    }
+
+    /// Set only in the child processes
+    /// [`a_changed_producing_jdk_misses_the_reference_cache_across_processes`] spawns, carrying the
+    /// unique tag of the mixed-Java case they compile.
+    const JDK_PROBE: &str = "KRUSTY_REF_JDK_PROBE_TAG";
+
+    /// A JDK home of another feature release than the selected one, for the cross-JDK half of the
+    /// producing-JDK cache test.
+    const SECOND_JDK: &str = "KRUSTY_SECOND_JAVA_HOME";
+
+    /// One child process's reference lookup: its cache key, the process's hit and miss counts, and
+    /// the class-file major version of the javac-compiled class it got.
+    #[derive(Debug, PartialEq, Eq)]
+    struct JdkProbeRun {
+        key: u128,
+        hits: u64,
+        misses: u64,
+        java_major: u16,
+    }
+
+    fn jdk_probe_source(tag: &str) -> String {
+        format!(
+            "// FILE: Greeting.java\n\
+             public class Greeting {{ public static String ok() {{ return \"OK\"; }} }}\n\
+             // FILE: box.kt\n\
+             // {tag}\n\
+             fun box(): String = Greeting.ok()\n"
+        )
+    }
+
+    /// The class-file major version javac at `java_home` emits without `--release`.
+    fn javac_major(java_home: &Path) -> u16 {
+        let release = std::fs::read_to_string(java_home.join("release"))
+            .unwrap_or_else(|error| panic!("read {}/release: {error}", java_home.display()));
+        let feature: u16 = release
+            .lines()
+            .find_map(|line| line.strip_prefix("JAVA_VERSION="))
+            .and_then(|version| version.trim_matches('"').split('.').next()?.parse().ok())
+            .unwrap_or_else(|| panic!("no JAVA_VERSION in {}/release", java_home.display()));
+        feature + 44
+    }
+
+    fn run_jdk_probe(java_home: &Path, tag: &str) -> JdkProbeRun {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "box_reference_classes::tests::producing_jdk_probe",
+                "--nocapture",
+            ])
+            .env(JDK_PROBE, tag)
+            .env("KRUSTY_REF_JAVA_HOME", java_home)
+            .env("JAVA_HOME", java_home)
+            .output()
+            .expect("run the producing-JDK probe");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "producing-JDK probe failed: {}\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("jdk-probe "))
+            .unwrap_or_else(|| panic!("no probe report in {stdout}"));
+        let field = |name: &str| {
+            report
+                .split(' ')
+                .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+                .unwrap_or_else(|| panic!("no {name} in {report}"))
+        };
+        JdkProbeRun {
+            key: u128::from_str_radix(field("key"), 16).expect("hex key"),
+            hits: field("hits").parse().expect("hit count"),
+            misses: field("misses").parse().expect("miss count"),
+            java_major: field("major").parse().expect("major version"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_changed_producing_jdk_misses_the_reference_cache_across_processes() {
+        if !kotlinc_available()
+            || std::env::var_os(JDK_PROBE).is_some()
+            || byte_dump::published_compiler_id().is_none()
+        {
+            return;
+        }
+        // Every probe process selects the JDK through one unchanging path, a symlink this test
+        // retargets, so only the installation's own identity can tell the two JDKs apart.
+        let root = std::env::temp_dir().join(format!(
+            "krusty_ref_jdk_probe_{}_{}",
+            std::process::id(),
+            staging_sequence()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create the probe directory");
+        let home = root.join("jdk");
+        let first_jdk = PathBuf::from(common::java_home());
+        std::os::unix::fs::symlink(&first_jdk, &home).expect("link the first JDK");
+        let tag = format!(
+            "producing-JDK probe {} {:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        );
+
+        let cold = run_jdk_probe(&home, &tag);
+        assert_eq!(
+            (cold.hits, cold.misses, cold.java_major),
+            (0, 1, javac_major(&first_jdk)),
+            "a new case compiles live under the first JDK"
+        );
+        let warm = run_jdk_probe(&home, &tag);
+        assert_eq!(
+            warm,
+            JdkProbeRun {
+                hits: 1,
+                misses: 0,
+                ..cold
+            },
+            "another process on the same JDK reads the published inventory back"
+        );
+
+        let mut keys = vec![cold.key];
+        match std::env::var_os(SECOND_JDK).filter(|home| !home.is_empty()) {
+            Some(second_jdk) => {
+                let second_jdk = PathBuf::from(second_jdk);
+                assert_ne!(
+                    javac_major(&second_jdk),
+                    cold.java_major,
+                    "{SECOND_JDK} must name a JDK of another feature release"
+                );
+                std::fs::remove_file(&home).expect("unlink the first JDK");
+                std::os::unix::fs::symlink(&second_jdk, &home).expect("link the second JDK");
+                let switched = run_jdk_probe(&home, &tag);
+                assert_eq!(
+                    (switched.hits, switched.misses, switched.java_major),
+                    (0, 1, javac_major(&second_jdk)),
+                    "the same case at the same JDK path recompiles under the replacement JDK"
+                );
+                assert_ne!(switched.key, cold.key);
+                keys.push(switched.key);
+            }
+            None => eprintln!("set {SECOND_JDK} to check that another JDK misses the cache"),
+        }
+
+        for key in keys {
+            std::fs::remove_dir_all(reference_cache_dir(key))
+                .expect("remove the probe's inventory entry");
+        }
+        std::fs::remove_dir_all(&root).expect("remove the probe directory");
+    }
+
+    #[test]
+    fn producing_jdk_probe() {
+        let Some(tag) = std::env::var_os(JDK_PROBE) else {
+            return;
+        };
+        let src = jdk_probe_source(tag.to_str().expect("UTF-8 probe tag"));
+        let jdk = BoxJdk::Full { root: None };
+        let classpath = [common::stdlib_jar()];
+        let reference = reference_compile(&src, "box", &classpath, jdk, NO_HELPERS)
+            .expect("the mixed-Java probe compiles");
+        let key =
+            reference_cache_key(&src, "box", &classpath, jdk, NO_HELPERS).expect("probe cache key");
+        let java = reference
+            .module(MAIN_MODULE)
+            .and_then(|classes| classes.get("Greeting"))
+            .expect("the javac-compiled class is in the inventory");
+        let stats = reference_stats();
+        println!(
+            "jdk-probe key={key:032x} hits={} misses={} major={}",
+            stats.hits,
+            stats.misses,
+            u16::from_be_bytes([java[6], java[7]])
+        );
     }
 
     fn compile_or_skip(

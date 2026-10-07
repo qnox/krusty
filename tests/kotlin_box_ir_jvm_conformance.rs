@@ -304,9 +304,10 @@ fn compile_source(
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
     );
+    let modes = krusty::conformance::UnitCodegenModes::of_unit([src]);
     let backend = krusty::jvm::JvmBackend::new(cp)
-        .with_jvm_default(krusty::conformance::jvm_default_mode(src))
-        .with_lambda_modes(box_lambda_modes([src]));
+        .with_jvm_default(modes.jvm_default)
+        .with_lambda_modes(modes.lambdas);
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     T_EMIT.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
@@ -318,30 +319,6 @@ fn compile_source(
         })
         .collect::<Vec<_>>();
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
-}
-
-/// `-Xlambdas` and `-Xsam-conversions` for a box file. `// LAMBDAS: CLASS` and
-/// `// SAM_CONVERSIONS: CLASS` select the class strategy; anything else keeps kotlinc's default
-/// `indy`.
-fn box_lambda_modes<'a>(
-    sources: impl IntoIterator<Item = &'a str>,
-) -> krusty::jvm::ir_emit::LambdaModes {
-    let sources = sources.into_iter().collect::<Vec<_>>();
-    let modes = krusty::jvm::ir_emit::LambdaModes {
-        lambdas: sources
-            .iter()
-            .copied()
-            .map(krusty::conformance::lambda_mode)
-            .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
-            .unwrap_or_default(),
-        sam_conversions: sources
-            .iter()
-            .copied()
-            .map(krusty::conformance::sam_conversion_mode)
-            .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
-            .unwrap_or_default(),
-    };
-    modes
 }
 
 /// The `helpers` package source the Kotlin test infra injects into every `// WITH_COROUTINES` box test
@@ -605,16 +582,12 @@ fn compile_blocks_mixed(
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, features, &mut diags,
     );
-    let jvm_default = blocks
-        .iter()
-        .map(|(_, source)| krusty::conformance::jvm_default_mode(source))
-        .find(|mode| *mode != krusty::jvm::ir_emit::JvmDefaultMode::default())
-        .unwrap_or_default();
+    let modes = krusty::conformance::UnitCodegenModes::of_unit(
+        blocks.iter().map(|(_, source)| source.as_str()),
+    );
     let backend = krusty::jvm::JvmBackend::new(cp)
-        .with_jvm_default(jvm_default)
-        .with_lambda_modes(box_lambda_modes(
-            blocks.iter().map(|(_, source)| source.as_str()),
-        ));
+        .with_jvm_default(modes.jvm_default)
+        .with_lambda_modes(modes.lambdas);
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let classes = outputs
         .into_iter()
@@ -818,6 +791,26 @@ fn compile_module_test(
         flat: all,
         module_ranges,
     })
+}
+
+/// Compile one box case with krusty through the topology its markers select: `// MODULE:` builds,
+/// then `// FILE:` multi-file sets (also used for `// WITH_COROUTINES`, which needs the generated
+/// `helpers` source compiled alongside it), then a single source file.
+fn compile_box_case(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&Path>,
+    progress: &dyn Fn(&str),
+) -> Option<CompiledClasses> {
+    if src.contains("// MODULE:") {
+        compile_module_test(src, cp_jars, jdk_modules, progress)
+    } else if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
+        compile_multifile(src, stem, cp_jars, jdk_modules).map(CompiledClasses::single_module)
+    } else {
+        compile_source(src, stem, cp_jars, jdk_modules, progress)
+            .map(CompiledClasses::single_module)
+    }
 }
 
 /// Find the class that declares `static box()Ljava/lang/String;`.
@@ -1395,6 +1388,123 @@ fun box(): String = Registry.value()\n";
     );
 }
 
+/// `(module, internal name)` of every class in one inventory.
+type QualifiedClassNames = BTreeSet<(String, String)>;
+
+/// Module-qualified class names of krusty's gate compile and of the reference inventory for one
+/// case, or `None` when the reference compiler is not provisioned.
+fn gate_and_reference_class_names(
+    src: &str,
+    stem: &str,
+    jdk: krusty::conformance::BoxJdk<'_>,
+) -> Option<(QualifiedClassNames, QualifiedClassNames)> {
+    let classpath = common::classpath_jars_for(src);
+    let krusty = compile_box_case(src, stem, &classpath, jdk.classpath_root(), &|_| {})
+        .unwrap_or_else(|| panic!("krusty must compile {stem}"));
+    let reference = match box_reference_classes::reference_compile(
+        src,
+        stem,
+        &classpath,
+        jdk,
+        COROUTINE_HELPERS,
+    ) {
+        Ok(reference) => box_byte_score::qualified_from_reference(&reference),
+        Err(error) if error == "kotlinc unavailable" => return None,
+        Err(error) => panic!("reference compiler rejected {stem}: {error}"),
+    };
+    Some((
+        krusty.qualified().into_keys().collect(),
+        reference.into_keys().collect(),
+    ))
+}
+
+/// Real corpus cases whose directive changes the emitted class population: class lambdas
+/// (`functionNtoString`), class SAM wrappers (`sameWrapperClass2`), and no `$DefaultImpls`
+/// (`kt46389_jvmDefault`). The reference inventory must be compiled under the same mode as the
+/// gate's compile, so both sides list the same module-qualified classes.
+#[test]
+fn reference_inventories_follow_each_units_codegen_modes() {
+    let Some(box_dir) = krusty::toolchain::box_corpus_dir() else {
+        return;
+    };
+    if krusty::toolchain::kotlinc_path().is_none() {
+        return;
+    }
+    let roots = krusty::conformance::BoxJdkRoots::new(
+        krusty::toolchain::box_mock_jdk_rt_jar(&box_dir).unwrap_or_else(|error| panic!("{error}")),
+        Some(Path::new(&common::java_home()).join("lib").join("modules")).filter(|p| p.is_file()),
+    );
+    for (case, mode_marker, emitted) in [
+        (
+            "functions/functionNtoString.kt",
+            "FunctionNtoStringKt$box$1",
+            true,
+        ),
+        (
+            "sam/constructors/sameWrapperClass2.kt",
+            "SameWrapperClass2Kt$sam$SAM$0",
+            true,
+        ),
+        ("bridges/kt46389_jvmDefault.kt", "I$DefaultImpls", false),
+    ] {
+        let src = krusty::conformance::prepare_test_source(
+            &fs::read_to_string(box_dir.join(case)).expect("read corpus case"),
+        );
+        let stem = Path::new(case).file_stem().unwrap().to_str().unwrap();
+        let Some((gate, reference)) =
+            gate_and_reference_class_names(&src, stem, roots.select(&src))
+        else {
+            return;
+        };
+        assert_eq!(
+            reference, gate,
+            "{case}: reference and gate class inventories"
+        );
+        assert_eq!(
+            reference.contains(&(
+                box_reference_classes::MAIN_MODULE.to_string(),
+                mode_marker.to_string()
+            )),
+            emitted,
+            "{case}: whether {mode_marker} is emitted, in {reference:?}"
+        );
+    }
+}
+
+/// Two modules pinning different `JVM_DEFAULT_MODE`s each compile under their own: the library's
+/// `no-compatibility` drops its `$DefaultImpls`, while the consumer keeps kotlinc's default holder.
+#[test]
+fn module_codegen_modes_stay_with_their_unit() {
+    let src = "// MODULE: lib\n\
+               // FILE: lib.kt\n\
+               // JVM_DEFAULT_MODE: no-compatibility\n\
+               interface Base { fun f(): String = \"O\" }\n\
+               // MODULE: main(lib)\n\
+               // FILE: main.kt\n\
+               interface Derived : Base { fun g(): String = \"K\" }\n\
+               class Impl : Derived\n\
+               fun box(): String = Impl().f() + Impl().g()\n";
+    let jdk = common::jdk_modules();
+    let jdk = krusty::conformance::BoxJdk::Full {
+        root: Some(jdk.as_path()),
+    };
+    let Some((gate, reference)) = gate_and_reference_class_names(src, "main", jdk) else {
+        return;
+    };
+    let qualified = |module: &str, name: &str| (module.to_string(), name.to_string());
+    assert_eq!(
+        reference,
+        BTreeSet::from([
+            qualified("lib", "Base"),
+            qualified("main", "Derived"),
+            qualified("main", "Derived$DefaultImpls"),
+            qualified("main", "Impl"),
+            qualified("main", "MainKt"),
+        ])
+    );
+    assert_eq!(gate, reference);
+}
+
 #[test]
 #[cfg(unix)]
 fn peak_process_rss_is_observable() {
@@ -1652,21 +1762,10 @@ fn kotlin_codegen_box_conformance() {
                     let (test_result, compiled) = (|| -> (TestResult, Option<CompiledClasses>) {
                         let t0 = std::time::Instant::now();
                         mark_box_case_phase(&active, tid, file, "compile");
-                        // A `// FILE:` multi-file test, OR a `// WITH_COROUTINES` test (which needs the
-                        // generated `helpers` source compiled alongside it), goes through the multi-block path.
-                        let compiled = if src.contains("// MODULE:") {
-                            compile_module_test(&src, &compile_cp, jdk_modules, &|phase| {
+                        let compiled =
+                            compile_box_case(&src, &stem, &compile_cp, jdk_modules, &|phase| {
                                 mark_box_case_phase(&active, tid, file, phase)
-                            })
-                        } else if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
-                            compile_multifile(&src, &stem, &compile_cp, jdk_modules)
-                                .map(CompiledClasses::single_module)
-                        } else {
-                            compile_source(&src, &stem, &compile_cp, jdk_modules, &|phase| {
-                                mark_box_case_phase(&active, tid, file, phase)
-                            })
-                            .map(CompiledClasses::single_module)
-                        };
+                            });
                         let compiled = match compiled {
                             Some(c) => c,
                             None => {

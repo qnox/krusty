@@ -115,7 +115,10 @@ fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf
     // JAVA_HOME) is unloadable by an older runtime, and the server-spawn failure then reads as
     // "kotlinc unavailable" — silently disabling every reference compile and cross-check.
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in KOTLINC_SERVER_SRC.bytes().chain(java_home.bytes()) {
+    for b in KOTLINC_SERVER_SRC
+        .bytes()
+        .chain(super::producing_jdk::driver_cache_key(java_home))
+    {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
     let dir =

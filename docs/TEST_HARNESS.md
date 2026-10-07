@@ -204,8 +204,16 @@ diagnostics fails that assert instead of compiling; read-only CI compiles that i
 live. The archive is read at runtime and is not compiled into the test binary or committed to the repository.
 The corpus byte-diff cache under `target/cache/ref-classes/` follows
 the same release/RC rule and stays uncached for any other compiler. A box-corpus reference compile
-reads and writes only that cache: its key already covers the source, stem, classpath, and compiler
-identity, so a miss compiles live with kotlinc in every environment and never touches the archive.
+reads and writes only that cache: its key already covers the source, stem, classpath, each
+compilation unit's code-generation modes, the compiler identity, and the producing JDK, so a miss
+compiles live with kotlinc in every environment and never touches the archive. Each unit compiles
+under the `// LAMBDAS:`, `// SAM_CONVERSIONS:`, and `// JVM_DEFAULT_MODE:` modes its own Kotlin
+sources select, exactly as krusty's gate compile selects them, and an unrecognized mode value is a
+reference failure. The producing JDK is the one `KRUSTY_REF_JAVA_HOME` (else `JAVA_HOME`) selects for
+the reference kotlinc server and javac; it is identified by its `release` record and the size and
+modification time of its `lib/modules` image, so retargeting or upgrading a JDK at the same path
+still recompiles. Set `KRUSTY_SECOND_JAVA_HOME` to a JDK of another feature release to make
+`a_changed_producing_jdk_misses_the_reference_cache_across_processes` also check the cross-JDK miss.
 Recording each of those compiles into the archive as well rewrote the whole archive per store and
 pushed a cold scored shard past its deadline.
 
@@ -315,7 +323,8 @@ once and schedules test binaries to preserve shared JVM runners.
 
 `KRUSTY_BYTE_DIFF=1` makes the box-conformance run ALSO compile every krusty-compiled corpus file
 with the reference kotlinc (persistent in-process compiler server; results cached under
-`target/cache/ref-classes/`, keyed by source + stem + classpath + dist identity) and compare the
+`target/cache/ref-classes/`, keyed by source + stem + classpath + per-unit code-generation modes +
+dist identity + producing JDK) and compare the
 two module-qualified class sets **byte-for-byte**. The diff reads the same reference inventory as
 the byte score, so a run with both compiles each case once:
 

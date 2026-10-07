@@ -7,9 +7,11 @@
 use std::path::{Path, PathBuf};
 
 mod box_jdk;
+mod codegen_modes;
 mod reference_jvm;
 
 pub use box_jdk::{box_jdk_kind, BoxJdk, BoxJdkKind, BoxJdkRoots};
+pub use codegen_modes::{unsupported_codegen_mode_directive, UnitCodegenModes};
 pub use reference_jvm::{reference_jvm_acceptance, ReferenceJvmAcceptance};
 
 /// Recursively collect Kotlin sources in deterministic path order. A source file is also accepted as

@@ -7,6 +7,7 @@ pub(crate) mod kotlinc_server;
 pub mod language_directives;
 mod metadata_diff;
 mod native_backend;
+pub(crate) mod producing_jdk;
 pub(crate) mod server_pool;
 pub use kotlinc_lib::kotlinc_lib_out;
 pub use kotlinc_server::{kotlin_compiler_jar, kotlinc_compile};
@@ -1139,19 +1140,23 @@ class TestClassLoader extends ClassLoader {
 }
 "#;
 
-/// Locate `JAVA_HOME` for the runner JVM (`KRUSTY_REF_JAVA_HOME` overrides). `None` ⇒ skip.
-#[allow(dead_code)]
-pub fn java_home() -> String {
+/// The JDK home the runner JVMs, javac, and the reference kotlinc server run on:
+/// `KRUSTY_REF_JAVA_HOME`, else `JAVA_HOME`. `None` when neither names a home.
+pub fn selected_java_home() -> Option<String> {
     std::env::var("KRUSTY_REF_JAVA_HOME")
         .or_else(|_| std::env::var("JAVA_HOME"))
         .ok()
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| {
-            panic!(
-                "JAVA_HOME is not set, so no JVM-backed test in this suite can run.\n\
-                 There is no fallback to /usr/libexec/java_home — set it explicitly to a JDK 21+ home."
-            )
-        })
+}
+
+/// [`selected_java_home`], which every JVM-backed test requires.
+pub fn java_home() -> String {
+    selected_java_home().unwrap_or_else(|| {
+        panic!(
+            "JAVA_HOME is not set, so no JVM-backed test in this suite can run.\n\
+             There is no fallback to /usr/libexec/java_home — set it explicitly to a JDK 21+ home."
+        )
+    })
 }
 
 /// Compile `BoxRunner.java` once into a stable cache dir keyed by the source hash; return its dir.
@@ -2724,7 +2729,10 @@ fn setup_java_runner(java_home: &str) -> Option<PathBuf> {
     // JDK in the cache key for the same reason as `setup_kotlinc_server`: a newer-javac class
     // under an older runtime dies at load and the failure masquerades as "toolchain unavailable".
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in JAVA_RUNNER_SRC.bytes().chain(java_home.bytes()) {
+    for b in JAVA_RUNNER_SRC
+        .bytes()
+        .chain(producing_jdk::driver_cache_key(java_home))
+    {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/java_runner_{hash:016x}"));
