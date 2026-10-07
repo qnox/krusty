@@ -1147,6 +1147,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
             .env("KRUSTY_COVERAGE_E2E_SHARDS", "1")
             .env("KRUSTY_TEST_JOBS", "1")
             .env("KRUSTY_TEST_THREADS", "1")
+            .env("RUSTFLAGS", "-Z threads=4")
             .env("E2E_BIN", &e2e_bin)
             .env("UNIT_BIN", &unit_bin)
             .env("STUB_BUILD_LOG", &build_log)
@@ -1170,9 +1171,13 @@ fn phase_timing_coverage_run_prints_every_phase() {
         1,
         "CLI and language server must be one cargo build: {builds}"
     );
-    assert!(
-        stderr.contains("cargo-rustflags:-Z threads=7"),
-        "nproc frontend threads were not requested: {stderr}"
+    assert_eq!(
+        stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("cargo-rustflags:"))
+            .collect::<Vec<_>>(),
+        ["-Z threads=4 -Z threads=7"],
+        "nproc frontend threads were not appended: {stderr}"
     );
     fs::write(&build_log, "").expect("reset build log");
     let fallback_output = run_coverage("sysctl");
@@ -1182,9 +1187,13 @@ fn phase_timing_coverage_run_prints_every_phase() {
         fallback_output.status.success(),
         "coverage sysctl fallback run failed: {fallback_stderr}"
     );
-    assert!(
-        fallback_stderr.contains("cargo-rustflags:-Z threads=5"),
-        "sysctl frontend threads were not requested: {fallback_stderr}"
+    assert_eq!(
+        fallback_stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("cargo-rustflags:"))
+            .collect::<Vec<_>>(),
+        ["-Z threads=4 -Z threads=5"],
+        "sysctl frontend threads were not appended: {fallback_stderr}"
     );
     let starts = stderr
         .lines()
