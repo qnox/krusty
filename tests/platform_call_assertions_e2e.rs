@@ -539,6 +539,17 @@ fun box(): String {
 fn constructor_delegation_guards_a_platform_argument() {
     let krusty = common::expect_classes_with_stdlib(CONSTRUCTOR_DELEGATION, "CtorDelegation");
     let reference = compile_reference(CONSTRUCTOR_DELEGATION, "CtorDelegation");
+    let class_bytes = |classes: &[(String, Vec<u8>)]| {
+        classes
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        class_bytes(&krusty),
+        class_bytes(&reference),
+        "every emitted constructor-delegation class must be byte-identical to kotlinc"
+    );
     assert_eq!(
         assertion_sites(&krusty, "krusty"),
         assertion_sites(&reference, "kotlinc"),
