@@ -4,10 +4,10 @@
 //! holder's debug range opens at its store, before the element is set.
 //!
 //! kotlinc boxes only a local that a closure it does not inline captures; a lambda it inlines
-//! writes the caller's local directly. krusty boxes a local its inlined lambdas capture too, and
-//! the captured-vars optimization then turns the holder back into a plain local. Such a holder
-//! sets its element before its store, so the local it becomes is assigned before its range
-//! begins, as kotlinc's plain local is.
+//! writes the caller's local directly. krusty still boxes that local, and the captured-vars
+//! pass turns the holder back into a plain local. The declaration stores the holder before
+//! setting its element — the same shape as a closure that keeps the box. Once the pass removes
+//! the box, the local's range opens on the real initializer and a default store precedes it.
 
 use super::*;
 use crate::ir::ExprId;
@@ -19,15 +19,10 @@ impl Emitter<'_> {
     /// The holder a declaration's `RefNew` initializer creates, when the declaration stores it
     /// before setting its element. An initial value that cannot carry the loaded holder on the
     /// operand stack (see `spills_operand_prefix`) is set on the holder before the store instead.
-    pub(super) fn stored_shared_cell(
-        &self,
-        declaration: ExprId,
-        initializer: ExprId,
-    ) -> Option<SharedCell> {
+    pub(super) fn stored_shared_cell(&self, initializer: ExprId) -> Option<SharedCell> {
         match *self.ir.expr(initializer) {
             IrExpr::RefNew { elem, init }
-                if !init.is_some_and(|value| self.spills_operand_prefix(value))
-                    && !self.inlined_only_cells.contains(&declaration) =>
+                if !init.is_some_and(|value| self.spills_operand_prefix(value)) =>
             {
                 Some((elem, self.holder_initial_value(elem, init)))
             }
@@ -61,32 +56,6 @@ impl Emitter<'_> {
             _ => false,
         };
         (!default).then_some(value)
-    }
-
-    /// Record which of a block's captured-local declarations only inlined lambdas capture: every
-    /// later use of the local in the block reads or writes the holder's element, or is a capture
-    /// of a lambda with an inlined body.
-    pub(super) fn note_inlined_only_cells(&mut self, stmts: &[ExprId], value: Option<ExprId>) {
-        for (position, &statement) in stmts.iter().enumerate() {
-            let IrExpr::Variable {
-                index,
-                init: Some(initializer),
-                ..
-            } = *self.ir.expr(statement)
-            else {
-                continue;
-            };
-            if !matches!(self.ir.expr(initializer), IrExpr::RefNew { .. }) {
-                continue;
-            }
-            let scope = stmts[position + 1..].iter().copied().chain(value);
-            if scope
-                .into_iter()
-                .all(|root| only_inlined_captures(self.ir, root, index))
-            {
-                self.inlined_only_cells.insert(statement);
-            }
-        }
     }
 
     /// Store a new holder in `slot`, then set its `element` to the initial value, if any.
@@ -241,61 +210,4 @@ impl Emitter<'_> {
         };
         self.open_locals.insert(position, local);
     }
-}
-
-/// Whether every use of local `index` under `root` reads or writes its holder's element, or is a
-/// capture of a lambda an inline call expands: a literal argument for one of the call's inline
-/// parameters ([`super::inline_parameters`]). Such a lambda's body is spliced
-/// into the caller, so the search follows the holder into it: the body numbers its captures first,
-/// and the capture at position `k` is that body's value `k`. Any other lambda's body is its own
-/// function, so only its captures are searched, and capturing the holder there lets it escape.
-fn only_inlined_captures(ir: &crate::ir::IrFile, root: ExprId, index: u32) -> bool {
-    let is_local = |expression: ExprId, local: u32| matches!(*ir.expr(expression), IrExpr::GetValue(read) if read == local);
-    let mut pending = vec![(root, index)];
-    while let Some((expression, local)) = pending.pop() {
-        if is_local(expression, local) {
-            return false;
-        }
-        match ir.expr(expression) {
-            IrExpr::RefGet { holder, .. } if is_local(*holder, local) => {}
-            IrExpr::RefSet { holder, value, .. } if is_local(*holder, local) => {
-                pending.push((*value, local))
-            }
-            IrExpr::Call {
-                dispatch_receiver,
-                args,
-                ..
-            } if ir.call_inline_modifiers.contains_key(&expression) => {
-                pending.extend(dispatch_receiver.map(|receiver| (receiver, local)));
-                for (position, &argument) in args.iter().enumerate() {
-                    match ir.expr(argument) {
-                        IrExpr::Lambda {
-                            captures,
-                            inline_body: Some(body),
-                            ..
-                        } if super::inline_parameters::is_inline_parameter(
-                            ir, expression, position,
-                        ) == Some(true) =>
-                        {
-                            for (slot, &capture) in captures.iter().enumerate() {
-                                if is_local(capture, local) {
-                                    pending.push((*body, slot as u32));
-                                } else {
-                                    pending.push((capture, local));
-                                }
-                            }
-                        }
-                        _ => pending.push((argument, local)),
-                    }
-                }
-            }
-            IrExpr::Lambda { captures, .. } => {
-                pending.extend(captures.iter().map(|&capture| (capture, local)))
-            }
-            _ => crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                pending.push((child, local))
-            }),
-        }
-    }
-    true
 }

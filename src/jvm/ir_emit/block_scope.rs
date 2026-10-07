@@ -261,7 +261,6 @@ impl Emitter<'_> {
                     )
                 })
         });
-        self.note_inlined_only_cells(&stmts, value);
         let mut normalize_at_lambda_frame = normalize_at_lambda_frame;
         let mut reserved_inline_stack = None;
         for (index, statement) in stmts.into_iter().enumerate() {

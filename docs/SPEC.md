@@ -4849,6 +4849,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's `SharedVariablesManager` skips it. `-0.0`, an unsigned zero and a zero boxed into an
   `ObjectRef` are stored. Tests: `tests/shared_cell_initial_values_e2e.rs`.
 
+- **A `var` captured only by an inlined lambda is stored as its JVM default before its initializer.**
+  kotlinc leaves the variable unboxed and writes that default before the real initializer, then
+  opens the local's range, so the range covers the initializer. A `val`, an uncaptured `var`, and a
+  `var` an ordinary closure captures do not get the extra store. An initializer that is already the
+  default is a single store. The zero store is only at the declaration: a later assignment is not
+  preceded by another one. Tests: `tests/inline_capture_default_e2e.rs`.
+
 - **A lambda returns what kotlinc infers for it.** A lambda whose every result is `Unit` (a statement
   tail such as an assignment, a declaration or an `else`-less `if`, or a `Unit` call) has the result
   type `Unit` even where the expected function type returns `Any` or `Any?`, so its implementation
