@@ -17,6 +17,22 @@ use super::*;
 pub struct IrLambdaClass {
     /// A checked public inline declaration exposes this closure to callers in other packages.
     pub public_inline: bool,
+    /// The closure is part of a non-private inline declaration's published ABI. This is distinct
+    /// from [`Self::public_inline`]: a private inline default still needs a public JVM class for
+    /// cross-package module calls, but does not receive Kotlin's public-ABI metadata flag.
+    pub public_inline_abi: bool,
+    /// The closure's semantic function type mentions a reified parameter of the inline declaration
+    /// that exposes it. The JVM marks both singleton initialization and the default expression that
+    /// loads it so an inliner regenerates the type-specialized class.
+    pub requires_reification: bool,
+    /// Source label of this lambda's extension receiver, before JVM realization removes the
+    /// implementation's lambda-origin record. `None` means kotlinc's unlabeled `<this>` spelling;
+    /// a backend formats a present label at the local-variable boundary.
+    pub extension_receiver_label: Option<String>,
+    /// The inline function whose default argument this lambda implements. The JVM realization
+    /// records it before replacing the lambda expression; emission uses it for the `$default`
+    /// enclosure, source map, and metadata ABI flag without searching the rewritten body.
+    pub inline_default_owner: Option<FunId>,
     pub invoke: FunId,
     /// The lambda's function type: the class's `FunctionN` and its generic supertype.
     pub function_type: Ty,
