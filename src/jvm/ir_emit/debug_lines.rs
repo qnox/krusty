@@ -113,9 +113,9 @@ impl Emitter<'_> {
         }
     }
 
-    /// Mark one expression line, mapping a same-file inline copy through the class's SMAP. Common
-    /// IR supplies the semantic declaration owner and call line; this boundary chooses JVM source
-    /// paths and output line numbers.
+    /// Mark one expression line, mapping a same-module inline copy through the class's SMAP. Common
+    /// IR supplies the semantic declaration owner, the callee's source file, and the call line;
+    /// this boundary chooses JVM source paths and output line numbers.
     pub(super) fn mark_expression_start(&mut self, expression: ExprId, code: &mut CodeBuilder) {
         if self.ir.callable_scopes.contains(&expression)
             || self.ir.dispatch_line(expression).is_some()
@@ -168,13 +168,11 @@ impl Emitter<'_> {
         let Some(call_line) = provenance.call_line else {
             return line;
         };
-        let Some(source_file) = self.cw.source_file_name() else {
+        let Some((source_file, path)) =
+            self.copied_inline_file(provenance.function, provenance.owner, provenance.source)
+        else {
             return line;
         };
-        let path = provenance.owner.map_or_else(
-            || self.facade.clone(),
-            |owner| crate::jvm::names::classfile_internal_name_of(owner).to_owned(),
-        );
         let claimable = u16::try_from(self.ir.source_line_count)
             .unwrap_or(u16::MAX)
             .max(1);
@@ -187,6 +185,32 @@ impl Emitter<'_> {
             )
         });
         mapped.map_or(line, u32::from)
+    }
+
+    /// The source file and JVM path a copied inline line is mapped under.
+    ///
+    /// A top-level callee uses the exact facade already resolved for its declaration. A member uses
+    /// its semantic classifier. Same-file top-level code uses the current facade.
+    fn copied_inline_file(
+        &self,
+        function: crate::ir::FunId,
+        owner: Option<crate::types::TypeName>,
+        source: crate::fir::SourceFileId,
+    ) -> Option<(String, String)> {
+        let identity = self.ir.source_debug.file(source)?;
+        let path = owner.map_or_else(
+            || {
+                if self.ir.source_debug.is_current(source) {
+                    Some(self.facade.clone())
+                } else {
+                    self.ir.foreign_template_facade(function).map(|facade| {
+                        crate::jvm::names::classfile_internal_name_of(facade).to_owned()
+                    })
+                }
+            },
+            |owner| Some(crate::jvm::names::classfile_internal_name_of(owner).to_owned()),
+        )?;
+        Some((identity.name.to_string(), path))
     }
 
     /// Map a line of an external inline declaration's body through the class's source map, under
