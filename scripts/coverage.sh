@@ -108,14 +108,12 @@ mkdir -p target/coverage
 rm -f "$coverage_target"/*.profraw target/coverage/*.profdata target/coverage/*.profraw
 phase_end instrument
 
-# Compile the compiler and LSP coverage workloads without running them, then read each test
-# executable's path from Cargo's JSON build output. The dedicated `coverage` profile (Cargo.toml)
-# builds at opt-level 1 with gate-matching checks: the e2e suite runs krusty in-process for every
-# dependency-lib fixture, and instrumenting that at `dev` made the coverage run dominate CI.
-# Both product binaries are one cargo build. Separate invocations do not unify features the same
-# way, so the language-server build compiled krusty again. One invocation compiles that library
-# once and links both binaries from it. The instrumentation flags are unchanged, so the same
-# crates are covered.
+# Compile the product binaries and the compiler and language-server tests in one cargo build.
+# A separate `cargo test` after `cargo build` compiles krusty again and cannot overlap that
+# cfg(test) harness with the binaries. One invocation compiles the non-test library once, overlaps
+# the cfg(test) harness with the binaries, and leaves the instrumentation flags unchanged.
+# The dedicated `coverage` profile builds at opt-level 1: instrumenting the in-process e2e
+# compiler at `dev` made that suite dominate CI.
 run_phase() {
   local name="$1"
   shift
@@ -128,8 +126,43 @@ run_phase() {
     exit "$status"
   fi
 }
-run_phase build-bins "${coverage_cargo[@]}" build --profile coverage \
-  -p krusty-cli -p krusty-lsp --bin krusty --bin krusty-lsp
+# Cargo's human progress stays on stderr while its machine-readable artifact stream goes to the
+# temporary file. The executable query finds the test binaries without a second Cargo invocation.
+read_test_executables() {
+  jq -r '
+    def package_is($name):
+      test("(^|[/# ])" + $name + "([#@ ]|$)");
+    select(.reason == "compiler-artifact" and .profile.test == true and .executable != null)
+    | . as $artifact
+    | ($artifact.package_id | tostring) as $package
+    | ($artifact.target.kind | join(",")) as $kind
+    | if ($package | package_is("krusty-lsp")) then
+        $artifact.executable
+      elif ($package | package_is("krusty-cli")) and $kind == "lib" then
+        $artifact.executable
+      elif ($package | package_is("krusty"))
+          and ($kind == "lib" or ($kind == "test" and $artifact.target.name == "e2e")) then
+        $artifact.executable
+      else
+        empty
+      end
+  '
+}
+phase_begin build-compiler
+compiler_json="$(mktemp)"
+if "${coverage_cargo[@]}" build --profile coverage --message-format=json \
+    -p krusty -p krusty-cli -p krusty-lsp --lib --bins --tests >"$compiler_json"; then
+  phase_end build-compiler
+else
+  status="$?"
+  # JSON mode keeps Cargo progress on stderr, but rustc diagnostics are in the artifact stream.
+  # Replay rendered failures before deleting it so a broken coverage build remains diagnosable.
+  jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' \
+    "$compiler_json" >&2 || true
+  phase_end build-compiler
+  rm -f "$compiler_json"
+  exit "$status"
+fi
 export KRUSTY_BIN="$coverage_target/coverage/krusty"
 # Bin unit tests exec the supervisor. `cargo test --bin` builds the harness only, so publish the
 # uplifted binary the same way integration tests do.
@@ -142,36 +175,8 @@ if [ ! -x "$KRUSTY_LSP_BIN" ]; then
   echo "coverage: language server binary missing after workspace build: $KRUSTY_LSP_BIN" >&2
   exit 1
 fi
-# Each test-binary build is its own phase, and cargo's progress stays on stderr. Folding both into
-# one pipeline whose stderr was discarded left a multi-minute gap with no name in the CI log.
-read_test_executables() {
-  jq -r 'select(.profile.test == true and .executable != null) | .executable'
-}
-phase_begin build-compiler-tests
-compiler_json="$(mktemp)"
-if "${coverage_cargo[@]}" test --no-run --profile coverage --lib --test e2e --message-format=json >"$compiler_json"; then
-  phase_end build-compiler-tests
-else
-  status="$?"
-  phase_end build-compiler-tests
-  rm -f "$compiler_json"
-  exit "$status"
-fi
-mapfile -t compiler_bins < <(read_test_executables <"$compiler_json")
+mapfile -t bins < <(read_test_executables <"$compiler_json")
 rm -f "$compiler_json"
-phase_begin build-lsp-tests
-lsp_json="$(mktemp)"
-if "${coverage_cargo[@]}" test --no-run --profile coverage -p krusty-lsp --all-targets --message-format=json >"$lsp_json"; then
-  phase_end build-lsp-tests
-else
-  status="$?"
-  phase_end build-lsp-tests
-  rm -f "$lsp_json"
-  exit "$status"
-fi
-mapfile -t lsp_bins < <(read_test_executables <"$lsp_json")
-rm -f "$lsp_json"
-bins=("${compiler_bins[@]}" "${lsp_bins[@]}")
 
 # Keep the lib/bin unit-test executables and every integration binary except the excluded suites.
 run=()
