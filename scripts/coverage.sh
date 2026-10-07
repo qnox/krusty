@@ -89,6 +89,20 @@ rm -rf "$coverage_target"
 export CARGO_TARGET_DIR="$coverage_target"
 # Instrument the whole build (source-based coverage) for the rest of this script's cargo invocations.
 source <("${coverage_cargo[@]}" llvm-cov show-env --sh --branch 2>/dev/null)
+# The frontend of one rustc is otherwise single-threaded. Asking for one frontend job per core
+# sped the instrumented CLI and language-server build; the same `-C instrument-coverage` and
+# `-Z coverage-options=branch` flags are still what the wrapper passes through.
+frontend_threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+case "$frontend_threads" in
+  ''|*[!0-9]*) frontend_threads=1 ;;
+esac
+if [ "$frontend_threads" -gt 1 ]; then
+  if [ -n "${RUSTFLAGS:-}" ]; then
+    export RUSTFLAGS="$RUSTFLAGS -Z threads=${frontend_threads}"
+  else
+    export RUSTFLAGS="-Z threads=${frontend_threads}"
+  fi
+fi
 mkdir -p target/coverage
 # Prune stale counters so this run measures only the tests it runs. `cargo llvm-cov clean` refuses a
 # target/ it didn't create (missing CACHEDIR.TAG — e.g. a worktree whose target was set up by hand),
@@ -100,6 +114,10 @@ phase_end instrument
 # executable's path from Cargo's JSON build output. The dedicated `coverage` profile (Cargo.toml)
 # builds at opt-level 1 with gate-matching checks: the e2e suite runs krusty in-process for every
 # dependency-lib fixture, and instrumenting that at `dev` made the coverage run dominate CI.
+# Both product binaries are one cargo build. Separate invocations do not unify features the same
+# way, so the language-server build compiled krusty again. One invocation compiles that library
+# once and links both binaries from it. The instrumentation flags are unchanged, so the same
+# crates are covered.
 run_phase() {
   local name="$1"
   shift
@@ -112,8 +130,8 @@ run_phase() {
     exit "$status"
   fi
 }
-run_phase build-cli "${coverage_cargo[@]}" build --profile coverage -p krusty-cli
-run_phase build-lsp "${coverage_cargo[@]}" build --profile coverage -p krusty-lsp --bin krusty-lsp
+run_phase build-bins "${coverage_cargo[@]}" build --profile coverage \
+  -p krusty-cli -p krusty-lsp --bin krusty --bin krusty-lsp
 export KRUSTY_BIN="$coverage_target/coverage/krusty"
 # Bin unit tests exec the supervisor. `cargo test --bin` builds the harness only, so publish the
 # uplifted binary the same way integration tests do.
