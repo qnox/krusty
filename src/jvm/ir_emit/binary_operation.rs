@@ -260,8 +260,11 @@ impl Emitter<'_> {
     ) {
         let literal_argument = self.is_source_literal(rhs);
         // A condition and an assignment already placed the line on the receiver load. A literal
-        // must not take it. A declaration still lets the literal own the line, and a nested
-        // unsigned operation still forgets ahead of its own literal so that literal is kept.
+        // must not take it. The assignment flag stays set for the whole right-hand side, so an
+        // inner `and` shares that receiver line; its own literal does not start an entry. The
+        // inner `constructor-impl` still forgets, and the outer literal is the next mark. A
+        // declaration still lets the literal own the line, and a nested unsigned operation that
+        // is not under that flag forgets ahead of its own literal so that literal is kept.
         let keep_receiver_line = self.inside_condition || self.unsigned_assignment_line;
         let move_line = literal_argument
             && !keep_receiver_line

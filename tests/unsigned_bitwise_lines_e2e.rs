@@ -5,7 +5,9 @@
 //! the next mark of that line survives: a literal argument, the store, or the return. A literal
 //! argument owns the line when the receiver is a plain local of a declaration or expression. A
 //! condition keeps the line on the first instruction, and an assignment keeps it on the receiver
-//! load and writes it again at the store. The other argument, when it is a plain local, records
+//! load and writes it again at the store. A nested assignment keeps the inner literal on that
+//! same receiver line; the outer literal is marked after the inner `constructor-impl`, and the
+//! store after the outer one. The other argument, when it is a plain local, records
 //! no line of its own.
 
 use super::common;
@@ -73,6 +75,12 @@ fun write(v: UInt, writeNextByte: (Byte) -> Unit) {\n\
     }\n\
     val byte = v and 0x7fu\n\
     writeNextByte(byte.toByte())\n\
+}\n\
+\n\
+fun nestedAssignment(a: UInt): UInt {\n\
+    var x = a\n\
+    x = (x and 0x7fu) or 0x80u\n\
+    return x\n\
 }\n";
 
 #[test]
