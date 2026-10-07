@@ -144,6 +144,13 @@ impl Emitter<'_> {
         else {
             return None;
         };
+        // The coroutine transformer closes a suspension point at its declared result before the
+        // comparison consumes it. A primitive result is therefore already unboxed here even
+        // though the call's original descriptor returned `Object`; preserving that erased slot
+        // would make `areEqual(Object, Object)` consume a scalar.
+        if self.transformed_result(*arg).is_some() {
+            return None;
+        }
         let slot = *self.ir.physical_types.get(arg)?;
         (jvm_is_erased_top(ir_ty_to_jvm(&slot)) && ir_ty_to_jvm(type_operand).is_jvm_scalar())
             .then_some((*arg, slot))
