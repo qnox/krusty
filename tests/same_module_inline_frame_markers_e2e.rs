@@ -112,7 +112,7 @@ fn same_module_inline_frames_are_the_reference_compilers() {
         "public static final int plain()",
         "public static final java.lang.String declaring(java.lang.String)",
     ] {
-        common::method_code_diff_against_kotlinc(
+        common::class_bytes_diff_against_kotlinc(
             "InlineFrames",
             &[],
             SOURCE,
@@ -126,7 +126,7 @@ fn same_module_inline_frames_are_the_reference_compilers() {
 
 #[test]
 fn a_suspending_expansions_frames_are_the_reference_compilers() {
-    common::method_code_diff_against_kotlinc(
+    common::class_bytes_diff_against_kotlinc(
         "SuspendingFrames",
         &[],
         SUSPENDING,

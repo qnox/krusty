@@ -90,7 +90,7 @@ fn a_lambda_the_port_owns_is_inlined_like_the_reference_compiler() {
         "public static final int total()",
         "public static final int evens(java.util.List<java.lang.Integer>)",
     ] {
-        match common::method_code_diff_against_kotlinc(
+        match common::class_bytes_diff_against_kotlinc(
             "InlineLambdaRoute",
             &[("Lib.kt", LIB)],
             MAIN,

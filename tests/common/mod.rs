@@ -3459,20 +3459,20 @@ pub fn byte_diff_against_kotlinc_cp_target(
 /// not disassemble anything. Dependencies in `lib` (none when empty) are built by the reference
 /// compiler.
 #[allow(dead_code)]
-pub fn method_code_diff_against_kotlinc(
+pub fn class_bytes_diff_against_kotlinc(
     name: &str,
     lib: &[(&str, &str)],
     src: &str,
     class: &str,
     method: &str,
 ) -> Option<Result<(), String>> {
-    method_code_diffs_against_kotlinc(name, lib, src, class, &[method])?.pop()
+    class_bytes_diffs_against_kotlinc(name, lib, src, class, &[method])?.pop()
 }
 
-/// [`method_code_diff_against_kotlinc`] for several members of one class. The dependency and both
+/// [`class_bytes_diff_against_kotlinc`] for several members of one class. The dependency and both
 /// class files are built once. A byte match passes every member without disassembly. A mismatch
 /// fails every member with that class-file difference.
-pub fn method_code_diffs_against_kotlinc(
+pub fn class_bytes_diffs_against_kotlinc(
     name: &str,
     lib: &[(&str, &str)],
     src: &str,

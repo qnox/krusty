@@ -36,7 +36,7 @@ fn the_transformed_function_s_instructions_match_kotlinc() {
     // The optimizer runs after the transform, as kotlinc chains `OptimizationMethodVisitor` after
     // `CoroutineTransformerMethodVisitor`: it drops the transformer's leftover temporaries and
     // compacts the spill slots.
-    match common::method_code_diff_against_kotlinc(
+    match common::class_bytes_diff_against_kotlinc(
         "TransformerWorkCode",
         &[],
         WORK,
@@ -163,7 +163,7 @@ fn a_final_member_s_instructions_match_kotlinc() {
         ("Box", "public final java.lang.Object work("),
         ("Single", "public final java.lang.Object work("),
     ] {
-        match common::method_code_diff_against_kotlinc(
+        match common::class_bytes_diff_against_kotlinc(
             "TransformerMemberCode",
             &[],
             MEMBERS,
@@ -224,7 +224,7 @@ fn an_overridable_member_forwards_to_the_suspend_impl_that_carries_its_machine()
         ("Store", "static java.lang.Object fetch$suspendImpl("),
         ("Store", "public static java.lang.Object fetch$default("),
     ] {
-        match common::method_code_diff_against_kotlinc(
+        match common::class_bytes_diff_against_kotlinc(
             "TransformerOpenMemberCode",
             &[],
             OPEN_MEMBERS,
@@ -313,7 +313,7 @@ fn a_final_member_of_an_open_class_keeps_its_machine_like_kotlinc() {
         "public final java.lang.Object done(",
         "public final java.lang.Object plain(",
     ] {
-        match common::method_code_diff_against_kotlinc(
+        match common::class_bytes_diff_against_kotlinc(
             "TransformerOverrideMemberCode",
             &[("Lib.kt", OVERRIDE_LIB)],
             OVERRIDE_MEMBERS,
