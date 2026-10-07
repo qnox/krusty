@@ -6,7 +6,31 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(__x86_64__)
+#if defined(__APPLE__)
+/* The iOS simulator has no stable syscall ABI. These four libSystem symbols are declared here,
+   not included from an SDK: write, mmap, munmap and exit are the whole import surface. A write
+   that fails stops; Darwin reports the error through a thread-local errno, which this runtime
+   does not call. mmap returns (void *)-1 on failure, not an in-band errno. */
+extern long write(int fd, const void *buf, size_t count);
+extern void *mmap(void *address, size_t length, int protection, int flags, int fd, long offset);
+extern int munmap(void *address, size_t length);
+extern void exit(int status) __attribute__((noreturn));
+
+__attribute__((noreturn)) static inline void kt_sys_exit(long status) {
+    exit((int)status);
+}
+
+static inline void kt_sys_write(long fd, const char *bytes, size_t length) {
+    size_t written = 0;
+    while (written < length) {
+        long step = write((int)fd, bytes + written, length - written);
+        if (step <= 0) {
+            return;
+        }
+        written += (size_t)step;
+    }
+}
+#elif defined(__x86_64__)
 #define KT_SYS_WRITE 1
 #define KT_SYS_MMAP 9
 #define KT_SYS_MUNMAP 11
@@ -20,6 +44,7 @@
 #error "krusty native: unsupported architecture"
 #endif
 
+#if !defined(__APPLE__)
 static inline long kt_syscall(long number, long a0, long a1, long a2, long a3, long a4, long a5) {
 #if defined(__x86_64__)
     /* The syscall ABI passes the fourth argument in r10, not rcx: `syscall` clobbers rcx. */
@@ -88,6 +113,7 @@ static inline void kt_sys_write(long fd, const char *bytes, size_t length) {
         written += (size_t)step;
     }
 }
+#endif /* !__APPLE__ */
 
 /* Print `message` on stderr and exit the way a SIGABRT looks to a shell. */
 static inline void kt_sys_fail(const char *message, size_t length) {
@@ -103,16 +129,29 @@ static inline void kt_fail_oom(void) { KT_SYS_FAIL("krusty: out of memory\n"); }
    zero-filled by the kernel; callers rely on that instead of clearing. Exits on failure: there is
    no caller that could do anything else with a failed mapping. */
 static inline void *kt_map(size_t bytes) {
+#if defined(__APPLE__)
+    /* PROT_READ|PROT_WRITE is 3. MAP_PRIVATE|MAP_ANON is 0x1002 on Darwin, not Linux's 0x22. */
+    void *mapped = mmap(0, bytes, 3, 0x1002, -1, 0);
+    if (mapped == (void *)-1) {
+        kt_fail_oom();
+    }
+    return mapped;
+#else
     /* PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, no file. */
     long mapped = kt_syscall(KT_SYS_MMAP, 0, (long)bytes, 3, 0x22, -1, 0);
     if (mapped <= 0 && mapped >= -4095) {
         kt_fail_oom();
     }
     return (void *)mapped;
+#endif
 }
 
 static inline void kt_unmap(void *address, size_t bytes) {
+#if defined(__APPLE__)
+    munmap(address, bytes);
+#else
     kt_syscall(KT_SYS_MUNMAP, (long)address, (long)bytes, 0, 0, 0, 0);
+#endif
 }
 
 #endif /* KRUSTY_SYS_H */

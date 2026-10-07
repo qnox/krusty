@@ -6,7 +6,8 @@
 //! zero-toolchain cross-compilation needs it to be. The pipeline is therefore:
 //!
 //! checked common IR → codegen (Cranelift) → relocatable object → linker (with the runtime
-//! prebuilt into krusty by `build.rs`) → static ELF executable.
+//! prebuilt into krusty by `build.rs`) → static ELF executable, or an unsigned iOS simulator
+//! dylib.
 //!
 //! The runtime a program links against — allocator, conservative-root/precise-heap collector,
 //! object model, strings, `_start`, syscalls — is freestanding C under `runtime/`, compiled once

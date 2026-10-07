@@ -4498,6 +4498,15 @@ each one lowering more and declining less:
   not declared; colliding C spellings are likewise refused rather than emitted twice. The Kotlin
   program still runs.
   Tests: `tests/native_c_abi_e2e.rs`.
+- **iOS simulator.** `ios-simulator-aarch64` is an unsigned arm64 `MH_DYLIB`, not a static ELF.
+  Codegen is position-independent and uses the ISA's default call convention, Apple AArch64.
+  The runtime is still freestanding C, compiled by clang for `aarch64-apple-ios15.0-simulator`
+  with no SDK: it declares `write`, `mmap`, `munmap`, and `exit` itself and does not define
+  `_start`. The linker writes `LC_LOAD_DYLIB /usr/lib/libSystem.B.dylib` and `LC_BUILD_VERSION`
+  for the simulator. A branch to libSystem goes through a stub in the image; dyld binds the
+  pointer. The dylib is unsigned and contains no bitcode. A host that is not a Mac checks the
+  format and the load commands.
+  Tests: `tests/native_ios_e2e.rs`.
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host

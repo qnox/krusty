@@ -82,6 +82,29 @@ mod tests {
         (defined, undefined)
     }
 
+    /// Global symbols of a Mach-O relocatable, with one leading underscore removed. That underscore
+    /// is the platform's symbol decoration, not part of the link name.
+    fn macho_symbols(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
+        use object::{Object, ObjectSymbol};
+        let file = object::File::parse(bytes).expect("a Mach-O runtime object parses");
+        let (mut defined, mut undefined) = (Vec::new(), Vec::new());
+        for symbol in file.symbols() {
+            let Ok(name) = symbol.name() else {
+                continue;
+            };
+            if name.is_empty() || symbol.scope() == object::SymbolScope::Compilation {
+                continue;
+            }
+            let name = name.strip_prefix('_').unwrap_or(name).to_string();
+            if symbol.is_undefined() {
+                undefined.push(name);
+            } else {
+                defined.push(name);
+            }
+        }
+        (defined, undefined)
+    }
+
     #[test]
     fn a_prebuilt_runtime_is_every_source_as_a_closed_set_of_objects_for_its_arch() {
         assert!(
@@ -115,28 +138,49 @@ mod tests {
             let mut defined = HashSet::new();
             let mut undefined = Vec::new();
             for (name, bytes) in objects.iter() {
-                assert_eq!(&bytes[..4], b"\x7fELF", "{target}/{name} is not ELF");
-                assert_eq!(
-                    (bytes[4], bytes[5]),
-                    (2, 1),
-                    "{target}/{name} is not 64-bit little-endian"
-                );
-                assert_eq!(u16_at(bytes, 16), 1, "{target}/{name} is not a relocatable");
-                assert_eq!(
-                    u16_at(bytes, 18),
-                    arch.elf_machine(),
-                    "{target}/{name} is code for another machine"
-                );
-                let (defines, needs) = symbols(bytes);
+                let (defines, needs) = if target.os.static_elf() {
+                    assert_eq!(&bytes[..4], b"\x7fELF", "{target}/{name} is not ELF");
+                    assert_eq!(
+                        (bytes[4], bytes[5]),
+                        (2, 1),
+                        "{target}/{name} is not 64-bit little-endian"
+                    );
+                    assert_eq!(u16_at(bytes, 16), 1, "{target}/{name} is not a relocatable");
+                    assert_eq!(
+                        u16_at(bytes, 18),
+                        arch.elf_machine(),
+                        "{target}/{name} is code for another machine"
+                    );
+                    symbols(bytes)
+                } else {
+                    assert_eq!(
+                        &bytes[..4],
+                        &[0xcf, 0xfa, 0xed, 0xfe],
+                        "{target}/{name} is not a 64-bit Mach-O object"
+                    );
+                    assert_eq!(
+                        u32_at(bytes, 4),
+                        0x0100_000c,
+                        "{target}/{name} is not arm64"
+                    );
+                    assert_eq!(u32_at(bytes, 12), 1, "{target}/{name} is not a relocatable");
+                    macho_symbols(bytes)
+                };
                 defined.extend(defines);
                 undefined.extend(needs.into_iter().map(|symbol| (*name, symbol)));
             }
             // The program supplies its entry; everything else the runtime calls, the runtime defines.
             // A toolchain that slipped in a helper of its own (`__stack_chk_fail`, say) fails here
-            // rather than in a user's link.
+            // rather than in a user's link. The simulator imports four libSystem symbols instead of
+            // making the Linux syscalls; those are the whole import surface.
+            let imported = if target.os.static_elf() {
+                &["kt_program_entry"][..]
+            } else {
+                &["kt_program_entry", "exit", "mmap", "munmap", "write"][..]
+            };
             for (object, symbol) in undefined {
                 assert!(
-                    defined.contains(&symbol) || symbol == "kt_program_entry",
+                    defined.contains(&symbol) || imported.contains(&symbol.as_str()),
                     "{target}/{object} needs `{symbol}`, which no runtime object defines"
                 );
             }

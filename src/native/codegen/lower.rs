@@ -60,7 +60,7 @@ use crate::types::Ty;
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
 use super::super::symbols::Symbols;
-use super::super::target::NativeTarget;
+use super::super::target::{NativeTarget, Os};
 use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 
 /// The construct a lowering declined, phrased for a diagnostic.
@@ -68,7 +68,7 @@ pub type Unsupported = String;
 
 /// One lowered Kotlin file.
 pub struct Lowered {
-    /// A relocatable ELF object.
+    /// A relocatable object: ELF for a Linux target, Mach-O for the iOS simulator.
     pub object: Vec<u8>,
     /// Whether this file declared `main` and therefore defines [`PROGRAM_ENTRY`].
     pub defines_entry: bool,
@@ -138,8 +138,10 @@ fn carrier(ty: Ty) -> Carrier {
     }
 }
 
-/// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
-/// address linked by krusty's own linker; the verifier stays on while the lowering is young.
+/// Build the ISA for `target`. A Linux target is non-PIC, because the output is a static
+/// executable at a fixed address. The iOS simulator is a dylib, so its code is position-independent
+/// and uses the ISA's default calling convention (Apple AArch64). The verifier stays on while the
+/// lowering is young.
 /// Flags for a load or store through a reference the program already holds: aligned by
 /// construction, and non-trapping because null receivers are checked before any access.
 fn trusted() -> MemFlagsData {
@@ -147,13 +149,18 @@ fn trusted() -> MemFlagsData {
 }
 
 fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIsa, Unsupported> {
-    let triple: target_lexicon::Triple = target
-        .triple()
+    let triple_text = target.isa_triple();
+    let triple: target_lexicon::Triple = triple_text
         .parse()
-        .map_err(|error| format!("target triple `{}` ({error})", target.triple()))?;
+        .map_err(|error| format!("target triple `{triple_text}` ({error})"))?;
     let mut flags = settings::builder();
+    let pic = if target.os == Os::IosSimulator {
+        "true"
+    } else {
+        "false"
+    };
     for (name, value) in [
-        ("is_pic", "false"),
+        ("is_pic", pic),
         ("opt_level", "none"),
         ("enable_verifier", "true"),
         ("use_colocated_libcalls", "false"),
@@ -510,8 +517,12 @@ impl<'a> FileLowering<'a> {
         self.implemented_collections.contains(&shape)
     }
 
+    fn call_conv(&self) -> CallConv {
+        self.module.isa().default_call_conv()
+    }
+
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
-        let mut signature = Signature::new(CallConv::SystemV);
+        let mut signature = Signature::new(self.call_conv());
         for param in params {
             match carrier(*param).abi_param() {
                 Some(abi) => signature.params.push(abi),

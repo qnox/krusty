@@ -59,10 +59,14 @@ impl NativeTarget {
         Some(Self::new(Arch::host()?, Os::host()?))
     }
 
-    /// The triple passed to the C compiler. The `gnu` component names the ABI, not a libc: the
-    /// emitted program is freestanding and links against no C library.
+    /// The triple passed to the C compiler. See [`super::target_contract::clang_triple`].
     pub fn triple(self) -> String {
-        super::target_contract::triple(self.arch, self.os)
+        super::target_contract::clang_triple(self.arch, self.os)
+    }
+
+    /// The triple Cranelift parses. See [`super::target_contract::isa_triple`].
+    pub fn isa_triple(self) -> String {
+        super::target_contract::isa_triple(self.arch, self.os)
     }
 
     /// The conventional short name, as a user would write it.
@@ -117,8 +121,19 @@ mod tests {
         assert_eq!(
             error,
             "unknown native target `linux-s390x`; supported: linux-x86_64, linux-aarch64, \
-             linux-riscv64"
+             linux-riscv64, ios-simulator-aarch64"
         );
+    }
+
+    #[test]
+    fn the_ios_simulator_names_itself_and_its_two_triples() {
+        let target = "ios-simulator-aarch64"
+            .parse::<NativeTarget>()
+            .expect("the simulator is a supported target");
+        assert_eq!(target, NativeTarget::new(Arch::Aarch64, Os::IosSimulator));
+        assert_eq!(target.triple(), "aarch64-apple-ios15.0-simulator");
+        assert_eq!(target.isa_triple(), "aarch64-apple-ios15.0.0-sim");
+        assert!(!target.os.static_elf());
     }
 
     #[test]

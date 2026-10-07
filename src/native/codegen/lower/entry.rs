@@ -23,7 +23,7 @@ impl<'a> FileLowering<'a> {
         file_init: FuncId,
         statics_may_throw: bool,
     ) -> Result<(), Unsupported> {
-        let void = Signature::new(CallConv::SystemV);
+        let void = Signature::new(self.call_conv());
         let entry_id = self
             .module
             .declare_function(PROGRAM_ENTRY, Linkage::Export, &void)

@@ -21,14 +21,18 @@ pub enum Arch {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Os {
     Linux,
+    /// The iOS simulator. The image is an arm64 dylib that imports libSystem; it is not a static
+    /// ELF executable and it is not signed here.
+    IosSimulator,
 }
 
-/// Every target the runtime has a syscall and entry-point implementation for, in the order the
-/// build script builds them and the compiler lists them.
-pub const SUPPORTED: [(Arch, Os); 3] = [
+/// Every target the runtime has an implementation for, in the order the build script builds them
+/// and the compiler lists them.
+pub const SUPPORTED: [(Arch, Os); 4] = [
     (Arch::X86_64, Os::Linux),
     (Arch::Aarch64, Os::Linux),
     (Arch::Riscv64, Os::Linux),
+    (Arch::Aarch64, Os::IosSimulator),
 ];
 
 impl Arch {
@@ -69,34 +73,54 @@ impl Arch {
         }
     }
 
-    /// The flags this architecture's runtime objects are compiled with, beyond the ones every
-    /// target shares.
+    /// The flags a Linux runtime object for this architecture is compiled with, beyond the ones
+    /// every target shares.
     ///
     /// `-fno-pic` and a small code model keep the objects free of GOT/PLT machinery: the output is
     /// a static executable at a fixed address, so absolute 32-bit relocations are fine and
     /// simplest. RISC-V's clang does not take `-mcmodel=small` (its equivalent is the default
     /// `medlow`), and `-mno-relax` keeps linker-relaxation relocations out of its objects: krusty's
-    /// own linker applies relocations and relaxes nothing.
+    /// own linker applies relocations and relaxes nothing. The iOS simulator does not use these
+    /// flags; its runtime is position-independent and calls libSystem.
     pub const fn runtime_cflags(self) -> &'static [&'static str] {
         match self {
-            Self::X86_64 => &["-mcmodel=small", "-fcf-protection=none"],
-            Self::Aarch64 => &["-mcmodel=small"],
-            Self::Riscv64 => &["-mno-relax"],
+            Self::X86_64 => &["-fno-pic", "-mcmodel=small", "-fcf-protection=none"],
+            Self::Aarch64 => &["-fno-pic", "-mcmodel=small"],
+            Self::Riscv64 => &["-fno-pic", "-mno-relax"],
         }
     }
 }
 
 impl Os {
-    /// The spelling in an LLVM target triple.
+    /// The operating-system half of [`crate::native::NativeTarget::name`]. For Linux this is also
+    /// the operating-system token of the C compiler's triple.
     pub const fn triple_name(self) -> &'static str {
         match self {
             Self::Linux => "linux",
+            Self::IosSimulator => "ios-simulator",
         }
+    }
+
+    /// A static ELF executable. The iOS simulator is a Mach-O dylib instead.
+    pub const fn static_elf(self) -> bool {
+        matches!(self, Self::Linux)
     }
 }
 
-/// The triple passed to the C compiler for `arch` on `os`. The `gnu` component names the ABI, not a
-/// libc: the emitted program is freestanding and links against no C library.
-pub fn triple(arch: Arch, os: Os) -> String {
-    format!("{}-unknown-{}-gnu", arch.triple_name(), os.triple_name())
+/// The triple passed to the C compiler. Linux's `gnu` component names the ABI, not a libc: the
+/// runtime is freestanding. The simulator triple is clang's Darwin spelling and needs no SDK.
+pub fn clang_triple(arch: Arch, os: Os) -> String {
+    match os {
+        Os::Linux => format!("{}-unknown-linux-gnu", arch.triple_name()),
+        Os::IosSimulator => format!("{}-apple-ios15.0-simulator", arch.triple_name()),
+    }
+}
+
+/// The triple Cranelift's target lexicon parses. It matches [`clang_triple`] on Linux. The
+/// simulator's does not: lexicon spells the environment `sim` and the deployment `major.minor.patch`.
+pub fn isa_triple(arch: Arch, os: Os) -> String {
+    match os {
+        Os::Linux => clang_triple(arch, os),
+        Os::IosSimulator => format!("{}-apple-ios15.0.0-sim", arch.triple_name()),
+    }
 }

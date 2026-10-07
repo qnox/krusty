@@ -154,7 +154,7 @@ impl<'a> FileLowering<'a> {
         source: crate::fir::SourceFileId,
         statics: Option<FuncId>,
     ) -> Result<FuncId, Unsupported> {
-        let void = Signature::new(CallConv::SystemV);
+        let void = Signature::new(self.call_conv());
         let symbol = super::super::super::symbols::file_init_symbol(source);
         let id = self
             .module
