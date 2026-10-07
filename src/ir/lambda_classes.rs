@@ -17,6 +17,10 @@ use super::*;
 pub struct IrLambdaClass {
     /// A checked public inline declaration exposes this closure to callers in other packages.
     pub public_inline: bool,
+    /// The inline function whose default argument this lambda implements. The JVM realization
+    /// records it before replacing the lambda expression; emission uses it for the `$default`
+    /// enclosure, source map, and metadata ABI flag without searching the rewritten body.
+    pub inline_default_owner: Option<FunId>,
     pub invoke: FunId,
     /// The lambda's function type: the class's `FunctionN` and its generic supertype.
     pub function_type: Ty,

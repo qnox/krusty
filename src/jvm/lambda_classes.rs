@@ -308,20 +308,15 @@ fn inline_function_default_lambda(ir: &IrFile, fid: FunId) -> bool {
 }
 
 /// Whether `function` declares a default lambda that its JVM `$default` stub must materialize.
-/// This is derived at the JVM boundary from the checked default expression and lambda identity;
-/// common IR does not carry `$default` or `EnclosingMethod` policy.
+/// Lambda-class realization records the exact owner before it replaces the checked lambda
+/// expression; later emission consumes that relation and does not search the rewritten body.
 pub(in crate::jvm) fn has_inline_default_lambda(ir: &IrFile, function: FunId) -> bool {
-    ir.inline_fns.contains(&function)
-        && ir
-            .fn_params
-            .get(&function)
-            .and_then(|info| info.defaults.as_ref())
-            .is_some_and(|defaults| {
-                defaults
-                    .iter()
-                    .flatten()
-                    .any(|&expression| default_expression_lambda(ir, expression).is_some())
-            })
+    ir.classes.iter().any(|class| {
+        class
+            .lambda
+            .as_ref()
+            .is_some_and(|lambda| lambda.inline_default_owner == Some(function))
+    })
 }
 
 /// The lambda a default expression materializes, if it is one.
@@ -859,11 +854,12 @@ fn declare_class(
             capture_identity: None,
         });
     }
-    let inline_default = inline_default_owner(ir, fid).is_some();
+    let inline_default_owner = inline_default_owner(ir, fid);
     class.lambda = Some(crate::ir::IrLambdaClass {
         // The class is constructed from other packages: a public `inline` caller inlines the
         // default, and a private one still crosses packages inside the module.
-        public_inline: inline_default,
+        public_inline: inline_default_owner.is_some(),
+        inline_default_owner,
         invoke: fid,
         function_type: site.function_type,
         raw_supertype: raw_supertype(ir, fid, signature),
@@ -1030,6 +1026,7 @@ mod method_domain_tests {
         let mut closure = crate::ir::IrClass::synthetic(crate::types::type_name("Closure"));
         closure.lambda = Some(crate::ir::IrLambdaClass {
             public_inline: false,
+            inline_default_owner: None,
             invoke: 3,
             function_type: Ty::fun(vec![], Ty::Unit),
             raw_supertype: false,
