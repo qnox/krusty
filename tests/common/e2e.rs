@@ -224,7 +224,10 @@ fn kotlinc_paths_result(
     })
 }
 
-/// Compile named sources with both compiler CLIs and retain their diagnostic streams.
+/// Compile named sources with krusty and kotlinc and retain their diagnostic streams.
+///
+/// Krusty runs in-process, sharing the classpath index, unless the caller passes extra compiler
+/// flags. Those flags still go to the `krusty` CLI.
 pub fn compiler_diagnostics(
     sources: &[(&str, &str)],
     classpath: &[PathBuf],
@@ -232,8 +235,9 @@ pub fn compiler_diagnostics(
     compiler_diagnostics_with_reference_args(sources, classpath, &[])
 }
 
-/// Compile named sources with both compiler CLIs, forwarding explicit language arguments only to
-/// kotlinc. Krusty reads the equivalent `// LANGUAGE:` directives from each source fixture.
+/// Compile named sources with krusty and kotlinc, forwarding explicit language arguments only to
+/// kotlinc. Krusty reads the equivalent `// LANGUAGE:` directives from each source fixture and
+/// runs in-process.
 pub fn compiler_diagnostics_with_reference_args(
     sources: &[(&str, &str)],
     classpath: &[PathBuf],
@@ -242,8 +246,8 @@ pub fn compiler_diagnostics_with_reference_args(
     compiler_diagnostics_with_args(sources, classpath, &[], reference_extra_args)
 }
 
-/// Compile named sources with both compiler CLIs, handing both the same `shared_args` — switches a
-/// build passes every compiler alike, such as `-Xplugin`.
+/// Compile named sources with krusty and kotlinc, handing both the same `shared_args` — switches a
+/// build passes every compiler alike, such as `-Xplugin`. Shared flags select the `krusty` CLI.
 pub fn compiler_diagnostics_with_shared_args(
     sources: &[(&str, &str)],
     classpath: &[PathBuf],
@@ -260,20 +264,39 @@ fn compiler_diagnostics_with_args(
 ) -> CompilerDiagnosticResult {
     let work = common::scratch_dir().expect("cannot allocate compiler-diagnostic fixture");
     let source_paths = write_fixture_sources(&work, sources);
+    let source_texts = sources
+        .iter()
+        .map(|(_, source)| (*source).to_string())
+        .collect::<Vec<_>>();
     let joined_classpath = (!classpath.is_empty())
         .then(|| std::env::join_paths(classpath).expect("build compiler-diagnostic classpath"));
+    let krusty_out = work.join("krusty-out");
 
-    let mut krusty = Command::new(common::krusty_binary());
-    krusty.args([
-        "-d",
-        work.join("krusty-out").to_str().expect("UTF-8 output path"),
-    ]);
-    if let Some(classpath) = &joined_classpath {
-        krusty.arg("-cp").arg(classpath);
-    }
-    krusty.args(krusty_extra_args);
-    krusty.args(&source_paths);
-    let krusty = krusty.output().expect("run krusty diagnostic fixture");
+    // Extra flags select a CLI shape (plugins, `-jvm-default`, language overrides). The default
+    // invocation is the production pipeline in-process: a process per snippet rebuilt the stdlib
+    // and JDK indexes, and that startup dominated the diagnostic suites.
+    let (krusty_code, krusty_stdout, krusty_stderr) = if krusty_extra_args.is_empty() {
+        krusty_cli_diagnostics_in_process(&source_paths, &source_texts, classpath, &krusty_out)
+    } else {
+        let mut krusty = Command::new(common::krusty_binary());
+        krusty.args(["-d", krusty_out.to_str().expect("UTF-8 output path")]);
+        if let Some(classpath) = &joined_classpath {
+            krusty.arg("-cp").arg(classpath);
+        }
+        krusty.args(krusty_extra_args);
+        krusty.args(&source_paths);
+        let krusty = krusty.output().expect("run krusty diagnostic fixture");
+        (
+            krusty.status.code().unwrap_or_else(|| {
+                panic!(
+                    "krusty diagnostic fixture terminated by signal: status={:?}, sources={source_paths:?}",
+                    krusty.status
+                )
+            }),
+            String::from_utf8_lossy(&krusty.stdout).into_owned(),
+            String::from_utf8_lossy(&krusty.stderr).into_owned(),
+        )
+    };
 
     let mut reference_args = joined_classpath
         .map(|classpath| vec!["-cp".to_string(), classpath.to_string_lossy().into_owned()])
@@ -282,19 +305,130 @@ fn compiler_diagnostics_with_args(
     let (reference_code, reference_stderr) =
         kotlinc_paths_result(&source_paths, &work.join("reference-out"), &reference_args);
     let result = CompilerDiagnosticResult {
-        krusty_code: krusty.status.code().unwrap_or_else(|| {
-            panic!(
-                "krusty diagnostic fixture terminated by signal: status={:?}, sources={source_paths:?}",
-                krusty.status
-            )
-        }),
-        krusty_stdout: String::from_utf8_lossy(&krusty.stdout).into_owned(),
-        krusty_stderr: String::from_utf8_lossy(&krusty.stderr).into_owned(),
+        krusty_code,
+        krusty_stdout,
+        krusty_stderr,
         reference_code,
         reference_stderr,
     };
     let _ = std::fs::remove_dir_all(work);
     result
+}
+
+/// The default `krusty` CLI compile, inside this process. Classpath indexes stay in
+/// [`common::cached_classpath`], and the rendered streams match the CLI: located diagnostics on
+/// stderr, `ok: emitted …` on stdout, and a non-zero status when the compile has errors.
+fn krusty_cli_diagnostics_in_process(
+    source_paths: &[PathBuf],
+    source_texts: &[String],
+    explicit_classpath: &[PathBuf],
+    dest: &std::path::Path,
+) -> (i32, String, String) {
+    use krusty::diag::{DiagSink, Severity};
+    use krusty::frontend::PlatformProvider;
+    use krusty::jvm::jvm_libraries::JvmLibraries;
+    use krusty::language_settings::LanguageSettings;
+    use krusty::source::SourceInput;
+
+    let mut jars = explicit_classpath.to_vec();
+    let Some(stdlib) = krusty::jvm::kotlin_stdlib_jar() else {
+        return (
+            1,
+            String::new(),
+            "krusty: cannot locate kotlin-stdlib.jar; configure a Kotlin distribution or pass -no-stdlib\n"
+                .to_string(),
+        );
+    };
+    if !jars.iter().any(|path| path == &stdlib) {
+        jars.push(stdlib);
+    }
+    let Some(reflect) = krusty::jvm::kotlin_dist_jar("kotlin-reflect.jar") else {
+        return (
+            1,
+            String::new(),
+            "krusty: cannot locate kotlin-reflect.jar in the selected Kotlin distribution; pass -no-reflect to disable it\n"
+                .to_string(),
+        );
+    };
+    if !jars.iter().any(|path| path == &reflect) {
+        jars.push(reflect);
+    }
+    let jdk = common::jdk_modules();
+    let jdk_arg = (!jars.iter().any(|path| path == &jdk)).then_some(jdk.as_path());
+    let cp = common::cached_classpath(&jars, jdk_arg);
+    let settings = LanguageSettings::default();
+    let libraries = JvmLibraries::new(cp.clone())
+        .map(|libraries| libraries.with_api_version(settings.api_version));
+    let mut diags = DiagSink::new();
+    let stems = source_paths
+        .iter()
+        .map(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("File")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let inputs = source_paths
+        .iter()
+        .zip(source_texts)
+        .zip(&stems)
+        .map(|((path, source), stem)| {
+            SourceInput::new(
+                krusty::source::kind(path).expect("fixture source must have a known extension"),
+                source.as_str(),
+            )
+            .with_file_stem(stem)
+        })
+        .collect::<Vec<_>>();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
+        &inputs,
+        PlatformProvider::from(libraries),
+        &settings.features,
+        "main",
+        &mut diags,
+    );
+    let backend = krusty::jvm::JvmBackend::new(cp)
+        .with_annotations_in_metadata(settings.features.has("AnnotationsInMetadata"))
+        .with_metadata_version(Some(settings.language_version.metadata_version()));
+    let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
+    let rendered_files = source_paths
+        .iter()
+        .zip(source_texts)
+        .map(|(path, source)| {
+            (
+                path.to_str().expect("fixture path is UTF-8"),
+                source.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if diags.has_errors() {
+        diags
+            .diags
+            .retain(|diagnostic| diagnostic.severity == Severity::Error);
+        diags.module_warnings.clear();
+        let count = diags.diags.len();
+        return (
+            1,
+            String::new(),
+            format!(
+                "{}krusty: {count} error(s)\n",
+                diags.render_all(&rendered_files)
+            ),
+        );
+    }
+    let emitted = outputs
+        .iter()
+        .filter(|(path, _)| path.ends_with(".class"))
+        .count();
+    (
+        0,
+        format!(
+            "ok: emitted {emitted} class file(s) to {}\n",
+            dest.display()
+        ),
+        diags.render_all(&rendered_files),
+    )
 }
 
 /// Every error kotlinc reports for named sources, as `file:line:column: message` in emission

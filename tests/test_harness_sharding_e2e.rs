@@ -3,6 +3,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::thread;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -395,36 +398,68 @@ fn real_e2e_libtest_filters_select_exactly_the_planned_shards() {
     fs::write(&listing_path, &listing).expect("write libtest listing");
     fs::write(&plan_path, &planned.stdout).expect("write shard plan");
 
-    for shard in 0..SHARDS {
-        let expected = plan
-            .iter()
-            .filter(|(assigned, _, _)| *assigned == shard)
-            .map(|(_, tests, _)| tests)
-            .sum::<usize>();
-        let patterns = compact_skip_patterns(&plan_path, &listing_path, shard);
-        assert!(
-            patterns.status.success(),
-            "skip-pattern helper failed for shard {shard}: {}",
-            String::from_utf8_lossy(&patterns.stderr)
-        );
-        let patterns = String::from_utf8(patterns.stdout).expect("skip patterns are UTF-8");
-        let patterns = patterns.lines().collect::<Vec<_>>();
-        let argument_bytes = patterns
-            .iter()
-            .map(|pattern| pattern.len() + 8)
-            .sum::<usize>();
-        assert!(
-            argument_bytes < 64 * 1024,
-            "shard {shard} skip arguments use {argument_bytes} bytes"
-        );
-
-        let mut command = Command::new(&executable);
-        command.args(["--list", "--format", "terse"]);
-        for pattern in patterns {
-            command.args(["--skip", pattern]);
+    // Each `--list` starts this test binary. Running the 22 shards one after another held a
+    // coverage worker for more than a minute; the listings do not depend on each other.
+    let queries = (0..SHARDS)
+        .map(|shard| {
+            let expected = plan
+                .iter()
+                .filter(|(assigned, _, _)| *assigned == shard)
+                .map(|(_, tests, _)| tests)
+                .sum::<usize>();
+            let patterns = compact_skip_patterns(&plan_path, &listing_path, shard);
+            assert!(
+                patterns.status.success(),
+                "skip-pattern helper failed for shard {shard}: {}",
+                String::from_utf8_lossy(&patterns.stderr)
+            );
+            let patterns = String::from_utf8(patterns.stdout).expect("skip patterns are UTF-8");
+            let patterns = patterns.lines().map(str::to_owned).collect::<Vec<_>>();
+            let argument_bytes = patterns
+                .iter()
+                .map(|pattern| pattern.len() + 8)
+                .sum::<usize>();
+            assert!(
+                argument_bytes < 64 * 1024,
+                "shard {shard} skip arguments use {argument_bytes} bytes"
+            );
+            (expected, patterns)
+        })
+        .collect::<Vec<_>>();
+    let listings = Mutex::new(Vec::<Option<std::process::Output>>::from_iter(
+        (0..SHARDS).map(|_| None),
+    ));
+    let next = AtomicUsize::new(0);
+    let workers = thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .clamp(1, SHARDS);
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let shard = next.fetch_add(1, Ordering::Relaxed);
+                if shard >= SHARDS {
+                    break;
+                }
+                let mut command = Command::new(&executable);
+                command.args(["--list", "--format", "terse"]);
+                for pattern in &queries[shard].1 {
+                    command.args(["--skip", pattern]);
+                }
+                let selected = command.output().expect("list one planned shard");
+                listings.lock().expect("shard listings")[shard] = Some(selected);
+            });
         }
-        let selected = command.output().expect("list one planned shard");
-        assert!(selected.status.success());
+    });
+    let listings = listings.into_inner().expect("shard listings");
+    for (shard, selected) in listings.into_iter().enumerate() {
+        let selected = selected.expect("every shard was listed");
+        let expected = queries[shard].0;
+        assert!(
+            selected.status.success(),
+            "libtest list failed for shard {shard}: {}",
+            String::from_utf8_lossy(&selected.stderr)
+        );
         let selected = String::from_utf8(selected.stdout).expect("shard listing is UTF-8");
         let selected = selected
             .lines()
