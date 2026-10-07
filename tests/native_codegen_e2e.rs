@@ -1,11 +1,11 @@
 //! Kotlin to a native executable through krusty's OWN code generator and linker.
 //!
-//! No C is emitted anywhere on this path. The frontend produces checked common IR; the Cranelift
-//! backend lowers it to a relocatable object; krusty's linker joins that with the runtime that was
-//! prebuilt when krusty itself was built, and writes a static ELF executable — which is then RUN
-//! and its output compared. Nothing here inspects generated code, for the same reason the rest of
-//! the native track never did: code that reads right and prints the wrong thing is exactly what a
-//! shape assertion cannot catch.
+//! The frontend produces checked common IR; the Cranelift backend lowers it to a relocatable
+//! object; krusty's linker joins that with the runtime that was prebuilt when krusty itself was
+//! built, and writes a static ELF executable — which is then RUN and its output compared. The
+//! public C ABI is a header beside those objects, not a C translation of the program. Nothing here
+//! inspects generated code, for the same reason the rest of the native track never did: code that
+//! reads right and prints the wrong thing is exactly what a shape assertion cannot catch.
 //!
 //! Skips (never fails) when this build of krusty carries no prebuilt runtime for the host, which
 //! happens when no C cross-compiler was available at krusty's build time.
@@ -54,6 +54,14 @@ fn host() -> Option<NativeTarget> {
 }
 
 /// Compile `sources` with the Cranelift backend for `target`.
+fn objects_of(artifacts: &[Artifact]) -> Vec<&[u8]> {
+    artifacts
+        .iter()
+        .filter(|(name, _)| name.ends_with(".o"))
+        .map(|(_, bytes)| bytes.as_slice())
+        .collect()
+}
+
 fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Vec<String>) {
     let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
     let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
@@ -90,10 +98,7 @@ fn run(source: &str) -> String {
         diagnostics.is_empty(),
         "the code generator rejected the program: {diagnostics:?}"
     );
-    let objects = artifacts
-        .iter()
-        .map(|(_, bytes)| bytes.as_slice())
-        .collect::<Vec<_>>();
+    let objects = objects_of(&artifacts);
     assert!(!objects.is_empty(), "no object was emitted");
     let image = krusty::native::link_program(&objects, target)
         .unwrap_or_else(|error| panic!("krusty's linker must link the program: {error}"));
@@ -139,15 +144,19 @@ fn the_executable_is_a_static_elf_with_no_interpreter() {
     };
     let (artifacts, diagnostics) = compile(&[("Main", "fun main() { println(\"hi\") }")], target);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    assert!(
-        artifacts.iter().all(|(name, _)| name.ends_with(".o")),
-        "the code generator must emit relocatable objects, never source text: {:?}",
-        artifacts.iter().map(|(n, _)| n).collect::<Vec<_>>()
-    );
-    let objects = artifacts
+    let names = artifacts
         .iter()
-        .map(|(_, b)| b.as_slice())
+        .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>();
+    assert!(
+        names.iter().filter(|name| name.ends_with(".o")).count() >= 1
+            && names.iter().any(|name| name.ends_with(".h"))
+            && names
+                .iter()
+                .all(|name| name.ends_with(".o") || name.ends_with(".h")),
+        "the code generator emits relocatable objects and a C ABI header, never C source: {names:?}"
+    );
+    let objects = objects_of(&artifacts);
     let image = krusty::native::link_program(&objects, target).expect("link");
     assert_eq!(&image[..4], b"\x7fELF");
     assert_eq!(
@@ -216,10 +225,7 @@ fn one_host_links_a_static_executable_for_every_supported_architecture() {
             target,
         );
         assert!(diagnostics.is_empty(), "{target}: {diagnostics:?}");
-        let objects = artifacts
-            .iter()
-            .map(|(_, b)| b.as_slice())
-            .collect::<Vec<_>>();
+        let objects = objects_of(&artifacts);
         let image = krusty::native::link_program(&objects, target)
             .unwrap_or_else(|error| panic!("linking for {target} must succeed: {error}"));
         assert_eq!(&image[..4], b"\x7fELF", "{target}");
@@ -481,19 +487,14 @@ fn a_library_module_defines_no_entry_point() {
     let (artifacts, diagnostics) =
         compile(&[("Greeter", "fun greet(): String = \"hi\"\n")], target);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    assert_eq!(
-        artifacts
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Greeter.o"]
+    assert!(
+        artifacts.iter().any(|(name, _)| name == "Greeter.o"),
+        "{:?}",
+        artifacts.iter().map(|(name, _)| name).collect::<Vec<_>>()
     );
     // A module with no `main` is a library; inventing an entry point for it would produce a program
     // that silently does nothing. Linked alone, the runtime's `_start` has nothing to call.
-    let objects = artifacts
-        .iter()
-        .map(|(_, b)| b.as_slice())
-        .collect::<Vec<_>>();
+    let objects = objects_of(&artifacts);
     match krusty::native::link_program(&objects, target) {
         Err(krusty::native::ProgramLinkError::UndefinedSymbol(symbol)) => {
             assert_eq!(symbol, "kt_program_entry");
@@ -833,10 +834,7 @@ fn a_not_null_assertion_passes_a_value_through_and_fails_on_null() {
         target,
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    let objects = artifacts
-        .iter()
-        .map(|(_, bytes)| bytes.as_slice())
-        .collect::<Vec<_>>();
+    let objects = objects_of(&artifacts);
     let image = krusty::native::link_program(&objects, target).expect("link");
     let scratch = Scratch::new("notnull");
     let executable = scratch.path().join("program");
@@ -881,10 +879,7 @@ fn a_slice_between_the_halves_of_one_character_keeps_the_selected_utf16_units() 
         target,
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    let objects = artifacts
-        .iter()
-        .map(|(_, bytes)| bytes.as_slice())
-        .collect::<Vec<_>>();
+    let objects = objects_of(&artifacts);
     let image = krusty::native::link_program(&objects, target).expect("link");
     let scratch = Scratch::new("surrogate");
     let executable = scratch.path().join("program");
@@ -934,10 +929,7 @@ fn a_throw_a_program_wrote_stops_it_and_says_what_happened() {
     ] {
         let (artifacts, diagnostics) = compile(&[("Main", source)], target);
         assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
-        let objects = artifacts
-            .iter()
-            .map(|(_, bytes)| bytes.as_slice())
-            .collect::<Vec<_>>();
+        let objects = objects_of(&artifacts);
         let image = krusty::native::link_program(&objects, target).expect("link");
         let scratch = Scratch::new("throw");
         let executable = scratch.path().join("program");
