@@ -1,6 +1,6 @@
 //! The `InnerClasses` table: which nested classes a class names, and in what order.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use super::{ClassWriter, InnerClassResolver, InnerClassSpec};
@@ -263,7 +263,7 @@ impl ClassWriter {
                 .enumerate()
                 .map(|(rank, class)| (class, rank))
                 .collect();
-            let mut rows: Vec<_> = keys
+            let rows: Vec<_> = keys
                 .into_iter()
                 .zip(std::mem::take(&mut self.inner_class_candidates))
                 .map(|(key, spec)| {
@@ -271,108 +271,74 @@ impl ClassWriter {
                     (key, rank, spec)
                 })
                 .collect();
-            order_by_enclosure(&mut rows, &local.declaring);
-            self.inner_class_candidates = rows.into_iter().map(|(_, _, spec)| spec).collect();
+            self.inner_class_candidates = declaration_order(rows, &local.declaring)
+                .into_iter()
+                .map(|(_, _, spec)| spec)
+                .collect();
         }
     }
 }
 
-/// Apply the declaration graph as precedence constraints over the ordinary qualified-name order.
-///
-/// An ancestry relation is only a PARTIAL order. Putting it directly in a `sort_by` comparator and
-/// using qualified names for unrelated rows is not transitive: an unrelated row can close a cycle
-/// between an ancestor and its descendant. Start with the normal stable order, then perform a
-/// stable topological selection so every declaring row precedes the rows generated from its code.
-fn order_by_enclosure(
-    rows: &mut Vec<(String, usize, InnerClassSpec)>,
+/// Sort by kotlinc's qualified-name/pool order while keeping an exact declaring class before every
+/// class generated from its code. The latter is a partial order: mixing it directly into a pairwise
+/// comparator can be non-transitive when an unrelated row sorts between a child and its parent.
+/// A stable Kahn walk makes the contract a real total order, using the ordinary sorted position as
+/// the priority among rows whose declaring ancestors have already been emitted.
+fn declaration_order(
+    mut rows: Vec<(String, usize, InnerClassSpec)>,
     declaring: &HashMap<String, String>,
-) {
+) -> Vec<(String, usize, InnerClassSpec)> {
     rows.sort_by(|(key, rank, _), (other_key, other_rank, _)| {
         key.cmp(other_key).then(rank.cmp(other_rank))
     });
-    let mut remaining = std::mem::take(rows);
-    rows.reserve(remaining.len());
-    while !remaining.is_empty() {
-        let root = remaining
-            .iter()
-            .position(|(_, _, candidate)| {
-                !remaining.iter().any(|(_, _, possible_ancestor)| {
-                    candidate.inner != possible_ancestor.inner
-                        && declared_within(declaring, &candidate.inner, &possible_ancestor.inner)
-                })
-            })
-            // A cyclic declaration graph cannot impose ancestry. Preserve the already-established
-            // qualified-name order for that component rather than looping or giving `sort_by` an
-            // invalid comparator.
-            .unwrap_or(0);
-        rows.push(remaining.remove(root));
-    }
-}
-
-/// Whether `class` is generated from code lexically owned by `ancestor`, directly or through
-/// other generated classes. The relation is recorded from common-IR enclosure identities; JVM
-/// spelling is payload only and is never parsed to reconstruct it.
-fn declared_within(declaring: &HashMap<String, String>, class: &str, ancestor: &str) -> bool {
-    let mut class = class;
-    for _ in 0..=declaring.len() {
-        let Some(owner) = declaring.get(class) else {
-            return false;
-        };
-        if owner == ancestor {
-            return true;
+    let by_inner: HashMap<&str, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (_, _, spec))| (spec.inner.as_str(), index))
+        .collect();
+    let mut children = vec![Vec::new(); rows.len()];
+    let mut blocked = vec![false; rows.len()];
+    for (child, (_, _, spec)) in rows.iter().enumerate() {
+        let mut current = declaring.get(&spec.inner).map(String::as_str);
+        let mut seen = HashSet::new();
+        while let Some(parent) = current {
+            assert!(
+                seen.insert(parent),
+                "declaring-class ancestry must be acyclic"
+            );
+            if let Some(&parent) = by_inner.get(parent) {
+                children[parent].push(child);
+                blocked[child] = true;
+                break;
+            }
+            current = declaring.get(parent).map(String::as_str);
         }
-        class = owner;
-    }
-    false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn row(key: &str, rank: usize, inner: &str) -> (String, usize, InnerClassSpec) {
-        (
-            key.to_string(),
-            rank,
-            InnerClassSpec {
-                inner: inner.to_string(),
-                outer: None,
-                name: None,
-                access: 0,
-            },
-        )
     }
 
-    #[test]
-    fn enclosure_is_a_precedence_constraint_not_a_sort_comparator() {
-        let declaring = HashMap::from([
-            ("Outer$lambda$inner".to_string(), "Outer$lambda".to_string()),
-            ("Outer$lambda".to_string(), "Outer".to_string()),
-        ]);
-        // Qualified-name order puts the descendant first and an unrelated row between the two.
-        // Combining those two orders in a pairwise comparator forms a comparison cycle.
-        let mut rows = vec![
-            row("a", 0, "Outer$lambda$inner"),
-            row("b", 0, "Unrelated"),
-            row("c", 0, "Outer$lambda"),
-        ];
-        order_by_enclosure(&mut rows, &declaring);
-        let inners: Vec<_> = rows.iter().map(|(_, _, row)| row.inner.as_str()).collect();
-        assert_eq!(inners, ["Unrelated", "Outer$lambda", "Outer$lambda$inner"]);
+    let mut ready: BTreeSet<usize> = blocked
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &blocked)| (!blocked).then_some(index))
+        .collect();
+    let mut order = Vec::with_capacity(rows.len());
+    while let Some(index) = ready.pop_first() {
+        order.push(index);
+        for &child in &children[index] {
+            blocked[child] = false;
+            ready.insert(child);
+        }
     }
+    assert_eq!(
+        order.len(),
+        rows.len(),
+        "declaring-class ancestry must be acyclic"
+    );
 
-    #[test]
-    fn equal_qualified_names_keep_ancestor_before_descendant() {
-        let declaring =
-            HashMap::from([("Facade$call$1$1".to_string(), "Facade$call$1".to_string())]);
-        let mut rows = vec![
-            row("call.<anonymous>", 0, "Facade$call$1$1"),
-            row("call.<anonymous>", 1, "Facade$call$1"),
-        ];
-        order_by_enclosure(&mut rows, &declaring);
-        let inners: Vec<_> = rows.iter().map(|(_, _, row)| row.inner.as_str()).collect();
-        assert_eq!(inners, ["Facade$call$1", "Facade$call$1$1"]);
-    }
+    let mut rows = rows.into_iter().map(Some).collect::<Vec<_>>();
+    order
+        .into_iter()
+        .map(|index| rows[index].take().expect("each row is ordered once"))
+        .collect()
 }
 
 /// kotlinc's `fqNameWhenAvailable` of each row's class: from `paths` for a class declared in
@@ -404,4 +370,53 @@ fn qualified_names(rows: &[InnerClassSpec], paths: &HashMap<String, String>) -> 
     rows.iter()
         .map(|row| name(&row.inner, &by_inner, paths, 0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{declaration_order, HashMap, InnerClassSpec};
+
+    fn row(key: &str, inner: &str) -> (String, usize, InnerClassSpec) {
+        (
+            key.to_string(),
+            usize::MAX,
+            InnerClassSpec {
+                inner: inner.to_string(),
+                outer: None,
+                name: None,
+                access: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn declaration_constraints_form_a_total_order_with_qualified_names() {
+        // The old pairwise comparator formed a cycle here: Parent < Child by ancestry,
+        // Child < Unrelated and Unrelated < Parent by qualified name.
+        let rows = vec![row("z", "Parent"), row("a", "Child"), row("m", "Unrelated")];
+        let declaring = HashMap::from([("Child".to_string(), "Parent".to_string())]);
+
+        let ordered = declaration_order(rows, &declaring)
+            .into_iter()
+            .map(|(_, _, spec)| spec.inner)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordered, ["Unrelated", "Parent", "Child"]);
+    }
+
+    #[test]
+    fn an_unlisted_intermediate_owner_still_orders_its_listed_ancestor_first() {
+        let rows = vec![row("a", "Child"), row("z", "Root")];
+        let declaring = HashMap::from([
+            ("Child".to_string(), "Intermediate".to_string()),
+            ("Intermediate".to_string(), "Root".to_string()),
+        ]);
+
+        let ordered = declaration_order(rows, &declaring)
+            .into_iter()
+            .map(|(_, _, spec)| spec.inner)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordered, ["Root", "Child"]);
+    }
 }

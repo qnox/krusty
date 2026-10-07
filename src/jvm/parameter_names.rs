@@ -215,6 +215,17 @@ fn function_local_variable(
         return Some(name);
     }
     if matches!(identity.role, IrParameterRole::ExtensionReceiver) {
+        if let Some(lambda) = ir.classes.iter().find_map(|class| {
+            class
+                .lambda
+                .as_ref()
+                .filter(|lambda| lambda.invoke == function)
+        }) {
+            return Some(match lambda.extension_receiver_label.as_deref() {
+                Some(label) => format!("$this${}", super::debug_local_names::escaped(label)),
+                None => "<this>".to_string(),
+            });
+        }
         // Only a source lambda's implementation takes an extension receiver among the functions
         // with lambda parameters; a generated adapter passes its receiver as a value.
         if ir.lambda_own_params_from.contains_key(&function) {

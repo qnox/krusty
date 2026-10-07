@@ -36,11 +36,21 @@ pub(super) fn emit_lambda_class(
         cw.set_signature(signature);
     }
     cw.set_access(0x0010 | 0x0020 | u16::from(lambda.public_inline)); // FINAL | SUPER | publication
+    let inline_default = lambda.inline_default_owner;
     if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
+        let method = inline_default
+            .map(|function| super::method_defaults::default_stub_method(ir, function, &owner))
+            .or(method);
         match method {
             Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),
             None => cw.set_enclosing_class(&owner),
         }
+    }
+    if inline_default.is_some() {
+        let lines = u16::try_from(ir.source_line_count)
+            .unwrap_or(u16::MAX)
+            .max(1);
+        cw.start_inline_origin_source_map(lines);
     }
     env.inner_classes.register(&mut cw);
     cw.add_interface(&jvm_function_interface(arity));
@@ -195,13 +205,14 @@ pub(super) fn emit_lambda_class(
         add_singleton_instance_field(&mut cw, &class);
     }
     if lambda.public_inline {
-        cw.set_kotlin_metadata(
-            3,
-            &[2, 4, 0],
-            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_PUBLIC),
-            &[],
-            &[],
-        );
+        let mut xi =
+            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_PUBLIC);
+        // A private `inline` function's default lambda is public on the JVM but not part of the
+        // public ABI. Public and internal owners set the flag.
+        if lambda.public_inline_abi {
+            xi |= super::metadata_policy::METADATA_PUBLIC_ABI_FLAG;
+        }
+        cw.set_kotlin_metadata(3, &[2, 4, 0], xi, &[], &[]);
         env.run.finish_class(cw)
     } else {
         finish_local_synthetic_class(cw, env)
@@ -234,11 +245,16 @@ fn emit_initialization(
     if singleton {
         // Retained typed operations still require class reification. A concrete call-site copy
         // contains ordinary specialized operations and therefore has no declaration marker.
-        if class.methods.iter().any(|&method| {
-            ir.functions[method as usize]
-                .body
-                .is_some_and(|body| body_has_reified_markers(ir, body))
-        }) {
+        if class
+            .lambda
+            .as_ref()
+            .is_some_and(|lambda| lambda.requires_reification)
+            || class.methods.iter().any(|&method| {
+                ir.functions[method as usize]
+                    .body
+                    .is_some_and(|body| body_has_reified_markers(ir, body))
+            })
+        {
             let marker = emitter.cw.methodref(
                 "kotlin/jvm/internal/Intrinsics",
                 "needClassReification",

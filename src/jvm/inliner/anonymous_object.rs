@@ -40,8 +40,10 @@ const ALOAD: u8 = 0x19;
 const GETFIELD: u8 = 0xb4;
 const PUTFIELD: u8 = 0xb5;
 const GETSTATIC: u8 = 0xb2;
+const INVOKESTATIC: u8 = 0xb8;
 const INVOKESPECIAL: u8 = 0xb7;
 const NEW: u8 = 0xbb;
+const INTRINSICS: &str = "kotlin/jvm/internal/Intrinsics";
 
 /// `ACC_SYNTHETIC | ACC_FINAL`, a regenerated captured field's access
 /// (`NO_FLAG_PACKAGE_PRIVATE | ACC_SYNTHETIC | ACC_FINAL`).
@@ -500,6 +502,28 @@ fn check_supported(
     }
     for method in &original.methods {
         let Some(code) = &method.code else { continue };
+        // A declaration lambda whose function type mentions a reified parameter guards its own
+        // singleton initialization. Copying that initializer verbatim leaves a throwing
+        // `needClassReification` in the call-site class even after its `invoke` method is
+        // specialized. Until initializer specialization owns that marker, fail the inline call
+        // instead of emitting a class that throws when its INSTANCE is first read.
+        if method.name == "<clinit>"
+            && code.instructions().any(|insn| {
+                matches!(insn, Insn::Method {
+                    op: INVOKESTATIC,
+                    owner,
+                    name,
+                    desc,
+                    interface: false,
+                } if owner == INTRINSICS
+                    && name == "needClassReification"
+                    && desc == "()V")
+            })
+        {
+            return Err(RegenerationError::Unsupported(
+                "a class initializer requiring reification",
+            ));
+        }
         if code
             .instructions()
             .any(|insn| references_other_regenerated_class(insn, classes, &original.name))

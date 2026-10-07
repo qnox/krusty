@@ -1819,7 +1819,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `IrCall` argument may be null); there is no separate "defaulted call" node. The JVM backend realizes
   defaults exactly as kotlinc: a synthetic `name$default(self, params…, int mask, Object marker)` stub
   that, for each defaulted parameter, does `if ((mask & (1<<i)) != 0) param = <default>;` then tail-calls
-  the real method; a call with holes passes the computed mask + null marker. Byte-identical to kotlinc
+  the real method. A top-level `inline` function's stub does not tail-call: after the mask writes, it runs
+  the function body. The body's first local reuses the mask slot, so the `$i$f$` marker overwrites
+  the mask. The stub records the signature line at pc 0 and the same line again on the body
+  expression after that marker. A default value whose class is narrower than the slot
+  (`String` into `CharSequence`, a lambda class into `FunctionN`) is `checkcast` to the slot;
+  `Object` and `null` are not. A default argument that is a lambda is a class (`FileKt$f$1`),
+  a singleton when it captures nothing, not an `invokedynamic` — the stub is the non-inline
+  entry that materializes it. The class is public, its `EnclosingMethod` is `f$default`, and it
+  carries the file's identity source map. Its `@Metadata` visibility is public; a non-private
+  owner also sets the public-ABI bit (`xi` 944, or 816 when the `inline` function is private).
+  A same-file call still inlines. When that caller keeps a copy of the default lambda
+  (an `inline` `use` around the call that omits it), both copies build the one class.
+  Test: `tests/inline_default_stub_e2e.rs`. A call with holes
+  passes the computed mask + null marker. Byte-identical to kotlinc
   for data-class `copy` and instance methods. **Mask bits are LOGICAL**: kotlinc numbers them over
   the DECLARED value parameters, so an EXTENSION's receiver — physically the leading parameter of
   the static realization — does not shift them (`fun Host.tag(name, port = 9)` → `port` is bit 2
