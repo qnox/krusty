@@ -106,12 +106,24 @@ fn site_in_roots(
     every_emitted_root: bool,
     class_name: Option<TypeName>,
 ) -> Option<Site> {
-    let mut sites = reachable_lambdas(ir, fid, every_emitted_root).into_iter();
-    let (Some(node), None) = (sites.next(), sites.next()) else {
+    let nodes = reachable_lambdas(ir, fid, every_emitted_root);
+    // A same-file caller that inlines this function copies the default lambda into its body, so
+    // the stub and that caller each build the value. Both are the one class.
+    let inline_default = inline_default_owner(ir, fid).is_some();
+    let node = if nodes.len() == 1 {
+        nodes[0]
+    } else if inline_default {
+        nodes
+            .iter()
+            .copied()
+            .find(|&node| {
+                crate::jvm::local_class_names::callable_reference_name(ir, node).is_some()
+            })
+            .or_else(|| nodes.first().copied())?
+    } else {
         crate::trace_compiler!(
             "suspend",
-            "lambda fid={fid}: reachable lambda nodes {:?}",
-            reachable_lambdas(ir, fid, every_emitted_root)
+            "lambda fid={fid}: reachable lambda nodes {nodes:?}"
         );
         return None;
     };
@@ -134,9 +146,15 @@ fn site_in_roots(
     };
     let function_type = ir.logical_types.get(&node).copied()?;
     let fits = usize::from(*arity) <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY;
+    let mut template_copies = inline_template_copies(ir, fid, every_emitted_root);
+    if inline_default {
+        template_copies.extend(nodes.into_iter().filter(|&other| other != node));
+        template_copies.sort_unstable();
+        template_copies.dedup();
+    }
     (fits && !inline_call_argument(ir, node)).then(|| Site {
         node,
-        template_copies: inline_template_copies(ir, fid, every_emitted_root),
+        template_copies,
         class,
         function_type,
         captures: captures.clone(),

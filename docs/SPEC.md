@@ -1829,7 +1829,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   entry that materializes it. The class is public, its `EnclosingMethod` is `f$default`, and it
   carries the file's identity source map. Its `@Metadata` visibility is public; a non-private
   owner also sets the public-ABI bit (`xi` 944, or 816 when the `inline` function is private).
-  A same-file call still inlines. Test: `tests/inline_default_stub_e2e.rs`. A call with holes
+  A same-file call still inlines. When that caller keeps a copy of the default lambda
+  (an `inline` `use` around the call that omits it), both copies build the one class.
+  Test: `tests/inline_default_stub_e2e.rs`. A call with holes
   passes the computed mask + null marker. Byte-identical to kotlinc
   for data-class `copy` and instance methods. **Mask bits are LOGICAL**: kotlinc numbers them over
   the DECLARED value parameters, so an EXTENSION's receiver — physically the leading parameter of
