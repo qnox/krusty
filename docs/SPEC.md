@@ -825,10 +825,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `canInlineArgumentsInPlace` to where the body loads it. Common lowering keeps a dependency
   inline call's operands in locals only where the splice needs them: a root operand used once
   that is a plain read or constant, or the trailing run of such operands whatever their values
-  (unless one suspends), is passed directly, which keeps the source evaluation order. The JVM
+  (unless one suspends), is passed directly, which keeps the source evaluation order. A preserved
+  inline lambda's body still uses the lambda's own value numbering, so a local inside that body
+  is not a use of the caller's operand temporary. Counting it as one kept a copy of a parameter
+  passed beside the lambda (`repeat(n) { … }` stored `n` before the loop). The JVM
   splice then reads a constructor call or `Unit` in place too, so `x.resume(P("OK"))` stores no
   local (`fir_lower/source_calls.rs`, `jvm/ir_emit/in_place_arguments.rs`). Tests:
-  `tests/inline_arguments_in_place_e2e.rs`.
+  `tests/inline_arguments_in_place_e2e.rs`, `tests/inline_repeat_local_e2e.rs`.
+- **An inlined lambda's body locals include the brace `nop` and follow its marker.** The lambda's
+  inline template is the source block's statements, not a second block wrapped around that block,
+  and a `Unit` coercion around the block is not another scope (`fir_lower/local_callables.rs`).
+  Emission treats those statements as the lambda method's outermost scope, so they stay open
+  through the void return the bytecode inliner turns into the `nop` on the closing brace, and the
+  local-variable table lists the marker, then those locals, then the parameters. A block nested
+  inside those statements still closes where that block ends. Test:
+  `tests/inline_repeat_local_e2e.rs`.
 - **An `@InlineOnly` call reads a local through a representation-preserving coercion.**
   `println(message)` widens a non-null `String` to `Any?`. That coercion emits no bytecode, so
   kotlinc's `genOrGetLocal` still loads the caller's local after `getstatic System.out`. A

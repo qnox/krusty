@@ -1288,7 +1288,7 @@ fn inline_callable_body(
     if !implicit_return || result == Ty::Unit {
         let value = implicit_return.then(|| ir.add_expr(IrExpr::UnitInstance));
         let block = ir.add_expr(IrExpr::Block {
-            stmts: roots.to_vec(),
+            stmts: unit_inline_statements(ir, roots),
             value,
         });
         ir.logical_types.insert(block, Ty::Unit);
@@ -1309,6 +1309,39 @@ fn inline_callable_body(
         ir.logical_types.insert(block, ty);
     }
     block
+}
+
+/// Statements of a `Unit` inline body, with the source block as the outermost scope.
+///
+/// A lambda body lowers to its source block, and a `Unit` result wraps that block in a coercion
+/// whose value is `UnitInstance`. Wrapping either block again makes the locals a nested scope:
+/// they close before the implicit return, so a spliced lambda lists them ahead of its marker and
+/// their ranges stop short of the `nop` that return becomes (`repeat(n) { val byte = it; … }`).
+/// Synthetic `Unit` coercions are peeled entirely. The source block's statements then become the
+/// template's outermost scope, and a non-`Unit` block value stays a statement of that scope. A
+/// block nested inside those statements still closes where it ends.
+fn unit_inline_statements(ir: &crate::ir::IrFile, roots: &[ExprId]) -> Vec<ExprId> {
+    let mut statements = roots.to_vec();
+    loop {
+        let &[root] = statements.as_slice() else {
+            break;
+        };
+        let IrExpr::Block { stmts, value } = ir.expr(root) else {
+            break;
+        };
+        let unit_value = value.is_some_and(|value| matches!(ir.expr(value), IrExpr::UnitInstance));
+        let mut lifted = stmts.clone();
+        if let Some(value) = *value {
+            if !unit_value {
+                lifted.push(value);
+            }
+        }
+        statements = lifted;
+        if !unit_value {
+            break;
+        }
+    }
+    statements
 }
 
 /// Where a declaration parameter sits among the logical parameters.
