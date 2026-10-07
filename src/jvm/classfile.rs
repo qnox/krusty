@@ -639,6 +639,23 @@ impl ClassWriter {
         Some(&mut self.source_map)
     }
 
+    /// Start the identity source map kotlinc writes for a class generated inside an `inline`
+    /// function (`visitSMAP(…, intoInline = true)`). The map is kept even when the class inlines
+    /// nothing else. A map an earlier splice already started is left as it is.
+    pub fn start_inline_origin_source_map(&mut self, lines: u16) {
+        if self.source_map.is_unstarted() {
+            let Some(source_file) = self.source_file.clone() else {
+                return;
+            };
+            let path = self.internal_name.clone();
+            self.source_map = crate::jvm::source_map::SourceMap::for_regenerated_class(
+                &source_file,
+                &path,
+                lines,
+            );
+        }
+    }
+
     /// The class's own source file, for a synthesized class that belongs to it.
     pub fn source_file_name(&self) -> Option<String> {
         self.source_file.clone()

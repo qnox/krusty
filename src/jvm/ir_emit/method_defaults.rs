@@ -273,6 +273,42 @@ pub(super) fn emit_primitive_box_if_needed(
     }
 }
 
+/// Narrow a default value to its parameter slot when the value's class is a proper subtype.
+fn emit_default_store_narrowing(
+    cw: &mut ClassWriter,
+    produced: Ty,
+    slot: Ty,
+    code: &mut CodeBuilder,
+) {
+    if produced == Ty::Null || !produced.is_reference() || !slot.is_reference() {
+        return;
+    }
+    if crate::jvm::names::same_type_descriptor(produced, slot) {
+        return;
+    }
+    let Some(internal) = super::checkcast_internal(slot) else {
+        return;
+    };
+    let class = cw.class_ref(&internal);
+    code.checkcast(class);
+}
+
+/// Name and descriptor of `function`'s `$default` bridge, the method a default lambda's
+/// `EnclosingMethod` names. `owner` is that bridge's class.
+pub(super) fn default_stub_method(ir: &IrFile, function: u32, owner: &str) -> (String, String) {
+    let declaration = &ir.functions[function as usize];
+    let result = jvm_declared_ty(&declaration.ret);
+    let parameters = if declaration.is_static {
+        static_default_stub_params(ir, function)
+    } else {
+        default_stub_params(ir, function, Ty::obj(owner))
+    };
+    (
+        format!("{}$default", declaration.name),
+        method_descriptor(&parameters, result),
+    )
+}
+
 pub(super) fn emit_omitted_default_placeholder(
     cw: &mut ClassWriter,
     real: Ty,
@@ -375,12 +411,12 @@ pub(super) fn emit_default_param_overwrites(
             let skip = code.new_label();
             code.ifeq(skip);
             emitter.emit_value(*expression, code);
-            emit_primitive_box_if_needed(
-                emitter.cw,
-                ir_ty_to_jvm(&emitter.value_ty(*expression)),
-                ty,
-                code,
-            );
+            let produced = ir_ty_to_jvm(&emitter.value_ty(*expression));
+            emit_primitive_box_if_needed(emitter.cw, produced, ty, code);
+            // A lambda class, or a `String` stored into `CharSequence`, is narrower than the
+            // slot. kotlinc `checkcast`s to the slot's class; `Object` needs none, and `null`
+            // is already that type.
+            emit_default_store_narrowing(emitter.cw, produced, ty, code);
             store(ty, slot, code);
             code.bind(skip);
         }
@@ -480,7 +516,19 @@ pub(super) fn emit_facade_default_stub(
         marker,
     );
     let _ = emitter.lease_temporary(marker_slot, marker);
+    let inline = ir.inline_fns.contains(&fid);
     let mut code = CodeBuilder::new(emitter.frame.size());
+    // The stub's first line is the signature. The function method itself does not record that
+    // line: its table opens on the body, after the inline-depth marker.
+    if inline {
+        if let Some(&line) = ir
+            .fn_sig_lines
+            .get(&fid)
+            .or_else(|| ir.fn_decl_lines.get(&fid))
+        {
+            code.mark_line(line);
+        }
+    }
     emit_default_param_overwrites(
         &mut emitter,
         &mut code,
@@ -489,13 +537,43 @@ pub(super) fn emit_facade_default_stub(
         &param_slots,
         &mask_slots,
     );
-    if let Some(body) = function
+    let reified_body = function
         .body
-        .filter(|&body| body_has_reified_markers(ir, body))
-    {
+        .filter(|&body| body_has_reified_markers(ir, body));
+    let inline_body = function.body.filter(|_| inline);
+    if let Some(body) = inline_body.or(reified_body) {
+        let inline_marker = inline.then(|| {
+            // The mask and marker parameters sit in the slots the body reuses. The default
+            // prefix has already recorded its stack map against the method's entry locals, so
+            // the frame cursor can return to the first of those slots. kotlinc's `$i$f$` marker
+            // then overwrites the mask.
+            release_default_stub_suffix(&mut emitter, stub_param_tys.len(), mask_count);
+            super::method_entry::emit(fid, &real_params, false, None, env, &mut emitter, &mut code);
+            ir.top_level_inline_functions.contains(&fid).then(|| {
+                let slot = emitter
+                    .frame
+                    .enter_temp(super::frame_map::TempRole::InlineDepthMarker, Ty::Int)
+                    .slot();
+                code.push_int(0, emitter.cw);
+                store(Ty::Int, slot, &mut code);
+                (slot, code.bytes.len() as u16)
+            })
+        });
+        if inline {
+            // The signature line is already in effect at pc 0. The body restates that same line
+            // on the expression after the inline-depth marker.
+            code.forget_line();
+        }
         emitter.emit(body, &mut code);
         if ret == Ty::Unit && !emitter.discarding_diverges(body) {
             code.ret_void();
+        }
+        if let Some(Some((slot, start))) = inline_marker {
+            let marker_name = format!("$i$f${}", ir.functions[fid as usize].name);
+            code.add_local_entry(start, None, slot, &marker_name, "I");
+        }
+        if inline_body.is_some() {
+            record_stub_parameter_locals(ir, fid, &real_params, &mut code);
         }
     } else {
         for (index, &(slot, ty)) in param_slots.iter().enumerate() {
@@ -531,14 +609,20 @@ pub(super) fn emit_facade_default_stub(
         &descriptor,
         &code,
     );
-    if let Some(&line) = ir
-        .fn_sig_lines
-        .get(&fid)
-        .or_else(|| ir.fn_decl_lines.get(&fid))
-    {
-        emitter
-            .cw
-            .set_method_lines(&format!("{method_name}$default"), &descriptor, &[(0, line)]);
+    // An inline stub keeps the lines its body marked. Replacing them with the signature line
+    // would drop the expression entry kotlinc records after the inline-depth marker.
+    if !inline {
+        if let Some(&line) = ir
+            .fn_sig_lines
+            .get(&fid)
+            .or_else(|| ir.fn_decl_lines.get(&fid))
+        {
+            emitter.cw.set_method_lines(
+                &format!("{method_name}$default"),
+                &descriptor,
+                &[(0, line)],
+            );
+        }
     }
     drop(emitter);
     emit_published_default_accessor(
@@ -567,6 +651,50 @@ pub(super) fn default_call_name(
         format!("access${bridge_name}")
     } else {
         bridge_name.to_owned()
+    }
+}
+
+/// Return the frame cursor to the first mask slot.
+///
+/// The default prefix has used the mask, and kotlinc's inlined body allocates its first local in
+/// that slot. The temporary leases stay: stack maps at the prefix still describe the entry locals.
+fn release_default_stub_suffix(
+    emitter: &mut Emitter<'_>,
+    parameter_count: usize,
+    mask_count: usize,
+) {
+    emitter
+        .frame
+        .leave(FrameKey::Parameter((parameter_count + mask_count) as u16));
+    for mask in (0..mask_count).rev() {
+        emitter
+            .frame
+            .leave(FrameKey::Parameter((parameter_count + mask) as u16));
+    }
+}
+
+/// The real parameters of an inline `$default` stub, covering the whole method. The mask and
+/// marker are not named.
+fn record_stub_parameter_locals(ir: &IrFile, fid: u32, param_tys: &[Ty], code: &mut CodeBuilder) {
+    let function = &ir.functions[fid as usize];
+    let local_names = crate::jvm::parameter_names::function_locals(ir, fid, param_tys);
+    let mut slot = u16::from(!function.is_static);
+    for (index, ty) in param_tys.iter().enumerate() {
+        let name = local_names
+            .as_ref()
+            .and_then(|names| names.get(index))
+            .cloned()
+            .expect("a debug-published parameter needs its canonical source identity");
+        if let Some(name) = name {
+            code.add_local_entry(
+                0,
+                None,
+                slot,
+                &name,
+                &crate::jvm::names::type_descriptor(*ty),
+            );
+        }
+        slot += slot_words(*ty);
     }
 }
 

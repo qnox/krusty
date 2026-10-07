@@ -14,7 +14,10 @@
 //! The conflicts taken so far: a value class whose declared underlying type is neither nullable
 //! nor primitive, as a parameter or the result (the factory cannot box such a value, and it knows
 //! nothing of the mangled name its specialized method takes); and, before language level 2.4, a
-//! `Nothing`/`Nothing?` parameter or inferred result, which maps to `Void` and has no adaptee at all. The class is realized
+//! `Nothing`/`Nothing?` parameter or inferred result, which maps to `Void` and has no adaptee at all.
+//! A default argument of an `inline` function is a class even when the factory could adapt it:
+//! the non-inline `$default` stub materializes that lambda, and kotlinc writes `FileKt$f$1`
+//! rather than an `invokedynamic`. The class is realized
 //! before the lambda gets a lifted name, since kotlinc numbers only the lambdas it lifts, and
 //! before the value-class pass, which erases `invoke` and completes its bridge.
 
@@ -263,6 +266,37 @@ fn nests_lifted_functions_with(ir: &IrFile, body: ExprId, allow_nested_lambdas: 
         })
 }
 
+/// The `inline` function whose default argument `fid` implements, when it is one.
+///
+/// The `$default` stub is not an inline call, so it has to materialize the lambda. kotlinc writes
+/// that value as a class (`FileKt$f$1`), a singleton when the lambda captures nothing, and names
+/// the stub as the class's `EnclosingMethod`.
+pub(in crate::jvm) fn inline_default_owner(ir: &IrFile, fid: FunId) -> Option<FunId> {
+    ir.fn_params.iter().find_map(|(function, info)| {
+        (ir.inline_fns.contains(function)
+            && info.defaults.as_ref().is_some_and(|defaults| {
+                defaults
+                    .iter()
+                    .flatten()
+                    .any(|&expression| default_expression_lambda(ir, expression) == Some(fid))
+            }))
+        .then_some(*function)
+    })
+}
+
+/// Whether `fid` implements a lambda that is a default argument of an `inline` function.
+fn inline_function_default_lambda(ir: &IrFile, fid: FunId) -> bool {
+    inline_default_owner(ir, fid).is_some()
+}
+
+/// The lambda a default expression materializes, if it is one.
+fn default_expression_lambda(ir: &IrFile, expression: ExprId) -> Option<FunId> {
+    match ir.exprs.get(expression as usize) {
+        Some(IrExpr::Lambda { impl_fn, .. }) => Some(*impl_fn),
+        _ => None,
+    }
+}
+
 /// Whether `node` is an argument of a call to an inline declaration, whose splice consumes the
 /// lambda's body in place of its value.
 fn inline_call_argument(ir: &IrFile, node: ExprId) -> bool {
@@ -310,6 +344,7 @@ pub(super) fn realize(
     for fid in lambdas {
         let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
         let inline_anonymous = ir.inline_anonymous_lambdas.contains(&fid);
+        let inline_default = inline_function_default_lambda(ir, fid);
         let delegate_source = delegates.source(ir, fid);
         // A genuine source lambda has naming/origin provenance and obeys the same class-realization
         // rule in every emitted root. Generated callable-reference adapters deliberately have no
@@ -330,6 +365,7 @@ pub(super) fn realize(
         };
         if signature.suspend
             || (delegate_source.is_none()
+                && !inline_default
                 && (!adapt_factory
                     || (!runtime_reified
                         && !inline_anonymous
@@ -740,7 +776,11 @@ fn declare_class(
 ) -> ClassId {
     let mut class = crate::ir::IrClass::synthetic(site.class);
     class.superclass = crate::types::type_name("java/lang/Object");
-    class.enclosure = ir.callable_reference_enclosures.get(&site.node).copied();
+    // The value is built by the inline function's `$default` stub, so that stub is the
+    // enclosing method. A lambda the source names directly keeps its recorded scope.
+    class.enclosure = inline_default_owner(ir, fid)
+        .map(crate::ir::IrEnclosure::Function)
+        .or_else(|| ir.callable_reference_enclosures.get(&site.node).copied());
     class
         .interfaces
         .push(&crate::jvm::names::function_interface_internal_name(
@@ -778,8 +818,12 @@ fn declare_class(
             capture_identity: None,
         });
     }
+    let inline_default_of = inline_default_owner(ir, fid);
     class.lambda = Some(crate::ir::IrLambdaClass {
-        public_inline: false,
+        // The class is constructed from other packages: a public `inline` caller inlines the
+        // default, and a private one still crosses packages inside the module.
+        public_inline: inline_default_of.is_some(),
+        inline_default_of,
         invoke: fid,
         function_type: site.function_type,
         raw_supertype: raw_supertype(ir, fid, signature),
@@ -946,6 +990,7 @@ mod method_domain_tests {
         let mut closure = crate::ir::IrClass::synthetic(crate::types::type_name("Closure"));
         closure.lambda = Some(crate::ir::IrLambdaClass {
             public_inline: false,
+            inline_default_of: None,
             invoke: 3,
             function_type: Ty::fun(vec![], Ty::Unit),
             raw_supertype: false,

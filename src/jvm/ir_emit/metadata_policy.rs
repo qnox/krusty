@@ -27,6 +27,10 @@ pub(super) const SYNTHETIC_PROTECTED: i32 = 2;
 pub(super) const SYNTHETIC_PUBLIC: i32 = 3;
 pub(super) const SYNTHETIC_LOCAL: i32 = 5;
 
+/// `JvmAnnotationNames.METADATA_PUBLIC_ABI_FLAG`. A class generated for a non-private `inline`
+/// function is part of that function's ABI.
+pub(super) const METADATA_PUBLIC_ABI_FLAG: i32 = 1 << 7;
+
 /// `@Metadata.xi` of a `k=3` synthetic class. Kotlin 2.4.20 packs the class's normalized
 /// visibility into bits 8–10; earlier releases wrote the IR flags alone.
 pub(super) fn synthetic_class_xi(visibility: i32) -> i32 {
