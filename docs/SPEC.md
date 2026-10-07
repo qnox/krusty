@@ -4853,10 +4853,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc leaves the variable unboxed and writes that default before the real initializer, then
   opens the local's range, so the range covers the initializer. A `val`, an uncaptured `var`, and a
   `var` an ordinary closure captures do not get the extra store. An initializer that is already the
-  default is a single store.   The zero store is only at the declaration: a later assignment is not
-  preceded by another one. The `Ref` class that store replaces is not a code reference afterwards,
-  so its class constant is interned with the `InnerClasses` row, after `@Metadata`. A `Ref` the
-  method still boxes stays where the `new` interned it. Tests: `tests/inline_capture_default_e2e.rs`.
+  default is a single store. The zero store is only at the declaration: a later assignment is not
+  preceded by another one. Tests: `tests/inline_capture_default_e2e.rs`.
 
 - **A lambda returns what kotlinc infers for it.** A lambda whose every result is `Unit` (a statement
   tail such as an assignment, a declaration or an `else`-less `if`, or a `Unit` call) has the result

@@ -55,9 +55,6 @@ impl ClassWriter {
     /// retained `InnerClasses` rows. This fixes their pool order only; the attributes themselves
     /// are serialized as `InnerClasses`, then `EnclosingMethod`.
     pub(in crate::jvm) fn intern_post_metadata_attribute_refs(&mut self) {
-        // Before these rows intern their class constants: a `Ref` the captured-vars pass is about
-        // to delete must be met here, not at the `new` that emission already interned.
-        self.release_refs_removed_by_unboxing();
         self.intern_enclosing_method_refs();
         self.seed_inner_class_names();
     }
