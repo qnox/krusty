@@ -4016,12 +4016,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for `ULong`); `toString`/templates use
   `Integer.toUnsignedString`. Infix `and`/`or`/`xor` of the same `UInt` or `ULong`, and infix `shl`/`shr`
   with an `Int` count, are the carrier opcode (`iand`/`ior`/`ixor`/`ishl`, and `iushr`/`lushr` for `shr`)
-  followed by `constructor-impl`. `inv()` is `xor` with all bits set, then `constructor-impl`. A
-  mixed-width overload stays an ordinary call. `UInt.toLong()` zero-extends via `Integer.toUnsignedLong` (not the
+  followed by `constructor-impl`. That call ends the inline-only member: inside a condition the
+  line in effect is written again immediately, on the following jump, and anywhere else it is
+  forgotten so the next mark of the same line — the literal argument of an outer `or`, the store
+  of the result, or the `return` — is kept. A literal argument takes the line off a plain local
+  receiver of a declaration or expression. A condition keeps that line on the first instruction
+  instead, and an assignment keeps it on the receiver load and writes it again at the store.
+  A nested assignment `x = (x and 0x7fu) or 0x80u` keeps that line on the inner receiver; the
+  inner literal shares the entry. The outer literal is marked after the inner `constructor-impl`,
+  and the store after the outer one. The assignment state covers the whole right-hand side, so
+  the inner operation does not hand its line to its own literal.
+  Otherwise the receiver load keeps its line. The other argument, when it is a plain local,
+  records no line of its own, including a local on a later source line. A call in operand
+  position (`toUInt()`, `g()`) keeps the line it wrote. `inv()` is
+  `xor` with all bits set, then `constructor-impl`, and keeps the mark on the operation because
+  its mask is positionless. A mixed-width overload stays an ordinary call. `UInt.toLong()` zero-extends via `Integer.toUnsignedLong` (not the
   sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into a reference context uses the
   inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and `unbox-impl` on read, `is UInt` →
   `instanceof kotlin/UInt`) — never `Integer`, so identity and large values are preserved.
-  `tests/unsigned_e2e.rs`, `tests/unsigned_bitwise_e2e.rs`, `tests/feature_coverage_i_e2e.rs`.
+  `tests/unsigned_e2e.rs`, `tests/unsigned_bitwise_e2e.rs`,
+  `tests/unsigned_bitwise_lines_e2e.rs`, `tests/feature_coverage_i_e2e.rs`.
   With `+ImplicitSignedToUnsignedIntegerConversion`, a parameter marked
   `@kotlin.internal.ImplicitIntegerCoercion` also accepts a signed integer literal or another
   `@ImplicitIntegerCoercion` constant and converts that value to the unsigned carrier. `Int` to

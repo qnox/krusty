@@ -5624,6 +5624,11 @@ struct Emitter<'a> {
     inside_condition: bool,
     /// The enclosing unsigned operation's decision to move its eager source boundary.
     unsigned_receiver_line_moves: Option<bool>,
+    /// A plain local operand of an unsigned bitwise member is being loaded, so it records no line.
+    suppress_unsigned_local_line: bool,
+    /// An assignment of an unsigned bitwise value keeps its line on the receiver load. The store
+    /// writes that line again after `constructor-impl`.
+    unsigned_assignment_line: bool,
     /// Slot 0 remains the verifier's special uninitialized receiver until the constructor delegates.
     this_uninitialized: bool,
     /// Independent realization strategies for plain lambdas and SAM conversions.
@@ -5714,6 +5719,8 @@ impl<'a> Emitter<'a> {
             render_initializer_boundaries: false,
             inside_condition: false,
             unsigned_receiver_line_moves: None,
+            suppress_unsigned_local_line: false,
+            unsigned_assignment_line: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
@@ -6048,12 +6055,25 @@ impl<'a> Emitter<'a> {
                 match local_updates::iinc_delta(self.ir, e, var, value, jt) {
                     Some(delta) if !deferred => code.iinc(self.slots[&var].0, delta),
                     _ => {
+                        // `visitSetValue` marks the assignment before the value, so a literal
+                        // argument does not take the line the way a declaration initializer's does.
+                        // The store writes the line again once `constructor-impl` has forgotten it.
+                        let unsigned = self.completes_unsigned_bitwise_value(value);
+                        let saved_assignment = self.unsigned_assignment_line;
+                        if unsigned {
+                            self.unsigned_assignment_line = true;
+                        }
                         self.emit_value(value, code);
+                        self.unsigned_assignment_line = saved_assignment;
                         // Coerced to the slot's type as the initializer is: a value of another
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back.
                         self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
                         let slot = self.activate_inline_return_frame_result(var, jt);
+                        if unsigned {
+                            code.forget_line();
+                            debug_lines::mark_statement(self.ir, e, code);
+                        }
                         store(jt, slot, code);
                     }
                 }
