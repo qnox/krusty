@@ -95,9 +95,8 @@ fn compile_krusty(tag: &str, source: &str) -> Vec<(String, Vec<u8>)> {
         common::stdlib_jar(),
         common::jdk_modules(),
     ]));
-    let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()).expect("JVM provider"),
-    );
+    let platform =
+        Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()).expect("JVM provider"));
     let inputs = [SourceInput::kotlin(source).with_file_stem("UseClose")];
     let stems = ["UseClose".to_string()];
     let features = krusty::features::LangFeatures::from_source(source);
@@ -108,13 +107,8 @@ fn compile_krusty(tag: &str, source: &str) -> Vec<(String, Vec<u8>)> {
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );
-    let outputs = krusty::compiler::emit_analyzed(
-        analysis,
-        &stems,
-        &JvmBackend::new(cp),
-        "main",
-        &mut diags,
-    );
+    let outputs =
+        krusty::compiler::emit_analyzed(analysis, &stems, &JvmBackend::new(cp), "main", &mut diags);
     let classes = outputs
         .into_iter()
         .filter_map(|(path, bytes)| {
@@ -230,7 +224,10 @@ fn assert_method_matches(tag: &str, reference: &str, krusty: &str, signature: &s
     let code_stops = ["Exception table:", "StackMapTable:", "LineNumberTable:"];
     let reference_code = section(&reference, "Code:", &code_stops);
     let krusty_code = section(&krusty, "Code:", &code_stops);
-    assert_eq!(krusty_code, reference_code, "{tag}: {signature} instructions");
+    assert_eq!(
+        krusty_code, reference_code,
+        "{tag}: {signature} instructions"
+    );
     let table_stops = ["StackMapTable:", "LineNumberTable:", "LocalVariableTable:"];
     assert_eq!(
         section(&krusty, "Exception table:", &table_stops),
@@ -238,8 +235,16 @@ fn assert_method_matches(tag: &str, reference: &str, krusty: &str, signature: &s
         "{tag}: {signature} exception table"
     );
     assert_eq!(
-        section(&krusty, "LineNumberTable:", &["LocalVariableTable:", "Runtime"]),
-        section(&reference, "LineNumberTable:", &["LocalVariableTable:", "Runtime"]),
+        section(
+            &krusty,
+            "LineNumberTable:",
+            &["LocalVariableTable:", "Runtime"]
+        ),
+        section(
+            &reference,
+            "LineNumberTable:",
+            &["LocalVariableTable:", "Runtime"]
+        ),
         "{tag}: {signature} lines"
     );
 }
@@ -263,8 +268,8 @@ fn discarded_generic_use_matches_kotlinc() {
     );
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let result = common::run_box(&[], "UseCloseKt", &[krusty_dir, stdlib, jdk])
-        .expect("run discarded use");
+    let result =
+        common::run_box(&[], "UseCloseKt", &[krusty_dir, stdlib, jdk]).expect("run discarded use");
     assert_eq!(result, "OK");
 }
 

@@ -1664,11 +1664,7 @@ pub(super) fn specialize_recorded_facts(
 /// lambda parameter checkcasts to `BufferedReader`. A bound of `Any` stays the call-site type,
 /// which is what `let` and `id` store. A primitive substitution stays primitive. A reified
 /// parameter is present in `runtime` and is stored as its argument.
-fn inline_operand_storage_type(
-    declared: Ty,
-    specialized: Ty,
-    runtime: &HashMap<String, Ty>,
-) -> Ty {
+fn inline_operand_storage_type(declared: Ty, specialized: Ty, runtime: &HashMap<String, Ty>) -> Ty {
     let Some(name) = (match declared.non_null() {
         Ty::TyParam(name, _) => Some(name),
         Ty::DefinitelyNotNull(inner) => inner.ty_param_name(),

@@ -53,7 +53,6 @@ pub(super) fn mark_loop_control(loop_line: Option<u32>, code: &mut CodeBuilder) 
     }
 }
 
-
 impl Emitter<'_> {
     /// Mark the line a catch-all finalizer copy's block emission marks first.
     ///

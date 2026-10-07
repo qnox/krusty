@@ -158,14 +158,8 @@ pub(super) fn prepare_inline_template(
         let IrExpr::Return(value) = ir.expr(found.returned).clone() else {
             return None;
         };
-        ir.exprs[found.returned as usize] = frame_exit(
-            ir,
-            &label,
-            result_slot,
-            found.nested,
-            value,
-            found.returned,
-        );
+        ir.exprs[found.returned as usize] =
+            frame_exit(ir, &label, result_slot, found.nested, value, found.returned);
     }
 
     let mut frame_statements = Vec::new();

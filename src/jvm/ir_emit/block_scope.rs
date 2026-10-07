@@ -225,7 +225,8 @@ impl Emitter<'_> {
         else {
             return None;
         };
-        if !matches!(self.ir.expr(unit), IrExpr::UnitInstance) || self.opens_spliced_lambda_frame(&stmts)
+        if !matches!(self.ir.expr(unit), IrExpr::UnitInstance)
+            || self.opens_spliced_lambda_frame(&stmts)
         {
             return None;
         }
