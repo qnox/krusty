@@ -1330,7 +1330,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
         "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 7\n",
     )
     .expect("write failing unit stub");
-    let failed_unit = run_coverage();
+    let failed_unit = run_coverage("nproc");
     assert_eq!(failed_unit.status.code(), Some(1));
     let failed_unit_stderr =
         String::from_utf8(failed_unit.stderr).expect("coverage stderr is UTF-8");
@@ -1349,7 +1349,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
         "#!/usr/bin/env bash\nif [ \"${1:-}\" = --list ]; then printf '%s\\n' 'alpha::one: test' '' '1 test, 0 benchmarks'; exit 0; fi\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 9\n",
     )
     .expect("write failing e2e stub");
-    let failed_e2e = run_coverage();
+    let failed_e2e = run_coverage("nproc");
     assert_eq!(failed_e2e.status.code(), Some(1));
     let failed_e2e_stderr = String::from_utf8(failed_e2e.stderr).expect("coverage stderr is UTF-8");
     assert!(
