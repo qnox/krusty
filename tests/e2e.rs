@@ -1371,6 +1371,8 @@ mod local_fun_ref_e2e;
 mod local_function_signature_e2e;
 #[path = "local_inner_enclosing_line_e2e.rs"]
 mod local_inner_enclosing_line_e2e;
+#[path = "local_object_type_of_e2e.rs"]
+mod local_object_type_of_e2e;
 #[path = "local_override_boxed_result_e2e.rs"]
 mod local_override_boxed_result_e2e;
 #[path = "local_shadows_receiver_member_e2e.rs"]

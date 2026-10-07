@@ -633,11 +633,16 @@ impl Walk<'_> {
             IrExpr::Call {
                 callee: Callee::Local(function),
                 ..
-            } if !self.class_member_fids.contains(function)
-                && self.helper_access.foreign_owner(*function).is_none() =>
-            {
-                Some((StaticOwner::Facade, StaticAccessor::Function(*function)))
-            }
+            } if self.helper_access.foreign_owner(*function).is_none() => self
+                .ir
+                .class_static_local_functions
+                .get(function)
+                .copied()
+                .map(StaticOwner::Class)
+                .or_else(|| {
+                    (!self.class_member_fids.contains(function)).then_some(StaticOwner::Facade)
+                })
+                .map(|owner| (owner, StaticAccessor::Function(*function))),
             IrExpr::Call {
                 callee: Callee::ClassStatic { owner, function },
                 ..

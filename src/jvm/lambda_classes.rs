@@ -309,13 +309,15 @@ pub(super) fn realize(
     lambdas.dedup();
     for fid in lambdas {
         let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
+        let inline_anonymous = ir.inline_anonymous_lambdas.contains(&fid);
         let delegate_source = delegates.source(ir, fid);
         // A genuine source lambda has naming/origin provenance and obeys the same class-realization
         // rule in every emitted root. Generated callable-reference adapters deliberately have no
         // lambda origin: widening their root inventory would reclassify their already-selected ABI.
         // Runtime-reified copies keep the wide inventory too even if a preceding transform moved
         // their origin record.
-        let every_emitted_root = ir.lambda_origins.contains_key(&fid) || runtime_reified;
+        let every_emitted_root =
+            ir.lambda_origins.contains_key(&fid) || runtime_reified || inline_anonymous;
         let values = reachable_lambdas(ir, fid, every_emitted_root);
         let Some(function_type) = values
             .first()
@@ -330,6 +332,7 @@ pub(super) fn realize(
             || (delegate_source.is_none()
                 && (!adapt_factory
                     || (!runtime_reified
+                        && !inline_anonymous
                         && !signature
                             .params
                             .iter()
@@ -339,9 +342,10 @@ pub(super) fn realize(
         {
             continue;
         }
-        let class_name = ((runtime_reified || delegate_source.is_some())
-            && ir.specialized_functions.contains_key(&fid))
-        .then(|| specialized_reified_placeholder(facade, fid));
+        let class_name = ir
+            .specialized_functions
+            .contains_key(&fid)
+            .then(|| specialized_reified_placeholder(facade, fid));
         if let Some(source) = delegate_source {
             let sites = delegate_sites(ir, fid, class_name)?;
             if sites.is_empty() {

@@ -105,5 +105,8 @@ pub enum FirLoweringFailure {
     /// class would erase the parameter.
     MalformedReifiedAnonymousObject {
         class: crate::types::TypeName,
+        /// Source line of the failed invariant in `escaping_anonymous`; internal failures must
+        /// identify the broken ownership check instead of collapsing every copy error together.
+        invariant_line: u32,
     },
 }

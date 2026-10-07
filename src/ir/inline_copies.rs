@@ -138,6 +138,15 @@ impl IrFile {
         self.inline_expansions.declared_operand_types.values_mut()
     }
 
+    pub(crate) fn inline_operand_declared_type_mut(
+        &mut self,
+        declaration: ExprId,
+    ) -> Option<&mut Ty> {
+        self.inline_expansions
+            .declared_operand_types
+            .get_mut(&declaration)
+    }
+
     pub(crate) fn retain_inline_unit_line(&mut self, expression: ExprId) {
         self.inline_expansions
             .retained_unit_lines

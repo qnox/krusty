@@ -36,7 +36,8 @@ struct DispatchClassifierFact {
 impl<'a> CheckedDispatchClassifiers<'a> {
     pub(super) fn new(ir: &crate::ir::IrFile, stable: &'a dyn BackendClassifierSource) -> Self {
         let mut file = std::collections::HashMap::new();
-        for class in ir.classes.iter().filter(|class| {
+        let mut published_by = std::collections::HashMap::new();
+        for (class_id, class) in ir.classes.iter().enumerate().filter(|(_, class)| {
             !class.is_source_declared || crate::jvm::local_classifiers::is_local(ir, class)
         }) {
             let identity = class.fq_name_id();
@@ -66,10 +67,12 @@ impl<'a> CheckedDispatchClassifiers<'a> {
                 value_class: class.is_value,
                 supertypes: supertypes.into_boxed_slice(),
             };
-            assert!(
-                file.insert(identity, fact).is_none(),
-                "one common-IR file may publish one classifier per semantic identity"
-            );
+            if let Some(previous) = published_by.insert(identity, class_id) {
+                panic!(
+                    "one common-IR file may publish one classifier per semantic identity: {identity} belongs to class {previous} and class {class_id}"
+                );
+            }
+            file.insert(identity, fact);
         }
         Self { stable, file }
     }

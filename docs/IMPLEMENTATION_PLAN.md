@@ -4121,7 +4121,9 @@ Remaining:
   throws whatever its body does. That is not specific to `typeOf`.
 - Reified `typeOf` in an anonymous object's property initializer is specialized at the inline
   call, including when another inline function passes the outer reified parameter
-  (`reifiedAsNestedArgument`). `localClass` remains: two local objects compare equal.
+  (`reifiedAsNestedArgument`). An anonymous object that captures a `crossinline` lambda is copied
+  per call as well (`localClass`): a capture-free lambda is inlined into the copy, and `typeOf`
+  names that copy.
   Same-module `object` members (`reified/capture.kt`, `reified/innerObject.kt`) are copied at the
   inline call.
 - Reified intersection-type arguments (`intersectionType`,
