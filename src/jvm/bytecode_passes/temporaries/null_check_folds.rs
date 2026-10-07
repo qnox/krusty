@@ -25,6 +25,7 @@
 use std::collections::BTreeSet;
 
 use super::super::insn_list::NodeId;
+use super::super::opcodes::GOTO;
 use super::adjacency::Body;
 use super::shapes::{
     ends_flow, is_swappable, loads_reference, null_jump, var_op, Kind, VarOp, DUP, IFNONNULL,
@@ -113,6 +114,33 @@ fn only_jumps_to(body: &Body, target: LabelId) -> Option<(NodeId, Vec<NodeId>)> 
     Some((start, jumps))
 }
 
+/// Whether a label retained from unreachable code remains an intervening predecessor of `target`.
+/// A `goto` immediately before the labels can jump to a later label at the same instruction; that
+/// later join bypasses every earlier label, and kotlinc can still fold the safe call. A terminal
+/// instruction without such an exact edge leaves the retained boundary in front of the target.
+fn preserved_boundary_intervenes(
+    body: &Body,
+    start: NodeId,
+    target: LabelId,
+    preserved_unreachable_labels: &BTreeSet<LabelId>,
+) -> bool {
+    let standing = body.labels_before(start);
+    let Some(own) = standing.iter().position(|label| *label == target) else {
+        return false;
+    };
+    let bypassed = body.prev_insn(start).is_some_and(|previous| {
+        matches!(
+            body.insn(previous),
+            Insn::Jump { op: GOTO, target }
+                if standing.iter().position(|label| label == target).is_some_and(|rank| rank > own)
+        )
+    });
+    !bypassed
+        && standing[..own].iter().any(|label| {
+            preserved_unreachable_labels.contains(label) && body.kept_by_process_labels(*label)
+        })
+}
+
 /// Fold every null check whose value the path after it loads again; `None` when a check kotlinc
 /// could fold was not proven foldable here, and the method then keeps every check as it was.
 pub(super) fn fold(
@@ -183,10 +211,7 @@ pub(super) fn fold(
         let Some(own) = rank(&target) else {
             continue;
         };
-        if standing[..own]
-            .iter()
-            .any(|label| preserved_unreachable_labels.contains(label))
-        {
+        if preserved_boundary_intervenes(body, start, target, preserved_unreachable_labels) {
             continue;
         }
         let mut to_own = Vec::new();
@@ -300,17 +325,10 @@ fn kotlinc_could_rewrite(
     let Some((start, jumps)) = only_jumps_to(body, target) else {
         return body.protected_bound_at(target);
     };
-    if op == IFNULL {
-        let standing = body.labels_before(start);
-        let Some(own) = standing.iter().position(|label| *label == target) else {
-            return false;
-        };
-        if standing[..own]
-            .iter()
-            .any(|label| preserved_unreachable_labels.contains(label))
-        {
-            return false;
-        }
+    if op == IFNULL
+        && preserved_boundary_intervenes(body, start, target, preserved_unreachable_labels)
+    {
+        return false;
     }
     if op == IFNONNULL {
         jumps == [jump] && part(jump)

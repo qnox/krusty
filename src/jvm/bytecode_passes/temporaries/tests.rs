@@ -796,7 +796,7 @@ fn a_preserved_unreachable_label_keeps_the_safe_call_temporary() {
         jump(GOTO, 9),
         op(RETURN),
     ];
-    let code = Code::new(&insns).without(&[8]);
+    let code = Code::new(&insns).line(8).without(&[8]);
     let expected = code.insns(&[
         op(ICONST_0),
         jump(IFEQ, 2),
@@ -806,6 +806,36 @@ fn a_preserved_unreachable_label_keeps_the_safe_call_temporary() {
         jump(IFNULL, 9),
         aload(1),
         op(ATHROW),
+        op(RETURN),
+    ]);
+    assert_eq!(code.run_with_preserved_labels(&[8]), expected);
+}
+
+#[test]
+fn an_unused_preserved_label_does_not_keep_the_safe_call_temporary() {
+    // kotlinc's processLabels removes an unreachable label that no jump or table uses before the
+    // temporary pass. It therefore cannot interrupt the safe-call adjacency match.
+    let insns = [
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 9),
+        aload(1),
+        op(ATHROW),
+        jump(GOTO, 9),
+        op(RETURN),
+    ];
+    let code = Code::new(&insns).without(&[8]);
+    let expected = code.insns(&[
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        op(DUP),
+        jump(IFNULL, 9),
+        op(ATHROW),
+        op(POP),
         op(RETURN),
     ]);
     assert_eq!(code.run_with_preserved_labels(&[8]), expected);
@@ -907,7 +937,7 @@ fn keeping_the_throwing_safe_call_still_folds_another_temporary() {
         jump(GOTO, 14),
         op(RETURN),
     ];
-    let code = Code::new(&insns).without(&[13]);
+    let code = Code::new(&insns).line(13).without(&[13]);
     let expected = code.insns(&[
         op(ICONST_0),
         jump(IFEQ, 2),
