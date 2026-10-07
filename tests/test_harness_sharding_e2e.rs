@@ -1106,14 +1106,24 @@ fn phase_timing_coverage_run_prints_every_phase() {
     )
     .expect("write unit stub");
     fs::write(bin_dir.join("just"), "#!/bin/sh\nexit 0\n").expect("write just stub");
+    fs::write(
+        bin_dir.join("nproc"),
+        "#!/bin/sh\n[ \"${STUB_CPU_SOURCE:-}\" = nproc ] || exit 1\nprintf '%s\\n' 7\n",
+    )
+    .expect("write nproc stub");
+    fs::write(
+        bin_dir.join("sysctl"),
+        "#!/bin/sh\n[ \"${STUB_CPU_SOURCE:-}\" = sysctl ] || exit 1\n[ \"$*\" = '-n hw.ncpu' ] || exit 2\nprintf '%s\\n' 5\n",
+    )
+    .expect("write sysctl stub");
     let build_log = temp.join("builds.txt");
     fs::write(
         bin_dir.join("cargo"),
         "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == +* ]]; then shift; fi\ncmd=\"${1:-}\"; shift || true\ncase \"$cmd\" in\n  llvm-cov)\n    sub=\"${1:-}\"; shift || true\n    case \"$sub\" in\n      --version) exit 0 ;;\n      show-env) printf '%s\\n' true ;;\n      report)\n        out=\"\"\n        while [ $# -gt 0 ]; do\n          if [ \"$1\" = --output-path ]; then out=\"$2\"; shift 2; else shift; fi\n        done\n        mkdir -p \"$(dirname \"$out\")\"\n        printf '%s\\n' '{\"data\":[{\"totals\":{\"regions\":{\"covered\":1,\"count\":2},\"functions\":{\"covered\":1,\"count\":2},\"lines\":{\"covered\":1,\"count\":2},\"branches\":{\"covered\":1,\"count\":2}}}]}' >\"$out\"\n        ;;\n      *) echo \"unexpected llvm-cov $sub\" >&2; exit 2 ;;\n    esac\n    ;;\n  build)\n    printf '%s\\n' \"$*\" >>\"$STUB_BUILD_LOG\"\n    echo \"cargo-rustflags:${RUSTFLAGS-}\" >&2\n    case \" $* \" in\n      *\" -p krusty-cli \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" -p krusty-lsp \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" --bin krusty \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" --bin krusty-lsp \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    mkdir -p \"$CARGO_TARGET_DIR/coverage\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    chmod +x \"$CARGO_TARGET_DIR/coverage/krusty\" \"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    ;;\n  test)\n    echo \"cargo: visible stderr $*\" >&2\n    if [[ \" $* \" == *\" --test e2e \"* ]]; then\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$E2E_BIN\\\"}\"\n    else\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$UNIT_BIN\\\"}\"\n    fi\n    ;;\n  *) echo \"unexpected cargo $cmd $*\" >&2; exit 2 ;;\nesac\n",
     )
     .expect("write cargo stub");
-    for name in ["e2e", "lsp-unit", "just", "cargo"] {
-        let path = if name == "just" || name == "cargo" {
+    for name in ["e2e", "lsp-unit", "just", "cargo", "nproc", "sysctl"] {
+        let path = if matches!(name, "just" | "cargo" | "nproc" | "sysctl") {
             bin_dir.join(name)
         } else if name == "e2e" {
             e2e_bin.clone()
@@ -1124,23 +1134,27 @@ fn phase_timing_coverage_run_prints_every_phase() {
             .expect("make stub executable");
     }
 
-    let output = Command::new("bash")
-        .arg(root.join("scripts").join("coverage.sh"))
-        .arg(&summary)
-        .env("HOME", &temp)
-        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
-        .env("CARGO_TARGET_DIR", &target)
-        .env("KRUSTY_COVERAGE_TARGET_DIR", &target)
-        .env("KRUSTY_COVERAGE_COMPILER_JSON", &compiler_json)
-        .env("KRUSTY_COVERAGE_LSP_JSON", &lsp_json)
-        .env("KRUSTY_COVERAGE_E2E_SHARDS", "1")
-        .env("KRUSTY_TEST_JOBS", "1")
-        .env("KRUSTY_TEST_THREADS", "1")
-        .env("E2E_BIN", &e2e_bin)
-        .env("UNIT_BIN", &unit_bin)
-        .env("STUB_BUILD_LOG", &build_log)
-        .output()
-        .expect("run coverage with stubbed toolchain");
+    let run_coverage = |cpu_source: &str| {
+        Command::new("bash")
+            .arg(root.join("scripts").join("coverage.sh"))
+            .arg(&summary)
+            .env("HOME", &temp)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .env("CARGO_TARGET_DIR", &target)
+            .env("KRUSTY_COVERAGE_TARGET_DIR", &target)
+            .env("KRUSTY_COVERAGE_COMPILER_JSON", &compiler_json)
+            .env("KRUSTY_COVERAGE_LSP_JSON", &lsp_json)
+            .env("KRUSTY_COVERAGE_E2E_SHARDS", "1")
+            .env("KRUSTY_TEST_JOBS", "1")
+            .env("KRUSTY_TEST_THREADS", "1")
+            .env("E2E_BIN", &e2e_bin)
+            .env("UNIT_BIN", &unit_bin)
+            .env("STUB_BUILD_LOG", &build_log)
+            .env("STUB_CPU_SOURCE", cpu_source)
+            .output()
+            .expect("run coverage with stubbed toolchain")
+    };
+    let output = run_coverage("nproc");
     let stderr = String::from_utf8(output.stderr).expect("coverage stderr is UTF-8");
     assert!(
         output.status.success(),
@@ -1156,15 +1170,22 @@ fn phase_timing_coverage_run_prints_every_phase() {
         1,
         "CLI and language server must be one cargo build: {builds}"
     );
-    let nproc = String::from_utf8(Command::new("nproc").output().expect("nproc").stdout)
-        .expect("nproc is UTF-8");
-    let nproc = nproc.trim();
-    if nproc != "1" && !nproc.is_empty() {
-        assert!(
-            stderr.contains(&format!("cargo-rustflags:-Z threads={nproc}")),
-            "frontend threads were not requested: {stderr}"
-        );
-    }
+    assert!(
+        stderr.contains("cargo-rustflags:-Z threads=7"),
+        "nproc frontend threads were not requested: {stderr}"
+    );
+    fs::write(&build_log, "").expect("reset build log");
+    let fallback_output = run_coverage("sysctl");
+    let fallback_stderr =
+        String::from_utf8(fallback_output.stderr).expect("fallback coverage stderr is UTF-8");
+    assert!(
+        fallback_output.status.success(),
+        "coverage sysctl fallback run failed: {fallback_stderr}"
+    );
+    assert!(
+        fallback_stderr.contains("cargo-rustflags:-Z threads=5"),
+        "sysctl frontend threads were not requested: {fallback_stderr}"
+    );
     let starts = stderr
         .lines()
         .filter_map(|line| line.strip_prefix("coverage: phase start "))
