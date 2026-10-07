@@ -31,6 +31,111 @@ pub(super) struct LambdaMethods {
     functions: std::collections::HashSet<FunId>,
 }
 
+#[derive(Clone, Copy)]
+struct InlineDefaultClassContext {
+    /// The inline declaration whose default lambda is the root of this class tree.
+    root_owner: FunId,
+    /// The direct default lambda records the `$default` owner; descendants instead enclose their
+    /// immediately surrounding realized lambda's `invoke` method.
+    direct_owner: Option<FunId>,
+    parent_lambda: Option<FunId>,
+}
+
+/// Every lambda class that belongs to an inline default's materialized class tree.
+///
+/// The relation comes from exact lifting identities. Source spellings and generated JVM names are
+/// deliberately absent: a candidate belongs to the tree when the direct default lambda's lifting
+/// path is a prefix of its path, and its nearest lambda prefix is its enclosing class.
+fn inline_default_class_contexts(
+    ir: &IrFile,
+    lambdas: &[FunId],
+) -> std::collections::HashMap<FunId, InlineDefaultClassContext> {
+    let direct = lambdas
+        .iter()
+        .filter_map(|&lambda| inline_default_owner(ir, lambda).map(|owner| (lambda, owner)))
+        .collect::<std::collections::HashMap<_, _>>();
+    let paths = lambdas
+        .iter()
+        .filter_map(|&lambda| {
+            let (sequence, site) = ir.lifted_functions.get(&lambda)?;
+            Some((
+                lambda,
+                sequence.clone(),
+                site.path
+                    .iter()
+                    .map(|step| step.position)
+                    .collect::<Vec<_>>(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut contexts = direct
+        .iter()
+        .map(|(&lambda, &owner)| {
+            (
+                lambda,
+                InlineDefaultClassContext {
+                    root_owner: owner,
+                    direct_owner: Some(owner),
+                    parent_lambda: None,
+                },
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    for (lambda, sequence, path) in &paths {
+        let root =
+            paths
+                .iter()
+                .filter_map(|(candidate, candidate_sequence, candidate_path)| {
+                    let owner = direct.get(candidate)?;
+                    (candidate_sequence == sequence && path.starts_with(candidate_path))
+                        .then_some((*candidate, *owner, candidate_path.len()))
+                })
+                .max_by_key(|(_, _, depth)| *depth);
+        let Some((root_lambda, root_owner, root_depth)) = root else {
+            continue;
+        };
+        if *lambda == root_lambda {
+            continue;
+        }
+        let parent_lambda = paths
+            .iter()
+            .filter(|(candidate, candidate_sequence, candidate_path)| {
+                candidate_sequence == sequence
+                    && *candidate != *lambda
+                    && candidate_path.len() >= root_depth
+                    && candidate_path.len() < path.len()
+                    && path.starts_with(candidate_path)
+            })
+            .max_by_key(|(_, _, candidate_path)| candidate_path.len())
+            .map(|(candidate, _, _)| *candidate);
+        contexts.insert(
+            *lambda,
+            InlineDefaultClassContext {
+                root_owner,
+                direct_owner: None,
+                parent_lambda,
+            },
+        );
+    }
+    contexts
+}
+
+fn inline_default_type_requires_reification(
+    ir: &IrFile,
+    context: InlineDefaultClassContext,
+    function_type: Ty,
+) -> bool {
+    let reified = ir
+        .signatures
+        .get(&context.root_owner)
+        .into_iter()
+        .flat_map(|signature| &signature.type_params)
+        .filter(|parameter| parameter.reified)
+        .map(|parameter| parameter.semantic_name.clone())
+        .collect::<Vec<_>>();
+    crate::types::ty_mentions_param(function_type, &reified)
+}
+
 impl LambdaMethods {
     fn collect(ir: &IrFile) -> Self {
         let mut functions = ir
@@ -302,11 +407,6 @@ pub(in crate::jvm) fn inline_default_owner(ir: &IrFile, fid: FunId) -> Option<Fu
     })
 }
 
-/// Whether `fid` implements a lambda that is a default argument of an `inline` function.
-fn inline_function_default_lambda(ir: &IrFile, fid: FunId) -> bool {
-    inline_default_owner(ir, fid).is_some()
-}
-
 /// Whether `function` declares a default lambda that its JVM `$default` stub must materialize.
 /// Lambda-class realization records the exact owner before it replaces the checked lambda
 /// expression; later emission consumes that relation and does not search the rewritten body.
@@ -317,6 +417,22 @@ pub(in crate::jvm) fn has_inline_default_lambda(ir: &IrFile, function: FunId) ->
             .as_ref()
             .is_some_and(|lambda| lambda.inline_default_owner == Some(function))
     })
+}
+
+/// Whether this exact default value materializes an inline lambda class whose semantic function
+/// type still contains a reified parameter. kotlinc marks the load/construction in the `$default`
+/// stub in addition to marking the class initializer itself.
+pub(in crate::jvm) fn inline_default_value_requires_reification(
+    ir: &IrFile,
+    expression: ExprId,
+) -> bool {
+    let internal = match ir.expr(expression) {
+        IrExpr::ExternalStaticInstance { ty, .. } | IrExpr::New { internal: ty, .. } => *ty,
+        _ => return false,
+    };
+    ir.class_id_by_name(internal)
+        .and_then(|class| ir.classes[class as usize].lambda.as_ref())
+        .is_some_and(|lambda| lambda.inline_default_owner.is_some() && lambda.requires_reification)
 }
 
 /// The lambda a default expression materializes, if it is one.
@@ -371,10 +487,11 @@ pub(super) fn realize(
         .collect::<Vec<_>>();
     lambdas.sort_unstable();
     lambdas.dedup();
+    let inline_default_classes = inline_default_class_contexts(ir, &lambdas);
     for fid in lambdas {
         let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
         let inline_anonymous = ir.inline_anonymous_lambdas.contains(&fid);
-        let inline_default = inline_function_default_lambda(ir, fid);
+        let inline_default = inline_default_classes.get(&fid).copied();
         let delegate_source = delegates.source(ir, fid);
         // A genuine source lambda has naming/origin provenance and obeys the same class-realization
         // rule in every emitted root. Generated callable-reference adapters deliberately have no
@@ -395,7 +512,7 @@ pub(super) fn realize(
         };
         if signature.suspend
             || (delegate_source.is_none()
-                && !inline_default
+                && inline_default.is_none()
                 && (!adapt_factory
                     || (!runtime_reified
                         && !inline_anonymous
@@ -431,7 +548,7 @@ pub(super) fn realize(
             if nests_lifted_functions_with(ir, body, runtime_reified) {
                 return Err(());
             }
-            realize_class(ir, fid, body, &sites[0], signature, &captures);
+            realize_class(ir, fid, body, &sites[0], signature, &captures, None);
             if let Some(result) = super::local_delegate_closures::invoke_result(ir, fid) {
                 let signed_result = ir.functions[fid as usize].ret;
                 ir.functions[fid as usize].ret = result;
@@ -463,10 +580,12 @@ pub(super) fn realize(
             ir,
             fid,
             every_emitted_root,
-            runtime_reified || inline_default,
+            runtime_reified || inline_default.is_some(),
             class_name,
         ) {
-            Ok((site, body, captures)) => realize_class(ir, fid, body, &site, signature, &captures),
+            Ok((site, body, captures)) => {
+                realize_class(ir, fid, body, &site, signature, &captures, inline_default)
+            }
             Err(shape) => {
                 crate::trace_compiler!(
                     "value_classes",
@@ -698,8 +817,9 @@ fn realize_class(
     site: &Site,
     signature: &crate::types::FnSig,
     captures: &[Capture],
+    inline_default: Option<InlineDefaultClassContext>,
 ) {
-    let class = declare_class(ir, fid, site, signature, captures);
+    let class = declare_class(ir, fid, site, signature, captures, inline_default);
     // `invoke` takes `this` and the lambda's own parameters; each captured value is read from its
     // field.
     let expressions = crate::ir::value_namespace_expressions(ir, body);
@@ -809,12 +929,14 @@ fn declare_class(
     site: &Site,
     signature: &crate::types::FnSig,
     captures: &[Capture],
+    inline_default: Option<InlineDefaultClassContext>,
 ) -> ClassId {
     let mut class = crate::ir::IrClass::synthetic(site.class);
     class.superclass = crate::types::type_name("java/lang/Object");
     // The value is built by the inline function's `$default` stub, so that stub is the
     // enclosing method. A lambda the source names directly keeps its recorded scope.
-    class.enclosure = inline_default_owner(ir, fid)
+    class.enclosure = inline_default
+        .and_then(|context| context.direct_owner.or(context.parent_lambda))
         .map(crate::ir::IrEnclosure::Function)
         .or_else(|| ir.callable_reference_enclosures.get(&site.node).copied());
     class
@@ -854,11 +976,19 @@ fn declare_class(
             capture_identity: None,
         });
     }
-    let inline_default_owner = inline_default_owner(ir, fid);
+    let inline_default_owner = inline_default.and_then(|context| context.direct_owner);
+    let public_inline = inline_default.is_some();
+    let public_inline_abi = inline_default
+        .is_some_and(|context| !ir.method_visibility(context.root_owner).is_private());
+    let requires_reification = inline_default.is_some_and(|context| {
+        inline_default_type_requires_reification(ir, context, site.function_type)
+    });
     class.lambda = Some(crate::ir::IrLambdaClass {
         // The class is constructed from other packages: a public `inline` caller inlines the
         // default, and a private one still crosses packages inside the module.
-        public_inline: inline_default_owner.is_some(),
+        public_inline,
+        public_inline_abi,
+        requires_reification,
         inline_default_owner,
         invoke: fid,
         function_type: site.function_type,
@@ -1026,6 +1156,8 @@ mod method_domain_tests {
         let mut closure = crate::ir::IrClass::synthetic(crate::types::type_name("Closure"));
         closure.lambda = Some(crate::ir::IrLambdaClass {
             public_inline: false,
+            public_inline_abi: false,
+            requires_reification: false,
             inline_default_owner: None,
             invoke: 3,
             function_type: Ty::fun(vec![], Ty::Unit),

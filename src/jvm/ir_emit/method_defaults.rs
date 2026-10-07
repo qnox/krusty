@@ -410,6 +410,17 @@ pub(super) fn emit_default_param_overwrites(
             code.iand();
             let skip = code.new_label();
             code.ifeq(skip);
+            if crate::jvm::lambda_classes::inline_default_value_requires_reification(
+                emitter.ir,
+                *expression,
+            ) {
+                let marker = emitter.cw.methodref(
+                    "kotlin/jvm/internal/Intrinsics",
+                    "needClassReification",
+                    "()V",
+                );
+                code.invokestatic(marker, 0, 0);
+            }
             emitter.emit_value(*expression, code);
             let produced = ir_ty_to_jvm(&emitter.value_ty(*expression));
             emit_primitive_box_if_needed(emitter.cw, produced, ty, code);

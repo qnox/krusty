@@ -209,7 +209,7 @@ pub(super) fn emit_lambda_class(
             super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_PUBLIC);
         // A private `inline` function's default lambda is public on the JVM but not part of the
         // public ABI. Public and internal owners set the flag.
-        if inline_default.is_some_and(|function| !ir.method_visibility(function).is_private()) {
+        if lambda.public_inline_abi {
             xi |= super::metadata_policy::METADATA_PUBLIC_ABI_FLAG;
         }
         cw.set_kotlin_metadata(3, &[2, 4, 0], xi, &[], &[]);
@@ -245,11 +245,16 @@ fn emit_initialization(
     if singleton {
         // Retained typed operations still require class reification. A concrete call-site copy
         // contains ordinary specialized operations and therefore has no declaration marker.
-        if class.methods.iter().any(|&method| {
-            ir.functions[method as usize]
-                .body
-                .is_some_and(|body| body_has_reified_markers(ir, body))
-        }) {
+        if class
+            .lambda
+            .as_ref()
+            .is_some_and(|lambda| lambda.requires_reification)
+            || class.methods.iter().any(|&method| {
+                ir.functions[method as usize]
+                    .body
+                    .is_some_and(|body| body_has_reified_markers(ir, body))
+            })
+        {
             let marker = emitter.cw.methodref(
                 "kotlin/jvm/internal/Intrinsics",
                 "needClassReification",
