@@ -91,9 +91,7 @@ impl Emitter<'_> {
             (!holds_operand).then(|| self.enter_unassigned_value(index, slot_ty, false))
         });
 
-        if let Some(cell) =
-            initializer.and_then(|value| self.stored_shared_cell(declaration, value))
-        {
+        if let Some(cell) = initializer.and_then(|value| self.stored_shared_cell(value)) {
             let slot = entered
                 .unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand));
             self.unassigned_values.remove(&index);
