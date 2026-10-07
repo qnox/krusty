@@ -816,16 +816,15 @@ fn private_default_published_by_inline(ir: &IrFile, target: u32) -> bool {
 /// The local function a call names, when this expression is a direct call.
 fn default_or_inline_callee(ir: &IrFile, expression: crate::ir::ExprId) -> Option<u32> {
     match ir.expr(expression) {
-        IrExpr::Call {
-            callee:
-                Callee::Local(function)
-                | Callee::LocalDefault(function)
-                | Callee::LocalWithDefaults { function, .. }
-                | Callee::ClassStatic { function, .. }
-                | Callee::ClassStaticDefault { function, .. }
-                | Callee::ClassStaticWithDefaults { function, .. },
-            ..
-        } => Some(*function),
+        IrExpr::Call { callee, .. } => match callee {
+            Callee::Local(function)
+            | Callee::LocalDefault(function)
+            | Callee::LocalWithDefaults { function, .. }
+            | Callee::ClassStatic { function, .. }
+            | Callee::ClassStaticDefault { function, .. }
+            | Callee::ClassStaticWithDefaults { function, .. } => Some(*function),
+            _ => None,
+        },
         IrExpr::MethodCall { class, index, .. } => ir
             .classes
             .get(*class as usize)

@@ -12,9 +12,6 @@ const GETSTATIC: u8 = 0xb2;
 const ARETURN: u8 = 0xb0;
 const RETURN: u8 = 0xb1;
 
-/// A planned lambda paired with the caller values it captures, in capture order.
-type LambdaShape = (inliner::Lambda, Vec<(u32, Ty)>);
-
 /// A lambda argument ready for the inliner, and the caller values it captures, in capture order.
 pub(super) struct LambdaArgument {
     pub lambda: inliner::Lambda,
@@ -399,7 +396,10 @@ impl Emitter<'_> {
 
     /// The literal lambda `argument` as route planning sees it before compiling it: its parameters,
     /// captured values and names, with a body that only returns; and the caller values it captures.
-    pub(super) fn lambda_shape(&self, argument: u32) -> Result<LambdaShape, &'static str> {
+    pub(super) fn lambda_shape(
+        &self,
+        argument: u32,
+    ) -> Result<(inliner::Lambda, Vec<(u32, Ty)>), &'static str> {
         let (lambda, _) = self.literal_lambda(argument)?;
         let parameter_types: Vec<String> = lambda
             .parameter_types

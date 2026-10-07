@@ -1845,9 +1845,10 @@ fn kotlin_codegen_box_conformance() {
                     })();
 
                     // Reference-compile this exact topology once for both the byte diff and the
-                    // byte-equality score. A passing box scores its common prefixes; a failed box
-                    // scores zero against the reference denominator; a reference failure fails the
-                    // run. `KRUSTY_NO_RUN` disables scoring but not an opt-in byte diff.
+                    // byte-equality score. A passing box credits only entire byte-identical class
+                    // files; a failed box scores zero against the reference denominator; a
+                    // reference failure fails the run. `KRUSTY_NO_RUN` disables scoring but not an
+                    // opt-in byte diff.
                     let reference = (score_on || byte_diff_on).then(|| {
                         mark_box_case_phase(&active, tid, file, "reference");
                         box_reference_classes::reference_compile(

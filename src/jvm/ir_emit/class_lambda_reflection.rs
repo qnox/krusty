@@ -266,11 +266,11 @@ fn approximate_type_parameters(ty: Ty, names: &[&str]) -> Ty {
 
 /// Metadata names of the lambda's value parameters, in order. `None` when the implementation has
 /// no parameter identities at all.
-fn value_parameter_names(
-    ir: &IrFile,
+fn value_parameter_names<'a>(
+    ir: &'a IrFile,
     impl_fn: u32,
     value_count: usize,
-) -> Result<Option<Vec<&str>>, String> {
+) -> Result<Option<Vec<&'a str>>, String> {
     let Some(identities) = ir.function_parameter_identities(impl_fn) else {
         return Ok(None);
     };

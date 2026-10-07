@@ -105,7 +105,7 @@ fn adaptation_specificity_shape(params: &[Ty], plan: &[AdaptedRefArgument]) -> V
             }
             AdaptedRefArgument::Vararg { values, .. } => {
                 let element = declared.array_read_elem().unwrap_or(declared);
-                shape.extend(std::iter::repeat_n(element, values.len()));
+                shape.extend(std::iter::repeat(element).take(values.len()));
             }
         }
     }

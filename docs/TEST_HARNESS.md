@@ -512,7 +512,8 @@ one box run over the same applicable `codegen/box` cases of each Kotlin version:
   applicable cases whose `box()` returns `OK` on krusty-emitted bytecode, shown as
   `<pct>% (<passed>/<applicable>)`.
 - The **JVM byte-equality badge** (`krusty-jvm-byte-equality.json`) is the share of generated
-  `.class` bytes that match the same-version kotlinc's over those same cases, shown as
+  `.class` bytes belonging to entire class files that are byte-identical to the same-version
+  kotlinc's over those same cases, shown as
   `<pct>% (<matched>/<total> bytes)`. Other target platforms may get their own sibling badges
   later; none replaces the conformance badge.
 
@@ -526,8 +527,8 @@ same topology (Kotlin and Java sources, `// MODULE:` dependencies, directives, c
 with the pinned kotlinc of that version. Both compilers' `.class` files, Java-emitted ones included,
 are paired by module and JVM internal class name:
 
-- A pair counts its identical leading bytes, up to the first differing byte, as `matched`, and the
-  longer of the two lengths as `total`. Bytes after the first difference never count.
+- A pair counts its full length as `matched` only when both class files are entirely byte-identical.
+  A differing pair counts 0 as `matched` and the longer of the two lengths as `total`.
 - A class that only one compiler emits counts 0 out of its full length.
 - A case whose `box()` does not return `OK` (krusty rejected it, emitted no `box()`, panicked, or the
   JVM returned anything else) counts 0 out of the summed size of kotlinc's classes.

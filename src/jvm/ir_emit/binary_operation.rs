@@ -276,7 +276,8 @@ impl Emitter<'_> {
             }
         }
         let receiver_is_unsigned = self.unsigned_bitwise_operation(lhs).is_some();
-        let outer_receiver = self.unsigned_receiver_line_moves.replace(move_line);
+        let outer_receiver =
+            std::mem::replace(&mut self.unsigned_receiver_line_moves, Some(move_line));
         // The extension receiver is generated in full, so its load keeps a line. A literal that
         // takes that line is the exception: the load then has none.
         self.emit_unsigned_operand(lhs, code, move_line);

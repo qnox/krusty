@@ -4,10 +4,6 @@
 use super::common;
 use std::path::Path;
 
-type ClassFiles = Vec<(String, Vec<u8>)>;
-type MethodFlags = Vec<(String, String, bool)>;
-type AccessorPairs = Vec<(String, Option<(String, String)>, Option<(String, String)>)>;
-
 fn collect_class_names(root: &Path, directory: &Path, names: &mut Vec<String>) {
     for entry in std::fs::read_dir(directory).expect("read compiler output") {
         let path = entry.expect("read compiler output entry").path();
@@ -141,7 +137,7 @@ fun box(): String {\n\
     return \"OK\"\n\
 }\n";
 
-fn compiled_classes(stem: &str, source: &str) -> (ClassFiles, ClassFiles) {
+fn compiled_classes(stem: &str, source: &str) -> (Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>) {
     let work = common::scratch_dir().expect("allocate anonymous-object fixture");
     let source_path = work.join(format!("{stem}.kt"));
     let krusty_output = work.join("krusty");
@@ -197,7 +193,12 @@ fn compiled_classes(stem: &str, source: &str) -> (ClassFiles, ClassFiles) {
     compiled
 }
 
-fn accessor_identity(info: &krusty::jvm::classreader::ClassInfo) -> (MethodFlags, AccessorPairs) {
+fn accessor_identity(
+    info: &krusty::jvm::classreader::ClassInfo,
+) -> (
+    Vec<(String, String, bool)>,
+    Vec<(String, Option<(String, String)>, Option<(String, String)>)>,
+) {
     let mut methods = info
         .methods
         .iter()

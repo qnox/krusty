@@ -57,7 +57,7 @@ pub enum PluginSynthesizedOperand {
     /// A checker-selected call on a singleton receiver. The complete ordinary member-call result
     /// crosses this boundary; FIR publication must not reconstruct any target fact from the name.
     SingletonCall {
-        call: Box<FrontendResolvedSingletonCall>,
+        call: FrontendResolvedSingletonCall,
         arguments: Vec<PluginSynthesizedOperand>,
     },
     /// A nested plugin operation over synthesized operands, specialized by the named plugin.

@@ -207,10 +207,10 @@ fn property_accessor(
     }
 }
 
-fn property_member(
-    ir: &IrFile,
+fn property_member<'a>(
+    ir: &'a IrFile,
     property: crate::fir::PropertyId,
-) -> Option<&crate::ir::IrProperty> {
+) -> Option<&'a crate::ir::IrProperty> {
     let checked = ir.checked_properties.get(&property)?;
     let class = ir.classes.get(checked.class? as usize)?;
     class

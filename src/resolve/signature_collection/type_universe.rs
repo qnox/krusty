@@ -713,8 +713,8 @@ fn seed_source_alias_expansions(
             break;
         }
     }
-    for (file_index, names) in file_class_names.iter_mut().enumerate() {
-        module.install_selected(names, file_index, &seeded);
+    for file_index in 0..file_class_names.len() {
+        module.install_selected(&mut file_class_names[file_index], file_index, &seeded);
     }
 }
 
@@ -781,13 +781,10 @@ fn source_alias_expansion(
 ) -> SourceAliasSeed {
     let function_syntax = target.name == "<fun>" || !target.fun_params.is_empty();
     let chained = names.alias_expansion(&target.name).is_some();
-    if !function_syntax
-        && !chained
-        && !target_may_be_pending_alias
-        && names.get_class(&target.name).is_none()
-        && Ty::from_name(&target.name).is_none()
-    {
-        return SourceAliasSeed::Skip;
+    if !function_syntax && !chained && !target_may_be_pending_alias {
+        if names.get_class(&target.name).is_none() && Ty::from_name(&target.name).is_none() {
+            return SourceAliasSeed::Skip;
+        }
     }
     let mut diags = DiagSink::new();
     let symbolic = TParams::symbolic_from_decl_with(formals, &[], &|_| None);

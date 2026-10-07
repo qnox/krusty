@@ -978,6 +978,23 @@ pub(super) fn boxed_step(owner: DeclarationOwner, name: &str, params: &[Ty]) -> 
     Some((ty, step))
 }
 
+/// Whether a name is one of Kotlin's function types (`kotlin.Function0`..`Function22`, or the
+/// arity-less `kotlin.Function` they all extend).
+///
+/// The one dependency type whose member this target gives a FIXED slot: a function value's
+/// `invoke` sits right after `kotlin.Any`'s three, and the runtime names that number itself.
+#[cfg(test)]
+pub(super) fn is_function_type_name(owner: crate::types::TypeName) -> bool {
+    owner == crate::types::wk::function_root() || function_type_arity(owner).is_some()
+}
+
+#[cfg(test)]
+fn function_type_arity(owner: crate::types::TypeName) -> Option<usize> {
+    owner
+        .unsigned_suffix_after_prefix("kotlin/Function")
+        .or_else(|| owner.unsigned_suffix_after_prefix("kotlin/jvm/functions/Function"))
+}
+
 /// The runtime marker an `is` against one of Kotlin's REFLECTION types asks about.
 ///
 /// A property reference is an object of a type of its own — the generator emits one per property —

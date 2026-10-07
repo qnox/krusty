@@ -74,15 +74,9 @@ fn instructions(
 fn a_nested_class_reaches_a_cross_package_protected_member_through_the_subclass() {
     let (classes, _) = common::javac_compile(&[("Base.java".into(), BASE.into())], &[])
         .expect("javac compiles the protected base");
-    let host = common::compare_with_kotlinc_plugin(
-        "Host",
-        HOST,
-        "Host",
-        std::slice::from_ref(&classes),
-        "1.8",
-        &[],
-    )
-    .expect("Host compiles against the Java base");
+    let host =
+        common::compare_with_kotlinc_plugin("Host", HOST, "Host", &[classes.clone()], "1.8", &[])
+            .expect("Host compiles against the Java base");
     for header in [
         "public static final java.lang.String access$secret(Host);",
         "public static final java.lang.String access$step(Host, int);",
@@ -102,7 +96,7 @@ fn a_nested_class_reaches_a_cross_package_protected_member_through_the_subclass(
         "Host",
         HOST,
         "Host$go$probe$1",
-        std::slice::from_ref(&classes),
+        &[classes.clone()],
         "1.8",
         &[],
     )
@@ -126,7 +120,7 @@ fn a_same_package_nested_class_calls_a_protected_member_directly() {
         "Same",
         SAME,
         "Same$go$probe$1",
-        std::slice::from_ref(&classes),
+        &[classes.clone()],
         "1.8",
         &[],
     )
@@ -140,15 +134,9 @@ fn a_same_package_nested_class_calls_a_protected_member_directly() {
         "a same-package caller needs no accessor: {krusty:?}"
     );
 
-    let owner = common::compare_with_kotlinc_plugin(
-        "Same",
-        SAME,
-        "Same",
-        std::slice::from_ref(&classes),
-        "1.8",
-        &[],
-    )
-    .expect("Same compiles");
+    let owner =
+        common::compare_with_kotlinc_plugin("Same", SAME, "Same", &[classes.clone()], "1.8", &[])
+            .expect("Same compiles");
     assert!(
         common::method_block(
             &owner.krusty,

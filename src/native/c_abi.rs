@@ -95,7 +95,11 @@ pub(super) fn is_file_level(ir: &IrFile, index: usize) -> bool {
     {
         return false;
     }
-    if ir.classes.iter().any(|class| class.methods.contains(&id)) {
+    if ir
+        .classes
+        .iter()
+        .any(|class| class.methods.iter().any(|method| *method == id))
+    {
         return false;
     }
     true
@@ -247,7 +251,7 @@ fn describe(ty: Ty) -> String {
         Ty::Nullable(inner) => format!("{}?", describe(*inner)),
         Ty::Fun(_) => "a function type".to_string(),
         Ty::Nothing => "kotlin.Nothing".to_string(),
-        Ty::Obj(name, []) => name.render().replace('/', "."),
+        Ty::Obj(name, args) if args.is_empty() => name.render().replace('/', "."),
         Ty::Obj(name, args) => {
             let arguments = args
                 .iter()

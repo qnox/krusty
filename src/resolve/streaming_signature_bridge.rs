@@ -4709,7 +4709,12 @@ pub(crate) fn finalized_streamed_signature_index(
                 .classes
                 .values()
                 .find(|class| class.stable_declaration == Some(stub.id));
-            if class.is_some_and(|class| class.annotations.contains(&jvm_inline)) {
+            if class.is_some_and(|class| {
+                class
+                    .annotations
+                    .iter()
+                    .any(|annotation| *annotation == jvm_inline)
+            }) {
                 flags = flags.with(crate::fir::DeclarationFlags::VALUE, true);
             } else if class.is_some_and(|class| class.full_value) {
                 flags = flags.with(crate::fir::DeclarationFlags::FULL_VALUE, true);
