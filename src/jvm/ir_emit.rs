@@ -2705,7 +2705,7 @@ fn emit_class(
         fq_name: &fq_name,
         ctor_signature: ctor_signature.as_deref(),
     };
-    if byte_parity && c.has_primary_ctor {
+    if byte_parity && c.has_primary_ctor && !c.is_value {
         seed_plain_class_pool(pool_seed(), &mut cw);
     }
     // Access: an extended or abstract class must not be `final`; a class with an emitted abstract
@@ -2929,6 +2929,13 @@ fn emit_class(
     }
     if c.is_value {
         inherited_default_forwarders::emit_value_class_inherited_defaults(ir, c, &mut cw, env);
+    }
+    // Unlike an ordinary class, kotlinc visits a value class's declared members before its private
+    // primary constructor. Reserve the constructor header at that real schedule boundary: doing it
+    // with the ordinary-class seed above makes `<init>` the first member-owned pool entry and shifts
+    // every declared member's constants even though the method table itself is correctly ordered.
+    if byte_parity && c.has_primary_ctor && c.is_value {
+        seed_plain_class_pool(pool_seed(), &mut cw);
     }
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
