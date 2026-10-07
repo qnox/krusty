@@ -149,3 +149,58 @@ pub(super) fn seed_accessor_locals(c: &crate::ir::IrClass, fq_name: &str, cw: &m
         cw.seed_utf8(&format!("L{fq_name};"));
     }
 }
+
+/// Intern one generated value-class method's local names immediately after that method's body.
+///
+/// The debug tables are attached once the whole class has been emitted, but kotlinc visits each
+/// table with its owning method. Reserving these strings at the same boundary keeps later method,
+/// bridge, field, and annotation constants in their real order. Roles come from synthesis-owned
+/// function identities; generated spellings are output here, never lookup input.
+pub(super) fn seed_value_class_method_locals(
+    enabled: bool,
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    fid: u32,
+    cw: &mut ClassWriter,
+) {
+    if !enabled || !c.is_value {
+        return;
+    }
+    let Some(field) = c.fields.first() else {
+        return;
+    };
+    let carrier = crate::jvm::names::type_descriptor(field.ty);
+    let this_desc = format!("L{};", c.fq_name());
+    let object = "Ljava/lang/Object;";
+    let locals: Vec<(&str, &str)> = if let Some(role) = ir.jvm_value_class_generated_any.get(&fid) {
+        match role {
+            crate::ir::IrValueClassAnyMember::Equals => {
+                vec![("arg0", carrier.as_str()), ("other", object)]
+            }
+            crate::ir::IrValueClassAnyMember::HashCode
+            | crate::ir::IrValueClassAnyMember::ToString => vec![("arg0", carrier.as_str())],
+        }
+    } else if let Some(role) = ir.jvm_value_class_any_delegators.get(&fid) {
+        match role {
+            crate::ir::IrValueClassAnyMember::Equals => {
+                vec![("this", this_desc.as_str()), ("other", object)]
+            }
+            crate::ir::IrValueClassAnyMember::HashCode
+            | crate::ir::IrValueClassAnyMember::ToString => {
+                vec![("this", this_desc.as_str())]
+            }
+        }
+    } else {
+        match ir.jvm_value_class_representation_order.get(&fid).copied() {
+            Some(0) => vec![(field.name.as_str(), carrier.as_str())],
+            Some(1) => vec![("v", carrier.as_str())],
+            Some(2) => vec![("this", this_desc.as_str())],
+            Some(3) => vec![("p1", carrier.as_str()), ("p2", carrier.as_str())],
+            _ => return,
+        }
+    };
+    for (name, descriptor) in locals {
+        cw.seed_utf8(name);
+        cw.seed_utf8(descriptor);
+    }
+}

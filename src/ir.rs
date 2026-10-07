@@ -2222,6 +2222,11 @@ pub struct IrFile {
     /// The static `-impl` of each `Any` member the JVM value-class synthesis generated, by exact
     /// identity. A source-declared override is never in it.
     pub(crate) jvm_value_class_generated_any: std::collections::HashMap<u32, IrValueClassAnyMember>,
+    /// The generated instance delegator paired with each value-class `Any` implementation, by exact
+    /// identity. The JVM emitter uses this role for physical member/debug layout; source spelling is
+    /// never used to rediscover a synthesized method.
+    pub(crate) jvm_value_class_any_delegators:
+        std::collections::HashMap<u32, IrValueClassAnyMember>,
     /// Methods kotlinc marks `ACC_BRIDGE` (0x40) — e.g. a `@Serializable` serializer's
     /// `typeParametersSerializers`. The JVM backend ORs `0x40` for a `FunId` in this set.
     pub bridge_methods: std::collections::HashSet<u32>,

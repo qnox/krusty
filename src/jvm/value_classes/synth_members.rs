@@ -534,6 +534,8 @@ pub(super) fn synth_value_members(
         let ibody = ret_block(ir, call);
         let fid = add_inst(ir, "toString", vec![], str_ir, ibody);
         realized.any_delegators.insert(fid);
+        ir.jvm_value_class_any_delegators
+            .insert(fid, crate::ir::IrValueClassAnyMember::ToString);
         ir.open_methods.insert(fid);
         if !custom_to_string {
             ir.jvm_nullability_unannotated_methods.insert(fid);
@@ -570,6 +572,8 @@ pub(super) fn synth_value_members(
         let ibody = ret_block(ir, call);
         let fid = add_inst(ir, "hashCode", vec![], int_ir, ibody);
         realized.any_delegators.insert(fid);
+        ir.jvm_value_class_any_delegators
+            .insert(fid, crate::ir::IrValueClassAnyMember::HashCode);
         ir.open_methods.insert(fid);
         if !custom_hash_code {
             ir.jvm_nullability_unannotated_methods.insert(fid);
@@ -666,6 +670,8 @@ pub(super) fn synth_value_members(
         let ibody = ret_block(ir, call);
         let fid = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody);
         realized.any_delegators.insert(fid);
+        ir.jvm_value_class_any_delegators
+            .insert(fid, crate::ir::IrValueClassAnyMember::Equals);
         crate::jvm::method_parameters::record_function(ir, fid, &["other"], &[]);
         ir.open_methods.insert(fid);
         if !custom_equals {

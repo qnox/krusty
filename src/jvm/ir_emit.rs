@@ -156,7 +156,8 @@ mod value_class_signatures;
 use crate::jvm::private_static_access::StaticOwner;
 use class_pool_seed::{
     seed_accessor_locals, seed_ctor_before_members, seed_enum_constructor_locals,
-    seed_plain_constructor_tail, seed_value_ctor_after_members, PlainClassPoolSeed,
+    seed_plain_constructor_tail, seed_value_class_method_locals, seed_value_ctor_after_members,
+    PlainClassPoolSeed,
 };
 pub(super) use enclosure::{class_enclosure, property_accessor_function};
 use primary_constructor_parameters::{
@@ -2246,6 +2247,7 @@ struct ScheduledMemberEmission<'a> {
     param_assertions: bool,
     env: &'a EmitEnv<'a>,
     markers: &'a std::collections::HashSet<u32>,
+    byte_parity: bool,
 }
 
 /// Emit one member of the class's source schedule: a property's accessors (and its annotation
@@ -2264,6 +2266,7 @@ fn emit_scheduled_member(
         param_assertions,
         env,
         markers,
+        byte_parity,
     } = *emission;
     let fid = match member {
         SourceOrderedMember::Property(property) => {
@@ -2361,6 +2364,7 @@ fn emit_scheduled_member(
             !f.is_static,
             env,
         );
+        seed_value_class_method_locals(byte_parity, ir, c, fid, cw);
         if ir.function_reference_access_bridges.contains(&fid) {
             access_bridges::emit_function_reference_access_bridge(
                 ir,
@@ -2803,6 +2807,7 @@ fn emit_class(
         param_assertions: opts.param_assertions,
         env,
         markers: &markers,
+        byte_parity,
     };
     // A value class's declared members and `Any` overrides precede its private primary `<init>`,
     // which its generated representation members follow; every other class starts with `<init>`.
@@ -3243,11 +3248,18 @@ fn emit_class(
             &mut cw,
         );
     }
-    cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
         .then(|| build_class_metadata(ir, c, opts, env))
         .flatten();
+    // kotlinc visits a value class's generated field/method nullability before its class-level
+    // `@JvmInline`. Preserve that physical writer order without changing ordinary-class emission.
+    let early_value_nullability =
+        c.is_value && computed.is_some() && !is_coroutine_state_machine(c);
+    if early_value_nullability {
+        attach_synth_nullability(ir, c, &mut cw);
+    }
+    cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
     // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
     // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
@@ -3268,7 +3280,9 @@ fn emit_class(
             },
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
-        attach_synth_nullability(ir, c, &mut cw);
+        if !early_value_nullability {
+            attach_synth_nullability(ir, c, &mut cw);
+        }
     }
     if continuation_metadata.is_some() {
         let self_desc = format!("L{fq_name};");
