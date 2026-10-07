@@ -169,17 +169,32 @@ impl Emitter<'_> {
     ) -> bool {
         mode == Some(crate::ir::EqualityMode::Primitive)
             && [lhs, rhs].into_iter().any(|operand| {
-                self.erased_scalar_result(operand)
-                    .is_some_and(|(source, _)| {
-                        self.ir
-                            .jvm_erased_primitive_wrapper_values
-                            .contains(&operand)
-                            || self
-                                .ir
-                                .jvm_erased_primitive_wrapper_values
-                                .contains(&source)
-                    })
+                self.erased_scalar_result(operand).is_some()
+                    && self.erased_wrapper_property_coercion(operand)
             })
+    }
+
+    /// Whether an implicit-coercion chain contains the exact generic-property read that retained
+    /// an ordinary JVM wrapper. Checked lowering can add one coercion and value-class realization
+    /// another; neither changes which recorded producer occupies the erased slot.
+    fn erased_wrapper_property_coercion(&self, mut expression: crate::ir::ExprId) -> bool {
+        loop {
+            if self
+                .ir
+                .jvm_erased_primitive_wrapper_values
+                .contains(&expression)
+            {
+                return true;
+            }
+            match self.ir.expr(expression) {
+                crate::ir::IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => expression = *arg,
+                _ => return false,
+            }
+        }
     }
 
     /// Whether `ty` names a `@JvmInline value class`, whose values use a backend-owned carrier.
