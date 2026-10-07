@@ -13525,11 +13525,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answer; `TopLevelEnumValueOf` and `IrExpr::EnumValueOf::declaration` now carry the selection to
   the backend. Two entries at one offset needed a debug-line operation of its own
   (`CodeBuilder::mark_line_retained`): ordinary marking replaces at a repeated offset, which is
-  correct everywhere else and here would lose one of the two positions. The same operation opens an
-  emitted `inline fun` TEMPLATE on its own body line, which kotlinc records beside the body's first
-  instruction line. Tests: `a_multi_line_enum_value_of_keeps_both_entries_at_its_dispatch`,
+  correct everywhere else and here would lose one of the two positions. An emitted top-level
+  `inline fun` does not use that operation for its own method: the `$i$f$` marker and the parameter
+  guards carry no line, and the first entry is the first statement or the expression body. The
+  signature line is not recorded beside that entry, and it is not written onto the marker when the
+  body's first entry starts later.
+  Tests: `a_multi_line_enum_value_of_keeps_both_entries_at_its_dispatch`,
   `a_multi_line_enum_member_value_of_returns_to_its_line`,
-  `a_reified_enum_value_of_template_marks_its_call_site`.
+  `a_reified_enum_value_of_template_marks_its_call_site`,
+  `inline_block_opens_on_its_first_statement`.
 
 - **A reflective `E::valueOf` is the enum's `valueOf` member, not a lambda.** Used as a
   `KFunction`, `E::valueOf` is a callable-reference value whose target is the classifier's implicit

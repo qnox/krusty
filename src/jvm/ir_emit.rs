@@ -4998,18 +4998,8 @@ fn emit_method_inner_with_holder(
             store(Ty::Int, slot, &mut code);
             (slot, code.bytes.len() as u16)
         });
-    // An emitted inline TEMPLATE opens its body on the function's own body line, which kotlinc
-    // records even when the body's first instruction belongs to a later line: a template's body is
-    // what a call site expands, so both positions are kept. `mark_line_retained` is what lets the
-    // body's own first mark join this one at the same offset instead of replacing it; where the two
-    // agree — the ordinary case — it deduplicates and nothing is added.
-    if inline_marker.is_some() {
-        if let Some(&line) = ir.fn_decl_lines.get(&fid) {
-            if line != 0 {
-                code.mark_line_retained(line);
-            }
-        }
-    }
+    // The marker and the parameter guards carry no line. The method's first entry is the first
+    // statement, or the expression body — kotlinc does not also record the signature line there.
     // Building the machine: everything the discovery pass learned is in hand, so the entry,
     // the dispatch and the state it re-enters can be emitted around the same body.
     let machine_states = match (machine_slots, env.run.machine_plan(fid)) {
