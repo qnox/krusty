@@ -37,7 +37,7 @@ fun afterFor(items: List<String>) {\n\
 
 #[test]
 fn throwing_safe_calls_after_control_flow_are_byte_identical_to_kotlinc() {
-    common::assert_classes_identical_to_kotlinc(
+    common::assert_classes_identical_to_kotlinc_jdk(
         "SafeCallAfterThrow",
         SRC,
         &["SafeCallAfterThrowKt"],
