@@ -112,14 +112,12 @@ pub(super) fn predeclare_properties(
     inline_payload_declarations: &std::collections::HashSet<DeclarationId>,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
-    for raw in 0..index.declaration_count() {
-        let declaration = DeclarationId::from_raw(raw as u32);
+    for declaration in super::declarations_for_lowering(index, source, inline_payload_declarations)
+    {
         let Some(anchor) = index.declaration_anchor(declaration) else {
             continue;
         };
-        if (anchor.source != source && !inline_payload_declarations.contains(&declaration))
-            || anchor.kind != DeclarationKind::Property
-        {
+        if anchor.kind != DeclarationKind::Property {
             continue;
         }
         let body_local = index.is_body_local_declaration(declaration);
@@ -1136,13 +1134,13 @@ fn materialize_member_property(
             let classifier = anchor.owner.ok_or(FirFileLoweringFailure::MissingProperty(
                 property.declaration,
             ))?;
-            let source_parameter_count = (0..index.declaration_count())
-                .find_map(|raw| {
-                    let constructor = DeclarationId::from_raw(raw as u32);
+            let source_parameter_count = index
+                .owned_declarations(classifier)
+                .iter()
+                .copied()
+                .find_map(|constructor| {
                     index.declaration_anchor(constructor).and_then(|candidate| {
-                        (candidate.kind == DeclarationKind::Constructor
-                            && candidate.owner == Some(classifier)
-                            && candidate.sibling == 0)
+                        (candidate.kind == DeclarationKind::Constructor && candidate.sibling == 0)
                             .then(|| index.signature(constructor).map(|sig| sig.parameters.len()))
                             .flatten()
                     })
@@ -1613,15 +1611,15 @@ fn setter_declaration(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
 ) -> Option<DeclarationId> {
-    (0..index.declaration_count())
-        .map(|raw| DeclarationId::from_raw(raw as u32))
+    index
+        .owned_declarations(declaration)
+        .iter()
         .find(|accessor| {
-            index.declaration_anchor(*accessor).is_some_and(|anchor| {
-                anchor.kind == DeclarationKind::Accessor
-                    && anchor.owner == Some(declaration)
-                    && anchor.sibling == 1
+            index.declaration_anchor(**accessor).is_some_and(|anchor| {
+                anchor.kind == DeclarationKind::Accessor && anchor.sibling == 1
             })
         })
+        .copied()
 }
 
 /// A property's setter visibility: the setter declaration's own, else the property's.

@@ -245,10 +245,9 @@ fn enum_entry_ordinal(
     target: DeclarationId,
 ) -> Option<u32> {
     let mut ordinal = 0u32;
-    for raw in 0..index.declaration_count() {
-        let declaration = DeclarationId::from_raw(u32::try_from(raw).ok()?);
+    for &declaration in index.owned_declarations(owner) {
         let anchor = index.declaration_anchor(declaration)?;
-        if anchor.owner == Some(owner) && anchor.kind == DeclarationKind::EnumEntry {
+        if anchor.kind == DeclarationKind::EnumEntry {
             if declaration == target {
                 return Some(ordinal);
             }

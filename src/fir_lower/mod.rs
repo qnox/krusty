@@ -138,6 +138,31 @@ pub(super) fn resolved_parameter_identity(
     crate::ir::IrParameterIdentity::resolved(identity)
 }
 
+/// Declarations a per-file lowering pass must visit: this source's anchors, in declaration-id
+/// order, plus inline-payload declarations copied in from another source. Scanning the whole
+/// module for each file was quadratic.
+pub(super) fn declarations_for_lowering(
+    index: &ResolvedModuleIndex,
+    source: crate::fir::SourceFileId,
+    inline_payload: &std::collections::HashSet<crate::fir::DeclarationId>,
+) -> Vec<crate::fir::DeclarationId> {
+    let mut ids = index.declarations_in_source(source).to_vec();
+    if inline_payload.is_empty() {
+        return ids;
+    }
+    for &declaration in inline_payload {
+        let Some(anchor) = index.declaration_anchor(declaration) else {
+            continue;
+        };
+        if anchor.source != source {
+            ids.push(declaration);
+        }
+    }
+    ids.sort_by_key(|declaration| declaration.raw());
+    ids.dedup();
+    ids
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LoweringState {
     Uncomputed,

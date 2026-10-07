@@ -1625,6 +1625,10 @@ pub struct ResolvedModuleIndex {
     pub(super) declaration_names: Vec<Box<str>>,
     declaration_name_ids: FxHashMap<Box<str>, DeclarationNameId>,
     declarations_by_name: HashMap<DeclarationNameId, Vec<DeclarationId>>,
+    /// Ownerless declarations keyed by name. Package lookup must not walk every member that
+    /// shares a spelling: `value` or `toString` is declared once per file, and scanning that
+    /// list on every top-level probe is quadratic in the module.
+    top_level_declarations_by_name: HashMap<DeclarationNameId, Vec<DeclarationId>>,
     properties: HashMap<PropertyId, ResolvedPropertyHeader>,
     property_by_declaration: HashMap<DeclarationId, PropertyId>,
     /// Source identities and typed roles parallel to a property's resolved context-parameter
@@ -1923,6 +1927,13 @@ impl ResolvedModuleIndex {
             .get(&source)
             .map(Box::as_ref)
             .unwrap_or_default()
+    }
+
+    /// Every declaration anchored in `source`, in declaration-id order, including headerless
+    /// ancestry nodes the parser stream does not inventory. Per-file lowering reads this instead
+    /// of scanning the module.
+    pub(crate) fn declarations_in_source(&self, source: SourceFileId) -> &[DeclarationId] {
+        self.declarations.in_source(source)
     }
 
     pub fn source_order(&self, declaration: DeclarationId) -> Option<u32> {
@@ -2471,6 +2482,12 @@ impl ResolvedModuleIndex {
                 .entry(name)
                 .or_default()
                 .push(declaration);
+            if header.owner.is_none() {
+                self.top_level_declarations_by_name
+                    .entry(name)
+                    .or_default()
+                    .push(declaration);
+            }
         }
     }
 
@@ -2788,6 +2805,16 @@ impl ResolvedModuleIndex {
         self.declaration_name_ids
             .get(name)
             .and_then(|name| self.declarations_by_name.get(name))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Ownerless declarations with this spelling, in publication order. Member declarations that
+    /// reuse the spelling are absent: a package probe must not visit them.
+    pub(crate) fn top_level_declarations_named(&self, name: &str) -> &[DeclarationId] {
+        self.declaration_name_ids
+            .get(name)
+            .and_then(|name| self.top_level_declarations_by_name.get(name))
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
@@ -3378,6 +3405,14 @@ impl ResolvedModuleIndex {
                     + std::mem::size_of::<Vec<DeclarationId>>())
             + self
                 .declarations_by_name
+                .values()
+                .map(|declarations| declarations.len() * std::mem::size_of::<DeclarationId>())
+                .sum::<usize>()
+            + self.top_level_declarations_by_name.len()
+                * (std::mem::size_of::<DeclarationNameId>()
+                    + std::mem::size_of::<Vec<DeclarationId>>())
+            + self
+                .top_level_declarations_by_name
                 .values()
                 .map(|declarations| declarations.len() * std::mem::size_of::<DeclarationId>())
                 .sum::<usize>()

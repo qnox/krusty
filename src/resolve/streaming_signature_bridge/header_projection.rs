@@ -90,8 +90,7 @@ pub(in crate::resolve) fn streamed_owned_callable_declarations(
     owner: crate::fir::DeclarationId,
 ) -> Vec<crate::fir::DeclarationId> {
     let mut declarations = headers
-        .stubs
-        .iter()
+        .owned_stubs(owner)
         .filter(|stub| {
             stub.kind == crate::fir::DeclarationKind::Function
                 && headers.syntax.declaration(stub.id).is_some()
@@ -387,14 +386,13 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
 ) -> Option<StreamedPropertyHeader> {
     let property_stub = headers.stub(declaration)?;
     let setter_visibility = headers
-        .stubs
-        .iter()
+        .owned_stubs(declaration)
         .find(|stub| {
             stub.kind == crate::fir::DeclarationKind::Accessor
                 && headers
                     .declarations
                     .anchor(stub.id)
-                    .is_some_and(|anchor| anchor.owner == Some(declaration) && anchor.sibling == 1)
+                    .is_some_and(|anchor| anchor.sibling == 1)
         })
         .map_or(property_stub.visibility, |setter| setter.visibility);
     let getter_declared = headers.owned_stubs(declaration).any(|stub| {
@@ -815,14 +813,13 @@ pub(in crate::resolve) fn streamed_constructor_declaration(
     sibling: u32,
 ) -> Option<crate::fir::DeclarationId> {
     headers
-        .stubs
-        .iter()
+        .owned_stubs(owner)
         .find(|stub| {
             stub.kind == crate::fir::DeclarationKind::Constructor
                 && headers
                     .declarations
                     .stable_anchor(stub.id)
-                    .is_some_and(|anchor| anchor.owner == Some(owner) && anchor.sibling == sibling)
+                    .is_some_and(|anchor| anchor.sibling == sibling)
         })
         .map(|stub| stub.id)
 }

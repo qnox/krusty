@@ -787,6 +787,9 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
 #[derive(Default)]
 pub struct JvmState {
     module_packages: std::collections::BTreeMap<String, Vec<String>>,
+    /// One compilation emits many files against one frozen module. The inner-class attribute map
+    /// depends only on that module, so building it again on every file is quadratic.
+    inner_class_resolver: Option<crate::jvm::classfile::InnerClassResolver>,
 }
 
 /// A checked file after every JVM representation pass has selected its physical facts. Keeping the
@@ -873,8 +876,15 @@ impl JvmBackend {
             self.annotations_in_metadata,
         );
         let has_facade_members = metadata.is_some();
-        let inner_class_resolver =
-            checked_module_inner_class_resolver(classifiers.module(), self.cp.clone());
+        let inner_class_resolver = match state.inner_class_resolver.clone() {
+            Some(resolver) => resolver,
+            None => {
+                let resolver =
+                    checked_module_inner_class_resolver(classifiers.module(), self.cp.clone());
+                state.inner_class_resolver = Some(resolver.clone());
+                resolver
+            }
+        };
         self.emit_backend_ready_ir(
             BackendReadyIr {
                 ir,

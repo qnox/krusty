@@ -120,6 +120,9 @@ pub struct DeclarationIds {
     /// (a class's constructors by sibling ordinal) read this instead of scanning the inventory:
     /// a scan is linear in the MODULE, and it is asked once per class, so it was quadratic.
     owned: HashMap<DeclarationId, Vec<DeclarationId>>,
+    /// Declarations anchored in each source, in declaration-id order. A per-file pass that
+    /// scanned the whole module to find its own declarations was quadratic in the module.
+    by_source: HashMap<SourceFileId, Vec<DeclarationId>>,
 }
 
 impl DeclarationIds {
@@ -139,7 +142,16 @@ impl DeclarationIds {
             // Ids are allocated in increasing order, so pushing keeps each list id-ordered.
             self.owned.entry(owner).or_default().push(id);
         }
+        self.by_source.entry(anchor.source).or_default().push(id);
         id
+    }
+
+    /// Every declaration whose anchor names `source`, in declaration-id order.
+    pub fn in_source(&self, source: SourceFileId) -> &[DeclarationId] {
+        self.by_source
+            .get(&source)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     /// Every declaration whose anchor names `owner`, in declaration-id order.
@@ -204,5 +216,38 @@ impl DeclarationIds {
                 .values()
                 .map(|owned| owned.len() * std::mem::size_of::<DeclarationId>())
                 .sum::<usize>()
+            + self.by_source.len()
+                * (std::mem::size_of::<SourceFileId>() + std::mem::size_of::<Vec<DeclarationId>>())
+            + self
+                .by_source
+                .values()
+                .map(|declarations| declarations.len() * std::mem::size_of::<DeclarationId>())
+                .sum::<usize>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn anchor(source: u32, sibling: u32) -> DeclarationAnchor {
+        DeclarationAnchor {
+            source: SourceFileId::from_raw(source),
+            range: Span::new(sibling, sibling + 1),
+            owner: None,
+            kind: DeclarationKind::Classifier,
+            sibling,
+        }
+    }
+
+    #[test]
+    fn declarations_in_a_source_stay_in_id_order_and_exclude_other_sources() {
+        let mut ids = DeclarationIds::default();
+        let first = ids.intern(anchor(0, 0));
+        let other = ids.intern(anchor(1, 0));
+        let second = ids.intern(anchor(0, 1));
+        assert_eq!(ids.in_source(SourceFileId::from_raw(0)), &[first, second]);
+        assert_eq!(ids.in_source(SourceFileId::from_raw(1)), &[other]);
+        assert!(ids.in_source(SourceFileId::from_raw(2)).is_empty());
     }
 }

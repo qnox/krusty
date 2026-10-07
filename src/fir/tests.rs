@@ -2879,6 +2879,37 @@ fn owned_declarations_are_indexed_by_owner() {
     assert_eq!(index.companion_declaration(unrelated), None);
 }
 
+/// A repeated member spelling must not sit on the top-level name index. Package lookup probes
+/// that index on every unresolved name, and walking every same-named member is quadratic.
+#[test]
+fn top_level_name_index_excludes_owned_members() {
+    let header = |kind, owner| ResolvedDeclarationHeader {
+        kind,
+        owner,
+        name: None,
+        visibility: Visibility::Public,
+        flags: DeclarationFlags::default(),
+        initialization_order: None,
+    };
+    let owner = DeclarationId::from_raw(0);
+    let member = DeclarationId::from_raw(1);
+    let top_level = DeclarationId::from_raw(2);
+    let mut index = ResolvedModuleIndex::default();
+    index.publish_declaration_header(
+        member,
+        header(DeclarationKind::Function, Some(owner)),
+        Some("value"),
+    );
+    index.publish_declaration_header(
+        top_level,
+        header(DeclarationKind::Function, None),
+        Some("value"),
+    );
+    assert_eq!(index.declarations_named("value"), &[member, top_level]);
+    assert_eq!(index.top_level_declarations_named("value"), &[top_level]);
+    assert!(index.top_level_declarations_named("missing").is_empty());
+}
+
 /// The sibling lookup (`owned_declaration`) reads the same owner table, so a constructor is found
 /// by `(owner, kind, sibling)` without a scan; a declaration interned late (a checked local
 /// declaration) joins its owner's list.

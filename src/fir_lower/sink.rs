@@ -486,16 +486,12 @@ impl<'a> CommonIrBodySink<'a> {
         // over stable ownership to carry every header belonging to the selected local classifiers.
         loop {
             let mut changed = false;
-            for raw in 0..index.declaration_count() {
-                let declaration = DeclarationId::from_raw(raw as u32);
-                let Some(owner) = index
-                    .declaration_anchor(declaration)
-                    .and_then(|anchor| anchor.owner)
-                else {
-                    continue;
-                };
-                if declarations.contains(&owner) && declarations.insert(declaration) {
-                    changed = true;
+            let owners = declarations.iter().copied().collect::<Vec<_>>();
+            for owner in owners {
+                for &declaration in index.owned_declarations(owner) {
+                    if declarations.insert(declaration) {
+                        changed = true;
+                    }
                 }
             }
             if !changed {
@@ -710,10 +706,9 @@ impl<'a> CommonIrBodySink<'a> {
         }
         let mut newly_declared = std::collections::HashSet::new();
         let mut pending_local_names = Vec::new();
-        for raw in 0..index.declaration_count() {
-            let declaration = DeclarationId::from_raw(
-                u32::try_from(raw).expect("too many stable declarations for a packed id"),
-            );
+        for declaration in
+            super::declarations_for_lowering(index, self.source, &self.inline_payload_declarations)
+        {
             let Some(anchor) = index.declaration_anchor(declaration) else {
                 continue;
             };
@@ -726,10 +721,7 @@ impl<'a> CommonIrBodySink<'a> {
                 anchor.owner,
                 index.declaration_name(declaration),
             );
-            if (anchor.source != self.source
-                && !self.inline_payload_declarations.contains(&declaration))
-                || anchor.kind != DeclarationKind::Classifier
-            {
+            if anchor.kind != DeclarationKind::Classifier {
                 continue;
             }
             if self
@@ -909,16 +901,11 @@ impl<'a> CommonIrBodySink<'a> {
             }
             newly_declared.insert(declaration);
             let mut type_aliases = Vec::new();
-            for alias_raw in 0..index.declaration_count() {
-                let alias = DeclarationId::from_raw(
-                    u32::try_from(alias_raw).expect("too many stable declarations for a packed id"),
-                );
+            for alias in index.owned_declarations(declaration).iter().copied() {
                 let Some(alias_anchor) = index.declaration_anchor(alias) else {
                     continue;
                 };
-                if alias_anchor.owner != Some(declaration)
-                    || alias_anchor.kind != DeclarationKind::TypeAlias
-                {
+                if alias_anchor.kind != DeclarationKind::TypeAlias {
                     continue;
                 }
                 let Some(alias_header) = index.type_alias_header(alias) else {
@@ -969,16 +956,11 @@ impl<'a> CommonIrBodySink<'a> {
                     "a source classifier may publish its type aliases only once"
                 );
             }
-            for entry_raw in 0..index.declaration_count() {
-                let entry = DeclarationId::from_raw(
-                    u32::try_from(entry_raw).expect("too many stable declarations for a packed id"),
-                );
+            for entry in index.owned_declarations(declaration).iter().copied() {
                 let Some(entry_anchor) = index.declaration_anchor(entry) else {
                     continue;
                 };
-                if entry_anchor.owner != Some(declaration)
-                    || entry_anchor.kind != DeclarationKind::EnumEntry
-                {
+                if entry_anchor.kind != DeclarationKind::EnumEntry {
                     continue;
                 }
                 let name = index
@@ -1074,13 +1056,9 @@ impl<'a> CommonIrBodySink<'a> {
                 "a source classifier may publish one target-neutral naming plan"
             );
         }
-        for raw in 0..index.declaration_count() {
-            let declaration = DeclarationId::from_raw(
-                u32::try_from(raw).expect("too many stable declarations for a packed id"),
-            );
-            if !newly_declared.contains(&declaration) {
-                continue;
-            }
+        let mut declared = newly_declared.iter().copied().collect::<Vec<_>>();
+        declared.sort_by_key(|declaration| declaration.raw());
+        for declaration in declared {
             let Some(header) = index.declaration_header(declaration) else {
                 continue;
             };
@@ -1153,13 +1131,9 @@ impl<'a> CommonIrBodySink<'a> {
             class.constructor_prefix_count += 1;
             class.pre_super_param_fields.push((0, 0));
         }
-        for raw in 0..index.declaration_count() {
-            let declaration = DeclarationId::from_raw(
-                u32::try_from(raw).expect("too many stable declarations for a packed id"),
-            );
-            if !newly_declared.contains(&declaration) {
-                continue;
-            }
+        let mut declared = newly_declared.iter().copied().collect::<Vec<_>>();
+        declared.sort_by_key(|declaration| declaration.raw());
+        for declaration in declared {
             let Some(header) = index.declaration_header(declaration) else {
                 continue;
             };
@@ -1199,17 +1173,13 @@ impl<'a> CommonIrBodySink<'a> {
         &mut self,
         index: &ResolvedModuleIndex,
     ) -> Result<(), FirFileLoweringFailure> {
-        for raw in 0..index.declaration_count() {
-            let declaration = DeclarationId::from_raw(
-                u32::try_from(raw).expect("too many stable declarations for a packed id"),
-            );
+        for declaration in
+            super::declarations_for_lowering(index, self.source, &self.inline_payload_declarations)
+        {
             let Some(anchor) = index.declaration_anchor(declaration) else {
                 continue;
             };
-            if (anchor.source != self.source
-                && !self.inline_payload_declarations.contains(&declaration))
-                || anchor.kind != DeclarationKind::Function
-            {
+            if anchor.kind != DeclarationKind::Function {
                 continue;
             }
             let Some(declaration_header) = index.declaration_header(declaration) else {
