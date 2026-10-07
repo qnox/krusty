@@ -3726,16 +3726,17 @@ fn emit_interface_class(
             crate::jvm::parameter_names::function_locals(ir, fid, &physical_params),
         )
         .expect("an access bridge carries exact declaration parameter identities");
-        emit_jd_access_bridge(
+        access_bridges::emit_jd_access_bridge(
             &mut cw,
             c.fq_name,
             c.decl_line,
-            JdAccessBridgeMember {
+            access_bridges::JdAccessBridgeMember {
                 name: &f.name,
                 param_tys: &physical_params,
                 parameter_names: &parameter_names,
                 ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
                 varargs: method_access::varargs_access(ir, fid),
+                suspend: ir.suspend_funs.contains(&fid),
             },
         );
     }
@@ -4687,81 +4688,6 @@ fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
             }
         })
         .collect()
-}
-
-/// The member shape carried through an `access$<name>$jd` bridge. The vararg bit is a recorded
-/// declaration fact, not inferred from an array descriptor.
-pub(super) struct JdAccessBridgeMember<'a> {
-    pub(super) name: &'a str,
-    pub(super) param_tys: &'a [Ty],
-    pub(super) parameter_names: &'a [Option<String>],
-    pub(super) ret: Ty,
-    pub(super) varargs: u16,
-}
-
-/// The `access$<name>$jd` bridge kotlinc puts on an `enable`-mode interface for each of its
-/// non-private default methods: a `public static synthetic` whose body makes the NON-VIRTUAL call
-/// (`invokespecial` on the interface's own method) that the `$DefaultImpls` forward and legacy
-/// `super`-callers need. Its `LineNumberTable` is one entry at the invoke instruction, on the
-/// interface's declaration line — measured, not inferred.
-fn emit_jd_access_bridge(
-    cw: &mut ClassWriter,
-    interface: crate::types::TypeName,
-    decl_line: u32,
-    member: JdAccessBridgeMember<'_>,
-) {
-    let JdAccessBridgeMember {
-        name: member_name,
-        param_tys,
-        parameter_names,
-        ret,
-        varargs,
-    } = member;
-    assert_eq!(
-        parameter_names.len(),
-        param_tys.len(),
-        "an access bridge needs every declaration parameter identity"
-    );
-    let fq = interface.render();
-    let member_desc = method_descriptor(param_tys, ret);
-    let mut with_receiver = vec![Ty::obj_name(interface)];
-    with_receiver.extend_from_slice(param_tys);
-    let bridge_desc = method_descriptor(&with_receiver, ret);
-    let name = format!("access${member_name}$jd");
-    cw.reserve_method_name(&name);
-    cw.reserve_descriptor(&bridge_desc);
-    let argument_words = 1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>();
-    let mut code = CodeBuilder::new(argument_words);
-    code.aload(0);
-    let mut slot = 1u16;
-    for ty in param_tys {
-        load(*ty, slot, &mut code);
-        slot += slot_words(*ty);
-    }
-    if decl_line != 0 {
-        code.mark_line(decl_line);
-    }
-    let target = cw.interface_methodref(&fq, member_name, &member_desc);
-    code.invokespecial(target, argument_words as i32, slot_words(ret) as i32);
-    emit_return(ret, &mut code);
-    code.ensure_locals(argument_words);
-    code.link();
-    // PUBLIC | STATIC | SYNTHETIC, plus the selected member's own ACC_VARARGS when its last
-    // physical parameter is the declared vararg.
-    cw.add_method_sig(0x1009 | varargs, &name, &bridge_desc, &code, None);
-    let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
-    let mut slot = 1u16;
-    for (index, parameter) in param_tys.iter().enumerate() {
-        if let Some(parameter_name) = &parameter_names[index] {
-            locals.push((
-                parameter_name.clone(),
-                local_variable_desc(*parameter),
-                slot,
-            ));
-        }
-        slot += slot_words(*parameter);
-    }
-    cw.set_method_debug(&name, &bridge_desc, None, &locals);
 }
 
 /// Where an `enable`-mode holder forward sends its call.
