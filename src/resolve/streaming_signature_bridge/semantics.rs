@@ -492,6 +492,78 @@ impl ProductionSignatureSemantics<'_> {
         })?
     }
 
+    /// Property type parameters in the order the whole-table scans used to prefer them: a top-level
+    /// source property, then a top-level extension, then a member extension. The first recorded
+    /// declaration wins, including a property with no formals, so a miss still means "not a
+    /// property" and falls through to the header-only parameters.
+    fn property_type_parameters(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> Option<super::DeclarationTypeParameters> {
+        let missing = self
+            .property_type_parameters_by_declaration
+            .borrow()
+            .is_none();
+        if missing {
+            let mut parameters = std::collections::HashMap::new();
+            let record = |parameters: &mut std::collections::HashMap<
+                crate::fir::DeclarationId,
+                super::DeclarationTypeParameters,
+            >,
+                          declaration: crate::fir::DeclarationId,
+                          formals: &[String],
+                          formal_bounds: &[Ty]| {
+                parameters
+                    .entry(declaration)
+                    .or_insert_with(|| super::DeclarationTypeParameters {
+                        formals: formals.to_vec(),
+                        bounds: formal_bounds
+                            .iter()
+                            .copied()
+                            .map(|bound| vec![bound])
+                            .collect(),
+                    });
+            };
+            for property in self.table.source_props.values() {
+                if let Some(declaration) = property.stable_declaration {
+                    record(
+                        &mut parameters,
+                        declaration,
+                        &property.formals,
+                        &property.formal_bounds,
+                    );
+                }
+            }
+            for property in self.table.ext_props.values().flatten() {
+                if let Some(declaration) = property.stable_declaration {
+                    record(
+                        &mut parameters,
+                        declaration,
+                        &property.formals,
+                        &property.formal_bounds,
+                    );
+                }
+            }
+            for class in self.table.classes.values() {
+                for property in class.member_ext_props.values().flatten() {
+                    if let Some(declaration) = property.stable_declaration() {
+                        record(
+                            &mut parameters,
+                            declaration,
+                            property.type_params(),
+                            property.type_param_bounds(),
+                        );
+                    }
+                }
+            }
+            *self.property_type_parameters_by_declaration.borrow_mut() = Some(parameters);
+        }
+        self.property_type_parameters_by_declaration
+            .borrow()
+            .as_ref()
+            .and_then(|parameters| parameters.get(&declaration).cloned())
+    }
+
     pub(super) fn with_signature_type_scope<T>(
         &self,
         scope: crate::fir::SignatureScope,
@@ -572,61 +644,12 @@ impl ProductionSignatureSemantics<'_> {
                 &generic.formals,
                 &generic.formal_bounds,
             );
-        } else if let Some(property) = self
-            .table
-            .source_props
-            .values()
-            .find(|property| property.stable_declaration == Some(scope.owner))
-        {
-            let bounds = property
-                .formal_bounds
-                .iter()
-                .copied()
-                .map(|bound| vec![bound])
-                .collect::<Vec<_>>();
+        } else if let Some(parameters) = self.property_type_parameters(scope.owner) {
             self.declare_semantic_type_parameters(
                 &lexical,
                 scope.owner,
-                &property.formals,
-                &bounds,
-            );
-        } else if let Some(property) = self
-            .table
-            .ext_props
-            .values()
-            .flatten()
-            .find(|property| property.stable_declaration == Some(scope.owner))
-        {
-            let bounds = property
-                .formal_bounds
-                .iter()
-                .copied()
-                .map(|bound| vec![bound])
-                .collect::<Vec<_>>();
-            self.declare_semantic_type_parameters(
-                &lexical,
-                scope.owner,
-                &property.formals,
-                &bounds,
-            );
-        } else if let Some(property) = self
-            .table
-            .classes
-            .values()
-            .flat_map(|class| class.member_ext_props.values().flatten())
-            .find(|property| property.stable_declaration() == Some(scope.owner))
-        {
-            let bounds = property
-                .type_param_bounds()
-                .iter()
-                .copied()
-                .map(|bound| vec![bound])
-                .collect::<Vec<_>>();
-            self.declare_semantic_type_parameters(
-                &lexical,
-                scope.owner,
-                property.type_params(),
-                &bounds,
+                &parameters.formals,
+                &parameters.bounds,
             );
         } else {
             self.declare_header_only_type_parameters(&lexical, scope.owner)?;

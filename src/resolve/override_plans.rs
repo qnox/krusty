@@ -1366,12 +1366,8 @@ fn enum_entry_override_plans(
         let mut properties = Vec::new();
         let mut property_seen = HashSet::new();
         let mut functions = Vec::new();
-        for member_raw in 0..index.declaration_count() {
-            let member = DeclarationId::from_raw(member_raw as u32);
-            let Some(header) = index
-                .declaration_header(member)
-                .filter(|header| header.owner == Some(entry))
-            else {
+        for member in index.owned_declarations(entry).iter().copied() {
+            let Some(header) = index.declaration_header(member) else {
                 continue;
             };
             if !header.flags.has(DeclarationFlags::OVERRIDE) {
@@ -1467,12 +1463,8 @@ pub(crate) fn publish_checked_local_override_plans(
                     let mut properties = Vec::new();
                     let mut property_seen = HashSet::new();
                     let mut functions = Vec::new();
-                    for raw in 0..index.declaration_count() {
-                        let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
-                        let Some(member) = index
-                            .declaration_header(declaration)
-                            .filter(|member| member.owner == Some(classifier))
-                        else {
+                    for declaration in index.owned_declarations(classifier).iter().copied() {
+                        let Some(member) = index.declaration_header(declaration) else {
                             continue;
                         };
                         if !member.flags.has(DeclarationFlags::OVERRIDE) {

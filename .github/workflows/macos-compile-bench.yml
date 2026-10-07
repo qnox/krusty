@@ -1,0 +1,84 @@
+name: macos compile bench
+
+# Wall-clock compile of the kmp-ios-benchmark generated sources on an Apple Silicon
+# runner: krusty, kotlinc 2.4.20, and the image's swiftc. The job runs when this
+# workflow or the timing script changes, and on a manual dispatch.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/macos-compile-bench.yml
+      - scripts/bench-kmp-ios-compile.py
+      - scripts/tests/test_bench_kmp_ios_compile.py
+      - src/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: zulu
+          java-version: "21"
+      # build.rs compiles the freestanding runtime for every target, riscv64 included.
+      # Apple's clang has no RISC-V backend.
+      - name: select LLVM clang for the native runtime
+        run: |
+          set -euo pipefail
+          if ! brew list --versions llvm >/dev/null; then
+            brew install llvm
+          fi
+          clang="$(brew --prefix llvm)/bin/clang"
+          test -x "$clang"
+          "$clang" --print-targets | grep -q riscv64
+          echo "KRUSTY_RUNTIME_CC=$clang" >> "$GITHUB_ENV"
+      - name: build krusty
+        run: cargo build --profile gate -p krusty-cli --bin krusty
+      - name: install kotlinc 2.4.20
+        run: |
+          set -euo pipefail
+          ver=2.4.20
+          dest="$RUNNER_TEMP/kotlinc-$ver"
+          mkdir -p "$dest"
+          curl -fsSL "https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip" -o "$RUNNER_TEMP/kotlinc.zip"
+          python3 -c "import zipfile; zipfile.ZipFile('$RUNNER_TEMP/kotlinc.zip').extractall('$dest')"
+          chmod +x "$dest/kotlinc/bin/"*
+          echo "KOTLINC=$dest/kotlinc/bin/kotlinc" >> "$GITHUB_ENV"
+          echo "KOTLIN_STDLIB=$dest/kotlinc/lib/kotlin-stdlib.jar" >> "$GITHUB_ENV"
+      - name: test benchmark orchestration
+        run: python3 -m unittest scripts/tests/test_bench_kmp_ios_compile.py
+      - name: fetch the benchmark generator
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/kaanbiryol/kmp-ios-benchmark.git "$RUNNER_TEMP/kmp-ios-benchmark"
+          git -C "$RUNNER_TEMP/kmp-ios-benchmark" fetch --depth 1 origin 6587645851aa6c2426787a84d30df55b27102d95
+          git -C "$RUNNER_TEMP/kmp-ios-benchmark" checkout 6587645851aa6c2426787a84d30df55b27102d95
+      - name: time the compilers
+        run: |
+          set -euo pipefail
+          python3 scripts/bench-kmp-ios-compile.py \
+            --generator "$RUNNER_TEMP/kmp-ios-benchmark/bench/generate_code.py" \
+            --krusty "$PWD/target/gate/krusty" \
+            --kotlinc "$KOTLINC" \
+            --stdlib "$KOTLIN_STDLIB" \
+            --swiftc "$(command -v swiftc)" \
+            --work "$RUNNER_TEMP/bench-kmp-ios" \
+            --summary "$RUNNER_TEMP/bench-summary.md" \
+            100 200 400
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: macos-compile-bench
+          path: ${{ runner.temp }}/bench-summary.md
+          if-no-files-found: warn

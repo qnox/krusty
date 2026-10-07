@@ -15,7 +15,7 @@ use super::{
     DeclarationIds, DeclarationKind, LookupNames, ResolvedModuleIndex, SourceFileId,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum ActivePropertyRef {
     TopLevel(DeclId),
     ClassBody {
@@ -33,7 +33,7 @@ enum ActivePropertyRef {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum ActiveDeclarationRef {
     Function(DeclId),
     ClassMethod {
@@ -89,10 +89,15 @@ pub(crate) enum ActiveSourceBindingError {
 /// `File` by API convention and is dropped with it before the next bounded source is parsed.
 #[derive(Clone, Debug)]
 pub(crate) struct ActiveSourceDeclarations {
-    declarations: Vec<Option<ActiveDeclarationRef>>,
+    /// Parser binding of each stable declaration this unit published. Keyed by identity so binding
+    /// a file does not allocate a slot for every declaration in the module.
+    declarations: std::collections::HashMap<DeclarationId, ActiveDeclarationRef>,
     /// Reverse binding for the parser declaration inventory extracted from the one live unit.
     /// These are arena-local IDs and the table is dropped together with that unit.
     parser_declarations: Vec<Option<DeclarationId>>,
+    /// Parser binding to the stable identities that carry it, in declaration-id order. Lookups
+    /// answer from the bindings this unit published, not from a scan of the module.
+    by_binding: std::collections::HashMap<ActiveDeclarationRef, Vec<DeclarationId>>,
 }
 
 fn alias_default_binding(
@@ -114,14 +119,26 @@ fn alias_default_binding(
     let binding = active
         .binding(provider)
         .ok_or(ActiveSourceBindingError::MissingParserDeclaration(provider))?;
-    let slot = active
-        .declarations
-        .get_mut(target.raw() as usize)
-        .ok_or(ActiveSourceBindingError::InventoryShape(target))?;
-    if !replace_target && slot.is_some_and(|existing| existing != binding) {
+    if (target.raw() as usize) >= index.declaration_count() {
         return Err(ActiveSourceBindingError::InventoryShape(target));
     }
-    *slot = Some(binding);
+    if let Some(existing) = active.declarations.get(&target).copied() {
+        if existing == binding {
+            return Ok(());
+        }
+        if !replace_target {
+            return Err(ActiveSourceBindingError::InventoryShape(target));
+        }
+        if let Some(declarations) = active.by_binding.get_mut(&existing) {
+            declarations.retain(|declaration| *declaration != target);
+        }
+    }
+    active.declarations.insert(target, binding);
+    let declarations = active.by_binding.entry(binding).or_default();
+    if !declarations.contains(&target) {
+        declarations.push(target);
+        declarations.sort_by_key(|declaration| declaration.raw());
+    }
     Ok(())
 }
 
@@ -210,17 +227,9 @@ impl ActiveSourceDeclarations {
     /// Stable declarations represented by this one live parser unit. The iterator exposes only
     /// semantic identities; arena bindings remain private and die with the active unit.
     pub(crate) fn stable_declarations(&self) -> impl Iterator<Item = DeclarationId> + '_ {
-        self.declarations
-            .iter()
-            .enumerate()
-            .filter_map(|(raw, binding)| {
-                binding.map(|_| {
-                    DeclarationId::from_raw(
-                        u32::try_from(raw)
-                            .expect("active declaration table exceeds packed identity"),
-                    )
-                })
-            })
+        let mut declarations = self.declarations.keys().copied().collect::<Vec<_>>();
+        declarations.sort_by_key(|declaration| declaration.raw());
+        declarations.into_iter()
     }
 
     /// Bind a whole-file syntax arena retained by a same-parse caller to the complete stable
@@ -600,7 +609,9 @@ impl ActiveSourceDeclarations {
         }
 
         let parser_declarations = parser_to_stable.clone();
-        let mut declarations = vec![None; index.declaration_count()];
+        let mut declarations = std::collections::HashMap::new();
+        let mut by_binding: std::collections::HashMap<ActiveDeclarationRef, Vec<DeclarationId>> =
+            std::collections::HashMap::new();
         for (raw, stable) in parser_to_stable.into_iter().enumerate() {
             let Some(stable) = stable else {
                 continue;
@@ -608,31 +619,37 @@ impl ActiveSourceDeclarations {
             let Some(binding) = parser_bindings.get(raw).and_then(|binding| *binding) else {
                 return Err(ActiveSourceBindingError::MissingParserDeclaration(stable));
             };
-            let stable_slot = declarations
-                .get_mut(stable.raw() as usize)
-                .ok_or_else(|| {
-                    crate::trace_compiler!(
-                        "fir",
-                        "active stable id outside declaration index stable={stable:?} declaration_count={}",
-                        index.declaration_count(),
-                    );
-                    ActiveSourceBindingError::InventoryShape(stable)
-                })?;
-            if stable_slot.is_some_and(|prior| prior != binding) {
+            if (stable.raw() as usize) >= index.declaration_count() {
                 crate::trace_compiler!(
                     "fir",
-                    "active stable declaration has conflicting parser bindings stable={stable:?} parser_raw={raw} parser_anchor={:?} prior={stable_slot:?} next={binding:?}",
-                    parser_ids.anchor(DeclarationId::from_raw(
-                        u32::try_from(raw).expect("parser declaration overflow"),
-                    )),
+                    "active stable id outside declaration index stable={stable:?} declaration_count={}",
+                    index.declaration_count(),
                 );
                 return Err(ActiveSourceBindingError::InventoryShape(stable));
             }
-            *stable_slot = Some(binding);
+            if let Some(prior) = declarations.get(&stable) {
+                if *prior != binding {
+                    crate::trace_compiler!(
+                        "fir",
+                        "active stable declaration has conflicting parser bindings stable={stable:?} parser_raw={raw} parser_anchor={:?} prior={prior:?} next={binding:?}",
+                        parser_ids.anchor(DeclarationId::from_raw(
+                            u32::try_from(raw).expect("parser declaration overflow"),
+                        )),
+                    );
+                    return Err(ActiveSourceBindingError::InventoryShape(stable));
+                }
+                continue;
+            }
+            declarations.insert(stable, binding);
+            by_binding.entry(binding).or_default().push(stable);
+        }
+        for declarations in by_binding.values_mut() {
+            declarations.sort_by_key(|declaration| declaration.raw());
         }
         Ok(Self {
             declarations,
             parser_declarations,
+            by_binding,
         })
     }
 
@@ -708,9 +725,7 @@ impl ActiveSourceDeclarations {
     }
 
     fn binding(&self, declaration: DeclarationId) -> Option<ActiveDeclarationRef> {
-        self.declarations
-            .get(declaration.raw() as usize)
-            .and_then(|binding| *binding)
+        self.declarations.get(&declaration).copied()
     }
 
     pub(crate) fn same_parser_declaration(
@@ -722,18 +737,50 @@ impl ActiveSourceDeclarations {
             .is_some_and(|left| Some(left) == self.binding(right))
     }
 
-    pub(crate) fn classifier_declaration(&self, parser: DeclId) -> Option<DeclarationId> {
-        self.declarations
+    /// The other stable identity that binds the same parser node and carries the repaired local
+    /// classifier header. An early ancestry alias and the published local class share a parser
+    /// binding; callers follow the published one. This does not walk the module.
+    pub(crate) fn same_parser_local_class(
+        &self,
+        candidate: DeclarationId,
+        index: &ResolvedModuleIndex,
+    ) -> Option<DeclarationId> {
+        let binding = self.binding(candidate)?;
+        self.by_binding
+            .get(&binding)?
             .iter()
-            .enumerate()
-            .find_map(|(raw, binding)| {
-                (*binding == Some(ActiveDeclarationRef::Classifier(parser))).then(|| {
-                    DeclarationId::from_raw(
-                        u32::try_from(raw)
-                            .expect("active declaration table exceeds packed identity"),
-                    )
-                })
+            .copied()
+            .find(|other| {
+                *other != candidate
+                    && index
+                        .declaration_header(*other)
+                        .is_some_and(|header| header.flags.has(DeclarationFlags::LOCAL_CLASS))
             })
+    }
+
+    fn first_bound(&self, binding: ActiveDeclarationRef) -> Option<DeclarationId> {
+        self.by_binding
+            .get(&binding)
+            .and_then(|declarations| declarations.first().copied())
+    }
+
+    /// When a parser binding is recorded twice, the published header is the one later phases may
+    /// use. `max_by_key` keeps the last equal key, matching a low-to-high scan of declaration ids.
+    fn canonical_bound(
+        &self,
+        binding: ActiveDeclarationRef,
+        index: &ResolvedModuleIndex,
+    ) -> Option<DeclarationId> {
+        self.by_binding.get(&binding).and_then(|declarations| {
+            declarations
+                .iter()
+                .copied()
+                .max_by_key(|declaration| index.declaration_header(*declaration).is_some())
+        })
+    }
+
+    pub(crate) fn classifier_declaration(&self, parser: DeclId) -> Option<DeclarationId> {
+        self.first_bound(ActiveDeclarationRef::Classifier(parser))
     }
 
     pub(crate) fn canonical_classifier_declaration(
@@ -741,68 +788,27 @@ impl ActiveSourceDeclarations {
         parser: DeclId,
         index: &ResolvedModuleIndex,
     ) -> Option<DeclarationId> {
-        self.declarations
-            .iter()
-            .enumerate()
-            .filter_map(|(raw, binding)| {
-                (*binding == Some(ActiveDeclarationRef::Classifier(parser))).then(|| {
-                    DeclarationId::from_raw(
-                        u32::try_from(raw)
-                            .expect("active declaration table exceeds packed identity"),
-                    )
-                })
-            })
-            .max_by_key(|declaration| index.declaration_header(*declaration).is_some())
+        self.canonical_bound(ActiveDeclarationRef::Classifier(parser), index)
     }
 
     /// Stable identity of one parser declaration in the active file-level declaration stream.
     /// Nested members are reached through their stable owner; this reverse map is only for choosing
     /// the bounded root that the parser handed to the checker.
     pub(crate) fn file_declaration(&self, file: &File, parser: DeclId) -> Option<DeclarationId> {
-        self.declarations
-            .iter()
-            .enumerate()
-            .find_map(|(raw, binding)| {
-                let matches = match (*binding, file.decl(parser)) {
-                    (Some(ActiveDeclarationRef::Function(candidate)), Decl::Fun(_)) => {
-                        candidate == parser
-                    }
-                    (Some(ActiveDeclarationRef::Classifier(candidate)), Decl::Class(_)) => {
-                        candidate == parser
-                    }
-                    (
-                        Some(ActiveDeclarationRef::Property(ActivePropertyRef::TopLevel(
-                            candidate,
-                        ))),
-                        Decl::Property(_),
-                    ) => candidate == parser,
-                    _ => false,
-                };
-                matches.then(|| {
-                    DeclarationId::from_raw(
-                        u32::try_from(raw)
-                            .expect("active declaration table exceeds packed identity"),
-                    )
-                })
-            })
+        let binding = match file.decl(parser) {
+            Decl::Fun(_) => ActiveDeclarationRef::Function(parser),
+            Decl::Class(_) => ActiveDeclarationRef::Classifier(parser),
+            Decl::Property(_) => {
+                ActiveDeclarationRef::Property(ActivePropertyRef::TopLevel(parser))
+            }
+        };
+        self.first_bound(binding)
     }
 
     pub(crate) fn top_level_property_declaration(&self, parser: DeclId) -> Option<DeclarationId> {
-        self.declarations
-            .iter()
-            .enumerate()
-            .find_map(|(raw, binding)| {
-                (*binding
-                    == Some(ActiveDeclarationRef::Property(ActivePropertyRef::TopLevel(
-                        parser,
-                    ))))
-                .then(|| {
-                    DeclarationId::from_raw(
-                        u32::try_from(raw)
-                            .expect("active declaration table exceeds packed identity"),
-                    )
-                })
-            })
+        self.first_bound(ActiveDeclarationRef::Property(ActivePropertyRef::TopLevel(
+            parser,
+        )))
     }
 
     pub(crate) fn constructor_property_declaration(
@@ -810,21 +816,9 @@ impl ActiveSourceDeclarations {
         class: DeclId,
         index: u32,
     ) -> Option<DeclarationId> {
-        self.declarations
-            .iter()
-            .enumerate()
-            .find_map(|(raw, binding)| {
-                (*binding
-                    == Some(ActiveDeclarationRef::Property(
-                        ActivePropertyRef::ConstructorParameter { class, index },
-                    )))
-                .then(|| {
-                    DeclarationId::from_raw(
-                        u32::try_from(raw)
-                            .expect("active declaration table exceeds packed identity"),
-                    )
-                })
-            })
+        self.first_bound(ActiveDeclarationRef::Property(
+            ActivePropertyRef::ConstructorParameter { class, index },
+        ))
     }
 
     pub(crate) fn class_body_property_declaration(
@@ -832,21 +826,9 @@ impl ActiveSourceDeclarations {
         class: DeclId,
         index: u32,
     ) -> Option<DeclarationId> {
-        self.declarations
-            .iter()
-            .enumerate()
-            .find_map(|(raw, binding)| {
-                (*binding
-                    == Some(ActiveDeclarationRef::Property(
-                        ActivePropertyRef::ClassBody { class, index },
-                    )))
-                .then(|| {
-                    DeclarationId::from_raw(
-                        u32::try_from(raw)
-                            .expect("active declaration table exceeds packed identity"),
-                    )
-                })
-            })
+        self.first_bound(ActiveDeclarationRef::Property(
+            ActivePropertyRef::ClassBody { class, index },
+        ))
     }
 
     pub(crate) fn enum_entry_method_declaration(
@@ -855,23 +837,11 @@ impl ActiveSourceDeclarations {
         entry: u32,
         method: u32,
     ) -> Option<DeclarationId> {
-        self.declarations
-            .iter()
-            .enumerate()
-            .find_map(|(raw, binding)| {
-                (*binding
-                    == Some(ActiveDeclarationRef::EnumEntryMethod {
-                        class,
-                        entry,
-                        index: method,
-                    }))
-                .then(|| {
-                    DeclarationId::from_raw(
-                        u32::try_from(raw)
-                            .expect("active declaration table exceeds packed identity"),
-                    )
-                })
-            })
+        self.first_bound(ActiveDeclarationRef::EnumEntryMethod {
+            class,
+            entry,
+            index: method,
+        })
     }
 
     pub(crate) fn source_member_declaration(
@@ -880,56 +850,46 @@ impl ActiveSourceDeclarations {
         index: &ResolvedModuleIndex,
         member: crate::libraries::SourceMember,
     ) -> Option<DeclarationId> {
-        self.declarations
-            .iter()
-            .enumerate()
-            .filter_map(|(raw, binding)| {
-                let binding = (*binding)?;
-                let matches = match (member, binding) {
-                    (
-                        crate::libraries::SourceMember::Class { owner, method, .. },
-                        ActiveDeclarationRef::ClassMethod { class, index },
-                    ) => class.0 == owner && index == method,
-                    (
-                        crate::libraries::SourceMember::EnumEntry {
-                            owner,
-                            entry,
-                            method,
-                            ..
-                        },
-                        ActiveDeclarationRef::EnumEntryMethod {
-                            class,
-                            entry: candidate_entry,
-                            index,
-                        },
-                    ) => class.0 == owner && candidate_entry == entry && index == method,
-                    (
-                        crate::libraries::SourceMember::ClassProperty {
-                            owner, property, ..
-                        },
-                        ActiveDeclarationRef::Property(ActivePropertyRef::ClassBody {
-                            class,
-                            index,
-                        }),
-                    ) => {
-                        let primary = class_decl(file, class).map_or(0, |class| class.props.len());
-                        class.0 == owner && primary + index as usize == property as usize
-                    }
-                    _ => false,
-                };
-                matches.then(|| {
-                    DeclarationId::from_raw(
-                        u32::try_from(raw)
-                            .expect("active declaration table exceeds packed identity"),
-                    )
-                })
-            })
-            // Anonymous/local declarations can retain a parser-ancestry alias alongside the
-            // repaired semantic declaration. Only the latter owns a published header and may
-            // cross into checked FIR. This is the source-member counterpart of
-            // `canonical_classifier_declaration`; both choose by stable semantic publication,
-            // never by a source range or parser ID.
-            .max_by_key(|declaration| index.declaration_header(*declaration).is_some())
+        let binding = match member {
+            crate::libraries::SourceMember::Class { owner, method, .. } => {
+                ActiveDeclarationRef::ClassMethod {
+                    class: DeclId(owner),
+                    index: method,
+                }
+            }
+            crate::libraries::SourceMember::EnumEntry {
+                owner,
+                entry,
+                method,
+                ..
+            } => ActiveDeclarationRef::EnumEntryMethod {
+                class: DeclId(owner),
+                entry,
+                index: method,
+            },
+            crate::libraries::SourceMember::ClassProperty {
+                owner, property, ..
+            } => {
+                // `owner` is a parser id from the file that declared the member. A dependency
+                // member's id is not an index into the active unit; the previous scan only asked
+                // classes that this unit had already bound, so a foreign id returned no overlay
+                // instead of indexing off the end of this arena.
+                let class = DeclId(owner);
+                if file.decl_arena.get(class.0 as usize).is_none() {
+                    return None;
+                }
+                let primary = class_decl(file, class).map_or(0, |class| class.props.len());
+                let index = u32::try_from((property as usize).checked_sub(primary)?)
+                    .expect("a class-body property index fits in a declaration sibling");
+                ActiveDeclarationRef::Property(ActivePropertyRef::ClassBody { class, index })
+            }
+        };
+        // Anonymous/local declarations can retain a parser-ancestry alias alongside the
+        // repaired semantic declaration. Only the latter owns a published header and may
+        // cross into checked FIR. This is the source-member counterpart of
+        // `canonical_classifier_declaration`; both choose by stable semantic publication,
+        // never by a source range or parser ID.
+        self.canonical_bound(binding, index)
     }
 
     pub(crate) fn function<'a>(
@@ -1249,6 +1209,28 @@ fn bind_auxiliary_parser_declarations(
     parser_ids: &DeclarationIds,
     parser_to_stable: &mut [Option<DeclarationId>],
 ) {
+    // Headerless ancestry is matched by owner/kind/sibling. Candidates are this source's
+    // declarations only: scanning the whole module for every unbound parser node, and asking the
+    // binding vector whether each was already taken, was quadratic in the module. A file whose
+    // only executable fragments are parameter defaults paid that cost once per file.
+    let mut by_structure: std::collections::HashMap<
+        (Option<DeclarationId>, DeclarationKind, u32),
+        Vec<DeclarationId>,
+    > = std::collections::HashMap::new();
+    for stable in index.declarations_in_source(source).iter().copied() {
+        if index.declaration_header(stable).is_some() {
+            continue;
+        }
+        let Some(anchor) = index.declaration_anchor(stable) else {
+            continue;
+        };
+        by_structure
+            .entry((anchor.owner, anchor.kind, anchor.sibling))
+            .or_default()
+            .push(stable);
+    }
+    let mut bound: std::collections::HashSet<DeclarationId> =
+        parser_to_stable.iter().flatten().copied().collect();
     loop {
         let mut changed = false;
         // An inventoried child gives an exact structural identity to a parser-only owner. Bind
@@ -1277,6 +1259,7 @@ fn bind_auxiliary_parser_declarations(
             };
             if slot.is_none() {
                 *slot = Some(stable_owner);
+                bound.insert(stable_owner);
                 changed = true;
             }
         }
@@ -1302,42 +1285,27 @@ fn bind_auxiliary_parser_declarations(
                 }
                 None => None,
             };
-            let mut matches = (0..index.declaration_count()).filter_map(|stable_raw| {
-                let stable = DeclarationId::from_raw(
-                    u32::try_from(stable_raw).expect("stable declarations exceed packed identity"),
-                );
-                // A bounded parse renumbers `file.decls`, so a parser-only hoisted classifier can
-                // accidentally have the same owner/kind/sibling tuple as an already-bound nested
-                // classifier from the whole-file Pass-1 stream. Structural fallback is only for
-                // identities absent from that direct stream; never steal one already claimed by a
-                // real parser stub. Exact duplicate ancestry nodes are bound above through their
-                // inventoried child's stable owner.
-                if parser_to_stable
-                    .iter()
-                    .flatten()
-                    .any(|bound| *bound == stable)
-                {
-                    return None;
-                }
-                // This fallback exists only for parser-ancestry nodes that have no semantic
-                // declaration in the stable header stream. A declaration with a published header
-                // belongs either to this bounded unit's direct zip (and is already bound) or to a
-                // different unit. Matching that declaration structurally can otherwise bind a
-                // top-level class from an earlier unit to a hoisted anonymous class in the current
-                // one when both happen to be classifier sibling zero.
-                if index.declaration_header(stable).is_some() {
-                    return None;
-                }
-                index
-                    .declaration_anchor(stable)
-                    .filter(|candidate| {
-                        candidate.source == source
-                            && candidate.owner == owner
-                            && candidate.kind == anchor.kind
-                            && candidate.sibling == anchor.sibling
-                    })
-                    .map(|_| stable)
-            });
+            // A bounded parse renumbers `file.decls`, so a parser-only hoisted classifier can
+            // accidentally have the same owner/kind/sibling tuple as an already-bound nested
+            // classifier from the whole-file Pass-1 stream. Structural fallback is only for
+            // identities absent from that direct stream; never steal one already claimed by a
+            // real parser stub. Exact duplicate ancestry nodes are bound above through their
+            // inventoried child's stable owner.
+            //
+            // This fallback exists only for parser-ancestry nodes that have no semantic
+            // declaration in the stable header stream. A declaration with a published header
+            // belongs either to this bounded unit's direct zip (and is already bound) or to a
+            // different unit. Matching that declaration structurally can otherwise bind a
+            // top-level class from an earlier unit to a hoisted anonymous class in the current
+            // one when both happen to be classifier sibling zero.
+            let candidates = by_structure
+                .get(&(owner, anchor.kind, anchor.sibling))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let mut matches = candidates
+                .iter()
+                .copied()
+                .filter(|stable| !bound.contains(stable));
             let Some(stable) = matches.next() else {
                 continue;
             };
@@ -1345,6 +1313,7 @@ fn bind_auxiliary_parser_declarations(
                 continue;
             }
             parser_to_stable[raw] = Some(stable);
+            bound.insert(stable);
             changed = true;
         }
         if !changed {
