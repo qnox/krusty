@@ -169,10 +169,12 @@ impl Emitter<'_> {
     ) -> bool {
         mode == Some(crate::ir::EqualityMode::Primitive)
             && [lhs, rhs].into_iter().any(|operand| {
-                self.ir
-                    .jvm_erased_primitive_wrapper_values
-                    .contains(&operand)
-                    && self.erased_scalar_result(operand).is_some()
+                self.erased_scalar_result(operand)
+                    .is_some_and(|(source, _)| {
+                        self.ir
+                            .jvm_erased_primitive_wrapper_values
+                            .contains(&source)
+                    })
             })
     }
 

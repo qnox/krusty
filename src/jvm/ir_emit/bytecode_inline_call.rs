@@ -828,7 +828,9 @@ impl Emitter<'_> {
         // the call line can anchor the body's source-map interval, but it must not claim the
         // generated prefix before that first source argument. Withdrawing it leaves the enclosing
         // inline line in effect until emitting the in-place operand marks the call-site line.
-        if supplies.contains(&Supply::InPlace) {
+        if supplies.contains(&Supply::InPlace)
+            && !inliner::in_place_arguments_begin_at_entry(callee)
+        {
             code.withdraw_line();
         }
         let claimable = self.claimable_lines();

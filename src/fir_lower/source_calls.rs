@@ -1816,8 +1816,17 @@ impl BodyLowering<'_> {
             // the source call's line at dispatch, after the load. A non-captured implicit context
             // argument remains owned by the call from its first generated operand.
             let captured_context = first.is_some_and(|operand| {
-                let IrExpr::GetValue(value) = self.ir.expr(operand) else {
-                    return false;
+                let mut value = operand;
+                let value = loop {
+                    match self.ir.expr(value) {
+                        IrExpr::GetValue(value) => break *value,
+                        IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg,
+                            ..
+                        } => value = *arg,
+                        _ => return false,
+                    }
                 };
                 // Anonymous-object and local-class members own their capture directly. Their
                 // checked body retains the exact receiver provenance and the lifted parameter
@@ -1826,7 +1835,7 @@ impl BodyLowering<'_> {
                     .implicit_receiver_capture_slots
                     .iter()
                     .any(|(capture, slot)| {
-                        *slot == *value
+                        *slot == value
                             && matches!(
                                 &capture.receiver,
                                 crate::fir::FirCapturedReceiver::Context { .. }
@@ -1841,7 +1850,7 @@ impl BodyLowering<'_> {
                 else {
                     return false;
                 };
-                let Some(identity) = parameters.identities.get(*value as usize) else {
+                let Some(identity) = parameters.identities.get(value as usize) else {
                     return false;
                 };
                 let crate::ir::IrParameterRole::CapturedReceiver { ordinal } = identity.role else {
