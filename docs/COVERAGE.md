@@ -83,7 +83,9 @@ coverage: phase build-compiler-tests 645s
 The closing `coverage: phases` block repeats those durations and a `total` wall-clock line. `total`
 is time since the first phase, so overlapping phases are not added together. The compiler test
 build and the language-server test build are separate phases, and cargo's compile progress stays on
-stderr, so a long build is a named phase instead of a gap in the log.
+stderr, so a long build is a named phase instead of a gap in the log. The CLI and the language
+server are one phase, `build-bins`: one cargo invocation compiles krusty once and links both
+binaries. Nightly rustc is also asked to run one frontend job per core (`-Z threads`).
 
 ## Performance
 
