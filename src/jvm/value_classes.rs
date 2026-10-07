@@ -2315,7 +2315,7 @@ pub(crate) fn lower_value_classes(
                         .map(|underlying| erase(underlying, &under))
                         .unwrap_or(Ty::Error),
                 );
-                Some(prop_access(
+                let access = prop_access(
                     ir,
                     receiver,
                     owner,
@@ -2328,7 +2328,22 @@ pub(crate) fn lower_value_classes(
                         field_getters: &field_getters,
                         carrier_unboxes: &carrier_unboxes,
                     },
-                ))
+                );
+                // A generic underlying property specialized to an ordinary JVM primitive keeps
+                // that primitive's wrapper in its erased Object carrier. Record this exact read;
+                // the emitter cannot distinguish it from an ordinary generic CALL result by slot
+                // type alone. Unsigned and user value classes deliberately do not have a
+                // `jvm_boxed_ref`: their boxes must first be unboxed to their semantic carrier.
+                if property_has_erased_generic_slot(owner, &under)
+                    && result
+                        .non_null()
+                        .canonical_semantic()
+                        .jvm_boxed_ref()
+                        .is_some()
+                {
+                    ir.jvm_erased_primitive_wrapper_values.insert(id);
+                }
+                Some(access)
             }
             Some(Rw::ImplCall {
                 receiver,

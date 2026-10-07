@@ -156,20 +156,24 @@ impl Emitter<'_> {
             .then_some((*arg, slot))
     }
 
-    /// Whether checked primitive equality consumes a value that is still the wrapper stored in an
-    /// erased generic slot. The frontend's equality mode remains authoritative about Kotlin
-    /// semantics; this is only the JVM representation choice for those already-selected operands.
-    /// kotlinc compares the existing wrapper with a boxed peer through `Intrinsics.areEqual` rather
-    /// than unboxing and comparing two scalars.
-    pub(super) fn primitive_equality_has_erased_operand(
+    /// Whether checked primitive equality consumes an ordinary JVM wrapper retained by an exact
+    /// value-class underlying-property read. The frontend's equality mode remains authoritative;
+    /// this is only the JVM representation choice for those already-selected operands. An
+    /// ordinary generic call result and an unsigned/value-class box must be unboxed instead, even
+    /// though all three producers have an erased `Object` descriptor.
+    pub(super) fn primitive_equality_uses_erased_wrapper(
         &self,
         mode: Option<crate::ir::EqualityMode>,
         lhs: crate::ir::ExprId,
         rhs: crate::ir::ExprId,
     ) -> bool {
         mode == Some(crate::ir::EqualityMode::Primitive)
-            && (self.erased_scalar_result(lhs).is_some()
-                || self.erased_scalar_result(rhs).is_some())
+            && [lhs, rhs].into_iter().any(|operand| {
+                self.ir
+                    .jvm_erased_primitive_wrapper_values
+                    .contains(&operand)
+                    && self.erased_scalar_result(operand).is_some()
+            })
     }
 
     /// Whether `ty` names a `@JvmInline value class`, whose values use a backend-owned carrier.

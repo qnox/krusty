@@ -129,3 +129,20 @@ fun box(): String {\n\
 }\n";
     common::expect_box_same_as_kotlinc(src, "UnsignedCapturedCarrier");
 }
+
+#[test]
+fn an_unsigned_generic_call_result_is_unboxed_before_primitive_equality() {
+    let src = "fun <T> id(value: T): T = value\n\
+               fun box(): String = if (id(1u) == 1u) \"OK\" else \"wrong\"\n";
+    match common::class_bytes_diff_against_kotlinc(
+        "UnsignedGenericEquality",
+        &[],
+        src,
+        "UnsignedGenericEqualityKt",
+        "public static final java.lang.String box()",
+    ) {
+        Some(Ok(())) => {}
+        Some(Err(diff)) => panic!("{diff}"),
+        None => panic!("reference toolchain unavailable"),
+    }
+}
