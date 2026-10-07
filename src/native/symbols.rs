@@ -9,6 +9,21 @@ use std::collections::HashSet;
 use crate::ir::IrFile;
 
 /// A symbol-safe spelling of a Kotlin name: every non-alphanumeric character becomes `_`.
+/// Symbol both files of a module use for one top-level function.
+///
+/// The id is the checked callable identity, so the file that defines the function and the file
+/// that calls it name the same symbol without seeing each other's lowering. A suffix would break
+/// that: the caller has no way to know a collision the defining file resolved locally.
+pub(super) fn module_function_symbol(callable: crate::fir::CallableId) -> String {
+    format!("kt_mod_{}", callable.raw())
+}
+
+/// Symbol of a file's once-only top-level initializer. Both the file and any caller in the module
+/// derive it from the source-file identity, the same way [`module_function_symbol`] is derived.
+pub(super) fn file_init_symbol(source: crate::fir::SourceFileId) -> String {
+    format!("kt_fileinit_{}", source.raw())
+}
+
 pub(super) fn c_identifier(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for character in name.chars() {
@@ -51,6 +66,22 @@ pub(super) fn symbols(ir: &IrFile, reserved: HashSet<String>) -> Symbols {
     // `fun cast(value: Any)` would otherwise be named `kt_cast`, which the runtime already defines,
     // and the link fails with a duplicate symbol that says nothing about the Kotlin name behind it.
     let mut taken: HashSet<String> = reserved;
+    // Reserved before `unique` is built: that closure borrows `taken`, so these inserts cannot
+    // follow it. Top-level functions another file can name use the callable id. Methods keep the
+    // class symbol the per-file namer assigns; a cross-file member call is virtual.
+    let mut functions = vec![String::new(); ir.functions.len()];
+    for (callable, function) in &ir.checked_callable_functions {
+        let index = *function as usize;
+        let Some(declared) = ir.functions.get(index) else {
+            continue;
+        };
+        if declared.dispatch_receiver.is_some() {
+            continue;
+        }
+        let symbol = module_function_symbol(*callable);
+        taken.insert(symbol.clone());
+        functions[index] = symbol;
+    }
     let mut unique = |base: String, family: &dyn Fn(&str) -> Vec<String>| -> String {
         let mut candidate = base.clone();
         let mut ordinal = 0;
@@ -81,10 +112,13 @@ pub(super) fn symbols(ir: &IrFile, reserved: HashSet<String>) -> Symbols {
         .as_deref()
         .map(c_identifier)
         .filter(|package| !package.is_empty());
-    let mut functions = vec![String::new(); ir.functions.len()];
-    // Methods are named by their class, then everything else by the package.
+    // Methods are named by their class, then everything else by the package. A slot filled above
+    // is a cross-file symbol and stays.
     for (class, base) in ir.classes.iter().zip(&classes) {
         for &fid in &class.methods {
+            if !functions[fid as usize].is_empty() {
+                continue;
+            }
             let function = &ir.functions[fid as usize];
             let method = format!("kt_{base}_{}", c_identifier(&function.name));
             functions[fid as usize] = unique(method, &|name| vec![name.to_string()]);
