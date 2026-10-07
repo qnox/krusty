@@ -1224,11 +1224,7 @@ impl Accessor<'_> {
         let ir = self.ir;
         let target = &ir.functions[function as usize];
         let suspend = ir.suspend_funs.contains(&function);
-        let line = if suspend {
-            ir.fn_decl_lines.get(&function).copied().unwrap_or(0)
-        } else {
-            self.declaration_line
-        };
+        let line = self.declaration_line;
         let parameters = jvm_function_params(ir, function);
         let result = jvm_declared_ty(&target.ret);
         let descriptor = method_descriptor(&parameters, result);
@@ -1258,7 +1254,8 @@ impl Accessor<'_> {
             slot += slot_words(ty);
         }
         // An ordinary accessor maps the forwarding call after its operands are loaded. Coroutine
-        // lowering maps a suspend accessor's whole generated body to the target declaration.
+        // lowering maps a suspend accessor's whole generated body to its generated owner's
+        // declaration line (the file facade for a lifted local), not the target's source line.
         if !suspend && line != 0 {
             code.mark_line(line);
         }
