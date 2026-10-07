@@ -8,6 +8,10 @@ use super::*;
 enum OperandUse {
     /// The adapter coerces to the consumer's slot, so an erased generic result stays erased.
     Materialized,
+    /// A reference comparison consumes an erased scalar result as the box already occupying its
+    /// generic `Object` slot. Other values materialize normally and scalars are boxed by the
+    /// comparison's adapter.
+    ReferenceComparison,
     /// No adapter: each operand arrives at its own checked type.
     AsEmitted,
 }
@@ -111,6 +115,22 @@ impl Emitter<'_> {
         self.sequence_operands(default_plan, ops, code, OperandUse::Materialized, adapt);
     }
 
+    /// Push operands into reference-comparison slots, preserving a box already returned through an
+    /// erased generic boundary instead of unboxing and allocating an equivalent replacement box.
+    pub(super) fn emit_reference_comparison_operands(
+        &mut self,
+        ops: &[u32],
+        code: &mut CodeBuilder,
+    ) {
+        self.sequence_operands(
+            None,
+            ops,
+            code,
+            OperandUse::ReferenceComparison,
+            Self::box_scalar_operand,
+        );
+    }
+
     fn sequence_operands<F>(
         &mut self,
         default_plan: Option<(
@@ -167,6 +187,13 @@ impl Emitter<'_> {
     ) -> Ty {
         match operand_use {
             OperandUse::Materialized => self.emit_consumed_operand(o, code),
+            OperandUse::ReferenceComparison => match self.erased_scalar_result(o) {
+                Some((source, slot)) => {
+                    self.emit_value(source, code);
+                    slot
+                }
+                None => self.emit_consumed_operand(o, code),
+            },
             OperandUse::AsEmitted => {
                 self.emit_value(o, code);
                 self.value_ty(o)
@@ -188,7 +215,7 @@ impl Emitter<'_> {
     /// swapped past it. The shared adapted-operand path owns evaluation order, frame-aware spilling,
     /// and temporary cleanup; identity supplies only the primitive-to-reference adapter.
     pub(super) fn emit_identity_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
+        self.emit_reference_comparison_operands(&[lhs, rhs], code);
     }
 
     /// Preserve a completed left operand across a branchy right operand. This is safe when

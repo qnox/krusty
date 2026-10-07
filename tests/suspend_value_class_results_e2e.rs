@@ -13,7 +13,7 @@ fn expect_method_matches(src: &str, class: &str, method: &str) {
 }
 
 fn expect_method_matches_over(lib: &[(&str, &str)], src: &str, class: &str, method: &str) {
-    match common::method_code_diff_against_kotlinc(
+    match common::class_bytes_diff_against_kotlinc(
         "SuspendValueClassResults",
         lib,
         src,

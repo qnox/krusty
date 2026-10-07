@@ -1086,6 +1086,7 @@ impl BodyLowering<'_> {
                             crate::ir::IrLambdaForm::AnonymousFunction
                         }
                     },
+                    explicit_suspend: source_lambda.explicit_suspend(),
                     class_provenance: None,
                 },
             );

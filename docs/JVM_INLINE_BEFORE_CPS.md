@@ -802,8 +802,8 @@ So §7a is six gaps, all reachable without a coroutine:
 | a2 | the spliced-away lambda parameter's slot stays reserved | shifts every host local one slot up | **fixed** |
 | a3 | the spliced lambda body has no `$i$a$` inline-depth marker | a missing `iconst_0; istore` and a slot | **fixed** |
 | a4 | no `LocalVariableTable` entries for the inlined frame | the whole table, including the `$iv` names read from the dependency's own table | **fixed** |
-| a5 | no `SourceDebugExtension` | the entire SMAP attribute | open |
-| a6 | no `LineNumberTable` entries for the inlined body | the reference compiler records the *library's* lines inside the caller, which is what a5 then resolves | open |
+| a5 | no `SourceDebugExtension` | the entire SMAP attribute | **fixed** |
+| a6 | no `LineNumberTable` entries for the inlined body | the reference compiler records the *library's* lines inside the caller, which is what a5 then resolves | **fixed** |
 | b | the lambda's erased `invoke` adapter survives the splice | `valueOf` / `checkcast` / `intValue` the reference compiler does not emit | **fixed** (adjacent pairs) |
 
 **Result of the four code-level fixes.** For the shape this note is built around — a classpath
@@ -824,8 +824,8 @@ compiler's exact instruction sequence, over the same slots:
   42: iload_3 ; ireturn
 ```
 
-`classpath_inline_splice_parity_e2e` pins it, comparing one method's disassembly against the
-reference compiler's with pool indices normalized away.
+`classpath_inline_splice_parity_e2e` pins it by requiring the entire class file to be byte-identical
+to the reference compiler's output, including the constant pool and debug attributes.
 
 The `LocalVariableTable` matches too, entry for entry — same starts, lengths, slots and names:
 

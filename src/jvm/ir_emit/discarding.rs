@@ -133,9 +133,26 @@ impl Emitter<'_> {
         if self.emit_discarded_boxed_call(expression, node, code) {
             return;
         }
+        // `FunctionN.invoke` physically returns `Object`. Narrowing that result to the function's
+        // declared type exists only for a consumer; a statement-position invocation discards the
+        // erased slot directly, as a discarded generic call does above. Suspension points keep
+        // their existing materialization path because the coroutine machine owns their join type.
+        let discarded_erased_invocation = matches!(
+            node,
+            IrExpr::InvokeFunction { ret, .. }
+                if !matches!(ret, crate::types::Ty::Unit | crate::types::Ty::Nothing)
+                    && !self.machine_suspensions.contains_key(&expression)
+                    && self.transformed_result(expression).is_none()
+        );
+        if discarded_erased_invocation {
+            self.erased_invocations.insert(expression);
+        }
         let suspension = self.machine_before(expression, code);
         self.open_transformed_suspension(expression, code);
         self.emit_value_node(expression, node, code);
+        // `emit_value_node` normally consumes this marker at the invocation. Remove it defensively
+        // for aliases whose emission bypasses the ordinary `InvokeFunction` result path.
+        self.erased_invocations.remove(&expression);
         // A statement still suspends. The probe reads the result before it is popped, the same
         // way a used result is probed before its consumer.
         self.probe_intrinsic_suspension(expression, code);
@@ -156,6 +173,13 @@ impl Emitter<'_> {
         if self.diverges(expression) {
             return;
         }
-        discard(self.value_ty(expression), code);
+        discard(
+            if discarded_erased_invocation {
+                crate::types::Ty::obj("java/lang/Object")
+            } else {
+                self.value_ty(expression)
+            },
+            code,
+        );
     }
 }

@@ -67,6 +67,8 @@ pub enum IrGeneratedParameterRole {
         ordinal: u32,
     },
     Continuation,
+    /// The resume value passed to a generated continuation class's `invokeSuspend`.
+    ContinuationResult,
     /// The dispatch receiver stored by a generated continuation class.
     ContinuationDispatchReceiver,
     HolderReceiver,

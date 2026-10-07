@@ -29,7 +29,7 @@ fn members(class: &str, create: bool) -> Vec<String> {
 /// Compare each of `methods` of `class` with kotlinc's.
 fn expect_methods_match(name: &str, src: &str, class: &str, methods: &[String]) {
     for method in methods {
-        match common::method_code_diff_against_kotlinc(name, &[], src, class, method) {
+        match common::class_bytes_diff_against_kotlinc(name, &[], src, class, method) {
             None => panic!("reference kotlinc is provisioned"),
             Some(Ok(())) => {}
             Some(Err(difference)) => panic!("{difference}"),

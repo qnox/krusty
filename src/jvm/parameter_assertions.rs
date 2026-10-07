@@ -194,7 +194,7 @@ fn realize_secondary_constructors(ir: &mut IrFile) {
         })
         .collect::<Vec<_>>();
     for (class, generated) in ir.classes.iter_mut().zip(generated) {
-        if !class.is_source_declared || class.is_sealed || class.is_enum || class.is_value {
+        if !class.is_source_declared || class.is_sealed || class.is_enum {
             continue;
         }
         for (constructor, generated) in class.secondary_ctors.iter_mut().zip(generated) {

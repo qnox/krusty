@@ -825,6 +825,60 @@ fn read_class_attributes(r: &mut Reader, cp: &[C]) -> Option<ClassAttributes> {
     })
 }
 
+/// The class's `SourceDebugExtension` attribute body, or `None` when the class declares none.
+///
+/// The body is the source map itself (JVMS 4.7.11). A method attribute of the same name is not
+/// this value.
+pub fn source_debug_extension(bytes: &[u8]) -> Result<Option<String>, ReadError> {
+    let mut reader = Reader { b: bytes, i: 0 };
+    if reader.u4()? != 0xCAFEBABE {
+        return Err(ReadError::NotAClass);
+    }
+    reader.u2()?;
+    reader.u2()?;
+    let pool = parse_constant_pool(&mut reader)?;
+    reader.u2()?;
+    reader.u2()?;
+    reader.u2()?;
+    let interfaces = reader.u2()?;
+    for _ in 0..interfaces {
+        reader.u2()?;
+    }
+    skip_member_table(&mut reader)?;
+    skip_member_table(&mut reader)?;
+    let attributes = reader.u2()?;
+    for _ in 0..attributes {
+        let name_index = reader.u2()?;
+        let length = reader.u4()? as usize;
+        let body = reader.take(length)?;
+        let name = match pool.get(name_index as usize) {
+            Some(C::Utf8(name)) => name.as_str(),
+            _ => "",
+        };
+        if name == "SourceDebugExtension" {
+            let text = std::str::from_utf8(body).map_err(|_| ReadError::NotAClass)?;
+            return Ok(Some(text.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn skip_member_table(reader: &mut Reader<'_>) -> Result<(), ReadError> {
+    let members = reader.u2()?;
+    for _ in 0..members {
+        reader.u2()?;
+        reader.u2()?;
+        reader.u2()?;
+        let attributes = reader.u2()?;
+        for _ in 0..attributes {
+            reader.u2()?;
+            let length = reader.u4()? as usize;
+            reader.take(length)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     let mut r = Reader { b: bytes, i: 0 };
     if r.u4()? != 0xCAFEBABE {
@@ -1905,5 +1959,85 @@ mod tests {
                 facts: Default::default(),
             }]
         );
+    }
+
+    fn push_u2(bytes: &mut Vec<u8>, value: u16) {
+        bytes.extend(value.to_be_bytes());
+    }
+
+    fn push_u4(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend(value.to_be_bytes());
+    }
+
+    fn push_utf8(bytes: &mut Vec<u8>, text: &str) {
+        bytes.push(1);
+        push_u2(bytes, text.len() as u16);
+        bytes.extend(text.as_bytes());
+    }
+
+    /// Constant-pool count, then `Foo`, its class, `java/lang/Object`, its class, `m`, `()V`,
+    /// and `SourceDebugExtension`.
+    fn class_with_source_map(method_map: Option<&str>, class_map: Option<&str>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        push_u4(&mut bytes, 0xCAFEBABE);
+        push_u2(&mut bytes, 0);
+        push_u2(&mut bytes, 55);
+        push_u2(&mut bytes, 8);
+        push_utf8(&mut bytes, "Foo");
+        bytes.push(7);
+        push_u2(&mut bytes, 1);
+        push_utf8(&mut bytes, "java/lang/Object");
+        bytes.push(7);
+        push_u2(&mut bytes, 3);
+        push_utf8(&mut bytes, "m");
+        push_utf8(&mut bytes, "()V");
+        push_utf8(&mut bytes, "SourceDebugExtension");
+        push_u2(&mut bytes, 0x0001);
+        push_u2(&mut bytes, 2);
+        push_u2(&mut bytes, 4);
+        push_u2(&mut bytes, 0);
+        push_u2(&mut bytes, 0);
+        push_u2(&mut bytes, 1);
+        push_u2(&mut bytes, 0x0009);
+        push_u2(&mut bytes, 5);
+        push_u2(&mut bytes, 6);
+        match method_map {
+            Some(text) => {
+                push_u2(&mut bytes, 1);
+                push_u2(&mut bytes, 7);
+                push_u4(&mut bytes, text.len() as u32);
+                bytes.extend(text.as_bytes());
+            }
+            None => push_u2(&mut bytes, 0),
+        }
+        match class_map {
+            Some(text) => {
+                push_u2(&mut bytes, 1);
+                push_u2(&mut bytes, 7);
+                push_u4(&mut bytes, text.len() as u32);
+                bytes.extend(text.as_bytes());
+            }
+            None => push_u2(&mut bytes, 0),
+        }
+        bytes
+    }
+
+    #[test]
+    fn source_debug_extension_is_the_class_attribute() {
+        let class_map = "SMAP\nFoo.kt\n*E\n";
+        let bytes = class_with_source_map(Some("METHOD\n"), Some(class_map));
+        assert_eq!(
+            super::source_debug_extension(&bytes).expect("readable class"),
+            Some(class_map.to_string())
+        );
+        let without = class_with_source_map(Some("METHOD\n"), None);
+        assert_eq!(
+            super::source_debug_extension(&without).expect("readable class"),
+            None
+        );
+        assert!(matches!(
+            super::source_debug_extension(b"not a class"),
+            Err(super::ReadError::NotAClass)
+        ));
     }
 }

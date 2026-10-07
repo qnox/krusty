@@ -144,6 +144,10 @@ pub struct IrLambdaOrigin {
     pub label: Option<String>,
     /// Which source form the implementation was written in.
     pub form: IrLambdaForm,
+    /// Whether the source expression carried the `suspend` modifier. This is distinct from the
+    /// inferred function type: Kotlin metadata marks an explicit `suspend { ... }` function and
+    /// leaves a lambda merely coerced to a suspend function type unmarked.
+    pub explicit_suspend: bool,
     /// The naming walk's position for the class the lambda would compile to. A lambda spliced into
     /// an inline call writes no class, but a target spells its inline-depth marker from this
     /// provenance. The realized spelling stays in that target's own state.

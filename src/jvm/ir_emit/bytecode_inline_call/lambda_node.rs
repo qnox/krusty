@@ -524,6 +524,9 @@ impl Emitter<'_> {
         argument: u32,
         callee: &str,
     ) -> Result<LambdaArgument, &'static str> {
+        let reference_line = matches!(self.ir.expr(argument), IrExpr::CallableReference(_))
+            .then(|| self.ir.expr_source_lines.get(&argument).copied())
+            .flatten();
         let (lambda, _) = self.literal_lambda(argument)?;
         let value_class_parameters = lambda
             .parameter_coercions
@@ -561,6 +564,9 @@ impl Emitter<'_> {
         let mut scratch = CodeBuilder::new(args_size);
         scratch.push_int(0, self.cw);
         store(Ty::Int, args_size, &mut scratch);
+        if let Some(line) = reference_line {
+            self.mark_expression_line(argument, line, &mut scratch);
+        }
         let marker_start = u16::try_from(scratch.bytes.len())
             .map_err(|_| "an inline lambda's code is too long")?;
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);

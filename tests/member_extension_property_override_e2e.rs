@@ -9,10 +9,10 @@
 
 use super::common;
 
-/// The bridge's instructions match kotlinc's, over an interface kotlinc compiled. Whole-class
-/// identity is not asserted: it also covers the accessors' own debug tables and metadata flags.
+/// The complete implementation class matches kotlinc byte for byte over an interface kotlinc
+/// compiled. `method` only labels a failure; debug tables, metadata, and pool order are included.
 fn assert_same_method(name: &str, lib: &str, src: &str, class: &str, method: &str) {
-    match common::method_code_diff_against_kotlinc(name, &[("Lib.kt", lib)], src, class, method) {
+    match common::class_bytes_diff_against_kotlinc(name, &[("Lib.kt", lib)], src, class, method) {
         Some(Ok(())) => {}
         Some(Err(diff)) => panic!("{diff}"),
         None => panic!("{name}: reference toolchain unavailable"),

@@ -85,6 +85,7 @@ impl BodyFirChecker<'_> {
         };
         body.mark_source_lambda(crate::fir::FirSourceLambda::new(
             form,
+            self.file.suspend_lambdas.contains(&expression.0),
             self.lambda_binding_name.clone(),
             label,
         ));

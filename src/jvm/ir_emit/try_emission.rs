@@ -451,7 +451,7 @@ impl Emitter<'_> {
             let tslot = parked.slot();
             // The handler's entry belongs to the finalizer copy it introduces, not to the `finally`
             // keyword — mark it before the store so both copies open on the same line.
-            debug_lines::mark_block_entry(self.ir, f, code);
+            self.mark_finalizer_handler_entry(expression, f, code);
             store(thr_ty, tslot, code);
             // kotlinc protects the handler's own entry — everything ahead of the copy of the
             // finalizer it introduces — with a range of its own.
@@ -558,6 +558,7 @@ impl Emitter<'_> {
         };
         let target = if brk { end } else { cont };
         self.mark_expression_start(transfer, code);
+        let transfer_line = code.current_line();
         code.nop();
         // Every break to an inline-return frame leaves that result on the stack. A path that
         // skips `finally` and a path that never entered it (`setup() ?: return false` beside
@@ -584,6 +585,11 @@ impl Emitter<'_> {
                         }
                     }
                 }
+            }
+            // A transfer's finalizer copies run under their own source lines. Restore the checked
+            // transfer identity at the physical jump, as return emission restores it at `xreturn`.
+            if let Some(line) = transfer_line {
+                code.mark_line(u32::from(line));
             }
             code.goto(target);
         }

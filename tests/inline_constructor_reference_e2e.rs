@@ -30,7 +30,7 @@ fun mapped(values: List<String>): List<Holder> = values.map(::makeHolder)\n\
 ";
 
 fn method_matches(method: &str) {
-    let difference = common::method_code_diff_against_kotlinc(
+    let difference = common::class_bytes_diff_against_kotlinc(
         "InlineCtorRef",
         &[],
         SRC,

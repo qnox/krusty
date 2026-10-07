@@ -268,6 +268,10 @@ mod tests {
             drop(order);
             std::thread::yield_now();
         }
+        // The bounded event channel can still hold the final location result. Once the order is
+        // proven, no event is observed again; close the receiver so a concurrent final send cannot
+        // keep the engine blocked while `join` waits for it to notice command disconnection.
+        drop(incoming);
         engine.join();
     }
 

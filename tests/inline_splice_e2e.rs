@@ -45,12 +45,10 @@ fn user_inline_functions_are_spliced_not_called() {
         .1;
     for callee in ["triple", "atLeast", "applyIt"] {
         // A CALL, not the name: a spliced body still carries `$i$f$<callee>` in its debug table.
-        if let Some(called) = common::class_calls_method(main_class, "MainKt", callee) {
-            assert!(
-                !called,
-                "MainKt still calls `{callee}` — the inline fn was called, not spliced"
-            );
-        }
+        assert!(
+            !common::class_calls_method(main_class, callee),
+            "MainKt still calls `{callee}` — the inline fn was called, not spliced"
+        );
     }
 
     // 4. The spliced bytecode verifies and computes the right result (persistent box JVM). The inline
@@ -105,12 +103,10 @@ fn typed_bodies_are_spliced() {
         .expect("no MainTypedKt")
         .1;
     for callee in ["dscale", "lsum", "fbump", "widen"] {
-        if let Some(called) = common::class_calls_method(main_class, "MainTypedKt", callee) {
-            assert!(
-                !called,
-                "MainTypedKt still calls `{callee}` — spliced, not called"
-            );
-        }
+        assert!(
+            !common::class_calls_method(main_class, callee),
+            "MainTypedKt still calls `{callee}` — spliced, not called"
+        );
     }
 
     let Some(out) = common::run_box(&classes, "MainTypedKt", &[stdlib_path]) else {
@@ -118,4 +114,33 @@ fn typed_bodies_are_spliced() {
         return;
     };
     assert_eq!(out.trim(), "OK", "typed box() returned {out:?}");
+}
+
+fn facade_bytes(source: &str, stem: &str) -> Vec<u8> {
+    let classes = common::compile_in_process(source, stem, &[], None)
+        .unwrap_or_else(|| panic!("{stem} compiles"));
+    classes
+        .into_iter()
+        .find(|(name, _)| name == &format!("{stem}Kt"))
+        .unwrap_or_else(|| panic!("{stem} emits {stem}Kt"))
+        .1
+}
+
+#[test]
+fn an_invoke_of_the_callee_is_a_call() {
+    let bytes = facade_bytes(
+        "fun callee(): Int = 1\nfun box(): Int = callee()\n",
+        "InvokeCall",
+    );
+    assert!(common::class_calls_method(&bytes, "callee"));
+    assert!(!common::class_calls_method(&bytes, "box"));
+}
+
+#[test]
+fn a_local_named_like_a_function_is_not_a_call() {
+    let bytes = facade_bytes(
+        "fun box(): Int {\n    val callee = 1\n    return callee\n}\n",
+        "LocalName",
+    );
+    assert!(!common::class_calls_method(&bytes, "callee"));
 }

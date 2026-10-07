@@ -20,6 +20,7 @@ impl Emitter<'_> {
             IrExpr::Equality { op, mode, lhs, rhs } => {
                 self.unsigned_mixed_equality_branches(*op, *lhs, *rhs)
                     || (*mode != crate::ir::EqualityMode::Structural
+                        && !self.primitive_equality_uses_erased_wrapper(Some(*mode), *lhs, *rhs)
                         && matches!(op, Eq | Ne)
                         && self.value_ty(*lhs).is_jvm_scalar())
                     || (matches!(op, Eq | Ne)
@@ -331,7 +332,7 @@ impl Emitter<'_> {
             // accepts that with an always-false/true warning, whereas structural `x == null` is
             // rejected by the front end. Use the same adapted-operand primitive as mixed identity so
             // the `ifnull` reference slot receives a box; reference structural operands are a no-op.
-            self.emit_operands_adapted(None, &[operand], code, Self::box_scalar_operand);
+            self.emit_reference_comparison_operands(&[operand], code);
             self.mark_comparison_decision(&[operand], code);
             if (op == Eq) == jt {
                 code.ifnull(target);
@@ -358,7 +359,12 @@ impl Emitter<'_> {
         }
         // A recorded structural equality stays `Intrinsics.areEqual` even when inline substitution
         // stored both operands as scalars. Null and enum comparisons above keep their own shape.
-        if recorded_structural && matches!(op, Eq | Ne) {
+        // Primitive equality also uses that reference form when one of its operands still occupies
+        // the wrapper in an erased generic slot. This is physical JVM adaptation, not a semantic
+        // reclassification: the frontend-selected mode is unchanged.
+        if matches!(op, Eq | Ne)
+            && (recorded_structural || self.primitive_equality_uses_erased_wrapper(mode, lhs, rhs))
+        {
             return false;
         }
         // Structural equality's value result has different optimal consumers: value position can use it
@@ -412,7 +418,7 @@ impl Emitter<'_> {
     /// Put the null-safe structural equality result for two references on the operand stack.
     fn emit_structural_equality(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
         // Spill if rhs is branchy (`x == when { ... }`) so lhs is not live across its merge frames.
-        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
+        self.emit_reference_comparison_operands(&[lhs, rhs], code);
         self.mark_comparison_decision(&[lhs, rhs], code);
         let m = self.cw.methodref(
             "kotlin/jvm/internal/Intrinsics",

@@ -26,7 +26,7 @@ const SRC: &str = "var log = \"\"\n\
     }\n";
 
 fn assert_same_method(method: &str) {
-    match common::method_code_diff_against_kotlinc("Main", &[], SRC, "Foo", method) {
+    match common::class_bytes_diff_against_kotlinc("Main", &[], SRC, "Foo", method) {
         Some(Ok(())) => {}
         Some(Err(diff)) => panic!("{diff}"),
         None => panic!("Foo.{method}: reference toolchain unavailable"),

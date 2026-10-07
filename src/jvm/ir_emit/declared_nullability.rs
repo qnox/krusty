@@ -36,6 +36,18 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
     let unannotated_type_parameter =
         |ty: Ty| matches!(ty, Ty::TyParam(_, bound) if bound.is_nullable());
     let value_class_declaration = ir.vc_declared_sigs.get(&fid);
+    // A synthesized value-class `constructor-impl` has already been rewritten to its carrier in
+    // `f.params`, but its recorded representation signature still owns the source parameters. A
+    // non-null `N` whose carrier is `String?` is therefore `@NotNull`, not `@Nullable`, at the
+    // constructor boundary. Physical carrier nullability must not replace that semantic fact.
+    let value_class_constructor = ir
+        .jvm_value_class_constructor_impls
+        .contains_key(&fid)
+        .then(|| ir.jvm_value_class_member_signatures.get(&fid))
+        .flatten();
+    let value_class_parameters = value_class_declaration
+        .map(|(_, parameters, _)| parameters.as_slice())
+        .or_else(|| value_class_constructor.map(|signature| signature.params.as_slice()));
     // A LAMBDA IMPL (`<fn>$lambda$N`) is a synthetic realization — kotlinc gives it debug tables
     // but NO nullability annotations.
     let lambda_impl = ir.lambda_own_params_from.contains_key(&fid);
@@ -87,15 +99,19 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
             } else {
                 let semantic = source_index
                     .and_then(|index| {
-                        value_class_declaration.and_then(|(_, parameters, _)| parameters.get(index))
+                        value_class_parameters.and_then(|parameters| parameters.get(index))
                     })
                     .copied()
                     .unwrap_or(*t);
-                if source_index
-                    .and_then(|index| declared_nullable.and_then(|values| values.get(index)))
-                    .copied()
-                    .unwrap_or(false)
-                {
+                let nullable = if value_class_parameters.is_some() {
+                    semantic.is_nullable()
+                } else {
+                    source_index
+                        .and_then(|index| declared_nullable.and_then(|values| values.get(index)))
+                        .copied()
+                        .unwrap_or(false)
+                };
+                if nullable {
                     ann_of(*t, Ty::nullable(semantic))
                 } else {
                     ann_of(*t, semantic)

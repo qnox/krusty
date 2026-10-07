@@ -371,6 +371,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(binding_read_stability);
     copy_map!(short_circuits);
     copy_map!(physical_types);
+    if ir.jvm_erased_primitive_wrapper_values.contains(&source) {
+        ir.jvm_erased_primitive_wrapper_values.insert(target);
+    }
     copy_map!(reified_call_subst);
     copy_map!(reified_catch_markers);
     copy_map!(inline_call_type_arguments);

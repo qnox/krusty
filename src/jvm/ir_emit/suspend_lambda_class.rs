@@ -402,6 +402,7 @@ fn lambda_metadata(
         &crate::metadata::lambda_function::LambdaFunction {
             function_name: crate::metadata::lambda_function::function_name(lambda.form),
             jvm_method: None,
+            explicit_suspend: lambda.explicit_suspend,
             receiver,
             parameters: &parameters,
             result: signature.ret,

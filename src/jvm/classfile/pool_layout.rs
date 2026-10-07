@@ -380,22 +380,20 @@ fn orphan_anchors(
             // A rewrite-owned entry whose first remaining use comes after that method's code is
             // interned at that later visit, not at the position of the removed instruction. This
             // includes an `InnerClasses` row retaining a holder class that CapturedVars removed.
-            pending.extend(reached.iter().copied().filter(|&index| {
-                orphaned[index]
+            for &index in &reached {
+                if orphaned[index]
                     && !seen[index]
                     && owner[index]
                         .and_then(|method| code_starts.get(&method).copied())
                         .is_some_and(|code_start| position > code_start)
-            }));
-            if let Some(fresh) = reached
-                .iter()
-                .copied()
-                .filter(|&index| !seen[index] && !orphaned[index])
-                .min()
-            {
-                settle(&mut pending, fresh, &mut anchored);
-            }
-            for &index in &reached {
+                {
+                    pending.push(index);
+                } else if !seen[index] && !orphaned[index] {
+                    // `reached` follows ASM's component interning order. Settle at the next
+                    // freshly interned component, not the numerically smallest old pool index:
+                    // an orphaned descriptor in a later NameAndType belongs after its fresh name.
+                    settle(&mut pending, index, &mut anchored);
+                }
                 seen[index] = true;
                 if !orphaned[index] && slot.holder == Holder::Class {
                     header_max = header_max.max(index);
@@ -412,20 +410,12 @@ fn orphan_anchors(
             named_max = header_max;
         }
         header_max = 0;
-        for &index in &reached {
+        for index in reached {
             if orphaned[index] && !seen[index] {
                 pending.push(index);
+            } else if !seen[index] && !orphaned[index] {
+                settle(&mut pending, index, &mut anchored);
             }
-        }
-        let fresh = reached
-            .iter()
-            .copied()
-            .filter(|&index| !seen[index] && !orphaned[index])
-            .min();
-        if let Some(fresh) = fresh {
-            settle(&mut pending, fresh, &mut anchored);
-        }
-        for index in reached {
             seen[index] = true;
             if !orphaned[index] {
                 named_max = named_max.max(index);
@@ -439,17 +429,21 @@ fn orphan_anchors(
 /// `index` and every entry it names, each once.
 fn reached_from(read: &ClassSlots, index: u16) -> Vec<usize> {
     let mut reached = Vec::new();
-    let mut pending = vec![index];
-    while let Some(index) = pending.pop() {
+    let mut seen = vec![false; read.entries.len()];
+    fn visit(read: &ClassSlots, index: u16, seen: &mut [bool], reached: &mut Vec<usize>) {
         let at = usize::from(index);
-        if at >= read.entries.len() || reached.contains(&at) {
-            continue;
+        if seen.get(at).copied().unwrap_or(true) {
+            return;
+        }
+        seen[at] = true;
+        if let Some(entry) = &read.entries[at] {
+            for component in entry.named() {
+                visit(read, component, seen, reached);
+            }
         }
         reached.push(at);
-        if let Some(entry) = &read.entries[at] {
-            pending.extend(entry.named());
-        }
     }
+    visit(read, index, &mut seen, &mut reached);
     reached
 }
 

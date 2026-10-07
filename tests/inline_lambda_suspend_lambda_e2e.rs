@@ -37,7 +37,7 @@ fn a_suspend_lambda_in_an_inlined_lambda_builds_its_class() {
 
 #[test]
 fn a_suspend_lambda_in_an_inlined_lambda_is_built_like_the_reference_compiler() {
-    let difference = common::method_code_diff_against_kotlinc(
+    let difference = common::class_bytes_diff_against_kotlinc(
         "InlineSuspendLambda",
         &[("Lib.kt", LIB)],
         MAIN,

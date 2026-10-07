@@ -165,6 +165,9 @@ impl Emitter<'_> {
         let words = slot_words(ret);
         if self.return_finalizers.is_empty() || words == 0 {
             if self.emit_return_finalizers(code) {
+                if self.completes_unsigned_bitwise_value(value) {
+                    code.forget_line();
+                }
                 self.mark_return(returned, code);
                 emit_return(ret, code);
             }
@@ -190,6 +193,9 @@ impl Emitter<'_> {
         }
         self.release_temporary(parked);
         if survives {
+            if self.completes_unsigned_bitwise_value(value) {
+                code.forget_line();
+            }
             self.mark_return(returned, code);
             emit_return(ret, code);
         }

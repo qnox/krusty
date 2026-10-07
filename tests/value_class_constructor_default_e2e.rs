@@ -19,7 +19,7 @@ const SRC: &str = "@JvmInline value class S(val text: String)\n\
     }\n";
 
 fn assert_same_defaults_constructor(class: &str, method: &str) {
-    match common::method_code_diff_against_kotlinc("Main", &[], SRC, class, method) {
+    match common::class_bytes_diff_against_kotlinc("Main", &[], SRC, class, method) {
         Some(Ok(())) => {}
         Some(Err(diff)) => panic!("{diff}"),
         None => panic!("{class}.{method}: reference toolchain unavailable"),

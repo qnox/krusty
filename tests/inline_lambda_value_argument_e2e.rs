@@ -25,7 +25,7 @@ fn a_lambda_for_a_type_parameter_is_passed_as_a_value() {
 
 #[test]
 fn a_lambda_for_a_type_parameter_is_passed_like_the_reference_compiler() {
-    let difference = common::method_code_diff_against_kotlinc(
+    let difference = common::class_bytes_diff_against_kotlinc(
         "InlineValueArgument",
         &[("Lib.kt", LIB)],
         MAIN,

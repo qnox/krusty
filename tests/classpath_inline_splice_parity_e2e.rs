@@ -130,7 +130,7 @@ fn a_spliced_inline_body_emits_the_reference_compiler_s_instructions() {
 fun one(v: Int): Int = v + 1
 fun many(v: Int): Int = twice(v) { one(it) }
 "#;
-    match common::method_code_diff_against_kotlinc(
+    match common::class_bytes_diff_against_kotlinc(
         "InlineSpliceParity",
         &[("Lib.kt", LIB)],
         MAIN,

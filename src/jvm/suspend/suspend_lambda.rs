@@ -154,7 +154,11 @@ pub(super) fn route(
     ) {
         ir.expr_source_lines.insert(unit, close);
     }
-    let Some(form) = ir.lambda_origins.get(&fid).map(|origin| origin.form) else {
+    let Some((form, explicit_suspend)) = ir
+        .lambda_origins
+        .get(&fid)
+        .map(|origin| (origin.form, origin.explicit_suspend))
+    else {
         crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no source form");
         return Routed::Failed;
     };
@@ -228,6 +232,7 @@ pub(super) fn route(
                 .collect(),
             type_parameters: ir.lambda_type_parameters(fid).to_vec(),
             form,
+            explicit_suspend,
         },
     );
     route.machines.record_transformed(

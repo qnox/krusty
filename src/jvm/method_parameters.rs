@@ -512,10 +512,6 @@ pub(super) fn continuation_constructor(class: &IrClass) -> Vec<MethodParameter> 
         .collect()
 }
 
-pub(super) fn continuation_invoke_suspend() -> [MethodParameter; 1] {
-    [parameter("$result", 0)]
-}
-
 /// `MethodParameters` of a suspend lambda class's generated `member`, formatted from the
 /// parameter identities its realization recorded and checked against `physical_parameters`: a
 /// captured value or receiver under the name of the field it initializes, synthetic; the

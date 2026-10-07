@@ -91,6 +91,9 @@ pub(crate) struct SuspendLambdaClass {
     pub type_parameters: Vec<crate::ir::IrTypeParameter>,
     /// The source form, read before the implementation becomes `invokeSuspend` and drops its origin.
     pub form: crate::ir::IrLambdaForm,
+    /// Whether the source lambda itself carried the `suspend` modifier, rather than only acquiring
+    /// a suspend function type from its expected type.
+    pub explicit_suspend: bool,
 }
 
 /// The suspend functions whose machine is built during emission, with their suspensions: those

@@ -344,8 +344,10 @@ impl Emitter<'_> {
     }
 
     pub(super) fn mark_statement_line(&mut self, statement: u32, code: &mut CodeBuilder) {
-        if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
-            self.mark_expression_line(statement, line, code);
+        if self.ir.dispatch_line(statement).is_none() {
+            if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
+                self.mark_expression_line(statement, line, code);
+            }
         }
         // A line stays in effect until another statement replaces it, exactly as the
         // `LineNumberTable` reads: a statement without a line of its own does not clear it.

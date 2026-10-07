@@ -349,29 +349,6 @@ impl ConstPool {
 /// `(name_idx, desc_idx, slot, start, length)` for `LocalVariableTable`.
 type LvtEntry = (u16, u16, u16, Option<u16>, Option<u16>);
 
-/// How many parameters a JVM method descriptor `(…)ret` declares — one per top-level type, an
-/// `L…;` or `[…` counting as one.
-fn descriptor_param_count(descriptor: &str) -> usize {
-    let bytes = descriptor.as_bytes();
-    let Some(end) = descriptor.find(')') else {
-        return 0;
-    };
-    let (mut i, mut count) = (1, 0);
-    while i < end {
-        while i < end && bytes[i] == b'[' {
-            i += 1;
-        }
-        if i < end && bytes[i] == b'L' {
-            while i < end && bytes[i] != b';' {
-                i += 1;
-            }
-        }
-        i += 1;
-        count += 1;
-    }
-    count
-}
-
 struct MethodInfo {
     access: u16,
     name: u16,
@@ -384,6 +361,9 @@ struct MethodInfo {
     /// is producer provenance, not a guess from the final byte stream; explicit returns and throws
     /// leave it absent.
     implicit_void_return_pc: Option<u16>,
+    /// Body emission deliberately left the leading instruction without a source position. This
+    /// suppresses the declared-function fallback that would otherwise fill pc 0.
+    suppress_entry_line: bool,
     /// What kotlinc's bytecode rewrites need to reshape this method when the class is written.
     rewrite_source: Option<Box<method_rewrite::RewriteSource>>,
     /// `Code` exception table: `(start_pc, end_pc, handler_pc, catch_type)` — `catch_type` is a
@@ -785,6 +765,7 @@ impl ClassWriter {
             max_locals: 0,
             code: None,
             implicit_void_return_pc: None,
+            suppress_entry_line: false,
             rewrite_source: None,
             exceptions: Vec::new(),
             stackmap: None,
@@ -1262,6 +1243,7 @@ impl ClassWriter {
             max_locals: code.max_locals,
             code: Some(code.bytes.clone()),
             implicit_void_return_pc: code.implicit_void_return_pc,
+            suppress_entry_line: code.suppress_entry_line,
             // kotlinc's bytecode rewrites run when the class is written: several of this method's
             // tables are attached after it is added, and the rewrite depends on them.
             rewrite_source: (!code.bytes.is_empty())
@@ -2034,6 +2016,9 @@ pub struct CodeBuilder {
     /// Offset of the implicit void return appended by declared-function emission. Ordinary
     /// `ret_void` calls intentionally do not populate it.
     implicit_void_return_pc: Option<u16>,
+    /// The leading instruction intentionally has no source position; declared-function debug
+    /// attachment must not synthesize its declaration line at pc 0.
+    suppress_entry_line: bool,
     /// Whether the instruction stream is currently UNREACHABLE: an unconditional terminator
     /// (`goto`/`athrow`/a `*return`) has been emitted and no label has been bound since. Instructions
     /// appended in that state are dead code the type-checking verifier rejects — it demands a
@@ -2086,6 +2071,7 @@ impl CodeBuilder {
             retained_line_mark: None,
             local_entries: Vec::new(),
             implicit_void_return_pc: None,
+            suppress_entry_line: false,
             dead: false,
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),
