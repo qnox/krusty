@@ -271,12 +271,39 @@ impl ClassWriter {
                     (key, rank, spec)
                 })
                 .collect();
-            rows.sort_by(|(key, rank, _), (other_key, other_rank, _)| {
-                key.cmp(other_key).then(rank.cmp(other_rank))
+            rows.sort_by(|(key, rank, spec), (other_key, other_rank, other_spec)| {
+                // A class generated from another local class's code is nested inside that
+                // declaration even when both anonymous rows have the same computed path.
+                // kotlinc visits the declaring class first; the constant-pool encounter rank
+                // is only a tie-breaker for unrelated rows.
+                if declared_within(&local.declaring, &spec.inner, &other_spec.inner) {
+                    std::cmp::Ordering::Greater
+                } else if declared_within(&local.declaring, &other_spec.inner, &spec.inner) {
+                    std::cmp::Ordering::Less
+                } else {
+                    key.cmp(other_key).then(rank.cmp(other_rank))
+                }
             });
             self.inner_class_candidates = rows.into_iter().map(|(_, _, spec)| spec).collect();
         }
     }
+}
+
+/// Whether `class` is generated from code lexically owned by `ancestor`, directly or through
+/// other generated classes. The relation is recorded from common-IR enclosure identities; JVM
+/// spelling is payload only and is never parsed to reconstruct it.
+fn declared_within(declaring: &HashMap<String, String>, class: &str, ancestor: &str) -> bool {
+    let mut class = class;
+    for _ in 0..=declaring.len() {
+        let Some(owner) = declaring.get(class) else {
+            return false;
+        };
+        if owner == ancestor {
+            return true;
+        }
+        class = owner;
+    }
+    false
 }
 
 /// kotlinc's `fqNameWhenAvailable` of each row's class: from `paths` for a class declared in
