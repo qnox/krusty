@@ -6606,9 +6606,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   sees it. A CONSTRUCTOR parameter is a parameter position even when the same declaration also backs a
   field: `class Box(val c: Container<Number>)` with `class Container<out T>` signs its `<init>`
   `(LContainer<+Ljava/lang/Number;>;)V`, its field `LContainer<Ljava/lang/Number;>;` and its getter
-  `()LContainer<Ljava/lang/Number;>;`. A suspend function's return travels as a `Continuation<-RET>`
+  `()LContainer<Ljava/lang/Number;>;`. A Java type does not inherit that variance from the Kotlin
+  declaration it maps to: `java.util.List<T>` and `java.lang.Comparable<T>` stay invariant
+  (`Ljava/util/List<TT;>;`, `Ljava/lang/Comparable<TT;>;`), while `List<T>` is `out` and
+  `Comparable<T>` is `in`. A suspend function's return travels as a `Continuation<-RET>`
   PARAMETER and wildcards inside it. Realized as a `Wildcards` mode threaded through the signature formatter. Test:
-  `tests/generic_signature_e2e.rs::declaration_site_wildcards_appear_in_parameter_positions_only`.
+  `tests/generic_signature_e2e.rs::declaration_site_wildcards_appear_in_parameter_positions_only`
+  and `tests/generic_signature_e2e.rs::a_java_type_keeps_invariant_parameters`.
 
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell

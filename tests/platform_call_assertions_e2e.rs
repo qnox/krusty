@@ -542,7 +542,7 @@ fn constructor_delegation_guards_a_platform_argument() {
     let class_bytes = |classes: &[(String, Vec<u8>)]| {
         classes
             .iter()
-            .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+            .map(|(name, bytes)| (name.clone(), bytes.clone()))
             .collect::<std::collections::BTreeMap<_, _>>()
     };
     assert_eq!(
