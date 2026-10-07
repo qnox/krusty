@@ -2183,6 +2183,8 @@ mod root_package_cast_message_e2e;
 mod run_catching_inline_e2e;
 #[path = "run_noreceiver_e2e.rs"]
 mod run_noreceiver_e2e;
+#[path = "safe_call_after_throw_e2e.rs"]
+mod safe_call_after_throw_e2e;
 #[path = "safe_call_any_member_e2e.rs"]
 mod safe_call_any_member_e2e;
 #[path = "safe_call_argument_list_e2e.rs"]

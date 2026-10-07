@@ -773,6 +773,139 @@ fn null_checks_sharing_a_target_all_keep_their_values() {
 }
 
 #[test]
+fn an_athrow_after_an_int_jump_keeps_the_safe_call_temporary() {
+    // Constant-condition elimination has run: the labels it left in front of the `ifnull`
+    // target are gone from the class file, and `athrow` is the previous instruction. kotlinc
+    // still refuses the fold.
+    let insns = [
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 8),
+        aload(1),
+        op(ATHROW),
+        op(RETURN),
+    ];
+    let code = Code::new(&insns);
+    let expected = code.insns(&insns);
+    assert_eq!(code.run_after_earlier_passes(), expected);
+}
+
+#[test]
+fn an_athrow_without_an_int_jump_still_keeps_the_value_on_the_stack() {
+    let code = Code::new(&[
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 6),
+        aload(1),
+        op(ATHROW),
+        op(RETURN),
+    ]);
+    let expected = code.insns(&[
+        aload(0),
+        op(DUP),
+        jump(IFNULL, 6),
+        op(ATHROW),
+        op(POP),
+        op(RETURN),
+    ]);
+    assert_eq!(code.run(), Some(expected));
+}
+
+#[test]
+fn an_int_jump_without_an_int_constant_still_folds_the_throwing_safe_call() {
+    let code = Code::new(&[
+        aload(0),
+        jump(IFEQ, 2),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 7),
+        aload(1),
+        op(ATHROW),
+        op(RETURN),
+    ]);
+    let expected = code.insns(&[
+        aload(0),
+        jump(IFEQ, 2),
+        op(DUP),
+        jump(IFNULL, 7),
+        op(ATHROW),
+        op(POP),
+        op(RETURN),
+    ]);
+    assert_eq!(code.run(), Some(expected));
+}
+
+#[test]
+fn a_live_continuation_still_folds_when_the_method_has_an_int_jump() {
+    // The `goto` joins after the null result, so it is not a predecessor of the `ifnull` target.
+    let code = Code::new(&[
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 9),
+        aload(1),
+        call("touch"),
+        jump(GOTO, 10),
+        op(ACONST_NULL),
+        op(RETURN),
+    ]);
+    let expected = code.insns(&[
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        op(DUP),
+        jump(IFNULL, 9),
+        call("touch"),
+        jump(GOTO, 10),
+        op(POP),
+        op(ACONST_NULL),
+        op(RETURN),
+    ]);
+    assert_eq!(code.run(), Some(expected));
+}
+
+#[test]
+fn keeping_the_throwing_safe_call_still_folds_another_temporary() {
+    let code = Code::new(&[
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        astore(1),
+        aload(1),
+        string(),
+        expression_check(),
+        aload(1),
+        astore(2),
+        aload(2),
+        jump(IFNULL, 13),
+        aload(2),
+        op(ATHROW),
+        op(RETURN),
+    ]);
+    let expected = code.insns(&[
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        op(DUP),
+        string(),
+        expression_check(),
+        astore(2),
+        aload(2),
+        jump(IFNULL, 13),
+        aload(2),
+        op(ATHROW),
+        op(RETURN),
+    ]);
+    assert_eq!(code.run(), Some(expected));
+}
+
+#[test]
 fn a_null_target_also_reached_by_falling_through_is_left_alone() {
     // `if (x != null) x.run()`: the call falls into the target the check jumps to.
     let code = Code::new(&[aload(0), jump(IFNULL, 4), aload(0), call("run"), op(RETURN)]);
