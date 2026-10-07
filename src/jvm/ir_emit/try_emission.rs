@@ -399,13 +399,18 @@ impl Emitter<'_> {
                 });
                 if let (Some(name), Some(start_pc)) = (rendered.as_deref(), local_start) {
                     let end_pc = code.bytes.len().min(u16::MAX as usize) as u16;
-                    code.add_local_entry(
+                    let entry = (
                         start_pc,
                         Some(end_pc.saturating_sub(start_pc)),
                         cslot,
-                        name,
-                        &local_variable_desc(exc_ty),
+                        name.to_string(),
+                        local_variable_desc(exc_ty),
                     );
+                    if let Some(frame) = self.active_inline_frame_identity() {
+                        code.add_inline_frame_catch(frame, entry);
+                    } else {
+                        code.add_local_entry(entry.0, entry.1, entry.2, &entry.3, &entry.4);
+                    }
                 }
             }
             if !cbody_diverges {

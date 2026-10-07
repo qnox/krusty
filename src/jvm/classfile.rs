@@ -2003,6 +2003,14 @@ pub struct Label {
 
 static NEXT_CODE_BUILDER_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Copy)]
+enum LocalEntryPlacement {
+    Plain,
+    FrameMarker(u64),
+    FrameBeforeMarker(u64),
+    FrameLocal(u64),
+}
+
 #[derive(Clone)]
 pub struct CodeBuilder {
     id: u64,
@@ -2030,6 +2038,9 @@ pub struct CodeBuilder {
     retained_line_mark: Option<usize>,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
+    /// Semantic inline-frame placement parallel to `local_entries`. This never reaches the class
+    /// file; it makes table order independent of which lexical scope happens to close first.
+    local_entry_placements: Vec<LocalEntryPlacement>,
     /// Offset of the implicit void return appended by declared-function emission. Ordinary
     /// `ret_void` calls intentionally do not populate it.
     implicit_void_return_pc: Option<u16>,
@@ -2091,6 +2102,7 @@ impl CodeBuilder {
             inlined_line_marks: Vec::new(),
             retained_line_mark: None,
             local_entries: Vec::new(),
+            local_entry_placements: Vec::new(),
             implicit_void_return_pc: None,
             suppress_entry_line: false,
             dead: false,
@@ -2135,6 +2147,7 @@ impl CodeBuilder {
     ) {
         self.local_entries
             .push((start, length, slot, name.to_string(), desc.to_string()));
+        self.local_entry_placements.push(LocalEntryPlacement::Plain);
     }
 
     pub fn local_entries(&self) -> &[(u16, Option<u16>, u16, String, String)] {

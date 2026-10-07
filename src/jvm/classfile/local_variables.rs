@@ -1,23 +1,79 @@
 //! A method's `LocalVariableTable` strings: when its names and descriptors intern.
 
-use super::{ClassWriter, CodeBuilder, LvtEntry};
+use super::{ClassWriter, CodeBuilder, LocalEntryPlacement, LvtEntry};
 
 impl CodeBuilder {
-    /// How many `LocalVariableTable` entries the method has recorded so far.
-    pub(crate) fn local_entry_count(&self) -> usize {
-        self.local_entries.len()
-    }
-
-    /// Record a local's entry at `position` in table order, ahead of the entries recorded since
-    /// that position was read. kotlinc's inliner writes an inlined lambda's inline-depth marker
-    /// before the locals the lambda's body declares, although its range closes after theirs.
-    pub(crate) fn insert_local_entry(
+    /// Record a local owned by an inline frame. Its marker may close later and insert immediately
+    /// ahead of the frame's first already-recorded local.
+    pub(crate) fn add_inline_frame_local(
         &mut self,
-        position: usize,
+        frame: u64,
         entry: (u16, Option<u16>, u16, String, String),
     ) {
-        let position = position.min(self.local_entries.len());
+        let position = self
+            .local_entry_placements
+            .iter()
+            .position(|placement| {
+                matches!(placement, LocalEntryPlacement::FrameMarker(owner) if *owner == frame)
+            })
+            .and_then(|marker| {
+                self.local_entry_placements[marker + 1..]
+                    .iter()
+                    .position(|placement| matches!(placement, LocalEntryPlacement::FrameMarker(_)))
+                    .map(|next| marker + 1 + next)
+            })
+            .unwrap_or(self.local_entries.len());
         self.local_entries.insert(position, entry);
+        self.local_entry_placements
+            .insert(position, LocalEntryPlacement::FrameLocal(frame));
+    }
+
+    /// Record an inline frame marker before its own already-recorded locals, while retaining every
+    /// nested-frame and catch row that precedes them.
+    pub(crate) fn insert_inline_frame_marker(
+        &mut self,
+        frame: u64,
+        entry: (u16, Option<u16>, u16, String, String),
+    ) {
+        let first_local = self
+            .local_entry_placements
+            .iter()
+            .position(|placement| {
+                matches!(placement, LocalEntryPlacement::FrameLocal(owner) if *owner == frame)
+            });
+        let position = first_local.unwrap_or_else(|| {
+            self.local_entry_placements
+                .iter()
+                .rposition(|placement| {
+                    matches!(
+                        placement,
+                        LocalEntryPlacement::FrameBeforeMarker(owner) if *owner == frame
+                    )
+                })
+                .map_or(self.local_entries.len(), |position| position + 1)
+        });
+        self.local_entries.insert(position, entry);
+        self.local_entry_placements
+            .insert(position, LocalEntryPlacement::FrameMarker(frame));
+    }
+
+    /// Record a catch row before its containing inline frame's marker. Handler emission may close
+    /// after that marker's lexical scope; placement must not depend on that timing.
+    pub(crate) fn add_inline_frame_catch(
+        &mut self,
+        frame: u64,
+        entry: (u16, Option<u16>, u16, String, String),
+    ) {
+        let position = self
+            .local_entry_placements
+            .iter()
+            .position(|placement| {
+                matches!(placement, LocalEntryPlacement::FrameMarker(owner) if *owner == frame)
+            })
+            .unwrap_or(self.local_entries.len());
+        self.local_entries.insert(position, entry);
+        self.local_entry_placements
+            .insert(position, LocalEntryPlacement::FrameBeforeMarker(frame));
     }
 }
 

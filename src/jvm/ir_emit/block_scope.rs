@@ -477,8 +477,7 @@ impl Emitter<'_> {
                     .explicit_end
                     .unwrap_or(end)
                     .saturating_sub(local.start);
-                let inline = local.record(Some(length), code, self.recorded_inline_entries);
-                self.recorded_inline_entries += usize::from(inline);
+                local.record(Some(length), code);
             } else {
                 i += 1;
             }
@@ -532,6 +531,15 @@ impl Emitter<'_> {
             .retain(|value| self.slots.contains_key(value));
         self.frame.leave_block(scope.frame);
     }
+
+    /// The innermost inline frame currently owning emitted debug locals.
+    pub(super) fn active_inline_frame_identity(&self) -> Option<u64> {
+        self.open_locals
+            .iter()
+            .filter(|local| local.opens_inline_frame)
+            .max_by_key(|local| local.start)
+            .and_then(|local| local.inline_frame)
+    }
 }
 
 /// An open lexical slot scope; see [`Emitter::open_slot_scope`].
@@ -553,39 +561,33 @@ pub(super) struct OpenLocal {
     pub(super) start: u16,
     pub(super) name: String,
     pub(super) descriptor: String,
-    /// This local binds an inline call operand and starts with the inline frame, after all operands
-    /// have been evaluated, rather than at its individual store.
+    /// This local binds an inline call operand and starts with the next emitted inline frame,
+    /// after all operands have been evaluated, rather than at its own store.
     pub(super) inline_operand: bool,
-    /// Where in the table the entry goes when it must precede entries recorded after it opened,
-    /// rather than follow them: the table size and the number of inline-frame entries recorded
-    /// when it opened. The final position also counts the inline-frame entries recorded since —
-    /// a nested expansion's locals visit ahead of the marker of the frame that contains them —
-    /// while the frame's own plain locals still follow their marker.
-    pub(super) table_position: Option<(usize, usize)>,
-    /// Whether this entry belongs to an inline frame (a marker, an operand, or a copied local):
-    /// it counts toward where an enclosing frame's marker lands.
-    pub(super) inline_frame_entry: bool,
+    /// Identity of the inline frame this entry belongs to. This is emission provenance, not a JVM
+    /// spelling: locals opened before a frame marker are rebound when that marker is emitted.
+    pub(super) inline_frame: Option<u64>,
+    /// Whether this entry is the marker that opens `inline_frame`.
+    pub(super) opens_inline_frame: bool,
     /// Where the range ends when that is before its block does: a `do…while` body's local that the
     /// condition does not read ends where the condition starts.
     pub(super) explicit_end: Option<u16>,
 }
 
 impl OpenLocal {
-    /// Record the closed range in the method's `LocalVariableTable`; `inline_entries` is how many
-    /// inline-frame entries the table already holds. Returns whether this entry is one itself.
-    pub(super) fn record(
-        self,
-        length: Option<u16>,
-        code: &mut CodeBuilder,
-        inline_entries: usize,
-    ) -> bool {
+    /// Record the closed range in the method's `LocalVariableTable` with its inline-frame
+    /// ownership, so marker order does not depend on lexical scope-close timing.
+    pub(super) fn record(self, length: Option<u16>, code: &mut CodeBuilder) {
         let entry = (self.start, length, self.slot, self.name, self.descriptor);
-        match self.table_position {
-            Some((entries, open_inline)) => {
-                code.insert_local_entry(entries + (inline_entries - open_inline), entry)
-            }
-            None => code.add_local_entry(entry.0, entry.1, entry.2, &entry.3, &entry.4),
+        if self.opens_inline_frame {
+            let frame = self
+                .inline_frame
+                .expect("an inline frame marker has a frame identity");
+            code.insert_inline_frame_marker(frame, entry);
+        } else if let Some(frame) = self.inline_frame {
+            code.add_inline_frame_local(frame, entry);
+        } else {
+            code.add_local_entry(entry.0, entry.1, entry.2, &entry.3, &entry.4);
         }
-        self.inline_frame_entry
     }
 }

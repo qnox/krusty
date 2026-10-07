@@ -1236,6 +1236,10 @@ impl BodyLowering<'_> {
                         self.ir.call_operand_bindings.insert(declaration);
                         if let Some(name) = source_name {
                             self.ir.value_names.insert(declaration, name);
+                            self.ir.set_debug_local_provenance(
+                                declaration,
+                                IrDebugLocalProvenance::InlineLambdaParameter { depth: 0 },
+                            );
                         }
                         if let Some(ordinal) = reference_parameter {
                             self.ir.set_debug_local_provenance(
