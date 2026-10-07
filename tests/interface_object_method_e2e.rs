@@ -68,35 +68,7 @@ fun impl(x: Impl): String = x.toString()
 
 #[test]
 fn jdk_object_methods_match_kotlinc() {
-    let methods = [
-        "public static final java.lang.String path(",
-        "public static final boolean pathEq(",
-        "public static final int pathHc(",
-        "public static final java.lang.String fileName(",
-        "public static final java.lang.String parent(",
-        "public static final java.lang.String sequence(",
-        "public static final java.lang.String comparable(",
-        "public static final java.lang.String runnable(",
-        "public static final java.lang.String number(",
-        "public static final java.lang.String builder(",
-        "public static final boolean builderEq(",
-        "public static final java.lang.String file(",
-        "public static final java.lang.String thrown(",
-        "public static final java.lang.String any(",
-        "public static final java.lang.String annotation(",
-        "public static final java.lang.String text(",
-    ];
-    let results = common::method_code_diffs_against_kotlinc(
-        "ObjectMethodJdk",
-        &[],
-        JDK,
-        "ObjectMethodJdkKt",
-        &methods,
-    )
-    .expect("reference kotlinc is provisioned");
-    for (method, result) in methods.into_iter().zip(results) {
-        result.unwrap_or_else(|difference| panic!("{method}: {difference}"));
-    }
+    common::assert_classes_identical_to_kotlinc_jdk("ObjectMethodJdk", JDK, &["ObjectMethodJdkKt"]);
 }
 
 #[test]
@@ -113,9 +85,7 @@ fn a_declared_interface_object_method_is_any() {
     .0;
     let scratch = common::scratch_dir().expect("scratch directory");
     let reference = scratch.join("reference");
-    let actual_dir = scratch.join("krusty");
     std::fs::create_dir_all(&reference).expect("reference directory");
-    std::fs::create_dir_all(&actual_dir).expect("krusty directory");
     let source = scratch.join("Declared.kt");
     std::fs::write(&source, DECLARED).expect("write the Kotlin fixture");
     let Some((status, stderr)) = common::kotlinc_compile(&[
@@ -146,30 +116,23 @@ fn a_declared_interface_object_method_is_any() {
             )
         )
     });
-    let (_, bytes) = classes
-        .iter()
-        .find(|(name, _)| name == "DeclaredKt")
-        .expect("krusty emitted DeclaredKt");
-    let krusty_class = actual_dir.join("DeclaredKt.class");
-    std::fs::write(&krusty_class, bytes).expect("write krusty class");
-    let methods = [
-        "public static final java.lang.String iface(",
-        "public static final boolean ifaceEq(",
-        "public static final int ifaceHc(",
-        "public static final java.lang.String ifaceName(",
-        "public static final java.lang.String carrier(",
-        "public static final boolean carrierEq(",
-        "public static final int carrierHc(",
-        "public static final java.lang.String carrierName(",
-        "public static final java.lang.String plain(",
-        "public static final java.lang.String plainName(",
-        "public static final java.lang.String impl(",
-    ];
-    for method in methods {
-        let expected = method_body(&reference, "DeclaredKt", method);
-        let actual = method_body(&actual_dir, "DeclaredKt", method);
-        assert_eq!(actual, expected, "{method}");
-    }
+    let reference_classes = ["DeclaredKt", "Impl"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                std::fs::read(reference.join(format!("{name}.class")))
+                    .unwrap_or_else(|error| panic!("read kotlinc {name}: {error}")),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let krusty_classes = classes
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        krusty_classes, reference_classes,
+        "every emitted class must be byte-identical to kotlinc"
+    );
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
@@ -187,57 +150,4 @@ fun box(): String {
 "#,
         "ObjectMethodBox",
     );
-}
-
-/// Instruction text and the local-variable table, with line numbers omitted. Constant-pool indices
-/// collapse so two equal sequences still compare when their pools differ.
-fn method_body(dir: &std::path::Path, class: &str, method: &str) -> String {
-    let text = common::javap(&["-p", "-c", "-l", "-cp", &dir.to_string_lossy(), class])
-        .unwrap_or_else(|| panic!("javap {class}"));
-    let mut body = String::new();
-    let mut inside = false;
-    let mut skipping_lines = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(method) && trimmed.contains('(') {
-            inside = true;
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        if trimmed.is_empty() {
-            break;
-        }
-        if trimmed == "Code:" {
-            continue;
-        }
-        if trimmed == "LineNumberTable:" {
-            skipping_lines = true;
-            continue;
-        }
-        if trimmed == "LocalVariableTable:" {
-            skipping_lines = false;
-            body.push_str("LocalVariableTable\n");
-            continue;
-        }
-        if skipping_lines {
-            continue;
-        }
-        let mut parts = trimmed.splitn(2, "//");
-        let code = parts.next().unwrap_or(trimmed).trim();
-        let normalized = code
-            .split_whitespace()
-            .map(|token| if token.starts_with('#') { "#" } else { token })
-            .collect::<Vec<_>>()
-            .join(" ");
-        body.push_str(normalized.trim_end_matches(','));
-        if let Some(reference) = parts.next() {
-            body.push_str(" // ");
-            body.push_str(reference.trim());
-        }
-        body.push('\n');
-    }
-    assert!(!body.is_empty(), "javap has no method {method}");
-    body
 }
