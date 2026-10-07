@@ -1,10 +1,16 @@
-//! Call-site copies of anonymous objects that use a reified type parameter.
+//! Call-site copies of anonymous objects that use a reified type parameter, and of anonymous
+//! objects that capture an inline lambda.
 //!
 //! An anonymous object's methods are separate functions. Substituting types only in the inlined
 //! template leaves `new Declaration$1` pointing at the declaration class, whose `T` is erased.
 //! This module clones that class when the expansion fixes a reified type its members use, and
 //! points the copied construction at the clone. The declaration class stays in place so its own
 //! body can keep the reified marker.
+//!
+//! A `crossinline` lambda captured by the object is the other reason to copy. kotlinc regenerates
+//! that class at every call, and `typeOf` of the instance names the copy. A capture-free lambda is
+//! inlined into the copy's methods and dropped from its constructor. A lambda that itself captures
+//! values stays a constructor argument of the copy.
 
 use std::collections::{HashMap, HashSet};
 
@@ -23,9 +29,11 @@ pub(super) struct CallSite<'a> {
     pub inline_callee_source_name: &'a str,
 }
 
-/// Point each copied construction of a reified anonymous object at a class specialized for this
-/// expansion. A class that does not use the reified binding is left alone. Once it does, a missing
-/// body or accessor mapping fails the lowering instead of keeping the declaration class.
+/// Point each copied construction of an anonymous object at a class specialized for this
+/// expansion. A class that does not use the reified binding and does not capture an inline lambda
+/// is left alone. Once it is copied, a missing concrete body or accessor mapping fails the lowering
+/// instead of keeping the declaration class. An implementation already consumed by common inline
+/// lowering is explicitly bodyless and remains elided on the copy.
 pub(super) fn specialize(
     ir: &mut crate::ir::IrFile,
     roots: impl IntoIterator<Item = ExprId>,
@@ -33,17 +41,36 @@ pub(super) fn specialize(
     reified_bindings: &HashMap<String, Ty>,
     site: &CallSite<'_>,
 ) -> Result<(), super::super::FirLoweringFailure> {
-    if reified_bindings.is_empty() {
-        return Ok(());
-    }
     let expansion = Expansion {
         bindings,
         reified_bindings,
         site,
     };
     let mut seen = HashSet::new();
-    for root in roots {
-        retarget(ir, root, &expansion, &mut seen)?;
+    let mut renames = HashMap::new();
+    let mut detached_impls = HashSet::new();
+    let roots = roots.into_iter().collect::<Vec<_>>();
+    let owned = roots.iter().copied().collect::<HashSet<_>>();
+    for root in &roots {
+        retarget(
+            ir,
+            *root,
+            &owned,
+            &expansion,
+            &mut seen,
+            &mut renames,
+            &mut detached_impls,
+        )?;
+    }
+    for root in &roots {
+        remap_reachable_implementations(
+            ir,
+            &renames,
+            *root,
+            &owned,
+            &mut detached_impls,
+            &expansion,
+        );
     }
     Ok(())
 }
@@ -57,68 +84,104 @@ struct Expansion<'a> {
 fn retarget(
     ir: &mut crate::ir::IrFile,
     root: ExprId,
+    owned: &HashSet<ExprId>,
     expansion: &Expansion<'_>,
     seen: &mut HashSet<ExprId>,
+    renames: &mut HashMap<TypeName, TypeName>,
+    detached_impls: &mut HashSet<FunId>,
 ) -> Result<(), super::super::FirLoweringFailure> {
     let mut pending = vec![root];
     let mut constructions = Vec::new();
     while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
+        if !owned.contains(&expression) || !seen.insert(expression) {
             continue;
         }
         if matches!(ir.expr(expression), IrExpr::New { .. }) {
             constructions.push(expression);
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+            if owned.contains(&child) {
+                pending.push(child);
+            }
+        });
     }
     constructions.sort_unstable();
     for expression in constructions {
         let IrExpr::New { internal, .. } = ir.expr(expression).clone() else {
             continue;
         };
-        let Some(specialized) = specialized_class(ir, internal, expression, expansion, seen)?
+        let Some(specialized) = specialized_class(
+            ir,
+            internal,
+            expression,
+            expansion,
+            seen,
+            renames,
+            detached_impls,
+        )?
         else {
             continue;
         };
-        // The call's parameter types were substituted to the reified argument. The copy's
-        // constructor keeps the declaration erasure, so the construction must invoke that
-        // descriptor rather than `<init>(Token)`.
-        let class = ir
-            .class_id_by_name(specialized)
-            .ok_or_else(|| malformed(internal))?;
-        let declared = ir.classes[class as usize]
-            .ctor_args
-            .iter()
-            .map(|argument| argument.ty)
-            .collect::<Vec<_>>();
-        if let IrExpr::New {
-            internal: name,
-            ctor_params,
-            ..
-        } = &mut ir.exprs[expression as usize]
-        {
+        // Point the construction at the call-site class now. Its capture prefix is still being
+        // streamed independently from the class declaration, so constructor arity and the
+        // declaration-erased descriptor are finalized by `publish_one_copy` after every body has
+        // contributed its captures.
+        if let IrExpr::New { internal: name, .. } = &mut ir.exprs[expression as usize] {
             *name = specialized;
-            if let Some(parameters) = ctor_params {
-                if parameters.len() != declared.len() {
-                    return Err(malformed(internal));
-                }
-                *parameters = declared;
-            }
         }
     }
-    note_caller_property_uses(ir, root);
+    remap_reachable_implementations(ir, renames, root, owned, detached_impls, expansion);
+    note_caller_property_uses(ir, root, owned);
     Ok(())
 }
 
-fn note_caller_property_uses(ir: &mut crate::ir::IrFile, root: ExprId) {
+/// A shared lambda implementation detached for this anonymous-class copy is a call-site
+/// specialization too. Recording that ownership keeps a suspend or class-materialized lambda on
+/// the backend's specialized naming path instead of publishing a second source class identity.
+fn remap_reachable_implementations(
+    ir: &mut crate::ir::IrFile,
+    renames: &HashMap<TypeName, TypeName>,
+    root: ExprId,
+    owned: &HashSet<ExprId>,
+    detached_impls: &mut HashSet<FunId>,
+    expansion: &Expansion<'_>,
+) {
+    for detached in ir.remap_reachable_classifier_identities(renames, [root], owned, detached_impls)
+    {
+        ir.specialized_functions.insert(
+            detached.target,
+            crate::ir::IrSpecializedFunction {
+                source: detached.source,
+                caller_declaration: expansion.site.caller_declaration,
+                caller: expansion.site.caller,
+                caller_is_default: expansion.site.caller_is_default,
+                caller_source_name: expansion.site.caller_source_name.to_string(),
+                inline_callee: expansion.site.inline_callee,
+                inline_callee_source_name: expansion.site.inline_callee_source_name.to_string(),
+                parent: detached.parent,
+            },
+        );
+        if detached.parent.is_none() && detached.class_site {
+            ir.specialized_expansion_order
+                .entry(detached.target)
+                .or_insert(detached.order);
+        }
+    }
+}
+
+fn note_caller_property_uses(ir: &mut crate::ir::IrFile, root: ExprId, owned: &HashSet<ExprId>) {
     let mut pending = vec![root];
     let mut seen = HashSet::new();
     let mut uses = Vec::new();
     while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
+        if !owned.contains(&expression) || !seen.insert(expression) {
             continue;
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+            if owned.contains(&child) {
+                pending.push(child);
+            }
+        });
         let receiver = match ir.expr(expression) {
             IrExpr::Checked(
                 crate::ir::IrCheckedOperation::PropertyRead {
@@ -246,6 +309,8 @@ fn specialized_class(
     order: ExprId,
     expansion: &Expansion<'_>,
     seen: &mut HashSet<ExprId>,
+    renames: &mut HashMap<TypeName, TypeName>,
+    detached_impls: &mut HashSet<FunId>,
 ) -> Result<Option<TypeName>, super::super::FirLoweringFailure> {
     let Some(source) = ir.class_id_by_name(internal) else {
         return Ok(None);
@@ -257,15 +322,20 @@ fn specialized_class(
     if !anonymous {
         return Ok(None);
     }
-    if !class_uses_binding(ir, source, expansion.reified_bindings, &mut HashSet::new()) {
+    let uses_reified =
+        class_uses_binding(ir, source, expansion.reified_bindings, &mut HashSet::new());
+    let lambdas = inline_lambda_arguments(ir, source, order);
+    if !uses_reified && lambdas.is_empty() {
         return Ok(None);
     }
     let class_name = ir.classes[source as usize].fq_name;
+    if uses_reified {
+        ir.reified_anonymous_declarations.insert(source);
+    }
     let field_count = u32::try_from(ir.classes[source as usize].fields.len())
         .map_err(|_| malformed(class_name))?;
     let property_count = u32::try_from(ir.classes[source as usize].properties.len())
         .map_err(|_| malformed(class_name))?;
-    ir.reified_anonymous_declarations.insert(source);
     let placeholder = crate::types::type_name(&format!("specialized-anon#{order}"));
     let source_methods = ir.classes[source as usize].methods.clone();
     let mut cloned_methods = Vec::with_capacity(source_methods.len());
@@ -276,17 +346,20 @@ fn specialized_class(
             .get(method as usize)
             .cloned()
             .ok_or_else(|| malformed(class_name))?;
-        let body = function.body.ok_or_else(|| malformed(class_name))?;
-        let (cloned_body, cloned) = crate::ir::clone_expression_dag(ir, body);
-        let mut copied = cloned.values().copied().collect::<Vec<_>>();
-        copied.sort_unstable();
-        for copy in copied {
-            specialize_inline_copy(ir, copy, expansion.bindings, expansion.reified_bindings)
-                .ok_or_else(|| malformed(class_name))?;
-            owned.push(copy);
-        }
         let mut shape = function;
-        shape.body = Some(cloned_body);
+        if let Some(body) = shape.body {
+            let (cloned_body, cloned) = crate::ir::clone_expression_dag(ir, body);
+            let mut copied = cloned.values().copied().collect::<Vec<_>>();
+            copied.sort_unstable();
+            for copy in copied {
+                specialize_inline_copy(ir, copy, expansion.bindings, expansion.reified_bindings)
+                    .ok_or_else(|| malformed(class_name))?;
+                owned.push(copy);
+            }
+            shape.body = Some(cloned_body);
+        } else if !ir.inline_only_fns.contains(&method) {
+            return Err(malformed(class_name));
+        }
         // Member descriptors stay the declaration's erasure. Reified operations in the body are
         // specialized above; substituting the signature would emit a concrete descriptor plus a
         // bridge where kotlinc keeps the erased member.
@@ -346,6 +419,15 @@ fn specialized_class(
         .collect::<Vec<_>>();
     copy_override_edges(ir, source_name, placeholder, &methods)?;
     remap_owned_class(ir, &owned, source, class_id, internal, placeholder);
+    let omitted_capture_fields = consume_trivially_spliceable_lambdas(
+        ir,
+        class_id,
+        order,
+        &property_copies,
+        &lambdas,
+        class_name,
+    )?;
+    renames.insert(internal, placeholder);
     ir.specialized_anonymous_classes.insert(
         class_id,
         crate::ir::IrSpecializedAnonymousClass {
@@ -362,17 +444,20 @@ fn specialized_class(
             reified_bindings: expansion.reified_bindings.clone(),
             field_count,
             property_count,
+            omitted_capture_fields,
             caller_property_uses: Vec::new(),
             pending_property_roots: property_copies,
         },
     );
     for method in ir.classes[class_id as usize].methods.clone() {
         if let Some(body) = ir.functions[method as usize].body {
-            retarget(ir, body, expansion, seen)?;
+            let owned = expression_ids(ir, body);
+            retarget(ir, body, &owned, expansion, seen, renames, detached_impls)?;
         }
     }
     if let Some(body) = ir.classes[class_id as usize].init_body {
-        retarget(ir, body, expansion, seen)?;
+        let owned = expression_ids(ir, body);
+        retarget(ir, body, &owned, expansion, seen, renames, detached_impls)?;
     }
     let pending_roots = ir
         .specialized_anonymous_classes
@@ -380,7 +465,8 @@ fn specialized_class(
         .map(|record| record.pending_property_roots.clone())
         .unwrap_or_default();
     for root in pending_roots {
-        retarget(ir, root, expansion, seen)?;
+        let owned = expression_ids(ir, root);
+        retarget(ir, root, &owned, expansion, seen, renames, detached_impls)?;
     }
     Ok(Some(placeholder))
 }
@@ -457,8 +543,12 @@ fn mapped_function(
     }
 }
 
+#[track_caller]
 fn malformed(class: TypeName) -> super::super::FirLoweringFailure {
-    super::super::FirLoweringFailure::MalformedReifiedAnonymousObject { class }
+    super::super::FirLoweringFailure::MalformedReifiedAnonymousObject {
+        class,
+        invariant_line: std::panic::Location::caller().line(),
+    }
 }
 
 fn copy_capture_edges(ir: &mut crate::ir::IrFile, source: ClassId, target: ClassId) {
@@ -602,8 +692,16 @@ fn publish_one_copy(
         .get(copy_id as usize)
         .map(|class| class.fq_name)
         .ok_or_else(|| malformed(source_name))?;
-    if ir.classes[copy_id as usize].fields.len() != spec.field_count as usize
+    if ir.classes[copy_id as usize].fields.len() + spec.omitted_capture_fields as usize
+        != spec.field_count as usize
         || ir.classes[copy_id as usize].properties.len() != spec.property_count as usize
+    {
+        return Err(malformed(source_name));
+    }
+    // A field appended to the declaration after the copy is indexed from `field_count`. Dropping a
+    // capture shifts every later index, so that append is not the copy's next field.
+    if spec.omitted_capture_fields != 0
+        && ir.classes[source as usize].fields.len() > spec.field_count as usize
     {
         return Err(malformed(source_name));
     }
@@ -692,7 +790,6 @@ fn publish_one_copy(
         }
     }
     publish_property_members(ir, source, source_name, copy_name, &clones)?;
-    retarget_copied_property_calls(ir, copy_id, source, source_name, &clones)?;
     retarget_caller_property_uses(ir, copy_id, &spec, source_name)?;
     specialize(
         ir,
@@ -708,10 +805,81 @@ fn publish_one_copy(
             inline_callee_source_name: &spec.inline_callee_source_name,
         },
     )?;
+    retarget_copied_property_calls(ir, copy_id, source, source_name, &clones)?;
+    finalize_construction_signature(ir, copy_id, &spec, source_name)?;
     if let Some(record) = ir.specialized_anonymous_classes.get_mut(&copy_id) {
         record.method_clones = clones;
     }
     Ok(())
+}
+
+/// Finalize the copied construction only after the streamed class capture prefix is complete.
+/// Inline substitution may have specialized the call-site parameter types, while the anonymous
+/// class constructor retains its declaration erasure. The construction and declaration must now
+/// agree exactly; unlike the earlier copy step, a mismatch here is a malformed final IR state.
+fn finalize_construction_signature(
+    ir: &mut crate::ir::IrFile,
+    copy_id: ClassId,
+    spec: &crate::ir::IrSpecializedAnonymousClass,
+    source_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let declared = ir.classes[copy_id as usize]
+        .ctor_args
+        .iter()
+        .map(|argument| argument.ty)
+        .collect::<Vec<_>>();
+    let IrExpr::New { internal, args, .. } = &ir.exprs[spec.order as usize] else {
+        return Err(malformed(source_name));
+    };
+    let expected = ir.classes[copy_id as usize].fq_name_id();
+    if *internal != expected {
+        // A nested inline expansion may specialize the same construction again before accessors
+        // are published. That descendant now owns the constructor descriptor; the intermediate
+        // copy must not reject or overwrite it. Accept only an exact specialization chain rooted
+        // at this copy and tied to this same construction expression.
+        let Some(owner) = ir.class_id_by_name(*internal) else {
+            return Err(malformed(source_name));
+        };
+        if !specialization_descends_from(ir, owner, copy_id, spec.order) {
+            return Err(malformed(source_name));
+        }
+        return Ok(());
+    }
+    if args.len() != declared.len() {
+        return Err(malformed(source_name));
+    }
+    let IrExpr::New { ctor_params, .. } = &mut ir.exprs[spec.order as usize] else {
+        unreachable!("the construction shape was checked above");
+    };
+    if let Some(parameters) = ctor_params {
+        if parameters.len() != declared.len() {
+            return Err(malformed(source_name));
+        }
+        *parameters = declared;
+    }
+    Ok(())
+}
+
+fn specialization_descends_from(
+    ir: &crate::ir::IrFile,
+    mut class: ClassId,
+    ancestor: ClassId,
+    construction: ExprId,
+) -> bool {
+    let mut seen = HashSet::new();
+    while seen.insert(class) {
+        let Some(specialization) = ir.specialized_anonymous_classes.get(&class) else {
+            return false;
+        };
+        if specialization.order != construction {
+            return false;
+        }
+        if specialization.source == ancestor {
+            return true;
+        }
+        class = specialization.source;
+    }
+    false
 }
 
 /// Property reads inside the copy still name the declaration's property. That layout's owner is
@@ -724,6 +892,7 @@ fn retarget_copied_property_calls(
     source_name: TypeName,
     clones: &HashMap<FunId, FunId>,
 ) -> Result<(), super::super::FirLoweringFailure> {
+    let lineage = specialization_lineage(ir, source);
     let mut roots = ir.classes[copy_id as usize]
         .methods
         .iter()
@@ -732,12 +901,28 @@ fn retarget_copied_property_calls(
     roots.extend(ir.classes[copy_id as usize].init_body);
     let mut pending = roots;
     let mut seen = HashSet::new();
+    let mut seen_functions = HashSet::new();
     let mut operations = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        let implementation = match ir.expr(expression) {
+            IrExpr::Lambda { impl_fn, .. } if ir.specialized_functions.contains_key(impl_fn) => {
+                Some(*impl_fn)
+            }
+            IrExpr::Call {
+                callee: crate::ir::Callee::Local(function),
+                ..
+            } if ir.specialized_functions.contains_key(function) => Some(*function),
+            _ => None,
+        };
+        if let Some(implementation) = implementation {
+            if seen_functions.insert(implementation) {
+                pending.extend(ir.functions[implementation as usize].body);
+            }
+        }
         if matches!(
             ir.expr(expression),
             IrExpr::Checked(
@@ -749,7 +934,15 @@ fn retarget_copied_property_calls(
         }
     }
     for expression in operations {
-        retarget_property_operation(ir, expression, copy_id, source, source_name, clones)?;
+        retarget_property_operation(
+            ir,
+            expression,
+            copy_id,
+            source,
+            source_name,
+            &lineage,
+            clones,
+        )?;
     }
     Ok(())
 }
@@ -760,6 +953,7 @@ fn retarget_property_operation(
     copy_id: ClassId,
     source: ClassId,
     source_name: TypeName,
+    lineage: &[(ClassId, TypeName)],
     clones: &HashMap<FunId, FunId>,
 ) -> Result<(), super::super::FirLoweringFailure> {
     let IrExpr::Checked(operation) = ir.expr(expression).clone() else {
@@ -796,59 +990,218 @@ fn retarget_property_operation(
         ),
         _ => return Ok(()),
     };
-    let Some((getter, setter)) = copied_layout_accessors(ir, target, source, source_name) else {
+    let Some(layout) = copied_property_layout(ir, target, lineage) else {
         return Ok(());
     };
-    let function = match value {
-        Some(_) => setter.ok_or_else(|| malformed(source_name))?,
-        None => getter.ok_or_else(|| malformed(source_name))?,
+    let (declaring_class, accessor) = match (&layout, value) {
+        (
+            CopiedPropertyLayout::Member {
+                declaring_class,
+                setter,
+                ..
+            },
+            Some(_),
+        )
+        | (
+            CopiedPropertyLayout::Extension {
+                declaring_class,
+                setter,
+                ..
+            },
+            Some(_),
+        ) => (*declaring_class, *setter),
+        (
+            CopiedPropertyLayout::Member {
+                declaring_class,
+                getter,
+                ..
+            },
+            None,
+        )
+        | (
+            CopiedPropertyLayout::Extension {
+                declaring_class,
+                getter,
+                ..
+            },
+            None,
+        ) => (*declaring_class, *getter),
     };
-    let cloned = require_clone(function, clones, source_name)?;
-    let index = ir.classes[copy_id as usize]
-        .methods
-        .iter()
-        .position(|method| *method == cloned)
-        .ok_or_else(|| malformed(source_name))?;
-    let index = u32::try_from(index).map_err(|_| malformed(source_name))?;
     let receiver = dispatch_receiver.ok_or_else(|| malformed(source_name))?;
-    let mut args = context_arguments.into_iter().map(Some).collect::<Vec<_>>();
-    if let Some(extension_receiver) = extension_receiver {
-        args.push(Some(extension_receiver));
+    if let Some(function) = accessor {
+        let cloned =
+            cloned_lineage_method(ir, function, declaring_class, source, clones, source_name)?;
+        let index = ir.classes[copy_id as usize]
+            .methods
+            .iter()
+            .position(|method| *method == cloned)
+            .ok_or_else(|| malformed(source_name))?;
+        let index = u32::try_from(index).map_err(|_| malformed(source_name))?;
+        let mut args = context_arguments.into_iter().map(Some).collect::<Vec<_>>();
+        if let Some(extension_receiver) = extension_receiver {
+            args.push(Some(extension_receiver));
+        }
+        if let Some(value) = value {
+            args.push(Some(value));
+        }
+        ir.exprs[expression as usize] = IrExpr::MethodCall {
+            class: copy_id,
+            index,
+            receiver,
+            args,
+        };
+        return Ok(());
     }
-    if let Some(value) = value {
-        args.push(Some(value));
+    let CopiedPropertyLayout::Member {
+        backing_field: true,
+        name,
+        ty,
+        interface,
+        ..
+    } = layout
+    else {
+        return Err(malformed(source_name));
+    };
+    if extension_receiver.is_some() || !context_arguments.is_empty() {
+        return Err(malformed(source_name));
     }
-    ir.exprs[expression as usize] = IrExpr::MethodCall {
-        class: copy_id,
-        index,
-        receiver,
-        args,
+    let owner = ir.classes[copy_id as usize].fq_name;
+    ir.exprs[expression as usize] = match value {
+        Some(value) => IrExpr::PropertyWrite {
+            receiver: Some(receiver),
+            owner,
+            name,
+            value,
+            ty,
+            interface,
+            operation: Some(expression),
+        },
+        None => IrExpr::PropertyRead {
+            receiver: Some(receiver),
+            owner,
+            name,
+            ty,
+            interface,
+            operation: Some(expression),
+        },
     };
     Ok(())
 }
 
-fn copied_layout_accessors(
+enum CopiedPropertyLayout {
+    Member {
+        declaring_class: ClassId,
+        backing_field: bool,
+        getter: Option<FunId>,
+        setter: Option<FunId>,
+        name: String,
+        ty: Ty,
+        interface: bool,
+    },
+    Extension {
+        declaring_class: ClassId,
+        getter: Option<FunId>,
+        setter: Option<FunId>,
+    },
+}
+
+fn copied_property_layout(
     ir: &crate::ir::IrFile,
     property: crate::fir::PropertyId,
-    source: ClassId,
-    source_name: TypeName,
-) -> Option<(Option<FunId>, Option<FunId>)> {
+    lineage: &[(ClassId, TypeName)],
+) -> Option<CopiedPropertyLayout> {
     match ir.local_property_layouts.get(&property)? {
         crate::ir::IrLocalPropertyLayout::Member {
             class,
             owner,
+            backing_field,
             getter,
             setter,
+            name,
+            ty,
+            interface,
             ..
-        } if *class == source || *owner == source_name => Some((*getter, *setter)),
+        } => {
+            let declaring_class = lineage.iter().find_map(|(candidate, name)| {
+                (*candidate == *class || *name == *owner).then_some(*candidate)
+            })?;
+            Some(CopiedPropertyLayout::Member {
+                declaring_class,
+                backing_field: backing_field.is_some(),
+                getter: *getter,
+                setter: *setter,
+                name: name.clone(),
+                ty: *ty,
+                interface: *interface,
+            })
+        }
         crate::ir::IrLocalPropertyLayout::MemberExtension {
             owner,
             getter,
             setter,
             ..
-        } if *owner == source_name => Some((Some(*getter), *setter)),
+        } => {
+            let declaring_class = lineage
+                .iter()
+                .find_map(|(candidate, name)| (*name == *owner).then_some(*candidate))?;
+            Some(CopiedPropertyLayout::Extension {
+                declaring_class,
+                getter: Some(*getter),
+                setter: *setter,
+            })
+        }
         _ => None,
     }
+}
+
+/// Map a declaration method through every anonymous-class copy between its declaring class and the
+/// immediate source, then through the copy currently being published.
+fn cloned_lineage_method(
+    ir: &crate::ir::IrFile,
+    mut method: FunId,
+    declaring_class: ClassId,
+    source: ClassId,
+    clones: &HashMap<FunId, FunId>,
+    source_name: TypeName,
+) -> Result<FunId, super::super::FirLoweringFailure> {
+    let mut current = source;
+    let mut steps = Vec::new();
+    let mut seen = HashSet::new();
+    while current != declaring_class {
+        if !seen.insert(current) {
+            return Err(malformed(source_name));
+        }
+        let specialization = ir
+            .specialized_anonymous_classes
+            .get(&current)
+            .ok_or_else(|| malformed(source_name))?;
+        steps.push(&specialization.method_clones);
+        current = specialization.source;
+    }
+    for mapping in steps.into_iter().rev() {
+        method = mapping
+            .get(&method)
+            .copied()
+            .ok_or_else(|| malformed(source_name))?;
+    }
+    require_clone(method, clones, source_name)
+}
+
+fn specialization_lineage(ir: &crate::ir::IrFile, from: ClassId) -> Vec<(ClassId, TypeName)> {
+    let mut lineage = Vec::new();
+    let mut current = from;
+    let mut seen = HashSet::new();
+    while seen.insert(current) {
+        let Some(class) = ir.classes.get(current as usize) else {
+            break;
+        };
+        lineage.push((current, class.fq_name));
+        let Some(specialization) = ir.specialized_anonymous_classes.get(&current) else {
+            break;
+        };
+        current = specialization.source;
+    }
+    lineage
 }
 
 fn clone_member_function(
@@ -1017,20 +1370,31 @@ fn remap_owned_class(
     from_name: TypeName,
     to_name: TypeName,
 ) {
+    // A construction can be specialized repeatedly while nested inline bodies expand. Its copied
+    // body may still carry any earlier classifier in that exact specialization chain, especially a
+    // property access realized after the earlier copy was created. Every such ancestor denotes the
+    // same receiver now owned by `to`; remap the whole identity chain rather than only its most
+    // recent spelling.
+    let lineage = specialization_lineage(ir, from);
+    let source_classes = lineage.iter().map(|(class, _)| *class).collect::<Vec<_>>();
+    let mut source_names = lineage.iter().map(|(_, name)| *name).collect::<Vec<_>>();
+    if !source_names.contains(&from_name) {
+        source_names.push(from_name);
+    }
     for &expression in owned {
         if let Some(node) = ir.exprs.get_mut(expression as usize) {
-            remap_class(node, from, to, from_name, to_name);
+            remap_class(node, &source_classes, to, &source_names, to_name);
         }
         // A property read records the classifier its receiver statically has. Cloning the
         // expression keeps the declaration class, so the copy would invoke that class's accessor
         // with its own receiver.
         if let Some(owner) = ir.dispatch_classes.get_mut(&expression) {
-            if *owner == from_name {
+            if source_names.contains(owner) {
                 *owner = to_name;
             }
         }
         if let Some(owner) = ir.expression_owners.get_mut(&expression) {
-            if *owner == from_name {
+            if source_names.contains(owner) {
                 *owner = to_name;
             }
         }
@@ -1039,18 +1403,18 @@ fn remap_owned_class(
 
 fn remap_class(
     node: &mut IrExpr,
-    from: ClassId,
+    from: &[ClassId],
     to: ClassId,
-    from_name: TypeName,
+    from_name: &[TypeName],
     to_name: TypeName,
 ) {
     let class_id = |class: &mut ClassId| {
-        if *class == from {
+        if from.contains(class) {
             *class = to;
         }
     };
     let name = |name: &mut TypeName| {
-        if *name == from_name {
+        if from_name.contains(name) {
             *name = to_name;
         }
     };
@@ -1070,6 +1434,391 @@ fn remap_class(
         }
         IrExpr::PropertyRead { owner, .. } | IrExpr::PropertyWrite { owner, .. } => name(owner),
         _ => {}
+    }
+}
+
+struct InlineLambdaArgument {
+    parameter: usize,
+    field: u32,
+    impl_fn: u32,
+    inline_body: ExprId,
+    capture_count: usize,
+}
+
+/// Constructor arguments of `construction` that pass an inline lambda into a capture of `class`.
+fn inline_lambda_arguments(
+    ir: &crate::ir::IrFile,
+    class: ClassId,
+    construction: ExprId,
+) -> Vec<InlineLambdaArgument> {
+    let IrExpr::New { args, .. } = ir.expr(construction) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for (index, argument) in ir.classes[class as usize].ctor_args.iter().enumerate() {
+        if argument.provenance != crate::ir::IrCtorParameterProvenance::Capture {
+            continue;
+        }
+        // Local capture prefixes are finalized independently on the declaration and construction.
+        // Consume only pairs both sides already publish; exact constructor arity is checked after
+        // lowering has completed those lists, not while this streamed inline copy is being taken.
+        let Some(actual) = args.get(index).copied() else {
+            continue;
+        };
+        let Some((impl_fn, inline_body, capture_count)) = inline_lambda(ir, actual) else {
+            continue;
+        };
+        let Some(field) = argument.field_index else {
+            continue;
+        };
+        found.push(InlineLambdaArgument {
+            parameter: index,
+            field,
+            impl_fn,
+            inline_body,
+            capture_count,
+        });
+    }
+    found
+}
+
+fn inline_lambda(ir: &crate::ir::IrFile, expression: ExprId) -> Option<(u32, ExprId, usize)> {
+    match ir.expr(expression) {
+        IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body: Some(inline_body),
+            ..
+        } => Some((*impl_fn, *inline_body, captures.len())),
+        _ => None,
+    }
+}
+
+/// Inline a lambda into the copy only when its body needs no operand binding or value rehoming.
+///
+/// Capture freedom alone is not enough: an extension/value parameter still has to be bound, a
+/// suspend lambda carries continuation semantics, and a body-local value has to be moved out of the
+/// lambda's independent value domain. Those shapes keep the lambda as an initialized constructor
+/// capture until the ordinary inline-body splicer can realize them. The narrow shape consumed here
+/// is a parameter-free, non-suspend body with no value slots, used exclusively by zero-argument
+/// invocations of its capture field.
+fn consume_trivially_spliceable_lambdas(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    construction: ExprId,
+    pending_property_roots: &[ExprId],
+    lambdas: &[InlineLambdaArgument],
+    class_name: TypeName,
+) -> Result<u32, super::super::FirLoweringFailure> {
+    let mut removals = Vec::new();
+    for lambda in lambdas {
+        let Some(function) = ir.functions.get(lambda.impl_fn as usize) else {
+            return Err(malformed(class_name));
+        };
+        if lambda.capture_count != 0
+            || !function.params.is_empty()
+            || ir.suspend_funs.contains(&lambda.impl_fn)
+            || body_uses_values(ir, lambda.inline_body)
+        {
+            continue;
+        }
+        if !inline_lambda_into_field_invokes(
+            ir,
+            class,
+            pending_property_roots,
+            lambda.field,
+            lambda.inline_body,
+        ) {
+            continue;
+        }
+        ir.inline_only_fns.insert(lambda.impl_fn);
+        ir.functions
+            .get_mut(lambda.impl_fn as usize)
+            .ok_or_else(|| malformed(class_name))?
+            .body = None;
+        removals.push((lambda.parameter, lambda.field));
+    }
+    removals.sort_unstable();
+    removals.dedup();
+    let omitted = u32::try_from(removals.len()).map_err(|_| malformed(class_name))?;
+    for (parameter, field) in removals.into_iter().rev() {
+        remove_capture(
+            ir,
+            class,
+            construction,
+            pending_property_roots,
+            parameter,
+            field,
+            class_name,
+        )?;
+    }
+    Ok(omitted)
+}
+
+fn body_uses_values(ir: &crate::ir::IrFile, root: ExprId) -> bool {
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if !super::value_indices(ir.expr(expression)).is_empty() {
+            return true;
+        }
+        if let IrExpr::Lambda { captures, .. } = ir.expr(expression) {
+            pending.extend(captures.iter().copied());
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}
+
+fn inline_lambda_into_field_invokes(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    pending_property_roots: &[ExprId],
+    field: u32,
+    inline_body: ExprId,
+) -> bool {
+    let mut roots = ir.classes[class as usize]
+        .methods
+        .iter()
+        .filter_map(|method| ir.functions.get(*method as usize)?.body)
+        .collect::<Vec<_>>();
+    roots.extend(ir.classes[class as usize].init_body);
+    roots.extend(pending_property_roots.iter().copied());
+    let mut pending = roots;
+    let mut seen = HashSet::new();
+    let mut invocations = Vec::new();
+    let mut field_reads = HashSet::new();
+    let mut invoked_reads = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { .. } = ir.expr(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        if let IrExpr::GetField {
+            class: owner,
+            index,
+            ..
+        } = ir.expr(expression)
+        {
+            if *owner == class && *index == field {
+                field_reads.insert(expression);
+            }
+        }
+        if let IrExpr::InvokeFunction { func, args, .. } = ir.expr(expression) {
+            if let Some(read) = capture_field_read(ir, *func, class, field) {
+                if !args.is_empty() {
+                    return false;
+                }
+                invoked_reads.insert(read);
+                invocations.push(expression);
+            }
+        }
+    }
+    if invocations.is_empty() || field_reads != invoked_reads {
+        return false;
+    }
+    for invocation in invocations {
+        let (body, _) = crate::ir::clone_expression_dag(ir, inline_body);
+        ir.exprs[invocation as usize] = IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(body),
+        };
+        ir.suspend_calls.remove(&invocation);
+        ir.suspend_call_overridden_results.remove(&invocation);
+    }
+    !capture_field_remains(ir, class, pending_property_roots, field)
+}
+
+fn capture_field_read(
+    ir: &crate::ir::IrFile,
+    expression: ExprId,
+    class: ClassId,
+    field: u32,
+) -> Option<ExprId> {
+    match ir.expr(expression) {
+        IrExpr::GetField {
+            class: owner,
+            index,
+            ..
+        } if *owner == class && *index == field => Some(expression),
+        IrExpr::NotNullAssert { operand, .. } => capture_field_read(ir, *operand, class, field),
+        _ => None,
+    }
+}
+
+fn capture_field_remains(
+    ir: &crate::ir::IrFile,
+    class: ClassId,
+    pending_property_roots: &[ExprId],
+    field: u32,
+) -> bool {
+    let mut roots = ir.classes[class as usize]
+        .methods
+        .iter()
+        .filter_map(|method| ir.functions.get(*method as usize)?.body)
+        .collect::<Vec<_>>();
+    roots.extend(ir.classes[class as usize].init_body);
+    roots.extend(pending_property_roots.iter().copied());
+    let mut pending = roots;
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { .. } = ir.expr(expression) {
+            continue;
+        }
+        if let IrExpr::GetField {
+            class: owner,
+            index,
+            ..
+        } = ir.expr(expression)
+        {
+            if *owner == class && *index == field {
+                return true;
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}
+
+fn remove_capture(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    construction: ExprId,
+    pending_property_roots: &[ExprId],
+    parameter: usize,
+    field: u32,
+    class_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    shift_capture_reads(ir, class, pending_property_roots, field);
+    let declaration = &mut ir.classes[class as usize];
+    if field as usize >= declaration.fields.len()
+        || parameter >= declaration.ctor_args.len()
+        || declaration.ctor_param_count == 0
+        || declaration.constructor_prefix_count == 0
+    {
+        return Err(malformed(class_name));
+    }
+    let parameter_index = u32::try_from(parameter).map_err(|_| malformed(class_name))?;
+    declaration.fields.remove(field as usize);
+    declaration.ctor_param_count -= 1;
+    declaration.constructor_prefix_count -= 1;
+    for argument in &mut declaration.ctor_args {
+        if let Some(index) = argument.field_index.as_mut() {
+            if *index > field {
+                *index -= 1;
+            }
+        }
+    }
+    declaration
+        .pre_super_param_fields
+        .retain(|(param, stored)| *param != parameter_index && *stored != field);
+    for (param, stored) in &mut declaration.pre_super_param_fields {
+        if *param > parameter_index {
+            *param -= 1;
+        }
+        if *stored > field {
+            *stored -= 1;
+        }
+    }
+    if !declaration.ctor_param_annotations.is_empty() {
+        if declaration.ctor_param_annotations.len() != declaration.ctor_args.len() {
+            return Err(malformed(class_name));
+        }
+        declaration.ctor_param_annotations.remove(parameter);
+    }
+    declaration.ctor_args.remove(parameter);
+    shift_capture_map(&mut ir.shared_class_capture_fields, class, field);
+    shift_capture_map(&mut ir.class_capture_identities, class, field);
+    let IrExpr::New {
+        args,
+        ctor_params,
+        default_prefix_count,
+        ..
+    } = &mut ir.exprs[construction as usize]
+    else {
+        return Err(malformed(class_name));
+    };
+    if parameter >= args.len() {
+        return Err(malformed(class_name));
+    }
+    args.remove(parameter);
+    if let Some(parameters) = ctor_params {
+        if parameter >= parameters.len() {
+            return Err(malformed(class_name));
+        }
+        parameters.remove(parameter);
+    }
+    if parameter < *default_prefix_count as usize {
+        *default_prefix_count -= 1;
+    }
+    Ok(())
+}
+
+fn shift_capture_reads(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    pending_property_roots: &[ExprId],
+    removed: u32,
+) {
+    let mut roots = ir.classes[class as usize]
+        .methods
+        .iter()
+        .filter_map(|method| ir.functions.get(*method as usize)?.body)
+        .collect::<Vec<_>>();
+    roots.extend(ir.classes[class as usize].init_body);
+    roots.extend(pending_property_roots.iter().copied());
+    let mut pending = roots;
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { .. } = ir.expr(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        if let IrExpr::GetField {
+            class: owner,
+            index,
+            ..
+        } = &mut ir.exprs[expression as usize]
+        {
+            if *owner == class && *index > removed {
+                *index -= 1;
+            }
+        }
+    }
+}
+
+fn shift_capture_map<V: Clone>(
+    map: &mut std::collections::HashMap<(ClassId, u32), V>,
+    class: ClassId,
+    removed: u32,
+) {
+    let owned = map
+        .iter()
+        .filter(|((owner, _), _)| *owner == class)
+        .map(|((owner, index), value)| ((*owner, *index), Clone::clone(value)))
+        .collect::<Vec<_>>();
+    for ((owner, index), _) in &owned {
+        map.remove(&(*owner, *index));
+    }
+    for ((owner, index), value) in owned {
+        if index == removed {
+            continue;
+        }
+        let index = if index > removed { index - 1 } else { index };
+        map.insert((owner, index), value);
     }
 }
 

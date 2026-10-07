@@ -83,6 +83,34 @@ pub struct IrCallableReference {
     pub reflection_owner: Option<crate::types::TypeName>,
 }
 
+impl IrFile {
+    /// The checked invocation template of a callable reference consumed as an inline argument.
+    /// Callable-reference lowering published the returned expression directly; this projection
+    /// combines it with the reference's ordered captures/bound receiver and adapter signature
+    /// without inspecting the adapter body or its reflective target kind.
+    pub(crate) fn callable_reference_inline_template(
+        &self,
+        expression: ExprId,
+    ) -> Option<(FunId, Vec<ExprId>, ExprId, usize)> {
+        let IrExpr::CallableReference(reference) = self.expr(expression) else {
+            return None;
+        };
+        let Ty::Fun(signature) = reference.function_type.non_null() else {
+            return None;
+        };
+        if signature.suspend || reference.declaration_suspend {
+            return None;
+        }
+        let function = self.functions.get(reference.adapter as usize)?;
+        let body = function.body?;
+        let returned = *self.callable_reference_adapter_results.get(&body)?;
+        let mut captures = reference.captures.clone();
+        captures.extend(reference.bound_receiver);
+        let arity = function.params.len().checked_sub(captures.len())?;
+        (signature.params.len() == arity).then_some((reference.adapter, captures, returned, arity))
+    }
+}
+
 /// A synthesized function-reference subclass of `kotlin/jvm/internal/FunctionReferenceImpl`. See
 /// `emit_func_ref_class`. `param_tys`/`ret_ty` are the LOGICAL `invoke` signature (for `VirtualUnbound`,
 /// `param_tys[0]` is the receiver); the SAM interface erases them to `Object`, so `invoke` casts.

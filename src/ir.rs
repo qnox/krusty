@@ -177,6 +177,9 @@ pub struct IrCheckedSubstitution {
     /// not runtime reification operations.
     pub reified: bool,
     pub value: Ty,
+    /// Runtime classifier selected for a reified operation. See
+    /// [`crate::fir::FirTypeSubstitution::reified_runtime`].
+    pub reified_runtime: Ty,
     pub additional_bounds: Vec<Ty>,
 }
 
@@ -1578,6 +1581,10 @@ pub struct IrSpecializedAnonymousClass {
     /// Later materialization appends backing fields and accessors past these prefixes.
     pub field_count: u32,
     pub property_count: u32,
+    /// Capture fields removed from this copy because their `crossinline` lambda was inlined into
+    /// the copy's methods. `field_count` still counts them on the declaration, so later fields
+    /// appended to the declaration stay past that prefix.
+    pub omitted_capture_fields: u32,
     /// Property reads and writes in the inlined caller whose receiver is this copy's construction.
     /// Accessor functions are not available when the construction is retargeted, so the read is
     /// rebound once the copy's properties exist.
@@ -1586,6 +1593,18 @@ pub struct IrSpecializedAnonymousClass {
     /// these roots are not constructor statements. Nested specialization walks this field;
     /// [`IrClass::init_body`] stays the constructor body.
     pub pending_property_roots: Vec<ExprId>,
+}
+
+/// A line of an external inline declaration's own body, attributed at a lowered expression: the
+/// dependency's source file and the path its lines map under, the line there, and the call-site
+/// line the expansion answers to. A target maps it through the class's source map (the JVM
+/// records a JSR-045 range) rather than writing the raw number.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrExternalFrameLine {
+    pub file: Box<str>,
+    pub path: Box<str>,
+    pub line: u32,
+    pub call_line: u32,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
@@ -1928,6 +1947,10 @@ pub struct IrFile {
     /// semantically. A backend independently chooses the physical closure representation needed
     /// to realize that operation.
     pub(crate) runtime_reified_lambda_implementations: std::collections::HashSet<FunId>,
+    /// A lambda declared in an inline function whose signature names an anonymous class. The
+    /// declaration is a class, and each call copies it when that class is copied with the
+    /// expansion. This is independent of a reified operation in the body.
+    pub(crate) inline_anonymous_lambdas: std::collections::HashSet<FunId>,
     /// Class index of a function already published as that class's method.
     pub(crate) class_method_owners: std::collections::HashMap<FunId, Vec<u32>>,
     /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by
@@ -2073,6 +2096,14 @@ pub struct IrFile {
     /// target callee handle, this fact survives provider realization and is available even when a
     /// public inline call legally remains as a non-inlined fallback.
     pub inline_call_sites: std::collections::HashSet<ExprId>,
+    /// Callable-reference expressions consumed as inline arguments. This is the checked argument
+    /// edge itself, recorded while argument mapping still owns the decision; backends must not
+    /// rediscover consumption by scanning expression parents or adapter bodies.
+    pub(crate) inline_callable_reference_arguments: std::collections::HashSet<ExprId>,
+    /// Adapter body root -> the exact value returned by that adapter. Callable-reference lowering
+    /// records this while constructing the body, before wrapping it in `return`/`block`; consumers
+    /// never inspect the generated body shape to recover the invocation template.
+    pub(crate) callable_reference_adapter_results: std::collections::HashMap<ExprId, ExprId>,
     /// Complete evaluation regions for semantically inline calls, including any source-order
     /// operand prelude and any consumed inline-body template. This target-neutral fact survives
     /// provider realization and structural expansion, so backends need not reconstruct an inline
@@ -2090,6 +2121,25 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: std::collections::HashSet<ExprId>,
+    /// Inline lambda-argument markers whose store takes the target's synthetic inline line rather
+    /// than a source line. Common lowering flags the marker of an `@InlineOnly` expansion whose
+    /// lambda body starts on the call's own line; a target maps it to its synthetic-line
+    /// convention (the JVM records `fake.kt:1` in the class's source map).
+    pub inline_synthetic_lines: std::collections::HashSet<ExprId>,
+    /// Expressions that realize a call of an external inline function from its declaration plan
+    /// (the checked inline-body contract), as opposed to a same-module splice. kotlinc's inliner
+    /// owns the debug surface around such an expansion: it spills a pending operand-stack value
+    /// across it and resets the line in effect when it ends, so the enclosing call's line is
+    /// marked again at the next instruction.
+    pub external_inline_expansions: std::collections::HashSet<ExprId>,
+    /// Expressions whose line mark is a line of an external inline declaration's own body: the
+    /// frame's set-up statements (an iteration's loop prelude) and the close of a spliced lambda
+    /// frame. A target maps the line through the class's source map under the expanding call
+    /// rather than writing the raw number.
+    pub external_frame_lines: std::collections::HashMap<ExprId, IrExternalFrameLine>,
+    /// Blocks whose close ends an external inline declaration's frame: the frame's closing line
+    /// is marked on a `nop` before the frame's locals close, so their ranges extend past it.
+    pub external_frame_closes: std::collections::HashMap<ExprId, IrExternalFrameLine>,
     /// Function ids declared `operator` — `@Metadata` `Function.flags` bit 8, so a consumer admits
     /// the conventional call form (`recv(args)`, `a[i]`); the JVM method carries no such bit.
     pub operator_fns: std::collections::HashSet<u32>,

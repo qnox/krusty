@@ -48,6 +48,9 @@ pub(super) enum Holder {
     Class,
     /// An attribute's name, which the writer interns when it writes the attribute.
     AttributeName,
+    /// A method's `Code` attribute name: the observable visit boundary before its body, even when
+    /// that body contains no constant-pool operands.
+    CodeAttribute(usize),
     /// The `Code` of the method at this position in the class's method table.
     Code(usize, Part),
 }
@@ -324,6 +327,12 @@ impl Reader<'_> {
             let len = self.u4()? as usize;
             let end = self.at.checked_add(len).ok_or(Unread::Truncated)?;
             let name = self.utf8(name_index).unwrap_or_default().to_string();
+            if let ("Code", Scope::Method(method)) = (name.as_str(), scope) {
+                self.slots
+                    .last_mut()
+                    .expect("the attribute name slot was just read")
+                    .holder = Holder::CodeAttribute(method);
+            }
             self.attribute(&name, scope, len)?;
             if self.at != end {
                 return Err(Unread::AttributeLength(name));

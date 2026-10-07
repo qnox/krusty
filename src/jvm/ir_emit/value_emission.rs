@@ -1583,6 +1583,7 @@ impl super::Emitter<'_> {
                     .ir
                     .runtime_reified_lambda_implementations
                     .contains(impl_fn)
+                    || self.ir.inline_anonymous_lambdas.contains(impl_fn)
                 {
                     lambda_mode = LambdaMode::Class;
                 }

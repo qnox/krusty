@@ -223,7 +223,7 @@ The `ci` workflow's `ci-and-conformance` job is the single check for master's ru
 It needs `ci` and the whole `conformance` matrix, where every supported Kotlin version lane runs the
 box suite and then the non-box suite. The job is scheduled with `if: always()`, because a required
 check that is skipped counts as passing, and it fails unless both results are `success`. A failed,
-skipped, or cancelled dependency therefore fails it, including a failed `build-conformance-bin` or
+skipped, or cancelled dependency therefore fails it, including a failed `build-shared-bins` or
 `versions` job that skips the whole matrix. Its name stays the same when the version manifest
 changes. It runs on pull requests, merge groups, and master pushes. The master `release` job keeps
 its own, broader `needs` list (KLIB semantics, the Gradle matrix, and release builds), which this
@@ -381,8 +381,10 @@ binary, e2e shard planning, each e2e shard, and each coverage report. Cargo's ow
 stays on stderr for those builds. The run ends with `coverage: phases` repeating every finished
 phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
-`conformance-run: phase box-shard-N-of-M <seconds>s`. The conformance binary job prints
-`conformance-build: phase conformance-test-binary` and `conformance-build: phase krusty-cli`.
+`conformance-run: phase box-shard-N-of-M <seconds>s`. The shared binary job prints
+`shared-bins: phase conformance-test-binary`, `shared-bins: phase krusty-cli`, and
+`shared-bins: phase krusty-build-tests`. Conformance lanes and Gradle lanes run those binaries. A
+Gradle lane does not compile krusty.
 
 Performance-relevant harness state:
 

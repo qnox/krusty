@@ -140,29 +140,6 @@ pub(in crate::jvm) fn specialization_ordinal(
 ) -> Option<u32> {
     let specialization = ir.specialized_functions.get(&implementation)?;
     let location = specialization_location(ir, specialization, facade, modes)?;
-    if specialization.parent.is_none()
-        && anonymous_peer(
-            ir,
-            &location,
-            &specialization.inline_callee_source_name,
-            facade,
-            modes,
-        )
-    {
-        let order = ir
-            .specialized_expansion_order
-            .get(&implementation)
-            .copied()
-            .expect("a specialized lambda sharing an anonymous-object expansion records its order");
-        return expansion_ordinal(
-            ir,
-            &location,
-            &specialization.inline_callee_source_name,
-            order,
-            facade,
-            modes,
-        );
-    }
     let mut ordinal = 0u32;
     for function in 0..=implementation {
         let Some(candidate) = ir.specialized_functions.get(&function) else {
@@ -183,6 +160,45 @@ pub(in crate::jvm) fn specialization_ordinal(
         }
     }
     (ordinal != 0).then_some(ordinal)
+}
+
+/// Position of a specialized lambda class among the class artifacts created by one inline
+/// expansion. Implementation methods use [`specialization_ordinal`] instead: an indy-only lambda
+/// still has a method sibling, but it does not consume an anonymous-object/lambda class number.
+fn specialized_class_ordinal(
+    ir: &IrFile,
+    implementation: u32,
+    facade: &str,
+    modes: LambdaModes,
+) -> Option<u32> {
+    let specialization = ir.specialized_functions.get(&implementation)?;
+    let location = specialization_location(ir, specialization, facade, modes)?;
+    if specialization.parent.is_none()
+        && ir.specialized_expansion_order.contains_key(&implementation)
+        && anonymous_peer(
+            ir,
+            &location,
+            &specialization.inline_callee_source_name,
+            facade,
+            modes,
+        )
+    {
+        let order = ir
+            .specialized_expansion_order
+            .get(&implementation)
+            .copied()
+            .expect("a specialized lambda sharing an anonymous-object expansion records its order");
+        return expansion_ordinal(
+            ir,
+            &location,
+            &specialization.inline_callee_source_name,
+            order,
+            facade,
+            modes,
+            Some(implementation),
+        );
+    }
+    specialization_ordinal(ir, implementation, facade, modes)
 }
 
 fn anonymous_view(
@@ -224,23 +240,32 @@ fn expansion_ordinal(
     order: u32,
     facade: &str,
     modes: LambdaModes,
+    current_lambda_class: Option<u32>,
 ) -> Option<u32> {
     let mut orders = Vec::new();
     for (function, specialization) in &ir.specialized_functions {
+        // A representation pass can consume the source Lambda node after publishing its concrete
+        // IrClass. Keep that class in the expansion's shared artifact sequence: asking only whether
+        // the now-absent expression would use class strategy would make a later anonymous object
+        // reuse its ordinal.
+        let materialized = ir.classes.iter().any(|class| {
+            class
+                .lambda
+                .as_ref()
+                .is_some_and(|lambda| lambda.invoke == *function)
+        });
         if specialization.parent.is_some()
+            || (current_lambda_class != Some(*function)
+                && !materialized
+                && !super::method_access::lambda_impl_uses_class_strategy(ir, *function, modes))
             || specialization.inline_callee_source_name != callee
             || specialization_location(ir, specialization, facade, modes).as_ref() != Some(location)
         {
             continue;
         }
-        orders.push(
-            ir.specialized_expansion_order
-                .get(function)
-                .copied()
-                .expect(
-                    "a specialized lambda sharing an anonymous-object expansion records its order",
-                ),
-        );
+        if let Some(order) = ir.specialized_expansion_order.get(function).copied() {
+            orders.push(order);
+        }
     }
     for specialization in ir.specialized_anonymous_classes.values() {
         if specialization.inline_callee_source_name != callee
@@ -276,6 +301,7 @@ pub(in crate::jvm) fn anonymous_class_name(
         specialization.order,
         facade,
         modes,
+        None,
     )?;
     let mut name = owner;
     if !caller.is_empty() {
@@ -298,7 +324,7 @@ fn specialized_class_name(
     modes: LambdaModes,
 ) -> Option<String> {
     let specialization = ir.specialized_functions.get(&implementation)?;
-    let ordinal = specialization_ordinal(ir, implementation, facade, modes)?;
+    let ordinal = specialized_class_ordinal(ir, implementation, facade, modes)?;
     match specialization.parent {
         Some(parent) => Some(format!(
             "{}${ordinal}",

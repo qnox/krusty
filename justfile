@@ -407,6 +407,17 @@ test-all *ARGS:
 
 # --- Kotlin box-suite conformance (drives the README conformance and JVM byte-equality badges) ---
 
+# Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
+# binary; they do not compile krusty again.
+krusty-build-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin=$(cargo test --no-run --profile gate -p krusty-build --lib --message-format=json \
+      | jq -r 'select(.reason=="compiler-artifact" and .target.name=="krusty_build" and .executable != null) | .executable // empty' \
+      | tail -1)
+    [ -n "$bin" ] && [ -x "$bin" ] || { echo "could not locate krusty-build test binary" >&2; exit 1; }
+    printf '%s\n' "$bin"
+
 # Build the conformance test binary and print its path.
 conformance-bin:
     #!/usr/bin/env bash

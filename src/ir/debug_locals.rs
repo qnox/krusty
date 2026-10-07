@@ -36,6 +36,18 @@ pub(crate) enum IrDebugLocalProvenance {
     InlineLambdaReceiver {
         implementation: FunId,
     },
+    /// A value parameter of a source lambda spliced at an inline call site, bound from the call's
+    /// operand. kotlinc keeps the parameter's source spelling (`it` stays `it` — the `$iv` suffix
+    /// is for the inlined callable's OWN locals); `depth` counts the enclosing expansions the
+    /// splice was cloned into, each of which adds one suffix, as a lambda frame marker's does.
+    InlineLambdaParameter {
+        depth: u32,
+    },
+    /// Invocation parameter of a callable reference consumed directly by an inline call. The
+    /// ordinal is semantic provenance; each backend owns the physical `pN`-style spelling.
+    InlineCallableReferenceParameter {
+        ordinal: u32,
+    },
     /// The inline-depth marker an inline function's expansion opens with, after its operands are
     /// bound. The retained source name is the expanded callable's. It never grows with nesting: a
     /// debugger reads it as the name of the frame it opens, wherever that frame was cloned to.
@@ -69,7 +81,12 @@ impl IrDebugLocalProvenance {
                 implementation,
                 depth: depth.saturating_add(1),
             },
-            Self::InlineLambdaReceiver { .. } | Self::FunctionFrameMarker => self,
+            Self::InlineLambdaParameter { depth } => Self::InlineLambdaParameter {
+                depth: depth.saturating_add(1),
+            },
+            Self::InlineLambdaReceiver { .. }
+            | Self::InlineCallableReferenceParameter { .. }
+            | Self::FunctionFrameMarker => self,
         }
     }
 

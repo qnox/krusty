@@ -687,6 +687,7 @@ impl BodyLowering<'_> {
                     dispatch_class: Self::static_class(*receiver),
                     extension_receiver,
                     arguments,
+                    source_line: None,
                 })
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration)),
             crate::fir::FirCallTarget::Intrinsic {

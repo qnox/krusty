@@ -16,7 +16,7 @@ use crate::types::{Ty, TypeName};
 use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
-use super::inline_body::ExternalInlineCallRequest;
+use super::inline_body::{ExternalCollectionTransformPlan, ExternalInlineCallRequest};
 use super::{BodyLowering, FirLoweringFailure};
 
 #[derive(Clone, Copy)]
@@ -113,6 +113,9 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) dispatch_class: Option<TypeName>,
     pub(super) extension_receiver: Option<ExprId>,
     pub(super) arguments: &'a [IrCheckedArgument],
+    /// Source line of the call, when the lowering site carries one. An inline-body expansion
+    /// attributes its frame to it; an ordinary dependency call does not consume it.
+    pub(super) source_line: Option<u32>,
 }
 
 pub(super) struct ModuleConstructorRequest<'a> {
@@ -356,6 +359,7 @@ impl BodyLowering<'_> {
             dispatch_class,
             extension_receiver,
             arguments,
+            source_line,
         } = request;
         // Preserve the checked SOURCE receiver across dependency realization. An extension records
         // its declaration receiver (a generic `T` deliberately records nothing); a member records
@@ -380,6 +384,7 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
+                source_line,
             })?;
             self.ir.inline_regions.insert(expanded);
             return Some(expanded);
@@ -471,24 +476,26 @@ impl BodyLowering<'_> {
     /// The checker attaches this plan only when the selected argument is a source lambda whose
     /// body suspends. Common lowering consumes that decision without inspecting callable or body
     /// semantics again.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn external_inline_collection_transform(
         &mut self,
-        lambda_parameter: u32,
-        local_names: &crate::fir::FirInlineCollectionLocalNames,
-        traversal: &crate::fir::FirInlineIterationTraversal,
-        factory: ExternalCallableId,
-        factory_classifier: crate::types::TypeName,
-        factory_parameters: &[ResolvedTy],
-        capacity: Option<&crate::fir::FirInlineCollectionCapacity>,
-        append: &crate::fir::FirInlineCollectionAppend,
-        accumulator_ty: ResolvedTy,
+        plan: ExternalCollectionTransformPlan<'_>,
         receiver_ty: Option<ResolvedTy>,
         parameter_types: &[Ty],
         dispatch_receiver: Option<ExprId>,
         extension_receiver: Option<ExprId>,
         arguments: &[IrCheckedArgument],
     ) -> Option<ExprId> {
+        let ExternalCollectionTransformPlan {
+            lambda_parameter,
+            local_names,
+            traversal,
+            factory,
+            factory_classifier,
+            factory_parameters,
+            capacity,
+            append,
+            accumulator_ty,
+        } = plan;
         let (mut statements, receiver, args, defaults) =
             self.selected_semantic_operands(SelectedOperandRequest {
                 receiver_ty,
@@ -519,16 +526,8 @@ impl BodyLowering<'_> {
             } => lambda,
             _ => return None,
         };
-        let (implementation, captures, inline_body, arity) = match self.ir.expr(lambda).clone() {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                inline_body: Some(inline_body),
-                arity,
-                ..
-            } => (impl_fn, captures, inline_body, arity as usize),
-            _ => return None,
-        };
+        let (implementation, captures, inline_body, arity) =
+            inline_argument_template(self.ir, lambda)?;
         if arity != 1 {
             return None;
         }
@@ -1864,25 +1863,9 @@ impl BodyLowering<'_> {
                             CheckedArgumentPolicy::Selected {
                                 preserve_inline_lambdas,
                                 ..
-                            } => {
-                                preserve_inline_lambdas
-                                    && matches!(
-                                        self.ir.expr(value),
-                                        IrExpr::Lambda {
-                                            inline_body: Some(_),
-                                            ..
-                                        }
-                                    )
-                            }
+                            } => preserve_inline_lambdas && inline_argument_stays(self.ir, value),
                             CheckedArgumentPolicy::SameFileInline { inline, .. } => {
-                                inline
-                                    && matches!(
-                                        self.ir.expr(value),
-                                        IrExpr::Lambda {
-                                            inline_body: Some(_),
-                                            ..
-                                        }
-                                    )
+                                inline && inline_argument_stays(self.ir, value)
                             }
                         };
                         if matches!(policy, CheckedArgumentPolicy::SameFileInline { .. })
@@ -2018,6 +2001,59 @@ impl BodyLowering<'_> {
     /// consumed by `compareTo(Int)` must remain `Char`).
     fn direct_call_operand(&mut self, value: ExprId, _target: Ty) -> ExprId {
         value
+    }
+}
+
+/// A lambda literal, or a callable reference whose adapter is that literal, stays in the argument
+/// position. Spilling either would be the function object the splice is there to avoid.
+fn inline_argument_stays(ir: &crate::ir::IrFile, value: ExprId) -> bool {
+    match ir.expr(value) {
+        IrExpr::Lambda {
+            inline_body: Some(_),
+            ..
+        } => true,
+        IrExpr::CallableReference(_) => inline_argument_template(ir, value).is_some(),
+        _ => false,
+    }
+}
+
+/// The inline template of a lambda, or of a non-suspend callable reference whose adapter is that
+/// template. The reference's target is not consulted: the adapter's captures, bound receiver, and
+/// one returned value are the invocation. A stored reference never reaches this helper.
+pub(crate) fn inline_argument_template(
+    ir: &crate::ir::IrFile,
+    expression: ExprId,
+) -> Option<(u32, Vec<ExprId>, ExprId, usize)> {
+    let expression_node = ir.expr(expression).clone();
+    match expression_node {
+        IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body: Some(inline_body),
+            arity,
+            ..
+        } => Some((impl_fn, captures, inline_body, usize::from(arity))),
+        IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body: None,
+            arity,
+            ..
+        } if ir.lambda_class_provenance(impl_fn)
+            == Some(crate::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter) =>
+        {
+            let arity = usize::from(arity);
+            let function = ir.functions.get(impl_fn as usize)?;
+            let body = function.body?;
+            let inline_body = *ir.callable_reference_adapter_results.get(&body)?;
+            let body_arity = function.params.len();
+            if body_arity != arity + captures.len() {
+                return None;
+            }
+            Some((impl_fn, captures, inline_body, arity))
+        }
+        IrExpr::CallableReference(_) => ir.callable_reference_inline_template(expression),
+        _ => None,
     }
 }
 

@@ -80,6 +80,10 @@ pub(crate) enum CodegenMarker {
     Mark = 1,
     BeforeInlineCall = 2,
     AfterInlineCall = 3,
+    /// An opening marker whose stack slots were reserved in the emitter before the inline
+    /// lambda's frame marker was allocated. It is an internal transport distinction: both forms
+    /// decode to stack-normalization boundaries and are removed before the class is written.
+    BeforeInlineCallWithReservedLocals = 4,
 }
 
 impl CodegenMarker {
@@ -90,6 +94,7 @@ impl CodegenMarker {
             1 => CodegenMarker::Mark,
             2 => CodegenMarker::BeforeInlineCall,
             3 => CodegenMarker::AfterInlineCall,
+            4 => CodegenMarker::BeforeInlineCallWithReservedLocals,
             _ => return None,
         })
     }
@@ -100,6 +105,9 @@ impl CodegenMarker {
             CodegenMarker::Mark => ("mark", "(I)V"),
             CodegenMarker::BeforeInlineCall => ("beforeInlineCall", "()V"),
             CodegenMarker::AfterInlineCall => ("afterInlineCall", "()V"),
+            CodegenMarker::BeforeInlineCallWithReservedLocals => {
+                ("beforeInlineCallWithReservedLocals", "()V")
+            }
         }
     }
 }
@@ -121,7 +129,9 @@ impl InlineCallBracket {
             return None;
         }
         match CodegenMarker::from_operand(*operands.first()?)? {
-            CodegenMarker::BeforeInlineCall => Some(InlineCallBracket::Open),
+            CodegenMarker::BeforeInlineCall | CodegenMarker::BeforeInlineCallWithReservedLocals => {
+                Some(InlineCallBracket::Open)
+            }
             CodegenMarker::AfterInlineCall => Some(InlineCallBracket::Close),
             CodegenMarker::Mark => None,
         }

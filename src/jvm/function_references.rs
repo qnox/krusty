@@ -786,6 +786,47 @@ pub(super) fn realize(
     callables: &crate::backend::CheckedBackendCallables,
     facades: Facades<'_>,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
+    // Join each dependency inline call with the exact selected declaration while its argument
+    // vector is still semantic. This publishes consumption once; carrier planning below does not
+    // scan expression parents or infer inline-parameter roles from syntax.
+    let mut consumed_references = Vec::new();
+    for raw in 0..ir.exprs.len() {
+        let call = raw as u32;
+        let IrExpr::Call {
+            callee: crate::ir::Callee::External { target, params, .. },
+            args,
+            ..
+        } = &ir.exprs[raw]
+        else {
+            continue;
+        };
+        if !ir.inline_call_sites.contains(&call) {
+            continue;
+        }
+        let callable = callables
+            .callable(*target)
+            .ok_or(FunctionReferenceRealizationTarget::External(*target))?;
+        if !callable.inline.can_inline() {
+            continue;
+        }
+        for (parameter, &argument) in args.iter().enumerate() {
+            let inline = matches!(params.get(parameter), Some(Ty::Fun(_)))
+                && callable
+                    .inline_modifiers
+                    .get(parameter)
+                    .is_some_and(|modifier| {
+                        *modifier != crate::types::InlineParameterModifier::Noinline
+                    });
+            if inline
+                && matches!(ir.expr(argument), IrExpr::CallableReference(_))
+                && ir.callable_reference_inline_template(argument).is_some()
+            {
+                consumed_references.push(argument);
+            }
+        }
+    }
+    ir.inline_callable_reference_arguments
+        .extend(consumed_references);
     let adapter_owners = ir
         .classes
         .iter()
@@ -806,12 +847,43 @@ pub(super) fn realize(
         }
     }
     let expression_count = ir.exprs.len();
+    let mut carrier_adapters = std::collections::HashSet::new();
+    for raw in 0..expression_count {
+        let adapter = match &ir.exprs[raw] {
+            IrExpr::CallableReference(reference) => reference.adapter,
+            _ => continue,
+        };
+        if !ir
+            .inline_callable_reference_arguments
+            .contains(&(raw as u32))
+        {
+            carrier_adapters.insert(adapter);
+        }
+    }
     for raw in 0..expression_count {
         let IrExpr::CallableReference(reference) = ir.exprs[raw].clone() else {
             continue;
         };
-        let adapter_owner = adapter_owners.get(&reference.adapter).copied();
+        // A callable reference the splice places has no carrier: kotlinc writes neither the
+        // reference class nor the adapter, and names the inline marker after the class the
+        // reference would have been. A use that still evaluates the reference keeps the carrier,
+        // and with it the adapter.
         let sole = adapter_uses.get(&reference.adapter) == Some(&1);
+        if ir
+            .inline_callable_reference_arguments
+            .contains(&(raw as u32))
+        {
+            if !carrier_adapters.contains(&reference.adapter) {
+                if let Some(name) =
+                    crate::jvm::local_class_names::callable_reference_name(ir, raw as u32)
+                {
+                    ir.lambda_class_names.insert(reference.adapter, name);
+                }
+                ir.inline_only_fns.insert(reference.adapter);
+            }
+            continue;
+        }
+        let adapter_owner = adapter_owners.get(&reference.adapter).copied();
         let own_invoke = sole && own_invoke_realizable(ir, &reference);
         realize_adapter_reference(
             ir,

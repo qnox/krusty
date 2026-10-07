@@ -121,7 +121,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_ci_and_the_whole_matrix() {
 
     let conformance = job(&workflow, "conformance");
     assert!(
-        conformance.contains("    needs: [build-conformance-bin, versions]\n")
+        conformance.contains("    needs: [build-shared-bins, versions]\n")
             && conformance.contains("      fail-fast: false\n")
             && conformance
                 .contains("        version: ${{ fromJson(needs.versions.outputs.matrix) }}\n"),

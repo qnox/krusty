@@ -71,6 +71,39 @@ fn a_cast_a_rewrite_removes_leaves_no_entry_behind() {
 }
 
 #[test]
+/// A `checkcast` the rewrite removes leaves its class to the `InnerClasses` row, which is interned
+/// before the `Code` attribute name.
+fn a_removed_holder_class_moves_to_its_inner_classes_row() {
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    writer.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+        inner: "pkg/Ref$LongRef".to_string(),
+        outer: Some("pkg/Ref".to_string()),
+        name: Some("LongRef".to_string()),
+        access: ACC_PUBLIC | ACC_STATIC,
+    });
+    let desc = "(Lpkg/Ref$LongRef;)Ljava/lang/Object;";
+    writer.reserve_method_pool("f", desc, None, &[]);
+    add_static(&mut writer, "f", desc, |code, writer| {
+        code.aload(0);
+        code.checkcast(writer.class_ref("pkg/Ref$LongRef"));
+        code.areturn();
+    });
+    let entries = pool(&writer.finish());
+    let position = |entry: &str| {
+        entries
+            .iter()
+            .position(|candidate| candidate == entry)
+            .unwrap_or_else(|| panic!("{entry} in {entries:?}"))
+    };
+    // The row is interned before the `Code` attribute name, as kotlinc writes `InnerClasses`
+    // before that name. The removed `checkcast` does not leave the class beside the descriptor.
+    assert!(position("(Lpkg/Ref$LongRef;)Ljava/lang/Object;") < position("Class pkg/Ref$LongRef"));
+    assert!(position("Class pkg/Ref$LongRef") < position("Class pkg/Ref"));
+    assert!(position("Class pkg/Ref") < position("LongRef"));
+    assert!(position("LongRef") < position("Code"));
+}
+
+#[test]
 fn a_constant_only_later_code_still_names_moves_to_that_code() {
     // `fun f(s: String): Any = s as String` interned `java/lang/String` for a cast its rewrite
     // removes; `g` names the class between its casts to `B` and `C`, which is where ASM interns it.
@@ -151,6 +184,46 @@ fn a_constant_the_last_later_code_names_moves_to_the_end_of_that_code() {
             "Class B",
             "java/lang/String",
             "Class java/lang/String",
+        ]
+    );
+}
+
+#[test]
+fn a_removed_body_class_moves_to_its_late_inner_class_row() {
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    writer.reserve_method_name("f");
+    writer.reserve_descriptor("()V");
+    writer.seed_class("sample/Holder$Removed");
+    add_static(&mut writer, "f", "()V", |code, writer| {
+        code.push_string("body", writer);
+        code.pop();
+        code.ret_void();
+    });
+    writer.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+        inner: "sample/Holder$Removed".to_string(),
+        outer: Some("sample/Holder".to_string()),
+        name: Some("Removed".to_string()),
+        access: 0x0019,
+    });
+    let class = writer.finish();
+    // The push/pop rewrite removes `body` entirely. The seeded class survives only because the
+    // later InnerClasses row names it, so its first pool position is that row's visit window.
+    assert_eq!(
+        pool(&class),
+        [
+            "T",
+            "Class T",
+            "java/lang/Object",
+            "Class java/lang/Object",
+            "f",
+            "()V",
+            "sample/Holder$Removed",
+            "Class sample/Holder$Removed",
+            "sample/Holder",
+            "Class sample/Holder",
+            "Removed",
+            "Code",
+            "InnerClasses",
         ]
     );
 }

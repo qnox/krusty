@@ -151,7 +151,9 @@ fn marker_name(ir: &IrFile, declaration: ExprId) -> Option<String> {
             Some(name)
         }
         IrDebugLocalProvenance::InlineValue { .. }
-        | IrDebugLocalProvenance::InlineLambdaReceiver { .. } => None,
+        | IrDebugLocalProvenance::InlineLambdaReceiver { .. }
+        | IrDebugLocalProvenance::InlineLambdaParameter { .. }
+        | IrDebugLocalProvenance::InlineCallableReferenceParameter { .. } => None,
     }
 }
 
@@ -216,6 +218,18 @@ pub(super) fn render(
                 .unwrap_or_else(|| lambda_implementation_name(origin));
             Some(format!("$this${}", escaped(&name)))
         }
+        // A spliced lambda's value parameter keeps its source spelling; only cloning the splice
+        // into a further expansion suffixes it, one `$iv` per enclosing expansion.
+        Some(IrDebugLocalProvenance::InlineLambdaParameter { depth }) => {
+            let mut rendered = escaped(source?);
+            for _ in 0..depth {
+                rendered.push_str("$iv");
+            }
+            Some(rendered)
+        }
+        Some(IrDebugLocalProvenance::InlineCallableReferenceParameter { ordinal }) => Some(
+            super::parameter_names::inline_callable_reference_parameter(ordinal),
+        ),
         // A marker is named by [`marker_name`], which knows the class it is emitted into.
         Some(
             IrDebugLocalProvenance::FunctionFrameMarker

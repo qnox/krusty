@@ -60,6 +60,19 @@ impl Emitter<'_> {
             // only a callable control-flow return uses the JVM void representation.
             .unwrap_or_else(|| slot_type(self.ir, declaration, semantic_ty));
 
+        // The synthetic zero on an inline-return result exists for common-IR definite assignment;
+        // it is not a JVM store. Keep the semantic slot binding now so it survives the loop body's
+        // scope restore, but defer occupying the physical frame slot until the first real store.
+        // Locals inside the returned operand can then reuse this slot exactly as kotlinc does.
+        if self.open_inline_return_frame(declaration, index, slot_ty) {
+            let slot = self
+                .frame
+                .enter_deferred(super::frame_map::FrameKey::Value(index), slot_ty);
+            self.slots.insert(index, (slot, slot_ty));
+            self.unassigned_values.insert(index);
+            return;
+        }
+
         // A spilled local is declared twice with the same value identity. Reuse its slot when the
         // verifier types agree, or when both are references; never alias differing primitives.
         let is_reference = |ty: Ty| matches!(ty, Ty::String | Ty::Obj(..)) || ty.is_array();
@@ -78,9 +91,7 @@ impl Emitter<'_> {
             (!holds_operand).then(|| self.enter_unassigned_value(index, slot_ty, false))
         });
 
-        if let Some(cell) =
-            initializer.and_then(|value| self.stored_shared_cell(declaration, value))
-        {
+        if let Some(cell) = initializer.and_then(|value| self.stored_shared_cell(value)) {
             let slot = entered
                 .unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand));
             self.unassigned_values.remove(&index);
@@ -114,7 +125,15 @@ impl Emitter<'_> {
                 .unwrap_or(source);
             self.adapt_physical_operand(source, semantic, Some(semantic_ty), slot_ty, code);
             self.mark_expression_start(initializer, code);
-            debug_lines::mark_statement(self.ir, declaration, code);
+            // A declaration whose line is a mapped body line of an external inline declaration
+            // marks through the class's source map at its store too, like any other line mark.
+            match self.ir.external_frame_lines.get(&declaration).cloned() {
+                Some(frame) => {
+                    let line = self.map_external_frame_line(&frame);
+                    code.mark_line(line);
+                }
+                None => debug_lines::mark_statement(self.ir, declaration, code),
+            }
             let slot = entered
                 .unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand));
             self.unassigned_values.remove(&index);
@@ -126,7 +145,6 @@ impl Emitter<'_> {
             entered.unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand))
         };
         self.slots.insert(index, (slot, slot_ty));
-        self.open_inline_return_frame(declaration, slot, slot_ty);
         // A `lateinit` declaration emits no store, but its lexical debug lifetime still starts here.
         self.open_declared_local(declaration, slot, slot_ty, code);
     }

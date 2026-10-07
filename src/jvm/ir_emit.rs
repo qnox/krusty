@@ -108,6 +108,8 @@ mod interface_compatibility;
 mod intrinsic_probes;
 mod lambda_class;
 pub(super) mod lambda_class_names;
+mod lambda_implementation_placement;
+pub(crate) use lambda_implementation_placement::reparent_lambda_impls;
 mod local_updates;
 mod local_variable_representation;
 mod loop_emission;
@@ -1374,119 +1376,6 @@ fn new_writer_generic(
 /// Emit a whole IR file: the facade class of top-level `static` functions, plus one `.class` per
 /// `IrClass`. Returns `(internal_name, bytes)` for each, or `None` when the IR uses a construct the
 /// JVM backend can't represent (so every emission path skips it rather than miscompiling).
-/// Mark the lambda-argument impls of a MUST-INLINE call (`require`/`check`/`error` — a non-public
-/// `@InlineOnly` callee the backend always splices, never invokes) as `inline_only`, so the standalone
-/// `$lambda$N` method is NOT emitted. It is dead: the message lambda is spliced at the call site, so a
-/// leftover impl would only force a spurious facade class (`OrganizationIdKt` holding a dead
-/// `$lambda$0`) that kotlinc never emits. Safe because a `MustInline` callee is guaranteed spliced (or
-/// the whole file is skipped — then nothing is emitted anyway).
-/// Reparent lambda impl methods into the CLASS whose code emits their `invokedynamic`. An impl is
-/// PRIVATE (kotlinc's placement: same class as the call site), so a cross-class method handle would
-/// throw `IllegalAccessError`. Lowering attaches impls per `cur_class`; this pass covers the code
-/// that reaches a class only later: enum-entry constructor arguments (lowered class-less, emitted in
-/// the enum's `<clinit>`) and suspend-lambda state-machine bodies (moved into the machine class).
-/// Transitive: an impl reparented into a class drags the impls of its own nested lambdas along.
-pub fn reparent_lambda_impls(ir: &mut IrFile) {
-    let mut owned: std::collections::HashSet<u32> = ir
-        .classes
-        .iter()
-        .flat_map(|c| c.methods.iter().copied())
-        .collect();
-    // Impls whose `invokedynamic` (also) emits from FACADE code — facade-owned function bodies and
-    // static initializers — must STAY on the facade: a suspend-lambda state machine SHARES its body
-    // exprs with facade code, so a class walk alone would move an impl the facade still references.
-    let facade_reachable: std::collections::HashSet<u32> = {
-        let mut roots: Vec<crate::ir::ExprId> = Vec::new();
-        for (i, f) in ir.functions.iter().enumerate() {
-            // A lambda IMPL's body emits wherever the impl itself lands (facade or a class), so it
-            // is NOT a facade root — its nested lambdas are marked transitively below only when the
-            // impl is genuinely reachable from real facade code.
-            if !owned.contains(&(i as u32))
-                && f.dispatch_receiver.is_none()
-                && !ir.lambda_own_params_from.contains_key(&(i as u32))
-            {
-                if let Some(b) = f.body {
-                    roots.push(b);
-                }
-            }
-        }
-        for st in &ir.statics {
-            roots.extend(st.init);
-        }
-        let mut out = std::collections::HashSet::new();
-        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut stack = roots;
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            if let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[cur as usize] {
-                if out.insert(*impl_fn) {
-                    // Its nested lambdas emit wherever it does — keep the whole chain facade-side.
-                    if let Some(b) = ir.functions.get(*impl_fn as usize).and_then(|f| f.body) {
-                        stack.push(b);
-                    }
-                }
-            }
-            crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
-        }
-        out
-    };
-    for cid in 0..ir.classes.len() {
-        // Class-context roots whose code emits inside this class: member bodies, the instance
-        // initializer, a companion `<clinit>` body, super arguments, and enum-entry arguments.
-        let c = &ir.classes[cid];
-        let mut roots: Vec<crate::ir::ExprId> = Vec::new();
-        for &fid in &c.methods {
-            if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
-                roots.push(b);
-            }
-        }
-        roots.extend(c.init_body);
-        roots.extend(ir.companion_clinit_body(c.fq_name));
-        roots.extend(c.super_arg_prelude.iter().copied());
-        roots.extend(c.super_args.iter().copied());
-        for sc in &c.secondary_ctors {
-            roots.extend(sc.body);
-            roots.extend(sc.defaults.iter().flatten().copied());
-            roots.extend(sc.delegate_prelude.iter().copied());
-            roots.extend(sc.delegate_args.iter().copied());
-        }
-        for en in &c.enum_entries {
-            roots.extend(en.args.iter().copied());
-        }
-        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut stack = roots;
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            if let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[cur as usize] {
-                let fid = *impl_fn;
-                // Only a free (facade-owned) standalone impl moves; one already owned by a class —
-                // including THIS one — stays. A spliced (inline-only) impl never emits a method.
-                if !owned.contains(&fid)
-                    && !facade_reachable.contains(&fid)
-                    && !ir.inline_only_fns.contains(&fid)
-                    && ir
-                        .functions
-                        .get(fid as usize)
-                        .is_some_and(|f| f.dispatch_receiver.is_none())
-                {
-                    owned.insert(fid);
-                    ir.classes[cid].methods.push(fid);
-                    ir.note_class_method(cid as u32, fid);
-                    // The impl's own body now emits in this class too — walk it for nested lambdas.
-                    if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
-                        stack.push(b);
-                    }
-                }
-            }
-            crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
-        }
-    }
-}
-
 pub(crate) fn emit_all_with_checked_classifiers(
     ir: &IrFile,
     (facade_class, facade): (TypeName, &str),
@@ -4825,6 +4714,7 @@ fn emit_method_inner_with_holder(
     // public accessors for its private callees, so every copy is legal in another class.
     e.export_private_calls =
         ir.inline_fns.contains(&fid) && !ir.method_visibility(fid).is_private();
+    e.finally_markers = ir.inline_fns.contains(&fid);
     // kotlinc's transformer keeps a suspend body's own local names: they name the spills.
     let transformed = env.emit_time_machines.transformed(fid);
     // Suspend lowering does not preserve source-local expression IDs.
@@ -5072,18 +4962,8 @@ fn emit_method_inner_with_holder(
             store(Ty::Int, slot, &mut code);
             (slot, code.bytes.len() as u16)
         });
-    // An emitted inline TEMPLATE opens its body on the function's own body line, which kotlinc
-    // records even when the body's first instruction belongs to a later line: a template's body is
-    // what a call site expands, so both positions are kept. `mark_line_retained` is what lets the
-    // body's own first mark join this one at the same offset instead of replacing it; where the two
-    // agree — the ordinary case — it deduplicates and nothing is added.
-    if inline_marker.is_some() {
-        if let Some(&line) = ir.fn_decl_lines.get(&fid) {
-            if line != 0 {
-                code.mark_line_retained(line);
-            }
-        }
-    }
+    // The marker and the parameter guards carry no line. The method's first entry is the first
+    // statement, or the expression body — kotlinc does not also record the signature line there.
     // Building the machine: everything the discovery pass learned is in hand, so the entry,
     // the dispatch and the state it re-enters can be emitted around the same body.
     let machine_states = match (machine_slots, env.run.machine_plan(fid)) {
@@ -5253,7 +5133,8 @@ fn emit_method_inner_with_holder(
     // Method locals precede `this` and parameters in kotlinc's table order.
     if e.record_locals {
         for local in std::mem::take(&mut e.open_locals) {
-            local.record(None, &mut code);
+            let inline = local.record(None, &mut code, e.recorded_inline_entries);
+            e.recorded_inline_entries += usize::from(inline);
         }
     }
     // Suspend rewriting invalidates source-local expression ids, but its physical parameters remain
@@ -5629,6 +5510,12 @@ struct Emitter<'a> {
     /// This method is a non-private `inline` function. Private calls in it name `access$`
     /// accessors, because the splicer copies these instructions into other classes.
     export_private_calls: bool,
+    /// This method is `inline`, so each copy of a `finally` is bracketed by
+    /// `InlineMarker.finallyStart`/`finallyEnd`.
+    finally_markers: bool,
+    /// How many `finally` bodies are currently being emitted. The marker argument is one more
+    /// than the bodies already open, so the outermost copy is `1`.
+    finally_marker_depth: u32,
     /// Interface companion `$$INSTANCE` self-reads for this class, fixed from `static_owner`.
     self_companion: Option<TypeName>,
     /// Checked classifier declarations: which kind of classifier an operand's type names.
@@ -5647,6 +5534,10 @@ struct Emitter<'a> {
     /// Incoming definite-assignment state by control-flow label. Union is the verifier lattice:
     /// unassigned on any incoming edge means `top` at the merge.
     label_unassigned_values: HashMap<Label, HashSet<u32>>,
+    /// A semantic value carried on the operand stack by every jump to a label. The value becomes
+    /// stack-resident only when that label is bound; intervening handler emission must not consume
+    /// an earlier jump's value.
+    label_stack_resident_values: HashMap<Label, u32>,
     /// Safe-call guards that share one null exit (`a?.b?.c`), by guard `When`: the label, and whether
     /// this guard is the chain's outermost one, which binds it and yields the null result.
     safe_call_null_exits: HashMap<u32, (Label, bool)>,
@@ -5672,8 +5563,8 @@ struct Emitter<'a> {
     /// The suspensions of the function being emitted, by call expression, each with the value
     /// class box its resumption unboxes. Empty for every function whose machine the IR pass owns.
     machine_suspensions: HashMap<u32, Option<(TypeName, Ty)>>,
-    /// Where each inline-return frame emitted so far keeps its result, by the frame's label.
-    inline_return_frame_results: HashMap<String, (u16, Ty)>,
+    /// The deferred result value of each inline-return frame, by the frame's label.
+    inline_return_frame_results: HashMap<String, (u32, Ty)>,
     /// The suspension points kotlinc's coroutine transformer takes, when it takes this function.
     transformed_suspensions: transformed_suspensions::TransformedSuspensions,
     /// The declarations that read a suspend lambda's parameters from their fields, in the
@@ -5681,9 +5572,6 @@ struct Emitter<'a> {
     suspend_lambda_parameter_reads: HashSet<crate::ir::ExprId>,
     /// Function-value invocations whose consumer takes `invoke`'s erased `Object` as it is.
     erased_invocations: HashSet<crate::ir::ExprId>,
-    /// Captured-local declarations whose holder only inlined lambdas capture: see
-    /// `shared_cell_declaration`.
-    inlined_only_cells: HashSet<crate::ir::ExprId>,
     /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
     /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
@@ -5715,6 +5603,9 @@ struct Emitter<'a> {
     /// krusty would otherwise need. Pushed/popped around the branchy RHS in `emit_binop`.
     /// Open source locals, in declaration order.
     open_locals: Vec<block_scope::OpenLocal>,
+    /// How many recorded `LocalVariableTable` entries belong to an inline frame: where a frame
+    /// marker's entry lands depends on the nested entries recorded before it.
+    recorded_inline_entries: usize,
     /// The current lambda body's captures that are literal lambdas it only invokes.
     inline_lambda_aliases: HashMap<u32, inline_lambda_aliases::InlineLambdaAlias>,
     /// Current block nesting depth; the function body is depth 1.
@@ -5788,6 +5679,8 @@ impl<'a> Emitter<'a> {
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
             export_private_calls: false,
+            finally_markers: false,
+            finally_marker_depth: 0,
             classifiers: env.signature_symbols,
             dispatch_classifiers: env.dispatch_classifiers.clone(),
             owner: owner.to_string(),
@@ -5796,6 +5689,7 @@ impl<'a> Emitter<'a> {
             temporaries: backend_temporaries::BackendTemporaries::default(),
             unassigned_values: HashSet::new(),
             label_unassigned_values: HashMap::new(),
+            label_stack_resident_values: HashMap::new(),
             safe_call_null_exits: HashMap::new(),
             stack_resident_value: None,
             safe_call_exit_temporaries: HashMap::new(),
@@ -5809,7 +5703,6 @@ impl<'a> Emitter<'a> {
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::new(),
             erased_invocations: HashSet::new(),
-            inlined_only_cells: HashSet::new(),
             machine_next_ordinal: 0,
             machine_entered: false,
             machine_resumes: Vec::new(),
@@ -5818,6 +5711,7 @@ impl<'a> Emitter<'a> {
             ret,
             loop_stack: Vec::new(),
             open_locals: Vec::new(),
+            recorded_inline_entries: 0,
             inline_lambda_aliases: HashMap::new(),
             block_depth: 0,
             statement_line: None,
@@ -6149,21 +6043,23 @@ impl<'a> Emitter<'a> {
             } => self.emit_local_variable(e, index, ty, init, named, code),
             IrExpr::InlineFrameMarker => self.emit_inline_frame_marker(e, code),
             IrExpr::SetValue { var, value } => {
-                let Some(&(slot, jt)) = self.slots.get(&var) else {
+                let Some(&(_, jt)) = self.slots.get(&var) else {
                     panic!(
                         "malformed IR: assignment target {var} has no allocated JVM slot while emitting {}; known slots: {:?}",
                         self.owner,
                         self.slots.keys().collect::<Vec<_>>()
                     );
                 };
+                let deferred = self.inline_return_frame_result_type(var).is_some();
                 match local_updates::iinc_delta(self.ir, e, var, value, jt) {
-                    Some(delta) => code.iinc(slot, delta),
+                    Some(delta) if !deferred => code.iinc(self.slots[&var].0, delta),
                     _ => {
                         self.emit_value(value, code);
                         // Coerced to the slot's type as the initializer is: a value of another
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back.
                         self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
+                        let slot = self.activate_inline_return_frame_result(var, jt);
                         store(jt, slot, code);
                     }
                 }
@@ -7047,6 +6943,13 @@ impl<'a> Emitter<'a> {
     }
 
     fn bind(&mut self, label: Label, code: &mut CodeBuilder) {
+        let resident = self.label_stack_resident_values.remove(&label);
+        let joins_fallthrough = resident.is_some() && !code.is_dead();
+        if joins_fallthrough {
+            self.run.set_emit_error(
+                "a label joins a stack-carried value with a fallthrough edge".to_string(),
+            );
+        }
         if !code.is_dead() {
             self.label_unassigned_values
                 .entry(label)
@@ -7057,6 +6960,22 @@ impl<'a> Emitter<'a> {
             self.unassigned_values.clone_from(unassigned);
         }
         code.bind(label);
+        // The jump that reaches this label already pushed the result. The linear tracker still
+        // shows the dead path in front of the label (an `athrow` leaves height 0), so the landing
+        // use would load the slot again. A label that does not carry a result leaves whatever
+        // value is already stack-resident: a safe-call receiver can cross an unrelated bind.
+        if let Some(value) = resident {
+            if joins_fallthrough {
+                self.stack_resident_value = None;
+            } else if let Some(words) = self
+                .inline_return_frame_result_type(value)
+                .map(slot_words)
+                .filter(|words| *words > 0)
+            {
+                code.set_stack(words);
+                self.stack_resident_value = Some(value);
+            }
+        }
     }
 
     /// The definitely-assigned semantic locals, as `(slot, type)`.
