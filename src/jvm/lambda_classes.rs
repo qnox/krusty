@@ -464,7 +464,13 @@ pub(super) fn realize(
             }
             continue;
         }
-        match class_shape(ir, fid, every_emitted_root, runtime_reified, class_name) {
+        match class_shape(
+            ir,
+            fid,
+            every_emitted_root,
+            runtime_reified || inline_default,
+            class_name,
+        ) {
             Ok((site, body, captures)) => realize_class(ir, fid, body, &site, signature, &captures),
             Err(shape) => {
                 crate::trace_compiler!(

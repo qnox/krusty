@@ -54,3 +54,24 @@ fn a_private_inline_default_lambda_stays_out_of_the_public_abi() {
         &["InlineDefaultPrivateKt", "InlineDefaultPrivateKt$f$1"],
     );
 }
+
+#[test]
+fn an_inline_default_lambda_can_own_another_lambda() {
+    common::assert_classes_identical_to_kotlinc(
+        "InlineDefaultNestedLambda",
+        r#"inline fun test(
+    block: () -> String = {
+        var result = "O"
+        val append = { result += "K" }
+        append()
+        result
+    },
+) = block()
+"#,
+        &[
+            "InlineDefaultNestedLambdaKt",
+            "InlineDefaultNestedLambdaKt$test$1",
+            "InlineDefaultNestedLambdaKt$test$1$append$1",
+        ],
+    );
+}
