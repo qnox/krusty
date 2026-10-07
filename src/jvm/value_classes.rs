@@ -2303,6 +2303,12 @@ pub(crate) fn lower_value_classes(
                 owner,
                 result,
             }) => {
+                // The checked expression retains the applied property result (`R<Int>.a: Int`),
+                // while `result` is the declaration result (`T`). Capture the applied identity
+                // before publishing the declaration shape below: the JVM wrapper carried by an
+                // erased generic slot is selected by the applied primitive, not by spelling or by
+                // re-inferring a substitution after this boundary.
+                let applied_result = ir.logical_types.get(&id).copied().unwrap_or(result);
                 sole_property_coercions.insert(id);
                 ir.logical_types.insert(id, result);
                 if let Repr::Unboxed(nested) = repr_of_ty(&result, &under) {
@@ -2335,7 +2341,7 @@ pub(crate) fn lower_value_classes(
                 // type alone. Unsigned and user value classes deliberately do not have a
                 // `jvm_boxed_ref`: their boxes must first be unboxed to their semantic carrier.
                 if property_has_erased_generic_slot(owner, &under)
-                    && result
+                    && applied_result
                         .non_null()
                         .canonical_semantic()
                         .jvm_boxed_ref()
