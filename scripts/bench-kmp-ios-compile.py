@@ -3,12 +3,13 @@
 
 The articles time an iOS app build (xcodebuild, and for Kotlin a Gradle framework
 link before that). This script times the compilers themselves on the sources that
-harness generates: a clean compile of N files, then the same compile after one
-generated file changes. Each figure is the median of three trials after one warmup.
+harness generates: a clean compile of N files, then a rebuild of that same tree
+after one generated file changes. Each figure is the median of three trials after
+one warmup.
 
-krusty and kotlinc recompile every file they are given. swiftc is asked for
-`-incremental` on the second invocation, with an output file map, so it can
-rebuild only the edited file.
+krusty and kotlinc perform a full rebuild after the edit. swiftc is asked for
+`-incremental` on the second invocation, with an output file map, so it can rebuild
+only the edited file. The report labels these different compilation models explicitly.
 """
 
 from __future__ import annotations
@@ -50,6 +51,10 @@ class Bench:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.env = os.environ.copy()
+        # The selected compiler distribution owns both stdlib and reflect. Derive krusty's
+        # distribution from the exact kotlinc executable being benchmarked instead of relying on
+        # an unrelated ambient installation.
+        self.env["KRUSTY_KOTLINC"] = str(Path(args.kotlinc).resolve())
         self.gen = load_generator(Path(args.generator))
         self.root = Path(args.work)
         if self.root.exists():
@@ -142,23 +147,46 @@ class Bench:
         objects = sum(1 for _ in out.glob("*.o"))
         return code, elapsed, tail, objects
 
-    def kotlin_trials(self, count: int, label: str, compile, incremental: bool) -> tuple[list[float], int]:
-        times: list[float] = []
+    def kotlin_trials(
+        self, count: int, label: str, compile
+    ) -> tuple[list[float], list[float], int]:
+        clean_times: list[float] = []
+        rebuild_times: list[float] = []
         produced = 0
         for index in range(4):
             src = self.kotlin_sources(count)
-            if incremental:
-                self.edit_kotlin(src)
             out = self.root / f"out-{label}-{count}"
             code, elapsed, tail, produced = compile(src, out)
             kind = "warmup" if index == 0 else f"trial {index}"
-            print(f"  {label} {count} {kind}: {elapsed:.3f}s classes={produced} exit={code}", flush=True)
+            print(
+                f"  {label} clean {count} {kind}: {elapsed:.3f}s "
+                f"classes={produced} exit={code}",
+                flush=True,
+            )
             if code != 0:
                 print(tail)
-                raise SystemExit(f"{label} failed")
+                raise SystemExit(f"{label} clean compile failed")
             if index > 0:
-                times.append(elapsed)
-        return times, produced
+                clean_times.append(elapsed)
+
+            self.edit_kotlin(src)
+            code, elapsed, tail, rebuilt = compile(src, out)
+            print(
+                f"  {label} full rebuild after edit {count} {kind}: {elapsed:.3f}s "
+                f"classes={rebuilt} exit={code}",
+                flush=True,
+            )
+            if code != 0:
+                print(tail)
+                raise SystemExit(f"{label} rebuild after edit failed")
+            if rebuilt != produced:
+                raise SystemExit(
+                    f"{label} class count changed after edit at {count}: "
+                    f"clean {produced}, rebuilt {rebuilt}"
+                )
+            if index > 0:
+                rebuild_times.append(elapsed)
+        return clean_times, rebuild_times, produced
 
     def swift_trials(self, count: int) -> tuple[list[float], list[float], int]:
         clean_times: list[float] = []
@@ -193,22 +221,16 @@ class Bench:
     def measure(self, counts: list[int]) -> None:
         for count in counts:
             print(f"\n== {count} files ==", flush=True)
-            krusty_clean, krusty_classes = self.kotlin_trials(
-                count, "krusty-clean", self.compile_krusty, incremental=False
+            krusty_clean, krusty_rebuild, krusty_classes = self.kotlin_trials(
+                count, "krusty", self.compile_krusty
             )
-            kotlinc_clean, kotlinc_classes = self.kotlin_trials(
-                count, "kotlinc-clean", self.compile_kotlinc, incremental=False
+            kotlinc_clean, kotlinc_rebuild, kotlinc_classes = self.kotlin_trials(
+                count, "kotlinc", self.compile_kotlinc
             )
             if krusty_classes != kotlinc_classes:
                 raise SystemExit(
                     f"class count mismatch at {count}: krusty {krusty_classes}, kotlinc {kotlinc_classes}"
                 )
-            krusty_inc, _ = self.kotlin_trials(
-                count, "krusty-incremental", self.compile_krusty, incremental=True
-            )
-            kotlinc_inc, _ = self.kotlin_trials(
-                count, "kotlinc-incremental", self.compile_kotlinc, incremental=True
-            )
             swift_clean, swift_inc, swift_objects = self.swift_trials(count)
             self.rows.append(
                 {
@@ -216,8 +238,8 @@ class Bench:
                     "krusty_clean_s": median(krusty_clean),
                     "kotlinc_clean_s": median(kotlinc_clean),
                     "swift_clean_s": median(swift_clean),
-                    "krusty_incremental_s": median(krusty_inc),
-                    "kotlinc_incremental_s": median(kotlinc_inc),
+                    "krusty_rebuild_s": median(krusty_rebuild),
+                    "kotlinc_rebuild_s": median(kotlinc_rebuild),
                     "swift_incremental_s": median(swift_inc),
                     "classes": krusty_classes,
                     "swift_objects": swift_objects,
@@ -226,13 +248,13 @@ class Bench:
 
     def report(self) -> str:
         lines = [
-            "| Files | krusty clean | kotlinc clean | swiftc clean | krusty one-line | kotlinc one-line | swiftc one-line |",
-            "|------:|-------------:|--------------:|-------------:|----------------:|-----------------:|----------------:|",
+            "| Files | krusty clean | kotlinc clean | swiftc clean | krusty full rebuild after edit | kotlinc full rebuild after edit | swiftc incremental after edit |",
+            "|------:|-------------:|--------------:|-------------:|-------------------------------:|--------------------------------:|------------------------------:|",
         ]
         for row in self.rows:
             lines.append(
                 "| {files} | {krusty_clean_s:.2f}s | {kotlinc_clean_s:.2f}s | {swift_clean_s:.2f}s "
-                "| {krusty_incremental_s:.2f}s | {kotlinc_incremental_s:.2f}s | {swift_incremental_s:.2f}s |".format(
+                "| {krusty_rebuild_s:.2f}s | {kotlinc_rebuild_s:.2f}s | {swift_incremental_s:.2f}s |".format(
                     **row
                 )
             )

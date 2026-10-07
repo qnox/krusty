@@ -8,14 +8,16 @@ on:
     paths:
       - .github/workflows/macos-compile-bench.yml
       - scripts/bench-kmp-ios-compile.py
+      - scripts/tests/test_bench_kmp_ios_compile.py
+      - src/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
   workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: macos-compile-bench-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   bench:
@@ -54,9 +56,8 @@ jobs:
           chmod +x "$dest/kotlinc/bin/"*
           echo "KOTLINC=$dest/kotlinc/bin/kotlinc" >> "$GITHUB_ENV"
           echo "KOTLIN_STDLIB=$dest/kotlinc/lib/kotlin-stdlib.jar" >> "$GITHUB_ENV"
-          # krusty loads kotlin-stdlib and kotlin-reflect from the distribution named by
-          # KRUSTY_KOTLINC. The bench's -cp jar is not that distribution.
-          echo "KRUSTY_KOTLINC=$dest/kotlinc/bin/kotlinc" >> "$GITHUB_ENV"
+      - name: test benchmark orchestration
+        run: python3 -m unittest scripts/tests/test_bench_kmp_ios_compile.py
       - name: fetch the benchmark generator
         run: |
           set -euo pipefail
