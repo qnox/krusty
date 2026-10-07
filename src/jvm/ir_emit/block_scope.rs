@@ -569,6 +569,10 @@ pub(super) struct OpenLocal {
     pub(super) inline_frame: Option<u64>,
     /// Whether this entry is the marker that opens `inline_frame`.
     pub(super) opens_inline_frame: bool,
+    /// A lambda marker is listed ahead of locals its body already recorded. A function marker
+    /// follows locals of its frame whose ranges ended before the marker. A local that ends with
+    /// the marker stays after `$i$f$`, and operands still open are recorded after it.
+    pub(super) precedes_recorded_locals: bool,
     /// Where the range ends when that is before its block does: a `do…while` body's local that the
     /// condition does not read ends where the condition starts.
     pub(super) explicit_end: Option<u16>,
@@ -583,7 +587,7 @@ impl OpenLocal {
             let frame = self
                 .inline_frame
                 .expect("an inline frame marker has a frame identity");
-            code.insert_inline_frame_marker(frame, entry);
+            code.insert_inline_frame_marker(frame, self.precedes_recorded_locals, entry);
         } else if let Some(frame) = self.inline_frame {
             code.add_inline_frame_local(frame, entry);
         } else {

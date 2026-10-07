@@ -166,6 +166,10 @@ impl Emitter<'_> {
         }
         let provenance = self.ir.debug_local_provenance(declaration);
         let marker = provenance.is_some_and(crate::ir::IrDebugLocalProvenance::is_inline_marker);
+        let precedes_recorded_locals = matches!(
+            provenance,
+            Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker { .. })
+        );
         let inline_operand = match provenance {
             Some(crate::ir::IrDebugLocalProvenance::InlineValue { .. }) => {
                 self.ir.call_operand_bindings.contains(&declaration)
@@ -203,6 +207,7 @@ impl Emitter<'_> {
             inline_operand,
             inline_frame,
             opens_inline_frame: marker,
+            precedes_recorded_locals,
             explicit_end: None,
         };
         // kotlinc lists an inline frame's marker ahead of the locals binding that frame's operands,
