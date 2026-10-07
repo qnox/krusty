@@ -36,7 +36,7 @@ pub(super) fn emit_lambda_class(
         cw.set_signature(signature);
     }
     cw.set_access(0x0010 | 0x0020 | u16::from(lambda.public_inline)); // FINAL | SUPER | publication
-    let inline_default = lambda.inline_default_of;
+    let inline_default = crate::jvm::lambda_classes::inline_default_owner(ir, lambda.invoke);
     if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
         let method = inline_default
             .map(|function| super::method_defaults::default_stub_method(ir, function, &owner))

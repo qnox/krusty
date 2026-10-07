@@ -307,6 +307,23 @@ fn inline_function_default_lambda(ir: &IrFile, fid: FunId) -> bool {
     inline_default_owner(ir, fid).is_some()
 }
 
+/// Whether `function` declares a default lambda that its JVM `$default` stub must materialize.
+/// This is derived at the JVM boundary from the checked default expression and lambda identity;
+/// common IR does not carry `$default` or `EnclosingMethod` policy.
+pub(in crate::jvm) fn has_inline_default_lambda(ir: &IrFile, function: FunId) -> bool {
+    ir.inline_fns.contains(&function)
+        && ir
+            .fn_params
+            .get(&function)
+            .and_then(|info| info.defaults.as_ref())
+            .is_some_and(|defaults| {
+                defaults
+                    .iter()
+                    .flatten()
+                    .any(|&expression| default_expression_lambda(ir, expression).is_some())
+            })
+}
+
 /// The lambda a default expression materializes, if it is one.
 fn default_expression_lambda(ir: &IrFile, expression: ExprId) -> Option<FunId> {
     match ir.exprs.get(expression as usize) {
@@ -836,12 +853,11 @@ fn declare_class(
             capture_identity: None,
         });
     }
-    let inline_default_of = inline_default_owner(ir, fid);
+    let inline_default = inline_default_owner(ir, fid).is_some();
     class.lambda = Some(crate::ir::IrLambdaClass {
         // The class is constructed from other packages: a public `inline` caller inlines the
         // default, and a private one still crosses packages inside the module.
-        public_inline: inline_default_of.is_some(),
-        inline_default_of,
+        public_inline: inline_default,
         invoke: fid,
         function_type: site.function_type,
         raw_supertype: raw_supertype(ir, fid, signature),
@@ -1008,7 +1024,6 @@ mod method_domain_tests {
         let mut closure = crate::ir::IrClass::synthetic(crate::types::type_name("Closure"));
         closure.lambda = Some(crate::ir::IrLambdaClass {
             public_inline: false,
-            inline_default_of: None,
             invoke: 3,
             function_type: Ty::fun(vec![], Ty::Unit),
             raw_supertype: false,

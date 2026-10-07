@@ -17,9 +17,6 @@ use super::*;
 pub struct IrLambdaClass {
     /// A checked public inline declaration exposes this closure to callers in other packages.
     pub public_inline: bool,
-    /// The `inline` function whose default argument this class materializes. The `$default`
-    /// stub is its `EnclosingMethod`.
-    pub inline_default_of: Option<FunId>,
     pub invoke: FunId,
     /// The lambda's function type: the class's `FunctionN` and its generic supertype.
     pub function_type: Ty,

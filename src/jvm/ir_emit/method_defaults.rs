@@ -516,11 +516,11 @@ pub(super) fn emit_facade_default_stub(
         marker,
     );
     let _ = emitter.lease_temporary(marker_slot, marker);
-    let inline = ir.inline_fns.contains(&fid);
+    let inline_default = crate::jvm::lambda_classes::has_inline_default_lambda(ir, fid);
     let mut code = CodeBuilder::new(emitter.frame.size());
     // The stub's first line is the signature. The function method itself does not record that
     // line: its table opens on the body, after the inline-depth marker.
-    if inline {
+    if inline_default {
         if let Some(&line) = ir
             .fn_sig_lines
             .get(&fid)
@@ -540,9 +540,9 @@ pub(super) fn emit_facade_default_stub(
     let reified_body = function
         .body
         .filter(|&body| body_has_reified_markers(ir, body));
-    let inline_body = function.body.filter(|_| inline);
+    let inline_body = function.body.filter(|_| inline_default);
     if let Some(body) = inline_body.or(reified_body) {
-        let inline_marker = inline.then(|| {
+        let inline_marker = inline_default.then(|| {
             // The mask and marker parameters sit in the slots the body reuses. The default
             // prefix has already recorded its stack map against the method's entry locals, so
             // the frame cursor can return to the first of those slots. kotlinc's `$i$f$` marker
@@ -559,7 +559,7 @@ pub(super) fn emit_facade_default_stub(
                 (slot, code.bytes.len() as u16)
             })
         });
-        if inline {
+        if inline_default {
             // The signature line is already in effect at pc 0. The body restates that same line
             // on the expression after the inline-depth marker.
             code.forget_line();
@@ -611,7 +611,7 @@ pub(super) fn emit_facade_default_stub(
     );
     // An inline stub keeps the lines its body marked. Replacing them with the signature line
     // would drop the expression entry kotlinc records after the inline-depth marker.
-    if !inline {
+    if !inline_default {
         if let Some(&line) = ir
             .fn_sig_lines
             .get(&fid)
