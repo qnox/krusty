@@ -508,7 +508,7 @@ fn java_enum_constant_is_not_a_platform_value() {
 /// non-null parameter is guarded; a type parameter that admits null is not.
 const CONSTRUCTOR_DELEGATION: &str = r#"
 class Named(val text: String) {
-    constructor(key: String) : this(System.getenv(key))
+    constructor(key: String, marker: Int) : this(System.getenv(key))
 }
 
 class Entry(val path: java.nio.file.Path) {
@@ -526,7 +526,7 @@ class Box<T>(val value: T) {
 
 fun box(): String {
     try {
-        Named("KRUSTY_ABSENT_CTOR")
+        Named("KRUSTY_ABSENT_CTOR", 0)
         return "missing"
     } catch (e: NullPointerException) {
         val message = e.message
