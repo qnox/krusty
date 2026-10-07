@@ -326,6 +326,37 @@ fn declared_within(declaring: &HashMap<String, String>, class: &str, ancestor: &
     false
 }
 
+/// kotlinc's `fqNameWhenAvailable` of each row's class: from `paths` for a class declared in
+/// executable code, otherwise its outer class's name and its own simple name, or the dotted
+/// internal name of a top-level class.
+fn qualified_names(rows: &[InnerClassSpec], paths: &HashMap<String, String>) -> Vec<String> {
+    fn name(
+        inner: &str,
+        rows: &HashMap<&str, &InnerClassSpec>,
+        paths: &HashMap<String, String>,
+        depth: usize,
+    ) -> String {
+        if let Some(path) = paths.get(inner) {
+            return path.clone();
+        }
+        match rows.get(inner) {
+            Some(InnerClassSpec {
+                outer: Some(outer),
+                name: Some(simple),
+                ..
+            }) if depth < rows.len() => {
+                format!("{}.{simple}", name(outer, rows, paths, depth + 1))
+            }
+            _ => inner.replace('/', "."),
+        }
+    }
+    let by_inner: HashMap<&str, &InnerClassSpec> =
+        rows.iter().map(|row| (row.inner.as_str(), row)).collect();
+    rows.iter()
+        .map(|row| name(&row.inner, &by_inner, paths, 0))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,35 +404,4 @@ mod tests {
         let inners: Vec<_> = rows.iter().map(|(_, _, row)| row.inner.as_str()).collect();
         assert_eq!(inners, ["Facade$call$1", "Facade$call$1$1"]);
     }
-}
-
-/// kotlinc's `fqNameWhenAvailable` of each row's class: from `paths` for a class declared in
-/// executable code, otherwise its outer class's name and its own simple name, or the dotted
-/// internal name of a top-level class.
-fn qualified_names(rows: &[InnerClassSpec], paths: &HashMap<String, String>) -> Vec<String> {
-    fn name(
-        inner: &str,
-        rows: &HashMap<&str, &InnerClassSpec>,
-        paths: &HashMap<String, String>,
-        depth: usize,
-    ) -> String {
-        if let Some(path) = paths.get(inner) {
-            return path.clone();
-        }
-        match rows.get(inner) {
-            Some(InnerClassSpec {
-                outer: Some(outer),
-                name: Some(simple),
-                ..
-            }) if depth < rows.len() => {
-                format!("{}.{simple}", name(outer, rows, paths, depth + 1))
-            }
-            _ => inner.replace('/', "."),
-        }
-    }
-    let by_inner: HashMap<&str, &InnerClassSpec> =
-        rows.iter().map(|row| (row.inner.as_str(), row)).collect();
-    rows.iter()
-        .map(|row| name(&row.inner, &by_inner, paths, 0))
-        .collect()
 }

@@ -875,9 +875,7 @@ impl ActiveSourceDeclarations {
                 // classes that this unit had already bound, so a foreign id returned no overlay
                 // instead of indexing off the end of this arena.
                 let class = DeclId(owner);
-                if file.decl_arena.get(class.0 as usize).is_none() {
-                    return None;
-                }
+                file.decl_arena.get(class.0 as usize)?;
                 let primary = class_decl(file, class).map_or(0, |class| class.props.len());
                 let index = u32::try_from((property as usize).checked_sub(primary)?)
                     .expect("a class-body property index fits in a declaration sibling");

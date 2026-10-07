@@ -248,7 +248,8 @@ use integer_constants::{
 };
 use lambda_expectation::{
     functional_argument_expectation, module_member_lambda_shape, shaped_argument_inlining,
-    written_inline_modifier, FunctionalArgumentExpectation, MemberLambdaShape,
+    written_inline_modifier, FunctionalArgumentExpectation, LambdaArgumentContext,
+    MemberLambdaShape,
 };
 pub use lambda_returns::ReturnTarget;
 use lambda_returns::{call_implicit_lambda_label, LambdaResultConstraint, LambdaReturnScopes};
@@ -48186,8 +48187,7 @@ impl<'a> Checker<'a> {
                     declared,
                     argument,
                     actual,
-                    has_receiver,
-                    None,
+                    LambdaArgumentContext::new(has_receiver, None),
                 );
                 continue;
             }
@@ -48217,8 +48217,7 @@ impl<'a> Checker<'a> {
                 declared,
                 argument,
                 self.expr_types[argument.0 as usize],
-                false,
-                None,
+                LambdaArgumentContext::default(),
             );
         }
         self.resolved_ctor_delegations
@@ -54528,8 +54527,7 @@ impl<'a> Checker<'a> {
                                         declared,
                                         arg,
                                         actual,
-                                        has_receiver,
-                                        label.as_deref(),
+                                        LambdaArgumentContext::new(has_receiver, label.as_deref()),
                                     );
                                 }
                                 c.suppress_receiver_capture_accounting = previous_capture_accounting;
@@ -56468,7 +56466,8 @@ impl<'a> Checker<'a> {
         argument: ExprId,
         actual: Ty,
     ) {
-        self.expect_call_arg_labeled(scope, expected, expected, argument, actual, false, None);
+        let lambda = LambdaArgumentContext::default();
+        self.expect_call_arg_labeled(scope, expected, expected, argument, actual, lambda);
     }
 
     /// `declared` is the selected parameter's own type, before the call's type variables are
@@ -56481,8 +56480,7 @@ impl<'a> Checker<'a> {
         declared: Ty,
         argument: ExprId,
         actual: Ty,
-        lambda_has_receiver: bool,
-        implicit_lambda_label: Option<&str>,
+        lambda: LambdaArgumentContext<'_>,
     ) {
         // Some selected call paths validate their arguments directly rather than through
         // `selected_argument_type` (notably source constructors). Once selection supplies a
@@ -56514,8 +56512,8 @@ impl<'a> Checker<'a> {
                 scope,
                 argument,
                 expected,
-                lambda_has_receiver,
-                implicit_lambda_label,
+                lambda.has_receiver,
+                lambda.implicit_label,
             )
         } else if self.conditional_branches_admit_expected(argument, expected) {
             self.expr_expected(scope, argument, expected)
@@ -56625,7 +56623,7 @@ impl<'a> Checker<'a> {
                         scope,
                         argument,
                         &sam.params,
-                        implicit_lambda_label,
+                        lambda.implicit_label,
                     );
                     if let Some(conversion) =
                         self.sam_conversion_record(scope, argument, actual, sam)
@@ -57323,8 +57321,7 @@ impl<'a> Checker<'a> {
                 declared,
                 argument,
                 actual,
-                has_receiver,
-                None,
+                LambdaArgumentContext::new(has_receiver, None),
             );
         }
         for (index, binding) in bindings.iter_mut().enumerate() {

@@ -7,6 +7,23 @@ use super::{
     ContextualCallShape, GenericMemberPlan,
 };
 
+/// What a selected parameter supplies to a lambda argument besides its function type: whether the
+/// lambda's first parameter becomes an implicit receiver, and the implicit label naming it.
+#[derive(Clone, Copy, Default)]
+pub(super) struct LambdaArgumentContext<'l> {
+    pub(super) has_receiver: bool,
+    pub(super) implicit_label: Option<&'l str>,
+}
+
+impl<'l> LambdaArgumentContext<'l> {
+    pub(super) fn new(has_receiver: bool, implicit_label: Option<&'l str>) -> Self {
+        Self {
+            has_receiver,
+            implicit_label,
+        }
+    }
+}
+
 /// Contextual lambda shapes supplied by one selected module member, in source-argument order.
 pub(super) struct MemberLambdaShape {
     pub(super) param_types: Vec<Option<Vec<Ty>>>,
