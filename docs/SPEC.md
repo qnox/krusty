@@ -3935,6 +3935,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `getProgressionLastElement`'s unsigned argument coercions are not calls. The counted-loop lowering
   records those nodes as `SyntheticOriginKind::InlinedCall`; the JVM emitter applies the rule.
   `tests/unsigned_loop_lines_e2e.rs` (full-byte against kotlinc).
+- **A local stores an inlined generic result on the call's line.** The inlined body forgets the
+  caller's line, and kotlinc's `visitVariable` marks the declaration before it narrows the erased
+  result, so the `checkcast` starts that line and the store does not open another entry.
+  A repository-owned inline function returning its custom generic member's erased result, both as
+  a returned local and as the next call's argument, covers that shape without a stdlib-name path.
+  An unsigned bitwise initializer still forgets after its carrier conversion; its store remains
+  the mark that follows. `tests/inlined_result_narrow_line_e2e.rs`.
 - **`LocalVariableTable` for regular function bodies**: block locals end at block exit; method
   locals, `this`, and parameters span to method end. Parsed non-suspend functions record source
   local names through `IrFile::value_names`; synthesized and suspend methods retain their existing
