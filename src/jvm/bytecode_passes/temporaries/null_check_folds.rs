@@ -18,27 +18,19 @@
 //! leave jumps to them alone, where kotlinc would have a line number in between.
 //!
 //! A throwing selector is the other way that rule loses. Constant-condition elimination runs first
-//! on a method that has both an `int` jump and an `int` constant, and it deletes the unreachable
-//! continuation after `athrow` while keeping the labels that stood in it. The label immediately
-//! before the `ifnull` target then falls through, so the fold does not run and the receiver stays
-//! in its temporary (`astore; aload; ifnull; aload`). Class-file reading merges labels that share
-//! an offset, which leaves `athrow` as the previous instruction; the elimination's own gate is
-//! what records that those labels were there. Without the gate the dead `goto` in front of the
-//! target survives, and the fold still runs.
+//! and can delete the unreachable continuation after `athrow` while retaining the label that stood
+//! in it. That exact label, passed on as provenance by the earlier pass, stands before the
+//! `ifnull` target and defeats the adjacency match, so the receiver stays in its temporary.
 
 use std::collections::BTreeSet;
 
 use super::super::insn_list::NodeId;
-use super::super::opcodes::{ATHROW, BIPUSH, ICONST_5, ICONST_M1, IFEQ, IFLE, IF_ICMPEQ, SIPUSH};
 use super::adjacency::Body;
 use super::shapes::{
-    ends_flow, is_op, is_swappable, loads_reference, null_jump, var_op, Kind, VarOp, DUP,
-    IFNONNULL, IFNULL, POP, SWAP,
+    ends_flow, is_swappable, loads_reference, null_jump, var_op, Kind, VarOp, DUP, IFNONNULL,
+    IFNULL, POP, SWAP,
 };
-use crate::jvm::method_node::{Constant, Insn, LabelId, MethodNode, Node};
-
-/// `if_icmple`, the last `if_icmp<cond>`. `opcodes` publishes the first two of that range.
-const IF_ICMPLE: u8 = 0xa4;
+use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
 
 /// Same 50 MiB-by-method complexity ceiling as kotlinc's optimizer. The product is deliberately
 /// conservative for this representation: a slot/store analysis cell is larger than one byte.
@@ -121,51 +113,12 @@ fn only_jumps_to(body: &Body, target: LabelId) -> Option<(NodeId, Vec<NodeId>)> 
     Some((start, jumps))
 }
 
-/// Whether `insn` is an `int` conditional jump (`ifeq`…`ifle`, `if_icmpeq`…`if_icmple`).
-fn is_int_jump(insn: &Insn) -> bool {
-    match insn {
-        Insn::Jump { op, .. } => (IFEQ..=IFLE).contains(op) || (IF_ICMPEQ..=IF_ICMPLE).contains(op),
-        _ => false,
-    }
-}
-
-/// Whether `insn` pushes an `int` constant, as kotlinc's `isIntConst` decides it.
-fn is_int_constant(insn: &Insn) -> bool {
-    match insn {
-        Insn::Op(op) if (ICONST_M1..=ICONST_5).contains(op) => true,
-        Insn::Int {
-            op: BIPUSH | SIPUSH,
-            ..
-        } => true,
-        Insn::Ldc(Constant::Int(_)) => true,
-        _ => false,
-    }
-}
-
-/// kotlinc's `hasOptimizableConditions`: constant-condition elimination runs on this body.
-fn constant_condition_elimination_runs(body: &Body) -> bool {
-    let insns = body.instructions();
-    insns.iter().any(|&id| is_int_jump(body.insn(id)))
-        && insns.iter().any(|&id| is_int_constant(body.insn(id)))
-}
-
-/// `athrow` is the instruction in front of `start`, in a method constant-condition elimination
-/// rewrites.
-///
-/// That pass deletes everything unreachable after the `athrow` except labels. The label it leaves
-/// immediately before an `ifnull` target is a fall-through predecessor, so
-/// `simplifyKnownSafeCallPatterns` does not fold the check. The written class merges that label
-/// with the target, and the body read back has the `athrow` where the label stood.
-fn athrow_leaves_label_predecessor(body: &Body, start: NodeId) -> bool {
-    constant_condition_elimination_runs(body)
-        && body
-            .prev_insn(start)
-            .is_some_and(|prev| is_op(body.insn(prev), ATHROW))
-}
-
 /// Fold every null check whose value the path after it loads again; `None` when a check kotlinc
 /// could fold was not proven foldable here, and the method then keeps every check as it was.
-pub(super) fn fold(body: &mut Body) -> Option<Folds> {
+pub(super) fn fold(
+    body: &mut Body,
+    preserved_unreachable_labels: &BTreeSet<LabelId>,
+) -> Option<Folds> {
     let loads: Vec<NodeId> = body
         .instructions()
         .into_iter()
@@ -225,16 +178,17 @@ pub(super) fn fold(body: &mut Body) -> Option<Folds> {
         // `ifnull`: every jump to the target's label checks a local and reloads it on the
         // fall-through. Of the labels standing there, one before it is a predecessor that is not
         // such a jump; one after it is not a predecessor at all, and lands after the `pop`.
-        // Constant-condition elimination has already turned the unreachable continuation after
-        // `athrow` into such a label; the class file no longer shows the label separately.
-        if athrow_leaves_label_predecessor(body, start) {
-            continue;
-        }
         let standing = body.labels_before(start);
         let rank = |label: &LabelId| standing.iter().position(|other| other == label);
         let Some(own) = rank(&target) else {
             continue;
         };
+        if standing[..own]
+            .iter()
+            .any(|label| preserved_unreachable_labels.contains(label))
+        {
+            continue;
+        }
         let mut to_own = Vec::new();
         let mut foreign = false;
         for &other in &jumps {
@@ -288,10 +242,10 @@ pub(super) fn fold(body: &mut Body) -> Option<Folds> {
     // transformation. If a candidate kotlinc's matcher could still rewrite was not proven foldable,
     // keep the method as it was. One its matcher cannot match stays as it is in kotlinc too.
     let remaining = body.instructions();
-    if remaining
-        .iter()
-        .any(|&load| candidate(body, load).is_some() && kotlinc_could_rewrite(body, load))
-    {
+    if remaining.iter().any(|&load| {
+        candidate(body, load).is_some()
+            && kotlinc_could_rewrite(body, load, preserved_unreachable_labels)
+    }) {
         return None;
     }
     Some(folds)
@@ -309,7 +263,11 @@ pub(super) fn fold(body: &mut Body) -> Option<Folds> {
 /// rewrite accepts. Only a protected range's bound is reached by no predecessor of its own, so
 /// one at the target's own label answers that kotlinc could, keeping the caller conservative; one
 /// that stood past an instruction the cleanups removed since is at another label in kotlinc.
-fn kotlinc_could_rewrite(body: &Body, load: NodeId) -> bool {
+fn kotlinc_could_rewrite(
+    body: &Body,
+    load: NodeId,
+    preserved_unreachable_labels: &BTreeSet<LabelId>,
+) -> bool {
     let part = |jump: NodeId| {
         let Some(checked) = body.prev_insn(jump) else {
             return false;
@@ -342,8 +300,17 @@ fn kotlinc_could_rewrite(body: &Body, load: NodeId) -> bool {
     let Some((start, jumps)) = only_jumps_to(body, target) else {
         return body.protected_bound_at(target);
     };
-    if op == IFNULL && athrow_leaves_label_predecessor(body, start) {
-        return false;
+    if op == IFNULL {
+        let standing = body.labels_before(start);
+        let Some(own) = standing.iter().position(|label| *label == target) else {
+            return false;
+        };
+        if standing[..own]
+            .iter()
+            .any(|label| preserved_unreachable_labels.contains(label))
+        {
+            return false;
+        }
     }
     if op == IFNONNULL {
         jumps == [jump] && part(jump)

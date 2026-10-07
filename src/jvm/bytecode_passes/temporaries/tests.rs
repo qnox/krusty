@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::null_check_folds::{analysis_within_limit, ANALYSIS_COMPLEXITY_LIMIT};
 use super::shapes::is_expression_null_check;
@@ -186,7 +186,7 @@ impl Code {
     /// The rewritten instructions, or `None` when the pass declined and left the body alone.
     fn run(mut self) -> Option<Vec<Insn>> {
         let before = self.method.clone();
-        let outcome = eliminate(&mut self.method);
+        let outcome = eliminate(&mut self.method, &BTreeSet::new());
         if outcome.is_none() {
             assert_eq!(
                 self.method, before,
@@ -198,7 +198,15 @@ impl Code {
 
     /// The instructions left, whether or not the pass itself changed anything.
     fn run_after_earlier_passes(mut self) -> Vec<Insn> {
-        eliminate(&mut self.method);
+        eliminate(&mut self.method, &BTreeSet::new());
+        self.method.instructions().cloned().collect()
+    }
+
+    /// Run with the exact labels a preceding constant-condition pass retained while deleting
+    /// unreachable instructions.
+    fn run_with_preserved_labels(mut self, at: &[usize]) -> Vec<Insn> {
+        let labels = at.iter().map(|&index| self.labels[index]).collect();
+        eliminate(&mut self.method, &labels);
         self.method.instructions().cloned().collect()
     }
 }
@@ -773,24 +781,34 @@ fn null_checks_sharing_a_target_all_keep_their_values() {
 }
 
 #[test]
-fn an_athrow_after_an_int_jump_keeps_the_safe_call_temporary() {
-    // Constant-condition elimination has run: the labels it left in front of the `ifnull`
-    // target are gone from the class file, and `athrow` is the previous instruction. kotlinc
-    // still refuses the fold.
+fn a_preserved_unreachable_label_keeps_the_safe_call_temporary() {
+    // Constant-condition elimination deleted the unreachable `goto` after `athrow` but retained
+    // its label immediately before the `ifnull` target. That exact boundary defeats the fold.
     let insns = [
         op(ICONST_0),
         jump(IFEQ, 2),
         aload(0),
         astore(1),
         aload(1),
-        jump(IFNULL, 8),
+        jump(IFNULL, 9),
+        aload(1),
+        op(ATHROW),
+        jump(GOTO, 9),
+        op(RETURN),
+    ];
+    let code = Code::new(&insns).without(&[8]);
+    let expected = code.insns(&[
+        op(ICONST_0),
+        jump(IFEQ, 2),
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 9),
         aload(1),
         op(ATHROW),
         op(RETURN),
-    ];
-    let code = Code::new(&insns);
-    let expected = code.insns(&insns);
-    assert_eq!(code.run_after_earlier_passes(), expected);
+    ]);
+    assert_eq!(code.run_with_preserved_labels(&[8]), expected);
 }
 
 #[test]
@@ -872,7 +890,7 @@ fn a_live_continuation_still_folds_when_the_method_has_an_int_jump() {
 
 #[test]
 fn keeping_the_throwing_safe_call_still_folds_another_temporary() {
-    let code = Code::new(&[
+    let insns = [
         op(ICONST_0),
         jump(IFEQ, 2),
         aload(0),
@@ -883,11 +901,13 @@ fn keeping_the_throwing_safe_call_still_folds_another_temporary() {
         aload(1),
         astore(2),
         aload(2),
-        jump(IFNULL, 13),
+        jump(IFNULL, 14),
         aload(2),
         op(ATHROW),
+        jump(GOTO, 14),
         op(RETURN),
-    ]);
+    ];
+    let code = Code::new(&insns).without(&[13]);
     let expected = code.insns(&[
         op(ICONST_0),
         jump(IFEQ, 2),
@@ -897,12 +917,12 @@ fn keeping_the_throwing_safe_call_still_folds_another_temporary() {
         expression_check(),
         astore(2),
         aload(2),
-        jump(IFNULL, 13),
+        jump(IFNULL, 14),
         aload(2),
         op(ATHROW),
         op(RETURN),
     ]);
-    assert_eq!(code.run(), Some(expected));
+    assert_eq!(code.run_with_preserved_labels(&[13]), expected);
 }
 
 #[test]

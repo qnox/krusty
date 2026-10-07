@@ -53,7 +53,10 @@ fn body(desc: &str, max_locals: u16, nodes: &[N]) -> (MethodNode, Vec<LabelId>) 
 fn folds(desc: &str, max_locals: u16, nodes: &[N], expected: &[N], changed: bool) {
     let (mut method, _) = body(desc, max_locals, nodes);
     let (wanted, _) = body(desc, max_locals, expected);
-    assert_eq!(eliminate(&mut method, "T"), Ok(changed));
+    assert_eq!(
+        eliminate(&mut method, "T").map(|result| result.changed),
+        Ok(changed)
+    );
     assert_eq!(method.nodes, wanted.nodes);
 }
 

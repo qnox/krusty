@@ -10854,17 +10854,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every protected range and local variable left with no instruction even when nothing is dead at
   that point, as kotlinc's `removeEmptyCatchBlocks` and `prepareForEmitting` do
   (`dead_code::tests::a_range_an_earlier_pass_emptied_goes_though_nothing_is_dead`).
-- **A safe call that throws keeps its receiver temporary when the method has an `int` jump and an
-  `int` constant.** `simplifyKnownSafeCallPatterns` folds `aload v; ifnull L; aload v` into
-  `aload v; dup; ifnull` only when nothing falls into `L`. Constant-condition elimination runs
-  first on any method with both an `int` jump and an `int` constant, and it deletes the unreachable
-  continuation after `athrow` while keeping the labels that stood there. The label immediately
-  before `L` falls through, so the fold does not run: `lastException?.let { throw it }` after a
-  loop or an `if` stays `astore; aload; ifnull; aload`. The same call in a method with no `int`
-  jump keeps the dead `goto` in front of `L`, and the fold does run. Reading the class file merges
-  the labels that share `L`'s offset, so the body the fold sees has `athrow` as the previous
-  instruction; the elimination's gate is what says the labels were there. A selector that does not
-  throw still ends in a `goto`, and that check folds either way. Tests:
+- **A safe call that throws keeps its receiver temporary when constant-condition elimination
+  retains a label from its unreachable continuation.** `simplifyKnownSafeCallPatterns` folds
+  `aload v; ifnull L; aload v` into `aload v; dup; ifnull` only when raw instruction adjacency
+  admits it. Constant-condition elimination can delete the unreachable continuation after
+  `athrow` while keeping the label that stood there. That label immediately before `L` defeats the
+  fold: `lastException?.let { throw it }` after a loop or an `if` stays
+  `astore; aload; ifnull; aload`. The optimizer pipeline carries those exact retained-label
+  identities between the passes; the temporaries pass does not infer the earlier pass from
+  unrelated constants, jumps, or throws remaining in the method. Tests:
   `bytecode_passes::temporaries::tests` and `tests/safe_call_after_throw_e2e.rs`.
 - **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
   negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
