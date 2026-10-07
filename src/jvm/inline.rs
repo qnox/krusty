@@ -1831,9 +1831,11 @@ pub(super) fn splice_unified(
     let removed_indices: Vec<usize> = lambdas.iter().map(|lambda| lambda.param_index).collect();
     let compaction = LocalCompaction::parameters(descriptor, &removed_indices)?;
     remap_locals(&mut insns, |slot| compaction.compact(slot, base))?;
-    // Return handling: drop a trailing return (fall through with the result on the stack), and redirect
-    // any earlier return to the continuation just past the body. These are ordinary CFG edges; output
-    // frames and operand prefixes are derived later from the complete method.
+    // Return handling: turn a trailing return into `nop` (fall through with the result on the
+    // stack), and redirect any earlier return to the continuation just past the body. kotlinc's
+    // processReturns leaves that `nop` as the carrier of the inline body's closing line; its later
+    // nop cleanup removes it only when no debug boundary needs it. These are ordinary CFG edges;
+    // output frames and operand prefixes are derived later from the complete method.
     let last_idx = insns.len().saturating_sub(1);
     let join_pos = insns.len();
     for (i, insn) in insns.iter_mut().enumerate() {
@@ -1850,8 +1852,11 @@ pub(super) fn splice_unified(
         edits.push(Edit {
             at: last_idx,
             len: 1,
-            repl: Vec::new(),
-        }); // drop the trailing return → fall through
+            repl: vec![Insn::Plain {
+                op: 0x00,
+                operands: Vec::new(),
+            }],
+        }); // trailing return → closing-line nop → fall through
     }
     edits.sort_by_key(|e| e.at);
     // Reject overlapping edits (shouldn't happen for the shapes above).
@@ -2525,6 +2530,34 @@ mod tests {
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let out = splice_unified(&body, "(I)I", 1, &[], 0, &mut cw).expect("splice");
         assert!(!out.needs_relayout);
+        assert_eq!(
+            out.bytes.last(),
+            Some(&0x00),
+            "the trailing return becomes a nop"
+        );
+    }
+
+    #[test]
+    fn splice_unified_keeps_the_trailing_returns_line_on_its_nop() {
+        let body = MethodCode {
+            max_stack: 1,
+            max_locals: 0,
+            code: vec![0x04, 0xac],
+            source_cp: vec![C::Other].into(),
+            stackmap: None,
+            handlers: vec![],
+            locals: vec![],
+            lines: vec![(1, 7)],
+            source_file: None,
+            defining_class: "T".into(),
+            dependency_source_map: None,
+            bootstrap_methods: Vec::new(),
+        };
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let out = splice_unified(&body, "()I", 0, &[], 0, &mut cw).expect("splice");
+        assert_eq!(out.bytes, [0x04, 0x00]);
+        assert_eq!(out.lines, [(1, 7, true)]);
+        assert!(out.falls_through);
     }
 
     #[test]

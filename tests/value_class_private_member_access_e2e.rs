@@ -48,7 +48,7 @@ fn assert_same_method(src: &str, class: &str, member: &str) {
         reference,
         "{class}.{member}"
     );
-    match common::method_code_diff_against_kotlinc("Main", &[], src, class, member) {
+    match common::class_bytes_diff_against_kotlinc("Main", &[], src, class, member) {
         Some(Ok(())) => {}
         Some(Err(diff)) => panic!("{diff}"),
         None => panic!("{class}.{member}: reference toolchain unavailable"),

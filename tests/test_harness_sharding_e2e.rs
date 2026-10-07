@@ -1034,6 +1034,90 @@ fn a_panicking_caller_releases_its_server_claim() {
     assert_eq!(next_id.load(Ordering::Relaxed), 1);
 }
 
+fn slow_test_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("libtest-shards.sh")
+}
+
+fn run_slow_tests(log: &Path, threshold: &str) -> std::process::Output {
+    Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; libtest_slow_tests \"$2\" \"$3\"",
+            "slow-tests",
+        ])
+        .arg(slow_test_script())
+        .arg(log)
+        .arg(threshold)
+        .output()
+        .expect("list slow tests")
+}
+
+#[test]
+fn slow_tests_are_those_over_the_threshold() {
+    let dir = std::env::temp_dir().join(format!("krusty-slow-tests-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("slow-test fixture dir");
+    let log = dir.join("sample.log");
+    fs::write(
+        &log,
+        "\
+running 5 tests
+test fast::one ... ok <0.001s>
+test boundary::exact ... ok <0.200s>
+test boundary::over ... ok <0.201s>
+test slow::fails ... FAILED <1.500s>
+test slow::skipped ... ignored
+test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.70s
+",
+    )
+    .expect("write sample log");
+
+    let listed = run_slow_tests(&log, "200");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(listed.stdout).expect("utf-8"),
+        "1500\tslow::fails\n201\tboundary::over\n"
+    );
+
+    let shard = dir.join("shard-1-of-2.log");
+    fs::write(&shard, "test other::case ... ok <0.250s>\n").expect("write shard log");
+    let printed = Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; KRUSTY_SLOW_TEST_MS=200 libtest_print_slow_tests \"$2\" \"$3\"",
+            "print-slow-tests",
+        ])
+        .arg(slow_test_script())
+        .arg(&log)
+        .arg(&shard)
+        .output()
+        .expect("print slow tests");
+    assert!(
+        printed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(printed.stdout).expect("utf-8"),
+        "\
+slow-test: summary count=3 threshold=200ms
+slow-test: 1500ms bin=sample test=slow::fails
+slow-test: 250ms bin=shard-1-of-2 test=other::case
+slow-test: 201ms bin=sample test=boundary::over
+"
+    );
+
+    let invalid = run_slow_tests(&log, "200ms");
+    assert_eq!(invalid.status.code(), Some(2));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn phase_timing_records_start_duration_and_summary() {
@@ -1240,5 +1324,37 @@ fn phase_timing_coverage_run_prints_every_phase() {
         "missing phase total: {stderr}"
     );
     assert!(summary.is_file(), "coverage summary was not written");
+
+    fs::write(
+        &unit_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 7\n",
+    )
+    .expect("write failing unit stub");
+    let failed_unit = run_coverage("nproc");
+    assert_eq!(failed_unit.status.code(), Some(1));
+    let failed_unit_stderr =
+        String::from_utf8(failed_unit.stderr).expect("coverage stderr is UTF-8");
+    assert!(
+        failed_unit_stderr.contains("coverage: lsp-unit exited with status 7"),
+        "coverage hid unit failure: {failed_unit_stderr}"
+    );
+
+    fs::write(
+        &unit_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
+    )
+    .expect("restore unit stub");
+    fs::write(
+        &e2e_bin,
+        "#!/usr/bin/env bash\nif [ \"${1:-}\" = --list ]; then printf '%s\\n' 'alpha::one: test' '' '1 test, 0 benchmarks'; exit 0; fi\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 9\n",
+    )
+    .expect("write failing e2e stub");
+    let failed_e2e = run_coverage("nproc");
+    assert_eq!(failed_e2e.status.code(), Some(1));
+    let failed_e2e_stderr = String::from_utf8(failed_e2e.stderr).expect("coverage stderr is UTF-8");
+    assert!(
+        failed_e2e_stderr.contains("coverage: e2e-shard-1-of-1 exited with status 9"),
+        "coverage hid e2e failure: {failed_e2e_stderr}"
+    );
     fs::remove_dir_all(temp).expect("remove coverage phase directory");
 }

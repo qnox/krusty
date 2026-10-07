@@ -64,7 +64,7 @@ fn safe_call_duplication_and_its_refusals_match_kotlinc() {
         "public static final java.lang.Integer scalar(",
         "public static final java.lang.Long wide(",
     ];
-    let results = common::method_code_diffs_against_kotlinc(
+    let results = common::class_bytes_diffs_against_kotlinc(
         "SafeCallDup",
         &[],
         SRC,

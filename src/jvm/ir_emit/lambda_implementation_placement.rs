@@ -207,6 +207,7 @@ mod tests {
                 receiver_parameter: None,
                 label: None,
                 form: IrLambdaForm::Literal,
+                explicit_suspend: false,
                 class_provenance: None,
             },
         );

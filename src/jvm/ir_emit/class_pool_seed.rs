@@ -11,7 +11,31 @@ pub(super) struct PlainClassPoolSeed<'a> {
     pub(super) ctor_signature: Option<&'a str>,
 }
 
-pub(super) fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
+/// Reserve an ordinary class's constructor before its members, at kotlinc's schedule position.
+pub(super) fn seed_ctor_before_members(
+    enabled: bool,
+    seed: PlainClassPoolSeed<'_>,
+    cw: &mut ClassWriter,
+) {
+    if enabled && seed.class.has_primary_ctor && !seed.class.is_value {
+        seed_plain_class_pool(seed, cw);
+    }
+}
+
+/// Reserve a value class's constructor after the declared members which precede it. Reserving it
+/// with an ordinary class makes `<init>` the first member-owned pool entry and shifts the whole pool
+/// even when the method table is correctly ordered.
+pub(super) fn seed_value_ctor_after_members(
+    enabled: bool,
+    seed: PlainClassPoolSeed<'_>,
+    cw: &mut ClassWriter,
+) {
+    if enabled && seed.class.has_primary_ctor && seed.class.is_value {
+        seed_plain_class_pool(seed, cw);
+    }
+}
+
+fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
     let PlainClassPoolSeed {
         ir,
         class: c,
@@ -123,5 +147,69 @@ pub(super) fn seed_accessor_locals(c: &crate::ir::IrClass, fq_name: &str, cw: &m
     if c.decl_line != 0 {
         cw.seed_utf8("this");
         cw.seed_utf8(&format!("L{fq_name};"));
+    }
+}
+
+/// Intern one generated value-class method's local names immediately after that method's body.
+///
+/// The debug tables are attached once the whole class has been emitted, but kotlinc visits each
+/// table with its owning method. Reserving these strings at the same boundary keeps later method,
+/// bridge, field, and annotation constants in their real order. Roles come from synthesis-owned
+/// function identities; generated spellings are output here, never lookup input.
+pub(super) fn seed_value_class_method_locals(
+    enabled: bool,
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    fid: u32,
+    cw: &mut ClassWriter,
+) {
+    if !enabled || !c.is_value {
+        return;
+    }
+    let Some(field) = c.fields.first() else {
+        return;
+    };
+    let carrier = crate::jvm::names::type_descriptor(field.ty);
+    let this_desc = format!("L{};", c.fq_name());
+    let object = "Ljava/lang/Object;";
+    let locals: Vec<(&str, &str)> = if let Some(role) = ir.jvm_value_class_generated_any.get(&fid) {
+        match role {
+            crate::ir::IrValueClassAnyMember::Equals => {
+                vec![("arg0", carrier.as_str()), ("other", object)]
+            }
+            crate::ir::IrValueClassAnyMember::HashCode
+            | crate::ir::IrValueClassAnyMember::ToString => vec![("arg0", carrier.as_str())],
+        }
+    } else if let Some(role) = ir.jvm_value_class_any_delegators.get(&fid) {
+        match role {
+            crate::ir::IrValueClassAnyMember::Equals => {
+                vec![("this", this_desc.as_str()), ("other", object)]
+            }
+            crate::ir::IrValueClassAnyMember::HashCode
+            | crate::ir::IrValueClassAnyMember::ToString => {
+                vec![("this", this_desc.as_str())]
+            }
+        }
+    } else {
+        match ir.jvm_value_class_representation_order.get(&fid).copied() {
+            Some(0) => vec![(field.name.as_str(), carrier.as_str())],
+            Some(1) => vec![("v", carrier.as_str())],
+            Some(2) => vec![("this", this_desc.as_str())],
+            Some(3) => vec![
+                (
+                    crate::jvm::parameter_names::value_class_equals_operand(1),
+                    carrier.as_str(),
+                ),
+                (
+                    crate::jvm::parameter_names::value_class_equals_operand(2),
+                    carrier.as_str(),
+                ),
+            ],
+            _ => return,
+        }
+    };
+    for (name, descriptor) in locals {
+        cw.seed_utf8(name);
+        cw.seed_utf8(descriptor);
     }
 }

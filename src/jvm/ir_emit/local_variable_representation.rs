@@ -124,6 +124,9 @@ impl Emitter<'_> {
                 .copied()
                 .unwrap_or(source);
             self.adapt_physical_operand(source, semantic, Some(semantic_ty), slot_ty, code);
+            if self.completes_unsigned_bitwise_value(initializer) {
+                code.forget_line();
+            }
             self.mark_expression_start(initializer, code);
             // A declaration whose line is a mapped body line of an external inline declaration
             // marks through the class's source map at its store too, like any other line mark.

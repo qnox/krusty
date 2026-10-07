@@ -127,10 +127,12 @@ impl SourceMap {
         self.files.is_empty()
     }
 
-    /// Whether anything has been inlined into this class. A class with no inlined code carries no
+    /// Whether anything has been inlined into this class. A same-file inline expansion adds another
+    /// range to the owning file rather than another file, so file count alone cannot answer this.
+    /// A class with no inlined code carries only its owning identity range and no
     /// `SourceDebugExtension` at all.
     pub fn is_empty(&self) -> bool {
-        self.files.len() < 2
+        self.files.is_empty() || (self.files.len() == 1 && self.files[0].ranges.len() == 1)
     }
 
     /// The output line for line `source` of file `name` at `path`, expanded by a call at
@@ -505,6 +507,23 @@ mod tests {
         let map = SourceMap::new("Main.kt", "MainKt", 3);
         assert!(map.is_empty());
         assert_eq!(map.render(), None);
+    }
+
+    #[test]
+    fn a_same_file_inline_range_keeps_the_map() {
+        let mut map = SourceMap::new("Main.kt", "MainKt", 3);
+        assert_eq!(
+            map.map_copied_line("Main.kt", "MainKt", 1, Some(2)),
+            Some(4)
+        );
+        assert!(!map.is_empty());
+        assert_eq!(
+            map.render().expect("a map"),
+            "SMAP\nMain.kt\nKotlin\n*S Kotlin\n*F\n\
+             + 1 Main.kt\nMainKt\n\
+             *L\n1#1,3:1\n1#1:4\n\
+             *S KotlinDebug\n*F\n+ 1 Main.kt\nMainKt\n*L\n2#1:4\n*E\n"
+        );
     }
 
     /// The shape `docs/JVM_INLINE_BEFORE_CPS.md` measures: a two-line caller — so three claimable

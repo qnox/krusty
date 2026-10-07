@@ -1605,6 +1605,16 @@ impl BodyLowering<'_> {
         }
         let selected_declaration_parameter_types = declaration_parameter_types.clone();
         let declaration_result = signature.result.get();
+        // A call whose whole operand list consists of implicit context values begins at the first
+        // generated load: there is no written receiver or value argument to own a later start.
+        // Calls that also have an extension/value operand keep the ordinary operand-then-dispatch
+        // line sequence. Record the semantic shape here while the declaration still distinguishes
+        // context parameters; JVM emission only consumes the resulting debug provenance.
+        let starts_at_implicit_context = callable.shape.context_parameter_count != 0
+            && declared_extension_receiver.is_none()
+            && usize::try_from(callable.shape.context_parameter_count)
+                .ok()
+                .is_some_and(|count| count == selected_parameter_types.len());
         // kotlinc inlines every call of a same-module inline function, whichever class declares
         // it: the checked template is cloned here with its receiver as an explicit operand, and a
         // target backend adds the synthetic accessors its private member uses need.
@@ -1796,6 +1806,85 @@ impl BodyLowering<'_> {
             &selected_declaration_parameter_types,
             &default_argument_positions,
         );
+        if starts_at_implicit_context {
+            let first = match self.ir.expr(call) {
+                IrExpr::Call { args, .. } => args.first().copied(),
+                _ => None,
+            };
+            // Local-declaration lifting has already turned an enclosing context receiver into an
+            // explicit captured-receiver parameter. Its load is synthetic setup: kotlinc starts
+            // the source call's line at dispatch, after the load. A non-captured implicit context
+            // argument remains owned by the call from its first generated operand.
+            let captured_context = first.is_some_and(|operand| {
+                let mut value = operand;
+                let value = loop {
+                    match self.ir.expr(value) {
+                        IrExpr::GetValue(value) => break *value,
+                        IrExpr::GetField { class, index, .. } => {
+                            return self.ir.classes[*class as usize]
+                                .ctor_args
+                                .iter()
+                                .find(|argument| argument.field_index == Some(*index))
+                                .and_then(|argument| argument.capture.as_ref())
+                                .and_then(|capture| capture.receiver.as_ref())
+                                .is_some_and(|receiver| {
+                                    matches!(
+                                        receiver,
+                                        crate::ir::IrCapturedReceiver::Context { .. }
+                                    )
+                                });
+                        }
+                        IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg,
+                            ..
+                        } => value = *arg,
+                        _ => return false,
+                    }
+                };
+                // Anonymous-object and local-class members own their capture directly. Their
+                // checked body retains the exact receiver provenance and the lifted parameter
+                // slot even though they are not themselves lambda declarations.
+                if self
+                    .implicit_receiver_capture_slots
+                    .iter()
+                    .any(|(capture, slot)| {
+                        *slot == value
+                            && matches!(
+                                &capture.receiver,
+                                crate::fir::FirCapturedReceiver::Context { .. }
+                            )
+                    })
+                {
+                    return true;
+                }
+                let Some(parameters) = self
+                    .declaration_lambda
+                    .and_then(|function| self.ir.fn_params.get(&function))
+                else {
+                    return false;
+                };
+                let Some(identity) = parameters.identities.get(value as usize) else {
+                    return false;
+                };
+                let crate::ir::IrParameterRole::CapturedReceiver { ordinal } = identity.role else {
+                    return false;
+                };
+                parameters
+                    .captured_receivers
+                    .get(ordinal as usize)
+                    .is_some_and(|receiver| {
+                        matches!(receiver, crate::ir::IrCapturedReceiver::Context { .. })
+                    })
+            });
+            if captured_context {
+                if let Some(line) = source_line {
+                    self.ir.mark_dispatch_line(call, line);
+                }
+            } else if first.is_some_and(|operand| self.ir.is_positionless(operand)) {
+                self.ir.mark_generated_operand_start(call);
+            }
+        }
         // Preserve the declaration's unspecialized result on the concrete call node. Value-class
         // realization needs this checked distinction: a member declared to return `X` yields X's raw
         // carrier, while a generic `T` merely specialized to `X` yields a boxed value across erasure.

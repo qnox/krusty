@@ -271,11 +271,107 @@ impl ClassWriter {
                     (key, rank, spec)
                 })
                 .collect();
-            rows.sort_by(|(key, rank, _), (other_key, other_rank, _)| {
-                key.cmp(other_key).then(rank.cmp(other_rank))
-            });
+            order_by_enclosure(&mut rows, &local.declaring);
             self.inner_class_candidates = rows.into_iter().map(|(_, _, spec)| spec).collect();
         }
+    }
+}
+
+/// Apply the declaration graph as precedence constraints over the ordinary qualified-name order.
+///
+/// An ancestry relation is only a PARTIAL order. Putting it directly in a `sort_by` comparator and
+/// using qualified names for unrelated rows is not transitive: an unrelated row can close a cycle
+/// between an ancestor and its descendant. Start with the normal stable order, then perform a
+/// stable topological selection so every declaring row precedes the rows generated from its code.
+fn order_by_enclosure(
+    rows: &mut Vec<(String, usize, InnerClassSpec)>,
+    declaring: &HashMap<String, String>,
+) {
+    rows.sort_by(|(key, rank, _), (other_key, other_rank, _)| {
+        key.cmp(other_key).then(rank.cmp(other_rank))
+    });
+    let mut remaining = std::mem::take(rows);
+    rows.reserve(remaining.len());
+    while !remaining.is_empty() {
+        let root = remaining
+            .iter()
+            .position(|(_, _, candidate)| {
+                !remaining.iter().any(|(_, _, possible_ancestor)| {
+                    candidate.inner != possible_ancestor.inner
+                        && declared_within(declaring, &candidate.inner, &possible_ancestor.inner)
+                })
+            })
+            // A cyclic declaration graph cannot impose ancestry. Preserve the already-established
+            // qualified-name order for that component rather than looping or giving `sort_by` an
+            // invalid comparator.
+            .unwrap_or(0);
+        rows.push(remaining.remove(root));
+    }
+}
+
+/// Whether `class` is generated from code lexically owned by `ancestor`, directly or through
+/// other generated classes. The relation is recorded from common-IR enclosure identities; JVM
+/// spelling is payload only and is never parsed to reconstruct it.
+fn declared_within(declaring: &HashMap<String, String>, class: &str, ancestor: &str) -> bool {
+    let mut class = class;
+    for _ in 0..=declaring.len() {
+        let Some(owner) = declaring.get(class) else {
+            return false;
+        };
+        if owner == ancestor {
+            return true;
+        }
+        class = owner;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(key: &str, rank: usize, inner: &str) -> (String, usize, InnerClassSpec) {
+        (
+            key.to_string(),
+            rank,
+            InnerClassSpec {
+                inner: inner.to_string(),
+                outer: None,
+                name: None,
+                access: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn enclosure_is_a_precedence_constraint_not_a_sort_comparator() {
+        let declaring = HashMap::from([
+            ("Outer$lambda$inner".to_string(), "Outer$lambda".to_string()),
+            ("Outer$lambda".to_string(), "Outer".to_string()),
+        ]);
+        // Qualified-name order puts the descendant first and an unrelated row between the two.
+        // Combining those two orders in a pairwise comparator forms a comparison cycle.
+        let mut rows = vec![
+            row("a", 0, "Outer$lambda$inner"),
+            row("b", 0, "Unrelated"),
+            row("c", 0, "Outer$lambda"),
+        ];
+        order_by_enclosure(&mut rows, &declaring);
+        let inners: Vec<_> = rows.iter().map(|(_, _, row)| row.inner.as_str()).collect();
+        assert_eq!(inners, ["Unrelated", "Outer$lambda", "Outer$lambda$inner"]);
+    }
+
+    #[test]
+    fn equal_qualified_names_keep_ancestor_before_descendant() {
+        let declaring =
+            HashMap::from([("Facade$call$1$1".to_string(), "Facade$call$1".to_string())]);
+        let mut rows = vec![
+            row("call.<anonymous>", 0, "Facade$call$1$1"),
+            row("call.<anonymous>", 1, "Facade$call$1"),
+        ];
+        order_by_enclosure(&mut rows, &declaring);
+        let inners: Vec<_> = rows.iter().map(|(_, _, row)| row.inner.as_str()).collect();
+        assert_eq!(inners, ["Facade$call$1", "Facade$call$1$1"]);
     }
 }
 

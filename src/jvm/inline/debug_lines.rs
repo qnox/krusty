@@ -19,9 +19,9 @@ pub(super) struct Relocation<'a> {
 
 /// Produce `(absolute offset, line, from dependency)` marks in output-offset order.
 ///
-/// A host mark at the exact end of the splice belonged to its removed trailing return and marks no
-/// surviving instruction. Lambda marks name caller source. When a lambda returns, the dependency
-/// line in effect before it resumes at the end of the substituted body.
+/// A host mark on the trailing return follows that return to its replacement `nop`, which carries
+/// the inline body's closing line. Lambda marks name caller source. When a lambda returns, the
+/// dependency line in effect before it resumes at the end of the substituted body.
 pub(super) fn relocate(input: Relocation<'_>) -> Option<Vec<(u16, u16, bool)>> {
     let Relocation {
         host_lines,

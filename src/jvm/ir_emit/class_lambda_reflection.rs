@@ -117,6 +117,7 @@ pub(super) fn reflect(
                 name: "invoke",
                 descriptor: record_descriptor.then_some(physical.as_str()),
             }),
+            explicit_suspend: origin.explicit_suspend,
             receiver,
             parameters: &parameters,
             result: signature.ret,

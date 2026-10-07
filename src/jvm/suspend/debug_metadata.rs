@@ -273,7 +273,13 @@ fn collect_suspension_lines(
                 ir,
                 *value,
                 suspend_functions,
-                ir.expr_end_lines.get(value).copied().or(fall_through),
+                // A return has no fall-through line. Keep successors owned by the returned
+                // expression itself (a later operand, `when` branch, `try` region, or inline
+                // consumer), but a suspension whose result is only converted/selected and then
+                // returned resumes with DebugMetadata's sentinel `-1`, just like a direct tail
+                // suspension above. The returned expression's source end is diagnostic syntax,
+                // not an executable successor.
+                Some(u32::MAX),
                 out,
             );
         }

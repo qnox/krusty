@@ -48,6 +48,7 @@ pub(super) fn local_variable(
         IrParameterRole::Generated(role) => match role {
             IrGeneratedParameterRole::Positional { .. } => None,
             IrGeneratedParameterRole::Continuation => Some("$completion".to_string()),
+            IrGeneratedParameterRole::ContinuationResult => Some("$result".to_string()),
             IrGeneratedParameterRole::ContinuationDispatchReceiver => Some("this$0".to_string()),
             IrGeneratedParameterRole::HolderReceiver => Some("$this".to_string()),
             // kotlinc names the parameter like the field it initializes.
@@ -916,6 +917,7 @@ mod tests {
                 receiver_parameter: None,
                 label: None,
                 form: IrLambdaForm::Literal,
+                explicit_suspend: false,
                 class_provenance: None,
             },
         );
@@ -1034,6 +1036,7 @@ mod tests {
             receiver_parameter: Some(0),
             label: label.map(str::to_owned),
             form: crate::ir::IrLambdaForm::Literal,
+            explicit_suspend: false,
             class_provenance: None,
         };
 

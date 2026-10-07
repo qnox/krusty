@@ -15,6 +15,7 @@ pub enum FirLambdaForm {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirSourceLambda {
     form: FirLambdaForm,
+    explicit_suspend: bool,
     binding_name: Option<Box<str>>,
     label: Option<Box<str>>,
 }
@@ -25,6 +26,7 @@ impl FirSourceLambda {
     /// (see `parser::lambda_labels`). An anonymous function has none.
     pub fn new(
         form: FirLambdaForm,
+        explicit_suspend: bool,
         binding_name: Option<impl Into<Box<str>>>,
         label: Option<impl Into<Box<str>>>,
     ) -> Self {
@@ -35,6 +37,7 @@ impl FirSourceLambda {
         );
         Self {
             form,
+            explicit_suspend,
             binding_name: binding_name.map(Into::into),
             label,
         }
@@ -42,6 +45,12 @@ impl FirSourceLambda {
 
     pub const fn form(&self) -> FirLambdaForm {
         self.form
+    }
+
+    /// Whether the lambda carries the source `suspend` modifier. A lambda inferred against a
+    /// suspend function type is suspending too, but Kotlin metadata distinguishes the two forms.
+    pub const fn explicit_suspend(&self) -> bool {
+        self.explicit_suspend
     }
 
     pub fn binding_name(&self) -> Option<&str> {

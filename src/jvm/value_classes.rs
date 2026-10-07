@@ -1686,6 +1686,64 @@ pub(crate) fn lower_value_classes(
     // Ascending ExprId order rewrites a child before its parent, so `prop_access` sees the rewritten child.
     let mut targets: Vec<ExprId> = target_slots.keys().copied().collect();
     targets.sort_unstable();
+    // Exact call identity → its first checked result conversion. A generic property call itself
+    // retains the declaration result (`T`), while its immediate coercion carries the applied result
+    // (`Int`). Value-class property realization needs both: the declaration result selects the
+    // erased slot, and the applied result selects the wrapper that physically occupies that slot.
+    let mut applied_call_results = HashMap::new();
+    // A same-module call can be wrapped in an operand-ordering block. Common lowering records the
+    // checked result on that exact block, while its terminal call retains the declaration result.
+    // Follow only Block.value chains: conversions are distinct nodes and deliberately stop here.
+    let mut logical_results = ir
+        .logical_types
+        .iter()
+        .map(|(&expression, &result)| (expression, result))
+        .collect::<Vec<_>>();
+    logical_results.sort_unstable_by_key(|&(expression, _)| expression);
+    for (expression, result) in logical_results {
+        if let Some(call) = crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, expression)
+        {
+            applied_call_results.insert(call, result);
+        }
+    }
+    // The immediate implicit coercion is the ordinary same-module form of that edge. Follow only
+    // its operand's Block.value chain; an outer conversion sees another TypeOp and therefore cannot
+    // overwrite the property's own applied result.
+    for expression in &ir.exprs {
+        let IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = expression
+        else {
+            continue;
+        };
+        applied_call_results.insert(*arg, *type_operand);
+        if let Some(call) = crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, *arg) {
+            applied_call_results.insert(call, *type_operand);
+        }
+    }
+    // A generic declaration-result coercion is the explicit form of the same checked edge. Apply
+    // it last so its target remains authoritative if both records reach the same call.
+    let mut result_coercions = ir
+        .declaration_result_coercions
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    result_coercions.sort_unstable();
+    for coercion in result_coercions {
+        let IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = ir.expr(coercion)
+        else {
+            continue;
+        };
+        if let Some(call) = crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, *arg) {
+            applied_call_results.insert(call, *type_operand);
+        }
+    }
     // Exact identities of coercions created below to expose a value class's sole underlying
     // property. Their operand is the value-class carrier itself, but the coercion denotes property
     // extraction rather than an ordinary `X -> U` value conversion. Keep this backend-local origin
@@ -2303,6 +2361,11 @@ pub(crate) fn lower_value_classes(
                 owner,
                 result,
             }) => {
+                // The property call retains the declaration result (`T`); the exact checked
+                // declaration-result coercion retains its applied result (`R<Int>.a: Int`). The JVM
+                // wrapper carried by the erased slot is selected by that applied primitive, not by
+                // spelling or by re-inferring a substitution after this boundary.
+                let applied_result = applied_call_results.get(&id).copied().unwrap_or(result);
                 sole_property_coercions.insert(id);
                 ir.logical_types.insert(id, result);
                 if let Repr::Unboxed(nested) = repr_of_ty(&result, &under) {
@@ -2315,7 +2378,7 @@ pub(crate) fn lower_value_classes(
                         .map(|underlying| erase(underlying, &under))
                         .unwrap_or(Ty::Error),
                 );
-                Some(prop_access(
+                let access = prop_access(
                     ir,
                     receiver,
                     owner,
@@ -2328,7 +2391,22 @@ pub(crate) fn lower_value_classes(
                         field_getters: &field_getters,
                         carrier_unboxes: &carrier_unboxes,
                     },
-                ))
+                );
+                // A generic underlying property specialized to an ordinary JVM primitive keeps
+                // that primitive's wrapper in its erased Object carrier. Record this exact read;
+                // the emitter cannot distinguish it from an ordinary generic CALL result by slot
+                // type alone. Unsigned and user value classes deliberately do not have a
+                // `jvm_boxed_ref`: their boxes must first be unboxed to their semantic carrier.
+                if property_has_erased_generic_slot(owner, result, &under)
+                    && applied_result
+                        .non_null()
+                        .canonical_semantic()
+                        .jvm_boxed_ref()
+                        .is_some()
+                {
+                    ir.jvm_erased_primitive_wrapper_values.insert(id);
+                }
+                Some(access)
             }
             Some(Rw::ImplCall {
                 receiver,
@@ -4271,6 +4349,15 @@ fn prop_access(
     } else {
         receiver
     };
+    // Only a declaration type parameter makes this an erased generic slot. Keep that physical fact
+    // on the producer as well as on the rewritten property expression: consumers such as structural
+    // equality deliberately inspect through an `ImplicitCoercion` so `R<R<Int>>.a` stays boxed
+    // instead of being unboxed and boxed again. A concrete nested value class (`Outer.inner: Inner`)
+    // shares `Inner`'s carrier directly; stamping its producer as generic Object would make a
+    // coroutine caller cast that raw carrier to the `Inner` box.
+    if property_has_erased_generic_slot(x, result, under) {
+        ir.physical_types.insert(inner, u);
+    }
     // A generic value class keeps an erased `Object` carrier, but an applied property read
     // (`X<Int>.x`) has a concrete Kotlin result. Preserve that selected result so a real conversion
     // performs the required `Integer` unbox / reference cast instead of degrading it back to Any.
@@ -4299,6 +4386,16 @@ fn prop_access(
         arg: inner,
         type_operand: target,
     }
+}
+
+/// Whether this value class's declared property crosses a generic JVM slot. The declaration's
+/// underlying type owns that fact; the recursively erased carrier alone cannot distinguish
+/// `R<T>.value: T` from `Outer.inner: Inner` when both ultimately erase to `Object`.
+fn property_has_erased_generic_slot(class: TypeName, declared: Ty, under: &Under) -> bool {
+    declared.mentions_ty_param()
+        && under
+            .get(&class)
+            .is_some_and(|carrier| erase(carrier, under).is_erased_top())
 }
 
 /// Whether a JVM method descriptor's return type is the classfile form of `class`.
@@ -4963,9 +5060,9 @@ fn collect_reachable_scoped(exprs: &[IrExpr], root: ExprId, out: &mut HashSet<Ex
 }
 
 #[cfg(test)]
-mod descriptor_return_tests {
-    use super::descriptor_returns_class;
-    use crate::types::type_name;
+mod boundary_tests {
+    use super::{descriptor_returns_class, property_has_erased_generic_slot, Under};
+    use crate::types::{type_name, Ty};
 
     #[test]
     fn descriptor_return_matches_the_interned_class_without_rendering() {
@@ -4978,6 +5075,34 @@ mod descriptor_return_tests {
         assert!(!descriptor_returns_class(
             "(Lpkg/Foo$Bar;)Lpkg/Other;",
             class
+        ));
+    }
+
+    #[test]
+    fn only_a_declared_type_parameter_marks_a_generic_property_slot() {
+        let generic = type_name("fixture/Generic");
+        let nullable_generic = type_name("fixture/NullableGeneric");
+        let inner = type_name("fixture/Inner");
+        let outer = type_name("fixture/Outer");
+        let any = Ty::obj("kotlin/Any");
+        let parameter = Ty::ty_param("T", any);
+        let under = Under::from([
+            (generic, parameter),
+            (nullable_generic, Ty::nullable(parameter)),
+            (inner, any),
+            (outer, Ty::obj_name(inner)),
+        ]);
+
+        assert!(property_has_erased_generic_slot(generic, parameter, &under));
+        assert!(property_has_erased_generic_slot(
+            nullable_generic,
+            Ty::nullable(parameter),
+            &under
+        ));
+        assert!(!property_has_erased_generic_slot(
+            outer,
+            Ty::obj_name(inner),
+            &under
         ));
     }
 }
