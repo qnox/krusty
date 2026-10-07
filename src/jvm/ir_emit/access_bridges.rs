@@ -31,6 +31,10 @@ pub(super) fn emit_function_reference_access_bridge(
     cw.reserve_method_name(&name);
     cw.reserve_descriptor(&bridge_descriptor);
     let mut code = CodeBuilder::new(bridge_parameters.iter().map(|ty| slot_words(*ty)).sum());
+    let suspend = ir.suspend_funs.contains(&fid);
+    if suspend && line != 0 {
+        code.mark_line(line);
+    }
     let mut slot = 0u16;
     if !function.is_static {
         code.aload(0);
@@ -47,7 +51,7 @@ pub(super) fn emit_function_reference_access_bridge(
         cw.methodref(owner, &function.name, &descriptor)
     };
     let argument_words = parameters.iter().map(|ty| slot_words(*ty) as i32).sum();
-    if line != 0 {
+    if !suspend && line != 0 {
         code.mark_line(line);
     }
     if function.is_static {
