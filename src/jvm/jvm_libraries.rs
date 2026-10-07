@@ -16,6 +16,7 @@ mod inline_body_plan;
 mod inline_capability;
 mod java_nullability;
 mod mapped_builtin_member_status;
+mod object_methods;
 mod parameter_plans;
 #[cfg(test)]
 mod provider_normalization_tests;
@@ -1353,10 +1354,7 @@ impl JvmLibraries {
                 "resolve",
                 "classifier constructor metadata owner={internal_name:?} declarations={ctor_param_lists:?}",
             );
-            // Kotlin metadata owns the declaration list. JVM methods are addressed only by the exact
-            // realization key carried by that declaration; methods absent from metadata are compiler
-            // ABI, not source members. Java has no semantic metadata, so its classfile methods are the
-            // declarations.
+            // Metadata owns Kotlin declarations; a method absent from it is compiler ABI.
             let declared_methods: Vec<_> = if has_kotlin_metadata {
                 meta_fns
                     .iter()
@@ -1409,10 +1407,12 @@ impl JvmLibraries {
                     .collect()
             };
             for (m, declaration, constructor_declaration) in declared_methods {
-                // A Java class's bridges and synthetic accessors are javac ABI, not members: kotlinc's
-                // binary Java class reader drops them, so `Integer.compareTo(Object)` never makes
-                // `Int < Char` applicable ahead of a user `Int.compareTo(Char)` extension.
-                if uses_java_type_semantics && m.is_compiler_generated() {
+                // Drop javac bridges (`Integer.compareTo(Object)` is not a member) and an interface
+                // method that only redeclares `Object.toString`, `hashCode`, or `equals`.
+                if uses_java_type_semantics
+                    && (m.is_compiler_generated()
+                        || object_methods::is_object_method_in_interface(ci.is_interface(), m))
+                {
                     continue;
                 }
                 // Keep every Java declaration that can be accessed outside its declaring class.
