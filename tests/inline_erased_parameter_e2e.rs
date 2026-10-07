@@ -7,7 +7,7 @@
 //! reference, so `String.length` has no cast.
 
 use super::common;
-use super::common::{compare_with_kotlinc_plugin, method_instructions};
+use super::common::{compare_with_kotlinc_plugin_jdk, method_instructions};
 use super::temporary_elimination_e2e::stack_map;
 
 const SOURCE: &str = "inline fun <T : java.lang.AutoCloseable?, R> T.use(block: (T) -> R): R {\n\
@@ -44,11 +44,10 @@ const SOURCE: &str = "inline fun <T : java.lang.AutoCloseable?, R> T.use(block: 
 
 #[test]
 fn an_inlined_type_parameter_is_stored_as_its_erased_bound() {
-    let Some(built) = compare_with_kotlinc_plugin(
+    let Some(built) = compare_with_kotlinc_plugin_jdk(
         "InlineErasedParameter",
         SOURCE,
         "InlineErasedParameterKt",
-        &[common::stdlib_jar()],
         "25",
         &[],
     ) else {
