@@ -32,8 +32,20 @@ impl Emitter<'_> {
         expected: Ty,
         code: &mut CodeBuilder,
     ) {
-        self.emit_value(expression, code);
-        let source = self.value_ty(expression);
+        // A checked implicit coercion can name the call-site substitution even though the value
+        // still occupies the declaration's erased bound. Let this consumer choose whether that
+        // bound needs narrowing; eagerly emitting the coercion can cast `Comparable` to `String`
+        // and then back to `Comparable` for a function that returns the bound itself.
+        let source = if matches!(
+            self.erased_reference_result(expression),
+            Some(ErasedResult::Coerced { slot, .. })
+                if !jvm_is_erased_top(ir_ty_to_jvm(&slot))
+        ) {
+            self.emit_consumed_operand(expression, code)
+        } else {
+            self.emit_value(expression, code);
+            self.value_ty(expression)
+        };
         let target = ir_ty_to_jvm(&expected);
         // A type-parameter local kept in its erased reference slot is read here as the
         // primitive the caller returns. The store boxed into that slot; this is the unbox.
@@ -119,7 +131,23 @@ impl Emitter<'_> {
                 // This is not limited to `Object`: `T : Comparable<T>` arrives as `Comparable`.
                 // A String-only consumer casts that slot once to `String`; a consumer of the bound
                 // itself uses it unchanged instead of casting to `String` and back to `Comparable`.
-                let slot = *self.ir.physical_types.get(arg)?;
+                // A real call records its descriptor result in `physical_types`; only its erased
+                // top is this generic-result contract. A call recorded as inline can instead
+                // retain its declaration's non-top erased bound while the JVM splicer replaces
+                // it. Once inlining has removed the producer, `value_ty` reads that same active
+                // body-local slot.
+                let inline_producer = matches!(
+                    self.ir.expr(*arg),
+                    IrExpr::Call {
+                        callee: crate::ir::Callee::Static { inline, .. },
+                        ..
+                    } if inline.can_inline()
+                );
+                let slot = match self.ir.physical_types.get(arg).copied() {
+                    Some(slot) if jvm_is_erased_top(ir_ty_to_jvm(&slot)) || inline_producer => slot,
+                    Some(_) => return None,
+                    None => self.value_ty(*arg),
+                };
                 narrows(slot, *type_operand).then_some(ErasedResult::Coerced { call: *arg, slot })
             }
             crate::ir::IrExpr::InvokeFunction { ret, .. } => {
