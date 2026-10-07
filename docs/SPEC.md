@@ -13701,6 +13701,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   at runtime (trailing `Continuation` parameter), so `as`/`is` against a suspend fn type checkcast/test
   `Function{n+1}` (KT-66093). (`suspend_fn_type_cast_targets_arity_plus_one_interface`.)
 
+- **An inlined type parameter is stored as its erased bound.** `inline fun <T : AutoCloseable?> T.use`
+  stores the receiver as `AutoCloseable`, and `inline fun <T : Comparable<T>> id(x: T): T` stores `x`
+  as `Comparable`. A use that needs the call-site class `checkcast`s back (`id(s).length` is
+  `checkcast String` before `String.length`). A use of the bound does not: `this?.close()` is
+  `invokeinterface AutoCloseable.close` on that slot, with `dup; ifnull` when the call-site type is
+  nullable and with neither cast when it is not. An unconstrained `T` stays the specialized
+  reference — its bound erases to `Object` — and a primitive specialization stays unboxed.
+  (`tests/inline_erased_parameter_e2e.rs`.)
+
 - **An inline expansion's parameters are locals OF THAT EXPANSION, named by their ROLE.** A spilled
   local's debug name is what a debugger shows while stepping through an inlined body, and krusty
   produced the wrong one in three distinct ways:

@@ -19,7 +19,66 @@ pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
         .get(&declaration)
         .copied()
         .unwrap_or(semantic);
-    ir_ty_to_jvm(&stored_value_ty(declared))
+    let slot = ir_ty_to_jvm(&stored_value_ty(declared));
+    erased_inline_parameter_slot(ir, declaration, semantic).unwrap_or(slot)
+}
+
+/// The verifier type of an inlined type-parameter value.
+///
+/// kotlinc stores that parameter as its erased bound (`T : AutoCloseable?` is `AutoCloseable`) and
+/// `checkcast`s back to the call-site type at each use. An unconstrained `T` stays the specialized
+/// reference: its bound erases to `Object`, and no cast is emitted. A primitive specialization
+/// stays unboxed.
+fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
+    let declared = ir.inline_operand_declared_type(declaration)?;
+    if !matches!(declared.non_null(), Ty::TyParam(..)) {
+        return None;
+    }
+    let erased = ir_ty_to_jvm(&stored_value_ty(declared));
+    let specialized = ir_ty_to_jvm(&stored_value_ty(semantic));
+    if !erased.is_reference() || !specialized.is_reference() || erased == specialized {
+        return None;
+    }
+    let top = erased
+        .obj_internal()
+        .is_some_and(crate::jvm::jvm_class_map::is_jvm_erased_top);
+    if top {
+        None
+    } else {
+        Some(erased)
+    }
+}
+
+/// The erased bound of the inlined type parameter `expression` reads, when that parameter is stored
+/// as its bound. A coercion wrapped around the read does not change the slot the value comes from.
+pub(super) fn erased_inline_parameter_read(ir: &IrFile, mut expression: ExprId) -> Option<Ty> {
+    loop {
+        match ir.expr(expression) {
+            IrExpr::GetValue(value) => return inline_parameter_erased_slot(ir, *value),
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => expression = *arg,
+            _ => return None,
+        }
+    }
+}
+
+fn inline_parameter_erased_slot(ir: &IrFile, value: u32) -> Option<Ty> {
+    for id in 0..ir.exprs.len() {
+        let (index, ty) = match &ir.exprs[id] {
+            IrExpr::Variable { index, ty, .. } => (*index, *ty),
+            _ => continue,
+        };
+        if index != value {
+            continue;
+        }
+        if let Some(erased) = erased_inline_parameter_slot(ir, id as ExprId, ty) {
+            return Some(erased);
+        }
+    }
+    None
 }
 
 fn emit_deferred_zero(

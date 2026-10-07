@@ -161,12 +161,26 @@ impl Emitter<'_> {
             .get(&plan.init)
             .copied()
             .unwrap_or(source);
-        self.adapt_physical_operand(source, semantic, Some(plan.semantic_ty), plan.slot_ty, code);
+        // `this?.close()` duplicates the inlined receiver. That receiver is stored as its erased
+        // bound (`T : AutoCloseable?` is `AutoCloseable`). Narrowing the duplicate to the call-site
+        // class and widening it again for the member leaves a pair of `checkcast`s kotlinc never
+        // writes; the null check and the call both see the bound.
+        let slot_ty =
+            super::local_variable_representation::erased_inline_parameter_read(self.ir, plan.init)
+                .filter(|erased| {
+                    plan.slot_ty.is_reference() && erased.is_reference() && *erased != plan.slot_ty
+                })
+                .unwrap_or(plan.slot_ty);
+        let erased_receiver = slot_ty != plan.slot_ty;
+        self.adapt_physical_operand(source, semantic, Some(plan.semantic_ty), slot_ty, code);
         code.dup();
         let null_path = code.new_label();
         let end = code.new_label();
         self.mark_statement_line(plan.guard, code);
         code.ifnull(null_path);
+        // The selector's receiver read is this stack value. Publishing the erased slot type makes
+        // that read report the bound, so the member call does not `checkcast` back to it.
+        let previous_type = erased_receiver.then(|| self.var_types.insert(plan.temporary, slot_ty));
         self.stack_resident_value = Some(plan.temporary);
         let selector_diverges = if discarded {
             self.emit_discarding(plan.selector, code);
@@ -175,6 +189,16 @@ impl Emitter<'_> {
             self.emit_value(plan.selector, code);
             self.diverges(plan.selector)
         };
+        if let Some(previous_type) = previous_type {
+            match previous_type {
+                Some(previous) => {
+                    self.var_types.insert(plan.temporary, previous);
+                }
+                None => {
+                    self.var_types.remove(&plan.temporary);
+                }
+            }
+        }
         if self.stack_resident_value.is_some() {
             self.run.set_emit_error(
                 "safe-call receiver left on the stack was not consumed by its selector".to_string(),

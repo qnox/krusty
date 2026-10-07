@@ -1089,6 +1089,8 @@ mod inline_default_stub_e2e;
 mod inline_end_branch_e2e;
 #[path = "inline_erased_capture_e2e.rs"]
 mod inline_erased_capture_e2e;
+#[path = "inline_erased_parameter_e2e.rs"]
+mod inline_erased_parameter_e2e;
 #[path = "inline_finally_marker_e2e.rs"]
 mod inline_finally_marker_e2e;
 #[path = "inline_lambda_as_value_e2e.rs"]
