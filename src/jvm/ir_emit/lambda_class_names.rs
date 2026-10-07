@@ -140,6 +140,39 @@ pub(in crate::jvm) fn specialization_ordinal(
 ) -> Option<u32> {
     let specialization = ir.specialized_functions.get(&implementation)?;
     let location = specialization_location(ir, specialization, facade, modes)?;
+    let mut ordinal = 0u32;
+    for function in 0..=implementation {
+        let Some(candidate) = ir.specialized_functions.get(&function) else {
+            continue;
+        };
+        let same_stem = match specialization.parent {
+            Some(parent) => candidate.parent == Some(parent),
+            None => {
+                candidate.parent.is_none()
+                    && specialization_location(ir, candidate, facade, modes).as_ref()
+                        == Some(&location)
+                    && candidate.inline_callee_source_name
+                        == specialization.inline_callee_source_name
+            }
+        };
+        if same_stem {
+            ordinal = ordinal.saturating_add(1);
+        }
+    }
+    (ordinal != 0).then_some(ordinal)
+}
+
+/// Position of a specialized lambda class among the class artifacts created by one inline
+/// expansion. Implementation methods use [`specialization_ordinal`] instead: an indy-only lambda
+/// still has a method sibling, but it does not consume an anonymous-object/lambda class number.
+fn specialized_class_ordinal(
+    ir: &IrFile,
+    implementation: u32,
+    facade: &str,
+    modes: LambdaModes,
+) -> Option<u32> {
+    let specialization = ir.specialized_functions.get(&implementation)?;
+    let location = specialization_location(ir, specialization, facade, modes)?;
     if specialization.parent.is_none()
         && ir.specialized_expansion_order.contains_key(&implementation)
         && anonymous_peer(
@@ -162,28 +195,10 @@ pub(in crate::jvm) fn specialization_ordinal(
             order,
             facade,
             modes,
+            Some(implementation),
         );
     }
-    let mut ordinal = 0u32;
-    for function in 0..=implementation {
-        let Some(candidate) = ir.specialized_functions.get(&function) else {
-            continue;
-        };
-        let same_stem = match specialization.parent {
-            Some(parent) => candidate.parent == Some(parent),
-            None => {
-                candidate.parent.is_none()
-                    && specialization_location(ir, candidate, facade, modes).as_ref()
-                        == Some(&location)
-                    && candidate.inline_callee_source_name
-                        == specialization.inline_callee_source_name
-            }
-        };
-        if same_stem {
-            ordinal = ordinal.saturating_add(1);
-        }
-    }
-    (ordinal != 0).then_some(ordinal)
+    specialization_ordinal(ir, implementation, facade, modes)
 }
 
 fn anonymous_view(
@@ -225,11 +240,13 @@ fn expansion_ordinal(
     order: u32,
     facade: &str,
     modes: LambdaModes,
+    current_lambda_class: Option<u32>,
 ) -> Option<u32> {
     let mut orders = Vec::new();
     for (function, specialization) in &ir.specialized_functions {
         if specialization.parent.is_some()
-            || !super::method_access::lambda_impl_uses_class_strategy(ir, *function, modes)
+            || (current_lambda_class != Some(*function)
+                && !super::method_access::lambda_impl_uses_class_strategy(ir, *function, modes))
             || specialization.inline_callee_source_name != callee
             || specialization_location(ir, specialization, facade, modes).as_ref() != Some(location)
         {
@@ -273,6 +290,7 @@ pub(in crate::jvm) fn anonymous_class_name(
         specialization.order,
         facade,
         modes,
+        None,
     )?;
     let mut name = owner;
     if !caller.is_empty() {
@@ -295,7 +313,7 @@ fn specialized_class_name(
     modes: LambdaModes,
 ) -> Option<String> {
     let specialization = ir.specialized_functions.get(&implementation)?;
-    let ordinal = specialization_ordinal(ir, implementation, facade, modes)?;
+    let ordinal = specialized_class_ordinal(ir, implementation, facade, modes)?;
     match specialization.parent {
         Some(parent) => Some(format!(
             "{}${ordinal}",
