@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::thread;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
