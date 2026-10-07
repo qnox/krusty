@@ -488,13 +488,11 @@ fn declares_reserved_kotlin_package(src: &str) -> bool {
 }
 
 fn compiler_identity() -> (Option<String>, u64) {
-    match common::kotlin_compiler_jar() {
-        Some(jar) => {
-            let len = std::fs::metadata(&jar).map(|meta| meta.len()).unwrap_or(0);
-            (Some(jar.to_string_lossy().into_owned()), len)
-        }
-        None => (None, 0),
-    }
+    let identity = byte_dump::published_compiler_id();
+    let len = common::kotlin_compiler_jar()
+        .and_then(|jar| std::fs::metadata(jar).ok())
+        .map_or(0, |metadata| metadata.len());
+    (identity, len)
 }
 
 /// One reference compilation unit of a case, in build order: its module identity, sources, the
