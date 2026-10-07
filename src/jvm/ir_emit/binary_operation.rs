@@ -234,7 +234,16 @@ impl Emitter<'_> {
         let Some(semantic @ (Ty::UInt | Ty::ULong)) = semantic else {
             return;
         };
-        super::value_class_adapters::emit_native_value_class_constructor(self.cw, code, semantic);
+        if super::value_class_adapters::emit_native_value_class_constructor(self.cw, code, semantic)
+        {
+            // These members are inline-only. kotlinc's `markLineNumberAfterInlineIfNeeded` runs
+            // after the body: inside a condition the line is written again at once, on the jump;
+            // otherwise it is forgotten so the next mark of that same line is kept.
+            match code.current_line() {
+                Some(line) if self.inside_condition => code.inlined_line(line),
+                _ => code.forget_line(),
+            }
+        }
     }
 
     fn emit_unsigned_bitwise_operands(
