@@ -13733,6 +13733,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `Function0` whose implementation method was never emitted and the program died at its first
     call with `NoSuchMethodError` (box `labels/nestedInlineLabels.kt`, reduced into
     `a_forwarded_inline_lambda_parameter_is_still_spliced`).
+  - A nested inline copies that capture into another unnamed temporary before invoking it
+    (`use { use { shuffle(paths) } }`). The second temporary is the same lambda: both copies
+    are dropped and the inner invoke is spliced. A use that is not an invocation, including a
+    blocked inner copy, keeps the function object. (`a_lambda_invoked_inside_nested_inline_uses_is_spliced`.)
   - A member inline EXTENSION binds two receivers at once, and Kotlin keeps them distinct: the
     containing class's `this` and the receiver being extended are different values. One role could
     not stand for both, so `IrInlineLocalRole` has `DispatchReceiver` and `ExtensionReceiver`, and

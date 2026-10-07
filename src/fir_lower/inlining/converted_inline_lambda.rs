@@ -8,8 +8,9 @@
 //! non-local return makes the lambda inline-only: leaving the local in place calls a
 //! method that is never emitted. When every use of the local is an invocation the lambda
 //! can be spliced into, those invocations are retargeted at the lambda and the carrier
-//! is dropped. A named source binding stays a value: kotlinc rejects `val y = x` on an
-//! inline parameter.
+//! is dropped. A nested inline may copy that carrier into another unnamed temporary
+//! first; that copy is the same lambda. A named source binding stays a value: kotlinc
+//! rejects `val y = x` on an inline parameter.
 
 use std::collections::{HashMap, HashSet};
 
@@ -65,18 +66,23 @@ impl BodyLowering<'_> {
     /// Retarget invocations of an unnamed temporary whose initializer is an inline lambda
     /// substituted for an inline parameter. The temporary is the capture copy an external
     /// inline left behind; dropping it lets the ordinary lambda splice consume the invocation.
+    ///
+    /// A nested inline copies that temporary into another unnamed temporary before invoking it.
+    /// Both copies are the same lambda: the inner invoke is retargeted, and each pure forward
+    /// is dropped with the temporary it copied.
     pub(super) fn expose_inline_lambdas_behind_capture_copies(
         &mut self,
         copies: &[(ExprId, ExprId)],
         substituted_lambdas: &HashSet<ExprId>,
     ) {
-        let copied = copied_lambda_slots(self.ir, copies, substituted_lambdas);
+        let mut copied = copied_lambda_slots(self.ir, copies, substituted_lambdas);
         if copied.is_empty() {
             return;
         }
+        include_forwarded_lambda_slots(self.ir, copies, &mut copied);
         let spliceable = spliceable_invocations(self.ir, copies, &copied);
         let blocked = blocked_slots(self.ir, copies, &copied, &spliceable);
-        let mut drop_variables = Vec::new();
+        let mut dropping = HashSet::new();
         for (slot, carrier) in &copied {
             if blocked.contains(slot) {
                 continue;
@@ -96,8 +102,43 @@ impl BodyLowering<'_> {
                 };
                 *func = carrier.lambda;
             }
-            drop_variables.push(carrier.variable);
+            dropping.insert(*slot);
         }
+        // A temporary that only initializes another dropped copy is the same dead carrier.
+        loop {
+            let mut progressed = false;
+            for &(_, copy) in copies {
+                let IrExpr::Variable {
+                    index,
+                    init: Some(init),
+                    named: false,
+                    ..
+                } = self.ir.expr(copy)
+                else {
+                    continue;
+                };
+                if !dropping.contains(index) {
+                    continue;
+                }
+                let IrExpr::GetValue(source) = self.ir.expr(*init) else {
+                    continue;
+                };
+                if copied.contains_key(source)
+                    && !blocked.contains(source)
+                    && dropping.insert(*source)
+                {
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        let drop_variables = copied
+            .iter()
+            .filter(|(slot, _)| dropping.contains(slot))
+            .map(|(_, carrier)| carrier.variable)
+            .collect::<Vec<_>>();
         drop_variable_statements(self.ir, copies, &drop_variables);
     }
 
@@ -184,6 +225,52 @@ fn copied_lambda_slots(
         );
     }
     copied
+}
+
+/// An unnamed temporary initialized by reading another carrier slot is the same lambda.
+/// Nested `inline` calls copy a capture once per level (`use { use { shuffle(paths) } }`).
+fn include_forwarded_lambda_slots(
+    ir: &crate::ir::IrFile,
+    copies: &[(ExprId, ExprId)],
+    slots: &mut HashMap<u32, ConvertedCarrier>,
+) {
+    loop {
+        let mut added = false;
+        for &(_, copy) in copies {
+            let IrExpr::Variable {
+                index,
+                init: Some(init),
+                named: false,
+                ..
+            } = ir.expr(copy)
+            else {
+                continue;
+            };
+            if slots.contains_key(index) {
+                continue;
+            }
+            let IrExpr::GetValue(source) = ir.expr(*init) else {
+                continue;
+            };
+            let Some(carrier) = slots.get(source) else {
+                continue;
+            };
+            let lambda = carrier.lambda;
+            let result = carrier.result;
+            slots.insert(
+                *index,
+                ConvertedCarrier {
+                    variable: copy,
+                    lambda,
+                    result,
+                },
+            );
+            added = true;
+        }
+        if !added {
+            break;
+        }
+    }
 }
 
 fn converted_slots(
@@ -282,6 +369,17 @@ fn blocked_slots(
             parents.entry(child).or_default().push(parent);
         });
     }
+    let forward_init = |read: ExprId, parent: ExprId| {
+        matches!(
+            ir.expr(parent),
+            IrExpr::Variable {
+                index,
+                init: Some(init),
+                named: false,
+                ..
+            } if init == read && converted.contains_key(&index)
+        )
+    };
     let mut blocked = HashSet::new();
     for &(_, copy) in copies {
         let (slot, read) = match ir.expr(copy) {
@@ -292,15 +390,43 @@ fn blocked_slots(
         if !converted.contains_key(&slot) {
             continue;
         }
-        let only_spliceable_invocations = read
+        let accounted = read
             && parents.get(&copy).is_some_and(|uses| {
                 !uses.is_empty()
-                    && uses
-                        .iter()
-                        .all(|parent| spliceable_edges.contains(&(copy, *parent)))
+                    && uses.iter().all(|parent| {
+                        spliceable_edges.contains(&(copy, *parent)) || forward_init(copy, *parent)
+                    })
             });
-        if !only_spliceable_invocations {
+        if !accounted {
             blocked.insert(slot);
+        }
+    }
+    // A copy into a blocked slot is a real use of the source, not a forward the splice consumes.
+    loop {
+        let mut grew = false;
+        for &(_, copy) in copies {
+            let IrExpr::GetValue(source) = ir.expr(copy) else {
+                continue;
+            };
+            if !converted.contains_key(&source) || blocked.contains(&source) {
+                continue;
+            }
+            let Some(uses) = parents.get(&copy) else {
+                continue;
+            };
+            let feeds_blocked = uses.iter().any(|parent| {
+                matches!(
+                    ir.expr(*parent),
+                    IrExpr::Variable { index, init: Some(init), named: false, .. }
+                        if init == copy && blocked.contains(&index)
+                )
+            });
+            if feeds_blocked && blocked.insert(source) {
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
         }
     }
     blocked
@@ -427,6 +553,134 @@ mod tests {
         assert_eq!(
             blocked_slots(&ir, &copies, &converted, &spliceable),
             std::collections::HashSet::from([7])
+        );
+    }
+
+    #[test]
+    fn a_capture_copied_into_another_temporary_stays_spliceable() {
+        let mut ir = crate::ir::IrFile::default();
+        let function_ty = crate::types::Ty::fun(Vec::new(), crate::types::Ty::Unit);
+        let carrier = ir.add_expr(IrExpr::Variable {
+            index: 3,
+            ty: function_ty,
+            init: None,
+            named: false,
+        });
+        let forwarded_read = ir.add_expr(IrExpr::GetValue(3));
+        let forwarded = ir.add_expr(IrExpr::Variable {
+            index: 8,
+            ty: function_ty,
+            init: Some(forwarded_read),
+            named: false,
+        });
+        let invoke_read = ir.add_expr(IrExpr::GetValue(8));
+        let invocation = ir.add_expr(IrExpr::InvokeFunction {
+            func: invoke_read,
+            args: Vec::new(),
+            params: Vec::new(),
+            ret: crate::types::Ty::Unit,
+        });
+        let root = ir.add_expr(IrExpr::Block {
+            stmts: vec![carrier, forwarded, invocation],
+            value: None,
+        });
+        let copies = (0..=root).map(|id| (id, id)).collect::<Vec<_>>();
+        let mut slots = HashMap::from([(
+            3,
+            ConvertedCarrier {
+                variable: carrier,
+                lambda: 1,
+                result: crate::types::Ty::Unit,
+            },
+        )]);
+        super::include_forwarded_lambda_slots(&ir, &copies, &mut slots);
+        assert!(slots.contains_key(&8), "the inner copy is the same lambda");
+        let spliceable = [SpliceableInvoke {
+            invocation,
+            func: invoke_read,
+            slot: 8,
+        }];
+        assert!(
+            blocked_slots(&ir, &copies, &slots, &spliceable).is_empty(),
+            "a pure forward of a capture copy is still the spliced lambda"
+        );
+    }
+
+    #[test]
+    fn a_blocked_inner_copy_keeps_the_source_capture() {
+        let mut ir = crate::ir::IrFile::default();
+        let function_ty = crate::types::Ty::fun(Vec::new(), crate::types::Ty::Unit);
+        let carrier = ir.add_expr(IrExpr::Variable {
+            index: 3,
+            ty: function_ty,
+            init: None,
+            named: false,
+        });
+        let forwarded_read = ir.add_expr(IrExpr::GetValue(3));
+        let forwarded = ir.add_expr(IrExpr::Variable {
+            index: 8,
+            ty: function_ty,
+            init: Some(forwarded_read),
+            named: false,
+        });
+        let read = ir.add_expr(IrExpr::GetValue(8));
+        let root = ir.add_expr(IrExpr::Block {
+            stmts: vec![carrier, forwarded],
+            value: Some(read),
+        });
+        let copies = (0..=root).map(|id| (id, id)).collect::<Vec<_>>();
+        let converted = HashMap::from([
+            (
+                3,
+                ConvertedCarrier {
+                    variable: carrier,
+                    lambda: 1,
+                    result: crate::types::Ty::Unit,
+                },
+            ),
+            (
+                8,
+                ConvertedCarrier {
+                    variable: forwarded,
+                    lambda: 1,
+                    result: crate::types::Ty::Unit,
+                },
+            ),
+        ]);
+        assert_eq!(
+            blocked_slots(&ir, &copies, &converted, &[]),
+            std::collections::HashSet::from([3, 8])
+        );
+    }
+
+    #[test]
+    fn a_lambda_invoked_inside_nested_inline_uses_is_spliced() {
+        let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
+            "import java.io.OutputStream\n\
+             import java.util.zip.ZipOutputStream\n\
+             inline fun zip(out: OutputStream, shuffle: (MutableList<String>) -> Unit) {\n\
+                 out.use { outputStream ->\n\
+                     ZipOutputStream(outputStream).use {\n\
+                         shuffle(mutableListOf())\n\
+                     }\n\
+                 }\n\
+             }\n\
+             fun go(out: OutputStream) = zip(out) {}\n",
+            "NestedUseLambda",
+        );
+        let go = function_body(&ir, "go");
+        assert!(
+            !subtree_contains(&ir, go, &|expression| matches!(
+                expression,
+                IrExpr::Lambda { .. }
+            )),
+            "the lambda passed through nested uses must be spliced"
+        );
+        assert!(
+            !subtree_contains(&ir, go, &|expression| {
+                matches!(expression, IrExpr::InvokeFunction { .. })
+            }),
+            "a spliced lambda is not invoked as a function object"
         );
     }
 
