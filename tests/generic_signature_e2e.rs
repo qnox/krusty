@@ -212,6 +212,34 @@ fn declaration_site_wildcards_appear_in_parameter_positions_only() {
     );
 }
 
+/// `java.util.List` and `java.lang.Comparable` are invariant. The Kotlin declarations they map to
+/// (`List` is `out`, `Comparable` is `in`) keep that variance under the Kotlin name only.
+#[test]
+fn a_java_type_keeps_invariant_parameters() {
+    let src = "fun <T> takeList(items: java.util.List<T>) {}\n\
+               fun <T> takeComp(c: java.lang.Comparable<T>) {}\n";
+    let cs = classes(src);
+    let reference = kotlinc_class(src, "GKt");
+    let expect = |name: &str, signature: &str| {
+        assert_eq!(
+            method_signature(&cs, "GKt", name).as_deref(),
+            Some(signature),
+            "{name}"
+        );
+        let kotlinc = reference
+            .methods
+            .iter()
+            .find(|method| method.name == name)
+            .and_then(|method| method.signature.as_deref());
+        assert_eq!(kotlinc, Some(signature), "{name}");
+    };
+    expect("takeList", "<T:Ljava/lang/Object;>(Ljava/util/List<TT;>;)V");
+    expect(
+        "takeComp",
+        "<T:Ljava/lang/Object;>(Ljava/lang/Comparable<TT;>;)V",
+    );
+}
+
 #[test]
 fn top_level_property_field_gets_its_generic_signature() {
     // A top-level property's backing field lives on the FILE FACADE, whose field table is emitted by

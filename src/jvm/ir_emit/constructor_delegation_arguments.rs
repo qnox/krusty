@@ -2,7 +2,8 @@
 //!
 //! A delegation is not an IR call node, so its arguments are adapted here against the selected
 //! target constructor's declared parameters, exactly as a construction's arguments are: a
-//! substituted scalar passed to an erased generic parameter is boxed.
+//! substituted scalar passed to an erased generic parameter is boxed, while an erased generic
+//! call result consumed by that same reference parameter is not narrowed first.
 
 use super::*;
 
@@ -31,7 +32,15 @@ impl Emitter<'_> {
         let spilled = arguments
             .iter()
             .any(|&argument| self.spills_operand_prefix(argument))
-            .then(|| self.spill_to_temps(arguments, code));
+            .then(|| {
+                arguments
+                    .iter()
+                    .map(|&argument| {
+                        let source = self.emit_consumed_operand(argument, code);
+                        self.spill_operand(argument, source, code)
+                    })
+                    .collect::<Vec<_>>()
+            });
         code.aload(0);
         let mut slot = 1;
         for &ty in forwarded_prefix {
@@ -45,10 +54,7 @@ impl Emitter<'_> {
                     load(source, slot, code);
                     source
                 }
-                None => {
-                    self.emit_value(argument, code);
-                    self.value_ty(argument)
-                }
+                None => self.emit_consumed_operand(argument, code),
             };
             let semantic = self
                 .ir

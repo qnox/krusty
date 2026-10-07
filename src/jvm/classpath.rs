@@ -2723,11 +2723,9 @@ impl Classpath {
             .unwrap_or_default()
     }
 
-    /// The `.kotlin_builtins` analogue of a class generic signature: the builtin's formal
-    /// type-parameter names and its supertypes WITH type arguments (`MutableList<E> : List<E>`). This
-    /// is what lets a receiver's type argument bind (and travel up the hierarchy) when the mapped JVM
-    /// class — whose `Signature` normally carries these facts — is absent from the classpath.
-    /// `internal` may be the Kotlin name or its mapped JVM form (`java/util/List`).
+    /// Formal names and generic supertypes from `.kotlin_builtins`, so a receiver's type argument
+    /// still binds when the mapped JVM class is absent. `internal` may be the Kotlin name or
+    /// `java/util/List`.
     pub fn builtin_class_gsig_name(&self, internal: TypeName) -> Option<(Vec<String>, Vec<Ty>)> {
         let kotlin =
             super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).unwrap_or(internal);
@@ -2740,10 +2738,12 @@ impl Classpath {
         &self,
         internal: TypeName,
     ) -> Option<Vec<crate::types::TypeVariance>> {
-        let kotlin =
-            super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).unwrap_or(internal);
-        self.builtins_file_for_package(Self::builtins_package_for(kotlin))
-            .get_name(kotlin)
+        // A mapped JVM class does not borrow its Kotlin declaration's variance.
+        if super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).is_some() {
+            return None;
+        }
+        self.builtins_file_for_package(Self::builtins_package_for(internal))
+            .get_name(internal)
             .map(|class| class.formal_variances.clone())
     }
 

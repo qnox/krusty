@@ -9999,6 +9999,15 @@ impl ResolvedCtorDelegationTarget {
             | Self::Super { params, .. } => params,
         }
     }
+
+    fn declaration_params(&self) -> &[Ty] {
+        match self {
+            Self::ThisPrimary { params } | Self::ThisSecondary { params, .. } => params,
+            Self::Super {
+                declaration_params, ..
+            } => declaration_params,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -10013,6 +10022,9 @@ pub struct ResolvedCtorDelegation {
     pub argument_slots: Vec<usize>,
     /// Expected type for each source argument after vararg expansion/spread handling.
     pub argument_types: Vec<Ty>,
+    /// The selected declaration's corresponding parameter type before superclass substitution.
+    /// Platform commitment follows this shape, not the specialized expectation.
+    argument_declared_types: Vec<Ty>,
     /// Whether each source argument lands in a parameter marked with the resolved internal integer
     /// coercion annotation.
     argument_implicit_integer_coercion: Vec<bool>,
@@ -47914,6 +47926,7 @@ impl<'a> Checker<'a> {
             })
             .collect::<Option<Vec<_>>>()?;
         let mut argument_types = Vec::with_capacity(arguments.args.len());
+        let mut argument_declared_types = Vec::with_capacity(arguments.args.len());
         let mut argument_implicit_integer_coercion = Vec::with_capacity(arguments.args.len());
         let mut argument_lambda_receivers = Vec::with_capacity(arguments.args.len());
         for (source, (&argument, &slot)) in arguments.args.iter().zip(&argument_slots).enumerate() {
@@ -47931,6 +47944,18 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 parameter
+            };
+            let declared_parameter = *candidate.target.declaration_params().get(slot)?;
+            let declared = if candidate.vararg == Some(slot)
+                && !self.file.is_spread_arg(argument)
+                && arguments
+                    .names
+                    .get(source)
+                    .is_none_or(|name| name.is_none())
+            {
+                declared_parameter.array_read_elem()?
+            } else {
+                declared_parameter
             };
             let nominal = self.expr_types[argument.0 as usize];
             let actual = self.argument_type_for_expected(scope, argument, nominal, expected);
@@ -48041,6 +48066,7 @@ impl<'a> Checker<'a> {
                 }
             }
             argument_types.push(expected);
+            argument_declared_types.push(declared);
             argument_implicit_integer_coercion.push(
                 candidate
                     .implicit_integer_coercion
@@ -48084,6 +48110,7 @@ impl<'a> Checker<'a> {
             context_args: contextual.context_sources.into_iter().flatten().collect(),
             argument_slots,
             argument_types,
+            argument_declared_types,
             argument_implicit_integer_coercion,
             argument_lambda_receivers,
             omitted,
@@ -48138,10 +48165,11 @@ impl<'a> Checker<'a> {
             );
             return;
         }
-        for (index, (&argument, &expected)) in arguments
+        for (index, ((&argument, &expected), &declared)) in arguments
             .args
             .iter()
             .zip(&selected.argument_types)
+            .zip(&selected.argument_declared_types)
             .enumerate()
         {
             if matches!(
@@ -48153,7 +48181,16 @@ impl<'a> Checker<'a> {
                     .get(index)
                     .copied()
                     .unwrap_or(false);
-                self.check_argument_expected(scope, argument, expected, has_receiver, None);
+                let actual = self.expr_types[argument.0 as usize];
+                self.expect_call_arg_labeled(
+                    scope,
+                    expected,
+                    declared,
+                    argument,
+                    actual,
+                    has_receiver,
+                    None,
+                );
                 continue;
             }
             let constraint = selected
@@ -48176,11 +48213,14 @@ impl<'a> Checker<'a> {
             ) {
                 continue;
             }
-            self.expect_assignable(
+            self.expect_call_arg_labeled(
+                scope,
                 expected,
+                declared,
+                argument,
                 self.expr_types[argument.0 as usize],
-                self.span(argument),
-                "constructor delegation argument",
+                false,
+                None,
             );
         }
         self.resolved_ctor_delegations
@@ -54470,40 +54510,29 @@ impl<'a> Checker<'a> {
                                         .to_string()
                                 });
                                 c.suppress_receiver_capture_accounting = is_anonymous_object;
-                                for ((&arg, &expected), &has_receiver) in cl
+                                for (((&arg, &expected), &declared), &has_receiver) in cl
                                     .base_args
                                     .iter()
                                     .zip(&selected.argument_types)
+                                    .zip(&selected.argument_declared_types)
                                     .zip(&selected.argument_lambda_receivers)
                                 {
-                                    if matches!(
-                                        c.file.expr(arg),
-                                        Expr::Lambda { .. } | Expr::CallableRef { .. }
-                                    ) {
-                                        c.check_argument_expected(
-                                            header_scope,
-                                            arg,
-                                            expected,
-                                            has_receiver,
-                                            label.as_deref(),
-                                        );
-                                    } else {
-                                        // Selection fixes the base constructor's semantic parameter
-                                        // just as an ordinary call does. Commit that expectation for
-                                        // every argument form, not only lambdas: a nested generic
-                                        // constructor may have no argument-side evidence of its own
-                                        // (`Base<String>(Value("x"))`) and must publish `Value<String>`
-                                        // before checked FIR validates its substitutions.
-                                        let actual = c.expr_types[arg.0 as usize];
-                                        c.expect_call_arg_labeled(
-                                            header_scope,
-                                            expected,
-                                            expected,
-                                            arg,
-                                            actual,
-                                            label.as_deref(),
-                                        );
-                                    }
+                                    // Selection fixes the base constructor's semantic parameter
+                                    // just as an ordinary call does. Commit that expectation for
+                                    // every argument form: a nested generic constructor may have no
+                                    // argument-side evidence of its own (`Base<String>(Value("x"))`)
+                                    // and must publish `Value<String>` before checked FIR validates
+                                    // its substitutions.
+                                    let actual = c.expr_types[arg.0 as usize];
+                                    c.expect_call_arg_labeled(
+                                        header_scope,
+                                        expected,
+                                        declared,
+                                        arg,
+                                        actual,
+                                        has_receiver,
+                                        label.as_deref(),
+                                    );
                                 }
                                 c.suppress_receiver_capture_accounting = previous_capture_accounting;
                                 c.super_ctor_params
@@ -56441,7 +56470,7 @@ impl<'a> Checker<'a> {
         argument: ExprId,
         actual: Ty,
     ) {
-        self.expect_call_arg_labeled(scope, expected, expected, argument, actual, None);
+        self.expect_call_arg_labeled(scope, expected, expected, argument, actual, false, None);
     }
 
     /// `declared` is the selected parameter's own type, before the call's type variables are
@@ -56454,6 +56483,7 @@ impl<'a> Checker<'a> {
         declared: Ty,
         argument: ExprId,
         actual: Ty,
+        lambda_has_receiver: bool,
         implicit_lambda_label: Option<&str>,
     ) {
         // Some selected call paths validate their arguments directly rather than through
@@ -56482,7 +56512,13 @@ impl<'a> Checker<'a> {
         {
             self.expr_expected(scope, argument, expected)
         } else if self.lambda_needs_selected_shape(scope, argument, actual, expected) {
-            self.check_argument_expected(scope, argument, expected, false, implicit_lambda_label)
+            self.check_argument_expected(
+                scope,
+                argument,
+                expected,
+                lambda_has_receiver,
+                implicit_lambda_label,
+            )
         } else if self.conditional_branches_admit_expected(argument, expected) {
             self.expr_expected(scope, argument, expected)
         } else if self.call_result_can_bind_expected(argument, expected)
@@ -57283,7 +57319,15 @@ impl<'a> Checker<'a> {
             let declared = parameter_shapes
                 .get(index)
                 .map_or(*expected, |&(shape, _)| shape);
-            self.expect_call_arg_labeled(scope, substituted, declared, argument, actual, None);
+            self.expect_call_arg_labeled(
+                scope,
+                substituted,
+                declared,
+                argument,
+                actual,
+                has_receiver,
+                None,
+            );
         }
         for (index, binding) in bindings.iter_mut().enumerate() {
             if *binding == Ty::Null {
