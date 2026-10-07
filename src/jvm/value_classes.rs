@@ -4271,12 +4271,15 @@ fn prop_access(
     } else {
         receiver
     };
-    // The coercion's operand is the value the accessor physically produced. Keep that slot on the
-    // producer as well as on the rewritten property expression: consumers such as structural
-    // equality deliberately inspect through an `ImplicitCoercion` so an erased generic scalar
-    // (`R<Int>.a`: `Object` containing `Integer`) stays boxed instead of being unboxed and boxed
-    // again. Arithmetic still consumes the coercion at its concrete Kotlin result below.
-    ir.physical_types.insert(inner, u);
+    // Only a declaration type parameter makes this an erased generic slot. Keep that physical fact
+    // on the producer as well as on the rewritten property expression: consumers such as structural
+    // equality deliberately inspect through an `ImplicitCoercion` so `R<R<Int>>.a` stays boxed
+    // instead of being unboxed and boxed again. A concrete nested value class (`Outer.inner: Inner`)
+    // shares `Inner`'s carrier directly; stamping its producer as generic Object would make a
+    // coroutine caller cast that raw carrier to the `Inner` box.
+    if property_has_erased_generic_slot(x, under) {
+        ir.physical_types.insert(inner, u);
+    }
     // A generic value class keeps an erased `Object` carrier, but an applied property read
     // (`X<Int>.x`) has a concrete Kotlin result. Preserve that selected result so a real conversion
     // performs the required `Integer` unbox / reference cast instead of degrading it back to Any.
@@ -4305,6 +4308,15 @@ fn prop_access(
         arg: inner,
         type_operand: target,
     }
+}
+
+/// Whether this value class's declared property crosses a generic JVM slot. The declaration's
+/// underlying type owns that fact; the recursively erased carrier alone cannot distinguish
+/// `R<T>.value: T` from `Outer.inner: Inner` when both ultimately erase to `Object`.
+fn property_has_erased_generic_slot(class: TypeName, under: &Under) -> bool {
+    under
+        .get(&class)
+        .is_some_and(|declared| declared.mentions_ty_param())
 }
 
 /// Whether a JVM method descriptor's return type is the classfile form of `class`.
@@ -4969,9 +4981,9 @@ fn collect_reachable_scoped(exprs: &[IrExpr], root: ExprId, out: &mut HashSet<Ex
 }
 
 #[cfg(test)]
-mod descriptor_return_tests {
-    use super::descriptor_returns_class;
-    use crate::types::type_name;
+mod boundary_tests {
+    use super::{descriptor_returns_class, property_has_erased_generic_slot, Under};
+    use crate::types::{type_name, Ty};
 
     #[test]
     fn descriptor_return_matches_the_interned_class_without_rendering() {
@@ -4985,5 +4997,25 @@ mod descriptor_return_tests {
             "(Lpkg/Foo$Bar;)Lpkg/Other;",
             class
         ));
+    }
+
+    #[test]
+    fn only_a_declared_type_parameter_marks_a_generic_property_slot() {
+        let generic = type_name("fixture/Generic");
+        let nullable_generic = type_name("fixture/NullableGeneric");
+        let inner = type_name("fixture/Inner");
+        let outer = type_name("fixture/Outer");
+        let any = Ty::obj("kotlin/Any");
+        let parameter = Ty::ty_param("T", any);
+        let under = Under::from([
+            (generic, parameter),
+            (nullable_generic, Ty::nullable(parameter)),
+            (inner, any),
+            (outer, Ty::obj_name(inner)),
+        ]);
+
+        assert!(property_has_erased_generic_slot(generic, &under));
+        assert!(property_has_erased_generic_slot(nullable_generic, &under));
+        assert!(!property_has_erased_generic_slot(outer, &under));
     }
 }
