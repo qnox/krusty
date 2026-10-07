@@ -1811,7 +1811,34 @@ impl BodyLowering<'_> {
                 IrExpr::Call { args, .. } => args.first().copied(),
                 _ => None,
             };
-            if first.is_some_and(|operand| self.ir.is_positionless(operand)) {
+            // Local-declaration lifting has already turned an enclosing context receiver into an
+            // explicit captured-receiver parameter. Its load is synthetic setup: kotlinc starts
+            // the source call's line at dispatch, after the load. A non-captured implicit context
+            // argument remains owned by the call from its first generated operand.
+            let captured_context = first.is_some_and(|operand| {
+                let IrExpr::GetValue(value) = self.ir.expr(operand) else {
+                    return false;
+                };
+                let Some(parameters) = self
+                    .declaration_lambda
+                    .and_then(|function| self.ir.fn_params.get(&function))
+                else {
+                    return false;
+                };
+                let Some(identity) = parameters.identities.get(*value as usize) else {
+                    return false;
+                };
+                let crate::ir::IrParameterRole::CapturedReceiver { ordinal } = identity.role else {
+                    return false;
+                };
+                parameters
+                    .captured_receivers
+                    .get(ordinal as usize)
+                    .is_some_and(|receiver| {
+                        matches!(receiver, crate::ir::IrCapturedReceiver::Context { .. })
+                    })
+            });
+            if !captured_context && first.is_some_and(|operand| self.ir.is_positionless(operand)) {
                 self.ir.mark_generated_operand_start(call);
             }
         }
