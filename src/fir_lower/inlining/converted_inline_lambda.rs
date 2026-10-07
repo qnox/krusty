@@ -377,7 +377,7 @@ fn blocked_slots(
                 init: Some(init),
                 named: false,
                 ..
-            } if init == read && converted.contains_key(&index)
+            } if *init == read && converted.contains_key(&index)
         )
     };
     let mut blocked = HashSet::new();
@@ -418,10 +418,10 @@ fn blocked_slots(
                 matches!(
                     ir.expr(*parent),
                     IrExpr::Variable { index, init: Some(init), named: false, .. }
-                        if init == copy && blocked.contains(&index)
+                        if *init == copy && blocked.contains(&index)
                 )
             });
-            if feeds_blocked && blocked.insert(source) {
+            if feeds_blocked && blocked.insert(*source) {
                 grew = true;
             }
         }
