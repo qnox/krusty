@@ -199,6 +199,22 @@ impl CodeBuilder {
         let _ = self.record_line(line);
     }
 
+    /// Record a source line at a control-flow entry even when the same line was in effect on the
+    /// preceding linear path. Exception handlers start a distinct execution path, and kotlinc
+    /// retains their entry in the line table rather than deduplicating it against unreachable
+    /// fall-through state.
+    pub(crate) fn mark_control_entry_line(&mut self, line: u32) {
+        if self.dead || self.bytes.len() > u16::MAX as usize {
+            return;
+        }
+        let line = line.min(u16::MAX as u32) as u16;
+        let pc = self.bytes.len() as u16;
+        match self.line_marks.last_mut() {
+            Some((last_pc, last_line)) if *last_pc == pc => *last_line = line,
+            _ => self.line_marks.push((pc, line)),
+        }
+    }
+
     /// [`Self::mark_line`], reporting the index of the entry left in effect AT THE CURRENT pc —
     /// `None` when this call wrote none there.
     ///
