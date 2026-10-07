@@ -43,11 +43,17 @@ impl Emitter<'_> {
     /// been loaded. `inv()` is unary despite using xor-with-all-bits-set in IR, so it keeps the
     /// ordinary expression-entry mark. This is a JVM debug-layout decision over the checked
     /// operation shape, not dispatch on a library member spelling.
-    pub(super) fn defers_unsigned_bitwise_start_line(&self, expression: u32) -> bool {
+    fn defers_unsigned_bitwise_start_line(&self, expression: u32) -> bool {
         let Some((op, rhs)) = self.unsigned_bitwise_operation(expression) else {
             return false;
         };
         !(op == IrBinOp::BitXor && self.ir.is_positionless(rhs))
+    }
+
+    pub(super) fn mark_value_expression_start(&mut self, expression: u32, code: &mut CodeBuilder) {
+        if !self.defers_unsigned_bitwise_start_line(expression) {
+            self.mark_expression_start(expression, code);
+        }
     }
 
     pub(super) fn completes_unsigned_bitwise_value(&self, expression: u32) -> bool {

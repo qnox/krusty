@@ -153,8 +153,8 @@ mod value_class_override_metadata;
 mod value_class_signatures;
 use crate::jvm::private_static_access::StaticOwner;
 use class_pool_seed::{
-    seed_accessor_locals, seed_enum_constructor_locals, seed_plain_class_pool,
-    seed_plain_constructor_tail, PlainClassPoolSeed,
+    seed_accessor_locals, seed_ctor_before_members, seed_enum_constructor_locals,
+    seed_plain_constructor_tail, seed_value_ctor_after_members, PlainClassPoolSeed,
 };
 pub(super) use enclosure::{class_enclosure, property_accessor_function};
 use primary_constructor_parameters::{
@@ -2705,9 +2705,7 @@ fn emit_class(
         fq_name: &fq_name,
         ctor_signature: ctor_signature.as_deref(),
     };
-    if byte_parity && c.has_primary_ctor && !c.is_value {
-        seed_plain_class_pool(pool_seed(), &mut cw);
-    }
+    seed_ctor_before_members(byte_parity, pool_seed(), &mut cw);
     // Access: an extended or abstract class must not be `final`; a class with an emitted abstract
     // method is `ACC_ABSTRACT`. An inline-splice implementation is deliberately body-less after its
     // checked body has been consumed, but it is not a JVM method declaration at all.
@@ -2930,13 +2928,7 @@ fn emit_class(
     if c.is_value {
         inherited_default_forwarders::emit_value_class_inherited_defaults(ir, c, &mut cw, env);
     }
-    // Unlike an ordinary class, kotlinc visits a value class's declared members before its private
-    // primary constructor. Reserve the constructor header at that real schedule boundary: doing it
-    // with the ordinary-class seed above makes `<init>` the first member-owned pool entry and shifts
-    // every declared member's constants even though the method table itself is correctly ordered.
-    if byte_parity && c.has_primary_ctor && c.is_value {
-        seed_plain_class_pool(pool_seed(), &mut cw);
-    }
+    seed_value_ctor_after_members(byte_parity, pool_seed(), &mut cw);
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
@@ -5762,9 +5754,7 @@ struct Emitter<'a> {
     /// kotlinc's `isInsideCondition`: a `when` branch condition is being emitted, so an inlined
     /// call in it marks its own line again after the inlined code.
     inside_condition: bool,
-    /// Whether the unsigned primitive operation whose receiver is currently being emitted moved
-    /// its eager source boundary. A nested operation follows that decision so an explicit outer
-    /// return boundary survives while a local/expression-body boundary moves past the receiver.
+    /// The enclosing unsigned operation's decision to move its eager source boundary.
     unsigned_receiver_line_moves: Option<bool>,
     /// Slot 0 remains the verifier's special uninitialized receiver until the constructor delegates.
     this_uninitialized: bool,
@@ -6230,12 +6220,8 @@ impl<'a> Emitter<'a> {
 
     fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
         debug_lines::begin_expression(self.ir, e, code);
-        if !self.defers_unsigned_bitwise_start_line(e) {
-            self.mark_expression_start(e, code);
-        }
-        // A suspension whose machine emission owns: mark where it landed. The splice decides that
-        // position, so an offset recorded before it would be worthless, whereas an instruction
-        // travels with the code. Every marker is erased once its answers are read.
+        self.mark_value_expression_start(e, code);
+        // Mark a machine-owned suspension at its post-splice location.
         let suspension = self.machine_before(e, code);
         self.open_transformed_suspension(e, code);
         let node = self.ir.expr(e).clone();

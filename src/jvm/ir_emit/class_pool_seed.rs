@@ -11,7 +11,31 @@ pub(super) struct PlainClassPoolSeed<'a> {
     pub(super) ctor_signature: Option<&'a str>,
 }
 
-pub(super) fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
+/// Reserve an ordinary class's constructor before its members, at kotlinc's schedule position.
+pub(super) fn seed_ctor_before_members(
+    enabled: bool,
+    seed: PlainClassPoolSeed<'_>,
+    cw: &mut ClassWriter,
+) {
+    if enabled && seed.class.has_primary_ctor && !seed.class.is_value {
+        seed_plain_class_pool(seed, cw);
+    }
+}
+
+/// Reserve a value class's constructor after the declared members which precede it. Reserving it
+/// with an ordinary class makes `<init>` the first member-owned pool entry and shifts the whole pool
+/// even when the method table is correctly ordered.
+pub(super) fn seed_value_ctor_after_members(
+    enabled: bool,
+    seed: PlainClassPoolSeed<'_>,
+    cw: &mut ClassWriter,
+) {
+    if enabled && seed.class.has_primary_ctor && seed.class.is_value {
+        seed_plain_class_pool(seed, cw);
+    }
+}
+
+fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
     let PlainClassPoolSeed {
         ir,
         class: c,
