@@ -206,15 +206,26 @@ fn a_removed_body_class_moves_to_its_late_inner_class_row() {
         access: 0x0019,
     });
     let class = writer.finish();
-    let entries = pool(&class);
-    let position = |entry: &str| {
-        entries
-            .iter()
-            .position(|candidate| candidate == entry)
-            .unwrap_or_else(|| panic!("{entry} in {entries:?}"))
-    };
-    assert!(position("String body") < position("Class sample/Holder$Removed"));
-    assert!(position("Class sample/Holder$Removed") < position("Class sample/Holder"));
+    // The push/pop rewrite removes `body` entirely. The seeded class survives only because the
+    // later InnerClasses row names it, so its first pool position is that row's visit window.
+    assert_eq!(
+        pool(&class),
+        [
+            "T",
+            "Class T",
+            "java/lang/Object",
+            "Class java/lang/Object",
+            "f",
+            "()V",
+            "sample/Holder$Removed",
+            "Class sample/Holder$Removed",
+            "sample/Holder",
+            "Class sample/Holder",
+            "Removed",
+            "Code",
+            "InnerClasses",
+        ]
+    );
 }
 
 #[test]
