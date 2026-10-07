@@ -188,37 +188,15 @@ impl<'a> Layout<'a> {
                 }
             }
         }
-        // A declaration/header or earlier body really interns an owned entry first only when its
-        // visit precedes the owning rewrite's code. A later holder merely reuses the stale entry
-        // krusty's original body interned. If the rewrite removed that use, kotlinc first interns
-        // it at the later holder instead (notably an `InnerClasses` row for a removed capture).
-        let mut owner_code_start = vec![usize::MAX; count];
-        for method in relaid {
-            let start = code_starts
-                .get(&method.index)
-                .copied()
-                .unwrap_or(usize::MAX);
-            for index in method.added.clone().chain(method.interned.clone()) {
-                if let Some(owner) = owner_code_start.get_mut(usize::from(index)) {
-                    *owner = (*owner).min(start);
-                }
-            }
-        }
         for index in 0..count {
-            if owned[index] {
-                fixed[index] = visited_first[index] && first_named[index] < owner_code_start[index];
+            if rewritten_reach[index] {
+                fixed[index] = visited_first[index];
             }
         }
         let orphaned: Vec<bool> = (0..count)
-            .map(|index| {
-                owned[index]
-                    && kept[index]
-                    && !fixed[index]
-                    && !rewritten_reach[index]
-                    && !leading[index]
-            })
+            .map(|index| owned[index] && kept[index] && !rewritten_reach[index] && !leading[index])
             .collect();
-        let anchored = orphan_anchors(read, &by_method, &orphaned);
+        let anchored = orphan_anchors(read, relaid, &by_method, &orphaned);
         if unnamed == Unnamed::Kept {
             let unowned: Vec<u16> = (1..count)
                 .filter(|&index| read.entries[index].is_some() && !owned[index])
@@ -354,12 +332,13 @@ fn method_code_starts(read: &ClassSlots) -> HashMap<usize, usize> {
     body
 }
 
-/// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten code
-/// no longer names is placed where the first later holder actually names it. That may be another
-/// method's code or a class-level structure such as `InnerClasses`. It precedes the first fresh
-/// entry that holder names after it, or follows the last entry named when none does.
+/// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten
+/// code no longer names, first named (in kotlinc's visit order) by later code, a later header, or
+/// a class attribute, is placed before the first entry that visit names for the first time with or
+/// after it, or right after the last entry that visit names when none follows.
 fn orphan_anchors(
     read: &ClassSlots,
+    relaid: &[RelaidMethod],
     by_method: &HashMap<usize, usize>,
     orphaned: &[bool],
 ) -> Vec<Option<usize>> {
@@ -369,7 +348,20 @@ fn orphan_anchors(
         return anchored;
     }
     let mut seen = vec![false; count];
+    let mut owner = vec![None; count];
+    for method in relaid {
+        for index in method.added.clone().chain(method.interned.clone()) {
+            if let Some(entry_owner) = owner.get_mut(usize::from(index)) {
+                *entry_owner = Some(method.index);
+            }
+        }
+    }
+    let code_starts = method_code_starts(read);
+    let mut method = None;
+    // The last entry the current method names: its header, then its code.
     let mut named_max = 0;
+    // The last entry the slots since the last code slot name: the next method's header.
+    let mut header_max = 0;
     let mut pending: Vec<usize> = Vec::new();
     let settle = |pending: &mut Vec<usize>, anchor: usize, anchored: &mut [Option<usize>]| {
         for orphan in pending.drain(..) {
@@ -378,18 +370,48 @@ fn orphan_anchors(
             }
         }
     };
-    for slot in read.visit_order() {
-        if matches!(slot.holder, Holder::AttributeName) {
-            continue;
-        }
-        let rewritten = matches!(slot.holder, Holder::Code(at, _) if by_method.contains_key(&at));
+    for (position, slot) in read.visit_order().enumerate() {
+        let code = match slot.holder {
+            Holder::Code(at, _) if !by_method.contains_key(&at) => Some(at),
+            _ => None,
+        };
         let reached = reached_from(read, slot.index);
-        if rewritten {
+        let Some(at) = code else {
+            // A rewrite-owned entry whose first remaining use comes after that method's code is
+            // interned at that later visit, not at the position of the removed instruction. This
+            // includes an `InnerClasses` row retaining a holder class that CapturedVars removed.
+            pending.extend(reached.iter().copied().filter(|&index| {
+                orphaned[index]
+                    && !seen[index]
+                    && owner[index]
+                        .and_then(|method| code_starts.get(&method).copied())
+                        .is_some_and(|code_start| position > code_start)
+            }));
+            if let Some(fresh) = reached
+                .iter()
+                .copied()
+                .filter(|&index| !seen[index] && !orphaned[index])
+                .min()
+            {
+                settle(&mut pending, fresh, &mut anchored);
+            }
             for &index in &reached {
                 seen[index] = true;
+                if !orphaned[index] && slot.holder == Holder::Class {
+                    header_max = header_max.max(index);
+                }
+            }
+            if matches!(slot.holder, Holder::Code(..)) {
+                header_max = 0;
             }
             continue;
+        };
+        if method != Some(at) {
+            settle(&mut pending, named_max + 1, &mut anchored);
+            method = Some(at);
+            named_max = header_max;
         }
+        header_max = 0;
         for &index in &reached {
             if orphaned[index] && !seen[index] {
                 pending.push(index);
