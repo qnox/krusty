@@ -41,6 +41,15 @@ impl ClassWriter {
         }
     }
 
+    /// Restore only the source-map state from `checkpoint`.
+    ///
+    /// A literal lambda is compiled into a scratch method before the enclosing inline body is
+    /// written. Its constants and any members remain inputs to that later write, but source-map
+    /// ranges must not become visible until the lambda is actually inserted into the body.
+    pub(crate) fn restore_source_map(&mut self, checkpoint: &ClassCheckpoint) {
+        self.source_map = checkpoint.source_map.clone();
+    }
+
     /// Forget what code compiled since `checkpoint` left in the class: its constants, source-map
     /// lines, bootstrap methods and nested-class candidates, all of which only that code referred
     /// to. It was compiled to be read back as a method node and written elsewhere, which kotlinc

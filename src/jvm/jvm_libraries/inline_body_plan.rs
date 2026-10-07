@@ -458,6 +458,70 @@ fn has_only_template_effects(instructions: &[Insn]) -> bool {
     })
 }
 
+/// Every body this module recognizes as an invoke-lambda plan has a prelude that is empty or a
+/// parameter null-check. A declaration compiled with its own function-marker store
+/// (`iconst_0; istore $i$f$`) fails that exact template, so a recognized invoke-lambda body is
+/// exactly an `@InlineOnly` declaration: its frame carries no body debug surface of its own.
+fn invoke_lambda_frame(callable: &LibraryCallable) -> crate::libraries::InlineBodyFrame {
+    crate::libraries::InlineBodyFrame {
+        callee: callable.name.as_str().into(),
+        inline_only: true,
+        source: None,
+    }
+}
+
+/// Resolve one line of a recognized declaration body through the body's own debug mapping — the
+/// same resolution the bytecode splice applies when it maps an inlined line into a caller. A
+/// present mapping that does not cover the line drops it, exactly as the splice would.
+fn resolve_body_line(
+    body: &crate::jvm::classreader::MethodCode,
+    line: u16,
+) -> Option<(Box<str>, Box<str>, u16)> {
+    match body.dependency_source_map.as_ref() {
+        Some(map) => map
+            .resolve(line)
+            .map(|(name, path, source)| (name.into(), path.into(), source)),
+        None => Some((
+            body.source_file.as_deref()?.into(),
+            body.defining_class.as_str().into(),
+            line,
+        )),
+    }
+}
+
+/// The line covering byte `pc` in the body's own line table: the last entry at or before it.
+fn body_line_at(body: &crate::jvm::classreader::MethodCode, pc: usize) -> Option<u16> {
+    body.lines
+        .iter()
+        .rev()
+        .find(|(start, _)| usize::from(*start) <= pc)
+        .map(|(_, line)| *line)
+}
+
+/// The debug source of a recognized non-inline-only declaration body, given the instruction index
+/// of its first loop instruction and of the frame-closing return. Both lines resolve under the one
+/// declaration's file identity; the recognized loop templates never span files.
+fn recognized_body_source(
+    body: &crate::jvm::classreader::MethodCode,
+    instructions: &[Insn],
+    loop_start: usize,
+    close: usize,
+    element: Option<Box<str>>,
+) -> Option<crate::libraries::InlineBodySource> {
+    let offsets = inline::insn_offsets_at(instructions, 0);
+    let invoke_line = body_line_at(body, *offsets.get(loop_start)?)?;
+    let close_line = body_line_at(body, *offsets.get(close)?)?;
+    let (file, path, invoke_line) = resolve_body_line(body, invoke_line)?;
+    let (_, _, close_line) = resolve_body_line(body, close_line)?;
+    Some(crate::libraries::InlineBodySource {
+        file,
+        path,
+        invoke_line,
+        close_line,
+        element,
+    })
+}
+
 fn cleanup_boundaries_are_immediate(
     invoke: usize,
     normal_cleanup_start: usize,
@@ -757,7 +821,7 @@ impl JvmLibraries {
     ) -> Option<InlineBodyPlan> {
         match self.inline_collection_transform_body_plan(callable, body_descriptor, parameter_slots)
         {
-            collection_transform::CollectionTransformDecode::Plan(plan) => return Some(plan),
+            collection_transform::CollectionTransformDecode::Plan(plan) => return Some(*plan),
             collection_transform::CollectionTransformDecode::Rejected => return None,
             collection_transform::CollectionTransformDecode::Unavailable => {
                 *decode_unavailable = true;
@@ -860,6 +924,7 @@ impl JvmLibraries {
         {
             if let Some(return_parameter) = return_parameter {
                 return Some(InlineBodyPlan::InvokeLambda {
+                    frame: invoke_lambda_frame(callable),
                     lambda_parameter,
                     arguments: invoke_argument_slots
                         .iter()
@@ -929,6 +994,7 @@ impl JvmLibraries {
                     return None;
                 }
                 return Some(InlineBodyPlan::InvokeLambda {
+                    frame: invoke_lambda_frame(callable),
                     lambda_parameter,
                     arguments: vec![InlineBodyValue::Parameter(0)],
                     prologue: Vec::new(),
@@ -1153,6 +1219,7 @@ impl JvmLibraries {
             )
         };
         Some(InlineBodyPlan::InvokeLambda {
+            frame: invoke_lambda_frame(callable),
             lambda_parameter,
             arguments: Vec::new(),
             prologue: vec![InlineBodyCall {
@@ -1287,6 +1354,7 @@ mod tests {
             recovery: None,
             defaults,
             result: None,
+            ..
         }) = callable.inline_body_plan.as_deref()
         else {
             panic!("kotlin.io.use must publish its exact inline plan")
@@ -1426,6 +1494,7 @@ mod tests {
             recovery: None,
             defaults,
             result: None,
+            ..
         }) = callable.inline_body_plan.as_deref()
         else {
             panic!("kotlin.let must publish its exact plain invocation plan")
@@ -1458,6 +1527,7 @@ mod tests {
             recovery: None,
             defaults,
             result: None,
+            ..
         }) = with_lock.inline_body_plan.as_deref()
         else {
             panic!("Mutex.withLock must publish its exact region plan")
@@ -1498,6 +1568,7 @@ mod tests {
             recovery: None,
             defaults,
             result: None,
+            ..
         }) = with_permit.inline_body_plan.as_deref()
         else {
             panic!("Semaphore.withPermit must publish its exact region plan")

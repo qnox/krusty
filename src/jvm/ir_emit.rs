@@ -5143,7 +5143,8 @@ fn emit_method_inner_with_holder(
     // Method locals precede `this` and parameters in kotlinc's table order.
     if e.record_locals {
         for local in std::mem::take(&mut e.open_locals) {
-            local.record(None, &mut code);
+            let inline = local.record(None, &mut code, e.recorded_inline_entries);
+            e.recorded_inline_entries += usize::from(inline);
         }
     }
     // Suspend rewriting invalidates source-local expression ids, but its physical parameters remain
@@ -5615,6 +5616,9 @@ struct Emitter<'a> {
     /// krusty would otherwise need. Pushed/popped around the branchy RHS in `emit_binop`.
     /// Open source locals, in declaration order.
     open_locals: Vec<block_scope::OpenLocal>,
+    /// How many recorded `LocalVariableTable` entries belong to an inline frame: where a frame
+    /// marker's entry lands depends on the nested entries recorded before it.
+    recorded_inline_entries: usize,
     /// The current lambda body's captures that are literal lambdas it only invokes.
     inline_lambda_aliases: HashMap<u32, inline_lambda_aliases::InlineLambdaAlias>,
     /// Current block nesting depth; the function body is depth 1.
@@ -5721,6 +5725,7 @@ impl<'a> Emitter<'a> {
             ret,
             loop_stack: Vec::new(),
             open_locals: Vec::new(),
+            recorded_inline_entries: 0,
             inline_lambda_aliases: HashMap::new(),
             block_depth: 0,
             statement_line: None,

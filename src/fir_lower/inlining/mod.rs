@@ -1086,7 +1086,11 @@ impl BodyLowering<'_> {
     /// Record an inline-depth frame boundary named `callee`, live to the end of the block that
     /// declares it. It is not a value: the JVM debug boundary materializes the slot, the zero
     /// store, and the spelling.
-    fn inline_marker(&mut self, callee: String, provenance: IrDebugLocalProvenance) -> ExprId {
+    pub(super) fn inline_marker(
+        &mut self,
+        callee: String,
+        provenance: IrDebugLocalProvenance,
+    ) -> ExprId {
         let declaration = self.ir.add_expr(IrExpr::InlineFrameMarker);
         self.ir.value_names.insert(declaration, callee);
         self.ir.set_debug_local_provenance(declaration, provenance);

@@ -89,6 +89,7 @@ fn execute(source: &str) -> std::process::Output {
     );
     let objects = artifacts
         .iter()
+        .filter(|(name, _)| name.ends_with(".o"))
         .map(|(_, bytes)| bytes.as_slice())
         .collect::<Vec<_>>();
     let image = krusty::native::link_program(&objects, target)
