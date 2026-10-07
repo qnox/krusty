@@ -196,7 +196,11 @@ impl Emitter<'_> {
                 let line = self.map_external_frame_line(&frame);
                 code.mark_line(line);
             }
-            None => debug_lines::mark_statement(self.ir, declaration, code),
+            None => {
+                if let Some(&line) = self.ir.expr_lines.get(&declaration) {
+                    self.mark_expression_line(declaration, line, code);
+                }
+            }
         }
     }
 }

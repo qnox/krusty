@@ -68,7 +68,9 @@ impl Emitter<'_> {
     ) {
         let (class, _) = ref_class(&elem);
         self.emit_new_holder(class, code);
-        debug_lines::mark_statement(self.ir, declaration, code);
+        if let Some(&line) = self.ir.expr_lines.get(&declaration) {
+            self.mark_expression_line(declaration, line, code);
+        }
         let holder = Ty::obj(class);
         store(holder, slot, code);
         self.mark_suspend_lambda_parameter_read(declaration, code);
@@ -79,7 +81,9 @@ impl Emitter<'_> {
             load(holder, slot, code);
             self.mark_expression_start(value, code);
             self.emit_element_value(elem, value, code);
-            debug_lines::mark_statement(self.ir, declaration, code);
+            if let Some(&line) = self.ir.expr_lines.get(&declaration) {
+                self.mark_expression_line(declaration, line, code);
+            }
             self.put_element(&elem, code);
         }
     }

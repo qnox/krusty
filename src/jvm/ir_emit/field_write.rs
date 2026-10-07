@@ -130,11 +130,10 @@ impl Emitter<'_> {
         // A value that carried its OWN source line leaves that line in effect; the store belongs to
         // the statement, so kotlinc marks the statement's line again at the `putfield`. Without it
         // the property's line stays in effect over everything that follows the store.
-        if let (Some(&statement_line), true) = (
-            self.ir.expr_lines.get(&statement),
-            self.ir.expr_source_lines.contains_key(&value),
-        ) {
-            code.mark_line(statement_line);
+        if self.ir.expr_source_lines.contains_key(&value) {
+            if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
+                self.mark_expression_line(statement, statement_line, code);
+            }
         }
         if let Some(method) = cross_class_method {
             code.invokestatic(method, (1 + slot_words(field_ty)) as i32, 0);

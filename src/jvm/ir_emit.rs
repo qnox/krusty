@@ -5561,6 +5561,9 @@ struct Emitter<'a> {
     machine_suspensions: HashMap<u32, Option<(TypeName, Ty)>>,
     /// The deferred result value of each inline-return frame, by the frame's label.
     inline_return_frame_results: HashMap<String, (u32, Ty)>,
+    /// Inline-return results whose expansion is discarded. A break to that frame leaves the
+    /// value in its slot: the landing label does not read it, so it must not travel on the stack.
+    discarded_inline_results: HashSet<u32>,
     /// The suspension points kotlinc's coroutine transformer takes, when it takes this function.
     transformed_suspensions: transformed_suspensions::TransformedSuspensions,
     /// The declarations that read a suspend lambda's parameters from their fields, in the
@@ -5703,6 +5706,7 @@ impl<'a> Emitter<'a> {
             continuation_slot: None,
             machine_suspensions: HashMap::new(),
             inline_return_frame_results: HashMap::new(),
+            discarded_inline_results: HashSet::new(),
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::new(),
             erased_invocations: HashSet::new(),
@@ -6074,6 +6078,8 @@ impl<'a> Emitter<'a> {
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back.
                         self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
+                        // An inlined `return` stores on the return's line, after the value.
+                        self.mark_expression_start(e, code);
                         let slot = self.activate_inline_return_frame_result(var, jt);
                         if unsigned {
                             code.forget_line();

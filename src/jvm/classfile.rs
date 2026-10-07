@@ -2069,6 +2069,10 @@ pub struct CodeBuilder {
     next_bind: u32,
     /// Pending line-mark obligations (see [`line_numbers::PendingLines`]).
     pending_lines: line_numbers::PendingLines,
+    /// This method expanded an inline body. kotlinc sorts that method's whole exception table by
+    /// handler pc, then start pc, only after inlining. A method that was not inlined keeps
+    /// emission order (the inner handler of a nested `try` stays ahead of the outer one).
+    inlined_bytecode: bool,
 }
 
 impl CodeBuilder {
@@ -2094,7 +2098,14 @@ impl CodeBuilder {
             bind_sequence: Vec::new(),
             next_bind: 0,
             pending_lines: Default::default(),
+            inlined_bytecode: false,
         }
+    }
+
+    /// The method expanded inline bytecode, so [`Self::resolved_exceptions`] sorts the table the
+    /// way kotlinc's inliner does.
+    pub(crate) fn note_inlined_bytecode(&mut self) {
+        self.inlined_bytecode = true;
     }
 
     /// Whether `label` was bound inside a dropped dead region (see `dead_bound`).
@@ -2140,7 +2151,8 @@ impl CodeBuilder {
     /// Drops degenerate ranges where `start >= end` (an empty protected region — e.g. an empty `try`
     /// body — protects nothing, and an empty range is an illegal `Code` exception-table entry).
     pub fn resolved_exceptions(&self) -> Vec<(u16, u16, u16, u16)> {
-        self.exceptions
+        let mut resolved = self
+            .exceptions
             .iter()
             // An UNBOUND label means the region it delimits was dropped as dead code (`bind_at` is a
             // no-op while dead), so the entry describes bytes that do not exist. Without this the
@@ -2159,7 +2171,12 @@ impl CodeBuilder {
                 )
             })
             .filter(|&(start, end, _, _)| start < end)
-            .collect()
+            .collect::<Vec<_>>();
+        // `(start, end, handler, type)`. kotlinc's inliner sorts by handler index, then start.
+        if self.inlined_bytecode {
+            resolved.sort_by(|left, right| left.2.cmp(&right.2).then(left.0.cmp(&right.0)));
+        }
+        resolved
     }
 
     /// The current (linearly tracked) operand-stack height.

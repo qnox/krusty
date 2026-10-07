@@ -72,21 +72,50 @@ pub(super) fn frame_exit(
     result: Option<u32>,
     nested: bool,
     value: Option<ExprId>,
+    source: ExprId,
 ) -> IrExpr {
     let mut stmts = Vec::new();
-    if let Some(value) = value {
-        stmts.push(match (result, nested) {
-            (Some(var), false) => ir.add_expr(IrExpr::SetValue { var, value }),
-            (Some(_), true) => ir.add_expr(IrExpr::SetFrameResult {
+    let store = if let Some(value) = value {
+        let store = match (result, nested) {
+            (Some(var), false) => Some(ir.add_expr(IrExpr::SetValue { var, value })),
+            (Some(_), true) => Some(ir.add_expr(IrExpr::SetFrameResult {
                 frame: label.to_string(),
                 value,
-            }),
-            (None, _) => value,
-        });
-    }
-    stmts.push(ir.add_expr(IrExpr::Break {
+            })),
+            (None, _) => {
+                stmts.push(value);
+                None
+            }
+        };
+        if let Some(store) = store {
+            stmts.push(store);
+        }
+        store
+    } else {
+        None
+    };
+    // The break replaces `source`. It keeps that return's line and inline-copy identity so the
+    // `goto` after `finally` is the rewritten return, not an unlabeled jump the goto cleanup
+    // threads into the finalizer's own exit. The store takes the same line, marked at the
+    // `istore`/`astore` rather than at the value that precedes it.
+    let exit = ir.add_expr(IrExpr::Break {
         label: Some(label.to_string()),
-    }));
+    });
+    let line = ir
+        .expr_lines
+        .get(&source)
+        .copied()
+        .or_else(|| ir.expr_source_lines.get(&source).copied());
+    if let Some(line) = line {
+        ir.expr_lines.insert(exit, line);
+        ir.expr_source_lines.insert(exit, line);
+        if let Some(store) = store {
+            ir.expr_source_lines.insert(store, line);
+            ir.copy_inline_copy_mark(source, store);
+        }
+    }
+    ir.copy_inline_copy_mark(source, exit);
+    stmts.push(exit);
     IrExpr::Block { stmts, value: None }
 }
 
@@ -129,8 +158,14 @@ pub(super) fn prepare_inline_template(
         let IrExpr::Return(value) = ir.expr(found.returned).clone() else {
             return None;
         };
-        ir.exprs[found.returned as usize] =
-            frame_exit(ir, &label, result_slot, found.nested, value);
+        ir.exprs[found.returned as usize] = frame_exit(
+            ir,
+            &label,
+            result_slot,
+            found.nested,
+            value,
+            found.returned,
+        );
     }
 
     let mut frame_statements = Vec::new();

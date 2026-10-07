@@ -3,7 +3,7 @@
 //! Common IR keeps expression values even where Kotlin source discards them. This boundary chooses
 //! the JVM statement shape, including control flow whose branches must discard independently.
 
-use super::{bottom_values, discard, CodeBuilder, Emitter, IrExpr};
+use super::{bottom_values, discard, CodeBuilder, Emitter, IrExpr, Ty};
 
 impl Emitter<'_> {
     pub(super) fn emit_discarding(&mut self, expression: u32, code: &mut CodeBuilder) {
@@ -51,8 +51,23 @@ impl Emitter<'_> {
                     }
                     return;
                 }
+                // A generic inline return specialized to Unit already stored
+                // `kotlin.Unit.INSTANCE` before `finally`. The caller that discards the call
+                // does not reload that slot.
+                IrExpr::GetValue(index)
+                    if self.inline_return_frame_result_type(*index)
+                        == Some(Ty::obj("kotlin/Unit")) =>
+                {
+                    return;
+                }
                 IrExpr::When { branches } => {
                     self.emit_when(expression, branches, true, code);
+                    return;
+                }
+                // A discarded block is a statement block: its trailing read is not a value the
+                // break out of an inline-return frame has to carry.
+                IrExpr::Block { stmts, value } if !self.is_transformed_block(expression) => {
+                    self.emit_statement_block(expression, stmts.clone(), *value, code);
                     return;
                 }
                 // A discarded `try` runs its branches as statements, as a discarded `when` does,

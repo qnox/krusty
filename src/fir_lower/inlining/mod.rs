@@ -550,9 +550,17 @@ impl BodyLowering<'_> {
                     InlineOperandPlan::Copy => {
                         let operand = operand.expect("a copied operand is supplied");
                         let slot = self.allocate_temporary();
+                        // A non-reified reference parameter whose bound is not `Any` is stored as
+                        // that bound (`T : AutoCloseable?` is `AutoCloseable`). The call-site type
+                        // is checked only where a name binds it, such as the lambda parameter.
+                        let stored = inline_operand_storage_type(
+                            *declared_ty,
+                            *specialized_ty,
+                            &reified_bindings,
+                        );
                         let declaration = self.ir.add_expr(IrExpr::Variable {
                             index: slot,
-                            ty: stored_value_ty(*specialized_ty),
+                            ty: stored_value_ty(stored),
                             init: Some(operand),
                             named: true,
                         });
@@ -767,6 +775,11 @@ impl BodyLowering<'_> {
                 if let Some(Some(lambda)) = inline_lambdas.get(*parameter as usize) {
                     let lambda = *lambda;
                     self.ir.exprs[copy as usize] = self.ir.expr(lambda).clone();
+                    // The parameter read's end line is the callee's `block(this)`. The splice's
+                    // closing `nop` belongs on the call-site lambda's `}`.
+                    if let Some(&end) = self.ir.expr_end_lines.get(&lambda) {
+                        self.ir.expr_end_lines.insert(copy, end);
+                    }
                     // The parameter read carried the inline body's line. A callable reference is
                     // the call site's expression: the spliced invocation keeps that line, and the
                     // frame-closing nop can then return to the inlined call.
@@ -941,7 +954,18 @@ impl BodyLowering<'_> {
         // The loop shape, and only now: the result local is reserved here, so a promoted expansion
         // above leaves no hole in the numbering, and each return is rewritten into the break that
         // carries it out.
-        let result_slot = (result_ty != Ty::Unit).then(|| {
+        // A type parameter specialized to `Unit` is still a reference at the generic return:
+        // kotlinc stores `kotlin.Unit.INSTANCE` before `finally` and reloads it only when the
+        // caller reads the value. A function declared to return `Unit` stays void and keeps no slot.
+        let declared_ret = self.ir.functions[function as usize].ret;
+        let generic_unit_result =
+            result_ty == Ty::Unit && declared_ret.non_null().ty_param_name().is_some();
+        let slot_ty = if generic_unit_result {
+            Ty::obj("kotlin/Unit")
+        } else {
+            result_ty
+        };
+        let result_slot = (slot_ty != Ty::Unit).then(|| {
             let slot = self.next_temporary;
             self.next_temporary += 1;
             slot
@@ -954,6 +978,7 @@ impl BodyLowering<'_> {
                 result_slot,
                 found.nested,
                 found.value,
+                found.returned,
             );
         }
 
@@ -961,10 +986,10 @@ impl BodyLowering<'_> {
         if let Some(slot) = result_slot {
             let initial = self
                 .ir
-                .add_expr(IrExpr::Const(IrConst::zero_for_value_type(result_ty)));
+                .add_expr(IrExpr::Const(IrConst::zero_for_value_type(slot_ty)));
             let declaration = self.ir.add_expr(IrExpr::Variable {
                 index: slot,
-                ty: stored_value_ty(result_ty),
+                ty: stored_value_ty(slot_ty),
                 init: Some(initial),
                 named: false,
             });
@@ -1268,6 +1293,11 @@ impl BodyLowering<'_> {
             stmts: declarations,
             value: Some(body),
         };
+        // The closing `nop` is the lambda literal's last line (its `}`), which is otherwise a
+        // line that already holds the call and the nop cleanup would delete.
+        if let Some(end) = self.ir.expr_end_lines.get(&func).copied() {
+            self.ir.expr_end_lines.insert(invocation, end);
+        }
         // The spliced body's own calls are the suspension points now, not the invocation.
         self.ir.suspend_calls.remove(&invocation);
         self.ir.suspend_call_overridden_results.remove(&invocation);
@@ -1466,9 +1496,15 @@ pub(super) fn specialize_typed_expression(
             }
         }
         IrExpr::Variable {
-            ty: type_operand, ..
+            ty: type_operand,
+            named,
+            ..
+        } => {
+            if !keep_erased_inline_temporary(*named, *type_operand, bindings, runtime) {
+                specialize_ty(type_operand, bindings);
+            }
         }
-        | IrExpr::PrimitiveNeg {
+        IrExpr::PrimitiveNeg {
             ty: type_operand, ..
         }
         | IrExpr::PropertyRead {
@@ -1621,6 +1657,72 @@ pub(super) fn specialize_recorded_facts(
     if let Some(point) = ir.intrinsic_suspension_points.get_mut(&expression) {
         specialize_ty(&mut point.result, bindings);
     }
+}
+
+/// The JVM type of a copied inline operand. A non-reified reference parameter whose bound is a
+/// proper class is stored as that bound: `T : AutoCloseable?` keeps `AutoCloseable`, and the
+/// lambda parameter checkcasts to `BufferedReader`. A bound of `Any` stays the call-site type,
+/// which is what `let` and `id` store. A primitive substitution stays primitive. A reified
+/// parameter is present in `runtime` and is stored as its argument.
+fn inline_operand_storage_type(
+    declared: Ty,
+    specialized: Ty,
+    runtime: &HashMap<String, Ty>,
+) -> Ty {
+    let Some(name) = (match declared.non_null() {
+        Ty::TyParam(name, _) => Some(name),
+        Ty::DefinitelyNotNull(inner) => inner.ty_param_name(),
+        _ => None,
+    }) else {
+        return specialized;
+    };
+    if runtime.contains_key(name) || !specialized.is_reference() {
+        return specialized;
+    }
+    let bound = match declared.non_null() {
+        Ty::TyParam(_, bound) => *bound,
+        Ty::DefinitelyNotNull(inner) => match *inner {
+            Ty::TyParam(_, bound) => *bound,
+            _ => return specialized,
+        },
+        _ => return specialized,
+    };
+    let erased = bound.non_null().erased_recv();
+    if erased.is_erased_top() {
+        specialized
+    } else {
+        erased
+    }
+}
+
+/// An unnamed temporary whose type is still a non-reified type parameter keeps that parameter
+/// when the call substitutes a reference. The JVM slot is the parameter's erased bound
+/// (`T : AutoCloseable?` stores `AutoCloseable`); specializing the temporary to the type argument
+/// stores the argument and casts back to the bound at every member call. A named local is a source
+/// binding and takes the argument. A primitive argument must occupy a primitive slot. A reified
+/// parameter is present in `runtime` and is specialized so the run-time checks see the argument.
+fn keep_erased_inline_temporary(
+    named: bool,
+    ty: Ty,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+) -> bool {
+    if named {
+        return false;
+    }
+    let Some(name) = (match ty.non_null() {
+        Ty::TyParam(name, _) => Some(name),
+        Ty::DefinitelyNotNull(inner) => inner.ty_param_name(),
+        _ => None,
+    }) else {
+        return false;
+    };
+    if runtime.contains_key(name) {
+        return false;
+    }
+    bindings
+        .get(name)
+        .is_some_and(|substitution| substitution.is_reference())
 }
 
 fn specialize_ty(ty: &mut Ty, bindings: &HashMap<String, Ty>) {

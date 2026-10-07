@@ -53,6 +53,7 @@ pub(super) fn mark_loop_control(loop_line: Option<u32>, code: &mut CodeBuilder) 
     }
 }
 
+
 impl Emitter<'_> {
     /// Mark the line a catch-all finalizer copy's block emission marks first.
     ///
@@ -80,6 +81,7 @@ impl Emitter<'_> {
             expression = first;
         };
         if let Some((expression, line)) = entry {
+            self.note_inlined_expression(expression, code);
             let line = self.mapped_expression_line(expression, line);
             // A handler reopens the finalizer's line after a preceding, different `try` line even
             // when the normal-path finalizer left that same line in effect. An entirely one-line
@@ -128,17 +130,37 @@ impl Emitter<'_> {
         self.mark_expression_line(expression, line, code);
     }
 
+    /// Mark `line`, mapping an inline copy through the class SMAP. Returns the line written into
+    /// the `LineNumberTable` (the mapped output line when a map answers), or `0` when `line` is
+    /// `0` and nothing is marked.
     pub(super) fn mark_expression_line(
         &mut self,
         expression: ExprId,
         line: u32,
         code: &mut CodeBuilder,
-    ) {
+    ) -> u32 {
         if line == 0 {
-            return;
+            return 0;
         }
+        self.note_inlined_expression(expression, code);
         let line = self.mapped_expression_line(expression, line);
         code.mark_line(line);
+        line
+    }
+
+    /// An inline copy sorts its exception table the way kotlinc's inliner does. The flag follows
+    /// the expression, so a mapped line and a finalizer handler that reopens the same line both
+    /// record it.
+    fn note_inlined_expression(&self, expression: ExprId, code: &mut CodeBuilder) {
+        let inlined = self.ir.external_frame_lines.contains_key(&expression)
+            || self.ir.inline_synthetic_lines.contains(&expression)
+            || self
+                .ir
+                .inline_copy_provenance(expression)
+                .is_some_and(|provenance| provenance.call_line.is_some());
+        if inlined {
+            code.note_inlined_bytecode();
+        }
     }
 
     fn mapped_expression_line(&mut self, expression: ExprId, line: u32) -> u32 {
@@ -211,6 +233,20 @@ impl Emitter<'_> {
             |owner| Some(crate::jvm::names::classfile_internal_name_of(owner).to_owned()),
         )?;
         Some((identity.name.to_string(), path))
+    }
+
+    /// Mark the `goto` that leaves a `try` after an inlined `finally` copy, through the class
+    /// SMAP when the finalizer is an inline copy.
+    ///
+    /// kotlinc gives that jump the `finally` block's closing line. Without it the finalizer's own
+    /// first line stays in effect into the catch-all handler, whose identical mark can then
+    /// deduplicate away.
+    pub(super) fn mark_block_exit(&mut self, block: ExprId, code: &mut CodeBuilder) {
+        if let Some(&line) = self.ir.expr_end_lines.get(&block) {
+            if line != 0 {
+                self.mark_expression_line(block, line, code);
+            }
+        }
     }
 
     /// Map a line of an external inline declaration's body through the class's source map, under
@@ -373,18 +409,6 @@ impl Emitter<'_> {
             if line != 0 {
                 code.mark_line_retained(line);
             }
-        }
-    }
-}
-
-/// Mark the `goto` that leaves a `try` after an inlined `finally` copy.
-///
-/// kotlinc gives that jump the `finally` block's closing line. Without it the finalizer's own first
-/// line stays in effect into the catch-all handler, whose identical mark can then deduplicate away.
-pub(super) fn mark_block_exit(ir: &IrFile, block: ExprId, code: &mut CodeBuilder) {
-    if let Some(&line) = ir.expr_end_lines.get(&block) {
-        if line != 0 {
-            code.mark_line(line);
         }
     }
 }

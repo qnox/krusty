@@ -15909,3 +15909,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument, each run and compared with kotlinc; a try/catch callee under an operand, run), and
   `classfile::inline_call_stacks::tests::a_method_the_passes_cannot_normalize_fails_the_class`.
   Corpus: a private-corpus module.
+
+- **An inlined generic `use` keeps the erased receiver and materializes a generic `Unit`.**
+  `inline fun <T : AutoCloseable?, R> T.use(block: (T) -> R): R` stores the extension receiver as
+  the erased bound (`AutoCloseable`). An unnamed safe-call temporary whose type is still that
+  non-reified parameter stays the parameter when the argument is a reference, so `this?.close()`
+  is `aload; dup; ifnull; invokeinterface close; goto; pop` on the bound. A named lambda parameter
+  (`r: T`) takes the type argument. A primitive substitution and a reified parameter still
+  specialize. When `R` is `Unit`, the return is a reference at the generic signature, so the
+  expansion stores `kotlin.Unit.INSTANCE` before `finally` and does not carry that slot across
+  the transfer; a function declared to return `Unit` stays void. The spliced lambda's `}` is a
+  `nop` on the call-site line while the lambda's locals are still open. A same-file expansion still
+  writes `SourceDebugExtension` (one file, a second line range, and the debug stratum at the
+  call). Catch, finally, and declaration marks of the copy go through that map. After inlining,
+  the method's exception table is sorted by handler pc, then start pc; the standalone `use`
+  method, which was not inlined, keeps emission order. That method's `try` is `Nothing`, not
+  `Unit`. A non-`Unit` `try` enters a result temporary after its body once every local the body
+  introduced has been left; a `Nothing` one's is `java/lang/Void` and stores nothing. A return
+  spill or a named local already wrote that index, so the catch parameters sit above it. When
+  nothing wrote it, the unused-slot pass gives the index to the catch. An inlined return whose
+  result slot is still live does not enter another temporary: the handlers are allocated above
+  that result. A `Unit` `try` does not enter one.
+  Tests: `tests/inline_use_close_e2e.rs`, `jvm::source_map::tests::a_same_file_inline_still_writes_a_map`.

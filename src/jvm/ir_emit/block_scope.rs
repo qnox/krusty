@@ -76,15 +76,16 @@ impl Emitter<'_> {
         self.mark_initializer_line(block, true, code);
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
+            // The lambda `}` is a `nop` while its parameters are still live. Their end label is
+            // the next debug point, so a brace on its own line keeps the `nop` and the following
+            // `Unit` materialization does not share that line.
+            self.close_spliced_lambda_frame(block, code);
             self.close_scope_locals(code, marked_initializer);
         }
         if normalizes_inline_stack
             && (!delays_stack_normalization || reserved_inline_stack.is_some())
         {
             code.inline_call_marker(false);
-        }
-        if !self.ir.callable_scopes.contains(&block) {
-            self.close_spliced_lambda_frame(block, code);
         }
         if let Some(discarded) = discard_after_close {
             super::discard(self.value_ty(discarded), code);
@@ -159,6 +160,29 @@ impl Emitter<'_> {
             if !dead {
                 if let Some(value) = value {
                     self.mark_statement_line(value, code);
+                    // `{ effects; }` coerced to `Unit` is `Block { effects, value: UnitInstance }`.
+                    // The lambda `}` stands between those effects and `Unit.INSTANCE`.
+                    if self.opens_spliced_lambda_frame(stmts) {
+                        if let Some((effects, unit)) = self.unit_after_lambda_effects(value) {
+                            for effect in effects {
+                                let base = code.stack_height();
+                                self.emit(effect, code);
+                                code.set_stack(base.max(0) as u16);
+                            }
+                            self.close_lambda_value_frame(block, code);
+                            self.emit_value(unit, code);
+                            if normalizes_inline_stack
+                                && (!delays_stack_normalization || reserved_inline_stack.is_some())
+                            {
+                                code.inline_call_marker(false);
+                            }
+                            self.block_depth -= 1;
+                            self.restore_slot_scope(saved);
+                            self.release_reserved_inline_stack(reserved_inline_stack);
+                            self.statement_line = enclosing_statement_line;
+                            return;
+                        }
+                    }
                     self.emit_value(value, code);
                 }
             }
@@ -167,18 +191,55 @@ impl Emitter<'_> {
         // open through the return, the same way a statement-position callable scope does.
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
+            self.close_spliced_lambda_frame(block, code);
             self.close_scope_locals(code, false);
+        } else {
+            self.close_spliced_lambda_frame(block, code);
         }
         if normalizes_inline_stack
             && (!delays_stack_normalization || reserved_inline_stack.is_some())
         {
             code.inline_call_marker(false);
         }
-        self.close_spliced_lambda_frame(block, code);
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
         self.release_reserved_inline_stack(reserved_inline_stack);
         self.statement_line = enclosing_statement_line;
+    }
+
+    fn opens_spliced_lambda_frame(&self, stmts: &[u32]) -> bool {
+        stmts.iter().any(|&statement| {
+            matches!(
+                self.ir.debug_local_provenance(statement),
+                Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
+            )
+        })
+    }
+
+    /// Effects of a `Unit` coercion, then the `Unit` value that follows the lambda's closing brace.
+    fn unit_after_lambda_effects(&self, value: u32) -> Option<(Vec<u32>, u32)> {
+        let IrExpr::Block {
+            stmts,
+            value: Some(unit),
+        } = self.ir.expr(value).clone()
+        else {
+            return None;
+        };
+        if !matches!(self.ir.expr(unit), IrExpr::UnitInstance) || self.opens_spliced_lambda_frame(&stmts)
+        {
+            return None;
+        }
+        Some((stmts, unit))
+    }
+
+    fn close_lambda_value_frame(&mut self, block: u32, code: &mut CodeBuilder) {
+        if !self.ir.callable_scopes.contains(&block) {
+            self.close_external_inline_frame(block, code);
+            self.close_spliced_lambda_frame(block, code);
+            self.close_scope_locals(code, false);
+        } else {
+            self.close_spliced_lambda_frame(block, code);
+        }
     }
 
     /// Close the frame of an external inline declaration whose body lines map through the class's
@@ -200,12 +261,13 @@ impl Emitter<'_> {
         code.nop();
     }
 
-    /// Close the frame of a lambda body spliced into an inline call, once its locals are closed.
+    /// Close the frame of a lambda body spliced into an inline call, while its locals are still open.
     ///
-    /// kotlinc's inliner returns to the inline body's own line at the invocation the lambda
-    /// replaced, with a `nop` to carry it. Its nop cleanup keeps that `nop` only where no other
-    /// instruction follows on the line before the next debug point, which is the same decision
-    /// the optimizer pipeline makes over this one.
+    /// kotlinc's inliner marks the lambda literal's closing brace and emits a `nop` there, then
+    /// ends the lambda's locals. The local-end label is the next debug point, so the nop cleanup
+    /// keeps the `nop` when that brace is the only instruction on its line. A one-line lambda
+    /// shares the line with the body and the `nop` goes. The brace is a call-site line, not a
+    /// line of the inlined callee, so it is not mapped through the callee's source range.
     fn close_spliced_lambda_frame(&mut self, block: u32, code: &mut CodeBuilder) {
         let IrExpr::Block { stmts, .. } = self.ir.expr(block) else {
             return;
@@ -219,9 +281,17 @@ impl Emitter<'_> {
         if !opens_frame || code.is_dead() {
             return;
         }
-        if let Some(&line) = self.ir.expr_source_lines.get(&block) {
-            // The spliced body ran under its own lines: kotlinc resets the line in effect after an
-            // inlined body, so the frame's closing mark is written even when it names that line.
+        if let Some(line) = self
+            .ir
+            .expr_end_lines
+            .get(&block)
+            .copied()
+            .filter(|line| *line != 0)
+        {
+            // Same line as the body: dedupe, so the `nop` shares that line and is removed.
+            // A brace on the next line starts a new entry and the local-end label keeps the `nop`.
+            code.mark_line(line);
+        } else if let Some(line) = self.ir.expr_source_lines.get(&block).copied() {
             code.forget_line();
             self.mark_expression_line(block, line, code);
         }
@@ -263,6 +333,18 @@ impl Emitter<'_> {
         });
         let mut normalize_at_lambda_frame = normalize_at_lambda_frame;
         let mut reserved_inline_stack = None;
+        // The trailing read is thrown away. Record it before the statements, so a break inside
+        // them can see that the landing label will not consume the result.
+        let discarded_result = (!opens_lambda_frame)
+            .then_some(value)
+            .flatten()
+            .and_then(|value| match self.ir.expr(value) {
+                IrExpr::GetValue(index) => Some(*index),
+                _ => None,
+            });
+        if let Some(index) = discarded_result {
+            self.discarded_inline_results.insert(index);
+        }
         for (index, statement) in stmts.into_iter().enumerate() {
             // FixStack replaces the opening marker with the saved caller stack. Keep that
             // generated store inside the lambda frame's mapped line interval.
@@ -301,6 +383,9 @@ impl Emitter<'_> {
             }
         }
         self.terminal_statement_target = None;
+        if let Some(index) = discarded_result {
+            self.discarded_inline_results.remove(&index);
+        }
         // The block's source statements are nested inside the expression its caller is emitting.
         // Once it closes, an instruction consuming the block's value belongs to that enclosing
         // statement, not to the last branch/statement visited inside the block.
@@ -344,15 +429,20 @@ impl Emitter<'_> {
     }
 
     pub(super) fn mark_statement_line(&mut self, statement: u32, code: &mut CodeBuilder) {
-        if self.ir.dispatch_line(statement).is_none() {
-            if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
-                self.mark_expression_line(statement, line, code);
-            }
-        }
-        // A line stays in effect until another statement replaces it, exactly as the
-        // `LineNumberTable` reads: a statement without a line of its own does not clear it.
-        if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
-            self.statement_line = Some(line);
+        let Some(&line) = self.ir.expr_lines.get(&statement) else {
+            return;
+        };
+        // A dispatch owns the line entry at the physical call, so this writes no second entry
+        // and the statement keeps its source line. Otherwise the marked line is the mapped
+        // output line of an inline copy: a later instruction that returns to this statement
+        // must not write the callee's raw line.
+        let marked = if self.ir.dispatch_line(statement).is_none() {
+            self.mark_expression_line(statement, line, code)
+        } else {
+            line
+        };
+        if line != 0 {
+            self.statement_line = Some(marked);
         }
     }
 
