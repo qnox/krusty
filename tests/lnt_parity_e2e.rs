@@ -221,3 +221,22 @@ fun midRet(): Int {\n    if (cond()) {\n        return 7\n    }\n    act()\n    
         "LntMidRetKt",
     );
 }
+
+#[test]
+fn inline_block_opens_on_its_first_statement() {
+    // An emitted top-level `inline fun` stores `$i$f$` after the parameter guards and gives that
+    // marker no line. A block whose first statement is on the next line starts the table there;
+    // the signature line is neither a second entry at that pc nor an entry on the marker. A
+    // null-checked parameter and an empty body take the same rule. An expression body and a
+    // statement that shares the signature line already agreed, and stay in this class.
+    assert_byte_identical(
+        "lntInlineOpen",
+        "inline fun blockNext(x: Int): Int {\n    return x + 1\n}\n\
+inline fun withVar(x: Int): Int {\n    var y = x\n    return y + 1\n}\n\
+inline fun exprNext(x: Int) =\n    x + 1\n\
+inline fun blockSame(x: Int): Int { return x + 1 }\n\
+inline fun empty() {}\n\
+inline fun note(s: String): Int {\n    return s.length\n}\n",
+        "LntInlineOpenKt",
+    );
+}
