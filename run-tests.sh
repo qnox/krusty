@@ -293,7 +293,7 @@ export -f run_label
 
 run_one() {
   local b="${2%%::*}" extra="" name slug status=0
-  local explicit_label="${3:-}" expected_tests="${4:-}" description
+  local explicit_label="${3:-}" description
   if [ "$2" != "$b" ]; then extra="${2#*::}"; fi
   name="$(basename "$b")"
   if [ -n "$explicit_label" ]; then
@@ -319,15 +319,6 @@ run_one() {
     :
   else
     status=$?
-  fi
-  if [ "$status" -eq 0 ] && [ -n "$expected_tests" ]; then
-    local selected_tests
-    selected_tests="$(libtest_selected_tests "$1/$name.log")" || status=125
-    if [ "$status" -eq 0 ] && [ "$selected_tests" -ne "$expected_tests" ]; then
-      printf 'test shard selected %s tests; plan assigned %s\n' \
-        "$selected_tests" "$expected_tests" >>"$1/$name.log"
-      status=125
-    fi
   fi
   if [ "$status" -ne 0 ]; then
     # Log name first so the report reads the failing pass's own output; the description carries the
@@ -390,47 +381,18 @@ while IFS= read -r b; do
   rest+=("$b")
 done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 
-# The e2e binary joins ~4,000 formerly-separate e2e tests, many of which drive the real kotlinc plus
-# a persistent JVM box runner. Run it DEDICATED and SEQUENTIALLY — after conformance, before the
-# small-binary pool — with `--test-threads=$ncpu` so its tests parallelize INTERNALLY across all cores,
-# and size the per-process box-runner pool to match so `ncpu` in-flight `box()` calls don't queue on too
-# few runners. The whole binary can exceed the five-minute per-process ceiling on smaller hosts, so
-# greedily balance whole top-level test modules into bounded shards. Each shard skips the other modules
-# and must report exactly its planned test count; a lossy libtest skip filter therefore fails visibly
-# instead of silently reducing coverage. Running the shards alone (outside the `-P jobs` fan-out) keeps
-# them from over-subscribing while they own the cores.
+# The e2e binary joins the product e2e tests, many of which drive the real kotlinc plus a persistent
+# JVM box runner. Run it once — after conformance, before the small-binary pool — with
+# `--test-threads=$ncpu` so its tests parallelize internally, and size the per-process box-runner pool
+# to match so in-flight `box()` calls do not queue on too few runners. The suite is one process under
+# KRUSTY_E2E_TIMEOUT_SECONDS. Do not split it to stay under the ordinary two-minute ceiling.
 e2e_bin="$(printf '%s\n' "${rest[@]}" | grep '/e2e-' | head -1 || true)"
 pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
 if [ -n "$e2e_bin" ]; then
-  e2e_shards="$KRUSTY_E2E_SHARDS"
-  libtest_require_positive_shard_count "$e2e_shards" "run-tests.sh: KRUSTY_E2E_SHARDS"
-  e2e_listing="$logdir/e2e-tests.list"
-  e2e_plan="$logdir/e2e-shards.plan"
-  e2e_timeout="$KRUSTY_E2E_TIMEOUT_SECONDS"
-  libtest_write_shard_plan \
-    "$e2e_bin" "$e2e_shards" "$e2e_listing" "$e2e_plan" "$e2e_timeout"
-  for ((shard = 0; shard < e2e_shards; shard++)); do
-    skip_args=()
-    skip_file="$logdir/e2e-shard-$shard.skips"
-    expected_tests="$(libtest_shard_expected_tests "$e2e_plan" "$shard")"
-    if [ "$expected_tests" -eq 0 ]; then
-      echo "run-tests.sh: e2e shard $((shard + 1))/$e2e_shards was assigned no tests" >&2
-      exit 1
-    fi
-    if ! libtest_shard_skip_patterns \
-      "$e2e_plan" "$e2e_listing" "$shard" >"$skip_file"; then
-      echo "run-tests.sh: could not build safe filters for e2e shard $((shard + 1))/$e2e_shards" >&2
-      exit 1
-    fi
-    while IFS= read -r pattern; do
-      skip_args+=(--skip "$pattern")
-    done <"$skip_file"
-    label="shard-$((shard + 1))-of-$e2e_shards"
-    echo "run-tests.sh: e2e $label: $expected_tests tests" >&2
-    KRUSTY_TEST_TIMEOUT_SECONDS="$e2e_timeout" \
-      KRUSTY_BOX_RUNNER_POOL="$pool" run_one \
-        "$logdir" "$e2e_bin::${skip_args[*]} --test-threads=$ncpu" "$label" "$expected_tests"
-  done
+  echo "run-tests.sh: e2e (timeout=${KRUSTY_E2E_TIMEOUT_SECONDS}s)" >&2
+  KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_E2E_TIMEOUT_SECONDS" \
+    KRUSTY_BOX_RUNNER_POOL="$pool" \
+    run_one "$logdir" "$e2e_bin::--test-threads=$ncpu"
 fi
 
 # Everything except conformance and e2e — small suites parallelized across binaries.

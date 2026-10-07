@@ -329,8 +329,10 @@ change, not a quiet reset inside yours.
   semantically distinct source forms.
 - Resolver work is complete only when the conformance survey has no resolver-related skips or
   regressions, including previously skipped cases.
-- Keep one test process unless parallel execution is strictly necessary. The suite-wide timeout is
-  120 seconds by default and must remain configurable for slow systems; timeout output must identify
-  the active test/case well enough to diagnose loops.
+- Keep one test process unless parallel execution is strictly necessary. Ordinary test processes
+  use a 120-second deadline by default. The product e2e suite is one process under
+  `KRUSTY_E2E_TIMEOUT_SECONDS` (30 minutes); do not split it into shards to stay under the ordinary
+  ceiling. Deadlines must remain configurable for slow systems; timeout output must identify the
+  active test/case well enough to diagnose loops.
 
 See also `docs/ARCHITECTURE.md`, `docs/COMPILER_REVIEW.md`, and `docs/TEST_HARNESS.md`.
