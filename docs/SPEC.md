@@ -10884,6 +10884,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every protected range and local variable left with no instruction even when nothing is dead at
   that point, as kotlinc's `removeEmptyCatchBlocks` and `prepareForEmitting` do
   (`dead_code::tests::a_range_an_earlier_pass_emptied_goes_though_nothing_is_dead`).
+- **A safe call that throws keeps its receiver temporary when constant-condition elimination
+  retains a label from its unreachable continuation.** `simplifyKnownSafeCallPatterns` folds
+  `aload v; ifnull L; aload v` into `aload v; dup; ifnull` only when raw instruction adjacency
+  admits it. Constant-condition elimination can delete the unreachable continuation after
+  `athrow` while keeping the label that stood there. That label immediately before `L` defeats the
+  fold: `lastException?.let { throw it }` after a loop or an `if` stays
+  `astore; aload; ifnull; aload`. The optimizer pipeline carries those exact retained-label
+  identities between the passes; the temporaries pass does not infer the earlier pass from
+  unrelated constants, jumps, or throws remaining in the method. Tests:
+  `bytecode_passes::temporaries::tests` and `tests/safe_call_after_throw_e2e.rs`.
 - **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
   negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
   `BooleanComparison`, which materializes both and jumps with `if_icmp<cond>`; it never reads a

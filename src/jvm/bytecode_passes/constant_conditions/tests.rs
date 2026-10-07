@@ -53,7 +53,10 @@ fn body(desc: &str, max_locals: u16, nodes: &[N]) -> (MethodNode, Vec<LabelId>) 
 fn folds(desc: &str, max_locals: u16, nodes: &[N], expected: &[N], changed: bool) {
     let (mut method, _) = body(desc, max_locals, nodes);
     let (wanted, _) = body(desc, max_locals, expected);
-    assert_eq!(eliminate(&mut method, "T"), Ok(changed));
+    assert_eq!(
+        eliminate(&mut method, "T").map(|result| result.changed),
+        Ok(changed)
+    );
     assert_eq!(method.nodes, wanted.nodes);
 }
 
@@ -295,32 +298,35 @@ fn an_incremented_local_is_no_longer_known() {
 #[test]
 fn unreachable_code_goes_with_its_line_but_not_its_label() {
     // A method with an `int` jump and constant loses its dead code even when no jump folds.
-    folds(
-        "(I)I",
-        1,
-        &[
-            Var(ILOAD, 0),
-            Jump(IFEQ, 0),
-            Op(ICONST_1),
-            Op(IRETURN),
-            At(1),
-            Line(9, 1),
-            Op(NOP),
-            At(0),
-            Op(ICONST_2),
-            Op(IRETURN),
-        ],
-        &[
-            Var(ILOAD, 0),
-            Jump(IFEQ, 0),
-            Op(ICONST_1),
-            Op(IRETURN),
-            At(1),
-            At(0),
-            Op(ICONST_2),
-            Op(IRETURN),
-        ],
-        true,
+    let source = [
+        Var(ILOAD, 0),
+        Jump(IFEQ, 0),
+        Op(ICONST_1),
+        Op(IRETURN),
+        At(1),
+        Line(9, 1),
+        Op(NOP),
+        At(0),
+        Op(ICONST_2),
+        Op(IRETURN),
+    ];
+    let expected = [
+        Var(ILOAD, 0),
+        Jump(IFEQ, 0),
+        Op(ICONST_1),
+        Op(IRETURN),
+        At(1),
+        At(0),
+        Op(ICONST_2),
+        Op(IRETURN),
+    ];
+    folds("(I)I", 1, &source, &expected, true);
+
+    let (mut method, labels) = body("(I)I", 1, &source);
+    let result = eliminate(&mut method, "T").expect("analysis succeeds");
+    assert_eq!(
+        result.preserved_unreachable_labels,
+        BTreeSet::from([labels[1]])
     );
 }
 

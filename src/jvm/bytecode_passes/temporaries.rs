@@ -42,10 +42,13 @@ pub(crate) struct Elimination {
 
 /// Rewrite `method`'s temporaries; `None` when nothing applies or the body is outside what the
 /// analysis models, leaving `method` as it was.
-pub(crate) fn eliminate(method: &mut MethodNode) -> Option<Elimination> {
+pub(crate) fn eliminate(
+    method: &mut MethodNode,
+    preserved_unreachable_labels: &BTreeSet<LabelId>,
+) -> Option<Elimination> {
     let original = method.nodes.clone();
     let mut body = Body::take(method);
-    let rewritten = rewrite(&mut body, method);
+    let rewritten = rewrite(&mut body, method, preserved_unreachable_labels);
     method.nodes = match rewritten {
         Some(_) => body.list.to_nodes(),
         None => original,
@@ -53,10 +56,14 @@ pub(crate) fn eliminate(method: &mut MethodNode) -> Option<Elimination> {
     rewritten
 }
 
-fn rewrite(body: &mut Body, method: &mut MethodNode) -> Option<Elimination> {
+fn rewrite(
+    body: &mut Body,
+    method: &mut MethodNode,
+    preserved_unreachable_labels: &BTreeSet<LabelId>,
+) -> Option<Elimination> {
     let mut changed = trivial_cleanup::remove_discarded_loads(body);
     changed |= trivial_cleanup::remove_nops(body);
-    let folds = null_check_folds::fold(body)?;
+    let folds = null_check_folds::fold(body, preserved_unreachable_labels)?;
     changed |= folds.folded;
     let mut analyzed = method.clone();
     analyzed.nodes = body.list.to_nodes();
