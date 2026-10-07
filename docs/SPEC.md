@@ -2537,13 +2537,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   gaps, not to the guard rule — in both directions the guard follows krusty's own type, so it is never
   wrong, only in a different place than kotlinc's:
   * A member kotlinc resolves on a Kotlin BUILTIN, which krusty resolves on the mapped Java class and
-    therefore types `T!`: `toString()` reached through a `CharSequence`/`Throwable`/`Comparable`
-    receiver (kotlinc: `kotlin.Any.toString(): String`), `Enum.name` (kotlinc: `kotlin.Enum.name:
-    String`), and `MutableMap.put` (kotlinc's non-null builtin parameters). krusty guards a value
-    kotlinc already knows is non-null (`kt42137.kt`, `kt65197.kt`, `kt15806.kt`,
-    `nestedClassesInAnnotations.kt`, `eagerLambdaAnalysisWithNoExpectedType.kt`,
-    `funWithTypeParameterWithUpperBound.kt`), or skips a narrowing kotlinc's builtin parameter creates
-    (`forInArrayListIndices.kt`).
+    therefore types `T!`: `Enum.name` (kotlinc: `kotlin.Enum.name: String`) and `MutableMap.put`
+    (kotlinc's non-null builtin parameters). krusty guards a value kotlinc already knows is non-null
+    (`kt42137.kt`, `kt65197.kt`, `kt15806.kt`, `nestedClassesInAnnotations.kt`,
+    `eagerLambdaAnalysisWithNoExpectedType.kt`, `funWithTypeParameterWithUpperBound.kt`), or skips a
+    narrowing kotlinc's builtin parameter creates (`forInArrayListIndices.kt`). `toString()` on a
+    `CharSequence`, `Throwable`, or other interface receiver is not this gap: an interface
+    redeclaration is not a member, and a mapped class such as `Throwable` keeps the builtin result.
   * An INFERRED declaration type: kotlinc commits an expression-body function's inferred return to the
     NON-NULL bound of a flexible body, so the guard lands inside that function; krusty keeps `T!`
     there and guards at the caller's declared type instead (`collectionAssignGetMultiIndex.kt`). This
@@ -2572,12 +2572,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   not-null. A JDK method of a MAPPED builtin classifier (`java.lang.Throwable` for `kotlin.Throwable`,
   `java.lang.annotation.Annotation`) is not a Java declaration in Kotlin's scope — kotlinc's
   `JvmMappedScope` shows the builtin it overrides — so it takes that declaration's rigid result without
-  the attribute and is not guarded (`ClassCastException().toString()`). A `@NotNull` Java result is
+  the attribute and is not guarded (`ClassCastException().toString()`). A Java interface method that
+  only redeclares `Object.toString()`, `hashCode()`, or `equals(Object)` is not a member
+  (`JavaMember.isObjectMethodInInterface`): `Path.toString()`, `CharSequence.toString()`, and the
+  same call on an interface that declares those methods resolve to `kotlin.Any` and compile as
+  `invokevirtual java/lang/Object.*` with no expression check. A class keeps a method it declares,
+  so `StringBuilder.toString()` and `File.toString()` are enhanced and checked, while an inherited
+  call such as `Number.toString()` names the receiver class (`invokevirtual Number.toString`) and is
+  not checked. A `@NotNull` Java result is
   enhanced on its own. Not yet modeled: the attribute travelling through an inferred lambda result
   (`sb.toString().also { }`), the message-less `checkNotNull` kotlinc puts on an inferred local
   initialized by an enhanced conditional, rigid type arguments of an enhanced FUNCTION result (only
   property reads are made rigid), and `NULLABLE` enhancement (`HashMap.get` stays `V!`).
-  Tests: `tests/enhanced_result_null_check_e2e.rs` (per-method differential vs kotlinc and a run).
+  Tests: `tests/enhanced_result_null_check_e2e.rs` (per-method differential vs kotlinc and a run);
+  `tests/interface_object_method_e2e.rs` (an interface's `Object` redeclaration versus a class that
+  declares or inherits the method).
 - **`EnhancedNullability` travels with the type argument it marks.** `computeIndexedQualifiers`
   enhances every flexible position of a Java result that an overridden declaration fixes not-null,
   type arguments included: `HashMap.entrySet()`, read as `entries`, is a rigid set of rigid, marked
