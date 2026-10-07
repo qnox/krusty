@@ -174,7 +174,8 @@ pub(super) fn normalize_invocation_flag(arg: &str) -> Result<String, String> {
     // A flag whose value is a scratch path names the same inputs wherever the files or output
     // directories were written, so the fingerprint must be their CONTENT, never the path. The two
     // kotlinc multiplatform flags carry different value shapes: `-Xcommon-sources` is a
-    // comma-separated list of common-module source FILES, while `-Xfriend-paths` is a
+    // comma-separated list of common-module source FILES; `-Xfragment-sources` is one stable
+    // fragment identity plus one scratch source FILE; and `-Xfriend-paths` is a
     // path-separator-joined list of friend-module class roots (as emitted by
     // `std::env::join_paths`), each either an output DIRECTORY or a JAR FILE such as
     // `kotlin-stdlib.jar`. Reading a directory as a file (or a jar as a directory) would error and
@@ -188,6 +189,20 @@ pub(super) fn normalize_invocation_flag(arg: &str) -> Result<String, String> {
             hashed.push(hex128(fingerprint_parts(&[&bytes])));
         }
         return Ok(format!("-Xcommon-sources={}", hashed.join(",")));
+    }
+    if let Some(value) = arg.strip_prefix("-Xfragment-sources=") {
+        let (fragment, file) = value
+            .split_once(':')
+            .ok_or_else(|| format!("invalid fragment source flag: {arg}"))?;
+        if fragment.is_empty() || file.is_empty() {
+            return Err(format!("invalid fragment source flag: {arg}"));
+        }
+        let bytes = std::fs::read(file)
+            .map_err(|err| format!("unreadable fragment source {file}: {err}"))?;
+        return Ok(format!(
+            "-Xfragment-sources={fragment}:{}",
+            hex128(fingerprint_parts(&[&bytes]))
+        ));
     }
     if let Some(value) = arg.strip_prefix("-Xfriend-paths=") {
         let mut hashed = Vec::new();

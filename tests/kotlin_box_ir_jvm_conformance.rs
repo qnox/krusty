@@ -1690,11 +1690,6 @@ fn kotlin_codegen_box_conformance() {
                                 );
                             }
                         }
-                        if byte_diff_on {
-                            let outcome =
-                                byte_diff_file(&src, &stem, &compile_cp, jdk, &compiled.flat);
-                            byte_diffs.lock().unwrap().push((file.clone(), outcome));
-                        }
                         let box_class = match find_box_class(&compiled.flat) {
                             Some(c) => c,
                             None => {
@@ -1750,31 +1745,46 @@ fn kotlin_codegen_box_conformance() {
                         }
                     })();
 
-                    // Byte-equality scoring: reference-compile this exact topology and score the
-                    // emitted bytes. A passing box scores its common prefixes; a failed box scores
-                    // zero against the reference denominator; a reference failure fails the run.
-                    let case_score = if score_on {
+                    // Reference-compile this exact topology once for both the byte diff and the
+                    // byte-equality score. A passing box scores its common prefixes; a failed box
+                    // scores zero against the reference denominator; a reference failure fails the
+                    // run. `KRUSTY_NO_RUN` disables scoring but not an opt-in byte diff.
+                    let reference = (score_on || byte_diff_on).then(|| {
                         mark_box_case_phase(&active, tid, file, "reference");
-                        let box_passed = matches!(test_result, TestResult::Pass);
-                        let krusty = compiled
-                            .as_ref()
-                            .map(CompiledClasses::qualified)
-                            .unwrap_or_default();
-                        let reference = box_reference_classes::reference_compile(
+                        box_reference_classes::reference_compile(
                             &src,
                             &stem,
                             &compile_cp,
                             jdk,
                             COROUTINE_HELPERS,
                         )
-                        .map(|reference| box_byte_score::qualified_from_reference(&reference));
-                        box_byte_score::score_case(
+                        .map(|reference| box_byte_score::qualified_from_reference(&reference))
+                    });
+                    if let (true, Some(compiled), Some(reference)) =
+                        (byte_diff_on, compiled.as_ref(), reference.as_ref())
+                    {
+                        let outcome = byte_diff_classes(
+                            &src,
+                            &stem,
+                            &compiled.qualified(),
                             reference.as_ref().map_err(String::as_str),
-                            box_passed,
-                            &krusty,
-                        )
-                    } else {
-                        box_byte_score::CaseScore::NotScored
+                        );
+                        byte_diffs.lock().unwrap().push((file.clone(), outcome));
+                    }
+                    let case_score = match reference.as_ref() {
+                        Some(reference) if score_on => {
+                            let box_passed = matches!(test_result, TestResult::Pass);
+                            let krusty = compiled
+                                .as_ref()
+                                .map(CompiledClasses::qualified)
+                                .unwrap_or_default();
+                            box_byte_score::score_case(
+                                reference.as_ref().map_err(String::as_str),
+                                box_passed,
+                                &krusty,
+                            )
+                        }
+                        _ => box_byte_score::CaseScore::NotScored,
                     };
 
                     (file.clone(), test_result, case_score)
@@ -2179,7 +2189,8 @@ enum TestResult {
 //
 // `KRUSTY_BYTE_DIFF=1`: every corpus file krusty compiles is ALSO compiled with the reference
 // kotlinc (persistent in-process server, content-keyed on-disk cache under
-// `target/cache/ref-classes/`) and the two class sets are compared BYTE-FOR-BYTE. Metric line:
+// `target/cache/ref-classes/`) and the two module-qualified class sets are compared BYTE-FOR-BYTE,
+// reusing the reference inventory the byte-equality score reads. Metric line:
 // `byte-diff: identical I | divergent D | ref-fail R`; per-file detail lands in
 // `target/byte_diff_report.txt`. Every applicable shape — ordinary, `// FILE:` multi-file, mixed
 // Java, and `// MODULE:` multi-module — is diffed; `box_reference_classes` mirrors the case's
@@ -2233,14 +2244,43 @@ fn compare_class_sets(
     Ok(())
 }
 
+/// Exact comparison for a module-qualified inventory. The module is part of the artifact identity:
+/// two modules may legally emit the same internal class name and both must be checked.
+fn compare_qualified_class_sets(
+    krusty: &box_byte_score::QualifiedClasses,
+    reference: &box_byte_score::QualifiedClasses,
+) -> Result<(), String> {
+    for ((module, name), reference_bytes) in reference {
+        let Some(krusty_bytes) = krusty.get(&(module.clone(), name.clone())) else {
+            return Err(format!("missing class {module}/{name}"));
+        };
+        if krusty_bytes != reference_bytes {
+            let offset = krusty_bytes
+                .iter()
+                .zip(reference_bytes)
+                .position(|(left, right)| left != right)
+                .unwrap_or_else(|| krusty_bytes.len().min(reference_bytes.len()));
+            return Err(format!(
+                "class {module}/{name}: bytes differ at offset {offset} (krusty {} B, kotlinc {} B)",
+                krusty_bytes.len(),
+                reference_bytes.len()
+            ));
+        }
+    }
+    if let Some((module, name)) = krusty.keys().find(|key| !reference.contains_key(*key)) {
+        return Err(format!("extra class {module}/{name}"));
+    }
+    Ok(())
+}
+
 /// `KRUSTY_BYTE_DIFF_DUMP=<dir>`: write a divergent file's two class sets side by side
-/// (`<dir>/<stem>-<hash>/{krusty,kotlinc}/…`) so divergences can be classified offline.
+/// (`<dir>/<stem>-<hash>/{krusty,kotlinc}/<module>/…`) so divergences can be classified offline.
 fn dump_class_sets(
     dir: &Path,
     stem: &str,
     src: &str,
-    krusty: &[(String, Vec<u8>)],
-    reference: &std::collections::BTreeMap<String, Vec<u8>>,
+    krusty: &box_byte_score::QualifiedClasses,
+    reference: &box_byte_score::QualifiedClasses,
 ) -> std::io::Result<()> {
     let root = dir.join(format!("{stem}-{:016x}", fnv64(src.as_bytes())));
     let write = |side: &str, name: &str, bytes: &[u8]| {
@@ -2250,11 +2290,11 @@ fn dump_class_sets(
         }
         fs::write(p, bytes)
     };
-    for (name, bytes) in krusty {
-        write("krusty", name, bytes)?;
+    for ((module, name), bytes) in krusty {
+        write("krusty", &format!("{module}/{name}"), bytes)?;
     }
-    for (name, bytes) in reference {
-        write("kotlinc", name, bytes)?;
+    for ((module, name), bytes) in reference {
+        write("kotlinc", &format!("{module}/{name}"), bytes)?;
     }
     fs::write(root.join("source.kt"), src)
 }
@@ -2279,42 +2319,32 @@ fn dump_compiled_classes(
     Ok(())
 }
 
-/// The full per-file byte-diff decision: reference-compile the case's exact topology, then compare.
-/// Every applicable shape is diffed; a reference failure is explicit (REF-FAIL), never a case that
-/// disappears from the population by shape.
-fn byte_diff_file(
+/// The full per-file byte-diff decision from the same exact-topology reference inventory used for
+/// scoring. Every applicable shape is diffed; a reference failure is explicit (REF-FAIL), never a
+/// case that disappears from the population by shape.
+fn byte_diff_classes(
     src: &str,
     stem: &str,
-    cp_jars: &[PathBuf],
-    jdk: krusty::conformance::BoxJdk<'_>,
-    classes: &[(String, Vec<u8>)],
+    krusty: &box_byte_score::QualifiedClasses,
+    reference: Result<&box_byte_score::QualifiedClasses, &str>,
 ) -> ByteDiff {
-    match super::box_reference_classes::reference_compile(
-        src,
-        stem,
-        cp_jars,
-        jdk,
-        COROUTINE_HELPERS,
-    ) {
-        Err(e) => ByteDiff::RefFail(e),
-        Ok(reference) => {
-            let ref_classes = reference.flatten();
-            match compare_class_sets(classes, &ref_classes) {
-                Ok(()) => ByteDiff::Identical,
-                Err(why) => {
-                    if let Some(dump) = env("KRUSTY_BYTE_DIFF_DUMP") {
-                        if let Err(error) =
-                            dump_class_sets(Path::new(&dump), stem, src, classes, &ref_classes)
-                        {
-                            return ByteDiff::Divergent(format!(
-                                "{why}; failed to dump divergent class sets: {error}"
-                            ));
-                        }
+    match reference {
+        Err(error) => ByteDiff::RefFail(error.to_string()),
+        Ok(reference) => match compare_qualified_class_sets(krusty, reference) {
+            Ok(()) => ByteDiff::Identical,
+            Err(why) => {
+                if let Some(dump) = env("KRUSTY_BYTE_DIFF_DUMP") {
+                    if let Err(error) =
+                        dump_class_sets(Path::new(&dump), stem, src, krusty, reference)
+                    {
+                        return ByteDiff::Divergent(format!(
+                            "{why}; failed to dump divergent class sets: {error}"
+                        ));
                     }
-                    ByteDiff::Divergent(why)
                 }
+                ByteDiff::Divergent(why)
             }
-        }
+        },
     }
 }
 
@@ -2341,6 +2371,33 @@ fn compare_class_sets_identical_and_divergent() {
     assert!(compare_class_sets(&k, &r3)
         .unwrap_err()
         .contains("extra class A"));
+}
+
+#[test]
+fn qualified_class_comparison_does_not_collapse_duplicate_module_names() {
+    let mut krusty = box_byte_score::QualifiedClasses::new();
+    krusty.insert(("left".to_string(), "sample/Dup".to_string()), vec![1, 2]);
+    krusty.insert(("right".to_string(), "sample/Dup".to_string()), vec![3, 4]);
+    let mut reference = krusty.clone();
+    reference.insert(("right".to_string(), "sample/Dup".to_string()), vec![3, 9]);
+
+    assert_eq!(
+        compare_qualified_class_sets(&krusty, &reference),
+        Err(
+            "class right/sample/Dup: bytes differ at offset 1 (krusty 2 B, kotlinc 2 B)"
+                .to_string()
+        )
+    );
+    reference.remove(&("left".to_string(), "sample/Dup".to_string()));
+    reference.insert(("right".to_string(), "sample/Dup".to_string()), vec![3, 4]);
+    assert_eq!(
+        compare_qualified_class_sets(&krusty, &reference),
+        Err("extra class left/sample/Dup".to_string())
+    );
+    assert_eq!(
+        compare_qualified_class_sets(&reference, &krusty),
+        Err("missing class left/sample/Dup".to_string())
+    );
 }
 
 #[test]

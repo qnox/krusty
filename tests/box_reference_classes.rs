@@ -109,7 +109,7 @@ pub fn reference_compile(
     coroutine_helpers: &str,
 ) -> Result<ReferenceClasses, String> {
     let base_args = jdk.kotlinc_args(cp_jars)?;
-    let language_args = reference_directive_args(src);
+    let language_args = reference_directive_args(src)?;
     let (compiler_id, compiler_len) = compiler_identity();
     let fingerprint = reference_cache_fingerprint(
         src,
@@ -330,7 +330,7 @@ const TEST_ONLY_LANGUAGE_FEATURES: &[&str] = &["ImplicitSignedToUnsignedIntegerC
 ///   accepts its `@MustUseReturnValues`/`@IgnorableReturnValue` annotations (krusty does not model
 ///   the checker, so it never passes this flag to its own compile, but the case's runtime `box()`
 ///   is unaffected, leaving it applicable and still requiring a reference compile).
-fn reference_directive_args(src: &str) -> Vec<String> {
+fn reference_directive_args(src: &str) -> Result<Vec<String>, String> {
     let mut args = language_directives::kotlinc_args(src);
     let opts_in_test_only = TEST_ONLY_LANGUAGE_FEATURES.iter().any(|feature| {
         let enabling = format!("-XXLanguage:+{feature}");
@@ -361,19 +361,20 @@ fn reference_directive_args(src: &str) -> Vec<String> {
             .strip_prefix("// RETURN_VALUE_CHECKER_MODE:")
     }) {
         // Map the test directive's enum value to the compiler flag spelling. An unrecognized value
-        // is left unmapped so the reference compile fails closed (REF-FAIL) rather than silently
-        // scoring against the wrong invocation.
+        // fails closed (REF-FAIL) rather than silently scoring against the wrong invocation.
         let flag = match mode.trim() {
-            "FULL" => Some("full"),
-            "CHECKER" => Some("check"),
-            "DISABLED" => Some("disable"),
-            _ => None,
+            "FULL" => "full",
+            "CHECKER" => "check",
+            "DISABLED" => "disable",
+            unknown => {
+                return Err(format!(
+                    "reference oracle does not support RETURN_VALUE_CHECKER_MODE {unknown}"
+                ));
+            }
         };
-        if let Some(flag) = flag {
-            args.push(format!("-Xreturn-value-checker={flag}"));
-        }
+        args.push(format!("-Xreturn-value-checker={flag}"));
     }
-    args
+    Ok(args)
 }
 
 /// Whether any source file declares a top-level package of `kotlin` or a `kotlin.*` subpackage,
@@ -1000,12 +1001,12 @@ mod tests {
         // A plain case adds nothing.
         assert_eq!(
             reference_directive_args("fun box() = \"OK\"\n"),
-            Vec::<String>::new()
+            Ok(Vec::<String>::new())
         );
         // `// ALLOW_KOTLIN_PACKAGE` opts in the reserved-`kotlin`-package flag.
         assert_eq!(
             reference_directive_args("// ALLOW_KOTLIN_PACKAGE\npackage kotlin.jvm\n"),
-            vec!["-Xallow-kotlin-package".to_string()]
+            Ok(vec!["-Xallow-kotlin-package".to_string()])
         );
         // A source that declares a `kotlin.*` package opts in the same flag WITHOUT the directive,
         // as several corpus cases do (e.g. a `// FILE:` block under `package kotlin.internal`).
@@ -1013,39 +1014,39 @@ mod tests {
             reference_directive_args(
                 "// FILE: a.kt\npackage kotlin.internal\nannotation class A\n// FILE: b.kt\nfun box() = \"OK\"\n"
             ),
-            vec!["-Xallow-kotlin-package".to_string()]
+            Ok(vec!["-Xallow-kotlin-package".to_string()])
         );
         // A package that merely starts with the letters `kotlin` but is not the reserved package is
         // not matched, so an ordinary case is unaffected.
         assert_eq!(
             reference_directive_args("package kotlinx.demo\nfun box() = \"OK\"\n"),
-            Vec::<String>::new()
+            Ok(Vec::<String>::new())
         );
         // A test-only feature additionally opts in the JVM property.
         assert_eq!(
             reference_directive_args(
                 "// LANGUAGE: +ImplicitSignedToUnsignedIntegerConversion\nfun box() = \"OK\"\n"
             ),
-            vec![
+            Ok(vec![
                 "-XXLanguage:+ImplicitSignedToUnsignedIntegerConversion".to_string(),
                 "-Dkotlinc.test.allow.testonly.language.features=true".to_string(),
-            ]
+            ])
         );
         // A non-test-only feature must NOT drag in the property: that would needlessly spin a
         // property-keyed compiler server and change the key for an ordinary case.
         assert_eq!(
             reference_directive_args("// LANGUAGE: +ContextParameters\nfun box() = \"OK\"\n"),
-            vec!["-XXLanguage:+ContextParameters".to_string()]
+            Ok(vec!["-XXLanguage:+ContextParameters".to_string()])
         );
         // `// OPT_IN:` markers each become an `-opt-in` flag; multiple markers on one line split.
         assert_eq!(
             reference_directive_args(
                 "// OPT_IN: kotlin.ExperimentalMultiplatform, kotlin.contracts.ExperimentalContracts\nfun box() = \"OK\"\n"
             ),
-            vec![
+            Ok(vec![
                 "-opt-in=kotlin.ExperimentalMultiplatform".to_string(),
                 "-opt-in=kotlin.contracts.ExperimentalContracts".to_string(),
-            ]
+            ])
         );
         // `// RETURN_VALUE_CHECKER_MODE: <MODE>` enables kotlinc's return-value checker so the
         // reference compile accepts a case's `@MustUseReturnValues`/`@IgnorableReturnValue`; the
@@ -1054,17 +1055,23 @@ mod tests {
             reference_directive_args(
                 "// RETURN_VALUE_CHECKER_MODE: FULL\n// WITH_STDLIB\nfun box() = \"OK\"\n"
             ),
-            vec!["-Xreturn-value-checker=full".to_string()]
+            Ok(vec!["-Xreturn-value-checker=full".to_string()])
         );
         assert_eq!(
             reference_directive_args("// RETURN_VALUE_CHECKER_MODE: CHECKER\nfun box() = \"OK\"\n"),
-            vec!["-Xreturn-value-checker=check".to_string()]
+            Ok(vec!["-Xreturn-value-checker=check".to_string()])
         );
         assert_eq!(
             reference_directive_args(
                 "// RETURN_VALUE_CHECKER_MODE: DISABLED\nfun box() = \"OK\"\n"
             ),
-            vec!["-Xreturn-value-checker=disable".to_string()]
+            Ok(vec!["-Xreturn-value-checker=disable".to_string()])
+        );
+        // An unrecognized mode has no verified compiler spelling, so the reference fails closed
+        // instead of scoring against an invocation that lacks the case's checker mode.
+        assert_eq!(
+            reference_directive_args("// RETURN_VALUE_CHECKER_MODE: UNKNOWN\nfun box() = \"OK\"\n"),
+            Err("reference oracle does not support RETURN_VALUE_CHECKER_MODE UNKNOWN".to_string())
         );
         // The real `expectActualTypealiasCoercion` corpus case opts in all three.
         assert_eq!(
@@ -1072,12 +1079,12 @@ mod tests {
                 "// LANGUAGE: +MultiPlatformProjects +ImplicitSignedToUnsignedIntegerConversion\n\
                  // ALLOW_KOTLIN_PACKAGE\nfun box() = \"OK\"\n"
             ),
-            vec![
+            Ok(vec![
                 "-XXLanguage:+MultiPlatformProjects".to_string(),
                 "-XXLanguage:+ImplicitSignedToUnsignedIntegerConversion".to_string(),
                 "-Dkotlinc.test.allow.testonly.language.features=true".to_string(),
                 "-Xallow-kotlin-package".to_string(),
-            ]
+            ])
         );
     }
 
@@ -1362,7 +1369,7 @@ mod tests {
             "probe",
             NO_HELPERS,
             &jdk.kotlinc_args(&[]).expect("full JDK arguments"),
-            &reference_directive_args(&src),
+            &reference_directive_args(&src).expect("supported probe directives"),
             compiler_id.as_deref(),
             compiler_len,
         );

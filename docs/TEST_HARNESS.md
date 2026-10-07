@@ -316,7 +316,8 @@ once and schedules test binaries to preserve shared JVM runners.
 `KRUSTY_BYTE_DIFF=1` makes the box-conformance run ALSO compile every krusty-compiled corpus file
 with the reference kotlinc (persistent in-process compiler server; results cached under
 `target/cache/ref-classes/`, keyed by source + stem + classpath + dist identity) and compare the
-two class sets **byte-for-byte**:
+two module-qualified class sets **byte-for-byte**. The diff reads the same reference inventory as
+the byte score, so a run with both compiles each case once:
 
 ```sh
 KRUSTY_BYTE_DIFF=1 KRUSTY_SERVER_POOL=4 ./run-tests.sh --test conformance -- --nocapture
@@ -326,7 +327,8 @@ The summary gains a `byte-diff: identical I | divergent D | ref-fail R` line, an
 (first difference per file) lands in `target/byte_diff_report.txt`. Every krusty-compiled topology,
 including `// MODULE:` and mixed-Java tests, is reference-compiled the way the JVM byte-equality score
 does it (see "Current Conformance"); kotlinc's `META-INF/*.kotlin_module` artifact is not compared.
-`KRUSTY_BYTE_DIFF_DUMP=<dir>` also writes both class sets of each divergent case. The first run pays one warm
+`KRUSTY_BYTE_DIFF_DUMP=<dir>` also writes both class sets of each divergent case, one
+`<module>/<internal name>.class` tree per compiler. The first run pays one warm
 kotlinc compile (~0.4 s) per file — raise `KRUSTY_SERVER_POOL` on a large-RAM host; later runs hit
 the on-disk cache. Pair with `KRUSTY_BOX_ONLY=<substring>` for a focused divergence loop.
 
@@ -468,7 +470,8 @@ are paired by module and JVM internal class name:
 - A case whose `box()` does not return `OK` (krusty rejected it, emitted no `box()`, panicked, or the
   JVM returned anything else) counts 0 out of the summed size of kotlinc's classes.
 - A reference compile or infrastructure failure fails the run; it is never a silent zero or a
-  dropped case.
+  dropped case. A test directive the reference oracle cannot map to a kotlinc option (for example
+  an unknown `// RETURN_VALUE_CHECKER_MODE:` value) is such a failure.
 
 Both reports keep integer counts, summed over cases and then over shards: `passed` and `applicable`
 cases for conformance, `matched` and `total` bytes for JVM byte equality. Each percentage,

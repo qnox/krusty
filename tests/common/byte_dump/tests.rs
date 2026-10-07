@@ -608,6 +608,39 @@ fn a_common_sources_flag_ignores_its_scratch_path() {
 }
 
 #[test]
+fn a_fragment_sources_flag_keeps_the_fragment_and_hashes_the_source() {
+    let root = temp_root("fragment-src");
+    let left_dir = root.join("left");
+    let right_dir = root.join("right");
+    std::fs::create_dir_all(&left_dir).unwrap();
+    std::fs::create_dir_all(&right_dir).unwrap();
+    let left = left_dir.join("Common.kt");
+    let right = right_dir.join("Common.kt");
+    std::fs::write(&left, "expect class A\n").unwrap();
+    std::fs::write(&right, "expect class A\n").unwrap();
+    let flag =
+        |fragment: &str, file: &Path| format!("-Xfragment-sources={fragment}:{}", file.display());
+
+    assert_eq!(
+        normalize_invocation_flag(&flag("common", &left)).unwrap(),
+        normalize_invocation_flag(&flag("common", &right)).unwrap(),
+        "equal fragment source bytes at distinct scratch paths share one recording"
+    );
+    assert_ne!(
+        normalize_invocation_flag(&flag("common", &left)).unwrap(),
+        normalize_invocation_flag(&flag("platform", &left)).unwrap(),
+        "the semantic fragment identity remains part of the key"
+    );
+    std::fs::write(&right, "expect class B\n").unwrap();
+    assert_ne!(
+        normalize_invocation_flag(&flag("common", &left)).unwrap(),
+        normalize_invocation_flag(&flag("common", &right)).unwrap(),
+        "changed fragment source bytes change the recording"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_friend_paths_flag_fingerprints_output_directories_not_their_paths() {
     let root = temp_root("friend-paths");
     // Two friend MODULES, each a class OUTPUT DIRECTORY, joined with the platform path separator
