@@ -1838,7 +1838,11 @@ impl BodyLowering<'_> {
                         matches!(receiver, crate::ir::IrCapturedReceiver::Context { .. })
                     })
             });
-            if !captured_context && first.is_some_and(|operand| self.ir.is_positionless(operand)) {
+            if captured_context {
+                if let Some(line) = source_line {
+                    self.ir.mark_dispatch_line(call, line);
+                }
+            } else if first.is_some_and(|operand| self.ir.is_positionless(operand)) {
                 self.ir.mark_generated_operand_start(call);
             }
         }

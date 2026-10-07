@@ -117,7 +117,9 @@ impl Emitter<'_> {
     /// IR supplies the semantic declaration owner and call line; this boundary chooses JVM source
     /// paths and output line numbers.
     pub(super) fn mark_expression_start(&mut self, expression: ExprId, code: &mut CodeBuilder) {
-        if self.ir.callable_scopes.contains(&expression) {
+        if self.ir.callable_scopes.contains(&expression)
+            || self.ir.dispatch_line(expression).is_some()
+        {
             return;
         }
         let Some(&line) = self.ir.expr_source_lines.get(&expression) else {
