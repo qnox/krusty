@@ -37,8 +37,9 @@ pub(crate) struct JvmMethod<'a> {
     pub descriptor: Option<&'a str>,
 }
 
-/// `Function.flags` of a lambda: final, `LOCAL` visibility (5), nothing else. kotlinc records a
-/// suspend lambda's function without `IS_SUSPEND`.
+/// `Function.flags` of a lambda: final, `LOCAL` visibility (5), nothing else. A lambda inferred
+/// against a suspend function type keeps these flags; an explicit `suspend { ... }` adds
+/// `IS_SUSPEND`.
 const LAMBDA_FLAGS: u64 = 5 << 1;
 
 /// A lambda's function as its class's metadata describes it. kotlinc records no context
@@ -48,6 +49,9 @@ pub(crate) struct LambdaFunction<'a> {
     pub function_name: &'a str,
     /// The class's `invoke`, when this is not a suspend lambda class.
     pub jvm_method: Option<JvmMethod<'a>>,
+    /// Whether the lambda expression itself carried the `suspend` modifier. This is source
+    /// provenance, not a fact recovered from its (possibly expected) function type.
+    pub explicit_suspend: bool,
     pub receiver: Option<Ty>,
     /// Each value parameter's metadata name and type, in order.
     pub parameters: &'a [(&'a str, Ty)],
@@ -147,9 +151,15 @@ pub(crate) fn build(lambda: &LambdaFunction<'_>) -> Result<(Vec<u8>, Vec<String>
         parameter.field_message(3, &ty); // ValueParameter.type = 3
         function.repeated_message(6, &parameter); // Function.value_parameter = 6
     }
-    function.field_varint(9, LAMBDA_FLAGS); // Function.flags = 9
-                                            // Interned after the Kotlin signature, which is the order kotlinc's serializer visits the
-                                            // `JvmMethodSignature` extension (Function field 100).
+    let flags = LAMBDA_FLAGS
+        | if lambda.explicit_suspend {
+            crate::metadata::function_flags::IS_SUSPEND
+        } else {
+            0
+    };
+    function.field_varint(9, flags); // Function.flags = 9
+    // Interned after the Kotlin signature, which is the order kotlinc's serializer visits the
+    // `JvmMethodSignature` extension (Function field 100).
     if let Some(method) = &lambda.jvm_method {
         let mut signature = Pb::new();
         signature.field_varint(1, strings.local(method.name) as u64); // JvmMethodSignature.name = 1
