@@ -1820,6 +1820,20 @@ impl BodyLowering<'_> {
                 let value = loop {
                     match self.ir.expr(value) {
                         IrExpr::GetValue(value) => break *value,
+                        IrExpr::GetField { class, index, .. } => {
+                            return self.ir.classes[*class as usize]
+                                .ctor_args
+                                .iter()
+                                .find(|argument| argument.field_index == Some(*index))
+                                .and_then(|argument| argument.capture.as_ref())
+                                .and_then(|capture| capture.receiver.as_ref())
+                                .is_some_and(|receiver| {
+                                    matches!(
+                                        receiver,
+                                        crate::ir::IrCapturedReceiver::Context { .. }
+                                    )
+                                });
+                        }
                         IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg,

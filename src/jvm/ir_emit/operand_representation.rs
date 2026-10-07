@@ -173,7 +173,11 @@ impl Emitter<'_> {
                     .is_some_and(|(source, _)| {
                         self.ir
                             .jvm_erased_primitive_wrapper_values
-                            .contains(&source)
+                            .contains(&operand)
+                            || self
+                                .ir
+                                .jvm_erased_primitive_wrapper_values
+                                .contains(&source)
                     })
             })
     }
