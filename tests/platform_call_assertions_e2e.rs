@@ -505,7 +505,8 @@ fn java_enum_constant_is_not_a_platform_value() {
 }
 
 /// `this(...)` and `super(...)` are value arguments. A platform result committed to a declared
-/// non-null parameter is guarded; a type parameter that admits null is not.
+/// non-null parameter is guarded; a type parameter that admits null is not, including after the
+/// superclass applies that parameter as a non-null type.
 const CONSTRUCTOR_DELEGATION: &str = r#"
 class Named(val text: String) {
     constructor(key: String, marker: Int) : this(System.getenv(key))
@@ -522,6 +523,11 @@ class Child : Base {
 
 class Box<T>(val value: T) {
     constructor(items: java.util.List<T>) : this(items.get(0))
+}
+
+open class GenericBase<T>(val value: T)
+class GenericChild : GenericBase<String> {
+    constructor(items: java.util.List<String>) : super(items.get(0))
 }
 
 fun box(): String {
