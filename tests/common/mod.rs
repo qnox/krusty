@@ -8,6 +8,8 @@ mod metadata_diff;
 mod native_backend;
 pub(crate) mod server_pool;
 pub use kotlinc_lib::kotlinc_lib_out;
+#[allow(unused_imports)] // conformance does not call this; the e2e crate does.
+pub(crate) use kotlinc_lib::kotlinc_lib_out_with;
 #[allow(unused_imports)] // conformance never calls these; the e2e crate does.
 pub use metadata_diff::{
     metadata_diff_against_kotlinc_cp, metadata_diff_against_kotlinc_lib,
