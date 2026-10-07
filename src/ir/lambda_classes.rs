@@ -25,6 +25,10 @@ pub struct IrLambdaClass {
     /// that exposes it. The JVM marks both singleton initialization and the default expression that
     /// loads it so an inliner regenerates the type-specialized class.
     pub requires_reification: bool,
+    /// Source label of this lambda's extension receiver, before JVM realization removes the
+    /// implementation's lambda-origin record. `None` means kotlinc's unlabeled `<this>` spelling;
+    /// a backend formats a present label at the local-variable boundary.
+    pub extension_receiver_label: Option<String>,
     /// The inline function whose default argument this lambda implements. The JVM realization
     /// records it before replacing the lambda expression; emission uses it for the `$default`
     /// enclosure, source map, and metadata ABI flag without searching the rewritten body.

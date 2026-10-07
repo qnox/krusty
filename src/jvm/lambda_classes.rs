@@ -878,6 +878,19 @@ fn realize_class(
         }
     }
     become_invoke(ir, fid, class, captures.len(), result);
+    if inline_default.is_some() && site.function_type.mentions_ty_param() {
+        // The class captures the inline declaration's type parameters; its specialized `invoke`
+        // does not redeclare them, but its method Signature still names those exact identities.
+        ir.signatures.insert(
+            fid,
+            crate::ir::IrGenericSig {
+                type_params: Vec::new(),
+                params: signature.params.clone(),
+                ret: Some(signature.ret),
+                supers: Vec::new(),
+            },
+        );
+    }
     // The body belongs to the new class: what it reaches of the enclosing class's private members
     // it reaches from outside.
     let mut pending = vec![body];
@@ -983,12 +996,17 @@ fn declare_class(
     let requires_reification = inline_default.is_some_and(|context| {
         inline_default_type_requires_reification(ir, context, site.function_type)
     });
+    let extension_receiver_label = ir
+        .lambda_origins
+        .get(&fid)
+        .and_then(|origin| origin.label.clone());
     class.lambda = Some(crate::ir::IrLambdaClass {
         // The class is constructed from other packages: a public `inline` caller inlines the
         // default, and a private one still crosses packages inside the module.
         public_inline,
         public_inline_abi,
         requires_reification,
+        extension_receiver_label,
         inline_default_owner,
         invoke: fid,
         function_type: site.function_type,
@@ -1158,6 +1176,7 @@ mod method_domain_tests {
             public_inline: false,
             public_inline_abi: false,
             requires_reification: false,
+            extension_receiver_label: None,
             inline_default_owner: None,
             invoke: 3,
             function_type: Ty::fun(vec![], Ty::Unit),

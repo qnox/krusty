@@ -559,6 +559,16 @@ pub(super) fn emit_facade_default_stub(
             // the frame cursor can return to the first of those slots. kotlinc's `$i$f$` marker
             // then overwrites the mask.
             release_default_stub_suffix(&mut emitter, stub_param_tys.len(), mask_count);
+            // A default expression may have moved the current line into its own body. The ordinary
+            // method-entry checks resume at the declaration signature; `mark_line` naturally
+            // deduplicates this when the default and signature share one line.
+            if let Some(&line) = ir
+                .fn_sig_lines
+                .get(&fid)
+                .or_else(|| ir.fn_decl_lines.get(&fid))
+            {
+                code.mark_line(line);
+            }
             super::method_entry::emit(fid, &real_params, false, None, env, &mut emitter, &mut code);
             ir.top_level_inline_functions.contains(&fid).then(|| {
                 let slot = emitter
