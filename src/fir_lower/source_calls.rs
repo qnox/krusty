@@ -1605,6 +1605,16 @@ impl BodyLowering<'_> {
         }
         let selected_declaration_parameter_types = declaration_parameter_types.clone();
         let declaration_result = signature.result.get();
+        // A call whose whole operand list consists of implicit context values begins at the first
+        // generated load: there is no written receiver or value argument to own a later start.
+        // Calls that also have an extension/value operand keep the ordinary operand-then-dispatch
+        // line sequence. Record the semantic shape here while the declaration still distinguishes
+        // context parameters; JVM emission only consumes the resulting debug provenance.
+        let starts_at_implicit_context = callable.shape.context_parameter_count != 0
+            && declared_extension_receiver.is_none()
+            && usize::try_from(callable.shape.context_parameter_count)
+                .ok()
+                .is_some_and(|count| count == selected_parameter_types.len());
         // kotlinc inlines every call of a same-module inline function, whichever class declares
         // it: the checked template is cloned here with its receiver as an explicit operand, and a
         // target backend adds the synthetic accessors its private member uses need.
@@ -1796,6 +1806,15 @@ impl BodyLowering<'_> {
             &selected_declaration_parameter_types,
             &default_argument_positions,
         );
+        if starts_at_implicit_context {
+            let first = match self.ir.expr(call) {
+                IrExpr::Call { args, .. } => args.first().copied(),
+                _ => None,
+            };
+            if first.is_some_and(|operand| self.ir.is_positionless(operand)) {
+                self.ir.mark_generated_operand_start(call);
+            }
+        }
         // Preserve the declaration's unspecialized result on the concrete call node. Value-class
         // realization needs this checked distinction: a member declared to return `X` yields X's raw
         // carrier, while a generic `T` merely specialized to `X` yields a boxed value across erasure.
