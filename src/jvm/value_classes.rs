@@ -4271,6 +4271,12 @@ fn prop_access(
     } else {
         receiver
     };
+    // The coercion's operand is the value the accessor physically produced. Keep that slot on the
+    // producer as well as on the rewritten property expression: consumers such as structural
+    // equality deliberately inspect through an `ImplicitCoercion` so an erased generic scalar
+    // (`R<Int>.a`: `Object` containing `Integer`) stays boxed instead of being unboxed and boxed
+    // again. Arithmetic still consumes the coercion at its concrete Kotlin result below.
+    ir.physical_types.insert(inner, u);
     // A generic value class keeps an erased `Object` carrier, but an applied property read
     // (`X<Int>.x`) has a concrete Kotlin result. Preserve that selected result so a real conversion
     // performs the required `Integer` unbox / reference cast instead of degrading it back to Any.
