@@ -1,8 +1,7 @@
 //! LineNumberTable byte-parity: krusty's per-statement line mapping must match kotlinc's exactly.
-//! Every case here is PARAMLESS with no locals or top-level properties, so kotlinc emits no
-//! LocalVariableTable — the class files must therefore be BYTE-IDENTICAL once the
-//! LineNumberTable matches (code shapes for these forms already are). LVT parity is a separate,
-//! follow-up slice.
+//! The older focused fixtures are paramless with no locals or top-level properties, so their
+//! `javap` comparison isolates the `LineNumberTable`. New fixtures should require complete raw
+//! class-file equality once every member and attribute of their source shape already agrees.
 //!
 //! kotlinc's mapping (probed on 2.4.0): one entry per statement at its first pc; an expression
 //! body maps to the expression's line; a `Unit` fn's implicit `return` maps to the CLOSING-BRACE
