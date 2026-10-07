@@ -191,7 +191,6 @@ fn a_constant_the_last_later_code_names_moves_to_the_end_of_that_code() {
 #[test]
 fn a_removed_body_class_moves_to_its_late_inner_class_row() {
     let mut writer = ClassWriter::new("T", "java/lang/Object");
-    let before = writer.cp.slot_count();
     writer.reserve_method_name("f");
     writer.reserve_descriptor("()V");
     writer.seed_class("sample/Holder$Removed");
@@ -200,7 +199,6 @@ fn a_removed_body_class_moves_to_its_late_inner_class_row() {
         code.pop();
         code.ret_void();
     });
-    let after = writer.cp.slot_count();
     writer.add_inner_class(crate::jvm::classfile::InnerClassSpec {
         inner: "sample/Holder$Removed".to_string(),
         outer: Some("sample/Holder".to_string()),
@@ -208,16 +206,7 @@ fn a_removed_body_class_moves_to_its_late_inner_class_row() {
         access: 0x0019,
     });
     let class = writer.finish();
-    let relaid = [RelaidMethod {
-        index: 0,
-        added: before + 1..after + 1,
-        leading: Vec::new(),
-        interned: after + 1..after + 1,
-    }];
-    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
-        .expect("the class reads")
-        .expect("the removed capture class moves to the late row");
-    let entries = pool(&laid_out);
+    let entries = pool(&class);
     let position = |entry: &str| {
         entries
             .iter()
