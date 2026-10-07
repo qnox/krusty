@@ -79,6 +79,12 @@ pub(super) fn attach_declared_function_debug(
         }
         slot += slot_words(*ty);
     }
+    // A top-level `inline fun` stores `$i$f$` at this slot before any statement. That marker has
+    // no line, so the declaration-line fallback must not land on it: `set_method_debug` would
+    // otherwise insert the signature line at pc 0 whenever the body's own first entry is later.
+    if function.is_static && ir.top_level_inline_functions.contains(&fid) {
+        body_pc += inline_depth_marker_width(slot);
+    }
     cw.set_method_debug(
         &function.name,
         &descriptor,
@@ -105,6 +111,18 @@ pub(super) fn attach_declared_function_debug(
         &descriptor,
         &[(body_pc, start), (return_pc, fallthrough_line)],
     );
+}
+
+/// `iconst_0` plus `istore` of the `$i$f$` local an emitted top-level inline function opens with.
+fn inline_depth_marker_width(slot: u16) -> u16 {
+    let store = if slot <= 3 {
+        1
+    } else if slot <= 0xff {
+        2
+    } else {
+        4
+    };
+    1 + store
 }
 
 /// Byte width of `aload <slot>` (`aload_0..3`, `aload u1`, or `wide aload u2`).
