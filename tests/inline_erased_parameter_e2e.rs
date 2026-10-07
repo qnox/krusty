@@ -40,12 +40,42 @@ const SOURCE: &str = "inline fun <T : java.lang.AutoCloseable?, R> T.use(block: 
     fun go(s: String) = id(s).length\n\
     fun plain(s: String) = plainId(s).length\n";
 
+const LIBRARY: &str = r#"package erased.bound
+
+inline fun <T : java.lang.AutoCloseable?> closeNow(value: T) {
+    value?.close()
+}
+
+inline fun <T : Comparable<T>> id(value: T): T = value
+inline fun <T> plainId(value: T): T = value
+"#;
+
+const CONSUMER: &str = r#"package erased.bound
+
+fun close(reader: java.io.BufferedReader?) = closeNow(reader)
+fun narrow(value: String) = id(value).length
+fun keep(value: String): Comparable<String> = id(value)
+fun plain(value: String) = plainId(value).length
+"#;
+
 #[test]
 fn an_inlined_type_parameter_is_stored_as_its_erased_bound() {
     common::assert_classes_identical_to_kotlinc_jdk(
         "InlineErasedParameter",
         SOURCE,
         &["InlineErasedParameterKt"],
+    );
+}
+
+#[test]
+fn a_bounded_erasure_stays_erased_until_its_consumer_needs_the_specialization() {
+    let library = common::kotlinc_lib_out(&[("ErasedBoundLibrary.kt", LIBRARY)])
+        .expect("reference kotlinc compiles the inline dependency");
+    common::assert_classes_identical_to_kotlinc_against_jdk(
+        "InlineErasedConsumer",
+        CONSUMER,
+        &["erased/bound/InlineErasedConsumerKt"],
+        &[library],
     );
 }
 

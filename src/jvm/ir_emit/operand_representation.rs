@@ -115,11 +115,12 @@ impl Emitter<'_> {
                 arg,
                 type_operand,
             } => {
-                // Only a slot erased to `Object`: a bounded type parameter's slot (`T : Base`) is
-                // already a class a receiver or argument adapter takes as the value's own type.
+                // Keep the declaration-side erasure until the consumer chooses its physical type.
+                // This is not limited to `Object`: `T : Comparable<T>` arrives as `Comparable`.
+                // A String-only consumer casts that slot once to `String`; a consumer of the bound
+                // itself uses it unchanged instead of casting to `String` and back to `Comparable`.
                 let slot = *self.ir.physical_types.get(arg)?;
-                (jvm_is_erased_top(ir_ty_to_jvm(&slot)) && narrows(slot, *type_operand))
-                    .then_some(ErasedResult::Coerced { call: *arg, slot })
+                narrows(slot, *type_operand).then_some(ErasedResult::Coerced { call: *arg, slot })
             }
             crate::ir::IrExpr::InvokeFunction { ret, .. } => {
                 (!matches!(ret, Ty::Unit | Ty::Nothing)
