@@ -1223,6 +1223,12 @@ impl Accessor<'_> {
     fn function(&self, function: u32, cw: &mut ClassWriter) {
         let ir = self.ir;
         let target = &ir.functions[function as usize];
+        let suspend = ir.suspend_funs.contains(&function);
+        let line = if suspend {
+            ir.fn_decl_lines.get(&function).copied().unwrap_or(0)
+        } else {
+            self.declaration_line
+        };
         let parameters = jvm_function_params(ir, function);
         let result = jvm_declared_ty(&target.ret);
         let descriptor = method_descriptor(&parameters, result);
@@ -1235,6 +1241,9 @@ impl Accessor<'_> {
         reserve_signature(cw, &name, &descriptor);
         let words: u16 = parameters.iter().map(|ty| slot_words(*ty)).sum();
         let mut code = CodeBuilder::new(words);
+        if suspend && line != 0 {
+            code.mark_line(line);
+        }
         let mut slot = 0u16;
         let mut locals = Vec::new();
         let names = crate::jvm::parameter_names::function_locals(ir, function, &parameters);
@@ -1248,8 +1257,11 @@ impl Accessor<'_> {
             }
             slot += slot_words(ty);
         }
-        // kotlinc maps the forwarding call, after its operands are loaded.
-        code.mark_line(self.declaration_line);
+        // An ordinary accessor maps the forwarding call after its operands are loaded. Coroutine
+        // lowering maps a suspend accessor's whole generated body to the target declaration.
+        if !suspend && line != 0 {
+            code.mark_line(line);
+        }
         let method = static_methodref(cw, ir, self.facade, self.owner, &target.name, &descriptor);
         code.invokestatic(method, words as i32, slot_words(result) as i32);
         emit_return(result, &mut code);
