@@ -156,8 +156,9 @@ pub(crate) fn build(lambda: &LambdaFunction<'_>) -> Result<(Vec<u8>, Vec<String>
             crate::metadata::function_flags::IS_SUSPEND
         } else {
             0
-    };
+        };
     function.field_varint(9, flags); // Function.flags = 9
+
     // Interned after the Kotlin signature, which is the order kotlinc's serializer visits the
     // `JvmMethodSignature` extension (Function field 100).
     if let Some(method) = &lambda.jvm_method {
