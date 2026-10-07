@@ -46,10 +46,10 @@ pub enum ProgramLinkError {
     /// krusty was built without a prebuilt runtime for this target (no C cross-compiler at
     /// build time), so there is nothing to link against.
     NoRuntime(NativeTarget),
-    /// An input object could not be parsed as an ELF relocatable, or is malformed.
+    /// An input object could not be parsed as a relocatable, or is malformed.
     Parse(String),
-    /// An input object is a well-formed relocatable for a different machine, word size or byte
-    /// order than the target's.
+    /// An input object is a well-formed relocatable for a different format, machine, word size or
+    /// byte order than the target's.
     ForeignObject(String),
     /// A symbol was referenced and nothing defines it.
     UndefinedSymbol(String),
@@ -618,6 +618,7 @@ mod tests {
         let mut build_version = None;
         let mut signed = false;
         let mut bitcode = false;
+        let mut protections = Vec::new();
         for _ in 0..ncmds {
             let cmd = u32_at(at);
             let size = u32_at(at + 4) as usize;
@@ -641,6 +642,14 @@ mod tests {
                 build_version = Some((u32_at(at + 8), u32_at(at + 12)));
             }
             if cmd == 0x19 {
+                let name_end = bytes[at + 8..at + 24]
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .unwrap_or(16);
+                let segment = std::str::from_utf8(&bytes[at + 8..at + 8 + name_end])
+                    .expect("a UTF-8 segment name")
+                    .to_string();
+                protections.push((segment, u32_at(at + 56), u32_at(at + 60)));
                 let nsects = u32_at(at + 64) as usize;
                 let mut section = at + 72;
                 for _ in 0..nsects {
@@ -666,6 +675,15 @@ mod tests {
         );
         assert!(!signed, "the dylib is unsigned");
         assert!(!bitcode, "the dylib contains no bitcode");
+        assert_eq!(
+            protections,
+            [
+                ("__TEXT".to_string(), 5, 5),
+                ("__DATA".to_string(), 3, 3),
+                ("__LINKEDIT".to_string(), 1, 1),
+            ],
+            "segments expose only their required protections"
+        );
         let file = object::File::parse(bytes.as_slice()).expect("the dylib parses");
         let mut undefined = Vec::new();
         for symbol in file.symbols() {

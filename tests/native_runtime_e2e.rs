@@ -2098,7 +2098,8 @@ fn a_runtime_compiler_that_emits_another_machines_code_fails_the_build() {
     assert_eq!(
         String::from_utf8(output.stderr).expect("build-script stderr is UTF-8"),
         format!(
-            "native runtime: `{}` built `krusty_rt.c` for `x86_64-unknown-linux-gnu` as \
+            "native runtime: `{}` built `krusty_rt.c` for `x86_64-unknown-linux-gnu` \
+             (codegen `x86_64-unknown-linux-gnu`) as \
              code for ELF machine 183, not 62\n",
             compiler.display()
         )
@@ -2171,7 +2172,8 @@ fn a_runtime_object_aligned_past_the_targets_page_fails_the_build() {
     assert_eq!(
         String::from_utf8(output.stderr).expect("build-script stderr is UTF-8"),
         format!(
-            "native runtime: `{}` built `krusty_rt.c` for `x86_64-unknown-linux-gnu` as an object \
+            "native runtime: `{}` built `krusty_rt.c` for `x86_64-unknown-linux-gnu` \
+             (codegen `x86_64-unknown-linux-gnu`) as an object \
              with a section aligned to 0x2000 bytes, more than the target's 0x1000-byte maximum \
              page size\n",
             compiler.display()

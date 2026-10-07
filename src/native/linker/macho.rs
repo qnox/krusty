@@ -77,7 +77,7 @@ struct Reloc {
     target: Target,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RelKind {
     Unsigned,
     Branch26,
@@ -85,6 +85,16 @@ enum RelKind {
     PageOff12,
     GotPage21,
     GotPageOff12,
+}
+
+impl RelKind {
+    fn shape(self) -> (u8, bool, u64) {
+        match self {
+            Self::Unsigned => (3, false, 8),
+            Self::Branch26 | Self::Page21 | Self::GotPage21 => (2, true, 4),
+            Self::PageOff12 | Self::GotPageOff12 => (2, false, 4),
+        }
+    }
 }
 
 struct InSection {
@@ -215,6 +225,13 @@ fn parse(what: &str, bytes: &[u8]) -> Result<ObjectFile, ProgramLinkError> {
                 "{what} has thread-local section `{name}`"
             )));
         }
+        let align = section.align().max(1);
+        if !align.is_power_of_two() || align > PAGE {
+            return Err(ProgramLinkError::Unsupported(format!(
+                "{what} section `{name}` has alignment {align:#x}, which the simulator's \
+                 {PAGE:#x}-byte pages cannot preserve"
+            )));
+        }
         let data = section
             .data()
             .map_err(|error| ProgramLinkError::Parse(error.to_string()))?;
@@ -224,7 +241,7 @@ fn parse(what: &str, bytes: &[u8]) -> Result<ObjectFile, ProgramLinkError> {
                 "{what} section `{name}` is shorter than its header says"
             )));
         }
-        let mut relocs = Vec::new();
+        let mut relocs: Vec<Reloc> = Vec::new();
         for (offset, reloc) in section.relocations() {
             if reloc.subtractor().is_some() {
                 return Err(ProgramLinkError::Unsupported(format!(
@@ -232,7 +249,9 @@ fn parse(what: &str, bytes: &[u8]) -> Result<ObjectFile, ProgramLinkError> {
                 )));
             }
             let RelocationFlags::MachO {
-                r_type, r_length, ..
+                r_type,
+                r_pcrel,
+                r_length,
             } = reloc.flags()
             else {
                 return Err(ProgramLinkError::Unsupported(format!(
@@ -240,12 +259,6 @@ fn parse(what: &str, bytes: &[u8]) -> Result<ObjectFile, ProgramLinkError> {
                 )));
             };
             let kind = if r_type == ARM64_RELOC_UNSIGNED {
-                if r_length != 3 {
-                    return Err(ProgramLinkError::UnsupportedRelocation {
-                        arch: super::super::target::Arch::Aarch64,
-                        r_type: u32::from(r_type.0),
-                    });
-                }
                 RelKind::Unsigned
             } else if r_type == ARM64_RELOC_BRANCH26 {
                 RelKind::Branch26
@@ -263,10 +276,29 @@ fn parse(what: &str, bytes: &[u8]) -> Result<ObjectFile, ProgramLinkError> {
                     r_type: u32::from(r_type.0),
                 });
             };
+            validate_relocation_site(what, &name, kind, r_length, r_pcrel, offset, size)?;
+            let (_, _, width) = kind.shape();
+            if relocs.iter().any(|prior| {
+                let (_, _, prior_width) = prior.kind.shape();
+                offset < prior.offset + prior_width && prior.offset < offset + width
+            }) {
+                return Err(ProgramLinkError::Parse(format!(
+                    "{what} has overlapping relocations in section `{name}` at {offset:#x}"
+                )));
+            }
             let mut addend = reloc.addend();
             if kind == RelKind::Unsigned && reloc.has_implicit_addend() {
-                let at = usize::try_from(offset).unwrap_or(usize::MAX);
-                let bytes = data.get(at..at + 8).ok_or_else(|| {
+                let at = usize::try_from(offset).map_err(|_| {
+                    ProgramLinkError::Parse(format!(
+                        "{what} has an absolute relocation past the end of `{name}`"
+                    ))
+                })?;
+                let end = at.checked_add(8).ok_or_else(|| {
+                    ProgramLinkError::Parse(format!(
+                        "{what} has an absolute relocation past the end of `{name}`"
+                    ))
+                })?;
+                let bytes = data.get(at..end).ok_or_else(|| {
                     ProgramLinkError::Parse(format!(
                         "{what} has an absolute relocation past the end of `{name}`"
                     ))
@@ -301,7 +333,6 @@ fn parse(what: &str, bytes: &[u8]) -> Result<ObjectFile, ProgramLinkError> {
             });
         }
         section_at.insert(section.index(), sections.len());
-        let align = section.align().max(1);
         sections.push(InSection {
             segment,
             name,
@@ -443,8 +474,7 @@ impl Image {
         };
         // Rebuild addresses now that `__text` grew and `__got` exists. Places of the original
         // contributions do not move: stubs are appended, and the GOT is a new section.
-        let text_growth = stub_bytes;
-        image.finish_layout(got, text_growth)?;
+        image.finish_layout(got)?;
         image.write(objects, &slots, &stubs, stub_at_text, &stub_at)
     }
 
@@ -535,11 +565,7 @@ impl Image {
         })
     }
 
-    fn finish_layout(
-        &mut self,
-        got: OutSection,
-        _text_growth: u64,
-    ) -> Result<(), ProgramLinkError> {
+    fn finish_layout(&mut self, got: OutSection) -> Result<(), ProgramLinkError> {
         if got.size != 0 {
             self.outs.push(got);
         }
@@ -761,7 +787,7 @@ impl Image {
                                     stub_base + stub as u64 * 12
                                 }
                             };
-                            let insn = read_u32(&bytes, pc);
+                            let insn = read_u32(&bytes, pc)?;
                             patch_u32(
                                 &mut bytes,
                                 pc,
@@ -779,7 +805,7 @@ impl Image {
                                 ));
                             };
                             let target = self.address(addr).wrapping_add(reloc.addend as u64);
-                            let insn = read_u32(&bytes, pc);
+                            let insn = read_u32(&bytes, pc)?;
                             let patched = if reloc.kind == RelKind::Page21 {
                                 encode_adrp(insn, pc, target)
                             } else {
@@ -792,7 +818,7 @@ impl Image {
                             let slot = slot_index(slots, &resolved, input, reloc)?;
                             let got = self.got_addr(slot);
                             let target = got.wrapping_add(reloc.addend as u64);
-                            let insn = read_u32(&bytes, pc);
+                            let insn = read_u32(&bytes, pc)?;
                             let patched = if reloc.kind == RelKind::GotPage21 {
                                 encode_adrp(insn, pc, target)
                             } else {
@@ -1215,6 +1241,36 @@ struct Segment {
     initprot: u32,
 }
 
+fn validate_relocation_site(
+    what: &str,
+    section: &str,
+    kind: RelKind,
+    r_length: u8,
+    r_pcrel: bool,
+    offset: u64,
+    section_size: u64,
+) -> Result<(), ProgramLinkError> {
+    let (expected_length, expected_pcrel, width) = kind.shape();
+    if r_length != expected_length || r_pcrel != expected_pcrel {
+        return Err(ProgramLinkError::Unsupported(format!(
+            "{what} has a {kind:?} relocation in `{section}` with length {r_length} and \
+             pcrel={r_pcrel}; expected length {expected_length} and pcrel={expected_pcrel}"
+        )));
+    }
+    let end = offset.checked_add(width).ok_or_else(|| {
+        ProgramLinkError::Parse(format!(
+            "{what} has a relocation past the end of section `{section}`"
+        ))
+    })?;
+    if end > section_size {
+        return Err(ProgramLinkError::Parse(format!(
+            "{what} has a relocation at {offset:#x} past the {section_size:#x}-byte section \
+             `{section}`"
+        )));
+    }
+    Ok(())
+}
+
 enum Resolved {
     Defined(Addr),
     Import { canonical: String, macho: String },
@@ -1367,14 +1423,29 @@ fn encode_pageoff(insn: u32, target: u64) -> Result<u32, String> {
     }
 }
 
-fn read_u32(bytes: &[u8], vm: u64) -> u32 {
-    let at = vm as usize;
-    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("instruction"))
+fn read_u32(bytes: &[u8], vm: u64) -> Result<u32, ProgramLinkError> {
+    let at = usize::try_from(vm).map_err(|_| {
+        ProgramLinkError::Unsupported(format!("an instruction at {vm:#x} is outside the dylib"))
+    })?;
+    let end = at.checked_add(4).ok_or_else(|| {
+        ProgramLinkError::Unsupported(format!("an instruction at {vm:#x} is outside the dylib"))
+    })?;
+    let slot = bytes.get(at..end).ok_or_else(|| {
+        ProgramLinkError::Unsupported(format!("an instruction at {vm:#x} is outside the dylib"))
+    })?;
+    Ok(u32::from_le_bytes(
+        slot.try_into().expect("four instruction bytes"),
+    ))
 }
 
 fn patch_u32(bytes: &mut [u8], vm: u64, value: u32) -> Result<(), ProgramLinkError> {
-    let at = usize::try_from(vm).unwrap_or(usize::MAX);
-    let slot = bytes.get_mut(at..at + 4).ok_or_else(|| {
+    let at = usize::try_from(vm).map_err(|_| {
+        ProgramLinkError::Unsupported(format!("a patch at {vm:#x} is outside the dylib"))
+    })?;
+    let end = at.checked_add(4).ok_or_else(|| {
+        ProgramLinkError::Unsupported(format!("a patch at {vm:#x} is outside the dylib"))
+    })?;
+    let slot = bytes.get_mut(at..end).ok_or_else(|| {
         ProgramLinkError::Unsupported(format!("a patch at {vm:#x} is outside the dylib"))
     })?;
     slot.copy_from_slice(&value.to_le_bytes());
@@ -1382,8 +1453,13 @@ fn patch_u32(bytes: &mut [u8], vm: u64, value: u32) -> Result<(), ProgramLinkErr
 }
 
 fn patch_u64(bytes: &mut [u8], vm: u64, value: u64) -> Result<(), ProgramLinkError> {
-    let at = usize::try_from(vm).unwrap_or(usize::MAX);
-    let slot = bytes.get_mut(at..at + 8).ok_or_else(|| {
+    let at = usize::try_from(vm).map_err(|_| {
+        ProgramLinkError::Unsupported(format!("a pointer at {vm:#x} is outside the dylib"))
+    })?;
+    let end = at.checked_add(8).ok_or_else(|| {
+        ProgramLinkError::Unsupported(format!("a pointer at {vm:#x} is outside the dylib"))
+    })?;
+    let slot = bytes.get_mut(at..end).ok_or_else(|| {
         ProgramLinkError::Unsupported(format!("a pointer at {vm:#x} is outside the dylib"))
     })?;
     slot.copy_from_slice(&value.to_le_bytes());
@@ -1423,7 +1499,7 @@ fn push_segment(
     push_u64(out, segment.vmsize);
     push_u64(out, segment.fileoff);
     push_u64(out, segment.filesize);
-    push_u32(out, 7);
+    push_u32(out, segment.initprot);
     push_u32(out, segment.initprot);
     push_u32(out, mine.len() as u32);
     push_u32(out, 0);
@@ -1658,4 +1734,57 @@ fn uleb_len(mut value: u64) -> usize {
         len += 1;
     }
     len
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_relocation_site, ProgramLinkError, RelKind};
+
+    #[test]
+    fn a_relocation_must_have_its_kinds_width_and_pc_mode() {
+        assert!(
+            validate_relocation_site("input", "__text", RelKind::Branch26, 2, true, 4, 8).is_ok()
+        );
+        assert_eq!(
+            validate_relocation_site("input", "__text", RelKind::Branch26, 3, true, 0, 8),
+            Err(ProgramLinkError::Unsupported(
+                "input has a Branch26 relocation in `__text` with length 3 and pcrel=true; \
+                 expected length 2 and pcrel=true"
+                    .to_string()
+            ))
+        );
+        assert_eq!(
+            validate_relocation_site("input", "__data", RelKind::Unsigned, 3, true, 0, 8),
+            Err(ProgramLinkError::Unsupported(
+                "input has a Unsigned relocation in `__data` with length 3 and pcrel=true; \
+                 expected length 3 and pcrel=false"
+                    .to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_relocation_must_fit_entirely_inside_its_section() {
+        assert!(
+            validate_relocation_site("input", "__text", RelKind::Page21, 2, true, 4, 8).is_ok()
+        );
+        assert_eq!(
+            validate_relocation_site("input", "__text", RelKind::Page21, 2, true, 5, 8),
+            Err(ProgramLinkError::Parse(
+                "input has a relocation at 0x5 past the 0x8-byte section `__text`".to_string()
+            ))
+        );
+        assert!(matches!(
+            validate_relocation_site(
+                "input",
+                "__data",
+                RelKind::Unsigned,
+                3,
+                false,
+                u64::MAX,
+                u64::MAX,
+            ),
+            Err(ProgramLinkError::Parse(_))
+        ));
+    }
 }
