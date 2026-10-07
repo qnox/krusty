@@ -985,7 +985,7 @@ fn statement_safe_call(line: bool) -> StatementSafeCall {
             *target = if *op == IFNULL { null_target } else { join };
         }
     }
-    let outcome = eliminate(&mut code.method);
+    let outcome = eliminate(&mut code.method, &BTreeSet::new());
     StatementSafeCall {
         method: code.method,
         labels: [code.labels[7], null_target, join],
