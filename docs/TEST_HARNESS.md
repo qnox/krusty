@@ -188,6 +188,11 @@ test process, so individual fixtures do not repeatedly read large platform artif
 arbitrary dependency remains content-hashed. The key contains no installation path: equal toolchain
 bytes in two locations match, while a patched compiler/runtime or JDK image with the same reported
 version is a hard miss.
+An older archive may still index a line as `2.4.20..`. That line is replayed for 2.4.20 only. A
+lookup that misses the current fingerprint also tries the earlier classpath identity, which hashed
+explicit entries and did not include the selected kotlinc or JDK. New recordings keep the current
+fingerprint and an exact version. A file this process cannot parse is replaced when the run
+publishes, instead of being saved unchanged.
 Locally, a release (`2.4.20`, `2.4.20-release-482`) or an RC tag
 (`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) with no matching dump fails the test and does not run
 kotlinc. `KRUSTY_RECORD_CLASS_DUMPS=1` recompiles and replaces the exact-version entries the run reaches. GitHub

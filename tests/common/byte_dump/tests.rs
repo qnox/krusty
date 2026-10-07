@@ -76,12 +76,35 @@ fn recordings_are_scoped_to_one_exact_compiler_version() {
     assert!(!index.contains(".."), "{index}");
     assert!(archive_path(&root).is_file());
     assert!(!index.contains("2.4.10"), "{index}");
-    assert!(
-        parse_modules(
-            "[[mod]]\n[key]\n2.4.20.. 00000000000000000000000000000000 00000000000000000000000000000000\n"
-        )
-        .is_none(),
-        "the current archive format must reject version inheritance"
+    let historical = parse_modules(
+        "[[mod]]\n[key]\n2.4.20.. 00000000000000000000000000000000 00000000000000000000000000000000\n",
+    )
+    .expect("a historical open range is the release that recorded it");
+    let historical = &historical["mod"]["key"];
+    assert_eq!(historical.len(), 1);
+    assert_eq!(historical[0].version, KotlinVersion::new(2, 4, 20));
+    assert_eq!(historical[0].channel, Channel::Release);
+    let closed = parse_modules(
+        "[[mod]]\n[key]\n2.4.0..2.4.10 00000000000000000000000000000000 00000000000000000000000000000000\n",
+    )
+    .expect("a closed historical range names the releases inside it");
+    let closed = &closed["mod"]["key"];
+    assert!(closed
+        .iter()
+        .all(|entry| entry.version <= KotlinVersion::new(2, 4, 10)));
+    assert!(!closed
+        .iter()
+        .any(|entry| entry.version == KotlinVersion::new(2, 4, 20)));
+    let open_from_older = parse_modules(
+        "[[mod]]\n[key]\n2.4.0.. 00000000000000000000000000000000 00000000000000000000000000000000\n",
+    )
+    .expect("an open range does not grow into later releases");
+    assert_eq!(
+        open_from_older["mod"]["key"]
+            .iter()
+            .map(|entry| entry.version)
+            .collect::<Vec<_>>(),
+        vec![KotlinVersion::new(2, 4, 0)]
     );
     let newer = DumpVersion {
         version: KotlinVersion::new(2, 4, 30),
@@ -155,6 +178,7 @@ fn a_release_dump_is_reused_and_a_snapshot_never_is() {
         key: "case|Stem|default|plain",
         compiler,
         fingerprint,
+        legacy_fingerprint: fingerprint,
         force,
         compile_missing: false,
         write: true,
@@ -221,6 +245,7 @@ fn a_missing_release_dump_fails_without_compiling() {
                 key: "case|Stem|default|plain",
                 compiler: Some(version("2.4.20-release-1")),
                 fingerprint,
+                legacy_fingerprint: fingerprint,
                 force: false,
                 compile_missing: false,
                 write: false,
@@ -273,6 +298,7 @@ fn a_read_only_partial_cache_compiles_a_new_fingerprint_without_writing() {
             key,
             compiler: Some(release),
             fingerprint: new_fingerprint,
+            legacy_fingerprint: new_fingerprint,
             force: false,
             compile_missing: true,
             write: false,
@@ -389,6 +415,7 @@ fn a_hit_missing_a_requested_class_fails_until_recorded() {
         key,
         compiler: Some(release),
         fingerprint,
+        legacy_fingerprint: fingerprint,
         force: false,
         compile_missing: false,
         write: true,
@@ -1690,7 +1717,7 @@ fn clean_observation_rejects_an_equal_metadata_corrupt_atomic_replacement() {
 }
 
 #[test]
-fn deletion_and_corruption_never_resurrect_cached_archive_state() {
+fn deletion_drops_cached_bytes_and_publication_replaces_an_unreadable_archive() {
     let release = version("2.4.20");
     let fingerprint = fingerprint_parts(&[b"source"]);
     let key = "case|A|default|plain";
@@ -1754,10 +1781,23 @@ fn deletion_and_corruption_never_resurrect_cached_archive_state() {
     let corrupt_bytes = b"replacement is corrupt";
     std::fs::write(archive_path(&pending_corrupt), corrupt_bytes).unwrap();
     flush_archive(&pending_corrupt);
-    assert_eq!(
+    assert_ne!(
         std::fs::read(archive_path(&pending_corrupt)).unwrap(),
         corrupt_bytes,
-        "pending memory must not overwrite a corrupt concurrent replacement"
+        "an unreadable archive is replaced, so the next run is not stuck missing"
+    );
+    assert_eq!(
+        load_files(
+            &pending_corrupt,
+            "mod",
+            "case|B|default|plain",
+            release,
+            fingerprint_parts(&[b"new"])
+        )
+        .unwrap()
+        .get("pkg/A")
+        .unwrap(),
+        b"new"
     );
 
     let _ = std::fs::remove_dir_all(&deleted);
@@ -1779,6 +1819,123 @@ fn disk_index(root: &Path) -> String {
     let raw = decompress(&std::fs::read(archive_path(root)).unwrap());
     let end = raw.iter().position(|byte| *byte == 0).unwrap();
     String::from_utf8(raw[..end].to_vec()).unwrap()
+}
+
+#[test]
+fn a_historical_open_range_replays_that_release_only() {
+    let root = temp_root("historical-range");
+    let raw = encode_raw(&files(b"recorded"));
+    let blob = fingerprint_parts(&[&raw]);
+    let fingerprint = fingerprint_parts(&[b"legacy inputs"]);
+    let index =
+        format!("[[mod]]\n[case|Stem|default|plain]\n2.4.20.. {fingerprint:032x} {blob:032x}\n");
+    write_index_archive(&root, &index, blob, &raw);
+    let release = version("2.4.20");
+    assert_eq!(
+        load_files(
+            &root,
+            "mod",
+            "case|Stem|default|plain",
+            release,
+            fingerprint
+        )
+        .unwrap()
+        .get("pkg/A")
+        .unwrap(),
+        b"recorded"
+    );
+    let newer = DumpVersion {
+        version: KotlinVersion::new(2, 4, 30),
+        channel: Channel::Release,
+    };
+    assert!(
+        load_files(&root, "mod", "case|Stem|default|plain", newer, fingerprint).is_none(),
+        "an open range does not apply to a later compiler"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_miss_on_the_current_fingerprint_replays_the_legacy_one() {
+    let root = temp_root("legacy-fingerprint");
+    let release = version("2.4.20");
+    let current = fingerprint_parts(&[b"current"]);
+    let legacy = fingerprint_parts(&[b"legacy"]);
+    let key = "case|Stem|default|plain";
+    store_files(&root, "mod", key, release, legacy, &files(b"old-key"));
+    flush_archive(&root);
+    let mut compiles = 0u32;
+    let hit = recall(
+        Recall {
+            root: &root,
+            module: "mod",
+            key,
+            compiler: Some(release),
+            fingerprint: current,
+            legacy_fingerprint: legacy,
+            force: false,
+            compile_missing: true,
+            write: true,
+        },
+        |_| true,
+        || {
+            compiles += 1;
+            Some(files(b"live"))
+        },
+    );
+    assert_eq!(compiles, 0, "the legacy fingerprint is a hit");
+    assert_eq!(hit.unwrap().get("pkg/A").unwrap(), b"old-key");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_invocation_miss_replays_the_pre_toolchain_fingerprint() {
+    let root = temp_root("legacy-invocation");
+    let source = root.join("Box.kt");
+    std::fs::write(&source, "fun box() = 1\n").unwrap();
+    let out = root.join("out");
+    let args = vec![
+        "-d".to_string(),
+        out.display().to_string(),
+        source.display().to_string(),
+    ];
+    let invocation = parse_invocation(&args)
+        .expect("readable invocation")
+        .expect("output and source");
+    let current_classpath =
+        super::fingerprint::classpath_content_fingerprint(&[]).expect("current classpath");
+    let legacy_classpath =
+        super::fingerprint::legacy_classpath_fingerprint(&[]).expect("legacy classpath");
+    assert!(
+        !legacy_classpath.contains("toolchain:"),
+        "{legacy_classpath}"
+    );
+    if current_classpath.contains("toolchain:") {
+        assert_ne!(invocation.fingerprint, invocation.legacy_fingerprint);
+    }
+    let raw = encode_raw(&files(b"class"));
+    let blob = fingerprint_parts(&[&raw]);
+    let key = hex128(invocation.legacy_fingerprint);
+    let index = format!(
+        "[[{INVOCATION_MODULE}]]\n[{key}]\n2.4.20.. {:032x} {blob:032x}\n",
+        invocation.legacy_fingerprint
+    );
+    write_index_archive(&root, &index, blob, &raw);
+    let replayed =
+        replay_class_dump_with_policy(&args, &root, Some(version("2.4.20")), false, true)
+            .expect("historical invocation");
+    assert_eq!(replayed.files.get("pkg/A").unwrap(), b"class");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn write_index_archive(root: &Path, index: &str, blob: u128, raw: &[u8]) {
+    let mut body = index.as_bytes().to_vec();
+    body.push(0);
+    body.extend_from_slice(&1u32.to_be_bytes());
+    body.extend_from_slice(&blob.to_be_bytes());
+    body.extend_from_slice(&(raw.len() as u32).to_be_bytes());
+    body.extend_from_slice(raw);
+    std::fs::write(archive_path(root), compress(&body)).unwrap();
 }
 
 fn temp_root(label: &str) -> PathBuf {

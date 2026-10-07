@@ -69,6 +69,7 @@ fn compile_pairs(
         &target,
         &inputs.variant,
         inputs.fingerprint,
+        inputs.legacy_fingerprint,
         classes,
         || {
             let dir = super::common_core::scratch_dir().expect("scratch directory");

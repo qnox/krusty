@@ -1081,6 +1081,8 @@ mod inline_constructor_reference_e2e;
 mod inline_crossinline_object_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]
 mod inline_deep_coverage_e2e;
+#[path = "inline_default_stub_e2e.rs"]
+mod inline_default_stub_e2e;
 #[path = "inline_end_branch_e2e.rs"]
 mod inline_end_branch_e2e;
 #[path = "inline_erased_capture_e2e.rs"]
@@ -2189,6 +2191,8 @@ mod root_package_cast_message_e2e;
 mod run_catching_inline_e2e;
 #[path = "run_noreceiver_e2e.rs"]
 mod run_noreceiver_e2e;
+#[path = "safe_call_after_throw_e2e.rs"]
+mod safe_call_after_throw_e2e;
 #[path = "safe_call_any_member_e2e.rs"]
 mod safe_call_any_member_e2e;
 #[path = "safe_call_argument_list_e2e.rs"]

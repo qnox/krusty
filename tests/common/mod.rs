@@ -3072,6 +3072,7 @@ pub fn byte_diff_against_kotlinc_cp_target(
         target,
         &inputs.variant,
         inputs.fingerprint,
+        inputs.legacy_fingerprint,
         &[class],
         || {
             let dir = scratch_dir()?;

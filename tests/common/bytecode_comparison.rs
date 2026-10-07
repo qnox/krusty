@@ -180,6 +180,7 @@ fn compare_with_kotlinc_plugin_request(
         jvm_target,
         &inputs.variant,
         inputs.fingerprint,
+        inputs.legacy_fingerprint,
         &[class],
         || {
             let dir = super::common_core::scratch_dir()?;
@@ -807,6 +808,7 @@ fn classes_against_kotlinc_lib_request(
         &target,
         &inputs.variant,
         inputs.fingerprint,
+        inputs.legacy_fingerprint,
         || {
             let dir = super::common_core::scratch_dir()?;
             let reference_dir = dir.join("ref");

@@ -123,6 +123,8 @@ pub(crate) enum Outcome {
 struct Run {
     /// The labels the temporaries pass pinned; the `goto` and jump passes leave jumps to them.
     pinned: BTreeSet<LabelId>,
+    /// Labels the constant-condition pass retained while deleting unreachable instructions.
+    constant_condition_labels: BTreeSet<LabelId>,
     removed_locals: Vec<bool>,
     changed: bool,
 }
@@ -145,18 +147,22 @@ impl Run {
                 redundant_checkcasts::eliminate(method, context.owner).ok()?
             }
             Pass::ConstantCondition => {
-                constant_conditions::eliminate(method, context.owner).ok()?
+                let done = constant_conditions::eliminate(method, context.owner).ok()?;
+                self.constant_condition_labels = done.preserved_unreachable_labels;
+                done.changed
             }
             Pass::RedundantBoxing => {
                 redundant_boxing::eliminate(method, context.owner, context.value_classes).ok()?
             }
-            Pass::TemporaryVariables => match temporaries::eliminate(method) {
-                Some(done) => {
-                    self.pinned = done.pinned;
-                    true
+            Pass::TemporaryVariables => {
+                match temporaries::eliminate(method, &self.constant_condition_labels) {
+                    Some(done) => {
+                        self.pinned = done.pinned;
+                        true
+                    }
+                    None => false,
                 }
-                None => false,
-            },
+            }
             Pass::StackPeephole => stack_peephole::optimize(method),
             Pass::PopBackwardPropagation => pop_backward::propagate(method, context.owner).ok()?,
             Pass::DeadCode => dead_code::eliminate(method),

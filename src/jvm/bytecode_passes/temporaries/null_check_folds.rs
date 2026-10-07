@@ -16,10 +16,16 @@
 //! ranges and anything else that describes the instruction the label stood at, as kotlinc's
 //! `L: pop; E:` has them. Those late labels are pinned: the `goto` and jump passes that run later
 //! leave jumps to them alone, where kotlinc would have a line number in between.
+//!
+//! A throwing selector is the other way that rule loses. Constant-condition elimination runs first
+//! and can delete the unreachable continuation after `athrow` while retaining the label that stood
+//! in it. That exact label, passed on as provenance by the earlier pass, stands before the
+//! `ifnull` target and defeats the adjacency match, so the receiver stays in its temporary.
 
 use std::collections::BTreeSet;
 
 use super::super::insn_list::NodeId;
+use super::super::opcodes::GOTO;
 use super::adjacency::Body;
 use super::shapes::{
     ends_flow, is_swappable, loads_reference, null_jump, var_op, Kind, VarOp, DUP, IFNONNULL,
@@ -108,9 +114,39 @@ fn only_jumps_to(body: &Body, target: LabelId) -> Option<(NodeId, Vec<NodeId>)> 
     Some((start, jumps))
 }
 
+/// Whether a label retained from unreachable code remains an intervening predecessor of `target`.
+/// A `goto` immediately before the labels can jump to a later label at the same instruction; that
+/// later join bypasses every earlier label, and kotlinc can still fold the safe call. A terminal
+/// instruction without such an exact edge leaves the retained boundary in front of the target.
+fn preserved_boundary_intervenes(
+    body: &Body,
+    start: NodeId,
+    target: LabelId,
+    preserved_unreachable_labels: &BTreeSet<LabelId>,
+) -> bool {
+    let standing = body.labels_before(start);
+    let Some(own) = standing.iter().position(|label| *label == target) else {
+        return false;
+    };
+    let bypassed = body.prev_insn(start).is_some_and(|previous| {
+        matches!(
+            body.insn(previous),
+            Insn::Jump { op: GOTO, target }
+                if standing.iter().position(|label| label == target).is_some_and(|rank| rank > own)
+        )
+    });
+    !bypassed
+        && standing[..own].iter().any(|label| {
+            preserved_unreachable_labels.contains(label) && body.kept_by_process_labels(*label)
+        })
+}
+
 /// Fold every null check whose value the path after it loads again; `None` when a check kotlinc
 /// could fold was not proven foldable here, and the method then keeps every check as it was.
-pub(super) fn fold(body: &mut Body) -> Option<Folds> {
+pub(super) fn fold(
+    body: &mut Body,
+    preserved_unreachable_labels: &BTreeSet<LabelId>,
+) -> Option<Folds> {
     let loads: Vec<NodeId> = body
         .instructions()
         .into_iter()
@@ -175,6 +211,9 @@ pub(super) fn fold(body: &mut Body) -> Option<Folds> {
         let Some(own) = rank(&target) else {
             continue;
         };
+        if preserved_boundary_intervenes(body, start, target, preserved_unreachable_labels) {
+            continue;
+        }
         let mut to_own = Vec::new();
         let mut foreign = false;
         for &other in &jumps {
@@ -228,10 +267,10 @@ pub(super) fn fold(body: &mut Body) -> Option<Folds> {
     // transformation. If a candidate kotlinc's matcher could still rewrite was not proven foldable,
     // keep the method as it was. One its matcher cannot match stays as it is in kotlinc too.
     let remaining = body.instructions();
-    if remaining
-        .iter()
-        .any(|&load| candidate(body, load).is_some() && kotlinc_could_rewrite(body, load))
-    {
+    if remaining.iter().any(|&load| {
+        candidate(body, load).is_some()
+            && kotlinc_could_rewrite(body, load, preserved_unreachable_labels)
+    }) {
         return None;
     }
     Some(folds)
@@ -249,7 +288,11 @@ pub(super) fn fold(body: &mut Body) -> Option<Folds> {
 /// rewrite accepts. Only a protected range's bound is reached by no predecessor of its own, so
 /// one at the target's own label answers that kotlinc could, keeping the caller conservative; one
 /// that stood past an instruction the cleanups removed since is at another label in kotlinc.
-fn kotlinc_could_rewrite(body: &Body, load: NodeId) -> bool {
+fn kotlinc_could_rewrite(
+    body: &Body,
+    load: NodeId,
+    preserved_unreachable_labels: &BTreeSet<LabelId>,
+) -> bool {
     let part = |jump: NodeId| {
         let Some(checked) = body.prev_insn(jump) else {
             return false;
@@ -279,9 +322,14 @@ fn kotlinc_could_rewrite(body: &Body, load: NodeId) -> bool {
     let Some((op, target)) = null_jump(body.insn(jump)) else {
         return false;
     };
-    let Some((_, jumps)) = only_jumps_to(body, target) else {
+    let Some((start, jumps)) = only_jumps_to(body, target) else {
         return body.protected_bound_at(target);
     };
+    if op == IFNULL
+        && preserved_boundary_intervenes(body, start, target, preserved_unreachable_labels)
+    {
+        return false;
+    }
     if op == IFNONNULL {
         jumps == [jump] && part(jump)
     } else {

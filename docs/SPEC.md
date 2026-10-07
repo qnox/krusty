@@ -1819,7 +1819,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `IrCall` argument may be null); there is no separate "defaulted call" node. The JVM backend realizes
   defaults exactly as kotlinc: a synthetic `name$default(self, params…, int mask, Object marker)` stub
   that, for each defaulted parameter, does `if ((mask & (1<<i)) != 0) param = <default>;` then tail-calls
-  the real method; a call with holes passes the computed mask + null marker. Byte-identical to kotlinc
+  the real method. A top-level `inline` function's stub does not tail-call: after the mask writes, it runs
+  the function body. The body's first local reuses the mask slot, so the `$i$f$` marker overwrites
+  the mask. The stub records the signature line at pc 0 and the same line again on the body
+  expression after that marker. A default value whose class is narrower than the slot
+  (`String` into `CharSequence`, a lambda class into `FunctionN`) is `checkcast` to the slot;
+  `Object` and `null` are not. A default argument that is a lambda is a class (`FileKt$f$1`),
+  a singleton when it captures nothing, not an `invokedynamic` — the stub is the non-inline
+  entry that materializes it. The class is public, its `EnclosingMethod` is `f$default`, and it
+  carries the file's identity source map. Its `@Metadata` visibility is public; a non-private
+  owner also sets the public-ABI bit (`xi` 944, or 816 when the `inline` function is private).
+  A same-file call still inlines. When that caller keeps a copy of the default lambda
+  (an `inline` `use` around the call that omits it), both copies build the one class.
+  Test: `tests/inline_default_stub_e2e.rs`. A call with holes
+  passes the computed mask + null marker. Byte-identical to kotlinc
   for data-class `copy` and instance methods. **Mask bits are LOGICAL**: kotlinc numbers them over
   the DECLARED value parameters, so an EXTENSION's receiver — physically the leading parameter of
   the static realization — does not shift them (`fun Host.tag(name, port = 9)` → `port` is bit 2
@@ -10884,6 +10897,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every protected range and local variable left with no instruction even when nothing is dead at
   that point, as kotlinc's `removeEmptyCatchBlocks` and `prepareForEmitting` do
   (`dead_code::tests::a_range_an_earlier_pass_emptied_goes_though_nothing_is_dead`).
+- **A safe call that throws keeps its receiver temporary when constant-condition elimination
+  retains a label from its unreachable continuation.** `simplifyKnownSafeCallPatterns` folds
+  `aload v; ifnull L; aload v` into `aload v; dup; ifnull` only when raw instruction adjacency
+  admits it. Constant-condition elimination can delete the unreachable continuation after
+  `athrow` while keeping the label that stood there. That label immediately before `L` defeats the
+  fold: `lastException?.let { throw it }` after a loop or an `if` stays
+  `astore; aload; ifnull; aload`. The optimizer pipeline carries those exact retained-label
+  identities between the passes; the temporaries pass does not infer the earlier pass from
+  unrelated constants, jumps, or throws remaining in the method. Tests:
+  `bytecode_passes::temporaries::tests` and `tests/safe_call_after_throw_e2e.rs`.
 - **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
   negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
   `BooleanComparison`, which materializes both and jumps with `if_icmp<cond>`; it never reads a
