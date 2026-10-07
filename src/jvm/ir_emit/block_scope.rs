@@ -76,16 +76,17 @@ impl Emitter<'_> {
         self.mark_initializer_line(block, true, code);
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
-            // The lambda `}` is a `nop` while its parameters are still live. Their end label is
-            // the next debug point, so a brace on its own line keeps the `nop` and the following
-            // `Unit` materialization does not share that line.
-            self.close_spliced_lambda_frame(block, code);
             self.close_scope_locals(code, marked_initializer);
         }
         if normalizes_inline_stack
             && (!delays_stack_normalization || reserved_inline_stack.is_some())
         {
             code.inline_call_marker(false);
+        }
+        // The lambda locals end at this `nop`. It returns to the inline body's line, and that
+        // local-end label is what keeps it when the following instruction is the next debug point.
+        if !self.ir.callable_scopes.contains(&block) {
+            self.close_spliced_lambda_frame(block, false, code);
         }
         if let Some(discarded) = discard_after_close {
             super::discard(self.value_ty(discarded), code);
@@ -191,16 +192,16 @@ impl Emitter<'_> {
         // open through the return, the same way a statement-position callable scope does.
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
-            self.close_spliced_lambda_frame(block, code);
             self.close_scope_locals(code, false);
-        } else {
-            self.close_spliced_lambda_frame(block, code);
         }
         if normalizes_inline_stack
             && (!delays_stack_normalization || reserved_inline_stack.is_some())
         {
             code.inline_call_marker(false);
         }
+        // After the lambda locals, including when this block is itself a callable scope and those
+        // locals stay open through the return. The `nop` is the inline body's line, not the brace.
+        self.close_spliced_lambda_frame(block, false, code);
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
         self.release_reserved_inline_stack(reserved_inline_stack);
@@ -236,10 +237,12 @@ impl Emitter<'_> {
     fn close_lambda_value_frame(&mut self, block: u32, code: &mut CodeBuilder) {
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
-            self.close_spliced_lambda_frame(block, code);
+            // `{ effects; }` coerced to `Unit`: the `}` is a `nop` while the lambda locals are
+            // still open, and `Unit.INSTANCE` follows them.
+            self.close_spliced_lambda_frame(block, true, code);
             self.close_scope_locals(code, false);
         } else {
-            self.close_spliced_lambda_frame(block, code);
+            self.close_spliced_lambda_frame(block, true, code);
         }
     }
 
@@ -262,14 +265,17 @@ impl Emitter<'_> {
         code.nop();
     }
 
-    /// Close the frame of a lambda body spliced into an inline call, while its locals are still open.
+    /// Close the frame of a lambda body spliced into an inline call.
     ///
-    /// kotlinc's inliner marks the lambda literal's closing brace and emits a `nop` there, then
-    /// ends the lambda's locals. The local-end label is the next debug point, so the nop cleanup
-    /// keeps the `nop` when that brace is the only instruction on its line. A one-line lambda
-    /// shares the line with the body and the `nop` goes. The brace is a call-site line, not a
-    /// line of the inlined callee, so it is not mapped through the callee's source range.
-    fn close_spliced_lambda_frame(&mut self, block: u32, code: &mut CodeBuilder) {
+    /// `brace` is the `{ effects; }` coercion to `Unit`: kotlinc marks the lambda literal's `}`
+    /// and emits a `nop` while the lambda locals are still open, then materializes `Unit`. A brace
+    /// on its own line starts a new entry; the local-end label on the following `Unit` keeps the
+    /// `nop`. A one-line brace shares the body's line and the `nop` goes.
+    ///
+    /// Otherwise the locals have already ended. The `nop` returns to the inline body's own line
+    /// at the invocation the lambda replaced. The local-end label sits on the `nop`, and the next
+    /// debug point (the inline-function frame's end, or the consumer) keeps it.
+    fn close_spliced_lambda_frame(&mut self, block: u32, brace: bool, code: &mut CodeBuilder) {
         let IrExpr::Block { stmts, .. } = self.ir.expr(block) else {
             return;
         };
@@ -282,17 +288,22 @@ impl Emitter<'_> {
         if !opens_frame || code.is_dead() {
             return;
         }
-        if let Some(line) = self
-            .ir
-            .expr_end_lines
-            .get(&block)
-            .copied()
-            .filter(|line| *line != 0)
-        {
-            // Same line as the body: dedupe, so the `nop` shares that line and is removed.
-            // A brace on the next line starts a new entry and the local-end label keeps the `nop`.
-            code.mark_line(line);
-        } else if let Some(line) = self.ir.expr_source_lines.get(&block).copied() {
+        if brace {
+            if let Some(line) = self
+                .ir
+                .expr_end_lines
+                .get(&block)
+                .copied()
+                .filter(|line| *line != 0)
+            {
+                code.mark_line(line);
+            } else if let Some(line) = self.ir.expr_source_lines.get(&block).copied() {
+                code.forget_line();
+                self.mark_expression_line(block, line, code);
+            }
+        } else if let Some(&line) = self.ir.expr_source_lines.get(&block) {
+            // The spliced body ran under its own lines: kotlinc resets the line in effect after an
+            // inlined body, so the frame's closing mark is written even when it names that line.
             code.forget_line();
             self.mark_expression_line(block, line, code);
         }

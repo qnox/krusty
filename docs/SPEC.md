@@ -15918,8 +15918,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`r: T`) takes the type argument. A primitive substitution and a reified parameter still
   specialize. When `R` is `Unit`, the return is a reference at the generic signature, so the
   expansion stores `kotlin.Unit.INSTANCE` before `finally` and does not carry that slot across
-  the transfer; a function declared to return `Unit` stays void. The spliced lambda's `}` is a
-  `nop` on the call-site line while the lambda's locals are still open. A same-file expansion still
+  the transfer; a function declared to return `Unit` stays void. That lambda's `}` is a
+  `nop` on the call-site line while its locals are still open, and `Unit.INSTANCE` follows them.
+  A value-returning splice is the other closing `nop`: the lambda locals end first, and the `nop`
+  returns to the inline body's line. A same-file expansion still
   writes `SourceDebugExtension` (one file, a second line range, and the debug stratum at the
   call). Catch, finally, and declaration marks of the copy go through that map. After inlining,
   the method's exception table is sorted by handler pc, then start pc; the standalone `use`
@@ -15930,4 +15932,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nothing wrote it, the unused-slot pass gives the index to the catch. An inlined return whose
   result slot is still live does not enter another temporary: the handlers are allocated above
   that result. A `Unit` `try` does not enter one.
-  Tests: `tests/inline_use_close_e2e.rs`, `jvm::source_map::tests::a_same_file_inline_still_writes_a_map`.
+  Tests: `tests/inline_use_close_e2e.rs`, `tests/same_module_inline_frame_markers_e2e.rs`,
+  `tests/inline_constructor_reference_e2e.rs`,
+  `jvm::source_map::tests::a_same_file_inline_still_writes_a_map`.
