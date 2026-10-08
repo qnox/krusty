@@ -2438,6 +2438,8 @@ mod string_concat_to_string_operand_e2e;
 mod string_concatenation_e2e;
 #[path = "string_plus_indy_e2e.rs"]
 mod string_plus_indy_e2e;
+#[path = "string_template_append_line_e2e.rs"]
+mod string_template_append_line_e2e;
 #[path = "subtype_receiver_extension_call_e2e.rs"]
 mod subtype_receiver_extension_call_e2e;
 #[path = "super_argument_capture_e2e.rs"]
