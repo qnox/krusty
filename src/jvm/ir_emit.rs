@@ -6070,6 +6070,11 @@ impl<'a> Emitter<'a> {
                         let saved_assignment = self.unsigned_assignment_line;
                         if unsigned {
                             self.unsigned_assignment_line = true;
+                            // The value's own mark follows at this same pc. When its right operand
+                            // is itself unsigned, kotlinc keeps both.
+                            if self.unsigned_bitwise_rhs_is_unsigned(value) {
+                                debug_lines::mark_statement_retained(self.ir, e, code);
+                            }
                         }
                         self.emit_value(value, code);
                         self.unsigned_assignment_line = saved_assignment;

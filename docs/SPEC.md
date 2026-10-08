@@ -4065,7 +4065,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A nested assignment `x = (x and 0x7fu) or 0x80u` keeps that line on the inner receiver; the
   inner literal shares the entry. The outer literal is marked after the inner `constructor-impl`,
   and the store after the outer one. The assignment state covers the whole right-hand side, so
-  the inner operation does not hand its line to its own literal.
+  the inner operation does not hand its line to its own literal. When that right-hand side is
+  itself unsigned (`r = r or (cur and mask)`, `r = r or (cur shl count)`), the assignment line is
+  recorded twice at the receiver load. A `while` or `do…while` condition is inside a condition,
+  so `cur and 0x80u == 0x80u` keeps the line on `cur`'s load and on the comparison, not on the
+  mask literal.
   Otherwise the receiver load keeps its line. The other argument, when it is a plain local,
   records no line of its own, including a local on a later source line. A call in operand
   position (`toUInt()`, `g()`) keeps the line it wrote. `inv()` is

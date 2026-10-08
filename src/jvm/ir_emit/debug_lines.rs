@@ -30,6 +30,18 @@ pub(super) fn mark_statement(ir: &IrFile, expression: ExprId, code: &mut CodeBui
     }
 }
 
+/// Mark a statement line and keep it when the next mark at this pc names that same line.
+///
+/// An unsigned assignment whose right operand is itself unsigned records the line twice at the
+/// receiver load: once for the assignment, once for the inlined operation.
+pub(super) fn mark_statement_retained(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
+    if let Some(&line) = ir.expr_lines.get(&expression) {
+        if line != 0 {
+            code.mark_line_retained(line);
+        }
+    }
+}
+
 /// Withdraw a line marked where a positionless expression begins; see
 /// [`CodeBuilder::withdraw_line`].
 pub(super) fn begin_expression(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {

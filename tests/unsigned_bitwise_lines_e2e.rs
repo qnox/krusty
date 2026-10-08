@@ -7,7 +7,9 @@
 //! condition keeps the line on the first instruction, and an assignment keeps it on the receiver
 //! load and writes it again at the store. A nested assignment keeps the inner literal on that
 //! same receiver line; the outer literal is marked after the inner `constructor-impl`, and the
-//! store after the outer one. The other argument, when it is a plain local, records
+//! store after the outer one. An assignment whose right operand is itself unsigned records
+//! that line twice at the receiver load. A loop condition keeps an unsigned test's line on the
+//! receiver load. The other argument, when it is a plain local, records
 //! no line of its own.
 
 use super::common;
@@ -81,6 +83,36 @@ fun nestedAssignment(a: UInt): UInt {\n\
     var x = a\n\
     x = (x and 0x7fu) or 0x80u\n\
     return x\n\
+}\n\
+\n\
+fun orLocal(result: UInt, cur: UInt): UInt {\n\
+    var r = result\n\
+    r = r or cur\n\
+    return r\n\
+}\n\
+\n\
+fun orAnd(result: UInt, cur: UInt): UInt {\n\
+    var r = result\n\
+    r = r or (cur and 0x7fu)\n\
+    return r\n\
+}\n\
+\n\
+fun orShl(result: UInt, cur: UInt, count: Int): UInt {\n\
+    var r = result\n\
+    r = r or (cur shl count)\n\
+    return r\n\
+}\n\
+\n\
+fun readU(readNextByte: () -> Byte): UInt {\n\
+    var result = 0u\n\
+    var cur: UInt\n\
+    var count = 0\n\
+    do {\n\
+        cur = readNextByte().toUInt() and 0xffu\n\
+        result = result or ((cur and 0x7fu) shl (count * 7))\n\
+        count++\n\
+    } while (cur and 0x80u == 0x80u && count <= 4)\n\
+    return result\n\
 }\n";
 
 #[test]

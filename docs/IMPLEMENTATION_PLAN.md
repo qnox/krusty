@@ -4883,6 +4883,10 @@ shadow with no output change.
     inside a condition and otherwise forgets it, so the next mark is written. Box files
     byte-identical to kotlinc go from 580 to 680 (100 gained, none lost), box pass/fail unchanged
     (`tests/unsigned_loop_lines_e2e.rs`).
+  - ✅ An unsigned assignment whose right operand is itself unsigned (`r = r or (cur and mask)`)
+    records that line twice at the receiver load. A `while` or `do…while` condition is inside a
+    condition, so `cur and 0x80u == 0x80u` keeps the line on the receiver load and the comparison,
+    not on the mask literal (`tests/unsigned_bitwise_lines_e2e.rs`).
   - ☐ 6c. Remaining line-only differences at 6b (127 files, 4,298 methods): unsigned range
     literals (`rangeTo`/`rangeUntil` are `@InlineOnly` and need their after-inline marks, ~58
     files; the range needs its selected operator declaration), a catch clause's line at the
