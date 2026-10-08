@@ -3111,7 +3111,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   common inference contains no collection-name table. A Kotlin-declared `MutableMap<String, Any>`
   carries no platform mark and still rejects `Map<K, V>`, as kotlinc rejects it. A Java
   collection parameter is the same mutable lower bound, not the read-only spelling of the JVM
-  interface. `removeEldestEntry(MutableMap.MutableEntry<String, String>?)` and
+  interface. Call-site assignability asks the provider for that parameter's read-only upper
+  face, and argument inference constrains through the face the value actually reaches, so
+  `listOf("x")` still selects `first(List<T>)` and `LinkedHashMap(map)` still instantiates
+  from a Kotlin `Map`. `removeEldestEntry(MutableMap.MutableEntry<String, String>?)` and
   `removeEldestEntry(Map.Entry<String, String>?)` are therefore both the protected Java method,
   and an override with no visibility modifier inherits `protected` on the JVM access flags and in
   `@Metadata`. The same holds for a generic `List<T>` parameter overridden as `MutableList<T>`
@@ -3120,7 +3123,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Map<List<String>, String>` parameter takes `mapOf(listOf("a") to "b")`. A Kotlin `MutableList`
   in that invariant position still rejects a read-only `List`.
   Tests: `tests/java_flexible_collection_e2e.rs`,
-  `method_access_flags_e2e::java_collection_override_inherits_protected_like_kotlinc`.
+  `method_access_flags_e2e::java_collection_override_inherits_protected_like_kotlinc`,
+  `classpath_static_call_inference_e2e::flexible_method_typevar_return_survives_specialization`,
+  `java_member_flexible_return_e2e::jdk_collection_index_keeps_the_callers_type_arguments`.
 - **A lambda whose input is still an open callee formal is a postponed probe.** A generic call
   whose lambda parameter's INPUT is one of the callee's own formals (`fun <T : Any> matching(f:
   (T) -> Boolean): T`, mockk's `match { it.contains(x) }`) can only shape that lambda once `T` is

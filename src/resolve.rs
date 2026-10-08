@@ -39047,6 +39047,15 @@ impl crate::assignable::TypeOracle for Checker<'_> {
     }
 
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        // The classpath provider publishes the read-only face of a Java collection
+        // (`MutableList<T>` -> `List<T>`). Call-site assignability has to use that relation:
+        // a direct-supertype walk misses it when the mutable face's recorded parents do not
+        // include the read-only face under the same value form, and then `listOf(...)` is
+        // rejected by every Java `List` parameter.
+        let provided = self.libraries.platform_flexible_upper_bound(lower);
+        if provided != lower {
+            return provided;
+        }
         let Some(lower_owner) = lower.obj_internal() else {
             return lower;
         };
