@@ -168,9 +168,9 @@ impl Emitter<'_> {
             Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker { .. })
         )
         .then(|| (code.local_entry_count(), self.recorded_inline_entries));
-        // A materialized inline parameter executes in a call-site-specialized slot, but kotlinc's
-        // LocalVariableTable retains the parameter declaration's erased type. Keep that debug
-        // representation separate from the verifier/storage type above.
+        // A materialized inline type parameter is stored as its erased bound. The debug descriptor
+        // is that same declaration type, including when the slot stayed specialized (an
+        // unconstrained `T`, or a primitive).
         let debug_ty = self
             .ir
             .inline_operand_declared_type(declaration)
