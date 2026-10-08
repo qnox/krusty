@@ -1,17 +1,20 @@
 //! The order a lifted local function takes its captured values in, as kotlinc's `ClosureAnnotator`
 //! builds it.
 //!
-//! The closure first sees the values the function's own defaults and body read, in the order they
-//! read them. The closures of the local functions the body calls or references, of its lambdas and
-//! of the anonymous objects it creates come after all of those, each in its own order, as they are
-//! met. A local function the body only declares adds nothing, and neither does a call to the
-//! function itself.
+//! The closure first sees the values the function's own defaults and body read, in source order.
+//! The checker publishes an `if` branch before its condition, so expression allocation is not that
+//! order; each direct read is placed by the source offset of the expression that reads it. The
+//! closures of the local functions the body calls or references, of its lambdas and of the
+//! anonymous objects it creates come after all of those, each in its own order, as they are met. A
+//! local function the body only declares adds nothing, and neither does a call to the function
+//! itself.
 
 use std::collections::HashMap;
 
 use crate::fir::{
     BodyLocalCallableDeclarationId, FirBody, FirCapture, FirCaptureSource, FirExprId, FirExprKind,
-    FirLocalCallableRef, FirLocalClassCaptureSource, FirStatementId, FirStatementKind,
+    FirLocalCallableRef, FirLocalClassCaptureSource, FirStatementId, FirStatementKind, Origin,
+    OriginId, OriginStore,
 };
 
 /// The `(enclosing_depth, source)` keys of `function`'s captures in first-use order. `checked`
@@ -20,10 +23,12 @@ pub(super) fn first_use_captures(
     function: &FirBody,
     declaration: BodyLocalCallableDeclarationId,
     checked: &HashMap<BodyLocalCallableDeclarationId, Box<[FirCapture]>>,
+    origins: &OriginStore,
 ) -> Vec<(u32, FirCaptureSource)> {
     Walk {
         declaration,
         checked,
+        origins,
         bodies: Vec::new(),
     }
     .closure(function)
@@ -32,6 +37,7 @@ pub(super) fn first_use_captures(
 struct Walk<'a> {
     declaration: BodyLocalCallableDeclarationId,
     checked: &'a HashMap<BodyLocalCallableDeclarationId, Box<[FirCapture]>>,
+    origins: &'a OriginStore,
     /// The function's body, then each lambda being walked inside it.
     bodies: Vec<&'a FirBody>,
 }
@@ -57,7 +63,11 @@ impl<'a> Walk<'a> {
                     enclosing_depth,
                     source,
                     ..
-                } => read.push((*enclosing_depth, FirCaptureSource::Value(*source))),
+                } => read.push((
+                    self.reading_order(expression.origin),
+                    raw,
+                    (*enclosing_depth, FirCaptureSource::Value(*source)),
+                )),
                 FirExprKind::LocalCall { target, .. }
                 | FirExprKind::LocalCallableReference { target, .. } => {
                     self.include(target, &mut included)
@@ -86,8 +96,23 @@ impl<'a> Walk<'a> {
             }
         }
         self.bodies.pop();
-        read.extend(included);
-        read
+        read.sort_by_key(|&(position, index, _)| (position, index));
+        let mut ordered = read.into_iter().map(|(_, _, key)| key).collect::<Vec<_>>();
+        ordered.extend(included);
+        ordered
+    }
+
+    /// The source offset of `origin`, following a synthetic node to the source node it was made
+    /// for. A node with no source offset sorts after every sourced read.
+    fn reading_order(&self, mut origin: OriginId) -> u32 {
+        for _ in 0..32 {
+            match self.origins.get(origin) {
+                Some(Origin::Source { span, .. }) => return span.lo,
+                Some(Origin::Synthetic { cause, .. }) => origin = cause,
+                None => return u32::MAX,
+            }
+        }
+        u32::MAX
     }
 
     /// Include the captures of the local function `target` names from the innermost body.

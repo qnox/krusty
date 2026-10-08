@@ -298,6 +298,7 @@ impl BodyFirChecker<'_> {
             &nested.body,
             declaration,
             &nested.session.local_function_captures,
+            nested.origins,
         );
         nested.body.order_captures(&order);
         nested

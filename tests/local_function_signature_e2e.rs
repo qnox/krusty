@@ -5,8 +5,9 @@
 //! is signed the same way; a lambda literal's method carries no `Signature`.
 //!
 //! The captured values lead the lifted method's parameters in the order kotlinc's closure first
-//! sees them: what the function's defaults and body read, a lambda's reads in place, and then the
-//! captures of each local function it calls, never in the order of their names.
+//! sees them: what the function's defaults and body read, in source order (a condition before the
+//! branch the checker publishes first, including a shared `var` cell), a lambda's reads in place,
+//! and then the captures of each local function it calls, never in the order of their names.
 
 use super::common;
 
@@ -81,6 +82,43 @@ fn captured_values_in_first_use_order_run() {
 #[test]
 fn captured_values_lead_in_first_use_order_as_kotlinc() {
     signs_as_kotlinc(CAPTURES, "Captures", &["CapturesKt"]);
+}
+
+/// A shared `var` cell and a plain value, each used first in the condition and first in the
+/// branch. kotlinc's closure sees the condition before the branch.
+const SHARED_CELL: &str = "fun box(): String = if (parse() == \"xy\") \"OK\" else \"fail\"\n\
+fun parse(): String {\n\
+    val parsedArgs = mutableListOf<String>()\n\
+    var current = StringBuilder()\n\
+    fun save(wasQuoted: Boolean) {\n\
+        if (wasQuoted || current.isNotBlank()) {\n\
+            parsedArgs.add(current.toString())\n\
+            current = StringBuilder()\n\
+        }\n\
+    }\n\
+    fun listFirst() {\n\
+        if (parsedArgs.isEmpty()) {\n\
+            current.append('x')\n\
+        }\n\
+    }\n\
+    fun branchWrites(flag: Boolean) {\n\
+        if (flag) current.append('y')\n\
+        parsedArgs.add(current.toString())\n\
+    }\n\
+    save(false)\n\
+    listFirst()\n\
+    branchWrites(true)\n\
+    return current.toString()\n\
+}\n";
+
+#[test]
+fn shared_var_capture_follows_source_order_at_runtime() {
+    common::expect_box_ok_with_stdlib(SHARED_CELL, "SharedCell");
+}
+
+#[test]
+fn shared_var_capture_leads_in_source_order_as_kotlinc() {
+    signs_as_kotlinc(SHARED_CELL, "SharedCell", &["SharedCellKt"]);
 }
 
 /// Compare the methods of each of `classes` that krusty and kotlinc compile `source` to.
