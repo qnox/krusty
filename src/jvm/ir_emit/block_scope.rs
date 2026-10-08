@@ -83,6 +83,12 @@ impl Emitter<'_> {
             self.close_external_inline_frame(block, code);
             if close_lambda_before_locals {
                 self.close_spliced_lambda_frame(block, true, code);
+            } else if discard_after_close.is_some() {
+                // A discarded `return this` (`also`/`apply`). A multi-line `}` is a `nop`
+                // while the lambda locals are still open; a one-line brace shares the body's
+                // line and the sweep drops the `nop`. The call-line `nop` still follows the
+                // locals.
+                self.emit_spliced_lambda_brace(block, code);
             }
             self.close_scope_locals(code, marked_initializer);
         }
@@ -139,6 +145,7 @@ impl Emitter<'_> {
         self.block_depth += 1;
         let mut dead = false;
         let mut reserved_inline_stack = None;
+        let mut anchored_lambda_result = false;
         if !self.try_emit_duplicated_safe_call(block, stmts, value, false, code) {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
             for &statement in stmts {
@@ -195,13 +202,31 @@ impl Emitter<'_> {
                             return;
                         }
                     }
-                    self.emit_value(value, code);
+                    // `also`/`apply` end in `return this`. kotlinc closes the spliced lambda
+                    // before that load, and the load itself carries the call's line. A `nop`
+                    // after the load sits between the value and its consumer (`astore` of the
+                    // initializer, or the join of an `if`) and is not in kotlinc's code.
+                    if self.spliced_lambda_result_read(stmts, value)
+                        && !self.ir.callable_scopes.contains(&block)
+                    {
+                        self.close_external_inline_frame(block, code);
+                        // A multi-line lambda's `}` is a `nop` while its locals are still open.
+                        // A one-line brace shares the body's line; the `nop` is then redundant
+                        // and the trivial sweep drops it.
+                        self.emit_spliced_lambda_brace(block, code);
+                        self.close_scope_locals(code, false);
+                        self.anchor_spliced_lambda_result(block, code);
+                        self.emit_value(value, code);
+                        anchored_lambda_result = true;
+                    } else {
+                        self.emit_value(value, code);
+                    }
                 }
             }
         }
         // A callable's own scope is its body. A value-returning lambda keeps those locals
         // open through the return, the same way a statement-position callable scope does.
-        if !self.ir.callable_scopes.contains(&block) {
+        if !anchored_lambda_result && !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
             self.close_scope_locals(code, false);
         }
@@ -212,11 +237,53 @@ impl Emitter<'_> {
         }
         // After the lambda locals, including when this block is itself a callable scope and those
         // locals stay open through the return. The `nop` is the inline body's line, not the brace.
-        self.close_spliced_lambda_frame(block, false, code);
+        // A `return this` already anchored that line on the load.
+        if !anchored_lambda_result {
+            self.close_spliced_lambda_frame(block, false, code);
+        }
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
         self.release_reserved_inline_stack(reserved_inline_stack);
         self.statement_line = enclosing_statement_line;
+    }
+
+    /// An inlined `return this` (`also`, `apply`): the block's value is a plain local read and
+    /// the block opened a spliced lambda frame.
+    fn spliced_lambda_result_read(&self, stmts: &[u32], value: u32) -> bool {
+        self.opens_spliced_lambda_frame(stmts) && matches!(self.ir.expr(value), IrExpr::GetValue(_))
+    }
+
+    /// The spliced lambda's closing brace, while its locals are still open.
+    fn emit_spliced_lambda_brace(&mut self, block: u32, code: &mut CodeBuilder) {
+        let Some(line) = self
+            .ir
+            .expr_end_lines
+            .get(&block)
+            .copied()
+            .filter(|line| *line != 0)
+        else {
+            return;
+        };
+        if self
+            .ir
+            .inline_copy_provenance(block)
+            .is_some_and(|frames| frames.len() > 1)
+        {
+            self.mark_expression_line(block, line, code);
+        } else {
+            code.mark_line(line);
+        }
+        code.nop();
+    }
+
+    /// Put the inline call's line on the instruction that follows, without a `nop`. The result
+    /// load is that instruction; kotlinc's line table records the call there.
+    fn anchor_spliced_lambda_result(&mut self, block: u32, code: &mut CodeBuilder) {
+        let Some(&line) = self.ir.expr_source_lines.get(&block) else {
+            return;
+        };
+        code.forget_line();
+        self.mark_expression_line(block, line, code);
     }
 
     fn opens_spliced_lambda_frame(&self, stmts: &[u32]) -> bool {
