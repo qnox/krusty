@@ -109,7 +109,12 @@ codegen-units = 16
 # arithmetic), but `debug-assertions` stay ON: this is the ONLY automated run that executes the
 # compiler's `debug_assert!` invariants — turning them off here would leave them dead in every CI
 # and local harness path. The coverage target dir is rebuilt from scratch each run, so incremental
-# only adds overhead.
+# only adds overhead. `lto = "off"` is required, not the inherited false: at opt-level 1 with more
+# than one codegen unit, rustc still runs intra-crate ThinLTO unless Cargo passes `-C lto=off`,
+# and it only does that for the string "off". That step dominated the cfg(test) harness compile,
+# which is the coverage build's critical path. On a 4-core host the workspace coverage build went
+# from 7m20s to 5m39s; frame audit, integer-literal joins, `-jvm-default`, and eager lambda
+# analysis stayed within the noise. Instrumentation flags are unchanged.
 [profile.coverage]
 inherits = "dev"
 opt-level = 1
@@ -117,6 +122,7 @@ overflow-checks = false
 debug-assertions = true
 debug = false
 incremental = false
+lto = "off"
 
 # Integration test binaries are explicit because Cargo otherwise treats every tests/*.rs file
 # as a separate executable. Product e2e tests are grouped into one e2e binary, while external
