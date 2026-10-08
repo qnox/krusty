@@ -23,6 +23,65 @@ impl Emitter<'_> {
         self.sequence_operands(None, ops, code, OperandUse::AsEmitted, |_, _, _| {});
     }
 
+    /// Whether an operand held on the stack below `e` must be spilled to a temporary.
+    ///
+    /// A `try` clears the operand stack on handler entry, a transfer to a loop outside the subtree
+    /// cannot see a value left on the stack, and a suspension cannot carry an unrecorded prefix.
+    /// An ordinary inline branch is not such a boundary. A closure's template is not in this
+    /// subtree either: it runs in the closure method, so a `use` spliced there does not spill the
+    /// receiver of the call that creates the closure. An inline call that splices the template
+    /// does, because the handler is then in this method.
+    pub(super) fn must_spill_across(&self, e: u32) -> bool {
+        if self.machine_suspensions.contains_key(&e) {
+            return true;
+        }
+        match self.ir.expr(e) {
+            IrExpr::Try { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => true,
+            IrExpr::Lambda { captures, .. } => captures
+                .iter()
+                .any(|&capture| self.must_spill_across(capture)),
+            IrExpr::Call {
+                callee:
+                    Callee::Static {
+                        owner,
+                        name,
+                        descriptor,
+                        inline,
+                    },
+                dispatch_receiver,
+                args,
+            } if inline.can_inline() => {
+                self.bodies
+                    .body(&owner.render(), name, descriptor)
+                    .is_some_and(|body| !body.handlers.is_empty())
+                    || dispatch_receiver.is_some_and(|receiver| self.must_spill_across(receiver))
+                    || args.iter().any(|&argument| {
+                        self.spills_operand_prefix(argument)
+                            || self.spliced_closure_must_spill(argument)
+                    })
+            }
+            _ => {
+                let mut spill = false;
+                crate::ir::for_each_child(&self.ir.exprs, e, &mut |c| {
+                    spill = spill || self.must_spill_across(c);
+                });
+                spill
+            }
+        }
+    }
+
+    /// The template of a lambda argument an inline call splices into this method. Creating the
+    /// lambda does not emit that template; the splice does.
+    fn spliced_closure_must_spill(&self, argument: u32) -> bool {
+        match self.ir.expr(argument) {
+            IrExpr::Lambda {
+                inline_body: Some(body),
+                ..
+            } => self.must_spill_across(*body),
+            _ => false,
+        }
+    }
+
     /// Whether operands already on the stack must be moved to temporaries before `e` is emitted.
     ///
     /// kotlinc keeps an operand prefix on the stack across ordinary branches in a later operand
@@ -37,21 +96,30 @@ impl Emitter<'_> {
 
     /// A spliced inline call that takes an inlined lambda and branches. kotlinc's inliner moves the
     /// stack prefix into locals around such a call; one without a lambda argument (`Any?.hashCode()`)
-    /// keeps the prefix on the stack through its branches.
+    /// keeps the prefix on the stack through its branches. A closure's template is not such a call:
+    /// evaluating the closure is `invokedynamic`, and the template runs in the closure method.
     fn splices_branching_inline(&self, e: u32) -> bool {
-        if let IrExpr::Call { callee, args, .. } = self.ir.expr(e) {
-            let takes_inlined_lambda = args.iter().any(|&a| {
-                matches!(
-                    self.ir.expr(a),
-                    IrExpr::Lambda {
-                        inline_body: Some(_),
-                        ..
-                    }
-                )
-            });
-            if takes_inlined_lambda && self.splice_branches(callee, args) {
-                return true;
+        match self.ir.expr(e) {
+            IrExpr::Lambda { captures, .. } => {
+                return captures
+                    .iter()
+                    .any(|&capture| self.splices_branching_inline(capture));
             }
+            IrExpr::Call { callee, args, .. } => {
+                let takes_inlined_lambda = args.iter().any(|&a| {
+                    matches!(
+                        self.ir.expr(a),
+                        IrExpr::Lambda {
+                            inline_body: Some(_),
+                            ..
+                        }
+                    )
+                });
+                if takes_inlined_lambda && self.splice_branches(callee, args) {
+                    return true;
+                }
+            }
+            _ => {}
         }
         let mut found = false;
         crate::ir::for_each_child(&self.ir.exprs, e, &mut |child| {
