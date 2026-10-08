@@ -32,9 +32,9 @@ use builtin_classifier_shapes::{
     builtin_library_type, mapped_builtin_property, mapped_builtin_signature, BuiltinGenericShape,
 };
 use builtins_customizer::JvmBuiltInsCustomizer;
+pub(in crate::jvm) use generic_signatures::parse_class_gsig;
 use generic_signatures::{
-    concrete_generic_ret, mark_receiver_fun_params, parse_class_gsig, parse_field_gsig,
-    suspend_return_from_gsig,
+    concrete_generic_ret, mark_receiver_fun_params, parse_field_gsig, suspend_return_from_gsig,
 };
 use inline_capability::{metadata_inline, property_accessor_inline};
 use java_nullability::{
@@ -2764,7 +2764,7 @@ fn parse_formals(s: &str) -> (Vec<String>, Vec<Vec<Ty>>, &str) {
 }
 
 /// Parse a JVM method generic signature `<formals>(params)ret`.
-fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
+pub(in crate::jvm) fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
     let (formals, mut formal_bounds, s) = parse_formals(sig);
     let mut inline_bounds = formals
         .iter()
@@ -4862,8 +4862,12 @@ impl JvmLibraries {
                         .then_some(crate::types::SemanticCallRole::KotlinAnyHashCode);
                         let semantic_role = m.semantic_role.or(inherited_wrapper_role);
                         let physical_owner = erased_top_member_owner(cn, m.owner.as_ref().copied());
-                        let collection_barrier =
-                            collection_barrier_role(builtin_cn, scope_name, &params, ret);
+                        let collection_barrier = collection_barrier_role(
+                            &self.cp,
+                            builtin_cn,
+                            scope_name,
+                            &m.descriptor,
+                        );
                         let callable = LibraryCallable {
                             annotations: m.annotations.clone(),
                             reflection_name: Some(m.name.clone()),
@@ -4969,58 +4973,31 @@ impl JvmLibraries {
 /// deliberately at the provider boundary: consumers carry the typed role attached to the selected
 /// declaration and never compare a call, override, bridge, or emitted method spelling.
 fn collection_barrier_role(
+    classpath: &Classpath,
     owner: TypeName,
     source_name: &str,
-    parameters: &[Ty],
-    result: Ty,
+    descriptor: &str,
 ) -> Option<crate::libraries::CollectionBarrierOutcome> {
-    use crate::libraries::CollectionBarrierOutcome::{False, NotFound, Null};
-
-    if parameters.len() != 1 {
+    let policy = classpath.collection_bridge_policy_name(
+        owner,
+        source_name,
+        descriptor,
+        super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
+    )?;
+    if policy.checked_parameters != [0] {
         return None;
     }
-    let collection = type_name("kotlin/collections/Collection");
-    let mutable_collection = type_name("kotlin/collections/MutableCollection");
-    let list = type_name("kotlin/collections/List");
-    let mutable_list = type_name("kotlin/collections/MutableList");
-    let set = type_name("kotlin/collections/Set");
-    let mutable_set = type_name("kotlin/collections/MutableSet");
-    let map = type_name("kotlin/collections/Map");
-    let mutable_map = type_name("kotlin/collections/MutableMap");
-    match (owner, source_name, result) {
-        (owner, "contains", Ty::Boolean)
-            if [
-                collection,
-                mutable_collection,
-                list,
-                mutable_list,
-                set,
-                mutable_set,
-            ]
-            .contains(&owner) =>
-        {
-            Some(False)
+    match policy.failure {
+        super::mapped_builtin_declarations::CollectionBridgeFailure::False => {
+            Some(crate::libraries::CollectionBarrierOutcome::False)
         }
-        (owner, "remove", Ty::Boolean)
-            if [mutable_collection, mutable_list, mutable_set].contains(&owner) =>
-        {
-            Some(False)
+        super::mapped_builtin_declarations::CollectionBridgeFailure::Null => {
+            Some(crate::libraries::CollectionBarrierOutcome::Null)
         }
-        (owner, "indexOf" | "lastIndexOf", Ty::Int) if owner == list || owner == mutable_list => {
-            Some(NotFound)
+        super::mapped_builtin_declarations::CollectionBridgeFailure::NotFound => {
+            Some(crate::libraries::CollectionBarrierOutcome::NotFound)
         }
-        (owner, "containsKey" | "containsValue", Ty::Boolean)
-            if owner == map || owner == mutable_map =>
-        {
-            Some(False)
-        }
-        (owner, "get", result)
-            if (owner == map || owner == mutable_map) && result.is_reference() =>
-        {
-            Some(Null)
-        }
-        (owner, "remove", result) if owner == mutable_map && result.is_reference() => Some(Null),
-        _ => None,
+        super::mapped_builtin_declarations::CollectionBridgeFailure::Argument(_) => None,
     }
 }
 
@@ -5658,31 +5635,35 @@ mod tests {
 
     #[test]
     fn decoded_collection_barrier_role_is_declaration_exact() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let classpath = crate::jvm::classpath::Classpath::new(vec![stdlib]);
         assert_eq!(
             collection_barrier_role(
+                &classpath,
                 type_name("kotlin/collections/MutableCollection"),
                 "remove",
-                &[Ty::String],
-                Ty::Boolean,
+                "(Ljava/lang/Object;)Z",
             ),
             Some(CollectionBarrierOutcome::False)
         );
         assert_eq!(
             collection_barrier_role(
+                &classpath,
                 type_name("kotlin/collections/MutableCollection"),
                 "add",
-                &[Ty::String],
-                Ty::Boolean,
+                "(Ljava/lang/Object;)Z",
             ),
             None,
             "a same-signature ordinary collection member must keep its parameter assertion"
         );
         assert_eq!(
             collection_barrier_role(
+                &classpath,
                 type_name("example/MutableCollection"),
                 "remove",
-                &[Ty::String],
-                Ty::Boolean,
+                "(Ljava/lang/Object;)Z",
             ),
             None
         );

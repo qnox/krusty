@@ -810,6 +810,14 @@ pub(super) fn dependency_access_bridge_local_variables(
         .collect()
 }
 
+/// Kotlin's generated local name for a specialized inherited-collection delegate parameter.
+///
+/// The bridge plan supplies the metadata declaration's complete arity and records this generated
+/// identity before emission; classfile emission never recovers it from a descriptor.
+pub(super) fn inherited_collection_specialized_local(ordinal: usize) -> String {
+    format!("p{ordinal}")
+}
+
 fn resolved_anonymous_context_labels(
     identities: &[crate::fir::ResolvedParameterIdentity],
     semantic_types: &[crate::types::Ty],

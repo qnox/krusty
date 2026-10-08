@@ -37,6 +37,7 @@ mod function_classifiers;
 mod function_references;
 mod generated_member_metadata;
 mod generic_erasure;
+mod inherited_collection_bridges;
 mod inherited_default_realization;
 pub mod inline;
 pub mod inline_class;

@@ -1063,6 +1063,8 @@ mod inferred_property_type_args_e2e;
 mod infix_newline_operand_e2e;
 #[path = "inheritance_e2e.rs"]
 mod inheritance_e2e;
+#[path = "inherited_collection_bridge_e2e.rs"]
+mod inherited_collection_bridge_e2e;
 #[path = "inherited_interface_default_e2e.rs"]
 mod inherited_interface_default_e2e;
 #[path = "inherited_member_owner_e2e.rs"]

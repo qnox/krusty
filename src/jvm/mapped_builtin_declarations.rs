@@ -18,6 +18,153 @@ pub(super) enum MappedBuiltinMemberKind {
     Function,
 }
 
+/// The neutral result required by one exact Kotlin collection declaration when a JVM-erased
+/// argument is not an instance of the declaration's substituted parameter type. This is target
+/// ABI policy, not source lookup: callers first bind a decoded `.kotlin_builtins` declaration and
+/// then ask for the policy by its full declaration identity and erased signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CollectionBridgeFailure {
+    False,
+    Null,
+    NotFound,
+    Argument(u16),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CollectionBridgePolicy {
+    pub(super) checked_parameters: &'static [u16],
+    pub(super) failure: CollectionBridgeFailure,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CollectionBridgePolicyRow {
+    declaration_owner: TypeName,
+    source_name: &'static str,
+    descriptor: &'static str,
+    kind: MappedBuiltinMemberKind,
+    checked_parameters: &'static [u16],
+    failure: CollectionBridgeFailure,
+}
+
+/// JVM type-safe collection policy from kotlinc's special generic signatures. Declaration shape
+/// remains metadata-owned; these rows contain only behavior that `.kotlin_builtins` does not encode.
+/// Every key is the complete declaration identity, including its erased function signature.
+fn collection_bridge_policies() -> &'static [CollectionBridgePolicyRow] {
+    static POLICIES: std::sync::OnceLock<Box<[CollectionBridgePolicyRow]>> =
+        std::sync::OnceLock::new();
+    POLICIES.get_or_init(|| {
+        use CollectionBridgeFailure::{Argument, False, NotFound, Null};
+        use MappedBuiltinMemberKind::Function;
+        [
+            (
+                "kotlin/collections/Collection",
+                "contains",
+                "(Ljava/lang/Object;)Z",
+                &[0][..],
+                False,
+            ),
+            (
+                "kotlin/collections/MutableCollection",
+                "remove",
+                "(Ljava/lang/Object;)Z",
+                &[0][..],
+                False,
+            ),
+            (
+                "kotlin/collections/List",
+                "indexOf",
+                "(Ljava/lang/Object;)I",
+                &[0][..],
+                NotFound,
+            ),
+            (
+                "kotlin/collections/List",
+                "lastIndexOf",
+                "(Ljava/lang/Object;)I",
+                &[0][..],
+                NotFound,
+            ),
+            (
+                "kotlin/collections/Map",
+                "containsKey",
+                "(Ljava/lang/Object;)Z",
+                &[0][..],
+                False,
+            ),
+            (
+                "kotlin/collections/Map",
+                "containsValue",
+                "(Ljava/lang/Object;)Z",
+                &[0][..],
+                False,
+            ),
+            (
+                "kotlin/collections/Map",
+                "get",
+                "(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[0][..],
+                Null,
+            ),
+            (
+                "kotlin/collections/Map",
+                "getOrDefault",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                &[0][..],
+                Argument(1),
+            ),
+            (
+                "kotlin/collections/MutableMap",
+                "remove",
+                "(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[0][..],
+                Null,
+            ),
+            (
+                "kotlin/collections/MutableMap",
+                "remove",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+                &[0, 1][..],
+                False,
+            ),
+        ]
+        .into_iter()
+        .map(
+            |(owner, source_name, descriptor, checked_parameters, failure)| {
+                CollectionBridgePolicyRow {
+                    declaration_owner: type_name(owner),
+                    source_name,
+                    descriptor,
+                    kind: Function,
+                    checked_parameters,
+                    failure,
+                }
+            },
+        )
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+    })
+}
+
+pub(super) fn collection_bridge_policy_for_declaration(
+    declaration_owner: TypeName,
+    source_name: &str,
+    descriptor: &str,
+    kind: MappedBuiltinMemberKind,
+) -> Option<CollectionBridgePolicy> {
+    collection_bridge_policies()
+        .iter()
+        .find(|row| {
+            row.declaration_owner == declaration_owner
+                && row.source_name == source_name
+                && row.descriptor == descriptor
+                && row.kind == kind
+        })
+        .map(|row| CollectionBridgePolicy {
+            checked_parameters: row.checked_parameters,
+            failure: row.failure,
+        })
+}
+
 /// One metadata-declared Kotlin builtin member paired with its exact JVM realization.
 ///
 /// Source and physical names deliberately remain separate. The declaring Kotlin identity and full
@@ -274,8 +421,9 @@ pub(super) fn overlay_constructor_semantics(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_property_realization, overlay_constructor_semantics, physical_name_for_call,
-        realization_for_declaration, special_realizations, MappedBuiltinMemberKind,
+        collection_bridge_policy_for_declaration, is_property_realization,
+        overlay_constructor_semantics, physical_name_for_call, realization_for_declaration,
+        special_realizations, CollectionBridgeFailure, MappedBuiltinMemberKind,
     };
     use crate::libraries::{CallSig, LibraryMember};
     use crate::types::{type_name, Ty};
@@ -394,5 +542,38 @@ mod tests {
             "entrySet",
             "()Ljava/util/Set;",
         ));
+    }
+
+    #[test]
+    fn collection_barrier_policy_uses_the_complete_declaration_signature() {
+        let get = collection_bridge_policy_for_declaration(
+            type_name("kotlin/collections/Map"),
+            "get",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            MappedBuiltinMemberKind::Function,
+        )
+        .expect("Map.get policy");
+        assert_eq!(get.checked_parameters, [0]);
+        assert_eq!(get.failure, CollectionBridgeFailure::Null);
+        assert_eq!(
+            collection_bridge_policy_for_declaration(
+                type_name("example/Map"),
+                "get",
+                "(Ljava/lang/Object;)Ljava/lang/Object;",
+                MappedBuiltinMemberKind::Function,
+            ),
+            None,
+            "a same-spelled user declaration has no platform policy"
+        );
+        assert_eq!(
+            collection_bridge_policy_for_declaration(
+                type_name("kotlin/collections/Map"),
+                "get",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                MappedBuiltinMemberKind::Function,
+            ),
+            None,
+            "owner and name without the full signature are insufficient"
+        );
     }
 }

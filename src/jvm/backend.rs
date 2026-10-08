@@ -63,6 +63,9 @@ pub(crate) struct BackendPassFacts {
     override_results: crate::jvm::override_results::OverrideResults,
     /// Neutral-result guards on collection overrides whose descriptor needs no bridge.
     collection_method_entry_barriers: crate::jvm::collection_barriers::MethodEntryBarriers,
+    /// JVM-only bridges for mapped collection declarations inherited from a Java superclass.
+    inherited_collection_bridges:
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridges,
     /// What the property-reference pass selected for each synthesized reference class. The
     /// value-class pass consumes and extends it; nothing recovers these answers from a spelling.
     property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
@@ -260,6 +263,8 @@ fn run_backend_passes_after_plugins(
         &facts.override_results,
         &mut facts.collection_method_entry_barriers,
     );
+    facts.inherited_collection_bridges =
+        crate::jvm::inherited_collection_bridges::select(ir, classpath, &facts.override_results);
     // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
     // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
     // symbols directly, NOT surfaced through the resolver's library view (which would change the checker's
@@ -959,6 +964,7 @@ impl JvmBackend {
             function_argument_arrays: &pass_facts.function_argument_arrays,
             override_results: &pass_facts.override_results,
             collection_method_entry_barriers: &pass_facts.collection_method_entry_barriers,
+            inherited_collection_bridges: &pass_facts.inherited_collection_bridges,
         };
         let classes = crate::jvm::ir_emit::emit_all_with_checked_classifiers(
             &ir,

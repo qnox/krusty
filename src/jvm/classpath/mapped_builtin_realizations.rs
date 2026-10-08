@@ -5,12 +5,71 @@
 //! declaration identity, kind, and erased descriptor.
 
 use super::super::mapped_builtin_declarations::{
-    realization_for_declaration, MappedBuiltinMember, MappedBuiltinMemberKind,
+    collection_bridge_policy_for_declaration, realization_for_declaration, CollectionBridgePolicy,
+    MappedBuiltinMember, MappedBuiltinMemberKind,
 };
 use super::{builtin_descriptor, Classpath};
+use crate::libraries::GenericSig;
 use crate::types::TypeName;
 
+/// One direct declaration decoded from `.kotlin_builtins`, with only its JVM realization joined.
+/// Consumers traverse the metadata supertype graph themselves so applied type arguments remain
+/// attached to the declaration that owns them.
+#[derive(Clone, Debug)]
+pub(in crate::jvm) struct DecodedBuiltinMember {
+    pub(in crate::jvm) declaration_owner: TypeName,
+    pub(in crate::jvm) source_name: String,
+    pub(in crate::jvm) physical_name: String,
+    pub(in crate::jvm) descriptor: String,
+    pub(in crate::jvm) kind: MappedBuiltinMemberKind,
+    pub(in crate::jvm) generic_sig: GenericSig,
+    pub(in crate::jvm) parameter_names: Vec<String>,
+}
+
 impl Classpath {
+    /// Direct declarations of one builtin classifier. All semantic shape comes from metadata; the
+    /// physical name is the exact target realization selected for that declaration and signature.
+    pub(in crate::jvm) fn decoded_builtin_members_name(
+        &self,
+        owner: TypeName,
+    ) -> Vec<DecodedBuiltinMember> {
+        let file = self.builtins_file_for_package(Self::builtins_package_for(owner));
+        let Some(class) = file.get_name(owner) else {
+            return Vec::new();
+        };
+        class
+            .members
+            .iter()
+            .map(|member| {
+                let descriptor = builtin_descriptor(&member.generic_sig);
+                let kind = if member.is_property {
+                    MappedBuiltinMemberKind::Property
+                } else {
+                    MappedBuiltinMemberKind::Function
+                };
+                let physical_name = self
+                    .mapped_builtin_realization(owner, &member.name, &descriptor, kind)
+                    .map(|(_, name)| name.to_string())
+                    .unwrap_or_else(|| {
+                        if member.is_property {
+                            super::ordinary_builtin_property_jvm_name(&member.name)
+                        } else {
+                            member.name.clone()
+                        }
+                    });
+                DecodedBuiltinMember {
+                    declaration_owner: owner,
+                    source_name: member.name.clone(),
+                    physical_name,
+                    descriptor,
+                    kind,
+                    generic_sig: member.generic_sig.clone(),
+                    parameter_names: member.param_names.clone(),
+                }
+            })
+            .collect()
+    }
+
     /// How reading a builtin property is realized on its mapped JVM owner when that owner has no
     /// class file to inspect (no JDK on the classpath). Declaration shape and inheritance come from
     /// `.kotlin_builtins`; only the exact accessor handle comes from target policy.
@@ -93,6 +152,42 @@ impl Classpath {
                     realization_for_declaration(current, source_name, descriptor, kind)
                 {
                     return Some(realization);
+                }
+            }
+            pending.extend(class.supertypes.iter_ids());
+        }
+        None
+    }
+
+    /// Exact type-safe collection policy inherited by a decoded declaration. The walk follows
+    /// metadata identities; a same-spelled user or platform method never enters it.
+    pub(in crate::jvm) fn collection_bridge_policy_name(
+        &self,
+        declaration_owner: TypeName,
+        source_name: &str,
+        descriptor: &str,
+        kind: MappedBuiltinMemberKind,
+    ) -> Option<CollectionBridgePolicy> {
+        let mut pending = std::collections::VecDeque::from([declaration_owner]);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = pending.pop_front() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let file = self.builtins_file_for_package(Self::builtins_package_for(current));
+            let Some(class) = file.get_name(current) else {
+                continue;
+            };
+            let declares_member = class.members.iter().any(|member| {
+                member.name == source_name
+                    && member.is_property == (kind == MappedBuiltinMemberKind::Property)
+                    && builtin_descriptor(&member.generic_sig) == descriptor
+            });
+            if declares_member {
+                if let Some(policy) =
+                    collection_bridge_policy_for_declaration(current, source_name, descriptor, kind)
+                {
+                    return Some(policy);
                 }
             }
             pending.extend(class.supertypes.iter_ids());
