@@ -93,6 +93,14 @@ fun t(): Int = 0
 fun conditionalArgument(c: Boolean): Int =
     takesNonNull(if (c) System.getenv("KRUSTY_ABSENT_19") else "x")
 
+fun defaulted(value: String = System.getenv("KRUSTY_ABSENT_20")): Int = value.length
+
+fun nullableDefault(value: String? = System.getenv("KRUSTY_ABSENT_21")): Int = value?.length ?: 0
+
+class DefaultedMember(val value: String = System.getenv("KRUSTY_ABSENT_22"))
+
+fun pathDefault(root: java.nio.file.Path = java.nio.file.Paths.get("/")): String = root.toString()
+
 fun box(): String = "OK"
 "#;
 
@@ -125,6 +133,8 @@ fun assignment(): Int {
     return v.length
 }
 
+fun defaulted(value: String = System.getenv("KRUSTY_ABSENT_DEFAULT")): Int = value.length
+
 fun probe(position: Int): String = try {
     when (position) {
         0 -> returned().length
@@ -132,6 +142,7 @@ fun probe(position: Int): String = try {
         2 -> argument()
         3 -> lambdaParameter()
         4 -> assignment()
+        5 -> defaulted()
         else -> Member().memberProperty.length
     }
     "no assertion emitted"
@@ -141,7 +152,7 @@ fun probe(position: Int): String = try {
 
 fun box(): String {
     var position = 0
-    while (position < 6) {
+    while (position < 7) {
         val message = probe(position)
         if (message != "getenv(...) must not be null") {
             return "position " + position + ": " + message
@@ -573,7 +584,12 @@ fn every_guarded_message_is_derived_from_the_checked_call() {
     let sites = assertion_sites(&positions().krusty, "krusty");
     assert!(!sites.is_empty(), "the fixture emitted no guard at all");
     assert!(
-        sites.iter().all(|(_, message)| message == "getenv(...)"),
-        "every guarded site in the fixture checks a `System.getenv` result: {sites:?}"
+        sites.iter()
+            .all(|(_, message)| message == "getenv(...)" || message == "get(...)"),
+        "every guarded site in the fixture checks a named platform call: {sites:?}"
+    );
+    assert!(
+        sites.iter().any(|(_, message)| message == "get(...)"),
+        "a Paths.get default must name the call: {sites:?}"
     );
 }

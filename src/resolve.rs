@@ -39588,6 +39588,11 @@ impl<'a> Checker<'a> {
     ) {
         let has_receiver = matches!(expected, Ty::Fun(function) if function.has_receiver);
         let actual = self.check_argument_expected(scope, expression, expected, has_receiver, None);
+        // A default fills its parameter. A platform result committed to a parameter that rejects
+        // null is guarded in the `$default` method, the same transition a call argument guards.
+        if !expected.upper_bound_admits_null() {
+            self.narrow_platform_value(expected, expression, PlatformNarrowing::Argument);
+        }
         self.expect_assignable(
             expected,
             actual,
