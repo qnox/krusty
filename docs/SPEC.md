@@ -4942,6 +4942,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   method returning nothing (`void`); one whose method returns a type parameter instantiated with
   `Unit` keeps returning the `Unit` value. Tests: `tests/lambda_result_types_e2e.rs`.
 
+- **An `in`-projected SAM adapts a Kotlin function.** For a generic declaration
+  `Sink<T>.accept(T)`, `Sink<in String?>` types the converted function as `(String?) -> Unit` in
+  checked FIR. The JVM realizes the forwarding implementation with the declaration's erased slot,
+  `void (Function1, Object)`, and forwards that value to `Function1.invoke` without narrowing it.
+  The common function invocation retains its semantic `Unit` result; statement emission discards
+  the erased `Object` exactly once. An exact `Sink<String?>` remains a direct SAM. Both a literal
+  and an existing function value are covered by raw whole-class comparison with kotlinc. Tests:
+  `tests/contravariant_sam_adapter_e2e.rs`.
+
 - **Method type parameter that shadows its class's (`class Box<T> { fun <T> m(x: T): T }`).** The
   classpath member-return substitution (`JvmLibraries::member_return`) binds a generic class's formal
   type parameters to the receiver's type arguments (`Box<String>` → `{T: String}`) and substitutes a

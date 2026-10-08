@@ -28,6 +28,9 @@ pub struct IrSamTarget {
     /// implements the interface by declaration identity reads this, never the name.
     pub method_target: IrSamMethod,
     pub parameters: Vec<Ty>,
+    /// Parameters specialized through a contravariant use-site capture. A target backend may use
+    /// this semantic provenance to realize an adapter; common IR retains the logical types above.
+    pub contravariant_parameters: Vec<bool>,
     pub result: Ty,
     pub declared_parameters: Vec<Ty>,
     pub declared_result: Ty,

@@ -65,6 +65,10 @@ pub(super) fn local_variable(
             IrGeneratedParameterRole::FunctionInvokeValue { ordinal } => {
                 Some(format!("p{}", ordinal + 1))
             }
+            IrGeneratedParameterRole::SamAdapterCapture { ordinal } => {
+                Some(format!("$tmp{ordinal}"))
+            }
+            IrGeneratedParameterRole::SamAdapterValue { ordinal } => Some(format!("p{ordinal}")),
             IrGeneratedParameterRole::SuspendLambdaCreateValue => Some("value".to_string()),
             IrGeneratedParameterRole::InterfaceDelegationValue { ordinal } => {
                 Some(format!("p{ordinal}"))

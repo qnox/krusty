@@ -361,7 +361,7 @@ pub(super) fn class_name(
     let origin = ir.lambda_origins.get(&impl_fn);
     // A generated copy is the call-site lambda kotlinc names
     // `{owner}${caller}$$inlined${callee}$N`, not the declaration class with a private suffix.
-    if let Some(specialization) = ir.specialized_functions.get(&impl_fn) {
+    let selected = if let Some(specialization) = ir.specialized_functions.get(&impl_fn) {
         let (owner, caller) = specialization_location(ir, specialization, facade, modes)
             .expect("a specialized lambda retains one physical caller location");
         let name = specialized_class_name(ir, impl_fn, &owner, &caller, facade, modes)
@@ -372,21 +372,19 @@ pub(super) fn class_name(
                 expansion: Some(impl_fn),
             }
         });
-        return (name, identity);
-    }
+        (name, identity)
     // The source's naming walk names a source lambda's class where it nests, as kotlinc does
     // (`Kt$box$1$1` inside `Kt$box$1`), whether or not its enclosing lambda became a class of its
     // own.
-    if let Some(name) = crate::jvm::local_class_names::lambda_class_name(ir, impl_fn) {
+    } else if let Some(name) = crate::jvm::local_class_names::lambda_class_name(ir, impl_fn) {
         let identity = origin.map_or(LambdaClassIdentity::Synthetic(impl_fn), |origin| {
             LambdaClassIdentity::Source {
                 identity: origin.identity,
                 expansion: None,
             }
         });
-        return (name.render(), identity);
-    }
-    if let Some(origin) = origin {
+        (name.render(), identity)
+    } else if let Some(origin) = origin {
         let ordinal = origin.ordinal + 1;
         // A class-initialization origin (a property initializer or an init block) has the EMPTY
         // enclosing name — kotlinc emits no function segment there (`C$prop$1`, `C$local$1`,
@@ -405,25 +403,58 @@ pub(super) fn class_name(
         }
         internal.push('$');
         internal.push_str(&ordinal.to_string());
-        return (
+        (
             internal,
             LambdaClassIdentity::Source {
                 identity: origin.identity,
                 expansion: None,
             },
-        );
-    }
+        )
     // Backend-synthesized lambdas have no source expression. Their implementation id is already
     // the exact stable identity; its generated name is serialization input only for this JVM
     // artifact boundary.
-    let (enclosing, index) = impl_name
-        .split_once("$lambda$")
-        .map(|(head, tail)| (head.to_string(), tail.parse::<u32>().unwrap_or(0)))
-        .unwrap_or_else(|| (impl_name.to_owned(), 0));
-    (
-        format!("{impl_owner}${enclosing}${}", index + 1),
-        LambdaClassIdentity::Synthetic(impl_fn),
-    )
+    } else {
+        let (enclosing, index) = impl_name
+            .split_once("$lambda$")
+            .map(|(head, tail)| (head.to_string(), tail.parse::<u32>().unwrap_or(0)))
+            .unwrap_or_else(|| (impl_name.to_owned(), 0));
+        (
+            format!("{impl_owner}${enclosing}${}", index + 1),
+            LambdaClassIdentity::Synthetic(impl_fn),
+        )
+    };
+    selected
+}
+
+/// [`class_name`] at a site that is about to emit a new class artifact. A materialized lambda may
+/// ask for its own name while nesting a specialized child, so collision advancement belongs only
+/// on this creation boundary, not on every name query.
+pub(super) fn emitted_class_name(
+    ir: &IrFile,
+    impl_fn: u32,
+    impl_name: &str,
+    impl_owner: &str,
+    facade: &str,
+    modes: LambdaModes,
+) -> (String, LambdaClassIdentity) {
+    let selected = class_name(ir, impl_fn, impl_name, impl_owner, facade, modes);
+    (next_unclaimed_name(ir, selected.0), selected.1)
+}
+
+/// A source callable-reference/local-class artifact and a generated class-mode lambda share one
+/// JVM ordinal sequence. Common IR retains their independent source identities; this JVM boundary
+/// advances the lambda to the first physical name not already claimed by a realized class.
+fn next_unclaimed_name(ir: &IrFile, mut candidate: String) -> String {
+    while ir.classes.iter().any(|class| class.fq_name() == candidate) {
+        candidate = match candidate.rsplit_once('$') {
+            Some((prefix, ordinal)) => match ordinal.parse::<u32>() {
+                Ok(ordinal) => format!("{prefix}${}", ordinal.saturating_add(1)),
+                Err(_) => format!("{candidate}$1"),
+            },
+            None => format!("{candidate}$1"),
+        };
+    }
+    candidate
 }
 
 /// JVM class name of a specialized lambda before a representation pass consumes its source

@@ -1784,6 +1784,7 @@ mod tests {
                 method: "apply".to_string(),
                 method_target: IrSamMethod::FunctionTypeInvoke,
                 parameters: vec![source_ty],
+                contravariant_parameters: vec![false],
                 result: source_ty,
                 declared_parameters: vec![source_ty],
                 declared_result: source_ty,

@@ -87,6 +87,7 @@ mod reified_arguments;
 mod reified_operations;
 mod result_null_checks;
 mod runtime_capabilities;
+mod sam_projected_adapters;
 mod sam_wrappers;
 mod shared_captures;
 mod singleton_storage;

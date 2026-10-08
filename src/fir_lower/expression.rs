@@ -1575,14 +1575,23 @@ impl BodyLowering<'_> {
         let origin = checked.origin;
         let value = expression;
         if let Some(FirConversionKind::Sam(sam)) = conversion.map(|conversion| conversion.kind) {
-            let unit_method = self.body.sam_conversion(sam).is_some_and(|conversion| {
+            let recorded = self.body.sam_conversion(sam);
+            let projected = recorded.is_some_and(|conversion| {
+                conversion
+                    .contravariant_parameters
+                    .iter()
+                    .any(|parameter| *parameter)
+            });
+            let unit_method = recorded.is_some_and(|conversion| {
                 !conversion.suspend && conversion.declared_result.get() == crate::types::Ty::Unit
             });
             let literal = self
                 .body
                 .expr(value)
                 .is_some_and(|operand| matches!(operand.kind, FirExprKind::Lambda { .. }));
-            if unit_method && literal {
+            // An `in`-projected SAM types the literal as a Kotlin function (`Unit` return) and
+            // adapts that value. A direct SAM implements the void method itself.
+            if unit_method && literal && !projected {
                 self.unit_method_lambda = Some(value);
             }
         }
@@ -1709,8 +1718,21 @@ impl BodyLowering<'_> {
                         origin: conversion.origin,
                     })?
                     .clone();
-                if let IrExpr::Lambda { impl_fn, sam, .. } = &mut self.ir.exprs[expression as usize]
+                let project_adapter = conversion
+                    .contravariant_parameters
+                    .iter()
+                    .any(|parameter| *parameter);
+                if !project_adapter
+                    && matches!(
+                        self.ir.exprs.get(expression as usize),
+                        Some(IrExpr::Lambda { .. })
+                    )
                 {
+                    let IrExpr::Lambda { impl_fn, sam, .. } =
+                        &mut self.ir.exprs[expression as usize]
+                    else {
+                        unreachable!("the operand was just matched as a lambda");
+                    };
                     let target = crate::ir::IrSamTarget {
                         classifier: conversion.classifier,
                         method: conversion.method.into(),
@@ -1718,6 +1740,7 @@ impl BodyLowering<'_> {
                             conversion.method_target,
                         ),
                         parameters: conversion.parameters.iter().map(|ty| ty.get()).collect(),
+                        contravariant_parameters: conversion.contravariant_parameters.to_vec(),
                         result: conversion.result.get(),
                         declared_parameters: conversion
                             .declared_parameters

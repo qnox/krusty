@@ -553,6 +553,8 @@ mod contract_smart_casts_e2e;
 mod contract_smartcast_e2e;
 #[path = "contract_user_e2e.rs"]
 mod contract_user_e2e;
+#[path = "contravariant_sam_adapter_e2e.rs"]
+mod contravariant_sam_adapter_e2e;
 #[path = "coroutine_intrinsics_e2e.rs"]
 mod coroutine_intrinsics_e2e;
 #[path = "counted_loop_shape_e2e.rs"]

@@ -227,6 +227,10 @@ fn run_backend_passes_after_plugins(
     // method, retaining nullable-construction sites only in JVM pass facts.
     let class_java_sam = lambda_modes.sam_conversions == crate::jvm::ir_emit::LambdaMode::Class;
     facts.sam_wrapper_realizations = crate::jvm::sam_wrappers::realize(ir, facade, class_java_sam);
+    // A projected SAM conversion stays logically typed as the function it captures. Only the JVM
+    // implementation method receives the declaration's erased slots, after class-mode wrappers
+    // have consumed conversions that realize their own forwarding methods.
+    crate::jvm::sam_projected_adapters::realize(ir);
     crate::jvm::generic_erasure::lower_function_type_parameters(ir);
     crate::jvm::deferred_local_storage::realize(ir);
     crate::jvm::call_result_boundaries::realize_call_result_boundaries(ir);
