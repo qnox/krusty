@@ -6670,47 +6670,6 @@ impl<'a> Emitter<'a> {
             && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
     }
 
-    /// Whether an operand held on the stack BELOW `e` must be spilled to a temp instead
-    /// a `try` in the subtree — the JVM clears the operand stack on handler entry, so a held value
-    /// would be lost — a transfer to a loop target outside the subtree, or a suspension whose state
-    /// machine cannot carry an unrecorded JVM operand prefix across resumption. An ordinary inline
-    /// branch is not such a boundary: final-body dataflow carries the live prefix through its edges.
-    /// Conservative: the spill path is always correct, only byte-parity with kotlinc is deferred.
-    fn must_spill_across(&self, e: u32) -> bool {
-        if self.machine_suspensions.contains_key(&e) {
-            return true;
-        }
-        match self.ir.expr(e) {
-            IrExpr::Try { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => true,
-            IrExpr::Call {
-                callee:
-                    Callee::Static {
-                        owner,
-                        name,
-                        descriptor,
-                        inline,
-                    },
-                dispatch_receiver,
-                args,
-            } if inline.can_inline() => {
-                self.bodies
-                    .body(&owner.render(), name, descriptor)
-                    .is_some_and(|body| !body.handlers.is_empty())
-                    || dispatch_receiver.is_some_and(|receiver| self.must_spill_across(receiver))
-                    || args
-                        .iter()
-                        .any(|&argument| self.spills_operand_prefix(argument))
-            }
-            _ => {
-                let mut spill = false;
-                crate::ir::for_each_child(&self.ir.exprs, e, &mut |c| {
-                    spill = spill || self.must_spill_across(c);
-                });
-                spill
-            }
-        }
-    }
-
     /// Whether emitting `e` introduces non-linear JVM control flow anywhere in its subtree. Operand
     /// sequences use this physical fact to keep an earlier value off the stack while nested branches,
     /// handlers, or inline splices execute. Stack-map frames themselves are computed from the final body.

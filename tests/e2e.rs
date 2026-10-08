@@ -436,6 +436,8 @@ mod cli_compiler_plugin_e2e;
 mod cli_dropin_e2e;
 #[path = "closure_in_class_e2e.rs"]
 mod closure_in_class_e2e;
+#[path = "closure_operand_spill_e2e.rs"]
+mod closure_operand_spill_e2e;
 #[path = "codegen_host_e2e.rs"]
 mod codegen_host_e2e;
 #[path = "collection_bridge_barrier_e2e.rs"]
