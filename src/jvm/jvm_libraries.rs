@@ -1461,7 +1461,7 @@ impl JvmLibraries {
                     // override checking erases to the classfile parameter (`Collection`), which
                     // was captured before that rewrite. Leaving the mutable face here made
                     // `AbstractList.addAll` fail to discharge `MutableList.addAll`.
-                    member.physical_params = physical_params;
+                    member.physical_params = physical_params.clone();
                 }
                 if let Some(declaration) = declaration {
                     crate::trace_compiler!(
