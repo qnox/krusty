@@ -1922,6 +1922,13 @@ impl super::Emitter<'_> {
             } => {
                 // A value that cannot carry the operand stack (`msg = try {…} finally {}`) can't
                 // run with the holder on it. Spill it first (as `RefNew` does).
+                let unsigned = self.completes_unsigned_bitwise_value(*value);
+                let saved_assignment = self.unsigned_assignment_line;
+                if unsigned {
+                    // A local assignment keeps the line on the receiver and writes it again at
+                    // the store. A captured local is the same assignment once the holder is gone.
+                    self.unsigned_assignment_line = true;
+                }
                 if self.spills_operand_prefix(*value) {
                     let temps = self.spill_to_temps(&[*value], code);
                     self.emit_value(*holder, code);
@@ -1932,6 +1939,12 @@ impl super::Emitter<'_> {
                 } else {
                     self.emit_value(*holder, code);
                     self.emit_element_value(*elem, *value, code);
+                }
+                self.unsigned_assignment_line = saved_assignment;
+                if unsigned {
+                    self.mark_expression_start(e, code);
+                    code.forget_line();
+                    super::debug_lines::mark_statement(self.ir, e, code);
                 }
                 let (cls, fdesc) = ref_class(elem);
                 let f = self.cw.fieldref(cls, "element", fdesc);

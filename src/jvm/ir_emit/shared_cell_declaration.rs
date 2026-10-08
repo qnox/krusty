@@ -77,10 +77,20 @@ impl Emitter<'_> {
         self.open_declared_local(declaration, slot, holder, code);
         if let Some(value) = value {
             // The element store is the declaration's statement: its value marks its own line,
-            // and the `putfield` returns to the declaration's.
+            // and the `putfield` returns to the declaration's. An unsigned initializer is the
+            // exception: the line stays on the holder store — unboxing moves it onto the zero
+            // default — and on this `putfield`, not on the literal or the receiver load.
             load(holder, slot, code);
-            self.mark_expression_start(value, code);
+            let unsigned = self.completes_unsigned_bitwise_value(value);
+            if !unsigned {
+                self.mark_expression_start(value, code);
+            }
+            let saved_assignment = self.unsigned_assignment_line;
+            if unsigned {
+                self.unsigned_assignment_line = true;
+            }
             self.emit_element_value(elem, value, code);
+            self.unsigned_assignment_line = saved_assignment;
             if let Some(&line) = self.ir.expr_lines.get(&declaration) {
                 self.mark_expression_line(declaration, line, code);
             }
