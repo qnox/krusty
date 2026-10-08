@@ -91,6 +91,7 @@ pub(super) fn emit_default_stub(
         ret,
         defaults.iter().flatten().copied(),
     );
+    publish_exported_private_access(&mut emitter, fid);
     let receiver = emitter.frame.enter(FrameKey::Receiver, owner_ty);
     emitter.slots.insert(0, (receiver, owner_ty));
     let mut param_slots = Vec::new();
@@ -452,6 +453,18 @@ pub(super) fn body_has_reified_markers(ir: &IrFile, expression: crate::ir::ExprI
     found
 }
 
+/// The stub evaluates default expressions, and an inline stub re-emits the body. Both use the
+/// same private-access accessors as the method the splicer copies.
+fn publish_exported_private_access(emitter: &mut Emitter<'_>, fid: u32) {
+    let exports = super::static_accessors::method_exports_private_calls(
+        emitter.ir,
+        &emitter.run.static_accessor_plan.borrow(),
+        fid,
+    );
+    emitter.method_exports_private_access = exports;
+    emitter.export_private_calls = exports;
+}
+
 /// Emit a facade-style static function `$default` synthetic.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_facade_default_stub(
@@ -505,6 +518,7 @@ pub(super) fn emit_facade_default_stub(
         ret,
         defaults.iter().flatten().copied(),
     );
+    publish_exported_private_access(&mut emitter, fid);
     let mut param_slots = Vec::new();
     for (index, ty) in stub_param_tys.iter().enumerate() {
         let slot = emitter.frame.enter(FrameKey::Value(index as u32), *ty);

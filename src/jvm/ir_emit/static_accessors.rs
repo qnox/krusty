@@ -71,6 +71,8 @@ pub(super) struct StaticAccessorPlan {
     /// The field each planned companion accessor reads, by (holder, companion), as the holder's
     /// classifier record declares it.
     companion_fields: HashMap<(TypeName, TypeName), Box<str>>,
+    /// Inline functions whose private reads and calls are published through accessors.
+    exporting_private_access: HashSet<u32>,
 }
 
 impl StaticAccessorPlan {
@@ -82,6 +84,23 @@ impl StaticAccessorPlan {
     pub(super) fn declares(&self, owner: StaticOwner, accessor: StaticAccessor) -> bool {
         self.accessors_of(owner).contains(&accessor)
     }
+
+    /// Whether emitting `function` must route private access through public accessors.
+    pub(super) fn exports_private_access(&self, function: u32) -> bool {
+        self.exporting_private_access.contains(&function)
+    }
+}
+
+/// A method the bytecode splicer copies must call public accessors for private callees and
+/// private properties. That is every non-private inline function, and every private inline
+/// function such a function expands.
+pub(super) fn method_exports_private_calls(
+    ir: &IrFile,
+    plan: &StaticAccessorPlan,
+    fid: u32,
+) -> bool {
+    (ir.inline_fns.contains(&fid) && !ir.method_visibility(fid).is_private())
+        || plan.exports_private_access(fid)
 }
 
 /// A JVM class whose code this file emits, with the IR roots of that code.
@@ -183,15 +202,99 @@ pub(super) fn routes_through_accessor(
         && ir.method_visibility(function).is_private()
 }
 
-/// Whether `root` is the body of a non-private `inline` function. Copies of that body run in
-/// other classes, so a private call inside it must already name the public accessor.
-pub(super) fn non_private_inline_body(ir: &IrFile, root: crate::ir::ExprId) -> bool {
-    ir.functions.iter().enumerate().any(|(index, function)| {
-        let function_id = index as u32;
-        function.body == Some(root)
-            && ir.inline_fns.contains(&function_id)
-            && !ir.method_visibility(function_id).is_private()
-    })
+/// Inline functions whose bodies are copied into a non-private `inline` function.
+///
+/// The seed is every non-private inline function, and every private inline function that
+/// publishes a `$default` stub. A private inline function also joins the set when one of those
+/// bodies calls it or contains a copy of it, directly or through other inline functions. The
+/// published bytecode of every function in the set calls `access$` for a private callee and
+/// `access$get<X>$p` / `access$set<X>$p` for a private property, including the private inline
+/// function's own method: the splicer copies that method, and it copies the non-private
+/// `$default` stub. A private inline function that is expanded only into non-inline callers,
+/// and that declares no default, stays out of the set and keeps direct access.
+pub(super) fn inline_functions_exporting_private_access(ir: &IrFile) -> HashSet<u32> {
+    let mut exporting = HashSet::new();
+    let mut stack = Vec::new();
+    for index in 0..ir.functions.len() {
+        let function = index as u32;
+        if ir.inline_fns.contains(&function)
+            && (!ir.method_visibility(function).is_private() || ir.has_param_defaults(function))
+        {
+            exporting.insert(function);
+            stack.push(function);
+        }
+    }
+    while let Some(function) = stack.pop() {
+        let Some(body) = ir.functions[function as usize].body else {
+            continue;
+        };
+        for callee in inline_template_dependencies(ir, body) {
+            if ir.inline_fns.contains(&callee) && exporting.insert(callee) {
+                stack.push(callee);
+            }
+        }
+    }
+    exporting
+}
+
+/// Whether `root` is the body of a function in `exporting`.
+pub(super) fn body_exports_private_access(
+    ir: &IrFile,
+    exporting: &HashSet<u32>,
+    root: crate::ir::ExprId,
+) -> bool {
+    ir.functions
+        .iter()
+        .enumerate()
+        .any(|(index, function)| function.body == Some(root) && exporting.contains(&(index as u32)))
+}
+
+/// Inline functions whose code `root` publishes: a direct call, or a same-module expansion
+/// whose copied expressions name the declaration.
+fn inline_template_dependencies(ir: &IrFile, root: crate::ir::ExprId) -> Vec<u32> {
+    let mut targets = Vec::new();
+    let mut stack = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(expression) = stack.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let Some(frames) = ir.inline_copy_provenance(expression) {
+            targets.extend(frames.iter().map(|frame| frame.function));
+        }
+        match ir.expr(expression) {
+            IrExpr::Call { callee, .. } => {
+                if let Some(function) = local_callee_function(callee) {
+                    targets.push(function);
+                }
+            }
+            IrExpr::MethodCall { class, index, .. } => {
+                if let Some(function) = ir
+                    .classes
+                    .get(*class as usize)
+                    .and_then(|class| class.methods.get(*index as usize))
+                    .copied()
+                {
+                    targets.push(function);
+                }
+            }
+            _ => {}
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
+    }
+    targets
+}
+
+fn local_callee_function(callee: &crate::ir::Callee) -> Option<u32> {
+    match callee {
+        crate::ir::Callee::Local(function)
+        | crate::ir::Callee::LocalDefault(function)
+        | crate::ir::Callee::LocalWithDefaults { function, .. }
+        | crate::ir::Callee::ClassStatic { function, .. }
+        | crate::ir::Callee::ClassStaticDefault { function, .. }
+        | crate::ir::Callee::ClassStaticWithDefaults { function, .. } => Some(*function),
+        _ => None,
+    }
 }
 
 /// A non-private `inline` function exports a same-owner private call. A lifted local function
@@ -233,6 +336,7 @@ pub(super) fn plan(
     contexts: &[EmissionContext],
     class_member_fids: &HashSet<u32>,
 ) -> StaticAccessorPlan {
+    let exporting_private_access = inline_functions_exporting_private_access(ir);
     let protected_calls = env.run.protected_member_access_bridges.borrow();
     let private_member_bridges = env.run.private_member_access_bridges.borrow();
     let walk = Walk {
@@ -261,7 +365,7 @@ pub(super) fn plan(
                 root,
                 0,
                 &HashMap::new(),
-                non_private_inline_body(ir, root),
+                body_exports_private_access(ir, &exporting_private_access, root),
                 &mut uses,
             );
         }
@@ -307,7 +411,7 @@ pub(super) fn plan(
                         root,
                         0,
                         &carriers,
-                        non_private_inline_body(ir, root),
+                        body_exports_private_access(ir, &exporting_private_access, root),
                         &mut uses,
                     );
                 }
@@ -319,6 +423,7 @@ pub(super) fn plan(
     let mut plan = StaticAccessorPlan {
         protected: walk.protected.into_inner(),
         companion_fields: walk.companion_fields.into_inner(),
+        exporting_private_access,
         ..StaticAccessorPlan::default()
     };
     let mut seen = HashSet::new();
@@ -607,12 +712,15 @@ impl Walk<'_> {
                     routes_through_accessor(ir, self.helper_access, context == owner, function)
                         || inline_exports_private_call(ir, export_private, function)
                 }
+                StaticAccessor::MemberGetter { .. } | StaticAccessor::MemberSetter { .. } => {
+                    context != owner
+                }
+                // A private field read inside an inline template is copied into other classes,
+                // so the template calls the accessor even when this class owns the field.
                 StaticAccessor::Getter(_)
                 | StaticAccessor::Setter(_)
-                | StaticAccessor::MemberGetter { .. }
-                | StaticAccessor::MemberSetter { .. }
                 | StaticAccessor::FieldGetter { .. }
-                | StaticAccessor::FieldSetter { .. } => context != owner,
+                | StaticAccessor::FieldSetter { .. } => context != owner || export_private,
                 // Placed by `companion_field_accessor`, which already decided it is needed.
                 StaticAccessor::CompanionInstance { .. } => true,
                 StaticAccessor::Protected(_) => true,
@@ -692,7 +800,9 @@ impl Walk<'_> {
         };
         let owner = &self.ir.classes[class as usize];
         let declared = owner.properties.get(property as usize)?;
-        if !declared.needs_access_bridge || declared.backing_field.is_none() {
+        // A same-class read still needs the accessor when an inline template is copied out.
+        // `collect` keeps it only for another class or such a template.
+        if declared.backing_field.is_none() {
             return None;
         }
         let accessor = match (read, declared.getter.is_some(), declared.setter.is_some()) {
@@ -838,11 +948,15 @@ fn field_accessor_shape(
 }
 
 /// The `invokestatic` of a private backing field's accessor, when `reader` is not the field's
-/// class. `None` keeps the direct `getfield` / `putfield`.
+/// class and [`StaticAccessorPlan`] published that accessor. `None` for `reader` asks for the
+/// accessor when the field is private: a class that is not the owner, and an inline template that
+/// must not name its own private field. A private field whose property has a getter stays a direct
+/// load unless the plan published `access$get<X>$p`.
 pub(super) fn cross_class_backing_field_method(
     cw: &mut ClassWriter,
     ir: &IrFile,
     facade: &str,
+    plan: &StaticAccessorPlan,
     reader: Option<StaticOwner>,
     class: u32,
     field: u32,
@@ -860,12 +974,21 @@ pub(super) fn cross_class_backing_field_method(
         .properties
         .iter()
         .position(|property| property.backing_field == Some(field))? as u32;
+    let owner = StaticOwner::Class(class_decl.fq_name);
+    let accessor = if write {
+        StaticAccessor::FieldSetter { class, property }
+    } else {
+        StaticAccessor::FieldGetter { class, property }
+    };
+    if !plan.declares(owner, accessor) {
+        return None;
+    }
     let access = field_accessor_shape(ir, class, property, write)?;
     Some(static_methodref(
         cw,
         ir,
         facade,
-        StaticOwner::Class(class_decl.fq_name),
+        owner,
         &access.name,
         &access.descriptor,
     ))

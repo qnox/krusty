@@ -91,6 +91,7 @@ impl Emitter<'_> {
                 self.emit_spliced_lambda_brace(block, code);
             }
             self.close_scope_locals(code, marked_initializer);
+            self.close_copied_function_inline_frame(block, code);
         }
         if let Some(expression) = emit_after_frame_close {
             self.emit_discarding(expression, code);
@@ -229,6 +230,7 @@ impl Emitter<'_> {
         if !anchored_lambda_result && !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
             self.close_scope_locals(code, false);
+            self.close_copied_function_inline_frame(block, code);
         }
         if normalizes_inline_stack
             && (!delays_stack_normalization || reserved_inline_stack.is_some())
@@ -284,6 +286,39 @@ impl Emitter<'_> {
         };
         code.forget_line();
         self.mark_expression_line(block, line, code);
+    }
+
+    /// A copied inline-function expansion returns to its own line before the enclosing caller
+    /// continues. The body's last instruction is on the callee's line; the caller's next
+    /// instruction may be on another, so this frame's line needs an anchor of its own. A later
+    /// instruction on the same line drops the `nop`.
+    fn close_copied_function_inline_frame(&mut self, block: u32, code: &mut CodeBuilder) {
+        if code.is_dead() || self.ir.inline_copy_provenance(block).is_none() {
+            return;
+        }
+        let IrExpr::Block { stmts, .. } = self.ir.expr(block) else {
+            return;
+        };
+        let opens_frame = stmts.iter().any(|&statement| {
+            matches!(
+                self.ir.debug_local_provenance(statement),
+                Some(IrDebugLocalProvenance::FunctionFrameMarker)
+            )
+        });
+        if !opens_frame {
+            return;
+        }
+        let Some(line) = self
+            .ir
+            .expr_source_lines
+            .get(&block)
+            .copied()
+            .filter(|line| *line != 0)
+        else {
+            return;
+        };
+        self.mark_expression_line(block, line, code);
+        code.nop();
     }
 
     fn opens_spliced_lambda_frame(&self, stmts: &[u32]) -> bool {

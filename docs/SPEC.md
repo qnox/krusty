@@ -4410,9 +4410,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is not a value and allocates no temporary. A lambda spliced into it keeps each named parameter
   in a local of its own and then records a `LambdaFrameMarker` for the callee it was passed to
   (for `suspendCoroutineUninterceptedOrReturn` too, whose selected name the checker keeps on the
-  intrinsic). The JVM emission boundary materializes each boundary as `iconst_0; istore` into a
+  intrinsic).   The JVM emission boundary materializes each boundary as `iconst_0; istore` into a
   slot that is not a semantic value, and the debug-name boundary (`jvm/debug_local_names.rs`)
-  spells them `$i$f$<callee>` and `$i$a$-<callee>-<lambda class>`. The class is the naming walk's
+  spells them `$i$f$<callee>` and `$i$a$-<callee>-<lambda class>`. The inline function's own
+  method opens with that same marker, an instance method included, under the JVM name
+  (`$i$f$pub$main`). The class is the naming walk's
   `class_provenance`, realized by the JVM naming pass (`Kt$f$r$1` for a lambda bound to `val r`,
   `Kt$f$2` in a suspend function whose continuation takes position 1). A default lambda written on
   an `expect` declaration is named from the actual classifier that survives actualization
@@ -4427,7 +4429,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lambda marker gains `$iv` per enclosing expansion while a function
   marker never does, as kotlinc's tables read. A spliced lambda's block ends with kotlinc's return
   to the invocation's line and a `nop`, which the nop cleanup keeps only when nothing else runs on
-  that line. Not yet matched: a multi-parameter lambda's arguments are stored in order rather than
+  that line. A function frame copied into another expansion does the same after its body: it marks
+  the call's line, mapped through the enclosing copy, on a `nop` that stays only when the caller's
+  next instruction is on a different line (`tests/private_inline_property_access_e2e.rs`). Not yet matched: a multi-parameter lambda's arguments are stored in order rather than
   evaluated first and stored in reverse, kotlinc spills the operand stack before a lambda body
   splices into an expression, the inline body's lines are not remapped through a source map, and a
   suspend function that the coroutine transformer does not route records no locals.   Tests:
@@ -4477,7 +4481,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ACC_PRIVATE` member that was not rewritten to a public accessor is never spliced (the member is
   legal only inside the defining class; the fallback real call stays in the class). A private
   function called from a non-private `inline` function is rewritten before that body is published:
-  the inline function itself calls `access$<name>`, so every splice of it does too.
+  the inline function itself calls `access$<name>`, so every splice of it does too. A private
+  property read in that template is the same boundary: the published method calls
+  `access$get<X>$p` / `access$set<X>$p`, and a private `inline` function expanded into the
+  non-private one carries those calls in its own method. A private `inline` function that
+  declares a default does too, even when every caller is non-inline: its `$default` stub is
+  not private, and that stub evaluates the default and re-emits the body. A same-module caller
+  re-emits that copied body, so the copy uses the accessors too. A lambda the caller
+  substituted into the expansion is the caller's code: it keeps the caller's own field access
+  (`tests/feature_coverage_u_e2e.rs`).
   **An `invokedynamic` relocates with its whole bootstrap entry, and only if that entry may move.**
   The instruction names a `BootstrapMethods` entry of its DEFINING class by index, not a pool entry,
   so relocation re-interns the entry — its method handle, its static arguments and its name/type —
@@ -8408,10 +8420,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument keeps the selected `$default` bridge: the accessor is `access$<name>$default` with that
   bridge's descriptor, masks, marker, and receiver, and its body `invokestatic`s `<name>$default`.
   A non-inline caller in the same package still calls the package-private `$default` stub directly.
-  A private `inline` function does not publish this boundary, and a lifted local function keeps
-  its own name. A private `inline` function that a non-private inline function expands does publish
-  the accessor for a private default it calls. Test: `tests/private_inline_access_e2e.rs`. Box
-  `ir/privateSignatures/privateLeakThroughInline.kt`.
+  A private `inline` function expanded only into non-inline callers does not publish this
+  boundary, and a lifted local function keeps its own name. A private `inline` function that a
+  non-private inline function expands does publish the accessor: for a private function or
+  private default it calls, and for a private property it reads or writes
+  (`access$get<X>$p` / `access$set<X>$p`, with the owner receiver on an instance field). That
+  private inline function's own method uses the accessor, because the splicer copies it. A
+  private `inline` function that declares a default publishes the same boundary on its own:
+  the `$default` stub is not private, so the method, the stub's default expressions, and the
+  body the stub re-emits all call the accessor. A same-module non-inline caller re-emits that
+  copied body and uses the same accessors.
+  Tests: `tests/private_inline_access_e2e.rs`, `tests/private_inline_property_access_e2e.rs`.
+  Box `ir/privateSignatures/privateLeakThroughInline.kt`.
 - **A private member-extension accessor reached from another class calls `access$<name>`.** The
   accessor is an instance method of the declaring class (`getItem(Key)` for `val Key.item`).
   A local class inside the owner is a separate class file, so it cannot call that private method.
