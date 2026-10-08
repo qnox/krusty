@@ -1137,6 +1137,8 @@ mod inline_only_extension_property_e2e;
 mod inline_preparation_sibling_annotation_e2e;
 #[path = "inline_reified_property_e2e.rs"]
 mod inline_reified_property_e2e;
+#[path = "inline_repeat_local_e2e.rs"]
+mod inline_repeat_local_e2e;
 #[path = "inline_return_bound_context_e2e.rs"]
 mod inline_return_bound_context_e2e;
 #[path = "inline_splice_e2e.rs"]

@@ -1004,10 +1004,19 @@ impl BodyLowering<'_> {
         Some((statements, receiver, args, normalized.defaults))
     }
 
-    /// Call `visit` for every local this expression reads, including nested operands and a
-    /// preserved inline lambda's captures and body — all run in the caller's frame once the call
-    /// is spliced.
+    /// Call `visit` for every caller local this expression reads, including nested operands and a
+    /// preserved inline lambda's captures.
+    ///
+    /// The lambda's `inline_body` keeps the lambda's own value numbering until the splice rehomes
+    /// it. Those indices are not caller slots: walking them counted a lambda local as a use of the
+    /// operand temporary and kept a copy kotlinc never emits (`repeat(n) { … }` spilling `n`).
     fn for_each_value_read(&self, expression: ExprId, visit: &mut impl FnMut(u32)) {
+        if let IrExpr::Lambda { captures, .. } = self.ir.expr(expression) {
+            for capture in captures.clone() {
+                self.for_each_value_read(capture, visit);
+            }
+            return;
+        }
         if let IrExpr::GetValue(slot) = self.ir.expr(expression) {
             visit(*slot);
         }
@@ -1020,8 +1029,17 @@ impl BodyLowering<'_> {
         }
     }
 
-    /// Whether this expression declares or assigns `slot`.
+    /// Whether this expression declares or assigns caller slot `slot`.
+    ///
+    /// A lambda `inline_body` is skipped for the same reason [`Self::for_each_value_read`] skips
+    /// it: its stores name the lambda's own locals, not the caller's.
     fn writes_value(&self, expression: ExprId, slot: u32) -> bool {
+        if let IrExpr::Lambda { captures, .. } = self.ir.expr(expression) {
+            return captures
+                .clone()
+                .into_iter()
+                .any(|capture| self.writes_value(capture, slot));
+        }
         let writes_here = match self.ir.expr(expression) {
             IrExpr::Variable { index, .. } => *index == slot,
             IrExpr::SetValue { var, .. } => *var == slot,
