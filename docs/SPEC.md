@@ -3116,6 +3116,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and an override with no visibility modifier inherits `protected` on the JVM access flags and in
   `@Metadata`. The same holds for a generic `List<T>` parameter overridden as `MutableList<T>`
   or `List<T>`, and for a raw `Map.Entry` parameter overridden as `MutableMap.MutableEntry`.
+  An invariant argument of that flexible type accepts the read-only face as well, so a Java
+  `Map<List<String>, String>` parameter takes `mapOf(listOf("a") to "b")`. A Kotlin `MutableList`
+  in that invariant position still rejects a read-only `List`.
   Tests: `tests/java_flexible_collection_e2e.rs`,
   `method_access_flags_e2e::java_collection_override_inherits_protected_like_kotlinc`.
 - **A lambda whose input is still an open callee formal is a postponed probe.** A generic call

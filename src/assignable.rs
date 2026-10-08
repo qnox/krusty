@@ -354,7 +354,8 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
             {
                 crate::types::TypeVariance::Out => assignable_inner(cx, oracle, a, p),
                 crate::types::TypeVariance::In => assignable_inner(cx, oracle, p, a),
-                crate::types::TypeVariance::Invariant => same_flexible_type(
+                crate::types::TypeVariance::Invariant => same_flexible_type_with(
+                    oracle,
                     normalized_type_argument(cx, a),
                     normalized_type_argument(cx, p),
                 ),
@@ -414,7 +415,7 @@ fn capture_projection_parameters(
     }
 }
 
-fn same_type_argument(left: Ty, right: Ty) -> bool {
+fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool {
     match (left, right) {
         (Ty::TyParam(a, _), Ty::TyParam(b, _)) => a == b,
         (Ty::Obj(a, aa), Ty::Obj(b, ba)) => {
@@ -423,12 +424,12 @@ fn same_type_argument(left: Ty, right: Ty) -> bool {
                 && aa
                     .iter()
                     .zip(ba)
-                    .all(|(&left, &right)| same_flexible_type(left, right))
+                    .all(|(&left, &right)| same_flexible_type_with(oracle, left, right))
         }
         (Ty::Nullable(a), Ty::Nullable(b))
         | (Ty::PlatformNullable(a), Ty::PlatformNullable(b))
         | (Ty::InProjection(a), Ty::InProjection(b))
-        | (Ty::OutProjection(a), Ty::OutProjection(b)) => same_flexible_type(*a, *b),
+        | (Ty::OutProjection(a), Ty::OutProjection(b)) => same_flexible_type_with(oracle, *a, *b),
         // Two stars in one argument slot are one projection, whatever readable bound each carries:
         // the bound is derived from the declaration, not part of the projection's identity.
         (Ty::StarProjection(_), Ty::StarProjection(_)) => true,
@@ -437,7 +438,7 @@ fn same_type_argument(left: Ty, right: Ty) -> bool {
         // invariant argument the two spellings are one type.
         (Ty::StarProjection(bound), Ty::OutProjection(other))
         | (Ty::OutProjection(other), Ty::StarProjection(bound)) => {
-            same_flexible_type(*bound, *other)
+            same_flexible_type_with(oracle, *bound, *other)
         }
         (Ty::Fun(a), Ty::Fun(b)) => {
             a.context_count == b.context_count
@@ -447,8 +448,8 @@ fn same_type_argument(left: Ty, right: Ty) -> bool {
                 && a.params
                     .iter()
                     .zip(&b.params)
-                    .all(|(&left, &right)| same_flexible_type(left, right))
-                && same_flexible_type(a.ret, b.ret)
+                    .all(|(&left, &right)| same_flexible_type_with(oracle, left, right))
+                && same_flexible_type_with(oracle, a.ret, b.ret)
         }
         _ => left == right,
     }
@@ -457,19 +458,42 @@ fn same_type_argument(left: Ty, right: Ty) -> bool {
 /// Semantic type-shape equality with Java platform nullability treated as its flexible interval.
 /// This is shared by invariant type-argument comparison and declaration override-slot matching;
 /// neither operation may turn the provider's `T!` into a fixed nullable or non-null type.
+/// Callers outside assignability compare nullability only; the hierarchy oracle supplies a
+/// collection's read-only upper face when one is in scope.
 pub(crate) fn same_flexible_type(left: Ty, right: Ty) -> bool {
+    same_flexible_type_with(&NullOracle, left, right)
+}
+
+struct NullOracle;
+
+impl TypeOracle for NullOracle {
+    fn direct_supertypes(&self, _ty: Ty) -> Vec<Ty> {
+        Vec::new()
+    }
+}
+
+fn same_flexible_type_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool {
     match (left, right) {
         (Ty::PlatformNullable(left), Ty::PlatformNullable(right)) => {
-            same_type_argument(*left, *right)
+            flexible_bound_matches(oracle, *left, *right)
+                || flexible_bound_matches(oracle, *right, *left)
         }
-        (Ty::PlatformNullable(inner), right) => {
-            same_type_argument(*inner, right) || same_type_argument(Ty::nullable(*inner), right)
+        (Ty::PlatformNullable(inner), other) | (other, Ty::PlatformNullable(inner)) => {
+            flexible_bound_matches(oracle, *inner, other)
         }
-        (left, Ty::PlatformNullable(inner)) => {
-            same_type_argument(left, *inner) || same_type_argument(left, Ty::nullable(*inner))
-        }
-        _ => same_type_argument(left, right),
+        _ => same_type_argument_with(oracle, left, right),
     }
+}
+
+/// `other` matches `inner` at either bound of its flexible interval: the retained lower bound,
+/// that bound made nullable, or the oracle's read-only collection face of the lower bound.
+fn flexible_bound_matches(oracle: &dyn TypeOracle, inner: Ty, other: Ty) -> bool {
+    let upper = platform_shape_upper_bound(oracle.platform_flexible_upper_bound(inner));
+    same_type_argument_with(oracle, other, inner)
+        || same_type_argument_with(oracle, other, Ty::nullable(inner))
+        || (upper != inner
+            && (same_type_argument_with(oracle, other, upper)
+                || same_type_argument_with(oracle, other, Ty::nullable(upper))))
 }
 
 /// Resolve a generic argument only for invariant identity comparison. A free type parameter becomes
@@ -773,6 +797,23 @@ mod tests {
                 "kotlin/collections/MutableList",
                 &[Ty::platform_nullable(Ty::String)],
             )),
+        ));
+    }
+
+    #[test]
+    fn invariant_argument_accepts_the_read_only_face_of_a_platform_collection() {
+        let read_only = g("kotlin/collections/List", &[Ty::String]);
+        let flexible = Ty::platform_nullable(g(
+            "kotlin/collections/MutableList",
+            &[Ty::platform_nullable(Ty::String)],
+        ));
+        assert!(ok(g("app/Box", &[read_only]), g("app/Box", &[flexible])));
+        assert!(!ok(
+            g("app/Box", &[read_only]),
+            g(
+                "app/Box",
+                &[g("kotlin/collections/MutableList", &[Ty::String])]
+            ),
         ));
     }
 
