@@ -1219,6 +1219,11 @@ impl BodyLowering<'_> {
             let inline =
                 inline_callable_body(nested.ir, &roots, result, body.has_implicit_return());
             let (inline, _) = crate::ir::clone_expression_dag(nested.ir, inline);
+            // The clone is the call site's template. A `Unit` body reuses its source block, so
+            // reshape only the clone: the callable method keeps the block lowering built.
+            if body.has_implicit_return() && result == Ty::Unit {
+                reshape_cloned_unit_inline_block(nested.ir, inline);
+            }
             Some(
                 super::inline_returns::prepare_inline_template(
                     nested.ir,
@@ -1286,6 +1291,14 @@ fn inline_callable_body(
     implicit_return: bool,
 ) -> ExprId {
     if !implicit_return || result == Ty::Unit {
+        // A single body block is the template root. Wrapping it, or copying its statements into
+        // a new block, nests the locals or leaves a second block that declares them beside the
+        // callable and the inlined copy (`repeat(n) { val byte = it; … }`).
+        if implicit_return {
+            if let Some(block) = unit_body_block(ir, roots) {
+                return block;
+            }
+        }
         let value = implicit_return.then(|| ir.add_expr(IrExpr::UnitInstance));
         let block = ir.add_expr(IrExpr::Block {
             stmts: roots.to_vec(),
@@ -1309,6 +1322,61 @@ fn inline_callable_body(
         ir.logical_types.insert(block, ty);
     }
     block
+}
+
+/// The block whose statements are a `Unit` inline body's outermost scope.
+///
+/// A lambda body lowers to that block. A coercion whose value is `UnitInstance` and whose only
+/// statement is another block is not a scope: the template uses the inner block. A block nested
+/// inside the body's own statements stays nested.
+fn unit_body_block(ir: &crate::ir::IrFile, roots: &[ExprId]) -> Option<ExprId> {
+    let &[mut block] = roots else {
+        return None;
+    };
+    loop {
+        let IrExpr::Block { stmts, value } = ir.expr(block) else {
+            return None;
+        };
+        let unit_value = value.is_some_and(|value| matches!(ir.expr(value), IrExpr::UnitInstance));
+        if unit_value {
+            if let &[inner] = stmts.as_slice() {
+                if matches!(ir.expr(inner), IrExpr::Block { .. }) {
+                    block = inner;
+                    continue;
+                }
+            }
+        }
+        return Some(block);
+    }
+}
+
+/// Make a cloned `Unit` inline block the template's outermost scope.
+///
+/// The callable method still owns the block this clone came from. A non-`Unit` block value
+/// becomes a statement, and the template's value is `UnitInstance`, so the locals cover the void
+/// return the bytecode inliner turns into the brace `nop`. The clone is that scope; a second
+/// block repeating the same statements would be an extra non-scope beside the callable.
+fn reshape_cloned_unit_inline_block(ir: &mut crate::ir::IrFile, block: ExprId) {
+    let IrExpr::Block { stmts, value } = ir.expr(block).clone() else {
+        return;
+    };
+    let unit_value = value.is_some_and(|value| matches!(ir.expr(value), IrExpr::UnitInstance));
+    let mut stmts = stmts;
+    let unit = if let Some(value) = value {
+        if unit_value {
+            value
+        } else {
+            stmts.push(value);
+            ir.add_expr(IrExpr::UnitInstance)
+        }
+    } else {
+        ir.add_expr(IrExpr::UnitInstance)
+    };
+    ir.exprs[block as usize] = IrExpr::Block {
+        stmts,
+        value: Some(unit),
+    };
+    ir.logical_types.insert(block, Ty::Unit);
 }
 
 /// Where a declaration parameter sits among the logical parameters.
