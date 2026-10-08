@@ -393,6 +393,10 @@ impl<'a> CommonIrBodySink<'a> {
         visiting.remove(&callable);
 
         let nested = body.inline_nested_declaration_bodies().to_vec();
+        // A template from another source carries that file's line count. The caller's source map
+        // identity range is the caller's own count, so the foreign count is rolled back after the
+        // template, its nested declarations, and its defaults have been lowered.
+        let caller_line_count = (anchor.source != self.source).then_some(self.ir.source_line_count);
         if let Err(error) = self.accept_body(index, body.owner(), body) {
             crate::trace_compiler!(
                 "lower",
@@ -422,6 +426,9 @@ impl<'a> CommonIrBodySink<'a> {
             for default in defaults {
                 self.accept_body(index, default.owner(), default)?;
             }
+        }
+        if let Some(caller_line_count) = caller_line_count {
+            self.ir.source_line_count = caller_line_count;
         }
         self.materialized_inline_callables.insert(callable);
         Ok(())

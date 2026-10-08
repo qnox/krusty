@@ -14,11 +14,17 @@ use std::collections::{HashMap, HashSet};
 use super::{ExprId, IrFile};
 use crate::types::{Ty, TypeName};
 
-/// Source identity for code copied from a same-file inline declaration. Common IR retains the
-/// semantic owner and call line; a target formats the physical source-map path and line range.
+/// Source identity for code copied from a same-module inline declaration. Common IR retains the
+/// exact callable identity, semantic owner, the callee's source file, and the call line; a target
+/// formats the physical source-map path and line range.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct IrInlineCopyProvenance {
+    /// Exact common-IR declaration whose body was copied. A backend uses this identity to obtain
+    /// an already-resolved physical realization; it must not reconstruct one from source names.
+    pub(crate) function: super::FunId,
     pub(crate) owner: Option<TypeName>,
+    /// The source file that declares the inline function.
+    pub(crate) source: crate::fir::SourceFileId,
     pub(crate) call_line: Option<u32>,
 }
 
@@ -42,15 +48,24 @@ impl IrFile {
         self.inline_expansions.copies.insert(copy);
     }
 
-    /// Record the declaration owner whose source body `copy` came from. An already-provenanced
-    /// nested inline copy keeps its inner declaration rather than being relabelled as the outer.
-    pub(crate) fn record_inline_copy_owner(&mut self, copy: ExprId, owner: Option<TypeName>) {
+    /// Record the declaration owner and source file whose body `copy` came from. An
+    /// already-provenanced nested inline copy keeps its inner declaration rather than being
+    /// relabelled as the outer.
+    pub(crate) fn record_inline_copy_owner(
+        &mut self,
+        copy: ExprId,
+        function: super::FunId,
+        owner: Option<TypeName>,
+        source: crate::fir::SourceFileId,
+    ) {
         self.mark_inline_copy(copy);
         self.inline_expansions
             .provenance
             .entry(copy)
             .or_insert(IrInlineCopyProvenance {
+                function,
                 owner,
+                source,
                 call_line: None,
             });
     }

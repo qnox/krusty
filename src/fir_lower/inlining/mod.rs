@@ -274,11 +274,12 @@ impl BodyLowering<'_> {
         let close_line = self.ir.fn_close_lines.get(&function).copied();
         // The name its inline frames are opened under.
         let callee = self.index.callable_name(target)?.to_owned();
+        let callable = self.index.callable(target)?;
         let source_owner = self
             .index
-            .callable(target)
-            .and_then(|callable| self.index.enclosing_classifier(callable.declaration))
+            .enclosing_classifier(callable.declaration)
             .map(|classifier| classifier.classifier);
+        let callee_source = self.index.declaration_anchor(callable.declaration)?.source;
         let caller_source_name = match self.body.debug_name() {
             Some(name) => name.to_owned(),
             None => match self.expansion_enclosure {
@@ -700,7 +701,8 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         copies.sort_by_key(|&(_, copy)| copy);
         for &(source, copy) in &copies {
-            self.ir.record_inline_copy_owner(copy, source_owner);
+            self.ir
+                .record_inline_copy_owner(copy, function, source_owner, callee_source);
             // A compiler temporary's synthetic zero is refreshed after its type specializes.
             // A deferred source local carries explicit declaration provenance instead: its
             // semantic type specializes normally, and each backend selects its physical zero.
@@ -989,7 +991,8 @@ impl BodyLowering<'_> {
         let value = match result_slot {
             None => {
                 let unit = self.ir.add_expr(IrExpr::UnitInstance);
-                self.ir.record_inline_copy_owner(unit, source_owner);
+                self.ir
+                    .record_inline_copy_owner(unit, function, source_owner, callee_source);
                 if let Some(line) = close_line {
                     self.ir.expr_source_lines.insert(unit, line);
                 }

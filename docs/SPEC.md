@@ -4366,6 +4366,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/same_module_inline_frame_markers_e2e.rs` (instructions and local tables against kotlinc,
   and a run), `tests/expect_default_lambda_marker_e2e.rs`, `jvm::debug_local_names::tests`.
 
+- **A same-module inline expansion from another source file is mapped under that file.** The
+  caller's class keeps an identity range of the caller's own line count — one past the last line,
+  the count a file that inlines nothing claims — even when the callee file is longer. Lines copied
+  from the callee are the next file in the map: the callee's source name, and the internal name of
+  its file facade for a top-level function or of its classifier for a member. A same-file expansion
+  stays on file 1 and opens its range after that identity range. Tests:
+  `tests/cross_file_inline_source_map_e2e.rs`.
+
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
   (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated
   argument temps, and a lambda argument is inlined at the call sites of its function-typed parameter
