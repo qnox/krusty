@@ -825,13 +825,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `canInlineArgumentsInPlace` to where the body loads it. Common lowering keeps a dependency
   inline call's operands in locals only where the splice needs them: a root operand used once
   that is a plain read or constant, or the trailing run of such operands whatever their values
-  (unless one suspends), is passed directly, which keeps the source evaluation order. A preserved
+  (unless one suspends), is passed directly, which keeps the source evaluation order. A direct
+  element of a vararg operand folds the same way, so `String.format("%s", "")` stores the format
+  string and then writes `""` into the array. An `@InlineOnly` parameter the body loads only for
+  its null check (`String.Companion.format`'s receiver) is evaluated and popped and takes no local.
+  An ordinary inline function stores that parameter anyway, so the caller's `$iv` local exists
+  (`tests/delegated_properties_array_e2e.rs`). A preserved
   inline lambda's body still uses the lambda's own value numbering, so a local inside that body
   is not a use of the caller's operand temporary. Counting it as one kept a copy of a parameter
   passed beside the lambda (`repeat(n) { … }` stored `n` before the loop). The JVM
   splice then reads a constructor call or `Unit` in place too, so `x.resume(P("OK"))` stores no
-  local (`fir_lower/source_calls.rs`, `jvm/ir_emit/in_place_arguments.rs`). Tests:
-  `tests/inline_arguments_in_place_e2e.rs`, `tests/inline_repeat_local_e2e.rs`.
+  local (`fir_lower/source_calls.rs`, `jvm/ir_emit/in_place_arguments.rs`,
+  `jvm/ir_emit/bytecode_inline_call.rs`). Tests:
+  `tests/inline_arguments_in_place_e2e.rs`, `tests/inline_repeat_local_e2e.rs`,
+  `tests/inline_format_arguments_e2e.rs`.
 - **An inlined lambda's body locals include the brace `nop` and follow its marker.** The lambda's
   inline template is the source block's statements, not a second block wrapped around that block,
   and a `Unit` coercion around the block is not another scope (`fir_lower/local_callables.rs`).

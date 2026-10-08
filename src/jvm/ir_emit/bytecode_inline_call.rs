@@ -89,6 +89,8 @@ enum Supply {
     InPlace,
     /// Read from the caller local the argument lives in.
     CallerLocal,
+    /// Evaluated and popped: the body does not read the parameter after its null check.
+    Unread,
 }
 
 /// The clean failure of an inline callee whose code the MethodNode reader rejects.
@@ -740,6 +742,7 @@ impl Emitter<'_> {
                     binding: match (lambda_bindings.get(&index), supply) {
                         (Some(&lambda), _) => Binding::Lambda(lambda),
                         (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
+                        (None, Supply::Unread) => Binding::Unread,
                         (None, Supply::Stored | Supply::InPlace) => Binding::Temporary,
                     },
                 })
@@ -785,6 +788,28 @@ impl Emitter<'_> {
         let mut leases = Vec::new();
         let mut in_place = HashMap::new();
         for (index, _) in args.iter().enumerate() {
+            // A parameter the body never reads is still evaluated, in order, then dropped. It
+            // takes no temporary: the next parameter keeps the slot kotlinc gives it.
+            if supplies[index] == Supply::Unread {
+                let operand_frame = self.frame.mark();
+                self.mark_synthesized_operand_run(
+                    Some((call_expression, &origins)),
+                    index,
+                    &mut inside_run,
+                    code,
+                );
+                self.emit_call_operand(
+                    call_expression,
+                    leading_non_argument_operands,
+                    args,
+                    physical,
+                    index,
+                    code,
+                );
+                self.frame.rewind_to(operand_frame);
+                super::discard(physical[index], code);
+                continue;
+            }
             let Some(temporary) = temporaries[index] else {
                 continue;
             };
@@ -982,9 +1007,11 @@ impl Emitter<'_> {
 
     /// kotlinc's choice per argument. An `@InlineOnly` callee reads a dispatch receiver or ordinary
     /// argument that is already a local from that local (`genOrGetLocal`), including a local under
-    /// a representation-preserving reference coercion; its extension receiver is always stored.
-    /// When the body loads its parameters first, the stored arguments are instead evaluated in
-    /// place.
+    /// a representation-preserving reference coercion; its extension receiver is stored when the
+    /// body reads it. A parameter that callee loads only for the null check inlining removes is
+    /// evaluated and popped, and takes no slot. An ordinary inline function stores that parameter
+    /// anyway, so the caller's `$iv` local exists. When the body loads its parameters first, the
+    /// stored arguments are instead evaluated in place.
     ///
     /// `None` only when a function-typed local has no provider-published `crossinline`/`noinline`
     /// modifier. An inline parameter, `crossinline` included, reads that local where it already
@@ -1028,6 +1055,35 @@ impl Emitter<'_> {
             if self.reads_continuation_local(argument) {
                 supplies.push(Supply::CallerLocal);
                 continue;
+            }
+            // An `@InlineOnly` body contributes no debug locals. A parameter it loads only for
+            // the null check inlining deletes is evaluated and popped, and the next parameter
+            // keeps the slot kotlinc gives it. An ordinary inline function still stores that
+            // parameter: the caller's table keeps its `$iv` local. An inlined lambda is not a
+            // value the body loads.
+            match self.is_inlined_literal(
+                call_expression,
+                leading_non_argument_operands,
+                index,
+                argument,
+            ) {
+                Ok(false) if target.inline_only => {
+                    let parameter_slot =
+                        physical.iter().take(index).map(|ty| slot_words(*ty)).sum();
+                    let parameter_read = inliner::reads_local(callee, parameter_slot)
+                        || callee.nodes.iter().any(|node| {
+                            matches!(
+                                node,
+                                Node::Insn(Insn::Iinc { slot, .. }) if *slot == parameter_slot
+                            )
+                        });
+                    if !parameter_read {
+                        supplies.push(Supply::Unread);
+                        continue;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => return None,
             }
             let Some(operand) = self.reference_local_operand(argument) else {
                 supplies.push(evaluated);

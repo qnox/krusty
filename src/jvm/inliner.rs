@@ -83,6 +83,8 @@ pub(crate) enum InlineError {
     FixStack(FixStackError),
     /// The body reads an inline lambda parameter as a value rather than invoking it.
     LambdaParameterAccess,
+    /// The body reads a parameter whose null check was its only use.
+    UnreadParameterAccess,
     /// An `invoke` passes a lambda more or fewer arguments than it takes.
     LambdaArity,
     /// An anonymous object's `new` and constructor calls do not pair up.
