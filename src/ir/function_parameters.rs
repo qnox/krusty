@@ -91,6 +91,14 @@ pub enum IrGeneratedParameterRole {
     FunctionInvokeValue {
         ordinal: u32,
     },
+    /// The function value captured by a generated semantic SAM adapter.
+    SamAdapterCapture {
+        ordinal: u32,
+    },
+    /// One logical input forwarded by a generated semantic SAM adapter.
+    SamAdapterValue {
+        ordinal: u32,
+    },
     /// The value a suspend lambda's `create` receives for the lambda's one parameter, ahead of the
     /// completion.
     SuspendLambdaCreateValue,

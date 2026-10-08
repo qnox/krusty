@@ -101,6 +101,9 @@ pub struct FirSamConversion {
     /// The abstract method the conversion implements, as the checker selected it.
     pub method_target: FirSamMethod,
     pub parameters: Box<[ResolvedTy]>,
+    /// Parameters whose specialization came through a contravariant use-site capture. This is
+    /// semantic provenance only; a backend owns any erased adapter representation it requires.
+    pub contravariant_parameters: Box<[bool]>,
     pub result: ResolvedTy,
     pub declared_parameters: Box<[ResolvedTy]>,
     pub declared_result: ResolvedTy,

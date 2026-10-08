@@ -34,6 +34,9 @@ pub struct SamSignature {
     pub(crate) declaration: Option<SamMethodDeclaration>,
     /// Call-site-specialized logical method shape used to type the converted function.
     pub(crate) params: Vec<Ty>,
+    /// Parameters whose specialization came through a contravariant use-site capture. This is a
+    /// source-type fact: targets decide whether and how that capture changes a physical adapter.
+    pub(crate) contravariant_params: Vec<bool>,
     pub(crate) ret: Ty,
     /// Declaration shape used by backend realization. Class parameters remain open here.
     pub(crate) declared_params: Vec<Ty>,
@@ -51,17 +54,26 @@ pub struct SamSignature {
     pub(crate) parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
 }
 
-/// One inherited declaration of an abstract-method candidate: its hierarchy depth, the member, its
-/// parameters and result specialized to the target application, and its declaration identity.
-type Declaration = (
-    u32,
-    LibraryMember,
-    Vec<Ty>,
-    Ty,
-    Option<SamMethodDeclaration>,
-);
+/// One inherited declaration of an abstract-method candidate.
+struct CollectedDeclaration {
+    depth: u32,
+    member: LibraryMember,
+    params: Vec<Ty>,
+    contravariant_params: Vec<bool>,
+    ret: Ty,
+    declaration: Option<SamMethodDeclaration>,
+}
 /// Every declaration of one override slot, keyed by its name and specialized parameters.
-type OverrideSlot = ((String, Vec<Ty>), Vec<Declaration>);
+type OverrideSlot = ((String, Vec<Ty>), Vec<CollectedDeclaration>);
+
+/// The logical specialization of one classifier application and its capture-read view. The latter
+/// is used only to retain which method parameters came through `in`; it is never published as the
+/// callable's parameter type.
+struct SamCaptureSpecialization<'a> {
+    logical: &'a GSigBinds,
+    capture_read: &'a GSigBinds,
+    occurrence_bounds: &'a std::collections::HashMap<String, Ty>,
+}
 
 pub(crate) fn semantic_sam_signature(
     source: &dyn SymbolSource,
@@ -83,8 +95,14 @@ pub(crate) fn semantic_sam_signature(
         let Some(classifier) = source.classifier(owner) else {
             continue;
         };
-        let mut bindings = classifier_bindings(&classifier, applied);
-        for argument in bindings.values_mut() {
+        let mut logical_bindings = classifier_bindings(&classifier, applied);
+        // `in String` checks the converted function at `String`, while its capture-read view is
+        // `Any?`. Keep that distinction only as provenance; `out` and `*` have no such divergence.
+        let capture_read_bindings = logical_bindings
+            .iter()
+            .map(|(name, argument)| (name.clone(), contravariant_capture_read(*argument)))
+            .collect::<GSigBinds>();
+        for argument in logical_bindings.values_mut() {
             // A SAM method receives/returns values, never use-site projection syntax. Composed
             // variance can legitimately leave more than one capture shell here: selecting
             // `Consumer<in T>` through `Holder<out X>` produces `in (out X)`. Consume the complete
@@ -95,6 +113,11 @@ pub(crate) fn semantic_sam_signature(
             }
         }
         let occurrence_bounds = classifier_type_parameter_bounds(&classifier);
+        let specialization = SamCaptureSpecialization {
+            logical: &logical_bindings,
+            capture_read: &capture_read_bindings,
+            occurrence_bounds: &occurrence_bounds,
+        };
         // A function-type classifier (`FunctionN`, `SuspendFunctionN`) declares only the function
         // type's own `invoke`, whichever provider published it: the same normalized method as the
         // `invoke` a functional supertype contributes below.
@@ -109,8 +132,7 @@ pub(crate) fn semantic_sam_signature(
                 },
                 depth,
                 depth == 0 && classifier.is_kotlin,
-                &bindings,
-                &occurrence_bounds,
+                &specialization,
                 &mut declarations,
             );
         }
@@ -135,8 +157,7 @@ pub(crate) fn semantic_sam_signature(
                 Some(SamMethodDeclaration::FunctionTypeInvoke),
                 depth,
                 false,
-                &bindings,
-                &occurrence_bounds,
+                &specialization,
                 &mut declarations,
             );
         }
@@ -144,36 +165,61 @@ pub(crate) fn semantic_sam_signature(
 
     let mut abstract_method = None;
     for (_, declarations) in declarations {
-        let nearest = declarations.iter().map(|(depth, ..)| *depth).min()?;
+        let nearest = declarations
+            .iter()
+            .map(|declaration| declaration.depth)
+            .min()?;
         let mut overridden_results = Vec::new();
-        for (_, member, ..) in declarations.iter().filter(|(depth, ..)| *depth > nearest) {
-            let result = declared_result(member);
+        for declaration in declarations
+            .iter()
+            .filter(|declaration| declaration.depth > nearest)
+        {
+            let result = declared_result(&declaration.member);
             if !overridden_results.contains(&result) {
                 overridden_results.push(result);
             }
         }
         let nearest = declarations
             .into_iter()
-            .filter(|(depth, ..)| *depth == nearest)
+            .filter(|declaration| declaration.depth == nearest)
             .collect::<Vec<_>>();
-        if nearest.iter().any(|(_, member, ..)| !member.is_abstract()) {
+        if nearest
+            .iter()
+            .any(|declaration| !declaration.member.is_abstract())
+        {
             continue;
         }
-        let (_, member, params, ret, declaration) = nearest.into_iter().next()?;
+        let CollectedDeclaration {
+            member,
+            params,
+            contravariant_params,
+            ret,
+            declaration,
+            ..
+        } = nearest.into_iter().next()?;
         if abstract_method
-            .replace((member, params, ret, declaration, overridden_results))
+            .replace((
+                member,
+                params,
+                contravariant_params,
+                ret,
+                declaration,
+                overridden_results,
+            ))
             .is_some()
         {
             return None;
         }
     }
-    let (sam, params, ret, declaration, overridden_results) = abstract_method?;
+    let (sam, params, contravariant_params, ret, declaration, overridden_results) =
+        abstract_method?;
     let parameter_identities = sam_parameter_identities(&sam)?;
     Some(SamSignature {
         internal,
         method: sam.name.clone(),
         declaration,
         params,
+        contravariant_params,
         ret,
         declared_params: sam.params.clone(),
         declared_ret: sam.ret,
@@ -226,8 +272,7 @@ fn collect_member(
     declaration: Option<SamMethodDeclaration>,
     depth: u32,
     retain_direct_kotlin_object_method: bool,
-    classifier_bindings: &GSigBinds,
-    classifier_occurrence_bounds: &std::collections::HashMap<String, Ty>,
+    specialization: &SamCaptureSpecialization<'_>,
     declarations: &mut Vec<OverrideSlot>,
 ) {
     // A public `Any`-shaped member inherited by the interface does not create a SAM method.
@@ -240,11 +285,13 @@ fn collect_member(
     {
         return;
     }
-    let mut bindings = classifier_bindings.clone();
-    let mut occurrence_bounds = classifier_occurrence_bounds.clone();
+    let mut logical = specialization.logical.clone();
+    let mut capture_read = specialization.capture_read.clone();
+    let mut occurrence_bounds = specialization.occurrence_bounds.clone();
     if let Some(signature) = &member.generic_sig {
         for formal in &signature.formals {
-            bindings.remove(formal);
+            logical.remove(formal);
+            capture_read.remove(formal);
             occurrence_bounds.remove(formal);
         }
     }
@@ -255,11 +302,20 @@ fn collect_member(
             signature.params.as_slice()
         });
     let declared_ret = declared_result(member);
-    let params = declared_params
+    let substitute = |bindings: &GSigBinds| {
+        declared_params
+            .iter()
+            .map(|parameter| sam_substitute(*parameter, &occurrence_bounds, bindings))
+            .collect::<Vec<_>>()
+    };
+    let params = substitute(&logical);
+    let capture_read_params = substitute(&capture_read);
+    let contravariant_params = params
         .iter()
-        .map(|parameter| sam_substitute(*parameter, &occurrence_bounds, &bindings))
-        .collect::<Vec<_>>();
-    let ret = sam_substitute(declared_ret, &occurrence_bounds, &bindings);
+        .zip(&capture_read_params)
+        .map(|(&logical, &read)| !crate::assignable::same_flexible_type(logical, read))
+        .collect();
+    let ret = sam_substitute(declared_ret, &occurrence_bounds, &logical);
     let slot = declarations.iter_mut().find(|((name, inputs), _)| {
         name == &member.name
             && inputs.len() == params.len()
@@ -268,14 +324,32 @@ fn collect_member(
                 .zip(&params)
                 .all(|(&left, &right)| crate::assignable::same_flexible_type(left, right))
     });
+    let collected = CollectedDeclaration {
+        depth,
+        member: member.clone(),
+        params: params.clone(),
+        contravariant_params,
+        ret,
+        declaration,
+    };
     if let Some((_, declarations)) = slot {
-        declarations.push((depth, member.clone(), params, ret, declaration));
+        declarations.push(collected);
     } else {
-        declarations.push((
-            (member.name.clone(), params.clone()),
-            vec![(depth, member.clone(), params, ret, declaration)],
-        ));
+        declarations.push(((member.name.clone(), params), vec![collected]));
     }
+}
+
+/// The read view of a use-site capture, used only to identify an `in`-origin parameter. It is not
+/// the interface method's callable input: `Sink<in String>` still accepts `String`.
+fn contravariant_capture_read(mut argument: Ty) -> Ty {
+    while argument.projection_inner().is_some() {
+        let read = argument.projection_read_ty();
+        if read == argument {
+            break;
+        }
+        argument = read;
+    }
+    argument
 }
 
 fn sam_substitute(

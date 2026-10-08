@@ -1690,7 +1690,7 @@ impl super::Emitter<'_> {
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
                 if lambda_mode == LambdaMode::Class {
-                    let (internal, identity) = lambda_class_names::class_name(
+                    let (internal, identity) = lambda_class_names::emitted_class_name(
                         self.ir,
                         *impl_fn,
                         &impl_name,
@@ -1759,37 +1759,43 @@ impl super::Emitter<'_> {
                     }
                     return;
                 }
-                // kotlinc interns the BOOTSTRAP ARGUMENTS first (erased SAM MethodType, the impl
-                // MethodHandle with its `$lambda$N` refs, the instantiated MethodType), and the
-                // LambdaMetafactory handle only after them — pool order follows that visit.
-                let sam_mt = self.cw.method_type(&sam_desc);
-                let impl_ref = if impl_owner_is_interface {
-                    self.cw
-                        .interface_methodref(&impl_owner, &impl_name, &impl_desc)
-                } else {
-                    self.cw.methodref(&impl_owner, &impl_name, &impl_desc)
-                };
-                let impl_mh = self.cw.method_handle_ref(6, impl_ref);
-                let inst_mt = self.cw.method_type(&inst_desc);
-                let meta = self.cw.method_handle_static(
-                    "java/lang/invoke/LambdaMetafactory",
-                    "metafactory",
-                    LMF_METAFACTORY_DESC,
-                );
-                let bsm = self.cw.add_bootstrap(meta, vec![sam_mt, impl_mh, inst_mt]);
                 // The `invokedynamic` takes the captured values and yields the interface instance.
+                // Emit those values first: a capture can itself be a lambda, and kotlinc registers
+                // that nested call site's bootstrap before the outer call site it feeds. At the
+                // instruction boundary, bootstrap arguments precede the LambdaMetafactory handle
+                // in the pool, matching kotlinc's visit order.
                 let cap_descs: String = cap_tys.iter().map(|t| type_descriptor(*t)).collect();
-                let indy =
-                    self.cw
-                        .invoke_dynamic(bsm, &sam_method, &format!("({cap_descs})L{iface};"));
+                let indy_desc = format!("({cap_descs})L{iface};");
                 let cap_words: i32 = cap_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 self.emit_indy_lambda(
                     code,
-                    indy,
                     cap_words,
                     captures,
                     cap_tys,
                     sam.as_ref().is_some_and(|target| target.nullable),
+                    |emitter| {
+                        let sam_mt = emitter.cw.method_type(&sam_desc);
+                        let impl_ref = if impl_owner_is_interface {
+                            emitter
+                                .cw
+                                .interface_methodref(&impl_owner, &impl_name, &impl_desc)
+                        } else {
+                            emitter.cw.methodref(&impl_owner, &impl_name, &impl_desc)
+                        };
+                        let impl_mh = emitter.cw.method_handle_ref(6, impl_ref);
+                        let inst_mt = emitter.cw.method_type(&inst_desc);
+                        let meta = emitter.cw.method_handle_static(
+                            "java/lang/invoke/LambdaMetafactory",
+                            "metafactory",
+                            LMF_METAFACTORY_DESC,
+                        );
+                        let bootstrap = emitter
+                            .cw
+                            .add_bootstrap(meta, vec![sam_mt, impl_mh, inst_mt]);
+                        emitter
+                            .cw
+                            .invoke_dynamic(bootstrap, &sam_method, &indy_desc)
+                    },
                 );
             }
             IrExpr::UnitInstance => {

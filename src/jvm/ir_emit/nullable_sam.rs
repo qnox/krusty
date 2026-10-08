@@ -72,11 +72,11 @@ impl<'a> Emitter<'a> {
     pub(super) fn emit_indy_lambda(
         &mut self,
         code: &mut CodeBuilder,
-        indy: u16,
         cap_words: i32,
         captures: &[u32],
         cap_tys: &[Ty],
         nullable: bool,
+        site: impl FnOnce(&mut Self) -> u16,
     ) {
         if nullable {
             let [function] = captures else {
@@ -88,6 +88,7 @@ impl<'a> Emitter<'a> {
             let done = code.new_label();
             code.dup();
             code.ifnull(null_case);
+            let indy = site(self);
             code.invokedynamic(indy, cap_words, 1);
             code.goto(done);
             code.bind(null_case);
@@ -97,6 +98,7 @@ impl<'a> Emitter<'a> {
             return;
         }
         self.emit_lambda_captures(captures, cap_tys, code);
+        let indy = site(self);
         code.invokedynamic(indy, cap_words, 1);
     }
 

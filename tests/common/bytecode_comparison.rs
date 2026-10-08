@@ -1130,6 +1130,21 @@ fn assert_classes_identical_to_kotlinc_full(
 /// of the enclosing assertion, but this report names the header, member, code/debug, and metadata
 /// difference that must be corrected instead of reducing the failure to a class name.
 pub fn exact_class_difference(class: &str, reference: &[u8], ours: &[u8]) -> String {
+    let first_raw_difference = reference
+        .iter()
+        .zip(ours)
+        .position(|(reference, ours)| reference != ours)
+        .map(|offset| {
+            let start = offset.saturating_sub(8);
+            let reference_end = (offset + 9).min(reference.len());
+            let ours_end = (offset + 9).min(ours.len());
+            format!(
+                "offset {offset}: kotlinc {:02x?}, krusty {:02x?}",
+                &reference[start..reference_end],
+                &ours[start..ours_end]
+            )
+        })
+        .unwrap_or_else(|| format!("shared prefix of {} bytes", reference.len().min(ours.len())));
     let header = |bytes: &[u8]| {
         let info = krusty::jvm::classreader::parse_class(bytes).expect("a readable class file");
         (
@@ -1143,7 +1158,7 @@ pub fn exact_class_difference(class: &str, reference: &[u8], ours: &[u8]) -> Str
     let reference_disassembly = disassemble(class, reference);
     let ours_disassembly = disassemble(class, ours);
     format!(
-        "{class} differs (kotlinc {} bytes, krusty {} bytes)\n\
+        "{class} differs (kotlinc {} bytes, krusty {} bytes; {first_raw_difference})\n\
          headers:\n  kotlinc: {:?}\n  krusty:  {:?}\n\
          member tables:\n  kotlinc: {:#?}\n  krusty:  {:#?}\n\
          members/code/debug:\n--- kotlinc ---\n{}\n--- krusty ---\n{}\n\
