@@ -36,6 +36,19 @@ pub(super) fn value_class_metadata_shape_admitted(ir: &IrFile, c: &crate::ir::Ir
         && !ir.has_value_param_ctor(&c.fq_name())
 }
 
+/// `Function.flags` for one synthesized `componentN`: `COMPONENT_FN_FLAGS` with the visibility
+/// bits swapped to the constructor property's visibility. An internal component stays operator,
+/// final, and synthesized, and records internal (0) rather than public (3).
+fn data_component_fn_flags(ir: &IrFile, c: &crate::ir::IrClass, ordinal: u32) -> Option<u64> {
+    use crate::metadata::class_builder::COMPONENT_FN_FLAGS;
+    let fid = ir.data_class_member(c.fq_name_id(), IrDataClassMemberRole::Component(ordinal))?;
+    let visibility = declaration_visibility_bits(ir.method_visibility(fid));
+    Some(
+        (COMPONENT_FN_FLAGS & !crate::metadata::property_flags::VISIBILITY_MASK)
+            | (visibility << 1),
+    )
+}
+
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Covers a class with a primary constructor of `val`/`var` properties plus real declared
 /// members (emitted with derived [`function_flags`]), and the data/value-class synthesized sets. Returns
@@ -68,8 +81,8 @@ pub(super) fn build_class_metadata_with_facts(
     run: &EmitRun,
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
-        build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, EQUALS_FN_FLAGS,
-        FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS, SEALED_CTOR_FLAGS,
+        build_class, ClassTail, FnMeta, PropMeta, EQUALS_FN_FLAGS, FN_IS_SUSPEND,
+        HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS, SEALED_CTOR_FLAGS,
     };
     if is_coroutine_state_machine(c) {
         return Some(KotlinMetadata {
@@ -919,7 +932,7 @@ pub(super) fn build_class_metadata_with_facts(
                 type_params: Vec::new(),
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
-                flags: COMPONENT_FN_FLAGS,
+                flags: data_component_fn_flags(ir, c, i as u32)?,
                 has_function_typed_parameter: false,
                 params_have_defaults: false,
                 receiver: None,

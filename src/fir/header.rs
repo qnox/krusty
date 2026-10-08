@@ -1264,12 +1264,12 @@ fn extract_file_stub_inventory(
         // declaration or body locator: their signatures come from the resolved primary-constructor
         // properties and their common-IR bodies are synthesized after function predeclaration.
         if class.is_data && !class.is_singleton() {
-            let data_property_count = class
+            for (ordinal, property) in class
                 .props
                 .iter()
                 .filter(|property| property.is_property)
-                .count();
-            for ordinal in 0..data_property_count {
+                .enumerate()
+            {
                 let sibling = u32::MAX
                     .checked_sub(ordinal as u32)
                     .expect("too many generated data-class components");
@@ -1284,7 +1284,7 @@ fn extract_file_stub_inventory(
                     DeclarationFlags::default()
                         .with(DeclarationFlags::OPERATOR, true)
                         .with(DeclarationFlags::FINAL, true),
-                    Visibility::Public,
+                    property.visibility,
                 ));
             }
             out.push(generated_function_stub(
