@@ -2528,7 +2528,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   guard `resolve(...)` when the target parameter rejects null, while `class Box<T>(value: T)` does
   not), a `return` / expression body, an assignment to a non-null target, and the explicit receiver of a
   Kotlin extension call whose DECLARED receiver rejects null (`getenv(..).trim()`; not a `T.ext()`
-  whose `T` admits null, and not a safe call). A MEMBER extension's explicit receiver is the same
+  whose `T` admits null, and not a safe call). A default argument is that parameter's value, so the
+  same rule guards it inside the `$default` method: `fun defaulted(value: String = System.getenv(...))`
+  checks `getenv(...)`, and `fun pathDefault(root: Path = Paths.get("/"))` checks `get(...)`. A
+  nullable parameter (`String?`) and a type parameter whose upper bound admits null stay unguarded.
+  A MEMBER extension's explicit receiver is the same
   receiver argument under the same exclusions: a class's or a companion's `String.shout()` invoked
   on `System.getProperty(name)` checks `getProperty(...)`, measured against kotlinc 2.4.20
   (`renamed_builtin_property_null_check_e2e`). kotlinc does NOT guard: an
@@ -2566,9 +2570,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   only, so a narrowing it
   cannot name stays unguarded rather than guarded under an invented name.
   Tests: `tests/platform_call_assertions_e2e.rs` (per-position `checkNotNullExpressionValue` call-site
-  and message differential vs kotlinc, every guarded position run for its exception and message, the
-  top-level `<clinit>` repro, and constructor delegation, including a generic parameter that admits
-  null).
+  and message differential vs kotlinc, every guarded position run for its exception and message,
+  including a default argument, the top-level `<clinit>` repro, and constructor delegation, including
+  a generic parameter that admits null).
 
   Measured over the 2.4.10 box corpus (per-file class-byte hashes with and without the guard, 3355
   files krusty compiles): 46 files change, none flips compile status, and 38 of them place the same
