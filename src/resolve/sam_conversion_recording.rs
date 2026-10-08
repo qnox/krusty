@@ -496,6 +496,7 @@ mod tests {
             method: "apply".into(),
             declaration: Some(crate::symbol_resolver::SamMethodDeclaration::FunctionTypeInvoke),
             params: Vec::new(),
+            adapter_params: Vec::new(),
             ret: Ty::Unit,
             declared_params: Vec::new(),
             declared_ret: Ty::Unit,

@@ -4942,6 +4942,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   method returning nothing (`void`); one whose method returns a type parameter instantiated with
   `Unit` keeps returning the `Unit` value. Tests: `tests/lambda_result_types_e2e.rs`.
 
+- **An `in`-projected SAM adapts a Kotlin function.** `Consumer<in String>`, Java
+  `Consumer<? super String>`, and `Stream.forEach` (`Consumer<? super T>`) type a lambda as
+  `(String) -> Unit`, implemented as a method that returns `kotlin.Unit`. The interface method is
+  a following lambda with a raw `Function1` parameter and no generic signature:
+  `void (Function1, Object)`, which forwards `invoke` and does not cast the argument back to
+  `String`. A function value passed to the same target gets only that adapter. An exact
+  `Consumer<String>`, an `out` return (`Supplier<out String>`), and a star (`Consumer<*>`) stay
+  one direct SAM method. `in Any?` is already nullable `Any`, so it stays direct; `in Any` is
+  narrower and is adapted. A Kotlin `fun interface` with an `in` argument uses the same function
+  plus the file's SAM wrapper, whose method takes `Object`. Tests:
+  `tests/contravariant_sam_adapter_e2e.rs`.
+
 - **Method type parameter that shadows its class's (`class Box<T> { fun <T> m(x: T): T }`).** The
   classpath member-return substitution (`JvmLibraries::member_return`) binds a generic class's formal
   type parameters to the receiver's type arguments (`Box<String>` → `{T: String}`) and substitutes a

@@ -1614,6 +1614,7 @@ impl BodyFirChecker<'_> {
             method: sam.method.as_str().into(),
             method_target,
             parameters: resolved_all(&sam.params)?,
+            adapter_parameters: resolved_all(&sam.adapter_params)?,
             result: resolved(sam.ret)?,
             declared_parameters: resolved_all(&sam.declared_params)?,
             declared_result: resolved(sam.declared_ret)?,

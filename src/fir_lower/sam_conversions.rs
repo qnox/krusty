@@ -43,9 +43,17 @@ impl BodyLowering<'_> {
             conversion.has_receiver,
             captured_suspend,
         );
+        // An `in` capture's adapter is called with the widened type (`Any?`). The captured
+        // function still accepts the lower bound, so `invoke` must not check-cast back to it.
+        let adapter_parameters = conversion
+            .adapter_parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>();
+        let void_method =
+            !conversion.suspend && conversion.declared_result.get() == crate::types::Ty::Unit;
         let callee = self.ir.add_expr(IrExpr::GetValue(0));
-        let arguments = conversion
-            .parameters
+        let arguments = adapter_parameters
             .iter()
             .enumerate()
             .map(|(parameter, _)| {
@@ -57,12 +65,14 @@ impl BodyLowering<'_> {
         let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
             func: callee,
             args: arguments,
-            params: conversion
-                .parameters
-                .iter()
-                .map(|parameter| parameter.get())
-                .collect(),
-            ret: conversion.result.get(),
+            params: adapter_parameters.clone(),
+            // A void interface method discards `invoke`'s erased `Object`. Naming that result
+            // `Unit` would pop it twice: once as the function result and again as the statement.
+            ret: if void_method {
+                Ty::nullable(Ty::obj("kotlin/Any"))
+            } else {
+                conversion.result.get()
+            },
         });
         // The captured suspend value takes this adapter's continuation as its last argument.
         // A non-suspend value adapted to a suspend method does not: that call stays `FunctionN`.
@@ -71,19 +81,22 @@ impl BodyLowering<'_> {
                 .suspend_calls
                 .insert(invoke, conversion.result.get());
         }
-        let body = self.callable_reference_adapter_body(
-            invoke,
-            conversion.result.get(),
-            conversion.result.get(),
-        );
-        let mut parameters = Vec::with_capacity(conversion.parameters.len() + 1);
+        let body = if void_method {
+            let done = self.ir.add_expr(IrExpr::Return(None));
+            self.ir.add_expr(IrExpr::Block {
+                stmts: vec![invoke, done],
+                value: None,
+            })
+        } else {
+            self.callable_reference_adapter_body(
+                invoke,
+                conversion.result.get(),
+                conversion.result.get(),
+            )
+        };
+        let mut parameters = Vec::with_capacity(adapter_parameters.len() + 1);
         parameters.push(function_type);
-        parameters.extend(
-            conversion
-                .parameters
-                .iter()
-                .map(|parameter| parameter.get()),
-        );
+        parameters.extend(adapter_parameters);
         let implementation = self.ir.add_fun(IrFunction {
             name: format!(
                 "$fir_sam_delegate_{}_{}",
@@ -91,12 +104,17 @@ impl BodyLowering<'_> {
                 self.ir.functions.len()
             ),
             params: parameters,
-            ret: crate::types::stored_value_ty(conversion.result.get()),
+            ret: if void_method {
+                crate::types::Ty::Unit
+            } else {
+                crate::types::stored_value_ty(conversion.result.get())
+            },
             body: Some(body),
             is_static: true,
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
+        self.record_sam_adapter_origin(implementation);
         self.ir
             .set_method_visibility(implementation, crate::types::Visibility::Private);
         self.ir.lambda_own_params_from.insert(implementation, 1);
@@ -154,4 +172,70 @@ impl BodyLowering<'_> {
             }),
         )
     }
+
+    /// Name the adapter as the next `$lambda$N` of the enclosing callable. kotlinc counts it in
+    /// the same sequence as a source lambda written at the conversion.
+    fn record_sam_adapter_origin(&mut self, function: crate::ir::FunId) {
+        let implementation_name = self.body.debug_name().unwrap_or_default().to_owned();
+        let lexical_owner = self.sam_adapter_lexical_owner();
+        let next = |select: &dyn Fn(&crate::ir::IrLambdaOrigin) -> Option<u32>| {
+            self.ir
+                .lambda_origins
+                .values()
+                .filter_map(select)
+                .max()
+                .map_or(0, |ordinal| ordinal.saturating_add(1))
+        };
+        let identity = next(&|origin| Some(origin.identity));
+        let implementation_ordinal = next(&|origin| {
+            (origin.lexical_owner == lexical_owner
+                && origin.implementation_name == implementation_name)
+                .then_some(origin.implementation_ordinal)
+        });
+        self.ir.lambda_origins.insert(
+            function,
+            crate::ir::IrLambdaOrigin {
+                identity,
+                lexical_owner,
+                enclosing_name: implementation_name.clone(),
+                binding_name: None,
+                ordinal: implementation_ordinal,
+                implementation_name,
+                implementation_ordinal,
+                receiver_parameter: None,
+                label: None,
+                // kotlinc emits this adapter as a lambda method, which carries no generic
+                // `Signature`. A literal origin is that method. It records no value-parameter
+                // identities, so the null checks a source lambda writes for its own parameters
+                // are not applied to arguments this method only forwards.
+                form: crate::ir::IrLambdaForm::Literal,
+                explicit_suspend: false,
+                class_provenance: None,
+            },
+        );
+    }
+
+    fn sam_adapter_lexical_owner(&self) -> Option<crate::types::TypeName> {
+        let owner = self.body.lexical_class_owner()?;
+        let class = self
+            .ir
+            .checked_classifier_classes
+            .get(&owner)
+            .or_else(|| self.ir.checked_enum_entry_classes.get(&owner))
+            .copied()?;
+        Some(self.ir.classes[class as usize].fq_name_id())
+    }
+}
+
+/// Whether the interface method's parameters are wider than the function the conversion captures.
+///
+/// That happens for an `in` / `? super` capture whose lower bound is narrower than nullable `Any`.
+/// The lambda is then a Kotlin function, and this adapter implements the interface.
+pub(super) fn sam_adapts_projected_parameters(conversion: &FirSamConversion) -> bool {
+    conversion.parameters.len() != conversion.adapter_parameters.len()
+        || conversion
+            .parameters
+            .iter()
+            .zip(conversion.adapter_parameters.iter())
+            .any(|(logical, adapter)| logical.get() != adapter.get())
 }
