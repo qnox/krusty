@@ -20,6 +20,7 @@ mod coroutine_transform;
 mod debug_metadata;
 mod descriptor_mentions;
 mod enclosing_method;
+mod exception_tables;
 mod inline_call_stacks;
 mod inner_classes;
 mod late_fields;
@@ -2003,14 +2004,6 @@ pub struct Label {
 
 static NEXT_CODE_BUILDER_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Copy)]
-enum LocalEntryPlacement {
-    Plain,
-    FrameMarker(u64),
-    FrameBeforeMarker(u64),
-    FrameLocal(u64),
-}
-
 #[derive(Clone)]
 pub struct CodeBuilder {
     id: u64,
@@ -2040,7 +2033,7 @@ pub struct CodeBuilder {
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
     /// Semantic inline-frame placement parallel to `local_entries`. This never reaches the class
     /// file; it makes table order independent of which lexical scope happens to close first.
-    local_entry_placements: Vec<LocalEntryPlacement>,
+    local_entry_placements: Vec<local_variables::LocalEntryPlacement>,
     /// Offset of the implicit void return appended by declared-function emission. Ordinary
     /// `ret_void` calls intentionally do not populate it.
     implicit_void_return_pc: Option<u16>,
@@ -2114,12 +2107,6 @@ impl CodeBuilder {
         }
     }
 
-    /// The method expanded inline bytecode, so [`Self::resolved_exceptions`] sorts the table the
-    /// way kotlinc's inliner does.
-    pub(crate) fn note_inlined_bytecode(&mut self) {
-        self.inlined_bytecode = true;
-    }
-
     /// Whether `label` was bound inside a dropped dead region (see `dead_bound`).
     fn is_dead_bound(&self, label: u32) -> bool {
         self.dead_bound
@@ -2147,49 +2134,12 @@ impl CodeBuilder {
     ) {
         self.local_entries
             .push((start, length, slot, name.to_string(), desc.to_string()));
-        self.local_entry_placements.push(LocalEntryPlacement::Plain);
+        self.local_entry_placements
+            .push(local_variables::LocalEntryPlacement::Plain);
     }
 
     pub fn local_entries(&self) -> &[(u16, Option<u16>, u16, String, String)] {
         &self.local_entries
-    }
-
-    /// Register a `try` range `[start, end)` guarded by a handler at `handler`, catching `catch_type`
-    /// (a constant-pool class index, or 0 for catch-all).
-    pub fn add_exception(&mut self, start: Label, end: Label, handler: Label, catch_type: u16) {
-        self.exceptions.push((start, end, handler, catch_type));
-    }
-
-    /// Resolve the exception table to byte offsets (call after all labels are bound, e.g. in `link`).
-    /// Drops degenerate ranges where `start >= end` (an empty protected region — e.g. an empty `try`
-    /// body — protects nothing, and an empty range is an illegal `Code` exception-table entry).
-    pub fn resolved_exceptions(&self) -> Vec<(u16, u16, u16, u16)> {
-        let mut resolved = self
-            .exceptions
-            .iter()
-            // An UNBOUND label means the region it delimits was dropped as dead code (`bind_at` is a
-            // no-op while dead), so the entry describes bytes that do not exist. Without this the
-            // `usize::MAX as u16` truncation below would fabricate offset 65535.
-            .filter(|&&(s, e, h, _)| {
-                [s, e, h]
-                    .iter()
-                    .all(|&label| self.labels[self.label_index(label)] != usize::MAX)
-            })
-            .map(|&(s, e, h, t)| {
-                (
-                    self.labels[self.label_index(s)] as u16,
-                    self.labels[self.label_index(e)] as u16,
-                    self.labels[self.label_index(h)] as u16,
-                    t,
-                )
-            })
-            .filter(|&(start, end, _, _)| start < end)
-            .collect::<Vec<_>>();
-        // `(start, end, handler, type)`. kotlinc's inliner sorts by handler index, then start.
-        if self.inlined_bytecode {
-            resolved.sort_by(|left, right| left.2.cmp(&right.2).then(left.0.cmp(&right.0)));
-        }
-        resolved
     }
 
     /// The current (linearly tracked) operand-stack height.

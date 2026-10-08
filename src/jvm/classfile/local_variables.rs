@@ -1,6 +1,14 @@
 //! A method's `LocalVariableTable` strings: when its names and descriptors intern.
 
-use super::{ClassWriter, CodeBuilder, LocalEntryPlacement, LvtEntry};
+use super::{ClassWriter, CodeBuilder, LvtEntry};
+
+#[derive(Clone, Copy)]
+pub(super) enum LocalEntryPlacement {
+    Plain,
+    FrameMarker(u64),
+    FrameBeforeMarker(u64),
+    FrameLocal(u64),
+}
 
 /// Exclusive end of a recorded local range. An open-ended range runs through the method.
 fn range_end(start: u16, length: Option<u16>) -> u32 {

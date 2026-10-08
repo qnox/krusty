@@ -15914,13 +15914,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `classfile::inline_call_stacks::tests::a_method_the_passes_cannot_normalize_fails_the_class`.
   Corpus: a private-corpus module.
 
-- **An inlined generic `use` keeps the erased receiver and materializes a generic `Unit`.**
-  `inline fun <T : AutoCloseable?, R> T.use(block: (T) -> R): R` stores the extension receiver as
-  the erased bound (`AutoCloseable`). An unnamed safe-call temporary whose type is still that
-  non-reified parameter stays the parameter when the argument is a reference, so `this?.close()`
-  is `aload; dup; ifnull; invokeinterface close; goto; pop` on the bound. A named lambda parameter
-  (`r: T`) takes the type argument. A primitive substitution and a reified parameter still
-  specialize. When `R` is `Unit`, the return is a reference at the generic signature, so the
+- **An inlined generic close keeps the erased receiver and materializes a generic `Unit`.**
+  `inline fun <T : Gate?, R> T.consumeAndClose(block: (T) -> R): R` stores the extension receiver
+  as the erased `Gate` bound. Common IR still specializes every copied declaration semantically;
+  it retains the declaration type as provenance for unnamed, non-reified generic temporaries. The
+  JVM uses that provenance to give the safe-call temporary its erased-bound slot, so
+  `this?.close()` is `aload; dup; ifnull; invokeinterface close; goto; pop`. A named lambda
+  parameter (`r: T`) takes the type argument. Primitive substitutions and reified parameters stay
+  specialized. When `R` is `Unit`, the return is a value at the generic signature, so the
   expansion stores `kotlin.Unit.INSTANCE` before `finally` and does not carry that slot across
   the transfer; a function declared to return `Unit` stays void. That lambda's `}` is a
   `nop` on the call-site line while its locals are still open, and `Unit.INSTANCE` follows them.
