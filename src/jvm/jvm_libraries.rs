@@ -1456,6 +1456,13 @@ impl JvmLibraries {
                 });
                 let mut member =
                     LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+                if uses_java_type_semantics {
+                    // `params` is the semantic flexible type (`MutableCollection<E>!`). Java
+                    // override checking erases to the classfile parameter (`Collection`), which
+                    // was captured before that rewrite. Leaving the mutable face here made
+                    // `AbstractList.addAll` fail to discharge `MutableList.addAll`.
+                    member.physical_params = physical_params;
+                }
                 if let Some(declaration) = declaration {
                     crate::trace_compiler!(
                         "member_slots",
