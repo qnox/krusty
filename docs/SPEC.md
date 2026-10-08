@@ -4070,6 +4070,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   recorded twice at the receiver load. A `while` or `do…while` condition is inside a condition,
   so `cur and 0x80u == 0x80u` keeps the line on `cur`'s load and on the comparison, not on the
   mask literal.
+  A receiver other than a plain local keeps the line it wrote: a property read and a captured
+  mutable local do not hand it to the literal. An inlined call in receiver position still
+  forgets, so `b.toUInt() and 0xffu` marks the literal. An assignment into a captured local
+  writes the line again at the element store. A declaration of a captured local keeps the line
+  on the holder store — unboxing moves that onto the zero default — and on the element store,
+  not on the initializer's literal.
   Otherwise the receiver load keeps its line. The other argument, when it is a plain local,
   records no line of its own, including a local on a later source line. A call in operand
   position (`toUInt()`, `g()`) keeps the line it wrote. `inv()` is
@@ -4079,7 +4085,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and `unbox-impl` on read, `is UInt` →
   `instanceof kotlin/UInt`) — never `Integer`, so identity and large values are preserved.
   `tests/unsigned_e2e.rs`, `tests/unsigned_bitwise_e2e.rs`,
-  `tests/unsigned_bitwise_lines_e2e.rs`, `tests/feature_coverage_i_e2e.rs`.
+  `tests/unsigned_bitwise_lines_e2e.rs`, `tests/captured_unsigned_lines_e2e.rs`,
+  `tests/feature_coverage_i_e2e.rs`.
   With `+ImplicitSignedToUnsignedIntegerConversion`, a parameter marked
   `@kotlin.internal.ImplicitIntegerCoercion` also accepts a signed integer literal or another
   `@ImplicitIntegerCoercion` constant and converts that value to the unsigned carrier. `Int` to

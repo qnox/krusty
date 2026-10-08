@@ -289,6 +289,7 @@ impl Emitter<'_> {
             std::mem::replace(&mut self.unsigned_receiver_line_moves, Some(move_line));
         // The extension receiver is generated in full, so its load keeps a line. A literal that
         // takes that line is the exception: the load then has none.
+        let marks_before = code.line_marks().len();
         self.emit_unsigned_operand(lhs, code, move_line);
         self.unsigned_receiver_line_moves = outer_receiver;
         // A call receiver (`b.toUInt()`) marks its own line while it emits. Only a mark still
@@ -298,7 +299,14 @@ impl Emitter<'_> {
                 code.withdraw_operand_line(line);
             }
         }
-        if literal_argument && !keep_receiver_line {
+        // A plain local lets the literal own the line, even when the load itself was marked
+        // (`(v and mask) shl c` records both). A property read or a captured local records its
+        // own line and keeps it; forgetting here would hand that same line to the literal. An
+        // inlined call (`toUInt()`) forgets after its body, so the literal still owns the line.
+        let receiver_left_a_live_line = !self.plain_local_operand(lhs)
+            && code.line_marks().len() > marks_before
+            && !code.line_forgotten();
+        if literal_argument && !keep_receiver_line && !receiver_left_a_live_line {
             code.forget_line();
         }
         // The other parameter of an inline-only member is `genOrGetLocal` when it is a local, so
