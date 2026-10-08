@@ -27,7 +27,10 @@ impl BodyLowering<'_> {
         conversion: &FirSamConversion,
         function: ExprId,
     ) -> Option<ExprId> {
-        let function_adapter = matches!(self.ir.expr(function), IrExpr::CallableReference(_));
+        // Only a Kotlin fun interface promises FunctionAdapter equality for a callable reference.
+        // A Java SAM keeps the ordinary indy conversion kotlinc emits.
+        let function_adapter = conversion.kotlin_interface
+            && matches!(self.ir.expr(function), IrExpr::CallableReference(_));
         let arity = u8::try_from(conversion.parameters.len()).ok()?;
         // The captured value keeps its own function arity. A non-suspend value adapted to a
         // suspend method is `FunctionN`; the implementation still receives the continuation.

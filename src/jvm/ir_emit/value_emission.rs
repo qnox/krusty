@@ -1690,7 +1690,7 @@ impl super::Emitter<'_> {
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
                 if lambda_mode == LambdaMode::Class {
-                    let (internal, identity) = lambda_class_names::class_name(
+                    let (internal, identity) = lambda_class_names::emitted_class_name(
                         self.ir,
                         *impl_fn,
                         &impl_name,

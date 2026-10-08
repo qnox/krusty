@@ -27,6 +27,12 @@ fun projectedLiteral(action: (String?) -> Unit) {
 fun projectedValue(action: (String?) -> Unit) {
     takeProjected(action)
 }
+
+fun referenced(value: String?) {}
+
+fun projectedReference() {
+    takeProjected(::referenced)
+}
 "#;
 
 #[test]
@@ -38,7 +44,10 @@ fn a_contravariant_sam_adapter_is_byte_identical_to_kotlinc() {
     common::assert_classes_identical_to_kotlinc_against(
         "ProjectedSam",
         SOURCE,
-        &["sample/ProjectedSamKt"],
+        &[
+            "sample/ProjectedSamKt",
+            "sample/ProjectedSamKt$projectedReference$1",
+        ],
         &[library],
     );
 }
