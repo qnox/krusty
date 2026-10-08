@@ -1391,7 +1391,7 @@ impl super::IrFile {
         self.deferred_local_types
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
-        self.inline_operand_declared_types_mut()
+        self.inline_declared_types_mut()
             .for_each(|value| *value = ty(*value, names));
         self.physical_types
             .values_mut()
@@ -1586,7 +1586,7 @@ fn remap_expression_facts(
             *value = ty(*value, names);
         }
     }
-    if let Some(value) = ir.inline_operand_declared_type_mut(expression) {
+    if let Some(value) = ir.inline_declared_type_mut(expression) {
         *value = ty(*value, names);
     }
     if let Some(owner) = ir.expression_owners.get_mut(&expression) {

@@ -129,8 +129,8 @@ impl SourceMap {
 
     /// Whether anything has been inlined into this class. A same-file inline expansion adds another
     /// range to the owning file rather than another file, so file count alone cannot answer this.
-    /// A class with no inlined code carries only its owning identity range and no
-    /// `SourceDebugExtension` at all.
+    /// A call-site range on that file still writes the map. A class with no inlined code carries
+    /// only its owning identity range and no `SourceDebugExtension` at all.
     pub fn is_empty(&self) -> bool {
         self.files.is_empty() || (self.files.len() == 1 && self.files[0].ranges.len() == 1)
     }
@@ -523,6 +523,24 @@ mod tests {
              + 1 Main.kt\nMainKt\n\
              *L\n1#1,3:1\n1#1:4\n\
              *S KotlinDebug\n*F\n+ 1 Main.kt\nMainKt\n*L\n2#1:4\n*E\n"
+        );
+    }
+
+    /// `use { }` declared in the same file as its caller still writes a map: one file, the callee
+    /// lines in a second range, and the debug stratum naming the call.
+    #[test]
+    fn a_same_file_inline_still_writes_a_map() {
+        let mut map = SourceMap::new("Ret.kt", "RetKt", 33);
+        let lines: Vec<u16> = (9..=21).collect();
+        let outputs = map_all(&mut map, "Ret.kt", "RetKt", &lines, 28);
+        assert_eq!(outputs, (34..=46).collect::<Vec<_>>());
+        assert!(!map.is_empty());
+        assert_eq!(
+            map.render().expect("a map"),
+            "SMAP\nRet.kt\nKotlin\n*S Kotlin\n*F\n\
+             + 1 Ret.kt\nRetKt\n\
+             *L\n1#1,33:1\n9#1,13:34\n\
+             *S KotlinDebug\n*F\n+ 1 Ret.kt\nRetKt\n*L\n28#1:34,13\n*E\n"
         );
     }
 

@@ -53,6 +53,28 @@ pub(super) fn specialize_inline_copy(
     bindings: &HashMap<String, Ty>,
     runtime: &HashMap<String, Ty>,
 ) -> Option<()> {
+    // Keep the declaration type of an unnamed, non-reified generic temporary as provenance. The
+    // copied expression itself is still specialized semantically; a backend can use the retained
+    // declaration type when choosing the temporary's physical representation.
+    let declared_temporary = match ir.expr(expression) {
+        IrExpr::Variable {
+            ty, named: false, ..
+        } => match ty.non_null() {
+            Ty::TyParam(name, _) if !runtime.contains_key(name) => Some(*ty),
+            Ty::DefinitelyNotNull(inner)
+                if inner
+                    .ty_param_name()
+                    .is_some_and(|name| !runtime.contains_key(name)) =>
+            {
+                Some(*ty)
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(declared) = declared_temporary {
+        ir.record_inline_declared_type(expression, declared);
+    }
     specialize_recorded_facts(ir, expression, bindings, runtime);
     {
         let expression = ir.exprs.get_mut(expression as usize)?;
@@ -558,7 +580,7 @@ impl BodyLowering<'_> {
                         });
                         self.ir.call_operand_bindings.insert(declaration);
                         self.ir
-                            .record_inline_operand_declared_type(declaration, *declared_ty);
+                            .record_inline_declared_type(declaration, *declared_ty);
                         if let Some(parameter) = parameter_names.get(index) {
                             if let Some(source_name) = parameter.source_name.clone() {
                                 self.ir.value_names.insert(declaration, source_name);
@@ -767,6 +789,11 @@ impl BodyLowering<'_> {
                 if let Some(Some(lambda)) = inline_lambdas.get(*parameter as usize) {
                     let lambda = *lambda;
                     self.ir.exprs[copy as usize] = self.ir.expr(lambda).clone();
+                    // The parameter read's end line is the callee's `block(this)`. The splice's
+                    // closing `nop` belongs on the call-site lambda's `}`.
+                    if let Some(&end) = self.ir.expr_end_lines.get(&lambda) {
+                        self.ir.expr_end_lines.insert(copy, end);
+                    }
                     // The parameter read carried the inline body's line. A callable reference is
                     // the call site's expression: the spliced invocation keeps that line, and the
                     // frame-closing nop can then return to the inlined call.
@@ -941,7 +968,12 @@ impl BodyLowering<'_> {
         // The loop shape, and only now: the result local is reserved here, so a promoted expansion
         // above leaves no hole in the numbering, and each return is rewritten into the break that
         // carries it out.
-        let result_slot = (result_ty != Ty::Unit).then(|| {
+        // A generic return specialized to `Unit` still carries the semantic Unit value through a
+        // `finally`; a function declared to return `Unit` has no value to carry.
+        let declared_ret = self.ir.functions[function as usize].ret;
+        let generic_unit_result =
+            result_ty == Ty::Unit && declared_ret.non_null().ty_param_name().is_some();
+        let result_slot = (result_ty != Ty::Unit || generic_unit_result).then(|| {
             let slot = self.next_temporary;
             self.next_temporary += 1;
             slot
@@ -954,6 +986,7 @@ impl BodyLowering<'_> {
                 result_slot,
                 found.nested,
                 found.value,
+                found.returned,
             );
         }
 
@@ -968,6 +1001,14 @@ impl BodyLowering<'_> {
                 init: Some(initial),
                 named: false,
             });
+            if declared_ret
+                .non_null()
+                .ty_param_name()
+                .is_some_and(|name| !reified_bindings.contains_key(name))
+            {
+                self.ir
+                    .record_inline_declared_type(declaration, declared_ret);
+            }
             self.ir
                 .inline_return_frames
                 .insert(declaration, label.clone());
@@ -1211,6 +1252,10 @@ impl BodyLowering<'_> {
                         self.ir.call_operand_bindings.insert(declaration);
                         if let Some(name) = source_name {
                             self.ir.value_names.insert(declaration, name);
+                            self.ir.set_debug_local_provenance(
+                                declaration,
+                                IrDebugLocalProvenance::InlineLambdaParameter { depth: 0 },
+                            );
                         }
                         if let Some(ordinal) = reference_parameter {
                             self.ir.set_debug_local_provenance(
@@ -1268,6 +1313,11 @@ impl BodyLowering<'_> {
             stmts: declarations,
             value: Some(body),
         };
+        // The closing `nop` is the lambda literal's last line (its `}`), which is otherwise a
+        // line that already holds the call and the nop cleanup would delete.
+        if let Some(end) = self.ir.expr_end_lines.get(&func).copied() {
+            self.ir.expr_end_lines.insert(invocation, end);
+        }
         // The spliced body's own calls are the suspension points now, not the invocation.
         self.ir.suspend_calls.remove(&invocation);
         self.ir.suspend_call_overridden_results.remove(&invocation);

@@ -5100,8 +5100,7 @@ fn emit_method_inner_with_holder(
     // Method locals precede `this` and parameters in kotlinc's table order.
     if e.record_locals {
         for local in std::mem::take(&mut e.open_locals) {
-            let inline = local.record(None, &mut code, e.recorded_inline_entries);
-            e.recorded_inline_entries += usize::from(inline);
+            local.record(None, &mut code);
         }
     }
     // Suspend rewriting invalidates source-local expression ids, but its physical parameters remain
@@ -5561,6 +5560,9 @@ struct Emitter<'a> {
     machine_suspensions: HashMap<u32, Option<(TypeName, Ty)>>,
     /// The deferred result value of each inline-return frame, by the frame's label.
     inline_return_frame_results: HashMap<String, (u32, Ty)>,
+    /// Inline-return results whose expansion is discarded. A break to that frame leaves the
+    /// value in its slot: the landing label does not read it, so it must not travel on the stack.
+    discarded_inline_results: HashSet<u32>,
     /// The suspension points kotlinc's coroutine transformer takes, when it takes this function.
     transformed_suspensions: transformed_suspensions::TransformedSuspensions,
     /// The declarations that read a suspend lambda's parameters from their fields, in the
@@ -5599,9 +5601,9 @@ struct Emitter<'a> {
     /// krusty would otherwise need. Pushed/popped around the branchy RHS in `emit_binop`.
     /// Open source locals, in declaration order.
     open_locals: Vec<block_scope::OpenLocal>,
-    /// How many recorded `LocalVariableTable` entries belong to an inline frame: where a frame
-    /// marker's entry lands depends on the nested entries recorded before it.
-    recorded_inline_entries: usize,
+    /// Method-local identity source for inline frames. This never crosses the JVM boundary; it
+    /// keeps debug-table ordering tied to producer provenance instead of generated local names.
+    next_inline_frame_identity: u64,
     /// The current lambda body's captures that are literal lambdas it only invokes.
     inline_lambda_aliases: HashMap<u32, inline_lambda_aliases::InlineLambdaAlias>,
     /// Current block nesting depth; the function body is depth 1.
@@ -5703,6 +5705,7 @@ impl<'a> Emitter<'a> {
             continuation_slot: None,
             machine_suspensions: HashMap::new(),
             inline_return_frame_results: HashMap::new(),
+            discarded_inline_results: HashSet::new(),
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::new(),
             erased_invocations: HashSet::new(),
@@ -5714,7 +5717,7 @@ impl<'a> Emitter<'a> {
             ret,
             loop_stack: Vec::new(),
             open_locals: Vec::new(),
-            recorded_inline_entries: 0,
+            next_inline_frame_identity: 0,
             inline_lambda_aliases: HashMap::new(),
             block_depth: 0,
             statement_line: None,
@@ -6074,6 +6077,8 @@ impl<'a> Emitter<'a> {
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back.
                         self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
+                        // An inlined `return` stores on the return's line, after the value.
+                        self.mark_expression_start(e, code);
                         let slot = self.activate_inline_return_frame_result(var, jt);
                         if unsigned {
                             code.forget_line();

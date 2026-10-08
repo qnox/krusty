@@ -33,10 +33,11 @@ pub(super) struct InlineExpansions {
     copies: HashSet<ExprId>,
     unread_operands: HashSet<ExprId>,
     provenance: HashMap<ExprId, IrInlineCopyProvenance>,
-    /// The semantic type declared for a materialized inline parameter, before call-site
-    /// specialization. A backend uses this only for declaration-owned debug representation; the
-    /// declaration expression and its physical slot keep the call-site-specialized type.
-    declared_operand_types: HashMap<ExprId, Ty>,
+    /// The semantic type of a materialized inline declaration before call-site specialization.
+    /// Operands, unnamed generic temporaries, and result frames keep this provenance while their
+    /// expressions carry the specialized semantic type. A backend may use the declaration type
+    /// for physical storage and debug representation.
+    declared_inline_types: HashMap<ExprId, Ty>,
     /// Discarded copied `Unit` values whose source closing line must remain physically anchored.
     /// Other copied `Unit` nodes carry source-map provenance without inventing an instruction.
     retained_unit_lines: HashSet<ExprId>,
@@ -108,8 +109,8 @@ impl IrFile {
         if self.is_unread_inline_operand(source) {
             self.mark_unread_inline_operand(target);
         }
-        if let Some(ty) = self.inline_operand_declared_type(source) {
-            self.record_inline_operand_declared_type(target, ty);
+        if let Some(ty) = self.inline_declared_type(source) {
+            self.record_inline_declared_type(target, ty);
         }
         if self.retains_inline_unit_line(source) {
             self.retain_inline_unit_line(target);
@@ -129,36 +130,33 @@ impl IrFile {
         self.inline_expansions.unread_operands.contains(&operand)
     }
 
-    pub(crate) fn record_inline_operand_declared_type(&mut self, declaration: ExprId, ty: Ty) {
+    pub(crate) fn record_inline_declared_type(&mut self, declaration: ExprId, ty: Ty) {
         self.inline_expansions
-            .declared_operand_types
+            .declared_inline_types
             .insert(declaration, ty);
     }
 
-    pub(crate) fn inline_operand_declared_type(&self, declaration: ExprId) -> Option<Ty> {
+    pub(crate) fn inline_declared_type(&self, declaration: ExprId) -> Option<Ty> {
         self.inline_expansions
-            .declared_operand_types
+            .declared_inline_types
             .get(&declaration)
             .copied()
     }
 
-    pub(crate) fn inline_operand_declared_types(&self) -> impl Iterator<Item = Ty> + '_ {
+    pub(crate) fn inline_declared_types(&self) -> impl Iterator<Item = Ty> + '_ {
         self.inline_expansions
-            .declared_operand_types
+            .declared_inline_types
             .values()
             .copied()
     }
 
-    pub(crate) fn inline_operand_declared_types_mut(&mut self) -> impl Iterator<Item = &mut Ty> {
-        self.inline_expansions.declared_operand_types.values_mut()
+    pub(crate) fn inline_declared_types_mut(&mut self) -> impl Iterator<Item = &mut Ty> {
+        self.inline_expansions.declared_inline_types.values_mut()
     }
 
-    pub(crate) fn inline_operand_declared_type_mut(
-        &mut self,
-        declaration: ExprId,
-    ) -> Option<&mut Ty> {
+    pub(crate) fn inline_declared_type_mut(&mut self, declaration: ExprId) -> Option<&mut Ty> {
         self.inline_expansions
-            .declared_operand_types
+            .declared_inline_types
             .get_mut(&declaration)
     }
 
