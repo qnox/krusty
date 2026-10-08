@@ -5,8 +5,9 @@
 //! is signed the same way; a lambda literal's method carries no `Signature`.
 //!
 //! The captured values lead the lifted method's parameters in the order kotlinc's closure first
-//! sees them: what the function's defaults and body read, a lambda's reads in place, and then the
-//! captures of each local function it calls, never in the order of their names.
+//! sees them: what the function's defaults and body read, in source order (a condition before the
+//! branch the checker publishes first, including a shared `var` cell), a lambda's reads in place,
+//! and then the captures of each local function it calls, never in the order of their names.
 
 use super::common;
 
@@ -81,6 +82,39 @@ fn captured_values_in_first_use_order_run() {
 #[test]
 fn captured_values_lead_in_first_use_order_as_kotlinc() {
     signs_as_kotlinc(CAPTURES, "Captures", &["CapturesKt"]);
+}
+
+/// Repository-owned values cover the three source-order shapes without relying on a JDK or
+/// stdlib member name: a mutable cell read in the condition before a branch value, a plain value
+/// read in the condition before the mutable cell, and a branch write before a later plain value.
+const CAPTURE_SOURCE_ORDER: &str = "class Token\n\
+class Sink { fun accept(value: Token) {} }\n\
+fun exercise(sink: Sink) {\n\
+    val marker = Token()\n\
+    var current = Token()\n\
+    fun cellFirst(flag: Boolean) {\n\
+        if (flag || current === marker) sink.accept(current)\n\
+        current = Token()\n\
+    }\n\
+    fun plainFirst(flag: Boolean) {\n\
+        if (flag || marker === marker) current = marker\n\
+    }\n\
+    fun branchWrite(flag: Boolean) {\n\
+        if (flag) current = Token()\n\
+        sink.accept(current)\n\
+    }\n\
+    cellFirst(false)\n\
+    plainFirst(false)\n\
+    branchWrite(true)\n\
+}\n";
+
+#[test]
+fn source_ordered_local_function_captures_are_byte_identical_to_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "CaptureSourceOrder",
+        CAPTURE_SOURCE_ORDER,
+        &["Token", "Sink", "CaptureSourceOrderKt"],
+    );
 }
 
 /// Compare the methods of each of `classes` that krusty and kotlinc compile `source` to.
