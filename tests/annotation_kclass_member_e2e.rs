@@ -116,7 +116,16 @@ fn kclass_annotation_hash_matches_kotlinc() {
          annotation class Mark(val k: KClass<*>, val ks: Array<KClass<*>>)\n\
          fun box(): String = Mark(Int::class, arrayOf(String::class)).hashCode().toString()\n";
     let reference = common::kotlinc_box_result(source);
-    let actual = common::expect_box_run_with_stdlib(source, "kclass_annotation_hash");
+    // This pins the JVM representation: annotation hashes incorporate
+    // java.lang.Class.hashCode(), whose numeric value is not portable to Native.
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let actual = common::expect_box_run(
+        source,
+        "kclass_annotation_hash",
+        &[stdlib],
+        Some(jdk.as_path()),
+    );
     assert_eq!(actual, reference, "stored Class hash diverges from kotlinc");
     reference
         .parse::<i32>()

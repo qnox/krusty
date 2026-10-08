@@ -17,6 +17,7 @@ mod callable_body_returns;
 mod catch_clauses;
 mod checked_hierarchy;
 mod checked_substitutions;
+mod inline_plan_tests;
 mod integral_constants;
 mod local_classifier_provenance;
 mod lowering_temporaries;
@@ -2128,26 +2129,6 @@ fn nested_generic_inline_expansion_specializes_its_result_storage() {
 }
 
 #[test]
-fn unused_foreign_inline_body_is_not_lowered_into_the_active_source() {
-    let ir = lower_source_from_set(
-        &[
-            (
-                "inline fun <reified T> unused(value: Any): T = value as T",
-                "Library",
-            ),
-            ("fun use(): String = \"OK\"", "Consumer"),
-        ],
-        1,
-    );
-
-    assert!(ir.foreign_inline_templates.is_empty());
-    assert!(ir
-        .functions
-        .iter()
-        .all(|function| function.name != "unused"));
-}
-
-#[test]
 fn consuming_sink_attaches_member_body_through_stable_classifier_identity() {
     let ir = lower_single_source(
         "class Box { fun answer(): Int = 42 }\n\
@@ -2582,7 +2563,9 @@ fn enum_entries_keep_the_selected_secondary_constructor_parameters() {
         class.enum_entries[0].constructor_parameter_types,
         [Ty::obj("kotlin/String")]
     );
+    assert_eq!(class.enum_entries[0].constructor.ordinal, 1);
     assert!(class.enum_entries[1].constructor_parameter_types.is_empty());
+    assert_eq!(class.enum_entries[1].constructor.ordinal, 2);
 }
 
 #[test]

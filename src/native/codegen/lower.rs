@@ -13,9 +13,11 @@
 use std::collections::HashMap;
 
 mod arithmetic;
+mod arrays;
 mod boxed;
 mod c_abi;
 mod calls;
+mod carrier;
 mod classes_literal;
 mod classifier_shapes;
 mod compiler_intrinsics;
@@ -25,13 +27,18 @@ mod entry;
 mod enums;
 mod exceptions;
 use arithmetic::{arithmetic_result, scalar_bound};
+use carrier::{box_suffix, carrier, scalar_suffix, Carrier};
 use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
 };
 mod functions;
+mod implementor_dispatch;
+mod lists;
 mod local_delegates;
+mod maps;
 mod objects;
+mod ranges;
 mod references;
 mod scope;
 mod statics;
@@ -42,8 +49,7 @@ mod unsigned;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::MemFlagsData;
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, BlockArg, InstBuilder, Signature, StackSlotData, StackSlotKind,
-    TrapCode,
+    types, Block, BlockArg, InstBuilder, Signature, StackSlotData, StackSlotKind, TrapCode,
 };
 use cranelift_codegen::ir::{FuncRef, Inst, Type, Value};
 use cranelift_codegen::isa::CallConv;
@@ -74,68 +80,6 @@ pub struct Lowered {
     pub defines_entry: bool,
     /// This file's contribution to the module's C header, in source order.
     pub abi: Vec<super::super::c_abi::Record>,
-}
-
-/// How a Kotlin type is carried in machine code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Carrier {
-    /// `Unit` in return position: no value.
-    Void,
-    /// A machine scalar of the given Cranelift type; the flag says whether an argument of this type
-    /// is sign- (true) or zero-extended when passed to the runtime's C ABI.
-    Scalar(Type, bool),
-    /// A `KRef`: an `i64` pointer into the collected heap, or null.
-    Ref,
-}
-
-impl Carrier {
-    fn clif(self) -> Option<Type> {
-        match self {
-            Self::Void => None,
-            Self::Scalar(ty, _) => Some(ty),
-            Self::Ref => Some(types::I64),
-        }
-    }
-
-    fn abi_param(self) -> Option<AbiParam> {
-        match self {
-            Self::Void => None,
-            Self::Scalar(ty, signed) if ty.bits() < 32 => Some(if signed {
-                AbiParam::new(ty).sext()
-            } else {
-                AbiParam::new(ty).uext()
-            }),
-            Self::Scalar(ty, _) => Some(AbiParam::new(ty)),
-            Self::Ref => Some(AbiParam::new(types::I64)),
-        }
-    }
-}
-
-/// A nullable primitive is a reference: `Int?` has to represent `null`, so it boxes, exactly as it
-/// does on the JVM and as the C runtime already expects.
-fn carrier(ty: Ty) -> Carrier {
-    match ty {
-        Ty::Unit => Carrier::Void,
-        Ty::Boolean => Carrier::Scalar(types::I8, false),
-        Ty::Byte => Carrier::Scalar(types::I8, true),
-        Ty::Short => Carrier::Scalar(types::I16, true),
-        Ty::Char => Carrier::Scalar(types::I16, false),
-        Ty::Int => Carrier::Scalar(types::I32, true),
-        Ty::Long => Carrier::Scalar(types::I64, true),
-        Ty::Float => Carrier::Scalar(types::F32, true),
-        Ty::Double => Carrier::Scalar(types::F64, true),
-        // Kotlin's unsigned integers are value classes, and common lowering erases each to the
-        // signed machine integer it wraps — the right machine shape, and the wrong one to reason
-        // about: `4294967295u` is that `Int`'s bits and not its value. The carrier keeps both
-        // facts, so every widening zero-extends and every comparison and division asks the unsigned
-        // question. What a carrier cannot keep is the TYPE, which is why a boxed one gets a
-        // descriptor of its own: `1u as? Int` must fail, and a boxed `UInt` must render unsigned.
-        Ty::UByte => Carrier::Scalar(types::I8, false),
-        Ty::UShort => Carrier::Scalar(types::I16, false),
-        Ty::UInt => Carrier::Scalar(types::I32, false),
-        Ty::ULong => Carrier::Scalar(types::I64, false),
-        _ => Carrier::Ref,
-    }
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -248,12 +192,11 @@ pub fn lower_file(
         // a thunk could be emitted for, and only the model knows that.
         unwalkable_collections: std::collections::HashSet::new(),
         walkable_classes: std::collections::HashMap::new(),
-        sequence_classes: std::collections::HashSet::new(),
         declares_its_own_comparable: declares_its_own_comparable(ir),
         implemented_dependencies: implemented_dependencies(ir),
     };
-    // Before anything reads a role: the walking members a class answers for decide both which
-    // receivers play an iteration role and which shapes still decline, and both are read while
+    // Before anything reads a shape: the walking members a class answers for decide both which
+    // receivers have a runtime-walkable representation and which shapes still decline; both are read while
     // bodies are lowered.
     lowering.resolve_walkable_classes();
     lowering.declare_functions()?;
@@ -383,21 +326,17 @@ struct FileLowering<'a> {
     /// Whether this file redeclares `Throwable.message` or `Throwable.cause`; see
     /// [`overrides_a_throwable_accessor`].
     overrides_a_throwable_accessor: bool,
-    /// The classes of THIS FILE the runtime can walk, by the role their own members answer for.
+    /// The classes of THIS FILE the runtime can walk, by their runtime collection shape.
     ///
     /// A class implementing `kotlin.collections.Iterable` or `Iterator` records where its own
     /// `iterator`/`hasNext`/`next` sit in its descriptor (`objects::WalkSlots`), which is what
     /// lets the runtime's walking entry points reach an object it did not make. This says which
     /// class that is, so a receiver typed by the class rather than by the interface plays the
-    /// role too — `xs.withIndex()` on a class of the program is the same walk as on a list.
-    walkable_classes:
-        std::collections::HashMap<crate::types::TypeName, super::super::intrinsics::IterationRole>,
-    /// Those among them that answer for `kotlin.sequences.Sequence`.
-    ///
-    /// They play the `Iterable` role — the walk is the same — and a receiver typed by one is
-    /// offered the same NARROW set of members a receiver typed `Sequence` is, for the same reason:
-    /// this runtime's walks are eager, and an eager `map` over a sequence is not Kotlin's.
-    sequence_classes: std::collections::HashSet<crate::types::TypeName>,
+    /// shape too, so its iteration-protocol members use the same descriptor dispatch as a list.
+    walkable_classes: std::collections::HashMap<
+        crate::types::TypeName,
+        super::super::intrinsics::CollectionShape,
+    >,
     /// The shapes among those that the runtime cannot walk an object of this file's behind; see
     /// [`unwalkable_collections`].
     unwalkable_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
@@ -407,109 +346,6 @@ struct FileLowering<'a> {
 }
 
 impl<'a> FileLowering<'a> {
-    fn collection_shape(
-        &self,
-        internal: crate::types::TypeName,
-    ) -> Option<super::super::intrinsics::CollectionShape> {
-        classifier_shapes::collection_shape(self.classifiers, internal)
-    }
-
-    fn is_list_check_type(&self, internal: crate::types::TypeName) -> bool {
-        classifier_shapes::is_list_check_type(self.classifiers, internal)
-    }
-
-    fn function_type_descriptor(&self, internal: crate::types::TypeName) -> Option<&'static str> {
-        classifier_shapes::function_type_descriptor(self.classifiers, internal)
-    }
-
-    /// Whether a class of this file answers for the dependency type `internal`.
-    fn implements_dependency(&self, internal: crate::types::TypeName) -> bool {
-        self.implemented_dependencies.contains(&internal)
-    }
-
-    /// Decide which classes of this file the runtime can WALK, and which collection shapes it
-    /// therefore still cannot.
-    ///
-    /// A class is walkable exactly when a thunk could be emitted for the members a walk goes
-    /// through: its own `iterator`, or its own `hasNext` AND `next`. That is one question, asked
-    /// here once, so that the role a receiver plays and the thunks an object carries can never
-    /// disagree — a class recorded as walkable whose descriptor holds no thunk would have its
-    /// objects read as something they are not.
-    ///
-    /// The shapes are the converse: a shape is UNWALKABLE where any class of this file behind it
-    /// is not walkable, because no static type tells one implementor from another within a shape.
-    /// `class Chars : CharSequence` is the case that makes it necessary — `CharSequence` shares
-    /// the iterable shape with a list, since text is walked by the same dispatch, but it declares
-    /// no `iterator`.
-    fn resolve_walkable_classes(&mut self) {
-        use super::super::intrinsics::IterationRole;
-        for id in 0..self.ir.classes.len() as ClassId {
-            let slots = self.walk_slots(id);
-            let role = if slots.iterator != 0 || slots.length != 0 {
-                // `Iterable` wins over `Iterator` for a class that answers for both. The two roles
-                // differ in which members a receiver is asked for, and a class handing out an
-                // iterator is asked for that one first. TEXT plays the same role: its own members
-                // are `length` and the indexed read, but a walk of it asks for an iterator and
-                // the runtime makes one over those two.
-                Some(IterationRole::Iterable)
-            } else if slots.has_next != 0 && slots.next != 0 {
-                Some(IterationRole::Iterator)
-            } else {
-                None
-            };
-            if let Some(role) = role {
-                let name = self.ir.classes[id as usize].fq_name;
-                self.walkable_classes.insert(name, role);
-                if slots.sequence {
-                    self.sequence_classes.insert(name);
-                }
-            }
-        }
-        let mut record = |owner: &crate::types::TypeName, overridden| {
-            if self.walkable_classes.contains_key(owner) {
-                return;
-            }
-            self.unwalkable_collections
-                .extend(classifier_shapes::collection_shape(
-                    self.classifiers,
-                    overridden,
-                ));
-        };
-        for (owner, edges) in &self.ir.function_overrides {
-            for edge in edges {
-                if matches!(
-                    edge.overridden,
-                    crate::fir::ResolvedFunctionOverrideTarget::External(_)
-                ) {
-                    record(owner, edge.overridden_owner);
-                }
-            }
-        }
-        for (owner, edges) in &self.ir.property_overrides {
-            for edge in edges {
-                if matches!(
-                    edge.overridden,
-                    crate::fir::ResolvedPropertyOverrideTarget::External(_)
-                ) {
-                    record(owner, edge.overridden_owner);
-                }
-            }
-        }
-    }
-
-    /// Whether this file declares a class of the given collection SHAPE.
-    ///
-    /// Asked by a type CHECK rather than by a call: a marker on the runtime's own types answers
-    /// `x is List<*>` for every list the runtime built, and says nothing about a list the program
-    /// declared. Where the file declares one, the check keeps declining rather than answering
-    /// `false` for an object that is one.
-    pub(super) fn implements_collection_shape(
-        &self,
-        shape: super::super::intrinsics::CollectionShape,
-    ) -> bool {
-        self.implemented_collections.contains(&shape)
-    }
-
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
         for param in params {
@@ -727,9 +563,12 @@ impl<'a> FileLowering<'a> {
         // The emitted function, for when a compiled program answers wrongly and the IR that made it
         // reads correctly — the difference is then in this, and nothing else shows it.
         crate::trace_compiler!("native", "{name}\n{}", context.func.display());
-        self.module
-            .define_function(id, &mut context)
-            .map_err(|error| format!("compiling `{name}` ({error})"))?;
+        if let Err(error) = self.module.define_function(id, &mut context) {
+            return Err(format!(
+                "compiling `{name}` ({error:?})\n{}",
+                context.func.display()
+            ));
+        }
         self.module.clear_context(&mut context);
         Ok(())
     }
@@ -1688,6 +1527,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             } => self.lateinit_initialized(receiver, class, index),
             IrExpr::SingletonValue { classifier } => self.singleton(classifier),
             IrExpr::GetStatic(index) => self.static_read(index),
+            IrExpr::NewArray { array_type, size } => self.new_array(array_type, size),
+            IrExpr::Vararg {
+                array_type,
+                spreads,
+                elements,
+            } => self.vararg(array_type, &spreads, &elements),
             IrExpr::Lambda { .. } | IrExpr::CallableReference(_) => self.lambda(id),
             IrExpr::InvokeFunction {
                 func,
@@ -1703,6 +1548,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.ref_set(holder, elem, value),
             IrExpr::EnumEntry { classifier, name } => self.enum_entry(classifier, &name),
+            IrExpr::EnumValues { classifier } => self.enum_values(classifier),
             // `declaration` separates the classifier's own `E.valueOf(name)` from the standard
             // library's INLINE `enumValueOf<E>(name)`. Both name the same lookup by entry name, and
             // the two differ only in what a consumer that records SOURCE POSITIONS attributes an
@@ -1769,6 +1615,82 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 receiver: Some(receiver),
                 ..
             }) if self.is_text_length(target) => self.text_length(receiver),
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.external_getter_is_indices(target) => self.indices(receiver),
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                result,
+                ..
+            }) if self.range_getter(target, receiver).is_some() => {
+                let (owner, name) = self
+                    .range_getter(target, receiver)
+                    .expect("checked by the guard");
+                self.range_property_member(owner, &name, receiver, result)
+                    .expect("a range member, by the guard")
+            }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.lazy_getter(target, receiver).is_some()
+                || self.pair_getter(target, receiver).is_some() =>
+            {
+                let name = self
+                    .lazy_getter(target, receiver)
+                    .or_else(|| self.pair_getter(target, receiver))
+                    .expect("checked by the guard");
+                match self.list_property_member(&name, receiver, any()) {
+                    Some(realized) => realized,
+                    None => Err(format!("`{name}` of a receiver that answers none of it")),
+                }
+            }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.indexed_value_getter(target, receiver).is_some() => {
+                let name = self
+                    .indexed_value_getter(target, receiver)
+                    .expect("checked by the guard");
+                let answer = lists::indexed_value_getter_ty(&name);
+                match self.list_property_member(&name, receiver, answer) {
+                    Some(realized) => realized,
+                    None => Err(format!(
+                        "`{name}` of a receiver that is not an indexed value"
+                    )),
+                }
+            }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.list_getter(target, receiver).is_some() => {
+                let name = self
+                    .list_getter(target, receiver)
+                    .expect("checked by the guard");
+                match self.list_property_member(&name, receiver, Ty::Int) {
+                    Some(realized) => realized,
+                    None => Err(format!("`{name}` of a receiver that is not a list")),
+                }
+            }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.map_getter(target, receiver).is_some() => {
+                let name = self
+                    .map_getter(target, receiver)
+                    .expect("checked by the guard");
+                let answer = maps::map_getter_ty(&name);
+                match self.map_property_member(&name, receiver, answer) {
+                    Some(realized) => realized,
+                    None => Err(format!("`{name}` of a receiver that is not a map")),
+                }
+            }
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,
@@ -1799,6 +1721,22 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::KClassLiteral {
                 classifier, value, ..
             } => self.class_literal(classifier, value),
+            IrExpr::Checked(IrCheckedOperation::RangeConstruction {
+                operation,
+                start,
+                start_type,
+                end,
+                end_type,
+                result,
+            }) => self.range_construction(operation, start, start_type, end, end_type, result),
+            IrExpr::Checked(IrCheckedOperation::RangeContains {
+                operation,
+                value,
+                start,
+                end,
+                negated,
+                counter,
+            }) => self.range_contains(operation, value, start, end, negated, counter),
             IrExpr::LateinitCheck { operand, name } => self.lateinit_check(operand, &name),
             IrExpr::Throw { operand } => self.throw(operand),
             IrExpr::Try {
@@ -2178,6 +2116,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 classifier: internal,
                 ..
             } => Ty::Obj(*internal, &[]),
+            IrExpr::EnumValues { classifier } => {
+                Ty::obj_args("kotlin/Array", &[Ty::Obj(*classifier, &[])])
+            }
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.file.ir.classes[*class as usize].methods[*index as usize];
                 self.file.ir.functions[fid as usize].ret
@@ -2199,6 +2140,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 )
             }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
+            IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::InvokeFunction { ret, .. } => *ret,
             IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
             IrExpr::CallableReference(reference) => reference.function_type,
@@ -2206,7 +2148,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // `name` and `ordinal` belong to `kotlin.Enum`, a class no file declares, so the
             // checked property table has nothing to say about them; their types are the language's
             // and are stated where the read itself is recognized.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => {
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver,
+                result,
+                ..
+            }) => {
                 if self.is_text_length(*target) {
                     return Some(Ty::Int);
                 }
@@ -2223,9 +2170,58 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 match self.enum_member_name(*target) {
                     Some("name") => Ty::String,
                     Some(_) => Ty::Int,
-                    None => return None,
+                    // A pair's components are references; a list's `size` is an `Int`; a range's
+                    // own members answer at their element's width. Which of the three this read is
+                    // depends on the receiver as much as on the getter — a range declares `first`
+                    // too — so the receiverless read is none of them.
+                    None => match receiver {
+                        // `x.indices` is realized as an `IntRange` and as nothing else, whatever
+                        // the receiver is indexable as, so the read IS one. Saying so is what
+                        // lets `b in a.indices` recognize its receiver as a range when `b` is not
+                        // an `Int`: that comparison is the ranges FACADE's, which reads its
+                        // element from the receiver, and a receiver with no type sent the call
+                        // to the dependency-member path to be declined by name.
+                        Some(_) if self.external_getter_is_indices(*target) => {
+                            Ty::obj("kotlin/ranges/IntRange")
+                        }
+                        Some(receiver)
+                            if self.lazy_getter(*target, *receiver).is_some()
+                                || self.pair_getter(*target, *receiver).is_some() =>
+                        {
+                            any()
+                        }
+                        Some(receiver)
+                            if self.indexed_value_getter(*target, *receiver).is_some() =>
+                        {
+                            let name = self
+                                .indexed_value_getter(*target, *receiver)
+                                .expect("checked by the guard");
+                            lists::indexed_value_getter_ty(&name)
+                        }
+                        Some(receiver) if self.list_getter(*target, *receiver).is_some() => Ty::Int,
+                        Some(receiver) if self.map_getter(*target, *receiver).is_some() => {
+                            let name = self
+                                .map_getter(*target, *receiver)
+                                .expect("checked by the guard");
+                            let answer = maps::map_getter_ty(&name);
+                            // The runtime's answer is only the carrier; the checked result names
+                            // the collection the read IS (`m.keys` is a `Set`). A walk over the
+                            // read itself, `for (k in m.keys)`, finds its collection shape there.
+                            if carrier(*result) == carrier(answer) {
+                                *result
+                            } else {
+                                answer
+                            }
+                        }
+                        Some(receiver) => {
+                            self.range_getter(*target, *receiver)?;
+                            *result
+                        }
+                        None => return None,
+                    },
                 }
             }
+            IrExpr::Checked(IrCheckedOperation::RangeConstruction { result, .. }) => *result,
             IrExpr::LocalPropertyReference(_) => Ty::obj("kotlin/reflect/KProperty"),
             // A class literal is an object of the reflection type Kotlin gives it, which is what
             // makes an equality between two of them an equality between references.
@@ -2433,6 +2429,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 };
                 self.string_get(receiver, *index, ret)
             }
+            // The frontend has already selected `kotlin.Enum.name` and lowered that declaration
+            // to this operation. Native consumes the operation identity directly; it does not
+            // rediscover the property from an owner or source spelling.
+            IrIntrinsic::EnumName => {
+                let (Some(receiver), []) = (receiver, args) else {
+                    return Err("a malformed enum name read".to_string());
+                };
+                self.enum_member("name", receiver)
+            }
             IrIntrinsic::Ieee754Equals { operand } => {
                 let [left, right] = args else {
                     return Err("a malformed IEEE floating-point equality".to_string());
@@ -2443,13 +2448,40 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         "an IEEE equality whose operand is not floating-point (`{operand:?}`)"
                     ));
                 }
-                self.ieee_equality(
-                    IrBinOp::Eq,
-                    *left,
-                    self.type_of(*left),
-                    *right,
-                    self.type_of(*right),
-                )
+                // Each argument's checked type carries its own nullability; the intrinsic carries
+                // the common floating declaration type. Physical carriers cannot supply either
+                // fact: a nullable float is a reference, and a property read through an interface
+                // may have a representation type that is deliberately less specific.
+                let left_ty = self.file.ir.logical_types.get(left).copied();
+                let right_ty = self.file.ir.logical_types.get(right).copied();
+                if [left_ty, right_ty]
+                    .into_iter()
+                    .any(|ty| ty.and_then(scalar_bound) != Some(operand))
+                {
+                    return Err(
+                        "an IEEE equality whose checked operands do not match its floating type"
+                            .to_string(),
+                    );
+                }
+                self.ieee_equality(IrBinOp::Eq, *left, left_ty, *right, right_ty)
+            }
+            IrIntrinsic::ArrayGet => {
+                let (Some(receiver), [index]) = (receiver, args) else {
+                    return Err("a malformed array read".to_string());
+                };
+                self.array_get(receiver, *index, ret)
+            }
+            IrIntrinsic::ArraySet => {
+                let (Some(receiver), [index, value]) = (receiver, args) else {
+                    return Err("a malformed array store".to_string());
+                };
+                self.array_set(receiver, *index, *value)
+            }
+            IrIntrinsic::ArraySize => {
+                let Some(receiver) = receiver else {
+                    return Err("a malformed array size".to_string());
+                };
+                self.array_size(receiver)
             }
             // `"$u"`: the frontend names the conversion rather than letting the template reach for
             // `Any.toString()`, because the value it would reach for is the signed number sharing
@@ -2758,57 +2790,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 }
 
-/// The primitive a reference-carried type REPRESENTS, or `None` when it represents no primitive.
-///
-/// A type parameter is the case that matters: `T : Int` is carried as a reference — a boxed `Int`,
-/// exactly as the JVM carries it — and its bound is what says which primitive is in the box. The
-/// chain is peeled because a bound can name another parameter, and the step count is capped so a
-/// cyclic one cannot spin.
 /// `Any?`: the type every runtime reference parameter is declared as.
 fn any() -> Ty {
     Ty::nullable(Ty::obj("kotlin/Any"))
-}
-
-/// The runtime's suffix for a scalar type's `kt_compare_*` and console functions.
-fn scalar_suffix(ty: Ty) -> Option<&'static str> {
-    Some(match ty {
-        Ty::Boolean => "boolean",
-        Ty::Byte => "byte",
-        Ty::Short => "short",
-        Ty::Char => "char",
-        Ty::Int => "int",
-        Ty::Long => "long",
-        Ty::Float => "float",
-        Ty::Double => "double",
-        _ => return None,
-    })
-}
-
-/// The Kotlin type an arithmetic operator produces, which is not always its operands'.
-///
-/// Arithmetic on the narrow integer types is `Int` arithmetic — Kotlin has no
-/// `Byte.plus(Byte): Byte`, and a result typed `Byte` would pick the wrong carrier. `Char` is the
-/// exception that makes the others a rule: `Char.plus(Int)` and `Char.minus(Int)` are declared to
-/// return `Char`, and only `Char.minus(Char)` returns `Int`. So `val c: Any = 'A' + 1` boxes a
-/// `Char` holding `'B'`, not an `Int` holding `66`.
-fn box_suffix(ty: Ty) -> Option<&'static str> {
-    Some(match ty {
-        Ty::Boolean => "boolean",
-        Ty::Byte => "byte",
-        Ty::Short => "short",
-        Ty::Char => "char",
-        Ty::Int => "int",
-        Ty::Long => "long",
-        Ty::Float => "float",
-        Ty::Double => "double",
-        // Each unsigned type has a descriptor of its own, which is what makes `1u as? Int` fail
-        // and a boxed one render its value rather than the signed number sharing its bits.
-        Ty::UByte => "ubyte",
-        Ty::UShort => "ushort",
-        Ty::UInt => "uint",
-        Ty::ULong => "ulong",
-        _ => return None,
-    })
 }
 
 fn callee_kind(callee: &Callee) -> &'static str {

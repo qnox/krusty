@@ -7,6 +7,7 @@ pub(crate) mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
 mod call_realization;
 mod call_sig;
+mod callable_scope_rung;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -31,6 +32,7 @@ pub use call_realization::{
     ExternalPropertyRealization, NonvirtualCallRealization, OverriddenCallKind,
     OverriddenCallRealization,
 };
+pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
@@ -46,7 +48,7 @@ pub use result_nullability::{ResultEnhancement, ReturnInfo};
 
 use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
-use crate::types::{SemanticCallRole, Ty, TypeName, TypeNameList};
+use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub use compiler_intrinsic::CompilerIntrinsic;
 pub(crate) use core_builtins::add_core_builtin_declarations;
@@ -855,29 +857,6 @@ pub enum Origin {
     },
 }
 
-/// The source-name scope rung through which an unqualified callable became visible.
-///
-/// This is call-site selection data, not declaration provenance: compiling the same declaration
-/// into the current module or a dependency must not change whether it participates as a current-
-/// package declaration or an import. Receiver-call lookup stamps this value onto its cloned
-/// candidates before overload selection.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CallableScopeRung {
-    /// The callable was obtained outside an import-scoped lookup (members and direct provider
-    /// queries use this value).
-    #[default]
-    Unscoped,
-    ExplicitImport,
-    CurrentPackage,
-    Import,
-}
-
-impl CallableScopeRung {
-    pub fn is_import(self) -> bool {
-        matches!(self, Self::ExplicitImport | Self::Import)
-    }
-}
-
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
 #[derive(Clone, Debug)]
@@ -894,6 +873,11 @@ pub struct LibraryCallable {
     /// a Kotlin property. Explicit calls still use `external_identity`; property reads/writes carry
     /// this distinct identity so the target backend alone chooses field versus accessor realization.
     pub external_property_identity: Option<crate::fir::ExternalPropertyId>,
+    /// Exact semantic namespace that declares this callable. This is provider-owned identity, not
+    /// the physical JVM facade/class in [`Self::owner`]. Keeping it on the normalized declaration
+    /// lets cached inline-body dependencies be re-interned in another classpath without recovering
+    /// semantics from their physical target spelling.
+    pub declaration_owner: Option<SemanticCallableOwner>,
     pub owner: TypeName,
     /// Kotlin/source name used for selection.
     pub name: String,

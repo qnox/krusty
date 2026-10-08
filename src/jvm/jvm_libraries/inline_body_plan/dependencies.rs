@@ -193,7 +193,11 @@ impl JvmLibraries {
             return InlineDependency::Rejected;
         }
         let ret = facts.declared_ret.unwrap_or(signature.ret);
+        let Some(package) = owner.parent() else {
+            return InlineDependency::Rejected;
+        };
         let mut callable = LibraryCallable {
+            declaration_owner: Some(crate::types::SemanticCallableOwner::Package(package)),
             inline: metadata_inline(
                 facts.is_inline,
                 facts.has_reified_type_params,
@@ -377,6 +381,13 @@ mod tests {
         assert_eq!(realization.callable.name, "throwIndexOverflow");
         assert!(realization.callable.params.is_empty());
         assert_eq!(realization.callable.ret, Ty::Unit);
+        assert_eq!(
+            realization.declaration_owner,
+            Some(crate::types::SemanticCallableOwner::Package(type_name(
+                "kotlin/collections"
+            ))),
+            "a cached inline dependency retains its semantic package when re-interned"
+        );
 
         let map = iteration(
             &current,

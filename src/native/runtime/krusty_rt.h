@@ -480,6 +480,8 @@ KRef kt_iterable_filter(KRef iterable, KRef predicate);
 KRef kt_iterable_filter_not(KRef iterable, KRef predicate);
 KRef kt_iterable_first_matching(KRef iterable, KRef predicate);
 KRef kt_iterable_first_or_null(KRef iterable, KRef predicate);
+KRef kt_iterable_first(KRef iterable);
+KRef kt_iterable_last(KRef iterable);
 KRef kt_iterable_last_matching(KRef iterable, KRef predicate);
 KRef kt_iterable_fold(KRef iterable, KRef initial, KRef operation);
 void kt_iterable_for_each_indexed(KRef iterable, KRef action);
@@ -601,6 +603,7 @@ kt_boolean kt_range_contains(KRef range, kt_long value);
 /* `range.first` / `range.last` / `range.start` / `range.endInclusive`, at the range's own width. */
 kt_long kt_range_first(KRef range);
 kt_long kt_range_last(KRef range);
+kt_long kt_range_step_value(KRef range);
 kt_boolean kt_range_is_empty(KRef range);
 
 /* ---- floating-point ranges -------------------------------------------------------------------
@@ -684,6 +687,10 @@ KRef kt_long_range_down_to(kt_long first, kt_long last);
 KRef kt_char_range_down_to(kt_char first, kt_char last);
 KRef kt_uint_range_down_to(kt_int first, kt_int last);
 KRef kt_ulong_range_down_to(kt_long first, kt_long last);
+kt_int kt_progression_last_int(kt_int first, kt_int last, kt_int step);
+kt_long kt_progression_last_long(kt_long first, kt_long last, kt_long step);
+kt_int kt_progression_last_uint(kt_int first, kt_int last, kt_int step);
+kt_long kt_progression_last_ulong(kt_long first, kt_long last, kt_long step);
 kt_boolean kt_range_iterator_has_next(KRef iterator);
 kt_long kt_range_iterator_next(KRef iterator);
 

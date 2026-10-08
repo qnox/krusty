@@ -93,7 +93,10 @@ impl JvmLibraries {
         let mut property = properties.pop()?;
         property.associated_classifier = Some(internal);
         property.associated_access_owner = Some(internal);
-        self.register_external_property(&mut property, None);
+        self.register_external_property(
+            &mut property,
+            Some(SemanticCallableOwner::Classifier(internal)),
+        );
         Some(property)
     }
 
@@ -250,11 +253,12 @@ impl JvmLibraries {
             field.ty.platform_lower_bound(),
             descriptor,
         );
+        declaration.declaration_owner = Some(SemanticCallableOwner::Classifier(field.owner));
         declaration.physical_name = (field.name != source_name).then(|| field.name.clone());
         declaration.external_identity = Some(self.cp.intern_external_callable(
             &declaration,
             crate::libraries::ExternalCallableKind::StaticFieldRead,
-            None,
+            Some(SemanticCallableOwner::Classifier(field.owner)),
         ));
         field.external_identity = declaration.external_identity;
     }
@@ -295,7 +299,10 @@ impl JvmLibraries {
             producer: crate::libraries::PropertyProducer::Field,
             read_stability: crate::libraries::PropertyReadStability::Unstable,
         };
-        self.register_external_property(&mut property, None);
+        self.register_external_property(
+            &mut property,
+            Some(SemanticCallableOwner::Classifier(field.owner)),
+        );
         Some(property)
     }
 
@@ -315,6 +322,7 @@ impl JvmLibraries {
             field.ty.platform_lower_bound(),
             descriptor.clone(),
         );
+        getter.declaration_owner = Some(SemanticCallableOwner::Classifier(field.owner));
         getter.physical_name = (field.name != getter_source_name).then(|| field.name.clone());
         getter.external_identity = field.external_identity;
         let setter = (!field.is_final).then(|| {
@@ -329,12 +337,13 @@ impl JvmLibraries {
                 Ty::Unit,
                 descriptor,
             );
+            setter.declaration_owner = Some(SemanticCallableOwner::Classifier(field.owner));
             setter.physical_name = setter_physical_name;
             setter.params = vec![field.ty];
             setter.external_identity = Some(self.cp.intern_external_callable(
                 &setter,
                 crate::libraries::ExternalCallableKind::StaticFieldWrite,
-                None,
+                Some(SemanticCallableOwner::Classifier(field.owner)),
             ));
             setter
         });

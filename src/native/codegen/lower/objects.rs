@@ -83,11 +83,6 @@ pub(super) struct WalkSlots {
     pub(super) next: u32,
     pub(super) length: u32,
     pub(super) char_at: u32,
-    /// Whether the class answers for `kotlin.sequences.Sequence` rather than for an eager
-    /// iterable. The walk is the same one — a sequence hands out an iterator like anything else —
-    /// but the set of MEMBERS a receiver of it may be asked is narrower, because every walk this
-    /// runtime has is eager.
-    pub(super) sequence: bool,
 }
 
 impl WalkSlots {
@@ -645,11 +640,31 @@ impl<'a> FileLowering<'a> {
                 None => self.import_data("kt_type_any")?,
             },
         };
-        let interfaces: Vec<DataId> = self.model.interfaces[class as usize]
+        let local_interfaces = self.model.interfaces[class as usize].clone();
+        let mut interfaces: Vec<DataId> = local_interfaces
             .clone()
             .into_iter()
             .map(|interface| self.classes[interface as usize].descriptor)
             .collect();
+        let external_roots = self.ir.classes[class as usize]
+            .interfaces
+            .iter()
+            .chain(
+                local_interfaces
+                    .into_iter()
+                    .flat_map(|interface| self.ir.classes[interface as usize].interfaces.iter()),
+            )
+            .filter(|interface| self.ir.class_id_by_name(*interface).is_none())
+            .collect::<Vec<_>>();
+        for marker in super::classifier_shapes::runtime_interface_descriptors(
+            self.classifiers,
+            external_roots,
+        ) {
+            let descriptor = self.import_data(marker)?;
+            if !interfaces.contains(&descriptor) {
+                interfaces.push(descriptor);
+            }
+        }
         let walk = self.define_walk_members(class, &base)?;
         let (qualified_name, simple_name, class_names) = self.reflection_names(class);
         self.define_type_descriptor(
@@ -900,7 +915,6 @@ impl<'a> FileLowering<'a> {
         let mut iterable = false;
         let mut iterator = false;
         let mut text = false;
-        let mut sequence = false;
         for edge in ir
             .function_overrides
             .get(&declaration.fq_name)
@@ -918,13 +932,9 @@ impl<'a> FileLowering<'a> {
                 edge.name.as_str(),
             ) {
                 (Some(CollectionShape::Iterable), "iterator") => iterable = true,
-                // A SEQUENCE is walked exactly as an iterable is: its one member is `iterator`,
-                // and the thunk the descriptor carries dispatches to it the same way. What the
-                // shape adds is the narrowing the receiver carries afterwards.
-                (Some(CollectionShape::Sequence), "iterator") => {
-                    iterable = true;
-                    sequence = true;
-                }
+                // A sequence is walked exactly as an iterable is: its one representation member
+                // is `iterator`, and the descriptor thunk dispatches to it the same way.
+                (Some(CollectionShape::Sequence), "iterator") => iterable = true,
                 (Some(CollectionShape::Iterator), "hasNext" | "next") => iterator = true,
                 (Some(CollectionShape::Text), "get" | "subSequence") => text = true,
                 _ => {}
@@ -952,9 +962,6 @@ impl<'a> FileLowering<'a> {
         let mut slots = WalkSlots::default();
         if iterable {
             slots.iterator = self.walk_slot(class, "iterator");
-            // Only where the iterator was actually found: a class with no slot to walk through is
-            // no sequence of this file's either, and the flag must not outlive the walk it narrows.
-            slots.sequence = sequence && slots.iterator != 0;
         }
         if iterator {
             slots.has_next = self.walk_slot(class, "hasNext");
@@ -2357,7 +2364,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             let descriptor = self.file.import_data("kt_type_any")?;
             return Ok(Some(self.allocate(descriptor, model::HEADER_SIZE)?));
         }
-        if is_runtime_constructed(internal) {
+        if is_runtime_constructed(self.file, internal) {
             return self.runtime_construction(internal, args, selected);
         }
         let class = self.file.class_of(internal, "construction of")?;

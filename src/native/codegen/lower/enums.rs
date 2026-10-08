@@ -95,20 +95,23 @@ impl<'a> FileLowering<'a> {
                 Some(subclass) => self.class_of(subclass, "the body of the enum constant")?,
                 None => class,
             };
-            // A constant may select a SECONDARY constructor: `ENTRY` on an enum whose primary
-            // takes a `String` and which also declares `constructor() : this("OK")` is that call.
-            // Kotlin admits no two constructors of one class with the same parameter list, so a
-            // secondary matching the selection is the one, and the primary is what remains.
-            let sibling = self.ir.classes[owner as usize]
-                .secondary_ctors
-                .iter()
-                .position(|candidate| {
-                    candidate.prefix_params.is_empty()
-                        && candidate.params == entry.constructor_parameter_types
-                });
-            let constructor = match sibling {
-                Some(sibling) => self.classes[owner as usize].secondaries[sibling],
-                None => self.classes[owner as usize].constructor.ok_or_else(|| {
+            // Checked FIR already selected the constructor. A bodied entry constructs its
+            // synthesized subclass's primary constructor; that constructor separately carries
+            // the exact enum-super target selected for the entry.
+            let selected = entry.subclass.is_none().then_some(entry.constructor);
+            let constructor = match selected {
+                Some(target) if !target.primary() => self.classes[owner as usize]
+                    .secondaries
+                    .get(target.ordinal as usize - 1)
+                    .copied()
+                    .ok_or_else(|| {
+                        format!(
+                            "an enum constant selecting an unknown secondary constructor (`{}.{}`)",
+                            declaration.fq_name(),
+                            entry.name
+                        )
+                    })?,
+                _ => self.classes[owner as usize].constructor.ok_or_else(|| {
                     format!(
                         "an enum constant whose class has no primary constructor (`{}.{}`)",
                         declaration.fq_name(),
@@ -200,47 +203,52 @@ impl<'a> FileLowering<'a> {
                             for &statement in &entry.argument_prelude {
                                 body.statement(statement)?;
                             }
-                            // A constant leaving an argument out reaches the class's own defaults
-                            // wrapper, which fills the frame and runs the constructor — the same wrapper
-                            // `Foo()` written as an expression reaches. What the entry supplies is then
-                            // the parameters it did NOT omit, at their own physical types.
-                            let omitted = {
+                            // A constant with a body is constructed through its synthesized
+                            // subclass's bare primary constructor. Its checked arguments and exact
+                            // enum-constructor target live on that subclass's superclass call, where
+                            // defaults are realized. An ordinary constant calls its selected enum
+                            // constructor here, through the defaults wrapper when necessary.
+                            let (target, carried) = if entry.subclass.is_some() {
+                                (constructor, Vec::new())
+                            } else {
                                 let mut omitted = entry.default_parameters.clone();
                                 omitted.sort_unstable();
-                                omitted
-                            };
-                            let (target, carried): (FuncId, Vec<Ty>) = if omitted.is_empty() {
-                                (constructor, entry.constructor_parameter_types.clone())
-                            } else {
-                                let key = super::defaults::CtorOmission {
-                                    class,
-                                    // An enum constant names the enum's PRIMARY constructor; a secondary
-                                    // is reached by a constant's own body, which is a subclass instead.
-                                    secondary: None,
-                                    omitted: omitted.clone(),
-                                };
-                                let Some(&wrapper) = body.file.default_constructors.get(&key)
-                                else {
-                                    return Err(format!(
-                                        "an enum constant omitting a constructor argument (`{}`)",
-                                        entry.name
-                                    ));
-                                };
-                                let carried = body.file.ir.classes[class as usize]
-                                    .ctor_args
-                                    .iter()
+                                let secondary = (!entry.constructor.primary())
+                                    .then_some(entry.constructor.ordinal as usize - 1);
+                                let frame = body
+                                    .file
+                                    .constructor_frame_of(class, secondary)
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "an enum constant selecting an unknown constructor (`{}.{}`)",
+                                            declaration.fq_name(),
+                                            entry.name
+                                        )
+                                    })?;
+                                let carried = frame
+                                    .into_iter()
                                     .enumerate()
                                     .filter(|(ordinal, _)| !omitted.contains(&(*ordinal as u32)))
-                                    .map(|(ordinal, argument)| {
-                                        super::super::super::captures::physical_ty(
-                                            body.file.ir,
-                                            class,
-                                            ordinal as u32,
-                                            argument.ty,
-                                        )
-                                    })
+                                    .map(|(_, ty)| ty)
                                     .collect();
-                                (wrapper, carried)
+                                let target = if omitted.is_empty() {
+                                    constructor
+                                } else {
+                                    let key = super::defaults::CtorOmission {
+                                        class,
+                                        secondary,
+                                        omitted,
+                                    };
+                                    let Some(&wrapper) = body.file.default_constructors.get(&key)
+                                    else {
+                                        return Err(format!(
+                                            "an enum constant omitting a constructor argument (`{}`)",
+                                            entry.name
+                                        ));
+                                    };
+                                    wrapper
+                                };
+                                (target, carried)
                             };
                             if entry.args.len() != carried.len() {
                                 return Err(
@@ -309,6 +317,43 @@ impl BodyLowering<'_, '_, '_> {
             address,
             0,
         )))
+    }
+
+    /// `Color.values()`: a fresh array holding every constant, in declaration order.
+    pub(super) fn enum_values(
+        &mut self,
+        classifier: TypeName,
+    ) -> Result<Option<Value>, Unsupported> {
+        let class = self.file.class_of(classifier, "the enum")?;
+        let count = self.file.ir.classes[class as usize].enum_entries.len();
+        let slots = self.file.enum_entries[&class].slots.clone();
+        self.build_enum(class)?;
+        // The constants first, then the array: a constant's construction allocates, and a
+        // half-filled array must not be what a collection finds.
+        let mut values = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let address = self.data_address(slot);
+            values.push(self.builder.ins().load(types::I64, trusted(), address, 0));
+        }
+        let element = Ty::Obj(classifier, &[]);
+        let shape = self.array_shape(Ty::obj_args("kotlin/Array", &[element]))?;
+        let descriptor = self.data_address(shape.descriptor);
+        let length = self.builder.ins().iconst(types::I32, count as i64);
+        let array = self
+            .runtime_call(
+                "kt_array_new",
+                &[any(), Ty::Int],
+                any(),
+                &[descriptor, length],
+            )?
+            .expect("`kt_array_new` returns the array");
+        for (ordinal, value) in values.into_iter().enumerate() {
+            let offset = super::arrays::ELEMENTS + (ordinal as i64) * i64::from(shape.stride);
+            self.builder
+                .ins()
+                .store(trusted(), value, array, offset as i32);
+        }
+        Ok(Some(array))
     }
 
     /// `Color.valueOf(text)`: the constant of that name, or a loud failure.

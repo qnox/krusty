@@ -169,7 +169,7 @@ impl BodyLowering<'_, '_, '_> {
                 }
                 let owner = super::super::super::intrinsics::DeclarationOwner::callable(
                     realization.physical_owner,
-                    realization.declaration_package,
+                    realization.declaration_owner,
                 );
                 // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
                 // A physical name is an emit handle: a JVM realization may RENAME a member, and
@@ -181,6 +181,44 @@ impl BodyLowering<'_, '_, '_> {
                     .reflection_name
                     .clone()
                     .unwrap_or_else(|| realization.name.clone());
+                // Intrinsic identity is the declaration's signature, not the types produced by
+                // call-site substitution. `compareTo<String>(...)`, for example, still names the
+                // declaration whose parameter is `T`; using the specialized `params`/`ret` here
+                // would make one declaration acquire a different intrinsic key at every call.
+                let generic_signature = realization.generic_sig.as_deref();
+                let declared_receiver = generic_signature
+                    .and_then(|signature| signature.receiver)
+                    .or(realization.source_receiver);
+                let declared_params = if let Some(signature) = generic_signature {
+                    std::borrow::Cow::Borrowed(signature.params.as_slice())
+                } else {
+                    let parameters = realization
+                        .declared_params
+                        .as_deref()
+                        .unwrap_or(&realization.params);
+                    if matches!(
+                        realization.kind,
+                        crate::libraries::ExternalCallableKind::Extension
+                    ) && parameters.len() > realization.context_count
+                    {
+                        let mut parameters = parameters.to_vec();
+                        parameters.remove(realization.context_count);
+                        std::borrow::Cow::Owned(parameters)
+                    } else {
+                        std::borrow::Cow::Borrowed(parameters)
+                    }
+                };
+                let declared_ret = generic_signature
+                    .map(|signature| signature.ret)
+                    .or(realization.declared_ret)
+                    .unwrap_or(realization.ret);
+                let signature = super::super::super::intrinsics::FunctionSignature::new(
+                    owner,
+                    &name,
+                    declared_params.as_ref(),
+                    declared_ret,
+                )
+                .with_receiver(declared_receiver);
                 let semantic_role = self
                     .file
                     .ir
@@ -188,10 +226,6 @@ impl BodyLowering<'_, '_, '_> {
                     .get(&site)
                     .copied()
                     .or(realization.semantic_role);
-                let runtime_member_role = compiler_intrinsics::runtime_member_role(
-                    realization.compiler_intrinsic,
-                    semantic_role,
-                );
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
@@ -207,18 +241,38 @@ impl BodyLowering<'_, '_, '_> {
                             .and_then(|ty| ty.obj_internal())
                         {
                             if self.file.implements_dependency(internal)
-                                && runtime_member_role.is_none()
+                                && !super::super::super::intrinsics::is_any_runtime_member(
+                                    signature,
+                                    semantic_role,
+                                )
                             {
+                                if let Some(realized) = self.implemented_member(
+                                    internal, *target, signature, receiver, args, *ret,
+                                ) {
+                                    return realized;
+                                }
+                                if let Some(realized) =
+                                    self.iteration_member(signature, receiver, args, *ret)
+                                {
+                                    return realized;
+                                }
+                                if let Some(realized) = self
+                                    .collection_algorithm_member(signature, receiver, args, *ret)
+                                {
+                                    return realized;
+                                }
+                                if super::classifier_shapes::is_read_only_property(internal) {
+                                    if let Some(realized) = self.read_only_property_member(
+                                        internal, *target, signature, receiver, args, *ret,
+                                    ) {
+                                        return realized;
+                                    }
+                                }
                                 return Err(format!(
                                     "the member `{}.{name}` of a type this file implements itself",
                                     internal.render().replace('/', ".")
                                 ));
                             }
-                        }
-                        if let Some(realized) =
-                            self.scope_function(owner, &name, receiver, args, *ret)
-                        {
-                            return realized;
                         }
                         // `x.isNaN()` and its two siblings are one comparison each. Realizing them
                         // here rather than in the runtime keeps the operand unboxed — the member
@@ -228,6 +282,15 @@ impl BodyLowering<'_, '_, '_> {
                             super::super::super::intrinsics::float_predicate(owner, &name)
                         {
                             return self.float_predicate(predicate, receiver);
+                        }
+                        if let Some(realized) = self.range_member(
+                            signature,
+                            realization.compiler_intrinsic,
+                            receiver,
+                            args,
+                            *ret,
+                        ) {
+                            return realized;
                         }
                         // The unsigned integers: a value class the erasure made look like the
                         // signed number sharing its bits, so every member where that difference
@@ -247,6 +310,31 @@ impl BodyLowering<'_, '_, '_> {
                         if let Some(realized) =
                             self.reference_delegate(realization.semantic_role, receiver, args, *ret)
                         {
+                            return realized;
+                        }
+                        if let Some(realized) =
+                            self.iteration_member(signature, receiver, args, *ret)
+                        {
+                            return realized;
+                        }
+                        if let Some(realized) =
+                            self.collection_algorithm_member(signature, receiver, args, *ret)
+                        {
+                            return realized;
+                        }
+                        if let Some(realized) = self.list_member_declared(
+                            signature,
+                            receiver,
+                            args,
+                            *ret,
+                            &realization.physical_params,
+                        ) {
+                            return realized;
+                        }
+                        if let Some(realized) = self.map_member(signature, receiver, args, *ret) {
+                            return realized;
+                        }
+                        if let Some(realized) = self.pair_construction(signature, receiver, args) {
                             return realized;
                         }
                         // `x++` where `x` is an `Int?`: the member is the primitive's, and so is
@@ -330,6 +418,29 @@ impl BodyLowering<'_, '_, '_> {
                             owner, &name, params,
                         ) {
                             return self.experimental_bitwise(op, receiver, args, *ret);
+                        }
+                        if let Some((symbol, carried, answer)) =
+                            super::super::super::intrinsics::array_member(owner, &name, params)
+                        {
+                            if self
+                                .type_of(receiver)
+                                .map(Ty::non_null)
+                                .is_some_and(Ty::is_array)
+                            {
+                                let mut operands = vec![self.reference(receiver)?];
+                                for argument in args {
+                                    operands.push(self.reference(*argument)?);
+                                }
+                                if self.terminated {
+                                    return Ok(None);
+                                }
+                                let produced =
+                                    self.runtime_call(symbol, &carried, answer, &operands)?;
+                                let Some(produced) = produced else {
+                                    return Ok(None);
+                                };
+                                return self.convert(produced, Some(answer), *ret);
+                            }
                         }
                         // `s.startsWith(t)`, `s.endsWith(t)` and `t in s`, whose last parameter
                         // is Kotlin's `ignoreCase`. The default reaches here as a CONSTANT
@@ -428,10 +539,7 @@ impl BodyLowering<'_, '_, '_> {
                         // by UTF-16 unit. A file that declares a `Comparable` of its own keeps
                         // declining: an object of the program's could stand behind that type and
                         // the runtime has no order for it.
-                        if realization.semantic_role
-                            == Some(
-                                crate::backend::BackendSemanticCallRole::KotlinComparableCompareTo,
-                            )
+                        if super::super::super::intrinsics::is_comparable_compare_to(signature)
                             && !self.file.declares_its_own_comparable
                         {
                             let operands =
@@ -507,10 +615,8 @@ impl BodyLowering<'_, '_, '_> {
                             return self.convert(produced, Some(any()), *ret);
                         }
                         let Some(symbol) = super::super::super::intrinsics::runtime_member(
-                            owner,
-                            &name,
-                            params,
-                            runtime_member_role,
+                            signature,
+                            semantic_role,
                         ) else {
                             return Err(format!(
                                 "the member `{}.{name}`",
@@ -528,6 +634,23 @@ impl BodyLowering<'_, '_, '_> {
                         self.runtime_call(symbol, &signature, *ret, &arguments)
                     }
                     None => {
+                        let packs_a_vararg = realization
+                            .physical_params
+                            .first()
+                            .is_some_and(|ty| ty.non_null().is_reference_array());
+                        if let Some(realized) =
+                            self.list_construction(signature, packs_a_vararg, args)
+                        {
+                            return realized;
+                        }
+                        if let Some(realized) =
+                            self.map_construction(signature, packs_a_vararg, args)
+                        {
+                            return realized;
+                        }
+                        if let Some(realized) = self.lazy_construction(signature, args) {
+                            return realized;
+                        }
                         if let Some(operation) =
                             compiler_intrinsics::console_intrinsic(realization.compiler_intrinsic)
                         {
@@ -556,11 +679,6 @@ impl BodyLowering<'_, '_, '_> {
                         ) {
                             return self.assert_fails_with(args, params, *ret);
                         }
-                        if let Some(realized) =
-                            self.top_level_scope_function(owner, &name, args, params, *ret)
-                        {
-                            return realized;
-                        }
                         if let Some(builder) =
                             super::super::super::intrinsics::builder_scope(owner, &name, params)
                         {
@@ -574,12 +692,26 @@ impl BodyLowering<'_, '_, '_> {
                         {
                             return self.precondition(precondition, args, *ret);
                         }
+                        if let Some(symbol) =
+                            super::super::super::intrinsics::progression_last_element(signature)
+                        {
+                            let arguments = self.arguments(args, params)?;
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            return self.runtime_call(symbol, params, *ret, &arguments);
+                        }
                         let Some(symbol) =
-                            super::super::super::intrinsics::runtime_function(owner, &name, params)
+                            super::super::super::intrinsics::runtime_function(signature)
                         else {
                             return Err(format!(
-                                "the declaration `{}.{name}`",
-                                realization.physical_owner.render().replace('/', ".")
+                                "the declaration `{}.{name}` ({}; receiver {:?}; parameters {:?}; \
+                                 result {:?})",
+                                realization.physical_owner.render().replace('/', "."),
+                                signature.owner.diagnostic_name(),
+                                signature.receiver,
+                                signature.params,
+                                signature.ret,
                             ));
                         };
                         let arguments = self.arguments(args, params)?;

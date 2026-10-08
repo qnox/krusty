@@ -49,9 +49,8 @@ fn a_cast_before_an_array_store_is_dropped_like_kotlincs() {
 /// the class of `x`, while the cast before another cast still does.
 #[test]
 fn a_store_without_its_cast_takes_any_element() {
-    common::expect_box_ok_with_stdlib(
-        &format!(
-            "{SOURCE}\
+    let source = format!(
+        "{SOURCE}\
              fun box(): String {{\n\
              \x20   if (castArgument(Mark()) != 2) return \"argument\"\n\
              \x20   if (castElements(Word(), Mark()) != 2) return \"elements\"\n\
@@ -62,7 +61,19 @@ fn a_store_without_its_cast_takes_any_element() {
              \x20   }}\n\
              \x20   return if (reifiedArgument<Word>(Mark()) == 1) \"OK\" else \"reified\"\n\
              }}\n"
+    );
+    // This test observes a JVM backend transform that deliberately removes a
+    // source cast immediately before `aastore`; it is not a portable language
+    // semantic for Native to reproduce.
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::expect_box_run(
+            &source,
+            "CastsBeforeAastoreBox",
+            &[stdlib],
+            Some(jdk.as_path()),
         ),
-        "CastsBeforeAastoreBox",
+        "OK"
     );
 }
