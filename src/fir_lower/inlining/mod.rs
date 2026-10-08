@@ -73,7 +73,7 @@ pub(super) fn specialize_inline_copy(
         _ => None,
     };
     if let Some(declared) = declared_temporary {
-        ir.record_inline_operand_declared_type(expression, declared);
+        ir.record_inline_declared_type(expression, declared);
     }
     specialize_recorded_facts(ir, expression, bindings, runtime);
     {
@@ -580,7 +580,7 @@ impl BodyLowering<'_> {
                         });
                         self.ir.call_operand_bindings.insert(declaration);
                         self.ir
-                            .record_inline_operand_declared_type(declaration, *declared_ty);
+                            .record_inline_declared_type(declaration, *declared_ty);
                         if let Some(parameter) = parameter_names.get(index) {
                             if let Some(source_name) = parameter.source_name.clone() {
                                 self.ir.value_names.insert(declaration, source_name);
@@ -1007,7 +1007,7 @@ impl BodyLowering<'_> {
                 .is_some_and(|name| !reified_bindings.contains_key(name))
             {
                 self.ir
-                    .record_inline_operand_declared_type(declaration, declared_ret);
+                    .record_inline_declared_type(declaration, declared_ret);
             }
             self.ir
                 .inline_return_frames

@@ -663,10 +663,7 @@ impl IrFile {
             "deferred local declaration",
             self.deferred_local_types.values().copied(),
         )?;
-        reject_all(
-            "inline operand declaration",
-            self.inline_operand_declared_types(),
-        )?;
+        reject_all("inline declaration", self.inline_declared_types())?;
         reject_all("exhaustive when", self.whens.exhaustive.values().copied())?;
         reject_all("physical expression", self.physical_types.values().copied())?;
         for properties in self.member_ext_props.values() {

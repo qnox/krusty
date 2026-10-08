@@ -195,7 +195,7 @@ impl Emitter<'_> {
         // call-site primitive, or a call-site reference for an erased-top parameter.
         let debug_ty = self
             .ir
-            .inline_operand_declared_type(declaration)
+            .inline_declared_type(declaration)
             .map(|declared| ir_ty_to_jvm(&stored_value_ty(declared)))
             .unwrap_or(ty);
         let local = super::block_scope::OpenLocal {
