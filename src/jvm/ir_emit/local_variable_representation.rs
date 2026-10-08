@@ -30,7 +30,7 @@ pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
 /// reference: its bound erases to `Object`, and no cast is emitted. A primitive specialization
 /// stays unboxed.
 fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
-    let declared = ir.inline_operand_declared_type(declaration)?;
+    let declared = ir.inline_declared_type(declaration)?;
     if !matches!(declared.non_null(), Ty::TyParam(..)) {
         return None;
     }
@@ -196,7 +196,11 @@ impl Emitter<'_> {
                 let line = self.map_external_frame_line(&frame);
                 code.mark_line(line);
             }
-            None => debug_lines::mark_statement(self.ir, declaration, code),
+            None => {
+                if let Some(&line) = self.ir.expr_lines.get(&declaration) {
+                    self.mark_expression_line(declaration, line, code);
+                }
+            }
         }
     }
 }

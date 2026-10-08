@@ -83,8 +83,10 @@ impl Emitter<'_> {
         {
             code.inline_call_marker(false);
         }
+        // The lambda locals end at this `nop`. It returns to the inline body's line, and that
+        // local-end label is what keeps it when the following instruction is the next debug point.
         if !self.ir.callable_scopes.contains(&block) {
-            self.close_spliced_lambda_frame(block, code);
+            self.close_spliced_lambda_frame(block, false, code);
         }
         if let Some(discarded) = discard_after_close {
             super::discard(self.value_ty(discarded), code);
@@ -159,6 +161,29 @@ impl Emitter<'_> {
             if !dead {
                 if let Some(value) = value {
                     self.mark_statement_line(value, code);
+                    // `{ effects; }` coerced to `Unit` is `Block { effects, value: UnitInstance }`.
+                    // The lambda `}` stands between those effects and `Unit.INSTANCE`.
+                    if self.opens_spliced_lambda_frame(stmts) {
+                        if let Some((effects, unit)) = self.unit_after_lambda_effects(value) {
+                            for effect in effects {
+                                let base = code.stack_height();
+                                self.emit(effect, code);
+                                code.set_stack(base.max(0) as u16);
+                            }
+                            self.close_lambda_value_frame(block, code);
+                            self.emit_value(unit, code);
+                            if normalizes_inline_stack
+                                && (!delays_stack_normalization || reserved_inline_stack.is_some())
+                            {
+                                code.inline_call_marker(false);
+                            }
+                            self.block_depth -= 1;
+                            self.restore_slot_scope(saved);
+                            self.release_reserved_inline_stack(reserved_inline_stack);
+                            self.statement_line = enclosing_statement_line;
+                            return;
+                        }
+                    }
                     self.emit_value(value, code);
                 }
             }
@@ -174,11 +199,51 @@ impl Emitter<'_> {
         {
             code.inline_call_marker(false);
         }
-        self.close_spliced_lambda_frame(block, code);
+        // After the lambda locals, including when this block is itself a callable scope and those
+        // locals stay open through the return. The `nop` is the inline body's line, not the brace.
+        self.close_spliced_lambda_frame(block, false, code);
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
         self.release_reserved_inline_stack(reserved_inline_stack);
         self.statement_line = enclosing_statement_line;
+    }
+
+    fn opens_spliced_lambda_frame(&self, stmts: &[u32]) -> bool {
+        stmts.iter().any(|&statement| {
+            matches!(
+                self.ir.debug_local_provenance(statement),
+                Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
+            )
+        })
+    }
+
+    /// Effects of a `Unit` coercion, then the `Unit` value that follows the lambda's closing brace.
+    fn unit_after_lambda_effects(&self, value: u32) -> Option<(Vec<u32>, u32)> {
+        let IrExpr::Block {
+            stmts,
+            value: Some(unit),
+        } = self.ir.expr(value).clone()
+        else {
+            return None;
+        };
+        if !matches!(self.ir.expr(unit), IrExpr::UnitInstance)
+            || self.opens_spliced_lambda_frame(&stmts)
+        {
+            return None;
+        }
+        Some((stmts, unit))
+    }
+
+    fn close_lambda_value_frame(&mut self, block: u32, code: &mut CodeBuilder) {
+        if !self.ir.callable_scopes.contains(&block) {
+            self.close_external_inline_frame(block, code);
+            // `{ effects; }` coerced to `Unit`: the `}` is a `nop` while the lambda locals are
+            // still open, and `Unit.INSTANCE` follows them.
+            self.close_spliced_lambda_frame(block, true, code);
+            self.close_scope_locals(code, false);
+        } else {
+            self.close_spliced_lambda_frame(block, true, code);
+        }
     }
 
     /// Close the frame of an external inline declaration whose body lines map through the class's
@@ -200,13 +265,17 @@ impl Emitter<'_> {
         code.nop();
     }
 
-    /// Close the frame of a lambda body spliced into an inline call, once its locals are closed.
+    /// Close the frame of a lambda body spliced into an inline call.
     ///
-    /// kotlinc's inliner returns to the inline body's own line at the invocation the lambda
-    /// replaced, with a `nop` to carry it. Its nop cleanup keeps that `nop` only where no other
-    /// instruction follows on the line before the next debug point, which is the same decision
-    /// the optimizer pipeline makes over this one.
-    fn close_spliced_lambda_frame(&mut self, block: u32, code: &mut CodeBuilder) {
+    /// `brace` is the `{ effects; }` coercion to `Unit`: kotlinc marks the lambda literal's `}`
+    /// and emits a `nop` while the lambda locals are still open, then materializes `Unit`. A brace
+    /// on its own line starts a new entry; the local-end label on the following `Unit` keeps the
+    /// `nop`. A one-line brace shares the body's line and the `nop` goes.
+    ///
+    /// Otherwise the locals have already ended. The `nop` returns to the inline body's own line
+    /// at the invocation the lambda replaced. The local-end label sits on the `nop`, and the next
+    /// debug point (the inline-function frame's end, or the consumer) keeps it.
+    fn close_spliced_lambda_frame(&mut self, block: u32, brace: bool, code: &mut CodeBuilder) {
         let IrExpr::Block { stmts, .. } = self.ir.expr(block) else {
             return;
         };
@@ -219,7 +288,20 @@ impl Emitter<'_> {
         if !opens_frame || code.is_dead() {
             return;
         }
-        if let Some(&line) = self.ir.expr_source_lines.get(&block) {
+        if brace {
+            if let Some(line) = self
+                .ir
+                .expr_end_lines
+                .get(&block)
+                .copied()
+                .filter(|line| *line != 0)
+            {
+                code.mark_line(line);
+            } else if let Some(line) = self.ir.expr_source_lines.get(&block).copied() {
+                code.forget_line();
+                self.mark_expression_line(block, line, code);
+            }
+        } else if let Some(&line) = self.ir.expr_source_lines.get(&block) {
             // The spliced body ran under its own lines: kotlinc resets the line in effect after an
             // inlined body, so the frame's closing mark is written even when it names that line.
             code.forget_line();
@@ -263,6 +345,18 @@ impl Emitter<'_> {
         });
         let mut normalize_at_lambda_frame = normalize_at_lambda_frame;
         let mut reserved_inline_stack = None;
+        // The trailing read is thrown away. Record it before the statements, so a break inside
+        // them can see that the landing label will not consume the result.
+        let discarded_result = (!opens_lambda_frame)
+            .then_some(value)
+            .flatten()
+            .and_then(|value| match self.ir.expr(value) {
+                IrExpr::GetValue(index) => Some(*index),
+                _ => None,
+            });
+        if let Some(index) = discarded_result {
+            self.discarded_inline_results.insert(index);
+        }
         for (index, statement) in stmts.into_iter().enumerate() {
             // FixStack replaces the opening marker with the saved caller stack. Keep that
             // generated store inside the lambda frame's mapped line interval.
@@ -301,6 +395,9 @@ impl Emitter<'_> {
             }
         }
         self.terminal_statement_target = None;
+        if let Some(index) = discarded_result {
+            self.discarded_inline_results.remove(&index);
+        }
         // The block's source statements are nested inside the expression its caller is emitting.
         // Once it closes, an instruction consuming the block's value belongs to that enclosing
         // statement, not to the last branch/statement visited inside the block.
@@ -344,15 +441,20 @@ impl Emitter<'_> {
     }
 
     pub(super) fn mark_statement_line(&mut self, statement: u32, code: &mut CodeBuilder) {
-        if self.ir.dispatch_line(statement).is_none() {
-            if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
-                self.mark_expression_line(statement, line, code);
-            }
-        }
-        // A line stays in effect until another statement replaces it, exactly as the
-        // `LineNumberTable` reads: a statement without a line of its own does not clear it.
-        if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
-            self.statement_line = Some(line);
+        let Some(&line) = self.ir.expr_lines.get(&statement) else {
+            return;
+        };
+        // A dispatch owns the line entry at the physical call, so this writes no second entry
+        // and the statement keeps its source line. Otherwise the marked line is the mapped
+        // output line of an inline copy: a later instruction that returns to this statement
+        // must not write the callee's raw line.
+        let marked = if self.ir.dispatch_line(statement).is_none() {
+            self.mark_expression_line(statement, line, code)
+        } else {
+            line
+        };
+        if line != 0 {
+            self.statement_line = Some(marked);
         }
     }
 
@@ -375,8 +477,7 @@ impl Emitter<'_> {
                     .explicit_end
                     .unwrap_or(end)
                     .saturating_sub(local.start);
-                let inline = local.record(Some(length), code, self.recorded_inline_entries);
-                self.recorded_inline_entries += usize::from(inline);
+                local.record(Some(length), code);
             } else {
                 i += 1;
             }
@@ -430,6 +531,15 @@ impl Emitter<'_> {
             .retain(|value| self.slots.contains_key(value));
         self.frame.leave_block(scope.frame);
     }
+
+    /// The innermost inline frame currently owning emitted debug locals.
+    pub(super) fn active_inline_frame_identity(&self) -> Option<u64> {
+        self.open_locals
+            .iter()
+            .filter(|local| local.opens_inline_frame)
+            .max_by_key(|local| local.start)
+            .and_then(|local| local.inline_frame)
+    }
 }
 
 /// An open lexical slot scope; see [`Emitter::open_slot_scope`].
@@ -451,39 +561,37 @@ pub(super) struct OpenLocal {
     pub(super) start: u16,
     pub(super) name: String,
     pub(super) descriptor: String,
-    /// This local binds an inline call operand and starts with the inline frame, after all operands
-    /// have been evaluated, rather than at its individual store.
+    /// This local binds an inline call operand and starts with the next emitted inline frame,
+    /// after all operands have been evaluated, rather than at its own store.
     pub(super) inline_operand: bool,
-    /// Where in the table the entry goes when it must precede entries recorded after it opened,
-    /// rather than follow them: the table size and the number of inline-frame entries recorded
-    /// when it opened. The final position also counts the inline-frame entries recorded since —
-    /// a nested expansion's locals visit ahead of the marker of the frame that contains them —
-    /// while the frame's own plain locals still follow their marker.
-    pub(super) table_position: Option<(usize, usize)>,
-    /// Whether this entry belongs to an inline frame (a marker, an operand, or a copied local):
-    /// it counts toward where an enclosing frame's marker lands.
-    pub(super) inline_frame_entry: bool,
+    /// Identity of the inline frame this entry belongs to. This is emission provenance, not a JVM
+    /// spelling: locals opened before a frame marker are rebound when that marker is emitted.
+    pub(super) inline_frame: Option<u64>,
+    /// Whether this entry is the marker that opens `inline_frame`.
+    pub(super) opens_inline_frame: bool,
+    /// A lambda marker is listed ahead of locals its body already recorded. A function marker
+    /// follows locals of its frame whose ranges ended before the marker. A local that ends with
+    /// the marker stays after `$i$f$`, and operands still open are recorded after it.
+    pub(super) precedes_recorded_locals: bool,
     /// Where the range ends when that is before its block does: a `do…while` body's local that the
     /// condition does not read ends where the condition starts.
     pub(super) explicit_end: Option<u16>,
 }
 
 impl OpenLocal {
-    /// Record the closed range in the method's `LocalVariableTable`; `inline_entries` is how many
-    /// inline-frame entries the table already holds. Returns whether this entry is one itself.
-    pub(super) fn record(
-        self,
-        length: Option<u16>,
-        code: &mut CodeBuilder,
-        inline_entries: usize,
-    ) -> bool {
+    /// Record the closed range in the method's `LocalVariableTable` with its inline-frame
+    /// ownership, so marker order does not depend on lexical scope-close timing.
+    pub(super) fn record(self, length: Option<u16>, code: &mut CodeBuilder) {
         let entry = (self.start, length, self.slot, self.name, self.descriptor);
-        match self.table_position {
-            Some((entries, open_inline)) => {
-                code.insert_local_entry(entries + (inline_entries - open_inline), entry)
-            }
-            None => code.add_local_entry(entry.0, entry.1, entry.2, &entry.3, &entry.4),
+        if self.opens_inline_frame {
+            let frame = self
+                .inline_frame
+                .expect("an inline frame marker has a frame identity");
+            code.insert_inline_frame_marker(frame, self.precedes_recorded_locals, entry);
+        } else if let Some(frame) = self.inline_frame {
+            code.add_inline_frame_local(frame, entry);
+        } else {
+            code.add_local_entry(entry.0, entry.1, entry.2, &entry.3, &entry.4);
         }
-        self.inline_frame_entry
     }
 }

@@ -20,6 +20,7 @@ mod coroutine_transform;
 mod debug_metadata;
 mod descriptor_mentions;
 mod enclosing_method;
+mod exception_tables;
 mod inline_call_stacks;
 mod inner_classes;
 mod late_fields;
@@ -2030,6 +2031,9 @@ pub struct CodeBuilder {
     retained_line_mark: Option<usize>,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
+    /// Semantic inline-frame placement parallel to `local_entries`. This never reaches the class
+    /// file; it makes table order independent of which lexical scope happens to close first.
+    local_entry_placements: Vec<local_variables::LocalEntryPlacement>,
     /// Offset of the implicit void return appended by declared-function emission. Ordinary
     /// `ret_void` calls intentionally do not populate it.
     implicit_void_return_pc: Option<u16>,
@@ -2069,6 +2073,10 @@ pub struct CodeBuilder {
     next_bind: u32,
     /// Pending line-mark obligations (see [`line_numbers::PendingLines`]).
     pending_lines: line_numbers::PendingLines,
+    /// This method expanded an inline body. kotlinc sorts that method's whole exception table by
+    /// handler pc, then start pc, only after inlining. A method that was not inlined keeps
+    /// emission order (the inner handler of a nested `try` stays ahead of the outer one).
+    inlined_bytecode: bool,
 }
 
 impl CodeBuilder {
@@ -2087,6 +2095,7 @@ impl CodeBuilder {
             inlined_line_marks: Vec::new(),
             retained_line_mark: None,
             local_entries: Vec::new(),
+            local_entry_placements: Vec::new(),
             implicit_void_return_pc: None,
             suppress_entry_line: false,
             dead: false,
@@ -2094,6 +2103,7 @@ impl CodeBuilder {
             bind_sequence: Vec::new(),
             next_bind: 0,
             pending_lines: Default::default(),
+            inlined_bytecode: false,
         }
     }
 
@@ -2124,42 +2134,12 @@ impl CodeBuilder {
     ) {
         self.local_entries
             .push((start, length, slot, name.to_string(), desc.to_string()));
+        self.local_entry_placements
+            .push(local_variables::LocalEntryPlacement::Plain);
     }
 
     pub fn local_entries(&self) -> &[(u16, Option<u16>, u16, String, String)] {
         &self.local_entries
-    }
-
-    /// Register a `try` range `[start, end)` guarded by a handler at `handler`, catching `catch_type`
-    /// (a constant-pool class index, or 0 for catch-all).
-    pub fn add_exception(&mut self, start: Label, end: Label, handler: Label, catch_type: u16) {
-        self.exceptions.push((start, end, handler, catch_type));
-    }
-
-    /// Resolve the exception table to byte offsets (call after all labels are bound, e.g. in `link`).
-    /// Drops degenerate ranges where `start >= end` (an empty protected region — e.g. an empty `try`
-    /// body — protects nothing, and an empty range is an illegal `Code` exception-table entry).
-    pub fn resolved_exceptions(&self) -> Vec<(u16, u16, u16, u16)> {
-        self.exceptions
-            .iter()
-            // An UNBOUND label means the region it delimits was dropped as dead code (`bind_at` is a
-            // no-op while dead), so the entry describes bytes that do not exist. Without this the
-            // `usize::MAX as u16` truncation below would fabricate offset 65535.
-            .filter(|&&(s, e, h, _)| {
-                [s, e, h]
-                    .iter()
-                    .all(|&label| self.labels[self.label_index(label)] != usize::MAX)
-            })
-            .map(|&(s, e, h, t)| {
-                (
-                    self.labels[self.label_index(s)] as u16,
-                    self.labels[self.label_index(e)] as u16,
-                    self.labels[self.label_index(h)] as u16,
-                    t,
-                )
-            })
-            .filter(|&(start, end, _, _)| start < end)
-            .collect()
     }
 
     /// The current (linearly tracked) operand-stack height.

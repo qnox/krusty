@@ -378,6 +378,7 @@ fn finish_accessor_expansion(
             result_slot,
             found.nested,
             found.value,
+            found.returned,
         );
     }
     let mut statements = Vec::new();

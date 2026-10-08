@@ -14,11 +14,6 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         let frame_start = u16::try_from(code.bytes.len()).unwrap_or(u16::MAX);
-        for local in &mut self.open_locals {
-            if local.depth == self.block_depth && local.inline_operand {
-                local.start = frame_start;
-            }
-        }
         let slot = self
             .frame
             .enter(FrameKey::InlineFrameMarker(declaration), Ty::Int);
@@ -33,6 +28,16 @@ impl Emitter<'_> {
             );
             return;
         }
-        self.open_declared_local(declaration, slot, Ty::Int, code);
+        let Some(frame) = self.open_declared_local(declaration, slot, Ty::Int, code) else {
+            return;
+        };
+        // Operands are evaluated and opened before the frame marker, but semantically belong to
+        // the frame it starts. Bind both their range start and their table-order identity here.
+        for local in &mut self.open_locals {
+            if local.inline_operand && local.inline_frame.is_none() {
+                local.start = frame_start;
+                local.inline_frame = Some(frame);
+            }
+        }
     }
 }

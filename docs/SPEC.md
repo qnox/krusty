@@ -4369,7 +4369,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is checked (`tests/expect_default_lambda_marker_e2e.rs`). A marker whose provenance
   was not realized is an error; the name is not rebuilt from the owner and an ordinal. A frame's
   marker is listed ahead of the locals binding its
-  operands, a lambda's also ahead of the locals its body declares, and a cloned lambda marker gains `$iv` per enclosing expansion while a function
+  operands, a lambda's also ahead of the locals its body declares. A function marker follows a body
+  local whose range ended before the marker, so an inlined `forEach` lists `element$iv` ahead of
+  `$i$f$forEach`. A local that ends with the marker (`use`'s `closed`), including one separated from
+  it only by a load the inline epilogue removes, and the receiver operand stay after it. A cloned
+  lambda marker gains `$iv` per enclosing expansion while a function
   marker never does, as kotlinc's tables read. A spliced lambda's block ends with kotlinc's return
   to the invocation's line and a `nop`, which the nop cleanup keeps only when nothing else runs on
   that line. Not yet matched: a multi-parameter lambda's arguments are stored in order rather than
@@ -15909,3 +15913,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument, each run and compared with kotlinc; a try/catch callee under an operand, run), and
   `classfile::inline_call_stacks::tests::a_method_the_passes_cannot_normalize_fails_the_class`.
   Corpus: a private-corpus module.
+
+- **An inlined generic close keeps the erased receiver and materializes a generic `Unit`.**
+  `inline fun <T : Gate?, R> T.consumeAndClose(block: (T) -> R): R` stores the extension receiver
+  as the erased `Gate` bound. Common IR still specializes every copied declaration semantically;
+  it retains the declaration type as provenance for unnamed, non-reified generic temporaries. The
+  JVM uses that provenance to give the safe-call temporary its erased-bound slot, so
+  `this?.close()` is `aload; dup; ifnull; invokeinterface close; goto; pop`. A named lambda
+  parameter (`r: T`) takes the type argument. Primitive substitutions and reified parameters stay
+  specialized. When `R` is `Unit`, the return is a value at the generic signature, so the
+  expansion stores `kotlin.Unit.INSTANCE` before `finally` and does not carry that slot across
+  the transfer; a function declared to return `Unit` stays void. That lambda's `}` is a
+  `nop` on the call-site line while its locals are still open, and `Unit.INSTANCE` follows them.
+  A value-returning splice is the other closing `nop`: the lambda locals end first, and the `nop`
+  returns to the inline body's line. A same-file expansion still
+  writes `SourceDebugExtension` (one file, a second line range, and the debug stratum at the
+  call). Catch, finally, and declaration marks of the copy go through that map. After inlining,
+  the method's exception table is sorted by handler pc, then start pc; the standalone `use`
+  method, which was not inlined, keeps emission order. That method's `try` is `Nothing`, not
+  `Unit`. A non-`Unit` `try` enters a result temporary after its body once every local the body
+  introduced has been left; a `Nothing` one's is `java/lang/Void` and stores nothing. A return
+  spill or a named local already wrote that index, so the catch parameters sit above it. When
+  nothing wrote it, the unused-slot pass gives the index to the catch. An inlined return whose
+  result slot is still live does not enter another temporary: the handlers are allocated above
+  that result. A `Unit` `try` does not enter one.
+  Tests: `tests/inline_use_close_e2e.rs`, `tests/same_module_inline_frame_markers_e2e.rs`,
+  `tests/inline_constructor_reference_e2e.rs`,
+  `jvm::source_map::tests::a_same_file_inline_still_writes_a_map`.

@@ -52,9 +52,10 @@ impl Emitter<'_> {
     /// A copied inline comparison uses the same mapped line as its operands, so a jump the constant
     /// folder removes shares that line and does not survive as its own `nop`.
     pub(super) fn mark_comparison_decision(&mut self, operands: &[ExprId], code: &mut CodeBuilder) {
-        match self.comparison_line.filter(|&(_, line)| line != 0) {
-            Some((expression, line)) => self.mark_expression_line(expression, line, code),
-            None => self.return_to_statement_line(operands, code),
+        if let Some((expression, line)) = self.comparison_line.filter(|&(_, line)| line != 0) {
+            self.mark_expression_line(expression, line, code);
+        } else {
+            self.return_to_statement_line(operands, code);
         }
     }
 

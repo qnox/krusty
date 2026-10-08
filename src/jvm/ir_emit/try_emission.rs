@@ -16,7 +16,7 @@ use crate::jvm::classfile::{CodeBuilder, Label};
 use crate::types::Ty;
 
 use super::frame_map::{FrameKey, TempRole, TempSlot};
-use super::{debug_lines, ir_ty_to_jvm, load, local_variable_desc, slot_words, store, Emitter};
+use super::{ir_ty_to_jvm, load, local_variable_desc, slot_words, store, Emitter};
 
 /// The operands of an IR `try` being emitted, as `IrExpr::Try` holds them.
 pub(super) struct TryParts<'a> {
@@ -215,6 +215,11 @@ impl Emitter<'_> {
             self.return_finalizers.push(finalizer);
         }
         let stores_body = !is_stmt && !body_diverges;
+        // A diverging body stores nothing. The result temporary, when one is entered below, only
+        // reserves its slot for the handlers. The size here is the frame before the body, so a
+        // local the body leaves can be told apart from a value the body keeps, such as an
+        // inline-return result.
+        let frame_at_body = self.frame.size();
         if stores_body {
             self.emit_value(body, code);
             // kotlinc materializes the body and every catch at the `try`'s own type before the
@@ -226,12 +231,15 @@ impl Emitter<'_> {
             // Statement, or a diverging body (`throw`/`return`): no value reaches the result temp.
             self.emit(body, code);
         }
-        // kotlinc's `visitTry` enters a result temporary for every `try` that is not `Unit` once
-        // the body is emitted, so it takes the slot the body's locals have just left and the catch
-        // parameters sit above it. A `Nothing` one's is a `java/lang/Void` nothing stores.
-        // A discarded `try` still enters it, at the `try`'s own type: kotlinc stores each branch
-        // there and drops the stores once nothing reads them.
-        let result_temp = (rt != Ty::Unit).then(|| {
+        // kotlinc's `visitTryWithInfo` enters a result temporary for every non-`Unit` `try`
+        // once the body is emitted, in the slot the body's locals have just left, so the catch
+        // parameters sit above it. A `Nothing` one's is a `java/lang/Void` nothing stores. The
+        // store after a diverging body is dead and is not emitted; when that index was never
+        // written, the unused-slot pass closes the gap and the catch reuses it. A local the body
+        // left, or a return spill stored into the same index, keeps the slot. An inline-return
+        // result that is still live already occupies the saved-value slot, and another temporary
+        // would sit above it. A `Unit` `try` does not enter one.
+        let result_temp = (rt != Ty::Unit && self.frame.size() <= frame_at_body).then(|| {
             let temp_ty = if rt == Ty::Nothing {
                 Ty::obj("java/lang/Void")
             } else {
@@ -285,7 +293,7 @@ impl Emitter<'_> {
             } // `finally` inlined on the normal path
             if !fin_diverges {
                 if let Some(f) = finally {
-                    debug_lines::mark_block_exit(self.ir, f, code);
+                    self.mark_block_exit(f, code);
                 }
                 code.goto(after);
                 after_reachable = true;
@@ -305,7 +313,7 @@ impl Emitter<'_> {
             // kotlinc marks the clause's own line, its `catch` keyword's, at the handler's entry: the
             // store of the caught exception belongs to the clause, not to its body's first line.
             if let Some(line) = c.line {
-                code.mark_line(line);
+                self.mark_expression_line(expression, line, code);
             }
             let exc_name = crate::jvm::jvm_class_map::to_jvm_classfile_type_name(c.jvm_class());
             let exc_internal = exc_name.jvm_binary_name();
@@ -391,13 +399,18 @@ impl Emitter<'_> {
                 });
                 if let (Some(name), Some(start_pc)) = (rendered.as_deref(), local_start) {
                     let end_pc = code.bytes.len().min(u16::MAX as usize) as u16;
-                    code.add_local_entry(
+                    let entry = (
                         start_pc,
                         Some(end_pc.saturating_sub(start_pc)),
                         cslot,
-                        name,
-                        &local_variable_desc(exc_ty),
+                        name.to_string(),
+                        local_variable_desc(exc_ty),
                     );
+                    if let Some(frame) = self.active_inline_frame_identity() {
+                        code.add_inline_frame_catch(frame, entry);
+                    } else {
+                        code.add_local_entry(entry.0, entry.1, entry.2, &entry.3, &entry.4);
+                    }
                 }
             }
             if !cbody_diverges {
@@ -411,7 +424,7 @@ impl Emitter<'_> {
                 } // `finally` inlined after the catch
                 if !fin_diverges {
                     if let Some(f) = finally {
-                        debug_lines::mark_block_exit(self.ir, f, code);
+                        self.mark_block_exit(f, code);
                     }
                     // The LAST catch of a `try` with no `finally` is followed immediately by
                     // `after`: nothing stands between them, so the jump would be to the next
@@ -569,7 +582,15 @@ impl Emitter<'_> {
             if brk && !code.is_dead() {
                 if let Some(label) = label {
                     if let Some(&(value, ty)) = self.inline_return_frame_results.get(label) {
-                        if slot_words(ty) > 0 {
+                        // A generic return specialized to `Unit` stores `kotlin.Unit.INSTANCE`
+                        // and leaves it there. kotlinc does not carry that reference across
+                        // `finally`: a later read is its own `getstatic`, and a discarded call
+                        // never reloads the slot. A primitive result is carried so every path
+                        // into the landing label has it on the stack.
+                        let carries = slot_words(ty) > 0
+                            && ty != Ty::obj("kotlin/Unit")
+                            && !self.discarded_inline_results.contains(&value);
+                        if carries {
                             let slot = self.activate_inline_return_frame_result(value, ty);
                             load(ty, slot, code);
                             if self
@@ -586,10 +607,15 @@ impl Emitter<'_> {
                     }
                 }
             }
-            // A transfer's finalizer copies run under their own source lines. Restore the checked
-            // transfer identity at the physical jump, as return emission restores it at `xreturn`.
-            if let Some(line) = transfer_line {
-                code.mark_line(u32::from(line));
+            // A transfer's finalizer copies run under their own source lines. Restore the line
+            // `mark_expression_start` already checked — the mapped output line of an inline copy —
+            // at the physical jump, as return emission restores it at `xreturn`. A dead jump is
+            // the finalizer's own exit; marking it lets goto cleanup thread this transfer into
+            // that copy.
+            if !code.is_dead() {
+                if let Some(line) = transfer_line {
+                    code.mark_line(u32::from(line));
+                }
             }
             code.goto(target);
         }

@@ -68,7 +68,9 @@ impl Emitter<'_> {
     ) {
         let (class, _) = ref_class(&elem);
         self.emit_new_holder(class, code);
-        debug_lines::mark_statement(self.ir, declaration, code);
+        if let Some(&line) = self.ir.expr_lines.get(&declaration) {
+            self.mark_expression_line(declaration, line, code);
+        }
         let holder = Ty::obj(class);
         store(holder, slot, code);
         self.mark_suspend_lambda_parameter_read(declaration, code);
@@ -79,7 +81,9 @@ impl Emitter<'_> {
             load(holder, slot, code);
             self.mark_expression_start(value, code);
             self.emit_element_value(elem, value, code);
-            debug_lines::mark_statement(self.ir, declaration, code);
+            if let Some(&line) = self.ir.expr_lines.get(&declaration) {
+                self.mark_expression_line(declaration, line, code);
+            }
             self.put_element(&elem, code);
         }
     }
@@ -149,31 +153,49 @@ impl Emitter<'_> {
         slot: u16,
         ty: Ty,
         code: &CodeBuilder,
-    ) {
+    ) -> Option<u64> {
         let Some(name) = self
             .record_locals
             .then(|| super::super::debug_local_names::declared_name(self.ir, declaration))
             .flatten()
         else {
-            return;
+            return None;
         };
         if code.bytes.len() > u16::MAX as usize {
-            return;
+            return None;
         }
         let provenance = self.ir.debug_local_provenance(declaration);
-        // A spliced lambda's marker precedes, in kotlinc's table, every local its body declares,
-        // and follows the locals of a frame nested inside it.
-        let table_position = matches!(
+        let marker = provenance.is_some_and(crate::ir::IrDebugLocalProvenance::is_inline_marker);
+        let precedes_recorded_locals = matches!(
             provenance,
             Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker { .. })
-        )
-        .then(|| (code.local_entry_count(), self.recorded_inline_entries));
-        // A materialized inline type parameter is stored as its erased bound. The debug descriptor
-        // is that same declaration type, including when the slot stayed specialized (an
-        // unconstrained `T`, or a primitive).
+        );
+        let inline_operand = match provenance {
+            Some(crate::ir::IrDebugLocalProvenance::InlineValue { .. }) => {
+                self.ir.call_operand_bindings.contains(&declaration)
+            }
+            Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver { .. })
+            | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { .. })
+            | Some(crate::ir::IrDebugLocalProvenance::InlineCallableReferenceParameter {
+                ..
+            }) => true,
+            _ => false,
+        };
+        let inline_frame = if marker {
+            let frame = self.next_inline_frame_identity;
+            self.next_inline_frame_identity = self.next_inline_frame_identity.wrapping_add(1);
+            Some(frame)
+        } else if inline_operand {
+            None
+        } else {
+            self.active_inline_frame_identity()
+        };
+        // The LocalVariableTable retains an inline parameter declaration's erased type. Keep that
+        // debug representation independent of whether the verifier slot uses the erased bound, a
+        // call-site primitive, or a call-site reference for an erased-top parameter.
         let debug_ty = self
             .ir
-            .inline_operand_declared_type(declaration)
+            .inline_declared_type(declaration)
             .map(|declared| ir_ty_to_jvm(&stored_value_ty(declared)))
             .unwrap_or(ty);
         let local = super::block_scope::OpenLocal {
@@ -182,24 +204,15 @@ impl Emitter<'_> {
             start: code.bytes.len() as u16,
             name,
             descriptor: local_variable_desc(debug_ty),
-            inline_operand: self.ir.call_operand_bindings.contains(&declaration)
-                && matches!(
-                    provenance,
-                    Some(crate::ir::IrDebugLocalProvenance::InlineValue { .. })
-                        | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver { .. })
-                        | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { .. })
-                        | Some(
-                            crate::ir::IrDebugLocalProvenance::InlineCallableReferenceParameter { .. }
-                        )
-                ),
-            table_position,
-            inline_frame_entry: provenance.is_some(),
+            inline_operand,
+            inline_frame,
+            opens_inline_frame: marker,
+            precedes_recorded_locals,
             explicit_end: None,
         };
         // kotlinc lists an inline frame's marker ahead of the locals binding that frame's operands,
         // which are declared before it in the same block: the inlined body's own table puts its
         // parameters last.
-        let marker = provenance.is_some_and(crate::ir::IrDebugLocalProvenance::is_inline_marker);
         let position = if marker {
             self.open_locals
                 .iter()
@@ -209,5 +222,6 @@ impl Emitter<'_> {
             self.open_locals.len()
         };
         self.open_locals.insert(position, local);
+        inline_frame
     }
 }
