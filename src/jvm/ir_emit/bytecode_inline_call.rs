@@ -1008,8 +1008,9 @@ impl Emitter<'_> {
     /// kotlinc's choice per argument. An `@InlineOnly` callee reads a dispatch receiver or ordinary
     /// argument that is already a local from that local (`genOrGetLocal`), including a local under
     /// a representation-preserving reference coercion; its extension receiver is stored when the
-    /// body reads it. A parameter the body loads only for the null check inlining removes is
-    /// evaluated and popped, and takes no slot. When the body loads its parameters first, the
+    /// body reads it. A parameter that callee loads only for the null check inlining removes is
+    /// evaluated and popped, and takes no slot. An ordinary inline function stores that parameter
+    /// anyway, so the caller's `$iv` local exists. When the body loads its parameters first, the
     /// stored arguments are instead evaluated in place.
     ///
     /// `None` only when a function-typed local has no provider-published `crossinline`/`noinline`
@@ -1055,26 +1056,31 @@ impl Emitter<'_> {
                 supplies.push(Supply::CallerLocal);
                 continue;
             }
-            // The body's parameter slot, before the caller's frame renumbers it. A parameter
-            // loaded only by the null check inlining deletes is not stored: the argument is
-            // evaluated and popped. An inlined lambda is not a value the body loads.
-            let parameter_slot = physical.iter().take(index).map(|ty| slot_words(*ty)).sum();
-            let parameter_read = inliner::reads_local(callee, parameter_slot)
-                || callee.nodes.iter().any(|node| {
-                    matches!(
-                        node,
-                        Node::Insn(Insn::Iinc { slot, .. }) if *slot == parameter_slot
-                    )
-                });
+            // An `@InlineOnly` body contributes no debug locals. A parameter it loads only for
+            // the null check inlining deletes is evaluated and popped, and the next parameter
+            // keeps the slot kotlinc gives it. An ordinary inline function still stores that
+            // parameter: the caller's table keeps its `$iv` local. An inlined lambda is not a
+            // value the body loads.
             match self.is_inlined_literal(
                 call_expression,
                 leading_non_argument_operands,
                 index,
                 argument,
             ) {
-                Ok(false) if !parameter_read => {
-                    supplies.push(Supply::Unread);
-                    continue;
+                Ok(false) if target.inline_only => {
+                    let parameter_slot =
+                        physical.iter().take(index).map(|ty| slot_words(*ty)).sum();
+                    let parameter_read = inliner::reads_local(callee, parameter_slot)
+                        || callee.nodes.iter().any(|node| {
+                            matches!(
+                                node,
+                                Node::Insn(Insn::Iinc { slot, .. }) if *slot == parameter_slot
+                            )
+                        });
+                    if !parameter_read {
+                        supplies.push(Supply::Unread);
+                        continue;
+                    }
                 }
                 Ok(_) => {}
                 Err(_) => return None,

@@ -827,8 +827,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that is a plain read or constant, or the trailing run of such operands whatever their values
   (unless one suspends), is passed directly, which keeps the source evaluation order. A direct
   element of a vararg operand folds the same way, so `String.format("%s", "")` stores the format
-  string and then writes `""` into the array, and a parameter the inlined body loads only for its
-  null check (`String.Companion.format`'s receiver) is evaluated and popped and takes no local. A preserved
+  string and then writes `""` into the array. An `@InlineOnly` parameter the body loads only for
+  its null check (`String.Companion.format`'s receiver) is evaluated and popped and takes no local.
+  An ordinary inline function stores that parameter anyway, so the caller's `$iv` local exists
+  (`tests/delegated_properties_array_e2e.rs`). A preserved
   inline lambda's body still uses the lambda's own value numbering, so a local inside that body
   is not a use of the caller's operand temporary. Counting it as one kept a copy of a parameter
   passed beside the lambda (`repeat(n) { … }` stored `n` before the loop). The JVM
