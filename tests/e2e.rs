@@ -1531,6 +1531,8 @@ mod mpp_expect_actual_e2e;
 mod mpp_requires_the_feature_e2e;
 #[path = "nested_class_annotation_scope_e2e.rs"]
 mod nested_class_annotation_scope_e2e;
+#[path = "nested_inline_lambda_e2e.rs"]
+mod nested_inline_lambda_e2e;
 #[path = "nested_receiver_lambda_captures_e2e.rs"]
 mod nested_receiver_lambda_captures_e2e;
 #[path = "nested_type_parameter_bound_e2e.rs"]

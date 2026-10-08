@@ -156,7 +156,7 @@ impl Emitter<'_> {
             || self
                 .ir
                 .inline_copy_provenance(expression)
-                .is_some_and(|provenance| provenance.call_line.is_some());
+                .is_some_and(|provenance| provenance.iter().any(|frame| frame.call_line.is_some()));
         if inlined {
             code.note_inlined_bytecode();
         }
@@ -183,29 +183,45 @@ impl Emitter<'_> {
                 return u32::from(synthetic);
             }
         }
-        let Some(provenance) = self.ir.inline_copy_provenance(expression) else {
+        // The source line stays the declaration's raw line. A nested same-module expansion has
+        // several semantic frames, but this physical copy is emitted from the outermost body;
+        // kotlinc maps that raw line under the outer call instead of recursively feeding an inner
+        // synthetic output line back into the same source map.
+        let Some(frame) = self
+            .ir
+            .inline_copy_provenance(expression)
+            .and_then(|provenance| {
+                provenance
+                    .iter()
+                    .rev()
+                    .find(|frame| frame.call_line.is_some())
+            })
+            .copied()
+        else {
             return line;
         };
-        let Some(call_line) = provenance.call_line else {
-            return line;
-        };
+        let call_line = frame
+            .call_line
+            .expect("an inline frame with a call line was selected");
         let Some((source_file, path)) =
-            self.copied_inline_file(provenance.function, provenance.owner, provenance.source)
+            self.copied_inline_file(frame.function, frame.owner, frame.source)
         else {
             return line;
         };
         let claimable = u16::try_from(self.ir.source_line_count)
             .unwrap_or(u16::MAX)
             .max(1);
-        let mapped = self.cw.source_map_for_inlining(claimable).and_then(|map| {
-            map.map_copied_line(
-                &source_file,
-                &path,
-                u16::try_from(line).unwrap_or(u16::MAX),
-                Some(u16::try_from(call_line).unwrap_or(u16::MAX)),
-            )
-        });
-        mapped.map_or(line, u32::from)
+        self.cw
+            .source_map_for_inlining(claimable)
+            .and_then(|map| {
+                map.map_copied_line(
+                    &source_file,
+                    &path,
+                    u16::try_from(line).unwrap_or(u16::MAX),
+                    Some(u16::try_from(call_line).unwrap_or(u16::MAX)),
+                )
+            })
+            .map_or(line, u32::from)
     }
 
     /// The source file and JVM path a copied inline line is mapped under.
@@ -275,7 +291,7 @@ impl Emitter<'_> {
             && self
                 .ir
                 .inline_copy_provenance(expression)
-                .is_some_and(|provenance| provenance.call_line.is_some())
+                .is_some_and(|provenance| provenance.iter().any(|frame| frame.call_line.is_some()))
             && self.ir.expr_source_lines.contains_key(&expression)
     }
 
