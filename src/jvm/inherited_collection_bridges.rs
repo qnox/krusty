@@ -22,11 +22,17 @@ use crate::types::{ty_subst, ty_subst_all, Ty, TypeName};
 #[derive(Default)]
 pub(super) struct InheritedCollectionBridges {
     by_class: HashMap<TypeName, Vec<InheritedCollectionBridge>>,
+    replaced_ordinary: HashSet<(TypeName, String, String)>,
 }
 
 impl InheritedCollectionBridges {
     pub(super) fn for_class(&self, class: TypeName) -> &[InheritedCollectionBridge] {
         self.by_class.get(&class).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub(super) fn replaces_ordinary(&self, class: TypeName, name: &str, descriptor: &str) -> bool {
+        self.replaced_ordinary
+            .contains(&(class, name.to_string(), descriptor.to_string()))
     }
 }
 
@@ -45,19 +51,27 @@ pub(super) enum InheritedCollectionBridgeBody {
         owner: TypeName,
         name: String,
         descriptor: String,
-        result_cast: Option<String>,
+        delegate_result: Ty,
         signature: Option<String>,
     },
-    /// Final bridge under the physical Java name.
+    /// A bridge that delegates to another entry on the generated class.
     Checked {
-        synthetic: bool,
+        access: InheritedCollectionBridgeAccess,
         checks: Vec<InheritedCollectionCheck>,
         failure: Option<CollectionBridgeFailure>,
         delegate_name: String,
         delegate_descriptor: String,
+        delegate_result: Ty,
         cast_arguments: Vec<InheritedCollectionCheck>,
         signature: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum InheritedCollectionBridgeAccess {
+    Final,
+    FinalSynthetic,
+    Synthetic,
 }
 
 #[derive(Clone, Debug)]
@@ -79,14 +93,32 @@ pub(super) fn select(
         if !crate::jvm::override_results::realizes_overrides(ir, class_index) {
             continue;
         }
-        let bridges = synthesize(ir, class_index, classpath, override_results);
-        if !bridges.is_empty() {
-            result
-                .by_class
-                .insert(ir.classes[class_index].fq_name_id(), bridges);
+        let selection = synthesize(ir, class_index, classpath, override_results);
+        let class = ir.classes[class_index].fq_name_id();
+        result.replaced_ordinary.extend(
+            selection
+                .replaced_ordinary
+                .into_iter()
+                .map(|(name, descriptor)| (class, name, descriptor)),
+        );
+        if !selection.bridges.is_empty() {
+            result.by_class.insert(class, selection.bridges);
         }
     }
     result
+}
+
+#[derive(Default)]
+struct BridgeSelection {
+    bridges: Vec<InheritedCollectionBridge>,
+    replaced_ordinary: Vec<(String, String)>,
+}
+
+struct ReplacedPropertyBridge {
+    name: String,
+    parameters: Vec<Ty>,
+    result: Ty,
+    descriptor: String,
 }
 
 fn synthesize(
@@ -94,29 +126,29 @@ fn synthesize(
     class_index: usize,
     classpath: &Classpath,
     override_results: &crate::jvm::override_results::OverrideResults,
-) -> Vec<InheritedCollectionBridge> {
+) -> BridgeSelection {
     let class = &ir.classes[class_index];
     if class.is_interface || class.is_annotation {
-        return Vec::new();
+        return BridgeSelection::default();
     }
     let Some(super_info) = classpath.find_name(class.superclass) else {
-        return Vec::new();
+        return BridgeSelection::default();
     };
     // A Kotlin superclass already publishes its final special bridges. Only the first Kotlin class
     // whose immediate superclass is Java materializes inherited fake overrides.
     if super_info.meta.class_kind.is_some() || class.superclass == crate::types::wk::java_object() {
-        return Vec::new();
+        return BridgeSelection::default();
     }
 
     let Some(start) = direct_supertype(class) else {
-        return Vec::new();
+        return BridgeSelection::default();
     };
     let Some(collection_face) = applied_collection_face(classpath, start) else {
-        return Vec::new();
+        return BridgeSelection::default();
     };
     let specifications = builtin_bridge_members(classpath, collection_face);
     if specifications.is_empty() {
-        return Vec::new();
+        return BridgeSelection::default();
     }
 
     let mut found = Vec::new();
@@ -144,17 +176,13 @@ fn synthesize(
         }
     }
 
-    let mut bridges = Vec::new();
+    let mut selection = BridgeSelection::default();
     for member in order_members(found) {
-        bridges.extend(member_bridges(
-            ir,
-            class,
-            classpath,
-            override_results,
-            member,
-        ));
+        let member = member_bridges(ir, class, classpath, override_results, member);
+        selection.bridges.extend(member.bridges);
+        selection.replaced_ordinary.extend(member.replaced_ordinary);
     }
-    bridges
+    selection
 }
 
 #[derive(Clone)]
@@ -380,33 +408,50 @@ fn member_bridges(
     classpath: &Classpath,
     override_results: &crate::jvm::override_results::OverrideResults,
     member: FoundMember,
-) -> Vec<InheritedCollectionBridge> {
+) -> BridgeSelection {
     let specification = &member.specification;
     let specialized_name = if specification.kind == MappedBuiltinMemberKind::Property {
         property_getter_name(&specification.source_name)
     } else {
         specification.source_name.clone()
     };
-    let specialized_descriptor = descriptor(&specification.parameters, specification.result);
     let Some((substituted_parameters, substituted_result)) =
         substituted_java_method(&member.method, &member.class_bindings)
     else {
-        return Vec::new();
+        return BridgeSelection::default();
+    };
+    let Some((_, super_result)) =
+        crate::jvm::jvm_libraries::parse_method_desc(&member.method.descriptor)
+    else {
+        return BridgeSelection::default();
     };
     let substituted_descriptor = descriptor(&substituted_parameters, substituted_result);
+    let replaced_ordinary = replaceable_inherited_property_bridge(
+        class,
+        &specialized_name,
+        &specification.physical_name,
+    );
+    // A generic property override has an erased Object bridge, but kotlinc's inherited entry uses
+    // the boxed specialization (`Integer`) between that bridge and the primitive Java method.
+    let specialized_result = if replaced_ordinary.as_ref().is_some_and(|bridge| {
+        jvm_declared_ty(&bridge.result).is_reference()
+            && jvm_declared_ty(&specification.result).is_jvm_scalar()
+    }) {
+        Ty::nullable(specification.result)
+    } else {
+        specification.result
+    };
+    let specialized_descriptor = descriptor(&specification.parameters, specialized_result);
     if specialized_name == specification.physical_name
         && specialized_descriptor == substituted_descriptor
     {
-        return Vec::new();
+        return BridgeSelection::default();
     }
-    if ordinary_bridge_covers(
-        class,
-        &specialized_name,
-        &specialized_descriptor,
-        &specification.physical_name,
-        &substituted_descriptor,
-    ) {
-        return Vec::new();
+    if ordinary_bridge_covers_source(class, &specification.physical_name, &substituted_descriptor)
+        || (ordinary_bridge_covers_source(class, &specialized_name, &specialized_descriptor)
+            && replaced_ordinary.is_none())
+    {
+        return BridgeSelection::default();
     }
     if declares(
         ir,
@@ -415,7 +460,7 @@ fn member_bridges(
         &specialized_name,
         &specialized_descriptor,
     ) {
-        return Vec::new();
+        return BridgeSelection::default();
     }
     if inherits_final(
         classpath,
@@ -423,21 +468,23 @@ fn member_bridges(
         &specification.physical_name,
         &substituted_descriptor,
     ) {
-        return Vec::new();
+        return BridgeSelection::default();
     }
 
-    let property_signature = (specification.kind == MappedBuiltinMemberKind::Property)
+    let specialized_property_signature = (specification.kind == MappedBuiltinMemberKind::Property)
+        .then(|| property_signature(specialized_result));
+    let physical_property_signature = (specification.kind == MappedBuiltinMemberKind::Property)
         .then(|| property_signature(specification.result));
     let mut bridges = vec![InheritedCollectionBridge {
         name: specialized_name.clone(),
         parameters: specification.parameters.clone(),
-        result: specification.result,
+        result: specialized_result,
         body: InheritedCollectionBridgeBody::SuperDelegate {
             owner: class.superclass,
             name: specification.physical_name.clone(),
             descriptor: member.method.descriptor.clone(),
-            result_cast: result_cast(&member.method.descriptor, specification.result),
-            signature: property_signature.as_ref().map(|pair| pair.0.clone()),
+            delegate_result: super_result,
+            signature: specialized_property_signature.map(|pair| pair.0),
         },
     }];
 
@@ -447,7 +494,7 @@ fn member_bridges(
         let Some((parameters, result)) =
             crate::jvm::jvm_libraries::parse_method_desc(&member.method.descriptor)
         else {
-            return Vec::new();
+            return BridgeSelection::default();
         };
         bridges.push(checked_bridge(CheckedBridgeInput {
             specification,
@@ -456,7 +503,8 @@ fn member_bridges(
             result,
             delegate_name: &specialized_name,
             delegate_descriptor: &specialized_descriptor,
-            synthetic: true,
+            delegate_result: specialized_result,
+            access: InheritedCollectionBridgeAccess::FinalSynthetic,
             signature: None,
         }));
     }
@@ -467,10 +515,32 @@ fn member_bridges(
         result: substituted_result,
         delegate_name: &specialized_name,
         delegate_descriptor: &specialized_descriptor,
-        synthetic: false,
-        signature: property_signature.map(|pair| pair.1),
+        delegate_result: specialized_result,
+        access: InheritedCollectionBridgeAccess::Final,
+        signature: physical_property_signature.map(|pair| pair.1),
     }));
-    bridges
+    if let Some(ordinary) = &replaced_ordinary {
+        if ordinary.descriptor != specialized_descriptor {
+            bridges.push(checked_bridge(CheckedBridgeInput {
+                specification,
+                name: ordinary.name.clone(),
+                parameters: ordinary.parameters.clone(),
+                result: ordinary.result,
+                delegate_name: &specialized_name,
+                delegate_descriptor: &specialized_descriptor,
+                delegate_result: specialized_result,
+                access: InheritedCollectionBridgeAccess::Synthetic,
+                signature: None,
+            }));
+        }
+    }
+    BridgeSelection {
+        bridges,
+        replaced_ordinary: replaced_ordinary
+            .map(|bridge| (bridge.name, bridge.descriptor))
+            .into_iter()
+            .collect(),
+    }
 }
 
 fn substituted_java_method(
@@ -497,7 +567,8 @@ struct CheckedBridgeInput<'a> {
     result: Ty,
     delegate_name: &'a str,
     delegate_descriptor: &'a str,
-    synthetic: bool,
+    delegate_result: Ty,
+    access: InheritedCollectionBridgeAccess,
     signature: Option<String>,
 }
 
@@ -509,7 +580,8 @@ fn checked_bridge(input: CheckedBridgeInput<'_>) -> InheritedCollectionBridge {
         result,
         delegate_name,
         delegate_descriptor,
-        synthetic,
+        delegate_result,
+        access,
         signature,
     } = input;
     let checks = specification
@@ -546,28 +618,46 @@ fn checked_bridge(input: CheckedBridgeInput<'_>) -> InheritedCollectionBridge {
         parameters,
         result,
         body: InheritedCollectionBridgeBody::Checked {
-            synthetic,
+            access,
             checks,
             failure: specification.policy.map(|policy| policy.failure),
             delegate_name: delegate_name.to_string(),
             delegate_descriptor: delegate_descriptor.to_string(),
+            delegate_result,
             cast_arguments,
             signature,
         },
     }
 }
 
-fn ordinary_bridge_covers(
+fn ordinary_bridge_covers_source(class: &IrClass, name: &str, expected_descriptor: &str) -> bool {
+    class.bridges.iter().any(|bridge| {
+        bridge.name == name
+            && descriptor(&bridge.erased_params, bridge.erased_ret) == expected_descriptor
+    })
+}
+
+/// A property satisfied only by an inherited Java method needs kotlinc's inherited pair instead
+/// of the ordinary synthetic override bridge. The pair calls the Java superclass with
+/// `invokespecial`, then publishes the final mapped-name bridge back to that entry.
+fn replaceable_inherited_property_bridge(
     class: &IrClass,
     source_name: &str,
-    source_descriptor: &str,
     physical_name: &str,
-    physical_descriptor: &str,
-) -> bool {
-    class.bridges.iter().any(|bridge| {
-        let bridge_descriptor = descriptor(&bridge.erased_params, bridge.erased_ret);
-        (bridge.name == source_name && bridge_descriptor == source_descriptor)
-            || (bridge.name == physical_name && bridge_descriptor == physical_descriptor)
+) -> Option<ReplacedPropertyBridge> {
+    class.bridges.iter().find_map(|bridge| {
+        (bridge.kind == crate::ir::BridgeKind::PropertyGetter
+            && bridge.target_function.is_none()
+            && bridge.property_implementation.is_none()
+            && bridge.name == source_name
+            && bridge.target_name.as_deref() == Some(physical_name)
+            && bridge.erased_params.is_empty())
+        .then(|| ReplacedPropertyBridge {
+            name: bridge.name.clone(),
+            parameters: bridge.erased_params.clone(),
+            result: bridge.erased_ret,
+            descriptor: descriptor(&bridge.erased_params, bridge.erased_ret),
+        })
     })
 }
 
@@ -630,7 +720,7 @@ fn signature_type(ty: Ty, keep_parameters: bool) -> String {
         Ty::Obj(name, arguments) if !arguments.is_empty() => {
             let arguments = arguments
                 .iter()
-                .map(|argument| signature_type(*argument, keep_parameters))
+                .map(|argument| signature_argument(*argument, keep_parameters))
                 .collect::<String>();
             format!("L{}<{}>;", owned_classfile_internal_name(name), arguments)
         }
@@ -638,9 +728,22 @@ fn signature_type(ty: Ty, keep_parameters: bool) -> String {
     }
 }
 
+fn signature_argument(ty: Ty, keep_parameters: bool) -> String {
+    match ty.non_null() {
+        Ty::TyParam(..) if keep_parameters => signature_type(ty, true),
+        Ty::StarProjection(_) | Ty::OutProjection(_) | Ty::InProjection(_) => {
+            signature_type(ty, keep_parameters)
+        }
+        _ if ty.nullable_primitive().is_some() || ty.non_null().is_jvm_scalar() => {
+            signature_type(reference_of(ty), keep_parameters)
+        }
+        _ => signature_type(ty, keep_parameters),
+    }
+}
+
 fn reference_of(ty: Ty) -> Ty {
     let ty = ty.non_null();
-    if let Some(boxed) = ty.jvm_boxed_ref() {
+    if let Some(boxed) = ty.boxed_ref() {
         return boxed;
     }
     match ty {
@@ -667,15 +770,6 @@ fn descriptor(parameters: &[Ty], result: Ty) -> String {
 
 fn descriptor_of(ty: Ty) -> String {
     crate::jvm::names::type_descriptor(jvm_declared_ty(&ty))
-}
-
-fn result_cast(java_descriptor: &str, specialized_result: Ty) -> Option<String> {
-    let java_result = java_descriptor
-        .rsplit_once(')')
-        .map_or(java_descriptor, |(_, result)| result);
-    let specialized = descriptor_of(specialized_result);
-    (specialized != java_result && specialized_result.is_reference())
-        .then(|| class_name(specialized_result))
 }
 
 fn is_instance_api(method: &MethodSig) -> bool {

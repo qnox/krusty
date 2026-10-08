@@ -166,9 +166,17 @@ pub(super) fn emit_bridges(
     let class = ClassBridges::new(ir, c, env);
     for (bridge_index, b) in c.bridges.iter().enumerate() {
         // An interface entry stands beside its static member, which emits it.
-        if b.kind != crate::ir::BridgeKind::ValueClassInterfaceEntry {
-            emit_bridge(&class, cw, bridge_index, b, None);
+        if b.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
+            continue;
         }
+        let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
+        if env
+            .inherited_collection_bridges
+            .replaces_ordinary(c.fq_name_id(), &b.name, &descriptor)
+        {
+            continue;
+        }
+        emit_bridge(&class, cw, bridge_index, b, None);
     }
     for bridge in env.inherited_collection_bridges.for_class(c.fq_name_id()) {
         emit_inherited_collection_bridge(ir, c, cw, bridge);
@@ -717,7 +725,7 @@ fn emit_inherited_collection_bridge(
             owner,
             name,
             descriptor: super_descriptor,
-            result_cast,
+            delegate_result,
             signature,
         } => {
             code.aload(0);
@@ -729,19 +737,23 @@ fn emit_inherited_collection_bridge(
             let arg_words: i32 = params.iter().map(|ty| i32::from(slot_words(*ty))).sum();
             let owner = owner.render();
             let method = cw.methodref(&owner, name, super_descriptor);
-            code.invokespecial(method, arg_words, i32::from(slot_words(ret)));
-            if let Some(cast) = result_cast {
-                code.checkcast(cw.class_ref(cast));
-            }
+            let delegate_result = jvm_declared_ty(delegate_result);
+            code.invokespecial(
+                method,
+                arg_words,
+                i32::from(slot_words(delegate_result)),
+            );
+            adapt_inherited_result(cw, &mut code, delegate_result, ret);
             emit_return(ret, &mut code);
             signature.as_deref()
         }
         crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Checked {
-            synthetic: _,
+            access: _,
             checks,
             failure,
             delegate_name,
             delegate_descriptor,
+            delegate_result,
             cast_arguments,
             signature,
         } => {
@@ -778,7 +790,13 @@ fn emit_inherited_collection_bridge(
             let arg_words: i32 = params.iter().map(|ty| i32::from(slot_words(*ty))).sum();
             let owner = class.fq_name();
             let method = cw.methodref(&owner, delegate_name, delegate_descriptor);
-            code.invokevirtual(method, arg_words, i32::from(slot_words(ret)));
+            let delegate_result = jvm_declared_ty(delegate_result);
+            code.invokevirtual(
+                method,
+                arg_words,
+                i32::from(slot_words(delegate_result)),
+            );
+            adapt_inherited_result(cw, &mut code, delegate_result, ret);
             emit_return(ret, &mut code);
             signature.as_deref()
         }
@@ -789,12 +807,20 @@ fn emit_inherited_collection_bridge(
             ..
         } => 0x0041,
         crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Checked {
-            synthetic: true,
+            access:
+                crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeAccess::Final,
+            ..
+        } => 0x0051,
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Checked {
+            access:
+                crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeAccess::FinalSynthetic,
             ..
         } => 0x1051,
         crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Checked {
+            access:
+                crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeAccess::Synthetic,
             ..
-        } => 0x0051,
+        } => 0x1041,
     };
     finish_inherited(
         cw,
@@ -806,6 +832,24 @@ fn emit_inherited_collection_bridge(
         access,
     );
     attach_inherited_bridge_debug(ir, class, cw, &bridge.name, &descriptor);
+}
+
+fn adapt_inherited_result(cw: &mut ClassWriter, code: &mut CodeBuilder, source: Ty, target: Ty) {
+    if source == target {
+        return;
+    }
+    match (source.is_jvm_scalar(), target.is_jvm_scalar()) {
+        (true, true) => emit_num_conv(source, target, code),
+        (true, false) => box_prim_free(cw, code, source),
+        (false, true) => unbox_prim_from(cw, code, source, target),
+        (false, false) => {
+            let target_descriptor = type_descriptor(target);
+            if target_descriptor != "Ljava/lang/Object;" {
+                let class_name = crate::jvm::names::instanceof_internal_name(target);
+                code.checkcast(cw.class_ref(&class_name));
+            }
+        }
+    }
 }
 
 fn attach_inherited_bridge_debug(
@@ -843,7 +887,9 @@ fn finish_inherited(
     match access {
         0x0041 => finish_code_sig::<0x0041>(cw, name, descriptor, code, locals, signature),
         0x0051 => finish_code_sig::<0x0051>(cw, name, descriptor, code, locals, signature),
-        _ => finish_code_sig::<0x1051>(cw, name, descriptor, code, locals, signature),
+        0x1041 => finish_code_sig::<0x1041>(cw, name, descriptor, code, locals, signature),
+        0x1051 => finish_code_sig::<0x1051>(cw, name, descriptor, code, locals, signature),
+        _ => unreachable!("unknown inherited collection bridge access {access:#06x}"),
     }
 }
 
