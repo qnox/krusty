@@ -968,7 +968,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
     let build_log = temp.join("builds.txt");
     fs::write(
         bin_dir.join("cargo"),
-        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == +* ]]; then shift; fi\ncmd=\"${1:-}\"; shift || true\ncase \"$cmd\" in\n  llvm-cov)\n    sub=\"${1:-}\"; shift || true\n    case \"$sub\" in\n      --version) exit 0 ;;\n      show-env) printf '%s\\n' true ;;\n      report)\n        out=\"\"\n        while [ $# -gt 0 ]; do\n          if [ \"$1\" = --output-path ]; then out=\"$2\"; shift 2; else shift; fi\n        done\n        mkdir -p \"$(dirname \"$out\")\"\n        printf '%s\\n' '{\"data\":[{\"totals\":{\"regions\":{\"covered\":1,\"count\":2},\"functions\":{\"covered\":1,\"count\":2},\"lines\":{\"covered\":1,\"count\":2},\"branches\":{\"covered\":1,\"count\":2}}}]}' >\"$out\"\n        ;;\n      *) echo \"unexpected llvm-cov $sub\" >&2; exit 2 ;;\n    esac\n    ;;\n  build)\n    printf '%s\\n' \"$*\" >>\"$STUB_BUILD_LOG\"\n    echo \"cargo-rustflags:${RUSTFLAGS-}\" >&2\n    case \" $* \" in\n      *\" -p krusty-cli \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" -p krusty-lsp \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" --bin krusty \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    case \" $* \" in\n      *\" --bin krusty-lsp \"*) ;;\n      *) echo \"unexpected build $*\" >&2; exit 2 ;;\n    esac\n    mkdir -p \"$CARGO_TARGET_DIR/coverage\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    chmod +x \"$CARGO_TARGET_DIR/coverage/krusty\" \"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    ;;\n  test)\n    echo \"cargo: visible stderr $*\" >&2\n    if [[ \" $* \" == *\" --test e2e \"* ]]; then\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$E2E_BIN\\\"}\"\n    else\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$UNIT_BIN\\\"}\"\n    fi\n    ;;\n  *) echo \"unexpected cargo $cmd $*\" >&2; exit 2 ;;\nesac\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == +* ]]; then shift; fi\ncmd=\"${1:-}\"; shift || true\ncase \"$cmd\" in\n  llvm-cov)\n    sub=\"${1:-}\"; shift || true\n    case \"$sub\" in\n      --version) exit 0 ;;\n      show-env) printf '%s\\n' true ;;\n      report)\n        out=\"\"\n        while [ $# -gt 0 ]; do\n          if [ \"$1\" = --output-path ]; then out=\"$2\"; shift 2; else shift; fi\n        done\n        mkdir -p \"$(dirname \"$out\")\"\n        printf '%s\\n' '{\"data\":[{\"totals\":{\"regions\":{\"covered\":1,\"count\":2},\"functions\":{\"covered\":1,\"count\":2},\"lines\":{\"covered\":1,\"count\":2},\"branches\":{\"covered\":1,\"count\":2}}}]}' >\"$out\"\n        ;;\n      *) echo \"unexpected llvm-cov $sub\" >&2; exit 2 ;;\n    esac\n    ;;\n  build)\n    printf '%s\\n' \"$*\" >>\"$STUB_BUILD_LOG\"\n    echo \"cargo-rustflags:${RUSTFLAGS-}\" >&2\n    echo \"cargo: visible stderr $*\" >&2\n    for need in \" -p krusty \" \" -p krusty-cli \" \" -p krusty-lsp \" \" --lib \" \" --bins \" \" --tests \"; do\n      case \" $* \" in\n        *\"$need\"*) ;;\n        *) echo \"unexpected build $*\" >&2; exit 2 ;;\n      esac\n    done\n    mkdir -p \"$CARGO_TARGET_DIR/coverage\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    chmod +x \"$CARGO_TARGET_DIR/coverage/krusty\" \"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    if [[ \" $* \" == *\" --message-format=json \"* ]]; then\n      printf '%s\\n' \"{\\\"reason\\\":\\\"compiler-artifact\\\",\\\"package_id\\\":\\\"path+file:///workspace#krusty@0.0.1\\\",\\\"profile\\\":{\\\"test\\\":true},\\\"target\\\":{\\\"name\\\":\\\"e2e\\\",\\\"kind\\\":[\\\"test\\\"]},\\\"executable\\\":\\\"$E2E_BIN\\\"}\"\n      printf '%s\\n' \"{\\\"reason\\\":\\\"compiler-artifact\\\",\\\"package_id\\\":\\\"path+file:///workspace/crates/krusty-lsp#0.0.1\\\",\\\"profile\\\":{\\\"test\\\":true},\\\"target\\\":{\\\"name\\\":\\\"lsp-unit\\\",\\\"kind\\\":[\\\"lib\\\"]},\\\"executable\\\":\\\"$UNIT_BIN\\\"}\"\n    fi\n    ;;\n  test)\n    echo \"cargo: visible stderr $*\" >&2\n    if [[ \" $* \" == *\" --test e2e \"* ]]; then\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$E2E_BIN\\\"}\"\n    else\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$UNIT_BIN\\\"}\"\n    fi\n    ;;\n  *) echo \"unexpected cargo $cmd $*\" >&2; exit 2 ;;\nesac\n",
     )
     .expect("write cargo stub");
     for name in ["e2e", "lsp-unit", "just", "cargo", "nproc", "sysctl"] {
@@ -1017,7 +1017,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
     assert_eq!(
         builds.lines().count(),
         1,
-        "CLI and language server must be one cargo build: {builds}"
+        "coverage must compile and discover its executables in one cargo invocation: {builds}"
     );
     assert_eq!(
         stderr
@@ -1052,9 +1052,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
         [
             "provision",
             "instrument",
-            "build-bins",
-            "build-compiler-tests",
-            "build-lsp-tests",
+            "build-compiler",
             "test-lsp-unit",
             "test-e2e",
             "report-compiler",
