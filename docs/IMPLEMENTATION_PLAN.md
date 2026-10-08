@@ -4486,6 +4486,16 @@ each one lowering more and declining less:
   objects, ranges and progressions, iteration over each and over a class of the program that
   implements `Iterable`/`CharSequence`, `lazy`, `Pair`, and property delegates (`ReadOnlyProperty`,
   `ReadWriteProperty`, `Delegates.notNull`/`observable`).
+- **The conformance lane** (tier 5): `tests/kotlin_box_native_conformance.rs` compiles every
+  applicable `codegen/box` source set natively, links all emitted objects, and RUNS it. Multi-file
+  cases use the production source-set path. Backend declines, frontend rejections, missing harness
+  capabilities such as multi-module dependency wiring, and wrong executions are expected failures;
+  only genuine target/source-universe exclusions are not-applicable. The exact fail and
+  not-applicable inventories are committed as reviewable text for each `(native, Kotlin version)`;
+  every transition fails the ratchet until the reviewed inventory changes, and compiler panics are
+  never expected. A corpus case is prepared for its target
+  (`conformance::prepare_test_source(src, TestTarget::Native)`):
+  `OPTIONAL_JVM_INLINE_ANNOTATION` expands to nothing off the JVM, as Kotlin's own runner does.
 - **Cross-file calls.** A top-level function is defined as `kt_mod_<callable id>`, the checked
   callable identity, so the defining file and a caller in another file of the module name the same
   symbol without seeing each other's lowering. `Callee::Module`, and a `CrossFile` edge that still

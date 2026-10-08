@@ -1,7 +1,6 @@
-# Kotlin 2.4.20 codegen/box files krusty expects to be not-applicable to the JVM backend, relative to
-# compiler/testData/codegen/box. Every outcome transition fails conformance. Regenerate
-# tests/box_expected_not_applicable/2.4.20.txt with KRUSTY_BLESS_BOX_FAILURES=1 on a full local run.
-# The goal is to empty this list of expected not-applicable cases.
+# Kotlin 2.4.10 codegen/box files expected to be not-applicable on jvm, relative to
+# compiler/testData/codegen/box. Regenerate both exact inventories with
+# KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local jvm run. The lists only shrink.
 annotations/instances/multiplatformInstantiation.kt
 annotations/nativeThrows.kt
 argumentOrder/varargAndDefaultParameters_ForNative.kt
@@ -15,7 +14,6 @@ associatedObjects/findAssociatedObject.kt
 associatedObjects/findAssociatedObjectAndDCE.kt
 associatedObjects/findAssociatedObjectInSeparatedFile.kt
 associatedObjects/findAssociatedObjectLazyness.kt
-associatedObjects/kt88571.kt
 binaryOp/call.kt
 binaryOp/callNullable.kt
 binaryOp/intrinsic.kt
@@ -54,40 +52,29 @@ casts/wasmCastMessagesWasmJs.kt
 char/unboxedCharSpecials.kt
 checkcastOptimization/kt47851.kt
 closures/closureThisByUsingMethodFromParentClass.kt
-companionBlocksAndExtensions/initializersBlocksAndEnum.kt
-companionBlocksAndExtensions/initializersBlocksAndEnumTriggeredByBlock.kt
-companionBlocksAndExtensions/initializersBlocksAndObject.kt
-companionBlocksAndExtensions/initializersEnumImplementingInterface.kt
-companionBlocksAndExtensions/initializersEnumImplementingInterfaceWithDefaultMember.kt
-companionBlocksAndExtensions/initializersInheritanceMixedWithObject.kt
-companionBlocksAndExtensions/initializersInheritanceMultipleSupertypes.kt
-companionBlocksAndExtensions/initializersInheritanceMultipleSupertypesMixedOrder.kt
-companionBlocksAndExtensions/initializersTriggeredByObject.kt
 compileKotlinAgainstKotlin/privateSuperTypeDefaults.kt
 compileKotlinAgainstKotlin/privateSuperTypeDefaults2.kt
 constants/numberLiteralCoercionToInferredType.kt
-contextParameters/contextualCallableReference.kt
-contextParameters/contextualCallableReferenceEquality.kt
-contextParameters/contextualCallableReferenceReturnType.kt
 contextParameters/withExtensionReceiverInType.kt
 coroutines/capturedOuterThis.kt
 coroutines/featureIntersection/defaultExpect.kt
 coroutines/featureIntersection/suspendFunctionAsSupertypeIsCheckWithArity.kt
 coroutines/implicitUnitReturn.kt
 coroutines/suspendFunctionalInterface.kt
+dataClasses/copy/kt12708.kt
 debugExperience/internalLocalsAreRenamed.kt
+defaultArguments/useNextParamInLambda.kt
+defaultArguments/useNextParamInLambdaTailrec.kt
 delegatedProperty/delegateToFinalProperty/initializeContainerOfTopLevelProperties.kt
 delegatedProperty/genericDelegateUncheckedCast2.kt
-enum/enumCompanionInitJs.kt
-enum/initEnumAfterObjectAccessJs.kt
+enum/enumCompanionInitJsAndWasm.kt
+enum/initEnumAfterObjectAccessJsAndWasm.kt
 evaluate/cornerCaseInFloat.kt
 evaluate/inJavaLangPackage.kt
-fullValueClasses/defaultConstructor.kt
 funInterface/equality/functionReferencesBound.kt
 funInterface/equality/functionReferencesUnbound.kt
 funInterface/equality/lambdaRuntimeConversion.kt
 functions/mutualInline.kt
-inference/eagerLambdaAnalysisOnConstructorCall.kt
 inference/eagerLambdaAnalysisWithNoExpectedType.kt
 inference/overrideDefaultMethod.kt
 inference/pcla/capturedTypes.kt
@@ -178,6 +165,7 @@ properties/eagerInitializationGlobal4.kt
 properties/eagerInitializationWithSimpleObject.kt
 properties/genericWithSameName.kt
 properties/kt78962.kt
+properties/lateinit/isInitializedAndDeinitialize/isInitializedMultiFile.kt
 properties/lazyInitializationThroughTopFun.kt
 properties/noInitializationLazilyOnNonPropertiesCall.kt
 ranges/forInIndices/kt43159_ArrayUpperBound.kt
@@ -199,6 +187,8 @@ reflection/typeOf/js/multipleModules.kt
 reflection/typeOf/js/typeOfCapturedStar.kt
 reflection/typeOf/js/typeOfReifiedUnit.kt
 reflection/typeOf/ktype1_anonymousObject.kt
+reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithInline.kt
+reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithoutInline.kt
 regressions/kt51927.kt
 reified/catchParameter/nullableNothing.kt
 reified/nullableNothingArrayAsStringArray.kt
@@ -224,12 +214,11 @@ topLevelInitializtion/failInInitializer4.kt
 unaryOp/call.kt
 unaryOp/callNullable.kt
 volatile/atomicArrayIntrinsics.kt
+volatile/crossModuleIntrinsic.kt
 volatile/intrinsicWithInlineFunction.kt
 volatile/intrinsics.kt
 volatile/intrinsicsOnGlobal.kt
 volatile/messagePassing.kt
-wasm-annotations/branchHint.kt
-wasm-ir-checks/wasmIrCheckForBranchHints.kt
 wasm-ir-checks/wasmIrCheckForWhens.kt
 wasm-new-exception-handling/breakAndOuterFinally.kt
 wasm-new-exception-handling/catch1.kt
