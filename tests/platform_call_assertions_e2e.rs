@@ -584,7 +584,8 @@ fn every_guarded_message_is_derived_from_the_checked_call() {
     let sites = assertion_sites(&positions().krusty, "krusty");
     assert!(!sites.is_empty(), "the fixture emitted no guard at all");
     assert!(
-        sites.iter()
+        sites
+            .iter()
             .all(|(_, message)| message == "getenv(...)" || message == "get(...)"),
         "every guarded site in the fixture checks a named platform call: {sites:?}"
     );
