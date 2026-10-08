@@ -150,19 +150,22 @@ impl Emitter<'_> {
                 .get(&initializer)
                 .copied()
                 .unwrap_or(source);
+            // An inlined body forgets the caller's line. kotlinc's `visitVariable` marks the
+            // declaration before it narrows the erased result, so the `checkcast` — not the store
+            // after it — starts that line (`val value = fetch(slot)`). An unsigned
+            // bitwise result still forgets after its carrier conversion, and the store is the mark
+            // that follows.
+            let restore_inlined_line =
+                code.line_forgotten() && !self.completes_unsigned_bitwise_value(initializer);
+            if restore_inlined_line {
+                self.mark_declared_initializer_line(declaration, initializer, code);
+            }
             self.adapt_physical_operand(source, semantic, Some(semantic_ty), slot_ty, code);
             if self.completes_unsigned_bitwise_value(initializer) {
                 code.forget_line();
             }
-            self.mark_expression_start(initializer, code);
-            // A declaration whose line is a mapped body line of an external inline declaration
-            // marks through the class's source map at its store too, like any other line mark.
-            match self.ir.external_frame_lines.get(&declaration).cloned() {
-                Some(frame) => {
-                    let line = self.map_external_frame_line(&frame);
-                    code.mark_line(line);
-                }
-                None => debug_lines::mark_statement(self.ir, declaration, code),
+            if !restore_inlined_line {
+                self.mark_declared_initializer_line(declaration, initializer, code);
             }
             let slot = entered
                 .unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand));
@@ -177,5 +180,23 @@ impl Emitter<'_> {
         self.slots.insert(index, (slot, slot_ty));
         // A `lateinit` declaration emits no store, but its lexical debug lifetime still starts here.
         self.open_declared_local(declaration, slot, slot_ty, code);
+    }
+
+    /// The declaration's line, after the initializer's own start when that start is a different
+    /// expression. A declaration inside an external inline body maps through the class source map.
+    fn mark_declared_initializer_line(
+        &mut self,
+        declaration: ExprId,
+        initializer: ExprId,
+        code: &mut CodeBuilder,
+    ) {
+        self.mark_expression_start(initializer, code);
+        match self.ir.external_frame_lines.get(&declaration).cloned() {
+            Some(frame) => {
+                let line = self.map_external_frame_line(&frame);
+                code.mark_line(line);
+            }
+            None => debug_lines::mark_statement(self.ir, declaration, code),
+        }
     }
 }
