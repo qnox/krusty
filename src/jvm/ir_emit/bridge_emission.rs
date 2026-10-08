@@ -831,7 +831,15 @@ fn emit_inherited_collection_bridge(
         signature,
         access,
     );
-    attach_inherited_bridge_debug(ir, class, cw, &bridge.name, &descriptor);
+    attach_inherited_bridge_debug(
+        ir,
+        class,
+        cw,
+        &bridge.name,
+        &descriptor,
+        &params,
+        &bridge.parameter_names,
+    );
 }
 
 fn adapt_inherited_result(cw: &mut ClassWriter, code: &mut CodeBuilder, source: Ty, target: Ty) {
@@ -858,6 +866,8 @@ fn attach_inherited_bridge_debug(
     cw: &mut ClassWriter,
     name: &str,
     descriptor: &str,
+    parameters: &[Ty],
+    parameter_names: &[String],
 ) {
     if class.decl_line == 0 {
         return;
@@ -867,12 +877,22 @@ fn attach_inherited_bridge_debug(
     } else {
         class.decl_start_line
     };
-    cw.set_method_debug(
-        name,
-        descriptor,
-        Some((0, line)),
-        &[(String::from("this"), format!("L{};", class.fq_name()), 0)],
+    assert_eq!(
+        parameters.len(),
+        parameter_names.len(),
+        "an inherited collection bridge names every physical parameter"
     );
+    let mut locals = vec![(String::from("this"), format!("L{};", class.fq_name()), 0)];
+    let mut slot = 1u16;
+    for (parameter, parameter_name) in parameters.iter().zip(parameter_names) {
+        locals.push((
+            parameter_name.clone(),
+            local_variable_desc(*parameter),
+            slot,
+        ));
+        slot += slot_words(*parameter);
+    }
+    cw.set_method_debug(name, descriptor, Some((0, line)), &locals);
 }
 
 fn finish_inherited(

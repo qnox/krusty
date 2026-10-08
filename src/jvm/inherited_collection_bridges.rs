@@ -40,6 +40,7 @@ impl InheritedCollectionBridges {
 pub(super) struct InheritedCollectionBridge {
     pub(super) name: String,
     pub(super) parameters: Vec<Ty>,
+    pub(super) parameter_names: Vec<String>,
     pub(super) result: Ty,
     pub(super) body: InheritedCollectionBridgeBody,
 }
@@ -192,6 +193,7 @@ struct BridgeMember {
     descriptor: String,
     kind: MappedBuiltinMemberKind,
     parameters: Vec<Ty>,
+    parameter_names: Vec<String>,
     result: Ty,
     policy: Option<CollectionBridgePolicy>,
 }
@@ -351,6 +353,7 @@ fn builtin_bridge_members(classpath: &Classpath, start: Ty) -> Vec<BridgeMember>
                     .iter()
                     .map(|ty| specialize_generic_slot(*ty, &bindings))
                     .collect(),
+                parameter_names: declaration.parameter_names,
                 result: specialize_generic_slot(declaration.generic_sig.ret, &bindings),
                 policy,
             });
@@ -478,6 +481,9 @@ fn member_bridges(
     let mut bridges = vec![InheritedCollectionBridge {
         name: specialized_name.clone(),
         parameters: specification.parameters.clone(),
+        parameter_names: (0..specification.parameters.len())
+            .map(crate::jvm::parameter_names::inherited_collection_specialized_local)
+            .collect(),
         result: specialized_result,
         body: InheritedCollectionBridgeBody::SuperDelegate {
             owner: class.superclass,
@@ -613,9 +619,15 @@ fn checked_bridge(input: CheckedBridgeInput<'_>) -> InheritedCollectionBridge {
             nullable: false,
         })
         .collect();
+    assert_eq!(
+        parameters.len(),
+        specification.parameter_names.len(),
+        "an inherited collection bridge retains every metadata parameter identity"
+    );
     InheritedCollectionBridge {
         name,
         parameters,
+        parameter_names: specification.parameter_names.clone(),
         result,
         body: InheritedCollectionBridgeBody::Checked {
             access,

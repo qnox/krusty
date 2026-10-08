@@ -23,6 +23,7 @@ pub(in crate::jvm) struct DecodedBuiltinMember {
     pub(in crate::jvm) descriptor: String,
     pub(in crate::jvm) kind: MappedBuiltinMemberKind,
     pub(in crate::jvm) generic_sig: GenericSig,
+    pub(in crate::jvm) parameter_names: Vec<String>,
 }
 
 impl Classpath {
@@ -63,6 +64,7 @@ impl Classpath {
                     descriptor,
                     kind,
                     generic_sig: member.generic_sig.clone(),
+                    parameter_names: member.param_names.clone(),
                 }
             })
             .collect()
