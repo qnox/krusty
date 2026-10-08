@@ -359,7 +359,7 @@ fn finish_accessor_expansion(
             let produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
             return Ok(ExpandedAccessor::Value(produced));
         }
-        if produce_sole_tail_return(ir, cloned_root, tail, value, close_line) {
+        if produce_sole_tail_return(ir, cloned_root, tail, value, result_ty, close_line) {
             return Ok(if setter {
                 ExpandedAccessor::Statement(cloned_root)
             } else {
