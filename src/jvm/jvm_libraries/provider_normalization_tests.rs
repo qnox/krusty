@@ -121,6 +121,17 @@ fn concrete_java_collection_keeps_its_kotlin_interface_faces() {
     let libraries = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
         vec![stdlib, jdk],
     )));
+    let list = libraries
+        .classifier_record(type_name("kotlin/collections/List"))
+        .expect("Kotlin List classifier");
+    assert_eq!(
+        list.mapped_collection,
+        Some(crate::types::MappedCollection {
+            kind: crate::types::CollectionKind::List,
+            mutable: false,
+        }),
+        "the semantic collection face must cross the provider boundary"
+    );
     let classifier = libraries
         .classifier_record(type_name("java/util/ArrayList"))
         .expect("ArrayList classifier");

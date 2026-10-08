@@ -1639,6 +1639,43 @@ KRef kt_iterable_filter_not(KRef iterable, KRef predicate) {
     return kt_iterable_filtered(iterable, predicate, 0);
 }
 
+KRef kt_iterable_first(KRef iterable) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    if (kt_more(iterator)) {
+        return kt_iterator_next(iterator);
+    }
+    if (kt_raised()) {
+        return NULL;
+    }
+    kt_throw(kt_throwable_new(
+        &kt_type_no_such_element_exception,
+        kt_string_utf8("Collection is empty.", 20)));
+    return NULL;
+}
+
+KRef kt_iterable_last(KRef iterable) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    KRef found = NULL;
+    kt_boolean any = 0;
+    while (kt_more(iterator)) {
+        found = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return NULL;
+        }
+        any = 1;
+    }
+    if (kt_raised()) {
+        return NULL;
+    }
+    if (!any) {
+        kt_throw(kt_throwable_new(
+            &kt_type_no_such_element_exception,
+            kt_string_utf8("Collection is empty.", 20)));
+        return NULL;
+    }
+    return found;
+}
+
 /* `xs.first { … }` and `xs.firstOrNull { … }`. Kotlin raises `NoSuchElementException` when nothing
    matches, with its own wording; the raise is followed by a RETURN, because `kt_throw` records the
    exception for the call site and comes back. */

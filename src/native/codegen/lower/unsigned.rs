@@ -21,6 +21,17 @@
 
 use super::*;
 
+/// The runtime range an unsigned receiver ranges over, as (runtime suffix, the width its bounds are
+/// carried at). Kotlin declares exactly two — `UIntRange` and `ULongRange` — and `UByte.rangeTo`
+/// and `UShort.rangeTo` both answer the former, so the narrow two carry their bounds as `UInt`.
+fn unsigned_range(element: Ty) -> Option<(&'static str, Ty)> {
+    match element {
+        Ty::UByte | Ty::UShort | Ty::UInt => Some(("uint", Ty::UInt)),
+        Ty::ULong => Some(("ulong", Ty::ULong)),
+        _ => None,
+    }
+}
+
 impl BodyLowering<'_, '_, '_> {
     /// A member whose checked receiver is one of the unsigned types, or `None` otherwise.
     pub(super) fn unsigned_member(
@@ -48,6 +59,37 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
+        // `a..b` and `a..<b` answer a RANGE OBJECT, so neither operand is carried at the width the
+        // arithmetic below would use: Kotlin declares `UByte.rangeTo(UByte)` as answering a
+        // `UIntRange`, so the narrow two widen to `UInt` and only `ULong` ranges over itself. The
+        // widening is zero-extension, which is what lets the runtime read the bounds unsigned.
+        if let Some((kind, carried)) = unsigned_range(element) {
+            let suffix = match name {
+                "rangeTo" => "",
+                "rangeUntil" => "_until",
+                _ => "",
+            };
+            if matches!(name, "rangeTo" | "rangeUntil") {
+                let Some(first) = self.coerce(receiver, carried)? else {
+                    return Err(format!("a `Unit` receiver of `{name}`"));
+                };
+                let Some(&end) = args.first() else {
+                    return Err(format!("`{name}` without a bound"));
+                };
+                let Some(last) = self.coerce(end, carried)? else {
+                    return Err(format!("a `Unit` bound of `{name}`"));
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                return self.runtime_call(
+                    &format!("kt_{kind}_range{suffix}"),
+                    &[carried, carried],
+                    ret,
+                    &[first, last],
+                );
+            }
+        }
         // A unary member reads its receiver at the width the RESULT is computed at: Kotlin's
         // `UByte.plus(UByte)` answers a `UInt`, so both operands widen before the operation and the
         // widening is where the zero-extension happens.
@@ -109,19 +151,7 @@ impl BodyLowering<'_, '_, '_> {
                 self.runtime_call(&symbol, &[width, width], width, &[left, *rhs])?
                     .ok_or_else(|| format!("`{name}` answered nothing"))?
             }
-            ("compareTo", [rhs]) => {
-                // `-1`, `0` or `1` from the two unsigned questions. A comparison answers `1` for
-                // true here, not all-ones, so the sign comes from subtracting one from the other
-                // rather than from widening either.
-                let less = self.builder.ins().icmp(IntCC::UnsignedLessThan, left, *rhs);
-                let greater = self
-                    .builder
-                    .ins()
-                    .icmp(IntCC::UnsignedGreaterThan, left, *rhs);
-                let less = self.builder.ins().uextend(types::I32, less);
-                let greater = self.builder.ins().uextend(types::I32, greater);
-                self.builder.ins().isub(greater, less)
-            }
+            ("compareTo", [rhs]) => self.unsigned_three_way_compare(left, *rhs),
             ("equals", [rhs]) => self.builder.ins().icmp(IntCC::Equal, left, *rhs),
             // Off the machine.
             ("toString", []) => {
@@ -162,6 +192,50 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Result<Option<Value>, Unsupported> {
         let other = self.type_of(argument).unwrap_or(element);
         self.unsigned_call(element, "compareTo", &[other], ret, receiver, &[argument])
+    }
+
+    /// The exact stdlib comparison selected for a compiler-generated unsigned loop header. Its
+    /// declaration takes the erased signed carrier, while its operation reads those bits unsigned.
+    pub(super) fn unsigned_compare_intrinsic(
+        &mut self,
+        carrier: Ty,
+        left: u32,
+        right: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let carrier = carrier.non_null();
+        if !matches!(carrier, Ty::Int | Ty::Long) {
+            return Err(format!(
+                "an unsigned comparison with a non-integral carrier `{carrier:?}`"
+            ));
+        }
+        let left = self.coerce(left, carrier)?;
+        let right = self.coerce(right, carrier)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let (Some(left), Some(right)) = (left, right) else {
+            return Err("an unsigned comparison on `Unit`".to_string());
+        };
+        let answer = self.unsigned_three_way_compare(left, right);
+        self.convert(answer, Some(Ty::Int), ret)
+    }
+
+    /// `-1`, `0` or `1` from the two unsigned ordering questions. A comparison answers `1` for
+    /// true here, not all-ones, so the sign comes from subtracting one from the other rather than
+    /// from widening either.
+    fn unsigned_three_way_compare(&mut self, left: Value, right: Value) -> Value {
+        let less = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, left, right);
+        let greater = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThan, left, right);
+        let less = self.builder.ins().uextend(types::I32, less);
+        let greater = self.builder.ins().uextend(types::I32, greater);
+        self.builder.ins().isub(greater, less)
     }
 
     /// `"$u"` — the frontend's own name for rendering an unsigned value, so a template never

@@ -30,6 +30,7 @@ fn a_read_only_delegate_of_this_file_answers_the_read() {
          import kotlin.reflect.KProperty\n\
          class Delegate : ReadOnlyProperty<Test, String> {\n\
          \x20   override fun getValue(thisRef: Test, property: KProperty<*>) = \"OK\"\n\
+         \x20   fun getValue(thisRef: String, property: KProperty<*>) = \"wrong\"\n\
          }\n\
          class Test {\n\
          \x20   val message by Delegate()\n\
@@ -94,4 +95,18 @@ fn two_read_only_delegates_are_told_apart() {
          \x20   return t.head + t.tail\n\
          }\n";
     every_backend_agrees_with_kotlinc("TwoReadOnlyDelegates", source);
+}
+
+/// A delegate whose `getValue` answers `Unit`, read where a reference is wanted. The override
+/// yields no machine value, and the read still hands back Kotlin's `Unit` object, not `null`.
+#[test]
+fn a_unit_answering_delegate_reads_as_the_unit_object() {
+    let source = "import kotlin.properties.ReadOnlyProperty\n\
+         import kotlin.reflect.KProperty\n\
+         class Nothingness : ReadOnlyProperty<Any?, Unit> {\n\
+         \x20   override fun getValue(thisRef: Any?, property: KProperty<*>) {}\n\
+         }\n\
+         val x: Any by Nothingness()\n\
+         fun box(): String = if (x.toString() == \"kotlin.Unit\") \"OK\" else \"fail: $x\"\n";
+    every_backend_agrees_with_kotlinc("UnitDelegate", source);
 }

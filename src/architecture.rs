@@ -445,6 +445,7 @@ mod tests {
             &["backend", "fir", "ir", "types"],
         );
         assert_allowed_crate_modules("src/native/codegen/lower/functions.rs", &["ir", "types"]);
+        assert_allowed_crate_modules("src/native/codegen/lower/arrays.rs", &["types"]);
         for path in rust_files_under("src/native/codegen") {
             let text = fs::read_to_string(&path).expect("read native code generator source");
             for forbidden in [

@@ -909,6 +909,9 @@ pub struct IrEnumEntry {
     /// secondary constructors whose parameters differ from the primary constructor; a backend
     /// prepends its own enum ABI operands to this already-resolved call shape.
     pub constructor_parameter_types: Vec<Ty>,
+    /// Exact constructor selected by checked FIR. A backend consumes this declaration ordinal;
+    /// it must not repeat overload selection from the parameter list.
+    pub constructor: IrConstructorTarget,
     /// Selected constructor parameters whose values come from declaration defaults. This is the
     /// frontend's final argument-mapping decision; a backend only realizes its default-argument ABI.
     pub default_parameters: Vec<u32>,

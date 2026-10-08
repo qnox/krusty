@@ -562,7 +562,7 @@ pub(super) fn publish_extension_collection_transform(
     })
 }
 
-/// Commit applicability while both the complete checked call and a literal's checked body are
+/// Commit applicability while both the complete checked call and its selected function value are
 /// available. `None` after this operation is an ordinary selected dependency call, not a lowering
 /// fallback. A present plan is therefore an unconditional obligation for common lowering.
 pub(super) fn finalize(
@@ -586,6 +586,7 @@ pub(super) fn finalize(
             lambda_parameter, ..
         } => *lambda_parameter,
     };
+    let invokes_function_value = matches!(plan, crate::fir::FirInlineBodyPlan::InvokeLambda { .. });
     let collection_transform = matches!(
         plan,
         crate::fir::FirInlineBodyPlan::CollectionTransform { .. }
@@ -609,11 +610,24 @@ pub(super) fn finalize(
         }
     }
     let value = selected_value.ok_or(MappingFailure::UnsupportedPlan)?;
-    let literal_body = body.expr(value).and_then(|argument| match &argument.kind {
+    let selected = body.expr(value);
+    let literal_body = selected.and_then(|argument| match &argument.kind {
         crate::fir::FirExprKind::Lambda { body, .. } => Some(body.as_ref()),
         _ => None,
     });
-    if !literal_body.is_some_and(|body| !collection_transform || body.direct_suspension) {
+    let readable_function_value = selected.is_some_and(|argument| {
+        matches!(
+            &argument.kind,
+            crate::fir::FirExprKind::ValueRead(_)
+                | crate::fir::FirExprKind::CapturedValueRead { .. }
+        )
+    });
+    let supported = if invokes_function_value {
+        literal_body.is_some() || readable_function_value
+    } else {
+        literal_body.is_some_and(|body| !collection_transform || body.direct_suspension)
+    };
+    if !supported {
         *inline_plan = None;
     }
     Ok(())
@@ -621,10 +635,76 @@ pub(super) fn finalize(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{checked_function_body_with_platform, jvm_stdlib_semantics};
+    use super::super::test_support::{
+        checked_function_body_with_platform, jvm_stdlib_semantics, root_expression,
+    };
     use super::*;
     use crate::fir::{FirCallTarget, FirExprId, FirExprKind, FirInlineBodyPlan};
     use crate::types::Ty;
+
+    #[test]
+    fn function_value_keeps_the_selected_external_call_and_provider_plan() {
+        let (body, _) = checked_function_body_with_platform(
+            "fun read(block: (String) -> Int): Int = \"value\".let(block)\n",
+            "read",
+            jvm_stdlib_semantics(),
+        );
+        let root = body.expr(root_expression(&body)).expect("root call");
+        let FirExprKind::Call(call) = &root.kind else {
+            panic!("let must remain a checked call")
+        };
+        let FirCallTarget::External {
+            inline_plan: Some(plan),
+            ..
+        } = &call.target
+        else {
+            panic!("stdlib let must retain its selected external identity")
+        };
+        let FirInlineBodyPlan::InvokeLambda {
+            frame,
+            lambda_parameter,
+            arguments,
+            prologue,
+            cleanup,
+            cause,
+            recovery,
+            defaults,
+            result,
+        } = plan.as_ref()
+        else {
+            panic!("stdlib let must retain its provider-owned invocation plan")
+        };
+        assert_eq!(frame.callee.as_ref(), "let");
+        assert_eq!(*lambda_parameter, 0);
+        assert_eq!(arguments.as_ref(), [crate::fir::FirInlineValue::Receiver]);
+        assert!(prologue.is_empty());
+        assert!(cleanup.is_empty());
+        assert_eq!(*cause, None);
+        assert!(recovery.is_none());
+        assert!(defaults.is_empty());
+        assert_eq!(*result, None);
+    }
+
+    #[test]
+    fn callable_reference_keeps_the_selected_external_call_without_provider_plan() {
+        let (body, _) = checked_function_body_with_platform(
+            "fun id(value: String): Int = value.length\n\
+             fun read(): Int = \"value\".let(::id)\n",
+            "read",
+            jvm_stdlib_semantics(),
+        );
+        let root = body.expr(root_expression(&body)).expect("root call");
+        let FirExprKind::Call(call) = &root.kind else {
+            panic!("let must remain a checked call")
+        };
+        let FirCallTarget::External { inline_plan, .. } = &call.target else {
+            panic!("stdlib let must retain its selected external identity")
+        };
+        assert!(
+            inline_plan.is_none(),
+            "a callable-reference adapter is not an ordinary function-value read"
+        );
+    }
 
     #[test]
     fn safe_iteration_call_retains_one_guarded_receiver_and_exact_plan() {
@@ -735,6 +815,44 @@ mod tests {
         assert_eq!(ordinary_receiver, receiver);
         assert_eq!(ordinary_parameters, parameters);
         assert_eq!(ordinary_plan, plan);
+    }
+
+    #[test]
+    fn invoke_plan_survives_an_ordinary_function_value_argument() {
+        let (body, _) = checked_function_body_with_platform(
+            "class PlanSubject\n\
+             fun retain(\n\
+             \x20   subject: PlanSubject,\n\
+             \x20   block: PlanSubject.() -> Unit,\n\
+             ): PlanSubject = subject.apply(block)\n",
+            "retain",
+            jvm_stdlib_semantics(),
+        );
+        let plan = (0..body.expression_count()).find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let FirCallTarget::External {
+                inline_plan: Some(plan),
+                ..
+            } = &call.target
+            else {
+                return None;
+            };
+            Some(plan.as_ref())
+        });
+        let Some(FirInlineBodyPlan::InvokeLambda {
+            lambda_parameter,
+            arguments,
+            result,
+            ..
+        }) = plan
+        else {
+            panic!("apply must retain its provider plan for a function-valued parameter")
+        };
+        assert_eq!(*lambda_parameter, 0);
+        assert_eq!(arguments.as_ref(), [crate::fir::FirInlineValue::Receiver]);
+        assert_eq!(*result, Some(crate::fir::FirInlineValue::Receiver));
     }
 
     #[test]

@@ -215,6 +215,29 @@ fn an_uncaught_throw_past_a_try_still_ends_the_program() {
 }
 
 #[test]
+fn the_runtimes_own_failures_are_catchable_kotlin_exceptions() {
+    // A `catch` is only worth having if what the RUNTIME raises can reach it. Each of these was a
+    // `kt_sys_exit` with a `krusty:` line until a handler existed to see the difference; each is
+    // now the exception Kotlin specifies, raised through the same pending slot a written `throw`
+    // uses, so a clause cannot tell the two apart.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var seen = \"\"\n\
+         \x20   val zero = 0\n\
+         \x20   try { seen += (1 / zero) } catch (e: ArithmeticException) { seen += \"a\" }\n\
+         \x20   try { val xs = IntArray(2); seen += xs[5] } catch (e: IndexOutOfBoundsException) { seen += \"b\" }\n\
+         \x20   val nothing: String? = null\n\
+         \x20   try { seen += nothing!! } catch (e: NullPointerException) { seen += \"c\" }\n\
+         \x20   val any: Any = 1\n\
+         \x20   try { seen += (any as String) } catch (e: ClassCastException) { seen += \"d\" }\n\
+         \x20   return if (seen == \"abcd\") \"OK\" else \"fail: $seen\"\n\
+         }\n",
+        "RuntimeFailuresCatchable",
+        "OK",
+    );
+}
+
+#[test]
 fn a_failed_cast_names_both_classes_the_way_kotlin_native_does() {
     expect_native_box(
         "class MyObject\n\

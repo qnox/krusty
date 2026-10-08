@@ -13,6 +13,26 @@
 use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 #[test]
+fn every_numeric_box_is_a_number_and_nothing_else_is() {
+    // `Char` and `Boolean` are the two that look numeric and are not, so they are the point of the
+    // program rather than padding: a rule keyed on "carried in a machine word" would get both wrong.
+    let src = "fun box(): String {\n\
+               \x20   val values: List<Any> = listOf(1.toByte(), 1.toShort(), 1, 1L, 1.0f, 1.0)\n\
+               \x20   var numbers = 0\n\
+               \x20   for (value in values) if (value is Number) numbers++\n\
+               \x20   val ch: Any = 'a'\n\
+               \x20   val flag: Any = true\n\
+               \x20   val text: Any = \"x\"\n\
+               \x20   if (ch is Number) return \"fail: Char is Number\"\n\
+               \x20   if (flag is Number) return \"fail: Boolean is Number\"\n\
+               \x20   if (text is Number) return \"fail: String is Number\"\n\
+               \x20   return if (numbers == 6) \"OK\" else \"fail: $numbers\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "EveryNumericBoxIsANumber");
+    expect_native_box(src, "EveryNumericBoxIsANumber", "OK");
+}
+
+#[test]
 fn a_value_type_is_comparable_even_when_it_is_not_a_number() {
     let src = "fun box(): String {\n\
                \x20   val n: Any = 1\n\
