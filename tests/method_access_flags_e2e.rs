@@ -260,6 +260,91 @@ fn java_package_private_override_inherits_protected_like_kotlinc() {
     );
 }
 
+/// A protected Java collection parameter is the flexible `(Mutable)X!`. An override written with
+/// the mutable face or the read-only face is that member, so a missing visibility modifier inherits
+/// `protected` on the JVM access flags and in `@Metadata`. Covers a generic JDK method
+/// (`LinkedHashMap.removeEldestEntry`), a generic `List<T>` parameter, its read-only spelling, and
+/// a raw `Map.Entry` parameter whose classfile has no `Signature` attribute.
+const JAVA_COLLECTION_OVERRIDE: &str = "import java.util.LinkedHashMap\n\
+class MutableHost : LinkedHashMap<String, String>() {\n\
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = false\n\
+}\n\
+class ReadOnlyHost : LinkedHashMap<String, String>() {\n\
+    override fun removeEldestEntry(eldest: Map.Entry<String, String>?): Boolean = false\n\
+}\n";
+
+const JAVA_COLLECTION_FIXTURE_OVERRIDE: &str = "package j\n\
+class MutableTake : ListBox<String>() {\n\
+    override fun take(values: MutableList<String>?): Boolean = false\n\
+}\n\
+class ReadOnlyTake : ListBox<String>() {\n\
+    override fun take(values: List<String>?): Boolean = false\n\
+}\n\
+class RawTake : RawBox() {\n\
+    override fun take(eldest: MutableMap.MutableEntry<*, *>?): Boolean = false\n\
+}\n";
+
+#[test]
+fn java_collection_override_inherits_protected_like_kotlinc() {
+    assert_flags_and_metadata("MutableHost", JAVA_COLLECTION_OVERRIDE, "MutableHost", &[]);
+    assert_flags_and_metadata(
+        "ReadOnlyHost",
+        JAVA_COLLECTION_OVERRIDE,
+        "ReadOnlyHost",
+        &[],
+    );
+    let Some((java, _)) = common::javac_compile(
+        &[
+            (
+                "ListBox.java".to_string(),
+                "package j;\nimport java.util.List;\npublic class ListBox<T> {\n    protected boolean take(List<T> values) { return false; }\n}\n".to_string(),
+            ),
+            (
+                "RawBox.java".to_string(),
+                "package j;\nimport java.util.Map;\npublic class RawBox {\n    @SuppressWarnings(\"rawtypes\")\n    protected boolean take(Map.Entry eldest) { return false; }\n}\n".to_string(),
+            ),
+        ],
+        &[],
+    ) else {
+        return;
+    };
+    let extra = std::slice::from_ref(&java);
+    assert_flags_and_metadata(
+        "MutableTake",
+        JAVA_COLLECTION_FIXTURE_OVERRIDE,
+        "j/MutableTake",
+        extra,
+    );
+    assert_flags_and_metadata(
+        "ReadOnlyTake",
+        JAVA_COLLECTION_FIXTURE_OVERRIDE,
+        "j/ReadOnlyTake",
+        extra,
+    );
+    assert_flags_and_metadata(
+        "RawTake",
+        JAVA_COLLECTION_FIXTURE_OVERRIDE,
+        "j/RawTake",
+        extra,
+    );
+}
+
+fn assert_flags_and_metadata(name: &str, src: &str, class: &str, extra: &[std::path::PathBuf]) {
+    let comparison =
+        common::compare_with_kotlinc_plugin_jdk_cp(name, src, class, extra, "1.8", &[])
+            .expect("reference kotlinc and javap are provisioned");
+    assert_eq!(
+        method_flags(&comparison.krusty_bytes),
+        method_flags(&comparison.reference_bytes),
+        "{class}: methods"
+    );
+    assert_eq!(
+        common::raw_kotlin_metadata(&comparison.krusty_bytes),
+        common::raw_kotlin_metadata(&comparison.reference_bytes),
+        "{class}: @Metadata"
+    );
+}
+
 /// A body-local classifier's override also keeps the overridden member's visibility: the local
 /// class's override plan is published when its declaring body is checked, after the members were
 /// predeclared, and `finalize_inherited_statuses` re-reads the corrected header once every body

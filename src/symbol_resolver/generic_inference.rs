@@ -191,7 +191,12 @@ pub(crate) fn infer_constructor_type_args_for_formals(
             continue;
         }
         for (p, a) in gsig.params.iter().zip(arg_tys) {
-            unify_inferred_ty(*p, *a, &mut binds);
+            // Keep this unification source-free. Passing the hierarchy in here would pin a
+            // constructor variable to the argument's own element (`ArrayList(listOf(s))` ->
+            // `E = String`) and block the expected-result widening (`ArrayList<CharSequence>`)
+            // that runs afterwards. Only the platform collection face is rewritten, so a Java
+            // `Map` parameter published as `MutableMap!` still matches a Kotlin `Map` by owner.
+            unify_inferred_ty(platform_argument_shape(source, *p, *a), *a, &mut binds);
         }
         break;
     }
@@ -540,13 +545,20 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
                 }
             }
         }
-        // Nullability/flexibility wraps the same generic shape; it does not hide type variables
-        // inside that shape. Java signatures routinely expose this as `Class<A>!` and `A!`.
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
+        // Nullability wraps the same generic shape; it does not hide type variables inside that
+        // shape. Java signatures routinely expose this as `Class<A>!` and `A!`.
+        Ty::Nullable(inner) => {
             // A null-only value is the bottom inhabitant of `T?`, so it materializes the wrapped
             // inference variable as non-null `Nothing`. Other nullable values constrain the same
             // wrapped variable from their non-null component (`String?` -> `T = String`).
             unify_ty_impl(source, *inner, nullable_generic_actual(actual), binds);
+        }
+        Ty::PlatformNullable(inner) => {
+            let actual = nullable_generic_actual(actual);
+            let inner = source
+                .map(|source| choose_platform_lower_face(source, *inner, actual))
+                .unwrap_or(*inner);
+            unify_ty_impl(source, inner, actual, binds);
         }
         _ => {}
     }
@@ -1122,8 +1134,15 @@ pub(super) fn unify_inferred_ty_impl(
                 }
             }
         }
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
+        Ty::Nullable(inner) => {
             unify_inferred_ty_impl(source, *inner, nullable_generic_actual(actual), binds);
+        }
+        Ty::PlatformNullable(inner) => {
+            let actual = nullable_generic_actual(actual);
+            let inner = source
+                .map(|source| choose_platform_lower_face(source, *inner, actual))
+                .unwrap_or(*inner);
+            unify_inferred_ty_impl(source, inner, actual, binds);
         }
         _ => {}
     }
@@ -1872,6 +1891,50 @@ pub(crate) fn infer_generic_return_bindings_from_symbols(
     let mut projected = generic_sig.clone();
     projected.ret = declared;
     infer_generic_return_bindings_impl(Some(source), &projected, expected, admits)
+}
+
+/// The denotable face of a platform lower bound that `actual` inhabits.
+///
+/// A Java collection parameter is published as its mutable lower bound (`List<T>` becomes
+/// `MutableList<T>!`). A Kotlin `List` does not reach `MutableList`, but it does reach the
+/// provider's read-only upper face, and that is the face whose type arguments constrain the
+/// call. A value that already reaches the mutable face — a `MutableList`, or an `ArrayList` —
+/// keeps it. A non-collection platform type has no distinct upper face and is unchanged. A
+/// Kotlin `MutableList` parameter is not platform-wrapped, so it never reaches this function.
+pub(super) fn choose_platform_lower_face(source: &dyn SymbolSource, lower: Ty, actual: Ty) -> Ty {
+    let Ty::Obj(owner, _) = lower else {
+        return lower;
+    };
+    let actual = actual.projection_inner().unwrap_or(actual).non_null();
+    if supertype_with_classifier(source, actual, owner).is_some() {
+        return lower;
+    }
+    let upper = crate::assignable::TypeOracle::platform_flexible_upper_bound(
+        &crate::symbol_resolver::SourceOracle(source),
+        lower,
+    );
+    let Ty::Obj(upper_owner, _) = upper else {
+        return lower;
+    };
+    if upper_owner != owner && supertype_with_classifier(source, actual, upper_owner).is_some() {
+        upper
+    } else {
+        lower
+    }
+}
+
+/// `shape` with a platform collection lower bound replaced by the face `actual` reaches.
+///
+/// The platform marker stays: nullability is a separate constraint from which collection face
+/// contributes type arguments. Constructor inference then unifies without a hierarchy walk, so
+/// an expected `ArrayList<CharSequence>` can still widen an argument-inferred `String`.
+fn platform_argument_shape(source: &dyn SymbolSource, shape: Ty, actual: Ty) -> Ty {
+    match shape {
+        Ty::PlatformNullable(inner) => {
+            Ty::platform_nullable(choose_platform_lower_face(source, *inner, actual))
+        }
+        other => other,
+    }
 }
 
 /// The provider-declared upper face of a platform type, preserving the platform nullability marker.

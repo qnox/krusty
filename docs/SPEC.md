@@ -965,6 +965,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (functions, properties, enum-entry body, constructor property parameter, multiple inheritance
   taking the most permissive visibility),
   `method_access_flags_e2e::java_package_private_override_inherits_protected_like_kotlinc`,
+  `method_access_flags_e2e::java_collection_override_inherits_protected_like_kotlinc`
+  (a protected Java collection parameter is the mutable lower bound of `(Mutable)X!`, so an
+  override written with either face is that member),
   `method_access_flags_e2e::local_override_keeps_overridden_visibility_like_kotlinc`,
   `method_access_flags_e2e::internal_override_stays_jvm_public_like_kotlinc` (JVM flags only —
   kotlinc mangles an internal member's JVM name to `f$main` and records it in the `@Metadata`
@@ -3110,8 +3113,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   at the expected constructor) now ask the declaration provider for the resolved upper face of a
   platform-flexible expectation. The JVM provider answers from its id-backed Java/Kotlin class map;
   common inference contains no collection-name table. A Kotlin-declared `MutableMap<String, Any>`
-  carries no platform mark and still rejects `Map<K, V>`, as kotlinc rejects it. Tests:
-  `tests/java_flexible_collection_e2e.rs`.
+  carries no platform mark and still rejects `Map<K, V>`, as kotlinc rejects it. A Java
+  collection parameter is the same mutable lower bound, not the read-only spelling of the JVM
+  interface. Call-site assignability and a generic constructor's class-typed argument fit ask
+  the provider for that parameter's read-only upper face, and argument inference constrains
+  through the face the value actually reaches, so `listOf("x")` still selects `first(List<T>)`
+  and `LinkedHashMap(map)` / `ArrayList(listOf(s))` still instantiate from a Kotlin collection.
+  Java erasure matching keeps the classfile parameter and its platform nullability (`String!`),
+  so `AbstractList` / `AbstractCollection`
+  still discharge `addAll`, `removeAll`, `retainAll`, and `containsAll` on the Kotlin collection
+  interfaces. `removeEldestEntry(MutableMap.MutableEntry<String, String>?)` and
+  `removeEldestEntry(Map.Entry<String, String>?)` are therefore both the protected Java method,
+  and an override with no visibility modifier inherits `protected` on the JVM access flags and in
+  `@Metadata`. The same holds for a generic `List<T>` parameter overridden as `MutableList<T>`
+  or `List<T>`, and for a raw `Map.Entry` parameter overridden as `MutableMap.MutableEntry`.
+  An invariant argument of that flexible type accepts the read-only face as well, so a Java
+  `Map<List<String>, String>` parameter takes `mapOf(listOf("a") to "b")`. A Kotlin `MutableList`
+  in that invariant position still rejects a read-only `List`.
+  Tests: `tests/java_flexible_collection_e2e.rs`,
+  `method_access_flags_e2e::java_collection_override_inherits_protected_like_kotlinc`,
+  `classpath_static_call_inference_e2e::flexible_method_typevar_return_survives_specialization`,
+  `java_member_flexible_return_e2e::jdk_collection_index_keeps_the_callers_type_arguments`.
 - **A lambda whose input is still an open callee formal is a postponed probe.** A generic call
   whose lambda parameter's INPUT is one of the callee's own formals (`fun <T : Any> matching(f:
   (T) -> Boolean): T`, mockk's `match { it.contains(x) }`) can only shape that lambda once `T` is

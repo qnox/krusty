@@ -18,12 +18,13 @@ pub(super) fn metadata_declared_nonnull_return(
     })
 }
 
-/// The lower bound of a Java collection return's flexible mutability interval. A Java
-/// `Iterator<T>` result is usable as both Kotlin `Iterator<T>` and `MutableIterator<T>`; publishing
-/// the mutable face here supplies that lower bound, whose ordinary Kotlin supertypes include the
-/// read-only face. Parameters deliberately keep their read-only upper-bound spelling, so this
-/// direction-specific normalization does not make a Kotlin read-only collection satisfy a mutable
-/// Kotlin parameter.
+/// The mutable lower bound of a Java collection's flexible mutability interval.
+///
+/// A Java `List<T>` or `Iterator<T>`, in a parameter or a result, is Kotlin's `(Mutable)List<T>!`
+/// / `(Mutable)Iterator<T>!`. Publishing the mutable face supplies that lower bound; its ordinary
+/// Kotlin supertypes include the read-only face, and a platform type's upper bound is that
+/// read-only face. A Kotlin-declared `MutableList` parameter is not a Java type and never passes
+/// through here, so a read-only Kotlin `List` still does not satisfy it.
 pub(super) fn java_collection_return_lower_bound(ty: Ty) -> Ty {
     match ty {
         Ty::Obj(owner, arguments) => {
