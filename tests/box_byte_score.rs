@@ -217,11 +217,11 @@ fn score_passing_duplicate_name_in_two_modules_scored_separately() {
     // copy does not cancel the identical bytes of `b`'s copy, and neither overwrites the other.
     let krusty = qualified(&[("a", "Dup", &[1, 2, 3]), ("b", "Dup", &[1, 2, 3])]);
     let reference = qualified(&[("a", "Dup", &[1, 9, 3]), ("b", "Dup", &[1, 2, 3])]);
-    // (a,Dup) differs and receives no credit; (b,Dup) is entirely byte-identical.
+    // (a,Dup) contributes its one-byte common prefix; (b,Dup) is entirely byte-identical.
     assert_eq!(
         score_passing(&krusty, &reference),
         ByteScore {
-            matched: 3,
+            matched: 4,
             total: 6
         }
     );
