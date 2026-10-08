@@ -71,6 +71,8 @@ mod property_layouts;
 pub(crate) mod referenced_classifiers;
 mod references;
 mod sam_target;
+mod source_debug;
+pub(crate) use source_debug::SourceDebug;
 mod static_properties;
 mod type_check_role;
 pub(crate) mod type_reflection;
@@ -1612,6 +1614,9 @@ pub struct IrExternalFrameLine {
 pub struct IrFile {
     pub package: Option<String>,
     pub source_line_count: u32,
+    /// Every source file in this compilation, so a copied inline body can name the file it came
+    /// from. Empty when a test builds an [`IrFile`] without the production compiler.
+    pub(crate) source_debug: SourceDebug,
     /// Finalized source-language decision for recursive non-reified `typeOf` bounds. The JVM
     /// realizes this checked per-file fact; it does not select the policy itself.
     pub(crate) recursive_type_of: bool,
