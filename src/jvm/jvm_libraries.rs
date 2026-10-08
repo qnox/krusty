@@ -1460,8 +1460,19 @@ impl JvmLibraries {
                     // `params` is the semantic flexible type (`MutableCollection<E>!`). Java
                     // override checking erases to the classfile parameter (`Collection`), which
                     // was captured before that rewrite. Leaving the mutable face here made
-                    // `AbstractList.addAll` fail to discharge `MutableList.addAll`.
-                    member.physical_params = physical_params.clone();
+                    // `AbstractList.addAll` fail to discharge `MutableList.addAll`. The classfile
+                    // parameter is still a Java reference, so it keeps platform nullability
+                    // (`String!`) without the mutable-collection rewrite.
+                    member.physical_params = physical_params
+                        .iter()
+                        .enumerate()
+                        .map(|(index, parameter)| {
+                            java_type_nullability(
+                                *parameter,
+                                m.parameter_nullability.get(index).copied().flatten(),
+                            )
+                        })
+                        .collect();
                 }
                 if let Some(declaration) = declaration {
                     crate::trace_compiler!(

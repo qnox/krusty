@@ -3115,7 +3115,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the provider for that parameter's read-only upper face, and argument inference constrains
   through the face the value actually reaches, so `listOf("x")` still selects `first(List<T>)`
   and `LinkedHashMap(map)` / `ArrayList(listOf(s))` still instantiate from a Kotlin collection.
-  Java erasure matching keeps the classfile parameter, so `AbstractList` / `AbstractCollection`
+  Java erasure matching keeps the classfile parameter and its platform nullability (`String!`),
+  so `AbstractList` / `AbstractCollection`
   still discharge `addAll`, `removeAll`, `retainAll`, and `containsAll` on the Kotlin collection
   interfaces. `removeEldestEntry(MutableMap.MutableEntry<String, String>?)` and
   `removeEldestEntry(Map.Entry<String, String>?)` are therefore both the protected Java method,
