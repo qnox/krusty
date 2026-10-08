@@ -261,15 +261,17 @@ impl CodeBuilder {
                     .is_some_and(|(lpc, _)| *lpc == pc)
         });
         match self.line_marks.last() {
-            // Already exactly this entry.
-            Some((lpc, ll)) if *lpc == pc && *ll == line => Some(self.line_marks.len() - 1),
-            // A retained entry sits here: this mark goes AFTER it, so both survive. The retention
-            // is spent — a third mark at the same offset replaces this one as usual.
+            // A retained entry sits here: this mark goes AFTER it, so both survive, even when it
+            // names the same line. kotlinc's `visitSetValue` marks an unsigned value and the
+            // inlined operation marks that line again before the receiver load. The retention is
+            // spent — a third mark at the same offset replaces this one as usual.
             Some((lpc, _)) if *lpc == pc && retained => {
                 self.retained_line_mark = None;
                 self.line_marks.push((pc, line));
                 Some(self.line_marks.len() - 1)
             }
+            // Already exactly this entry.
+            Some((lpc, ll)) if *lpc == pc && *ll == line => Some(self.line_marks.len() - 1),
             Some((lpc, _)) if *lpc == pc => {
                 let last = self.line_marks.last_mut()?;
                 last.1 = line;
@@ -596,6 +598,16 @@ mod tests {
         code.inlined_line(6);
         code.inlined_line(6);
         assert_eq!(code.line_marks(), [(0, 6), (1, 6)]);
+    }
+
+    /// The same line retained and marked again both stay. An unsigned assignment
+    /// `r = r or (cur and mask)` records that line twice at the receiver load.
+    #[test]
+    fn a_retained_mark_keeps_a_second_entry_of_the_same_line() {
+        let mut code = CodeBuilder::new(0);
+        code.mark_line_retained(8);
+        code.mark_line(8);
+        assert_eq!(code.line_marks(), [(0, 8), (0, 8)]);
     }
 
     /// A retained entry is spent by the mark that appends after it: a third at the same offset

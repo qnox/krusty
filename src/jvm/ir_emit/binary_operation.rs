@@ -65,6 +65,15 @@ impl Emitter<'_> {
         self.unsigned_bitwise_operation(expression).is_some()
     }
 
+    /// The right operand of this unsigned operation is itself an unsigned operation.
+    ///
+    /// `r = r or (cur and mask)` and `r = r or (cur shl count)` are this shape. kotlinc marks the
+    /// assignment line and then the inlined `or` marks it again, both at the receiver load.
+    pub(super) fn unsigned_bitwise_rhs_is_unsigned(&self, expression: u32) -> bool {
+        self.unsigned_bitwise_operation(expression)
+            .is_some_and(|(_, rhs)| self.unsigned_bitwise_operation(rhs).is_some())
+    }
+
     pub(super) fn emit_binop(
         &mut self,
         expression: u32,
