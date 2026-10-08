@@ -170,6 +170,9 @@ pub(super) fn emit_bridges(
             emit_bridge(&class, cw, bridge_index, b, None);
         }
     }
+    for bridge in env.inherited_collection_bridges.for_class(c.fq_name_id()) {
+        emit_inherited_collection_bridge(ir, c, cw, bridge);
+    }
 }
 
 /// The class whose bridges are being emitted, with the run's bridge facts.
@@ -692,5 +695,189 @@ pub(super) fn emit_value_class_interface_entries(
         let class = ClassBridges::new(ir, c, env);
         emit_bridge(&class, cw, bridge_index, b, Some(&header));
         cw.set_method_nullability(&b.name, &descriptor, header.result, &header.parameters);
+    }
+}
+
+fn emit_inherited_collection_bridge(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+    cw: &mut ClassWriter,
+    bridge: &crate::jvm::inherited_collection_bridges::InheritedCollectionBridge,
+) {
+    let params = jvm_tys(&bridge.parameters);
+    let ret = ir_ty_to_jvm(&bridge.result);
+    let descriptor = method_descriptor(&params, ret);
+    if cw.has_method(&bridge.name, &descriptor) {
+        return;
+    }
+    let words: u16 = params.iter().map(|ty| slot_words(*ty)).sum();
+    let mut code = CodeBuilder::new(1 + words);
+    let signature = match &bridge.body {
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::SuperDelegate {
+            owner,
+            name,
+            descriptor: super_descriptor,
+            result_cast,
+            signature,
+        } => {
+            code.aload(0);
+            let mut slot = 1u16;
+            for ty in &params {
+                load(*ty, slot, &mut code);
+                slot += slot_words(*ty);
+            }
+            let arg_words: i32 = params.iter().map(|ty| i32::from(slot_words(*ty))).sum();
+            let owner = owner.render();
+            let method = cw.methodref(&owner, name, super_descriptor);
+            code.invokespecial(method, arg_words, i32::from(slot_words(ret)));
+            if let Some(cast) = result_cast {
+                code.checkcast(cw.class_ref(cast));
+            }
+            emit_return(ret, &mut code);
+            signature.as_deref()
+        }
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Checked {
+            synthetic: _,
+            checks,
+            failure,
+            delegate_name,
+            delegate_descriptor,
+            cast_arguments,
+            signature,
+        } => {
+            for check in checks {
+                let pass = code.new_label();
+                let slot = parameter_slot(&params, usize::from(check.parameter));
+                if check.nullable {
+                    code.aload(slot);
+                    code.ifnull(pass);
+                }
+                code.aload(slot);
+                code.instance_of(cw.class_ref(&check.class_name));
+                code.ifne(pass);
+                emit_inherited_failure(
+                    &mut code,
+                    cw,
+                    failure.expect("a checked inherited collection bridge has a failure result"),
+                    &params,
+                );
+                code.bind(pass);
+            }
+            code.aload(0);
+            let mut slot = 1u16;
+            for (index, ty) in params.iter().enumerate() {
+                load(*ty, slot, &mut code);
+                if let Some(cast) = cast_arguments
+                    .iter()
+                    .find(|cast| usize::from(cast.parameter) == index)
+                {
+                    code.checkcast(cw.class_ref(&cast.class_name));
+                }
+                slot += slot_words(*ty);
+            }
+            let arg_words: i32 = params.iter().map(|ty| i32::from(slot_words(*ty))).sum();
+            let owner = class.fq_name();
+            let method = cw.methodref(&owner, delegate_name, delegate_descriptor);
+            code.invokevirtual(method, arg_words, i32::from(slot_words(ret)));
+            emit_return(ret, &mut code);
+            signature.as_deref()
+        }
+    };
+    let signature = signature.filter(|signature| *signature != descriptor);
+    let access = match &bridge.body {
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::SuperDelegate {
+            ..
+        } => 0x0041,
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Checked {
+            synthetic: true,
+            ..
+        } => 0x1051,
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Checked {
+            ..
+        } => 0x0051,
+    };
+    finish_inherited(
+        cw,
+        &bridge.name,
+        &descriptor,
+        &mut code,
+        1 + words,
+        signature,
+        access,
+    );
+    attach_inherited_bridge_debug(ir, class, cw, &bridge.name, &descriptor);
+}
+
+fn attach_inherited_bridge_debug(
+    _ir: &IrFile,
+    class: &crate::ir::IrClass,
+    cw: &mut ClassWriter,
+    name: &str,
+    descriptor: &str,
+) {
+    if class.decl_line == 0 {
+        return;
+    }
+    let line = if class.decl_start_line == 0 {
+        class.decl_line
+    } else {
+        class.decl_start_line
+    };
+    cw.set_method_debug(
+        name,
+        descriptor,
+        Some((0, line)),
+        &[(String::from("this"), format!("L{};", class.fq_name()), 0)],
+    );
+}
+
+fn finish_inherited(
+    cw: &mut ClassWriter,
+    name: &str,
+    descriptor: &str,
+    code: &mut CodeBuilder,
+    locals: u16,
+    signature: Option<&str>,
+    access: u16,
+) {
+    match access {
+        0x0041 => finish_code_sig::<0x0041>(cw, name, descriptor, code, locals, signature),
+        0x0051 => finish_code_sig::<0x0051>(cw, name, descriptor, code, locals, signature),
+        _ => finish_code_sig::<0x1051>(cw, name, descriptor, code, locals, signature),
+    }
+}
+
+fn parameter_slot(params: &[Ty], index: usize) -> u16 {
+    1 + params[..index]
+        .iter()
+        .map(|ty| slot_words(*ty))
+        .sum::<u16>()
+}
+
+fn emit_inherited_failure(
+    code: &mut CodeBuilder,
+    cw: &mut ClassWriter,
+    failure: crate::jvm::mapped_builtin_declarations::CollectionBridgeFailure,
+    params: &[Ty],
+) {
+    match failure {
+        crate::jvm::mapped_builtin_declarations::CollectionBridgeFailure::False => {
+            code.push_int(0, cw);
+            code.ireturn();
+        }
+        crate::jvm::mapped_builtin_declarations::CollectionBridgeFailure::Null => {
+            code.aconst_null();
+            code.areturn();
+        }
+        crate::jvm::mapped_builtin_declarations::CollectionBridgeFailure::NotFound => {
+            code.push_int(-1, cw);
+            code.ireturn();
+        }
+        crate::jvm::mapped_builtin_declarations::CollectionBridgeFailure::Argument(index) => {
+            let index = usize::from(index);
+            let ty = params[index];
+            load(ty, parameter_slot(params, index), code);
+            emit_return(ty, code);
+        }
     }
 }
