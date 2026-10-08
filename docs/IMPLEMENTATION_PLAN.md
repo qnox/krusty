@@ -4887,6 +4887,10 @@ shadow with no output change.
     records that line twice at the receiver load. A `while` or `do…while` condition is inside a
     condition, so `cur and 0x80u == 0x80u` keeps the line on the receiver load and the comparison,
     not on the mask literal (`tests/unsigned_bitwise_lines_e2e.rs`).
+  - ✅ An unsigned literal does not take the line from a property read or a captured mutable
+    local. An assignment into the captured local writes the line again at the store, and a
+    declaration keeps it on the holder store (the zero default after unboxing) and the element
+    store (`tests/captured_unsigned_lines_e2e.rs`).
   - ☐ 6c. Remaining line-only differences at 6b (127 files, 4,298 methods): unsigned range
     literals (`rangeTo`/`rangeUntil` are `@InlineOnly` and need their after-inline marks, ~58
     files; the range needs its selected operator declaration), a catch clause's line at the

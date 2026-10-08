@@ -2549,6 +2549,8 @@ mod toplevel_property_inference_e2e;
 #[path = "toplevel_property_ref_e2e.rs"]
 mod toplevel_property_ref_e2e;
 
+#[path = "captured_unsigned_lines_e2e.rs"]
+mod captured_unsigned_lines_e2e;
 #[path = "erased_parameter_boxing_e2e.rs"]
 mod erased_parameter_boxing_e2e;
 #[path = "function_type_parameter_name_e2e.rs"]
