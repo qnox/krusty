@@ -28,8 +28,9 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     ValueClassAdapter,
     /// The callee needs a later stage of the port.
     CalleeShape(UnsupportedShape),
-    /// The callee has a try/catch or a backward jump and the call starts with operands on the
-    /// stack; kotlinc spills them around the inlined body, which is not ported.
+    /// The callee has a try/catch or a backward jump, and a value that this call does not store
+    /// is already on the stack. The method inliner does not yet spill that prefix, so the call
+    /// stays on the byte splice.
     OperandsAcrossCallee,
     /// An `@InlineOnly` callee takes its arguments in place, beside a lambda.
     InPlaceArguments,
@@ -91,9 +92,6 @@ impl Emitter<'_> {
         if let Some(shape) = inliner::unsupported_shape(&callee, &self.bodies) {
             return splice(SpliceReason::CalleeShape(shape));
         }
-        if inliner::requires_empty_stack_on_entry(&callee) && code.stack_height() != 0 {
-            return splice(SpliceReason::OperandsAcrossCallee);
-        }
         let supplies = self
             .parameter_supplies(
                 call_expression,
@@ -104,6 +102,14 @@ impl Emitter<'_> {
                 &callee,
             )
             .ok_or("a function-typed argument has no published crossinline/noinline modifier")?;
+        // Argument stores run before the body. A duplicated safe-call receiver is one of those
+        // arguments, already on the stack, so the body still starts empty and the MethodInliner
+        // can place the callee. A value underneath that argument is not consumed here.
+        let consumed =
+            stored_stack_resident_words(self.ir, self.stack_resident_value, args, &supplies);
+        if inliner::requires_empty_stack_on_entry(&callee) && code.stack_height() != consumed {
+            return splice(SpliceReason::OperandsAcrossCallee);
+        }
         if supplies.contains(&Supply::InPlace) {
             return splice(SpliceReason::InPlaceArguments);
         }
@@ -167,6 +173,41 @@ impl Emitter<'_> {
             }
         }
         Ok(LambdaCallRoute::MethodInliner(callee))
+    }
+}
+
+/// Words of a stack-resident value that a stored argument will pop before the inline body.
+///
+/// A one-word safe call leaves its receiver on the stack. That receiver is the call's argument,
+/// not an operand the body has to jump over.
+fn stored_stack_resident_words(
+    ir: &crate::ir::IrFile,
+    resident: Option<u32>,
+    args: &[u32],
+    supplies: &[Supply],
+) -> i32 {
+    let Some(resident) = resident else {
+        return 0;
+    };
+    let stored = args.iter().zip(supplies).any(|(&argument, supply)| {
+        *supply == Supply::Stored && argument_reads_resident(ir, argument, resident)
+    });
+    i32::from(stored)
+}
+
+/// Whether evaluating `argument` reads the stack-resident value, through coercions that emit no
+/// bytecode of their own.
+fn argument_reads_resident(ir: &crate::ir::IrFile, mut argument: u32, resident: u32) -> bool {
+    loop {
+        match ir.expr(argument) {
+            crate::ir::IrExpr::GetValue(value) => return *value == resident,
+            crate::ir::IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => argument = *arg,
+            _ => return false,
+        }
     }
 }
 

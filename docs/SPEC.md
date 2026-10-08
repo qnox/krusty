@@ -7948,8 +7948,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A one-word safe call duplicates its receiver.** `a?.close()`, `foo()?.close()`, `a?.foo(x)`,
   and `a?.n` evaluate the receiver once, `dup` it, and `ifnull` to a `pop`. The non-null path uses
   the value still on the stack as the call or property receiver; that receiver is not stored in a
-  temporary. A chain (`a?.b?.c`), a scalar receiver (`Int?`), a receiver wider than one word, and a
-  selector that reads the receiver more than once keep the temporary. Test: `tests/safe_call_dup_e2e.rs`.
+  temporary. A classpath `inline` callee that needs an empty stack (a loop or a `try`) still takes
+  the method inliner: the duplicated receiver is that call's own argument and is stored before the
+  body. Only a value left underneath the argument keeps the call on the byte splice. A chain
+  (`a?.b?.c`), a scalar receiver (`Int?`), a receiver wider than one word, and a selector that
+  reads the receiver more than once keep the temporary. Tests: `tests/safe_call_dup_e2e.rs`,
+  `tests/safe_call_inline_callable_reference_e2e.rs`.
 - **An elvis over a safe call keeps its own null check.** fir2ir builds `a?.f() ?: b` as an elvis
   `when` over a temporary holding the safe call's (nullable) value, so kotlinc emits the safe call's
   `ifnull` to the shared null path and then the elvis's own `dup; ifnonnull`, whatever `f()`'s
