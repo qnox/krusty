@@ -718,15 +718,29 @@ fn emit_inherited_collection_bridge(
     if cw.has_method(&bridge.name, &descriptor) {
         return;
     }
+    let signature = match &bridge.body {
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::SuperDelegate {
+            signature,
+            ..
+        }
+        | crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Checked {
+            signature,
+            ..
+        } => signature.as_deref(),
+    }
+    .filter(|signature| *signature != descriptor);
+    // ASM visits the method header before its body. Reserve it here so body references do not
+    // precede the name, descriptor, and generic Signature in the constant pool.
+    cw.reserve_method_pool(&bridge.name, &descriptor, signature, &[]);
     let words: u16 = params.iter().map(|ty| slot_words(*ty)).sum();
     let mut code = CodeBuilder::new(1 + words);
-    let signature = match &bridge.body {
+    match &bridge.body {
         crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::SuperDelegate {
             owner,
             name,
             descriptor: super_descriptor,
             delegate_result,
-            signature,
+            signature: _,
         } => {
             code.aload(0);
             let mut slot = 1u16;
@@ -745,7 +759,6 @@ fn emit_inherited_collection_bridge(
             );
             adapt_inherited_result(cw, &mut code, delegate_result, ret);
             emit_return(ret, &mut code);
-            signature.as_deref()
         }
         crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::Checked {
             access: _,
@@ -755,7 +768,7 @@ fn emit_inherited_collection_bridge(
             delegate_descriptor,
             delegate_result,
             cast_arguments,
-            signature,
+            signature: _,
         } => {
             for check in checks {
                 let pass = code.new_label();
@@ -798,10 +811,8 @@ fn emit_inherited_collection_bridge(
             );
             adapt_inherited_result(cw, &mut code, delegate_result, ret);
             emit_return(ret, &mut code);
-            signature.as_deref()
         }
-    };
-    let signature = signature.filter(|signature| *signature != descriptor);
+    }
     let access = match &bridge.body {
         crate::jvm::inherited_collection_bridges::InheritedCollectionBridgeBody::SuperDelegate {
             ..

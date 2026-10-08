@@ -717,6 +717,9 @@ fn property_signature(result: Ty) -> (String, String) {
 }
 
 fn signature_type(ty: Ty, keep_parameters: bool) -> String {
+    if ty.nullable_primitive().is_some() {
+        return descriptor_of(ty);
+    }
     match ty.non_null() {
         Ty::TyParam(name, bound) => {
             if keep_parameters {
