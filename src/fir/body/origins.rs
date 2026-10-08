@@ -66,6 +66,19 @@ impl OriginStore {
         self.origins.get(id.raw() as usize).copied()
     }
 
+    /// The source occurrence that ultimately caused `id`.
+    ///
+    /// A synthetic origin can only name an origin already stored by [`Self::synthetic`], so this
+    /// chain is finite by construction and needs no arbitrary traversal limit.
+    pub fn source_span(&self, mut id: OriginId) -> Option<(SourceFileId, Span)> {
+        loop {
+            match self.get(id)? {
+                Origin::Source { file, span } => return Some((file, span)),
+                Origin::Synthetic { cause, .. } => id = cause,
+            }
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.origins.len()
     }

@@ -13,8 +13,8 @@ use std::collections::HashMap;
 
 use crate::fir::{
     BodyLocalCallableDeclarationId, FirBody, FirCapture, FirCaptureSource, FirExprId, FirExprKind,
-    FirLocalCallableRef, FirLocalClassCaptureSource, FirStatementId, FirStatementKind, Origin,
-    OriginId, OriginStore,
+    FirLocalCallableRef, FirLocalClassCaptureSource, FirStatementId, FirStatementKind, OriginId,
+    OriginStore,
 };
 
 /// The `(enclosing_depth, source)` keys of `function`'s captures in first-use order. `checked`
@@ -103,16 +103,13 @@ impl<'a> Walk<'a> {
     }
 
     /// The source offset of `origin`, following a synthetic node to the source node it was made
-    /// for. A node with no source offset sorts after every sourced read.
-    fn reading_order(&self, mut origin: OriginId) -> u32 {
-        for _ in 0..32 {
-            match self.origins.get(origin) {
-                Some(Origin::Source { span, .. }) => return span.lo,
-                Some(Origin::Synthetic { cause, .. }) => origin = cause,
-                None => return u32::MAX,
-            }
-        }
-        u32::MAX
+    /// for. Every checked capture read must retain such an origin.
+    fn reading_order(&self, origin: OriginId) -> u32 {
+        self.origins
+            .source_span(origin)
+            .expect("a checked capture read retains its source origin")
+            .1
+            .lo
     }
 
     /// Include the captures of the local function `target` names from the innermost body.

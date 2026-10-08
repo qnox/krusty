@@ -192,7 +192,12 @@ impl Emitter<'_> {
                     self.emit_value(source, code);
                     slot
                 }
-                None => self.emit_consumed_operand(o, code),
+                None => match *self.ir.expr(o) {
+                    IrExpr::RefGet { holder, elem } if ir_ty_to_jvm(&elem).is_reference() => {
+                        self.emit_shared_cell_read(holder, elem, false, code)
+                    }
+                    _ => self.emit_consumed_operand(o, code),
+                },
             },
             OperandUse::AsEmitted => {
                 self.emit_value(o, code);

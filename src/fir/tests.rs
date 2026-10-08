@@ -1778,13 +1778,20 @@ fn source_map_assigns_per_input_identities_without_retaining_source_text_or_line
 fn every_synthetic_origin_has_a_stable_source_cause() {
     let mut origins = OriginStore::default();
     let source = origins.source(SourceFileId::from_raw(2), Span::new(10, 14));
-    let synthetic = origins.synthetic(source, SyntheticOriginKind::ImplicitConversion);
+    let mut synthetic = origins.synthetic(source, SyntheticOriginKind::ImplicitConversion);
     assert_eq!(
         origins.get(synthetic),
         Some(Origin::Synthetic {
             cause: source,
             kind: SyntheticOriginKind::ImplicitConversion,
         })
+    );
+    for _ in 0..64 {
+        synthetic = origins.synthetic(synthetic, SyntheticOriginKind::ImplicitConversion);
+    }
+    assert_eq!(
+        origins.source_span(synthetic),
+        Some((SourceFileId::from_raw(2), Span::new(10, 14)))
     );
 }
 

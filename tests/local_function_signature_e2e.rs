@@ -84,41 +84,37 @@ fn captured_values_lead_in_first_use_order_as_kotlinc() {
     signs_as_kotlinc(CAPTURES, "Captures", &["CapturesKt"]);
 }
 
-/// A shared `var` cell and a plain value, each used first in the condition and first in the
-/// branch. kotlinc's closure sees the condition before the branch.
-const SHARED_CELL: &str = "fun box(): String = if (parse() == \"xy\") \"OK\" else \"fail\"\n\
-fun parse(): String {\n\
-    val parsedArgs = mutableListOf<String>()\n\
-    var current = StringBuilder()\n\
-    fun save(wasQuoted: Boolean) {\n\
-        if (wasQuoted || current.isNotBlank()) {\n\
-            parsedArgs.add(current.toString())\n\
-            current = StringBuilder()\n\
-        }\n\
+/// Repository-owned values cover the three source-order shapes without relying on a JDK or
+/// stdlib member name: a mutable cell read in the condition before a branch value, a plain value
+/// read in the condition before the mutable cell, and a branch write before a later plain value.
+const CAPTURE_SOURCE_ORDER: &str = "class Token\n\
+class Sink { fun accept(value: Token) {} }\n\
+fun exercise(sink: Sink) {\n\
+    val marker = Token()\n\
+    var current = Token()\n\
+    fun cellFirst(flag: Boolean) {\n\
+        if (flag || current === marker) sink.accept(current)\n\
+        current = Token()\n\
     }\n\
-    fun listFirst() {\n\
-        if (parsedArgs.isEmpty()) {\n\
-            current.append('x')\n\
-        }\n\
+    fun plainFirst(flag: Boolean) {\n\
+        if (flag || marker === marker) current = marker\n\
     }\n\
-    fun branchWrites(flag: Boolean) {\n\
-        if (flag) current.append('y')\n\
-        parsedArgs.add(current.toString())\n\
+    fun branchWrite(flag: Boolean) {\n\
+        if (flag) current = Token()\n\
+        sink.accept(current)\n\
     }\n\
-    save(false)\n\
-    listFirst()\n\
-    branchWrites(true)\n\
-    return current.toString()\n\
+    cellFirst(false)\n\
+    plainFirst(false)\n\
+    branchWrite(true)\n\
 }\n";
 
 #[test]
-fn shared_var_capture_follows_source_order_at_runtime() {
-    common::expect_box_ok_with_stdlib(SHARED_CELL, "SharedCell");
-}
-
-#[test]
-fn shared_var_capture_leads_in_source_order_as_kotlinc() {
-    signs_as_kotlinc(SHARED_CELL, "SharedCell", &["SharedCellKt"]);
+fn source_ordered_local_function_captures_are_byte_identical_to_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "CaptureSourceOrder",
+        CAPTURE_SOURCE_ORDER,
+        &["Token", "Sink", "CaptureSourceOrderKt"],
+    );
 }
 
 /// Compare the methods of each of `classes` that krusty and kotlinc compile `source` to.
