@@ -84,10 +84,24 @@ argument, member, initializer, or assignment location is a test failure.
 
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
-binaries once with Cargo's `gate` profile, runs the conformance binary alone in two passes (box
-corpus, then everything else), then runs the internally parallel e2e binary once, then runs the
-remaining small test binaries in parallel. The e2e suite is one process under
-`KRUSTY_E2E_TIMEOUT_SECONDS`.
+binaries once with Cargo's `gate` profile, runs the conformance binary alone in three passes (JVM
+box corpus, Native box corpus, then everything else), then runs the internally parallel e2e binary
+once, then runs the remaining small test binaries in parallel. The e2e suite is one process under
+`KRUSTY_E2E_TIMEOUT_SECONDS`. The native codegen/box lane also runs once, excluded from the
+"everything else" pass, under its dedicated `KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS` suite
+deadline. `scripts/native-conformance-run.sh` owns that same invocation for the `just` recipes and
+CI.
+
+The Native lane uses the same committed text ratchet as JVM, keyed by `native` and the exact Kotlin
+release. Backend declines, frontend rejections, and accepted-but-wrong executions are expected
+failures. A missing harness capability, including an unwired multi-module topology, is also an
+expected failure and remains in the denominator. Only target/source-universe exclusions are
+not-applicable. Pass is implicit. Any new non-pass or
+transition between pass/fail/not-applicable fails, and compiler panics always fail. No version range,
+GHA cache, or bootstrap exists: a local checkout and CI read the same reviewable baseline.
+A `box()` answer is read from behind the entry's `BOX_RESULT_FRAME` marker, whole, and never from the
+last line of output. A scheduled invocation requires the prebuilt runtime and the provisioned corpus;
+only a plain local run may skip or fall back to the vendored cases.
 
 Each scheduled invocation owns its log. An unfiltered binary keeps the plain `<binary>.log` name; a
 filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the two conformance logs are
@@ -99,17 +113,17 @@ earlier run. The failure report reads the exact invocation's log, and the timing
 invocation separately because each is a separate process with its own wall time. The e2e log is the
 unfiltered binary name.
 
-CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` runs both the
-box corpus and every active non-box conformance test from those artifacts. `KRUSTY_LANGUAGE_VERSION`,
-`KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the runtime reference toolchain, so the matrix
-does not rebuild Rust code per Kotlin version. Toolchain, box/serialization corpora, and recorded
-kotlinc-byte caches are isolated by version. Matrix runs opt into the KSP integration and require
-both KSP and pinned serialization-runtime provisioning, so missing prerequisites fail rather than
-turning those tests into passing skips. Each leg uses the same configurable process-group conformance
-deadline as the local harness, including its spawned compiler and runner JVMs. Each leg's box run
-uploads its case report and its JVM byte report (see "Current Conformance") as the separate
-`pct-<version>` and `jvm-byte-equality-<version>` artifacts. A
-release publishes only after every combined leg passes and matches both exact box outcome manifests.
+CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` expands into
+independent `jvm` and `native` matrix rows from those artifacts. The JVM row runs its box corpus and
+every active non-box conformance test; the Native row runs its box corpus independently, so neither
+target waits for the other's corpus result. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and
+`KRUSTY_KOTLIN_BOX_DIR` select the runtime reference toolchain, so the matrix does not rebuild Rust
+code per Kotlin version or target. Toolchain and box/serialization corpora are isolated by version.
+JVM rows opt into KSP and require both KSP and pinned serialization-runtime
+provisioning, so missing prerequisites fail rather than turning those tests into passing skips. Each
+row uses its target's configurable process-group deadline. JVM rows upload `pct-<version>` and
+`jvm-byte-equality-<version>`; Native rows upload `native-pct-<version>`. A release publishes only
+after all target rows pass and every row matches its platform/version expectations.
 
 ### Box-test JDK
 
@@ -123,26 +137,32 @@ before) and extends an older cache that lacks it; a run without it fails instead
 against another JDK. A mock-JDK run cannot see divergences that only appear against a modern JDK
 surface, so those need their own repository tests.
 
-## Box Outcome Manifests
+## Box Outcome Ratchet
 
-`tests/box_expected_failures/<version>.txt` names, one path per line relative to
-`compiler/testData/codegen/box`, the corpus files krusty is still allowed to fail against that Kotlin
-release. `tests/box_expected_not_applicable/<version>.txt` records the files intentionally excluded
-from the JVM backend. Pass is implicit: a path in neither file must pass. The conformance test fails
-on every transition among pass, fail, and not-applicable, so losing applicability cannot silently
-improve the score. Duplicate or corpus-absent entries also fail. Sharded and filtered runs judge only
-the files they ran while validating manifest paths against the complete discovered corpus.
+The generic ratchet is keyed by platform and exact Kotlin version:
+`tests/box_expected_failures/<platform>/<version>.txt` and
+`tests/box_expected_not_applicable/<platform>/<version>.txt`. Each entry is a corpus-relative path;
+pass is implicit. JVM has no expected failures, so every applicable JVM case must pass. Native's
+known non-passing backlog is explicit. Every pass/fail/not-applicable transition, duplicate, and
+corpus-absent entry fails. Sharded and filtered runs judge only their scheduled files while still
+validating committed paths against the complete corpus.
 
 After a change that moves any outcome, rewrite both manifests from a full run and commit the diffs
 with the change, so review sees exactly which files moved:
 
 ```sh
-KRUSTY_BLESS_BOX_FAILURES=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture
+# JVM applicability
+KRUSTY_BLESS_BOX_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
+  ./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture
+
+# Native failures and applicability (requires the provisioned Native runtime/corpus)
+KRUSTY_BLESS_BOX_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
+  ./run-tests.sh --test conformance kotlin_codegen_box_native_conformance -- --nocapture
 ```
 
 Blessing requires the exact value `1` and is refused under CI and on a partial run. Each tracked file
-is replaced atomically. The goal is to empty both sets of non-passing outcomes; once they are empty,
-the manifests and `tests/box_ratchet.rs` are deleted.
+is replaced atomically. Review and commit the platform/version diff. The failure lists only shrink;
+the long-term goal is zero expected failures on every platform.
 
 A pull request is judged against its own base, so two that each match the lists can still disagree
 with them once both land: one fixes a file the other's list still names, or their changes interact.
@@ -151,10 +171,12 @@ be up to date") on and the `ci-and-conformance` check required (see "Required Ch
 is checked on the combined commit before master moves. A branch that falls behind merges master in
 and re-blesses.
 
-The manifests only shrink. The required `ci` job runs `scripts/check-box-lists.sh` before building
-and fails a pull request that adds an entry to either manifest compared with its merge base,
-including one entry swapped for another: a regression is fixed, not recorded, and a fix does not
-pay for one. A manifest for a newly supported Kotlin version is exempt.
+All existing platform/version manifests only shrink. The required `ci` job runs
+`scripts/check-box-lists.sh` before building and fails a pull request that adds an entry to any
+existing outcome manifest compared with its merge base, including one entry swapped for another:
+a regression is fixed, not recorded, and a fix does not pay for one. A manifest for a newly
+supported Kotlin version is exempt. Native and JVM inventories use the same script and repository
+layout.
 
 The rest of the suite is version-sensitive too, because the supported kotlinc releases do not word
 every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
@@ -267,8 +289,9 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs `ci` and the whole `conformance` matrix, where every supported Kotlin version lane runs the
-box suite and then the non-box suite. The job is scheduled with `if: always()`, because a required
+It needs `ci` and the whole `conformance` matrix, where every supported Kotlin version has distinct
+JVM and Native rows; the JVM row also owns the non-box suite. The job is scheduled with
+`if: always()`, because a required
 check that is skipped counts as passing, and it fails unless both results are `success`. A failed,
 skipped, or cancelled dependency therefore fails it, including a failed `build-shared-bins` or
 `versions` job that skips the whole matrix. Its name stays the same when the version manifest
@@ -320,25 +343,24 @@ GitHub has actually reported:
 5. Repeat step 3. It must print `[{"context":"ci-and-conformance","integration_id":15368}]`, and an
    open pull request then lists `ci-and-conformance` as required.
 
-The conformance and JVM byte-equality badges change only when a master `release` job publishes. To
-verify a publication, confirm that run's `release` job succeeded, render its max-version reports
-locally, and compare the results with the Gist's `krusty-conformance.json` and
-`krusty-jvm-byte-equality.json`:
+The JVM conformance, JVM byte-equality, and Native conformance badges change only when a master
+`release` job publishes. To verify a publication, confirm that run's `release` job succeeded,
+render its max-version reports locally, and compare the results with the three Gist files:
 
 ```sh
 gh run view <run-id> --repo qnox/krusty --json jobs \
   --jq '.jobs[] | select(.name == "release") | {conclusion, steps: [.steps[] | {name, conclusion}]}'
 v="$(just max-version)"
-gh run download <run-id> --repo qnox/krusty -n "pct-$v" -n "jvm-byte-equality-$v" -D target/reports
-just conformance-badge target/reports/pct-$v/pct.txt target/reports/jvm-byte-equality-$v/jvm-byte-equality.txt
+gh run download <run-id> --repo qnox/krusty -n "pct-$v" -n "jvm-byte-equality-$v" -n "native-pct-$v" -D target/reports
+just conformance-badge target/reports/pct-$v/pct.txt target/reports/jvm-byte-equality-$v/jvm-byte-equality.txt target/reports/native-pct-$v/native-pct.txt
 curl -fsSL https://gist.githubusercontent.com/qnox/dec8149bc4f43b203d6cc9adc14f2026/raw/krusty-conformance.json
 curl -fsSL https://gist.githubusercontent.com/qnox/dec8149bc4f43b203d6cc9adc14f2026/raw/krusty-jvm-byte-equality.json
+curl -fsSL https://gist.githubusercontent.com/qnox/dec8149bc4f43b203d6cc9adc14f2026/raw/krusty-native-conformance.json
 ```
 
 The `label`, `message`, and `color` in `docs/badges/conformance.json` and
-`docs/badges/jvm-byte-equality.json` must match the Gist's respective files. A `release` job that
-skipped its publish steps (an older master commit, or no `CONFORMANCE_GIST_ID`) left both badges
-unchanged.
+`docs/badges/jvm-byte-equality.json` and `docs/badges/native-conformance.json` must match the Gist's
+respective files. A `release` job that skipped its publish steps left all three unchanged.
 
 ## Focused Runs
 
@@ -474,6 +496,8 @@ Optional profiling knobs:
   (`conformance-run.sh`).
 - `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 1800-second deadline for the single-process
   e2e suite, including a focused e2e run.
+- `KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 600-second deadline for the
+  single-process native codegen/box suite.
 - `KRUSTY_CONFORMANCE_SHARDS=<count>` overrides the four corpus shards the plain gate's box pass is
   partitioned into (no reference compilation, so the pass is cheap).
 - `KRUSTY_SCORED_CONFORMANCE_SHARDS=<count>` overrides the twelve shards the scored byte-equality run
@@ -486,8 +510,8 @@ Optional profiling knobs:
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.
 - `KRUSTY_FAIL_CAP=<n>` caps reported conformance failures.
-- `KRUSTY_BLESS_BOX_FAILURES=1` atomically rewrites the Kotlin version's fail and not-applicable
-  manifests from a full local conformance run instead of checking against them.
+- `KRUSTY_BLESS_BOX_EXPECTATIONS=1` atomically rewrites the selected platform/version's fail and
+  not-applicable inventories from a full local conformance run instead of checking against them.
 
 Optional compiler trace:
 
@@ -502,30 +526,41 @@ unless the requested category is enabled.
 
 There is no conformance number written down in this repository, deliberately. Every figure committed
 to a document went stale within days of the commit that changed it, and a stale number read as
-current is worse than no number. The live measures are two badges in `README.md`, both computed by
-one box run over the same applicable `codegen/box` cases of each Kotlin version:
+current is worse than no number. The live measures are three badges in `README.md`:
 
 - The **conformance badge** (`krusty-conformance.json`) is the case pass rate: the share of the
   applicable cases whose `box()` returns `OK` on krusty-emitted bytecode, shown as
   `<pct>% (<passed>/<applicable>)`.
-- The **JVM byte-equality badge** (`krusty-jvm-byte-equality.json`) is the share of generated
-  `.class` bytes belonging to entire class files that are byte-identical to the same-version
-  kotlinc's over those same cases, shown as
-  `<pct>% (<matched>/<total> bytes)`. Other target platforms may get their own sibling badges
-  later; none replaces the conformance badge.
+- The **JVM byte-equality badge** (`krusty-jvm-byte-equality.json`) is the share of matching leading
+  bytes in module/name-paired `.class` files against the same-version kotlinc over those same cases,
+  shown as
+  `<pct>% (<matched>/<total> bytes)`.
+- The **Native conformance badge** (`krusty-native-conformance.json`) is the pass rate of the
+  independent Native lane: cases that compile, link, run, and return `OK` over cases applicable to
+  Native, shown as `<pct>% (<passed>/<applicable>)`.
 
 A case is applicable when kotlinc's own JVM box runner expects it to pass (`src/conformance.rs`
 `backend_applicable`, mirroring `InTextDirectivesUtils.isPassingTarget`): cases restricted to other
 backends by `TARGET_BACKEND`/`DONT_TARGET_EXACT_BACKEND`, or muted on JVM by the `IGNORE_BACKEND`
-family, count in neither badge's numerator nor denominator.
+family, count in neither JVM badge's numerator nor denominator. Native applicability independently
+uses the corresponding Native target/mute directives.
+
+Both lanes scan the same version-pinned corpus directory. The Native lane never inherits a JVM
+mute: it excludes a case only for a Native/ANY target directive or a true target-runtime/source
+requirement such as JVM classes. A missing harness capability is an expected failure and remains in
+the denominator: this currently includes `// MODULE:` dependency construction, while Kotlin-only
+`// FILE:` source sets and generated coroutine helpers run normally. The committed inventories keep
+the Native denominator target-correct rather than hand-picked. These outcomes use the same generic
+platform/version ratchet as JVM, so local and CI runs enforce identical state without a GHA cache.
 
 For the byte score, each applicable case is compiled with krusty and also reference-compiled in the
 same topology (Kotlin and Java sources, `// MODULE:` dependencies, directives, classpath, and JDK)
 with the pinned kotlinc of that version. Both compilers' `.class` files, Java-emitted ones included,
 are paired by module and JVM internal class name:
 
-- A pair counts its full length as `matched` only when both class files are entirely byte-identical.
-  A differing pair counts 0 as `matched` and the longer of the two lengths as `total`.
+- A pair counts its common leading byte prefix as `matched` and the longer class length as `total`.
+  Matching bytes after the first difference do not resume credit; exact equality is the only way to
+  receive full credit.
 - A class that only one compiler emits counts 0 out of its full length.
 - A case whose `box()` does not return `OK` (krusty rejected it, emitted no `box()`, panicked, or the
   JVM returned anything else) counts 0 out of the summed size of kotlinc's classes.
@@ -533,11 +568,12 @@ are paired by module and JVM internal class name:
   dropped case. A test directive the reference oracle cannot map to a kotlinc option (for example
   an unknown `// RETURN_VALUE_CHECKER_MODE:` value) is such a failure.
 
-Both reports keep integer counts, summed over cases and then over shards: `passed` and `applicable`
-cases for conformance, `matched` and `total` bytes for JVM byte equality. Each percentage,
-`100 * count / of` with one decimal (`0.0` when the denominator is 0), is derived only from its own
-sums, so it is never an average of per-case or per-shard percentages, and neither report's counts
-stand in for the other's. Only the box corpus feeds either badge. The non-box conformance tests
+All reports keep integer counts: `passed` and `applicable` cases for each target's conformance, and
+`matched` and `total` bytes for JVM byte equality. Each percentage,
+`100 * count / of` rounded down to one decimal (`0.0` when the denominator is 0), is derived only
+from its own sums. Thus only an exact count can display `100.0%`; `3145/3146` displays `99.9%`.
+The score is never an average of per-case or per-shard percentages, and neither report's counts
+stand in for another's. Only the box corpus feeds these badges. The non-box conformance tests
 (serialization, KSP, and the rest of `just conformance-regressions`) are correctness gates in every
 version lane and contribute neither cases nor bytes.
 
@@ -552,7 +588,8 @@ Commands:
 ```sh
 just conformance [VERSION] [BYTES]      # stdout: "<pct> <passed> <applicable>"; default max version
 just conformance-run "$(just conformance-bin)" <version> [BYTES]   # the same, for a prebuilt binary
-just conformance-badge [CASES BYTES]    # writes docs/badges/*.json (untracked previews)
+just native-conformance-run "$(just conformance-bin)" <version> [NATIVE]
+just conformance-badge [CASES BYTES NATIVE]   # writes docs/badges/*.json previews
 ```
 
 `scripts/conformance-run.sh` runs `KRUSTY_SCORED_CONFORMANCE_SHARDS` shards. Each shard writes the
@@ -570,31 +607,32 @@ cache-read, compile, cleanup, and store time, then the kotlinc server's requests
 pool wait, start time, and compile time. A cold shard shows one miss per applicable case; a warm one
 shows hits and no server requests.
 
-`just conformance-badge` renders both reports of the max version's run with
+`just conformance-badge` renders all three reports of the max version's target runs with
 `scripts/conformance-badge.sh`. `docs/badges/conformance.json` gets the label
 `Kotlin <version> conformance` and the message `<pct>% (<passed>/<applicable>)`;
 `docs/badges/jvm-byte-equality.json` gets the label `Kotlin <version> JVM byte equality` and the
-message `<pct>% (<matched>/<total> bytes)`. Each is colored red below 10%, orange from 10%, yellow
-from 50%, and brightgreen from 70%. Pass `CASES` and `BYTES` together to render existing reports of
-one run instead of running the suite, for example a pull request's max-version artifacts:
+message `<pct>% (<matched>/<total> bytes)`; `docs/badges/native-conformance.json` gets the label
+`Kotlin <version> Native conformance` and its independent `<pct>% (<passed>/<applicable>)` score.
+Each is colored red below 10%, orange from 10%, yellow from 50%, and brightgreen from 70%. Pass all
+three report paths together to render existing reports instead of running the suites:
 
 ```sh
 v="$(just max-version)"
-gh run download <run-id> -n "pct-$v" -n "jvm-byte-equality-$v" -D target/reports
-just conformance-badge target/reports/pct-$v/pct.txt target/reports/jvm-byte-equality-$v/jvm-byte-equality.txt
+gh run download <run-id> -n "pct-$v" -n "jvm-byte-equality-$v" -n "native-pct-$v" -D target/reports
+just conformance-badge target/reports/pct-$v/pct.txt target/reports/jvm-byte-equality-$v/jvm-byte-equality.txt target/reports/native-pct-$v/native-pct.txt
 ```
 
-In CI, every version lane prints both reports' badge fields and uploads them as the separate
-`pct-<version>` and `jvm-byte-equality-<version>` artifacts. Only the `release` job on master
-publishes the max version's two payloads to the badge Gist, each to its own file; pull requests and
-merge groups never publish.
+In CI, every target row prints and uploads its own report: JVM owns `pct-<version>` and
+`jvm-byte-equality-<version>`, while Native owns `native-pct-<version>`. Only the
+`release` job on master publishes the max version's three payloads to the badge Gist; pull requests
+and merge groups never publish.
 
 To inspect where bytes are lost, focus a case with `KRUSTY_BOX_ONLY=<substring>` (which turns the
 score on for that selection, failed boxes included) and add `KRUSTY_BYTE_DIFF=1` for the first
 difference per class set in `target/byte_diff_report.txt` (see "Byte-Identity Differential Mode").
 
 Read the badges, or the `conformance` job of the latest master CI run, when you need today's
-figures; run `just conformance` locally when you need this checkout's.
+figures; use the target-specific recipes locally when you need this checkout's.
 
 A count in a phase-log entry (`docs/IMPLEMENTATION_PLAN.md`) is a snapshot of what that phase
 measured at the time it landed, not a claim about the present, and must not be quoted as current.

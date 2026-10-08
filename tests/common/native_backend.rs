@@ -317,13 +317,18 @@ fn native_sources_outcome(
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         },
         // The entry prints what `box()` returned after a frame marker, and nothing after it: the
-        // answer is every byte past the marker's LAST occurrence. What comes before is the
+        // answer is every byte past the one marker. What comes before is the
         // program's own output — `when (b) { true -> println("t") … }` prints `t` and then answers
         // `OK` — which the JVM path never sees, because there the answer is a return value rather
         // than a stream. Reading the last LINE instead would take `"FAIL\nOK"` for `OK`.
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            match stdout.rsplit_once(krusty::native::BOX_RESULT_FRAME) {
+            match stdout.split_once(krusty::native::BOX_RESULT_FRAME) {
+                Some((_, answer)) if answer.contains(krusty::native::BOX_RESULT_FRAME) => {
+                    NativeBox::Failed(
+                        "the program printed more than one box result frame".to_string(),
+                    )
+                }
                 Some((_, answer)) => NativeBox::Answered(answer.to_owned()),
                 None => NativeBox::Failed(format!(
                     "the program ended without framing an answer; stdout {stdout:?}"

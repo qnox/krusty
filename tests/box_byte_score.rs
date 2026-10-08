@@ -1,15 +1,15 @@
-//! Whole-class byte equality scoring for the Kotlin box conformance metric.
+//! Byte-prefix equality scoring for the Kotlin box conformance metric.
 //!
 //! The score grades krusty's emitted `.class` bytes against the pinned reference `kotlinc`'s. Each
 //! class is paired by `(module identity, JVM internal class name)` — never by bare name, so a class
 //! that repeats across two modules stays two distinct, separately scored artifacts.
 //!
-//! For a passing box case a paired class contributes its full length only when the entire class file
-//! is byte-identical. A differing pair contributes zero matched bytes against the longer file's
-//! length. A class present on only one side contributes zero matched bytes and its entire length. A
-//! failed box case contributes zero matched bytes against the sum of the reference `.class` sizes,
-//! with no byte comparison. A non-applicable case contributes nothing, and a reference-compilation
-//! failure makes the whole run fail closed rather than scoring the case.
+//! For a passing box case a paired class contributes its common leading-prefix byte count as the
+//! numerator and `max(krusty length, kotlinc length)` as the denominator: identical bytes after the
+//! first difference never resume credit. A class present on only one side contributes zero matched
+//! bytes and its entire length. A failed box case contributes zero matched bytes against the sum of
+//! the reference `.class` sizes, with no byte comparison. A non-applicable case contributes nothing,
+//! and a reference-compilation failure makes the whole run fail closed rather than scoring the case.
 //!
 //! All sums stay integers; the display percentage is derived only at the final reporting boundary.
 
@@ -54,15 +54,20 @@ pub fn qualified_from_reference(reference: &ReferenceClasses) -> QualifiedClasse
         .collect()
 }
 
-/// Whole-file equality and max-length denominator for one module/name-paired class.
+/// Common leading-prefix byte count and max-length denominator for one module/name-paired class.
 ///
-/// A class receives credit only when every byte and the file length match. This keeps the metric's
-/// unit honest: it measures bytes belonging to byte-identical class files, not similar prefixes.
-pub fn exact_match(krusty: &[u8], reference: &[u8]) -> ByteScore {
-    let total = krusty.len().max(reference.len()) as u64;
+/// Bytes equal only *after* the first difference do not count: the numerator stops at the first
+/// mismatch. Equal classes receive full credit; an unequal-length but equal-prefix pair receives
+/// only the shorter length; a first-byte mismatch receives zero.
+pub fn prefix_match(krusty: &[u8], reference: &[u8]) -> ByteScore {
+    let matched = krusty
+        .iter()
+        .zip(reference)
+        .take_while(|(left, right)| left == right)
+        .count() as u64;
     ByteScore {
-        matched: if krusty == reference { total } else { 0 },
-        total,
+        matched,
+        total: krusty.len().max(reference.len()) as u64,
     }
 }
 
@@ -72,7 +77,7 @@ pub fn score_passing(krusty: &QualifiedClasses, reference: &QualifiedClasses) ->
     let keys: BTreeSet<&(String, String)> = krusty.keys().chain(reference.keys()).collect();
     for key in keys {
         match (krusty.get(key), reference.get(key)) {
-            (Some(k), Some(r)) => score.add(exact_match(k, r)),
+            (Some(k), Some(r)) => score.add(prefix_match(k, r)),
             // A class only krusty emitted, or only the reference emitted, is entirely unmatched: no
             // numerator, its whole length in the denominator.
             (Some(k), None) => score.total += k.len() as u64,
@@ -124,9 +129,9 @@ fn qualified(entries: &[(&str, &str, &[u8])]) -> QualifiedClasses {
 }
 
 #[test]
-fn exact_match_equal_classes_receive_full_credit() {
+fn prefix_match_equal_classes_receive_full_credit() {
     assert_eq!(
-        exact_match(&[1, 2, 3, 4], &[1, 2, 3, 4]),
+        prefix_match(&[1, 2, 3, 4], &[1, 2, 3, 4]),
         ByteScore {
             matched: 4,
             total: 4
@@ -135,9 +140,9 @@ fn exact_match_equal_classes_receive_full_credit() {
 }
 
 #[test]
-fn exact_match_first_byte_mismatch_receives_zero() {
+fn prefix_match_first_byte_mismatch_receives_zero() {
     assert_eq!(
-        exact_match(&[9, 2, 3], &[1, 2, 3]),
+        prefix_match(&[9, 2, 3], &[1, 2, 3]),
         ByteScore {
             matched: 0,
             total: 3
@@ -146,30 +151,30 @@ fn exact_match_first_byte_mismatch_receives_zero() {
 }
 
 #[test]
-fn exact_match_difference_receives_zero_despite_equal_prefix_and_suffix() {
+fn prefix_match_stops_at_first_difference_despite_equal_suffix() {
     assert_eq!(
-        exact_match(&[1, 2, 3], &[1, 9, 3]),
+        prefix_match(&[1, 2, 3], &[1, 9, 3]),
         ByteScore {
-            matched: 0,
+            matched: 1,
             total: 3
         }
     );
 }
 
 #[test]
-fn exact_match_unequal_lengths_receive_zero_both_directions() {
+fn prefix_match_unequal_lengths_credit_shorter_prefix_both_directions() {
     assert_eq!(
-        exact_match(&[1, 2], &[1, 2, 3]),
+        prefix_match(&[1, 2], &[1, 2, 3]),
         ByteScore {
-            matched: 0,
+            matched: 2,
             total: 3
         }
     );
     // reference shorter: symmetric.
     assert_eq!(
-        exact_match(&[1, 2, 3], &[1, 2]),
+        prefix_match(&[1, 2, 3], &[1, 2]),
         ByteScore {
-            matched: 0,
+            matched: 2,
             total: 3
         }
     );
@@ -179,11 +184,11 @@ fn exact_match_unequal_lengths_receive_zero_both_directions() {
 fn score_passing_sums_paired_classes_by_bytes() {
     let krusty = qualified(&[("main", "A", &[1, 2, 3]), ("main", "B", &[4, 5])]);
     let reference = qualified(&[("main", "A", &[1, 2, 9]), ("main", "B", &[4, 5])]);
-    // A differs and receives no credit; B is entirely byte-identical.
+    // A has two equal leading bytes; B is entirely byte-identical.
     assert_eq!(
         score_passing(&krusty, &reference),
         ByteScore {
-            matched: 2,
+            matched: 4,
             total: 5
         }
     );
@@ -257,13 +262,13 @@ fn score_failed_zero_denominator_when_reference_empty() {
 }
 
 #[test]
-fn score_case_passing_requires_whole_class_equality() {
+fn score_case_passing_counts_the_matching_prefix() {
     let krusty = qualified(&[("main", "A", &[1, 2, 3])]);
     let reference = qualified(&[("main", "A", &[1, 2, 9])]);
     assert_eq!(
         score_case(Ok(&reference), true, &krusty),
         CaseScore::Scored(ByteScore {
-            matched: 0,
+            matched: 2,
             total: 3
         })
     );

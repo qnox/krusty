@@ -167,7 +167,8 @@ fn main() {
             break;
         }
         let src = std::fs::read_to_string(f).unwrap_or_default();
-        let src = krusty::conformance::prepare_test_source(&src);
+        let src =
+            krusty::conformance::prepare_test_source(&src, krusty::conformance::TestTarget::Jvm);
         if src.contains("// FILE:")
             || src.contains("// MODULE:")
             || !src.contains("fun box()")
