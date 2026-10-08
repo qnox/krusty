@@ -1907,20 +1907,7 @@ impl super::Emitter<'_> {
             }
             IrExpr::RefNew { elem, init } => self.emit_shared_cell(*elem, *init, code),
             IrExpr::RefGet { holder, elem } => {
-                self.emit_value(*holder, code);
-                let (cls, fdesc) = ref_class(elem);
-                let f = self.cw.fieldref(cls, "element", fdesc);
-                let ejvm = ir_ty_to_jvm(elem);
-                code.getfield(f, slot_words(ejvm) as i32);
-                // An `ObjectRef.element` is typed `Object`; narrow to the boxed value's reference type.
-                if ejvm.is_reference()
-                    && crate::jvm::names::instanceof_internal_name(ejvm) != "java/lang/Object"
-                {
-                    let cc = self
-                        .cw
-                        .class_ref(&crate::jvm::names::instanceof_internal_name(ejvm));
-                    code.checkcast(cc);
-                }
+                self.emit_shared_cell_read(*holder, *elem, true, code);
             }
             IrExpr::RefSet {
                 holder,

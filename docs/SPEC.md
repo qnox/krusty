@@ -2205,9 +2205,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Signature` (`tests/local_function_signature_e2e.rs`).
 - **Lifted captured value order (kotlinc's `ClosureAnnotator`).** The captured values lead a lifted
   local function's parameters in the order its closure first sees them, never by name: first the
-  values its defaults and body read, in reading order, then the closures of the local functions it
+  values its defaults and body read, in source order, then the closures of the local functions it
   calls or references, of its lambdas and of the anonymous objects it creates, each in its own
-  order, as they are met. A local function it only declares, and a call to itself, add nothing.
+  order, as they are met. Reading order is the source offset of each read: the checker publishes
+  an `if` branch before its condition, and a `var` cell read in the condition still leads a value
+  the branch reads (`if (cell.isNotBlank()) items.add(cell.toString())` captures `(cell, items)`).
+  A local function it only declares, and a call to itself, add nothing.
   `fun f() = g() + b` with `fun g() = a` takes `(b, a)`. The checker orders the declared captures
   once the body is checked and keeps each one's declared position, so a streamed caller that
   supplies them from the resolver's list places them (`tests/local_function_signature_e2e.rs`).

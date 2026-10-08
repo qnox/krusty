@@ -25,6 +25,40 @@ pub(super) enum ReferenceCoercion {
 }
 
 impl Emitter<'_> {
+    /// Read a boxed mutable local at either its declared value type or its holder field type.
+    ///
+    /// Ordinary consumers need the `ObjectRef.element` value narrowed to the checked reference
+    /// type. A reference comparison accepts the `Object` slot directly, exactly as `if_acmp*` does,
+    /// and must not introduce a checkcast that cannot affect reference identity.
+    pub(super) fn emit_shared_cell_read(
+        &mut self,
+        holder: crate::ir::ExprId,
+        elem: Ty,
+        materialize: bool,
+        code: &mut CodeBuilder,
+    ) -> Ty {
+        self.emit_value(holder, code);
+        let (class, descriptor) = ref_class(&elem);
+        let field = self.cw.fieldref(class, "element", descriptor);
+        let slot = ty_from_field_descriptor(descriptor);
+        code.getfield(field, slot_words(slot) as i32);
+        let value = ir_ty_to_jvm(&elem);
+        if materialize
+            && value.is_reference()
+            && crate::jvm::names::instanceof_internal_name(value) != "java/lang/Object"
+        {
+            let target = self
+                .cw
+                .class_ref(&crate::jvm::names::instanceof_internal_name(value));
+            code.checkcast(target);
+        }
+        if materialize {
+            value
+        } else {
+            slot
+        }
+    }
+
     /// Emit `expression` and materialize it at the consumer's declared type.
     pub(super) fn emit_value_as(
         &mut self,
