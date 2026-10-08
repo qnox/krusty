@@ -1119,3 +1119,20 @@ fn phase_timing_coverage_run_prints_every_phase() {
     );
     fs::remove_dir_all(temp).expect("remove coverage phase directory");
 }
+
+#[test]
+fn coverage_profile_disables_intra_crate_thin_lto() {
+    let manifest = include_str!("../Cargo.toml");
+    let coverage = manifest
+        .split_once("[profile.coverage]")
+        .expect("coverage profile")
+        .1;
+    let body = coverage
+        .split_once("\n[")
+        .map(|(body, _)| body)
+        .unwrap_or(coverage);
+    assert!(
+        body.lines().any(|line| line.trim() == "lto = \"off\""),
+        "the coverage profile must set lto = \"off\" so Cargo passes -C lto=off and rustc skips intra-crate ThinLTO"
+    );
+}
