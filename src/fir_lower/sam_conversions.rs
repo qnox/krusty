@@ -43,17 +43,17 @@ impl BodyLowering<'_> {
             conversion.has_receiver,
             captured_suspend,
         );
-        // An `in` capture's adapter is called with the widened type (`Any?`). The captured
-        // function still accepts the lower bound, so `invoke` must not check-cast back to it.
-        let adapter_parameters = conversion
-            .adapter_parameters
+        // Common IR keeps the checked function's logical parameter types. A target that needs an
+        // erased adapter for a contravariant capture realizes that physical boundary later.
+        let parameters = conversion
+            .parameters
             .iter()
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
         let void_method =
             !conversion.suspend && conversion.declared_result.get() == crate::types::Ty::Unit;
         let callee = self.ir.add_expr(IrExpr::GetValue(0));
-        let arguments = adapter_parameters
+        let arguments = parameters
             .iter()
             .enumerate()
             .map(|(parameter, _)| {
@@ -65,14 +65,8 @@ impl BodyLowering<'_> {
         let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
             func: callee,
             args: arguments,
-            params: adapter_parameters.clone(),
-            // A void interface method discards `invoke`'s erased `Object`. Naming that result
-            // `Unit` would pop it twice: once as the function result and again as the statement.
-            ret: if void_method {
-                Ty::nullable(Ty::obj("kotlin/Any"))
-            } else {
-                conversion.result.get()
-            },
+            params: parameters.clone(),
+            ret: conversion.result.get(),
         });
         // The captured suspend value takes this adapter's continuation as its last argument.
         // A non-suspend value adapted to a suspend method does not: that call stays `FunctionN`.
@@ -94,16 +88,16 @@ impl BodyLowering<'_> {
                 conversion.result.get(),
             )
         };
-        let mut parameters = Vec::with_capacity(adapter_parameters.len() + 1);
-        parameters.push(function_type);
-        parameters.extend(adapter_parameters);
+        let mut implementation_parameters = Vec::with_capacity(parameters.len() + 1);
+        implementation_parameters.push(function_type);
+        implementation_parameters.extend(parameters);
         let implementation = self.ir.add_fun(IrFunction {
             name: format!(
                 "$fir_sam_delegate_{}_{}",
                 self.body.owner().raw(),
                 self.ir.functions.len()
             ),
-            params: parameters,
+            params: implementation_parameters,
             ret: if void_method {
                 crate::types::Ty::Unit
             } else {
@@ -114,6 +108,28 @@ impl BodyLowering<'_> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
+        let mut parameter_identities = Vec::with_capacity(conversion.parameters.len() + 1);
+        parameter_identities.push(crate::ir::IrParameterIdentity::generated(
+            crate::ir::IrGeneratedParameterRole::SamAdapterCapture { ordinal: 0 },
+            None,
+        ));
+        parameter_identities.extend(conversion.parameters.iter().enumerate().map(
+            |(ordinal, _)| {
+                crate::ir::IrParameterIdentity::generated(
+                    crate::ir::IrGeneratedParameterRole::SamAdapterValue {
+                        ordinal: u32::try_from(ordinal).expect("too many SAM parameters"),
+                    },
+                    None,
+                )
+            },
+        ));
+        self.ir.fn_params.insert(
+            implementation,
+            crate::ir::FnParamInfo::identities(parameter_identities),
+        );
+        if let Some(&line) = self.ir.expr_source_lines.get(&function) {
+            self.ir.fn_decl_lines.insert(implementation, line);
+        }
         self.record_sam_adapter_origin(implementation);
         self.ir
             .set_method_visibility(implementation, crate::types::Visibility::Private);
@@ -146,6 +162,7 @@ impl BodyLowering<'_> {
                         .iter()
                         .map(|parameter| parameter.get())
                         .collect(),
+                    contravariant_parameters: conversion.contravariant_parameters.to_vec(),
                     result: conversion.result.get(),
                     declared_parameters: conversion
                         .declared_parameters
@@ -225,17 +242,4 @@ impl BodyLowering<'_> {
             .copied()?;
         Some(self.ir.classes[class as usize].fq_name_id())
     }
-}
-
-/// Whether the interface method's parameters are wider than the function the conversion captures.
-///
-/// That happens for an `in` / `? super` capture whose lower bound is narrower than nullable `Any`.
-/// The lambda is then a Kotlin function, and this adapter implements the interface.
-pub(super) fn sam_adapts_projected_parameters(conversion: &FirSamConversion) -> bool {
-    conversion.parameters.len() != conversion.adapter_parameters.len()
-        || conversion
-            .parameters
-            .iter()
-            .zip(conversion.adapter_parameters.iter())
-            .any(|(logical, adapter)| logical.get() != adapter.get())
 }

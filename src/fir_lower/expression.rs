@@ -1576,8 +1576,12 @@ impl BodyLowering<'_> {
         let value = expression;
         if let Some(FirConversionKind::Sam(sam)) = conversion.map(|conversion| conversion.kind) {
             let recorded = self.body.sam_conversion(sam);
-            let projected =
-                recorded.is_some_and(super::sam_conversions::sam_adapts_projected_parameters);
+            let projected = recorded.is_some_and(|conversion| {
+                conversion
+                    .contravariant_parameters
+                    .iter()
+                    .any(|parameter| *parameter)
+            });
             let unit_method = recorded.is_some_and(|conversion| {
                 !conversion.suspend && conversion.declared_result.get() == crate::types::Ty::Unit
             });
@@ -1714,8 +1718,10 @@ impl BodyLowering<'_> {
                         origin: conversion.origin,
                     })?
                     .clone();
-                let project_adapter =
-                    super::sam_conversions::sam_adapts_projected_parameters(&conversion);
+                let project_adapter = conversion
+                    .contravariant_parameters
+                    .iter()
+                    .any(|parameter| *parameter);
                 if !project_adapter
                     && matches!(
                         self.ir.exprs.get(expression as usize),
@@ -1734,6 +1740,7 @@ impl BodyLowering<'_> {
                             conversion.method_target,
                         ),
                         parameters: conversion.parameters.iter().map(|ty| ty.get()).collect(),
+                        contravariant_parameters: conversion.contravariant_parameters.to_vec(),
                         result: conversion.result.get(),
                         declared_parameters: conversion
                             .declared_parameters

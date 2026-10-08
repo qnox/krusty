@@ -4942,16 +4942,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   method returning nothing (`void`); one whose method returns a type parameter instantiated with
   `Unit` keeps returning the `Unit` value. Tests: `tests/lambda_result_types_e2e.rs`.
 
-- **An `in`-projected SAM adapts a Kotlin function.** `Consumer<in String>`, Java
-  `Consumer<? super String>`, and `Stream.forEach` (`Consumer<? super T>`) type a lambda as
-  `(String) -> Unit`, implemented as a method that returns `kotlin.Unit`. The interface method is
-  a following lambda with a raw `Function1` parameter and no generic signature:
-  `void (Function1, Object)`, which forwards `invoke` and does not cast the argument back to
-  `String`. A function value passed to the same target gets only that adapter. An exact
-  `Consumer<String>`, an `out` return (`Supplier<out String>`), and a star (`Consumer<*>`) stay
-  one direct SAM method. `in Any?` is already nullable `Any`, so it stays direct; `in Any` is
-  narrower and is adapted. A Kotlin `fun interface` with an `in` argument uses the same function
-  plus the file's SAM wrapper, whose method takes `Object`. Tests:
+- **An `in`-projected SAM adapts a Kotlin function.** For a generic declaration
+  `Sink<T>.accept(T)`, `Sink<in String?>` types the converted function as `(String?) -> Unit` in
+  checked FIR. The JVM realizes the forwarding implementation with the declaration's erased slot,
+  `void (Function1, Object)`, and forwards that value to `Function1.invoke` without narrowing it.
+  The common function invocation retains its semantic `Unit` result; statement emission discards
+  the erased `Object` exactly once. An exact `Sink<String?>` remains a direct SAM. Both a literal
+  and an existing function value are covered by raw whole-class comparison with kotlinc. Tests:
   `tests/contravariant_sam_adapter_e2e.rs`.
 
 - **Method type parameter that shadows its class's (`class Box<T> { fun <T> m(x: T): T }`).** The
