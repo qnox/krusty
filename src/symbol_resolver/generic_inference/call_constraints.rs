@@ -661,11 +661,26 @@ fn collect_call_inference_constraints(
 ) {
     match shape {
         Ty::TyParam(name, _) => constraints.insert(source, name, actual, position, origin),
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
+        Ty::Nullable(inner) => {
             collect_call_inference_constraints(
                 source,
                 *inner,
                 nullable_generic_actual(actual),
+                position,
+                origin,
+                constraints,
+            );
+        }
+        Ty::PlatformNullable(inner) => {
+            let actual = nullable_generic_actual(actual);
+            // A Java `List<T>!` is published as `MutableList<T>!`. `listOf("x")` reaches `List`,
+            // not `MutableList`, so the element variable has to be read from the provider's
+            // read-only face. A value that already reaches the mutable face keeps that face.
+            let inner = super::choose_platform_lower_face(source, *inner, actual);
+            collect_call_inference_constraints(
+                source,
+                inner,
+                actual,
                 position,
                 origin,
                 constraints,

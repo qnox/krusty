@@ -1427,7 +1427,7 @@ impl JvmLibraries {
                 if uses_java_type_semantics {
                     for (index, parameter) in params.iter_mut().enumerate() {
                         *parameter = java_type_nullability(
-                            *parameter,
+                            java_collection_return_lower_bound(*parameter),
                             m.parameter_nullability.get(index).copied().flatten(),
                         );
                     }
@@ -1456,6 +1456,24 @@ impl JvmLibraries {
                 });
                 let mut member =
                     LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+                if uses_java_type_semantics {
+                    // `params` is the semantic flexible type (`MutableCollection<E>!`). Java
+                    // override checking erases to the classfile parameter (`Collection`), which
+                    // was captured before that rewrite. Leaving the mutable face here made
+                    // `AbstractList.addAll` fail to discharge `MutableList.addAll`. The classfile
+                    // parameter is still a Java reference, so it keeps platform nullability
+                    // (`String!`) without the mutable-collection rewrite.
+                    member.physical_params = physical_params
+                        .iter()
+                        .enumerate()
+                        .map(|(index, parameter)| {
+                            java_type_nullability(
+                                *parameter,
+                                m.parameter_nullability.get(index).copied().flatten(),
+                            )
+                        })
+                        .collect();
+                }
                 if let Some(declaration) = declaration {
                     crate::trace_compiler!(
                         "member_slots",

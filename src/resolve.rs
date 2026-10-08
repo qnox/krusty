@@ -39047,6 +39047,15 @@ impl crate::assignable::TypeOracle for Checker<'_> {
     }
 
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        // The classpath provider publishes the read-only face of a Java collection
+        // (`MutableList<T>` -> `List<T>`). Call-site assignability has to use that relation:
+        // a direct-supertype walk misses it when the mutable face's recorded parents do not
+        // include the read-only face under the same value form, and then `listOf(...)` is
+        // rejected by every Java `List` parameter.
+        let provided = self.libraries.platform_flexible_upper_bound(lower);
+        if provided != lower {
+            return provided;
+        }
         let Some(lower_owner) = lower.obj_internal() else {
             return lower;
         };
@@ -48020,8 +48029,12 @@ impl<'a> Checker<'a> {
                                 .non_null()
                                 .obj_internal()
                                 .zip(expected.non_null().obj_internal())
-                                .is_some_and(|(actual, expected)| {
-                                    self.obj_name_is_subtype(actual, expected)
+                                .is_some_and(|(actual_owner, expected_owner)| {
+                                    self.generic_constructed_argument_reaches(
+                                        expected,
+                                        actual_owner,
+                                        expected_owner,
+                                    )
                                 })
                         }
                     }
@@ -55680,6 +55693,32 @@ impl<'a> Checker<'a> {
         self.lambda_returns.leave_function(enclosing_return_frame);
         self.retire_type_parameter_owners(&owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
+    }
+
+    /// A generic class-typed constructor parameter admits an argument whose owner is a subtype of
+    /// the parameter owner. A Java collection is published as the mutable face under platform
+    /// nullability (`MutableCollection<E>!`); the argument may be the read-only face (`List`
+    /// reaches `Collection`, the platform upper bound). A Kotlin `MutableCollection<T>` parameter
+    /// has no platform mark and does not accept that read-only face.
+    fn generic_constructed_argument_reaches(
+        &self,
+        parameter: Ty,
+        actual_owner: TypeName,
+        expected_owner: TypeName,
+    ) -> bool {
+        if self.obj_name_is_subtype(actual_owner, expected_owner) {
+            return true;
+        }
+        if !matches!(parameter, Ty::PlatformNullable(_)) {
+            return false;
+        }
+        let upper = <Self as crate::assignable::TypeOracle>::platform_flexible_upper_bound(
+            self,
+            parameter.non_null(),
+        );
+        upper.obj_internal().is_some_and(|upper_owner| {
+            upper_owner != expected_owner && self.obj_name_is_subtype(actual_owner, upper_owner)
+        })
     }
 
     fn obj_name_is_subtype(&self, sub: TypeName, sup: TypeName) -> bool {

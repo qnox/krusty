@@ -88,3 +88,31 @@ fun f(k: KAttrs) { every { k.attributes } returns emptyMap() }\n";
         ["argument type mismatch: actual type is 'Map<K, V>', but 'MutableMap<String, Any>' was expected."]
     );
 }
+
+/// A Java `Map<List<String>, String>` parameter is invariant in the key. The key's own flexible
+/// mutability still accepts a read-only `List<String>`, the same way the outer map accepts
+/// `Map<List<String>, String>`.
+const NESTED_JAVA: &str = "import java.util.List;\n\
+import java.util.Map;\n\
+public class Nest {\n\
+    public void lists(List<List<String>> rows) {}\n\
+    public void keyed(Map<List<String>, String> rows) {}\n\
+}\n";
+
+#[test]
+fn a_nested_java_collection_parameter_accepts_the_read_only_face() {
+    let use_src = "fun use(n: Nest) {\n\
+        n.lists(listOf(listOf(\"a\")))\n\
+        n.keyed(mapOf(listOf(\"a\") to \"b\"))\n\
+        n.keyed(mapOf(mutableListOf(\"a\") to \"b\"))\n\
+    }\n\
+    fun box(): String = \"OK\"\n";
+    assert_eq!(
+        java_box_with_stdlib(
+            "java-nested-collection",
+            &[("Nest.java", NESTED_JAVA)],
+            use_src
+        ),
+        "OK"
+    );
+}
