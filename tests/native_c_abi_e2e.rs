@@ -307,8 +307,9 @@ kt_ref demo_box(void);
     assert!(output.status.success(), "{:?}", output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let answer = stdout
-        .rsplit_once(krusty::native::BOX_RESULT_FRAME)
+        .split_once(krusty::native::BOX_RESULT_FRAME)
         .map(|(_, answer)| answer)
+        .filter(|answer| !answer.contains(krusty::native::BOX_RESULT_FRAME))
         .unwrap_or("");
     assert_eq!(answer, "OK");
 }

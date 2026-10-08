@@ -12,9 +12,10 @@
 //! Env vars:
 //!   KRUSTY_REF_JAVA_HOME / JAVA_HOME
 //!   KRUSTY_BOX_LIMIT        cap on files scanned (default: all)
-//!   KRUSTY_BLESS_BOX_FAILURES=1  rewrite both exact outcome manifests (full local runs only)
+//!   KRUSTY_BLESS_BOX_EXPECTATIONS=1  rewrite the JVM applicability inventory (full local only)
 //!
-//! Every run is held to that version's exact fail/not-applicable manifests; see `box_ratchet`.
+//! Every applicable case must pass. Every run is also held to that version's exact JVM
+//! not-applicable inventory; see `box_ratchet`.
 //! The kotlin-stdlib jar is located from local caches (`common::stdlib_jar`) and supplied via
 //! `-classpath` only to `// WITH_STDLIB` tests, plus the JVM runner's runtime classpath.
 
@@ -35,7 +36,7 @@ use krusty::jvm::classpath::Classpath;
 use krusty::jvm::classreader::parse_class;
 
 use super::box_byte_score;
-use super::box_ratchet::{self, Outcome};
+use super::box_ratchet::{self, Outcome, Platform};
 use super::box_reference_classes;
 use super::common;
 
@@ -329,48 +330,7 @@ fn compile_source(
 /// never emitted. These helpers live in `kotlin.coroutines.*` (the stdlib), NOT `kotlinx-coroutines-core`
 /// — no box test imports `kotlinx.coroutines`. Compiled as an extra source file in the same module so
 /// `EmptyContinuation`, `runBlocking`, `handleResultContinuation`, … resolve exactly as under kotlinc.
-const COROUTINE_HELPERS: &str = r#"package helpers
-import kotlin.coroutines.*
-import kotlin.coroutines.intrinsics.*
-
-fun <T> runBlocking(block: suspend () -> T): T {
-    var res: Result<T>? = null
-    block.startCoroutine(Continuation(EmptyCoroutineContext) {
-        res = it
-    })
-    return res!!.getOrThrow()
-}
-
-fun <T> handleResultContinuation(x: (T) -> Unit): Continuation<T> = object: Continuation<T> {
-    override val context = EmptyCoroutineContext
-    override fun resumeWith(result: Result<T>) {
-       x(result.getOrThrow())
-    }
-}
-
-fun handleExceptionContinuation(x: (Throwable) -> Unit): Continuation<Any?> = object: Continuation<Any?> {
-    override val context = EmptyCoroutineContext
-    override fun resumeWith(result: Result<Any?>) {
-       result.exceptionOrNull()?.let(x)
-    }
-}
-
-open class EmptyContinuation(override val context: CoroutineContext = EmptyCoroutineContext) : Continuation<Any?> {
-    companion object : EmptyContinuation()
-    override fun resumeWith(result: Result<Any?>) {
-       result.getOrThrow()
-    }
-}
-
-class ResultContinuation : Continuation<Any?> {
-    override val context = EmptyCoroutineContext
-    override fun resumeWith(result: Result<Any?>) {
-       this.result = result.getOrThrow()
-    }
-
-    var result: Any? = null
-}
-"#;
+const COROUTINE_HELPERS: &str = krusty::conformance::COROUTINE_HELPERS;
 
 /// Compile a `// FILE: name.kt`-split multi-file test as ONE module: parse each block, collect global
 /// signatures, populate the cross-file function→facade map (`SymbolTable.fn_facades`, like the CLI
@@ -1002,23 +962,6 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
     runner_dir
 }
 
-/// One machine report line, `<pct> <count> <of>`: a one-decimal percentage of two integer counts
-/// over the cases kotlinc's own JVM box runner expects to pass (`backend_applicable`:
-/// `TARGET_BACKEND`, `DONT_TARGET_EXACT_BACKEND` and the `IGNORE_BACKEND` family), never the whole
-/// corpus. Two reports share the format: the conformance badge's `<pct> <passed> <applicable>` box
-/// cases (`KRUSTY_CONFORMANCE_REPORT`) and the JVM byte-equality badge's `<pct> <matched> <total>`
-/// `.class` bytes (`KRUSTY_JVM_BYTE_REPORT`). The percentage is derived from the exact integer
-/// counts; `of == 0` yields `0.0` with no divide-by-zero. `scripts/conformance-report.sh` parses and
-/// re-derives the same line.
-fn count_report(count: u64, of: u64) -> String {
-    let pct = if of == 0 {
-        0.0
-    } else {
-        100.0 * count as f64 / of as f64
-    };
-    format!("{pct:.1} {count} {of}\n")
-}
-
 /// The scored run's reference-compile profile: inventory cache hits and misses, then the live
 /// compiler server's lifecycle. Durations are summed over worker threads, like the `timing` line.
 fn reference_profile(
@@ -1111,9 +1054,12 @@ fn retain_conformance_shard<T>(items: Vec<T>, index: usize, count: usize) -> Vec
 
 #[test]
 fn count_reports_have_stable_machine_format() {
-    // 3064 passed of 7352 applicable cases, or 3064 matched of 7352 total bytes -> 41.7%.
-    assert_eq!(count_report(3064, 7352), "41.7 3064 7352\n");
-    assert_eq!(count_report(24811524, 47290709), "52.5 24811524 47290709\n");
+    use super::common::conformance_report::count_report;
+
+    // Percentages round down: only equal counts may display 100.0%.
+    assert_eq!(count_report(3064, 7352), "41.6 3064 7352\n");
+    assert_eq!(count_report(24811524, 47290709), "52.4 24811524 47290709\n");
+    assert_eq!(count_report(3145, 3146), "99.9 3145 3146\n");
     assert_eq!(count_report(7, 7), "100.0 7 7\n");
     assert_eq!(count_report(0, 0), "0.0 0 0\n");
 }
@@ -1449,6 +1395,7 @@ fn reference_inventories_follow_each_units_codegen_modes() {
     ] {
         let src = krusty::conformance::prepare_test_source(
             &fs::read_to_string(box_dir.join(case)).expect("read corpus case"),
+            krusty::conformance::TestTarget::Jvm,
         );
         let stem = Path::new(case).file_stem().unwrap().to_str().unwrap();
         let Some((gate, reference)) =
@@ -1722,11 +1669,11 @@ fn kotlin_codegen_box_conformance() {
                 let tc0 = std::time::Instant::now();
                 let tr0 = std::time::Instant::now();
                 let src = fs::read_to_string(file).unwrap_or_default();
-                // The Kotlin test runner expands `OPTIONAL_JVM_INLINE_ANNOTATION` to `@JvmInline`
-                // unless `+FullValueClasses` is on, in which case the placeholder is empty. Mirror
-                // that so value-class tests reach the compiler instead of failing to parse on the
-                // bare placeholder identifier.
-                let src = krusty::conformance::prepare_test_source(&src);
+                // Apply the target- and feature-specific corpus placeholders before compilation.
+                let src = krusty::conformance::prepare_test_source(
+                    &src,
+                    krusty::conformance::TestTarget::Jvm,
+                );
                 t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 let __ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let applicable = if no_run {
@@ -1845,8 +1792,8 @@ fn kotlin_codegen_box_conformance() {
                     })();
 
                     // Reference-compile this exact topology once for both the byte diff and the
-                    // byte-equality score. A passing box credits only entire byte-identical class
-                    // files; a failed box scores zero against the reference denominator; a
+                    // byte-equality score. A passing box credits each class's equal leading bytes;
+                    // a failed box scores zero against the reference denominator; a
                     // reference failure fails the run. `KRUSTY_NO_RUN` disables scoring but not an
                     // opt-in byte diff.
                     let reference = (score_on || byte_diff_on).then(|| {
@@ -2174,19 +2121,25 @@ fn kotlin_codegen_box_conformance() {
     }
     if let Some(path) = env("KRUSTY_CONFORMANCE_REPORT") {
         let applicable = files.len() - not_applicable;
-        fs::write(&path, count_report(passed as u64, applicable as u64))
-            .unwrap_or_else(|err| panic!("failed to write conformance report: {err}"));
+        fs::write(
+            &path,
+            super::common::conformance_report::count_report(passed as u64, applicable as u64),
+        )
+        .unwrap_or_else(|err| panic!("failed to write conformance report: {err}"));
     }
     if let Some(path) = env("KRUSTY_JVM_BYTE_REPORT") {
         // The same applicable cases, counted in `.class` bytes. A scoring-off run (KRUSTY_NO_RUN)
         // reports 0/0.
-        fs::write(&path, count_report(byte_score.matched, byte_score.total))
-            .unwrap_or_else(|err| panic!("failed to write JVM byte report: {err}"));
+        fs::write(
+            &path,
+            super::common::conformance_report::count_report(byte_score.matched, byte_score.total),
+        )
+        .unwrap_or_else(|err| panic!("failed to write JVM byte report: {err}"));
     }
     if no_run {
-        eprintln!("box ratchet: skipped (KRUSTY_NO_RUN compiles without running box())");
+        eprintln!("box expectations: skipped (KRUSTY_NO_RUN compiles without running box())");
     } else {
-        check_expected_failures(&box_dir, &results, &corpus, full_run);
+        check_jvm_outcomes(&box_dir, &results, &corpus, full_run);
     }
     // A full run with zero passes means box() never ran (broken corpus discovery or JVM runner).
     // A deliberate `KRUSTY_BOX_ONLY` selection may legitimately pick only known-failing cases (the
@@ -2205,15 +2158,30 @@ fn kotlin_codegen_box_conformance() {
     }
 }
 
-/// Hold the run to both exact outcome manifests (see `box_ratchet`), or rewrite them under
-/// `KRUSTY_BLESS_BOX_FAILURES=1`.
-fn check_expected_failures(
+/// Reject every applicable failure and hold exclusions to the exact JVM applicability inventory.
+fn check_jvm_outcomes(
     box_dir: &Path,
     results: &[(PathBuf, TestResult, box_byte_score::CaseScore)],
     corpus: &BTreeSet<String>,
     full_run: bool,
 ) {
     let version = krusty::kotlin_version::target();
+    let failures: Vec<String> = results
+        .iter()
+        .filter_map(|(file, result, _)| match result {
+            TestResult::Fail(reason) => Some(format!(
+                "{}: {reason}",
+                box_ratchet::corpus_key(box_dir, file)
+            )),
+            TestResult::Pass | TestResult::NotApplicable => None,
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} applicable JVM box case(s) failed:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
     let outcomes: BTreeMap<String, Outcome> = results
         .iter()
         .map(|(file, result, _)| {
@@ -2225,56 +2193,48 @@ fn check_expected_failures(
             (box_ratchet::corpus_key(box_dir, file), outcome)
         })
         .collect();
-    let bless = box_ratchet::bless_requested(env("KRUSTY_BLESS_BOX_FAILURES").as_deref())
+    let bless = box_ratchet::bless_requested(env("KRUSTY_BLESS_BOX_EXPECTATIONS").as_deref())
         .unwrap_or_else(|error| panic!("{error}"));
     if bless {
         assert!(
             full_run,
-            "KRUSTY_BLESS_BOX_FAILURES needs a full run: unset KRUSTY_BOX_ONLY, KRUSTY_BOX_LIMIT and the shard variables"
+            "KRUSTY_BLESS_BOX_EXPECTATIONS needs a full run: unset KRUSTY_BOX_ONLY, KRUSTY_BOX_LIMIT and the shard variables"
         );
         assert!(
             env("CI").is_none(),
-            "KRUSTY_BLESS_BOX_FAILURES is refused under CI: a list is blessed locally and reviewed"
+            "KRUSTY_BLESS_BOX_EXPECTATIONS is refused under CI: expectations are blessed locally and reviewed"
         );
-        let failing: BTreeSet<String> = outcomes
-            .iter()
-            .filter(|(_, outcome)| **outcome == Outcome::Fail)
-            .map(|(path, _)| path.clone())
-            .collect();
         let not_applicable: BTreeSet<String> = outcomes
             .iter()
             .filter(|(_, outcome)| **outcome == Outcome::NotApplicable)
             .map(|(path, _)| path.clone())
             .collect();
-        let failure_path = box_ratchet::list_path(version);
-        let not_applicable_path = box_ratchet::not_applicable_list_path(version);
-        box_ratchet::write_atomic(
-            &failure_path,
-            &box_ratchet::render_failures(version, &failing),
-        )
-        .unwrap_or_else(|err| panic!("failed to replace {}: {err}", failure_path.display()));
-        box_ratchet::write_atomic(
-            &not_applicable_path,
-            &box_ratchet::render_not_applicable(version, &not_applicable),
-        )
-        .unwrap_or_else(|err| panic!("failed to replace {}: {err}", not_applicable_path.display()));
+        let not_applicable_path = box_ratchet::not_applicable_path(Platform::Jvm, version);
+        box_ratchet::write_not_applicable(Platform::Jvm, version, &not_applicable).unwrap_or_else(
+            |err| panic!("failed to replace {}: {err}", not_applicable_path.display()),
+        );
         eprintln!(
-            "box ratchet: blessed {} expected failures and {} expected not-applicable cases into {} and {}",
-            failing.len(),
+            "JVM box expectations: wrote {} expected not-applicable cases to {}",
             not_applicable.len(),
-            failure_path.display(),
             not_applicable_path.display(),
         );
         return;
     }
-    let expected = box_ratchet::load(version);
+    let expected = box_ratchet::load(Platform::Jvm, version);
+    assert!(
+        expected.failures.is_empty(),
+        "JVM expected-failure inventories are obsolete; remove every entry from {}",
+        box_ratchet::failure_path(Platform::Jvm, version).display()
+    );
     let mismatches = box_ratchet::compare(&expected, &outcomes, corpus);
-    assert!(mismatches.is_empty(), "{}", mismatches.report(version));
+    assert!(
+        mismatches.is_empty(),
+        "{}",
+        mismatches.report(Platform::Jvm, version)
+    );
     eprintln!(
-        "box ratchet: matches {} and {} ({} expected failures, {} expected not-applicable)",
-        box_ratchet::list_path(version).display(),
-        box_ratchet::not_applicable_list_path(version).display(),
-        expected.failures.len(),
+        "JVM box applicability matches {} ({} expected not-applicable)",
+        box_ratchet::not_applicable_path(Platform::Jvm, version).display(),
         expected.not_applicable.len(),
     );
 }

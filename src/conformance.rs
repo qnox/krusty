@@ -1,8 +1,6 @@
-//! Shared codegen/box conformance-test directives — the SINGLE source of truth for which tests apply
-//! to krusty's JVM backend and which extra libraries their classpath needs. Used by BOTH the
-//! conformance gate (`tests/kotlin_box_ir_jvm_conformance.rs`) and the `survey` bin, so their
-//! eligibility decisions and classpaths never drift (which previously let survey over-count by
-//! compiling against libraries a test didn't ask for, and let backend-excluded tests slip through).
+//! Shared codegen/box conformance-test directives and runner-provided source declarations. Target
+//! applicability stays explicit; source preparation shared by JVM, Native, and survey consumers
+//! must not drift into three subtly different test programs.
 
 use std::path::{Path, PathBuf};
 
@@ -115,26 +113,101 @@ private fun <T> checkTypeEquality(
 ) {}
 "#;
 
+/// The target a corpus case is being prepared for.
+///
+/// Two of the placeholders Kotlin's runner expands mean different things per target, so a source
+/// prepared for one backend is a DIFFERENT PROGRAM from the same source prepared for another.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestTarget {
+    Jvm,
+    Native,
+}
+
+/// The `helpers` package source Kotlin's codegen runner injects for `// WITH_COROUTINES`.
+///
+/// This is shared by every corpus consumer so a survey, JVM run, and Native run compile the same
+/// source program. The corpus does not currently request the state-machine or tail-call checker
+/// variants, so this is the runner's `false, false` helper set.
+pub const COROUTINE_HELPERS: &str = r#"package helpers
+import kotlin.coroutines.*
+import kotlin.coroutines.intrinsics.*
+
+fun <T> runBlocking(block: suspend () -> T): T {
+    var res: Result<T>? = null
+    block.startCoroutine(Continuation(EmptyCoroutineContext) {
+        res = it
+    })
+    return res!!.getOrThrow()
+}
+
+fun <T> handleResultContinuation(x: (T) -> Unit): Continuation<T> = object: Continuation<T> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<T>) {
+       x(result.getOrThrow())
+    }
+}
+
+fun handleExceptionContinuation(x: (Throwable) -> Unit): Continuation<Any?> = object: Continuation<Any?> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Any?>) {
+       result.exceptionOrNull()?.let(x)
+    }
+}
+
+open class EmptyContinuation(override val context: CoroutineContext = EmptyCoroutineContext) : Continuation<Any?> {
+    companion object : EmptyContinuation()
+    override fun resumeWith(result: Result<Any?>) {
+       result.getOrThrow()
+    }
+}
+
+class ResultContinuation : Continuation<Any?> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Any?>) {
+       this.result = result.getOrThrow()
+    }
+
+    var result: Any? = null
+}
+"#;
+
 /// Apply source declarations that Kotlin's codegen-test runner supplies for directives. These are
 /// ordinary Kotlin declarations, not compiler intrinsics; keeping the expansion here makes the gate,
 /// focused corpus helpers, and survey compile the same source program.
-pub fn prepare_test_source(src: &str) -> String {
-    // kotlinc inserts `@JvmInline` for this placeholder only while `FullValueClasses` is off.
-    // With the feature, the placeholder is empty so the class is a boxed `value class`, the same
-    // shape as an unannotated `value class` written beside it.
-    let inline_annotation =
-        if crate::features::LangFeatures::from_source(src).has("FullValueClasses") {
-            ""
-        } else {
-            "@JvmInline"
-        };
+///
+/// `OPTIONAL_JVM_INLINE_ANNOTATION` is the placeholder the corpus writes where a `value class`
+/// needs `@JvmInline`. The JVM runner inserts it only while `FullValueClasses` is disabled; Native
+/// always expands it to nothing because a Kotlin/Native `value class` needs no JVM annotation.
+pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
+    let full_value_classes =
+        crate::features::LangFeatures::from_source(src).has("FullValueClasses");
+    let (value_class_annotation, backend) = match target {
+        TestTarget::Jvm if !full_value_classes => ("@JvmInline", "\"JVM_IR\""),
+        TestTarget::Jvm => ("", "\"JVM_IR\""),
+        TestTarget::Native => ("", "\"NATIVE\""),
+    };
     let mut prepared = src
-        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", inline_annotation)
-        .replace("BACKEND_UNDER_TEST", "\"JVM_IR\"");
+        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", value_class_annotation)
+        .replace("BACKEND_UNDER_TEST", backend);
     if directive(src, "CHECK_TYPE_WITH_EXACT") {
         prepared.push_str(EXACT_TYPE_HELPER);
     }
     prepared
+}
+
+/// Language features Kotlin's codegen-test runner supplies for one target, followed by the test's
+/// own ordered `// LANGUAGE:` overrides.
+///
+/// Kotlin/Native accepts full value classes without the JVM-only `@JvmInline` marker. Treating the
+/// absence of that annotation through the JVM feature baseline rejects the source before the
+/// Native backend can be tested.
+pub fn test_features(src: &str, target: TestTarget) -> crate::features::LangFeatures {
+    let mut features = crate::features::LangFeatures::new();
+    if target == TestTarget::Native {
+        features.enable("FullValueClasses");
+    }
+    features.apply_source_directives(src);
+    features
 }
 
 /// Whether a box test applies to the backend tokens `names`, per kotlinc's test-runner directives, for
@@ -270,17 +343,33 @@ fn k2_language_configuration_applicable(src: &str) -> bool {
 }
 
 pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
-    // `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for
-    // their diagnostic half), so it always mentions ours.
-    let mentions = |line: &str| {
-        line.split(',')
-            .any(|t| t.trim() == "ANY" || names.contains(&t.trim()))
-    };
-    if let Some(l) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
-        if !mentions(l.trim_start_matches("// TARGET_BACKEND:").trim()) {
-            return false;
-        }
+    backend_targeted(src, names) && !backend_muted(src, names)
+}
+
+/// `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for their
+/// diagnostic half), so it always mentions ours.
+fn mentions(line: &str, names: &[&str]) -> bool {
+    line.split(',')
+        .any(|token| token.trim() == "ANY" || names.contains(&token.trim()))
+}
+
+/// Whether `// TARGET_BACKEND:` admits one of `names` — a case that names backends and none of
+/// ours is a case written for a platform this one is not.
+///
+/// Split from the mute half because the two ask different questions and a lane may answer them
+/// with different backend sets. A native lane targets `NATIVE` alone: a case marked JVM-only is
+/// JVM-only, and compiling it means compiling `java.lang.Runnable` against a target that has no
+/// JDK. Its mute query likewise names only `NATIVE`: a JVM mute may describe a JVM representation
+/// defect and is not evidence that Native should skip the shared frontend program.
+pub fn backend_targeted(src: &str, names: &[&str]) -> bool {
+    match src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
+        Some(line) => mentions(line.trim_start_matches("// TARGET_BACKEND:").trim(), names),
+        None => true,
     }
+}
+
+/// Whether any mute directive names one of `names`.
+pub fn backend_muted(src: &str, names: &[&str]) -> bool {
     src.lines()
         .filter(|l| {
             l.starts_with("// IGNORE_BACKEND:")
@@ -288,7 +377,7 @@ pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
                 || l.starts_with("// IGNORE_BACKEND_K2_MULTI_MODULE:")
                 || l.starts_with("// DONT_TARGET_EXACT_BACKEND:")
         })
-        .all(|l| !mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim()))
+        .any(|l| mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim(), names))
 }
 
 /// Whether the test applies to krusty's backend (the common case of [`backend_applicable`]).
@@ -909,6 +998,7 @@ mod tests {
     fn exact_type_directive_injects_the_kotlin_test_declaration() {
         let prepared = prepare_test_source(
             "// CHECK_TYPE_WITH_EXACT\nfun box(): String { checkExactType<String>(\"OK\"); return \"OK\" }",
+            TestTarget::Jvm,
         );
         assert!(prepared.contains("private fun <T> checkExactType"));
         assert!(prepared.contains("value: @kotlin.internal.Exact T"));
@@ -918,12 +1008,15 @@ mod tests {
     fn full_value_classes_drops_the_optional_jvm_inline_placeholder() {
         let with_feature = prepare_test_source(
             "// LANGUAGE: +MultiPlatformProjects, +FullValueClasses\nOPTIONAL_JVM_INLINE_ANNOTATION\nvalue class A(val x: Int)\n",
+            TestTarget::Jvm,
         );
         assert!(!with_feature.contains("@JvmInline"));
         assert!(!with_feature.contains("OPTIONAL_JVM_INLINE_ANNOTATION"));
         assert!(with_feature.contains("value class A"));
-        let without_feature =
-            prepare_test_source("OPTIONAL_JVM_INLINE_ANNOTATION\nvalue class A(val x: Int)\n");
+        let without_feature = prepare_test_source(
+            "OPTIONAL_JVM_INLINE_ANNOTATION\nvalue class A(val x: Int)\n",
+            TestTarget::Jvm,
+        );
         assert!(without_feature.starts_with("@JvmInline\n"));
         assert!(!without_feature.contains("OPTIONAL_JVM_INLINE_ANNOTATION"));
     }
@@ -932,10 +1025,46 @@ mod tests {
     fn backend_under_test_is_preprocessed_like_the_kotlin_runner() {
         let prepared = prepare_test_source(
             "val jvm = BACKEND_UNDER_TEST == \"JVM_IR\"\nval android = BACKEND_UNDER_TEST == \"ANDROID\"",
+            TestTarget::Jvm,
         );
         assert_eq!(
             prepared,
             "val jvm = \"JVM_IR\" == \"JVM_IR\"\nval android = \"JVM_IR\" == \"ANDROID\""
+        );
+    }
+
+    /// The same source is a DIFFERENT PROGRAM per target, and these two placeholders are why.
+    ///
+    /// A `value class` needs `@JvmInline` on the JVM and nowhere else, so Kotlin's own runner
+    /// expands the placeholder to nothing for a non-JVM target. Expanding it regardless put a
+    /// JVM-only annotation into every such program — and `kotlin.jvm.*` is not among a native
+    /// target's default imports, so it did not resolve.
+    #[test]
+    fn a_native_target_gets_the_program_its_own_runner_would_compile() {
+        let source = "OPTIONAL_JVM_INLINE_ANNOTATION\nvalue class V(val x: Int)\n\
+                      val here = BACKEND_UNDER_TEST";
+        assert_eq!(
+            prepare_test_source(source, TestTarget::Native),
+            "\nvalue class V(val x: Int)\nval here = \"NATIVE\""
+        );
+        assert_eq!(
+            prepare_test_source(source, TestTarget::Jvm),
+            "@JvmInline\nvalue class V(val x: Int)\nval here = \"JVM_IR\""
+        );
+    }
+
+    #[test]
+    fn native_test_features_accept_unannotated_value_classes_and_keep_directive_overrides() {
+        assert!(
+            test_features("value class V(val x: Int)", TestTarget::Native).has("FullValueClasses")
+        );
+        assert!(!test_features(
+            "// LANGUAGE: -FullValueClasses\nvalue class V(val x: Int)",
+            TestTarget::Native,
+        )
+        .has("FullValueClasses"));
+        assert!(
+            !test_features("value class V(val x: Int)", TestTarget::Jvm).has("FullValueClasses")
         );
     }
 

@@ -12,10 +12,10 @@ impl<'a> FileLowering<'a> {
     /// `box()` case reports its verdict — and exits through the kernel; it never returns to
     /// `_start`.
     ///
-    /// A `box()` answer is printed after [`BOX_RESULT_FRAME`], with nothing after it: the answer is
-    /// every byte that follows the frame's last occurrence. Its last LINE would not do, because the
-    /// program's own output comes before it and an answer may span lines: `"FAIL\nOK"` is a wrong
-    /// answer whose last line is `OK`.
+    /// A `box()` answer is printed after [`BOX_RESULT_FRAME`], with nothing after it. A harness
+    /// requires exactly one frame and reads every byte after it. Its last LINE would not do,
+    /// because the program's own output comes first and an answer may span lines: `"FAIL\nOK"` is
+    /// a wrong answer whose last line is `OK`.
     pub(super) fn define_program_entry(
         &mut self,
         main_index: usize,

@@ -136,15 +136,16 @@ profile-box FILTER="":
     KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 KRUSTY_BOX_ONLY="{{FILTER}}" ./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture
 
 # Run the whole external/reference conformance binary without coverage instrumentation. `just ci`
-# does not call this. CI builds the binary once and runs both the box suite and every other test for
-# every supported version (see .github/workflows/ci.yml). Keep the
-# memory-heavy Kotlin box corpus test isolated, then run every other conformance test in a fresh
-# process.
-# Pass 2's tests are independent JVM-backed suites; thread them (capped at 4 — each thread can hold
-# a compiler-server/runner JVM) instead of serializing ~40 tests on one core.
+# does not call this. CI builds the binary once and runs both target box suites and every other test
+# for every supported version (see .github/workflows/ci.yml). Keep the memory-heavy JVM and Native
+# corpus tests isolated, then run every other conformance test in a fresh process. The Native lane
+# compiles, links and runs every accepted case once under its dedicated suite-wide deadline
+# (`scripts/native-conformance-run.sh`). The final independent JVM-backed tests are threaded (capped
+# at 4 — each thread can hold a compiler-server/runner JVM) instead of serializing ~40 tests.
 conformance-all-plain:
     just conformance
-    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --test-threads=$(n=$(nproc 2>/dev/null || sysctl -n hw.ncpu); [ "$n" -gt 4 ] && n=4; echo $n)
+    just native-conformance-run "$(just conformance-bin)" "$(just max-version)"
+    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --test-threads=$(n=$(nproc 2>/dev/null || sysctl -n hw.ncpu); [ "$n" -gt 4 ] && n=4; echo $n)
 
 # Run all conformance tests for one runtime-selected Kotlin version. The shared Cargo target avoids
 # per-version rebuilds; the reference compiler and corpus are provisioned on demand.
@@ -163,8 +164,9 @@ conformance-one VERSION:
     export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
     bin="$(just conformance-bin)"
     just conformance-run "$bin" "$v"
+    bash scripts/native-conformance-run.sh "$bin"
     conf_threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"; [ "$conf_threads" -gt 4 ] && conf_threads=4
-    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --test-threads="$conf_threads"
+    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --test-threads="$conf_threads"
 
 # Measure test coverage — regions, functions, lines and BRANCHES — via LLVM source-based coverage
 # (nightly, `-Zcoverage-options=branch`). Runs an instrumented build + the own suite in parallel and
@@ -447,45 +449,61 @@ conformance-run BIN VERSION BYTES="":
     set -euo pipefail
     bash scripts/conformance-run.sh "{{BIN}}" "{{VERSION}}" "{{BYTES}}"
 
+# Run the Native codegen/box ratchet with a prebuilt conformance binary. Provisioning is explicit
+# here so a fresh CI step gets the exact compiler/corpus selected by VERSION rather than depending
+# on environment mutations from an earlier shell.
+native-conformance-run BIN VERSION REPORT="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="{{VERSION}}"
+    kotlinc="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
+    box_dir="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
+    KRUSTY_LANGUAGE_VERSION="$v" \
+      KRUSTY_KOTLINC="$kotlinc" \
+      KRUSTY_KOTLIN_BOX_DIR="$box_dir" \
+      bash scripts/native-conformance-run.sh "{{BIN}}" {{ if REPORT != "" { quote(REPORT) } else { "" } }}
+
 # Run every non-box conformance test with the binary from `conformance-bin`. CI invokes this beside
-# `conformance-run` in every supported-version lane. A sibling `krusty` next to BIN is the CLI.
+# `conformance-run` in every supported-version JVM row. A sibling `krusty` next to BIN is the CLI.
 conformance-regressions BIN VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     bash scripts/conformance-regressions.sh "{{BIN}}" "{{VERSION}}"
 
-# Preview the shields.io endpoint badges in docs/badges/*.json (untracked) for the max version, from
-# one box run: conformance.json (the `krusty-conformance.json` endpoint) from its case report, and
-# jvm-byte-equality.json (the `krusty-jvm-byte-equality.json` endpoint) from its JVM byte report.
-# With no arguments it runs `just conformance`; pass CASES and BYTES together to render existing
-# reports of one run instead, such as a lane's downloaded `pct-<version>` and
-# `jvm-byte-equality-<version>` CI artifacts. The master release job publishes the same payloads
-# (scripts/conformance-badge.sh) to the badge Gist; nothing here publishes.
-conformance-badge CASES="" BYTES="":
+# Preview the shields.io endpoint badges in docs/badges/*.json (untracked) for the max version.
+# With no arguments it runs both target lanes; pass CASES, BYTES, and NATIVE together to render
+# downloaded reports. The master release job publishes the same payloads; nothing here publishes.
+conformance-badge CASES="" BYTES="" NATIVE="":
     #!/usr/bin/env bash
     set -euo pipefail
     v="$(just max-version)"
     cases='{{CASES}}'
     bytes='{{BYTES}}'
-    if [ -z "$cases" ] && [ -z "$bytes" ]; then
+    native='{{NATIVE}}'
+    if [ -z "$cases" ] && [ -z "$bytes" ] && [ -z "$native" ]; then
       mkdir -p target
       cases="target/conformance-$v.report"
       bytes="target/jvm-byte-equality-$v.report"
+      native="target/native-conformance-$v.report"
       just conformance "$v" "$bytes" > "$cases"
-    elif [ -z "$cases" ] || [ -z "$bytes" ]; then
-      echo "conformance-badge: pass CASES and BYTES from the same box run, or neither" >&2
+      just native-conformance-run "$(just conformance-bin)" "$v" "$native"
+    elif [ -z "$cases" ] || [ -z "$bytes" ] || [ -z "$native" ]; then
+      echo "conformance-badge: pass CASES, BYTES, and NATIVE together, or none" >&2
       exit 2
     fi
     mkdir -p docs/badges
-    trap 'rm -f docs/badges/conformance.json.tmp docs/badges/jvm-byte-equality.json.tmp' EXIT
+    trap 'rm -f docs/badges/conformance.json.tmp docs/badges/jvm-byte-equality.json.tmp docs/badges/native-conformance.json.tmp' EXIT
     bash scripts/conformance-badge.sh json conformance "$cases" "$v" > docs/badges/conformance.json.tmp
     bash scripts/conformance-badge.sh json jvm-byte-equality "$bytes" "$v" \
       > docs/badges/jvm-byte-equality.json.tmp
+    bash scripts/conformance-badge.sh json native-conformance "$native" "$v" \
+      > docs/badges/native-conformance.json.tmp
     mv docs/badges/conformance.json.tmp docs/badges/conformance.json
     mv docs/badges/jvm-byte-equality.json.tmp docs/badges/jvm-byte-equality.json
+    mv docs/badges/native-conformance.json.tmp docs/badges/native-conformance.json
     printf '{"schemaVersion":1,"label":"Kotlin","message":"%s","color":"blue"}\n' \
       "$v" > docs/badges/kotlin.json
-    echo "wrote docs/badges/conformance.json + jvm-byte-equality.json + kotlin.json from $cases + $bytes"
+    echo "wrote docs/badges/conformance.json + jvm-byte-equality.json + native-conformance.json + kotlin.json"
 
 # Run the box-corpus survey — the roadmap of why krusty SKIPS a codegen/box test (the unresolved /
 # unsupported buckets, most-frequent first). Provisions the SAME version-matched, cached corpus +

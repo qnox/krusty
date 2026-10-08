@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# The box outcome manifests only shrink: a change may remove entries from
-# tests/box_expected_failures/ and tests/box_expected_not_applicable/, never add one, so a
-# regression cannot be recorded as expected and a fix cannot pay for one. A manifest the base
-# does not have yet (a newly supported Kotlin version) is exempt. Only the head's own changes
-# count: it is compared with its merge base, so a branch that is behind a base which has since
-# dropped entries is not charged with them.
+# The platform/version box outcome manifests only shrink: a change may remove entries, never add one, so a
+# regression cannot be recorded as expected and a fix cannot pay for one. A manifest the base does
+# not have yet (a newly supported Kotlin version) is exempt. Only the head's own changes count: it
+# is compared with its merge base, so a branch that is behind a base which has since dropped entries
+# is not charged with them. JVM currently has no expected failures; Native's backlog is reviewed in
+# the same text format rather than hidden in a GHA cache.
 #
 #   scripts/check-box-lists.sh <base-rev> <head-rev>
 set -euo pipefail
@@ -29,9 +29,13 @@ while read -r manifest; do
   added_total=$((added_total + count))
   echo "box-lists: $manifest gains $count entr$([ "$count" -eq 1 ] && echo y || echo ies):" >&2
   sed 's/^/    /' <<<"$added" >&2
-done < <(git ls-tree -r --name-only "$head" -- tests/box_expected_failures tests/box_expected_not_applicable)
+done < <(
+  git ls-tree -r --name-only "$head" -- \
+    tests/box_expected_failures \
+    tests/box_expected_not_applicable
+)
 
 if ((added_total)); then
-  echo "box-lists: the box outcome manifests only shrink; fix the files above instead of listing them" >&2
+  echo "box-lists: platform/version box expectations only shrink; fix the files above instead of listing them" >&2
   exit 1
 fi

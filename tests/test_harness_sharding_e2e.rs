@@ -18,14 +18,14 @@ fn without_phase_timing(stderr: &str) -> String {
 }
 
 #[test]
-fn canonical_gate_defaults_bound_ordinary_processes_and_the_e2e_suite() {
+fn canonical_gate_defaults_bound_ordinary_and_single_process_suites() {
     let defaults = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("scripts")
         .join("test-gate-defaults.sh");
     let output = Command::new("bash")
         .args([
             "-c",
-            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS; source \"$1\"; if [ -n \"${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS+set}\" ]; then echo 'a scored run has no deadline of its own' >&2; exit 1; fi; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_SHARDS\" \"$KRUSTY_SCORED_CONFORMANCE_SHARDS\"",
+            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS; source \"$1\"; if [ -n \"${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS+set}\" ]; then echo 'a scored run has no deadline of its own' >&2; exit 1; fi; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_SHARDS\" \"$KRUSTY_SCORED_CONFORMANCE_SHARDS\"",
             "gate-default-test",
         ])
         .arg(defaults)
@@ -41,7 +41,7 @@ fn canonical_gate_defaults_bound_ordinary_processes_and_the_e2e_suite() {
         .lines()
         .map(|value| value.parse::<u64>().expect("numeric gate default"))
         .collect::<Vec<_>>();
-    assert_eq!(values, [120, 120, 1800, 4, 12]);
+    assert_eq!(values, [120, 120, 1800, 600, 4, 12]);
 }
 
 #[cfg(unix)]
@@ -394,7 +394,32 @@ fn regression_threads() -> String {
 
 #[cfg(unix)]
 #[test]
-fn prebuilt_conformance_regressions_skip_the_box_suite() {
+fn native_runner_rejects_a_missing_report_and_truncates_the_callers_copy() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (temp, binary) = regression_fixture("native-missing-report", "#!/bin/sh\nexit 0\n");
+    let report = temp.join("native-pct.txt");
+    fs::write(&report, "100.0 9 9\n").expect("write stale Native report");
+
+    let output = Command::new("bash")
+        .arg(root.join("scripts").join("native-conformance-run.sh"))
+        .arg(&binary)
+        .arg(&report)
+        .env("KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .output()
+        .expect("run Native conformance fixture without a report");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(fs::read(&report).expect("read truncated report"), b"");
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("native stderr is UTF-8"),
+        "native-conformance-run: test did not write a valid \"<pct> <passed> <applicable>\" report\n"
+    );
+    fs::remove_dir_all(temp).expect("remove Native missing-report fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn prebuilt_conformance_regressions_skip_the_box_suites() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let (temp, binary) = regression_fixture(
         "skip",
@@ -430,7 +455,7 @@ fn prebuilt_conformance_regressions_skip_the_box_suite() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--test-threads\n{}\n",
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--test-threads\n{}\n",
             sibling.display(),
             regression_threads(),
         ),
@@ -477,7 +502,7 @@ fn prebuilt_conformance_regressions_recipe_runs_the_script() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--test-threads\n{}\n",
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--test-threads\n{}\n",
             sibling.display(),
             regression_threads(),
         ),
@@ -566,7 +591,7 @@ fn prebuilt_conformance_regressions_enforce_the_deadline() {
 }
 
 #[test]
-fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
+fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workflow =
         fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow");
@@ -577,14 +602,23 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
         workflow.contains("version: ${{ fromJson(needs.versions.outputs.matrix) }}"),
         "conformance job must expand every supported Kotlin version"
     );
+    assert!(
+        workflow.contains("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
+            && workflow.contains("target: [jvm, native]"),
+        "each exact Kotlin version must expose independent JVM and Native matrix rows"
+    );
     let box_run = workflow[matrix..]
         .find("just conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
         .map(|offset| matrix + offset)
-        .expect("each version lane runs the box suite");
+        .expect("each version's JVM row runs the box suite");
+    let native_box_run = workflow[matrix..]
+        .find("just native-conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
+        .map(|offset| matrix + offset)
+        .expect("each version's Native row runs the native box suite");
     let regressions = workflow[matrix..]
         .find("just conformance-regressions \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
         .map(|offset| matrix + offset)
-        .expect("each version lane runs every non-box conformance test");
+        .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
             "needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, versions, build-release]",
@@ -593,9 +627,21 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
             "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
         );
     assert!(
-        matrix < box_run && box_run < regressions && regressions < release,
-        "one matrix lane runs box then non-box tests before release"
+        matrix < box_run
+            && box_run < native_box_run
+            && native_box_run < regressions
+            && regressions < release
     );
+    for needle in [
+        "- name: run box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
+        "- name: run native box conformance ${{ matrix.version }}\n        if: matrix.target == 'native'",
+        "- name: run non-box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
+    ] {
+        assert!(
+            workflow.contains(needle),
+            "target ownership must be explicit in the matrix ({needle})"
+        );
+    }
     assert!(
         workflow.contains("target/cache/ser-corpus/${{ matrix.version }}"),
         "each version lane caches its matching serialization corpus"
@@ -605,6 +651,10 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
         "the expanded corpus cache must not reuse the immutable box-only key"
     );
     assert!(
+        workflow.contains("kotlin-native-conformance-${{ matrix.version }}-"),
+        "a Native row must not race to publish the JVM row's broader immutable cache"
+    );
+    assert!(
         workflow.contains("box-corpus-mock-jdk-${{ matrix.version }}-"),
         "the box corpus cache must not reuse an immutable key from before its mock JDK input"
     );
@@ -612,6 +662,22 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
         workflow.contains("recorded-kotlinc-bytes-conformance-${{ matrix.version }}-"),
         "recorded kotlinc bytes must be isolated by matrix version"
     );
+    assert!(
+        !workflow.contains("recorded-native-outcomes-")
+            && !workflow.contains("KRUSTY_NATIVE_OUTCOME_CACHE"),
+        "Native expectations are committed text, not an opaque GHA cache"
+    );
+    for directory in [
+        "tests/box_expected_failures/native",
+        "tests/box_expected_not_applicable/native",
+    ] {
+        assert!(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(directory)
+                .is_dir(),
+            "Native expectations must be committed under the shared platform/version layout: {directory}"
+        );
+    }
     assert!(
         !workflow.contains("\n  conformance-regressions:\n"),
         "non-box conformance must not remain a max-version-only job"

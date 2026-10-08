@@ -1,7 +1,7 @@
-//! The two box reports of one conformance run, the case report `<pct> <passed> <applicable>` and
-//! the JVM byte report `<pct> <matched> <total>`, as they travel from per-shard reports through
-//! `conformance-run.sh` to their badge payloads (`conformance-badge.sh`), the
-//! `just conformance-badge` preview, the master-only release publisher, and the public copy.
+//! Target box reports as they travel from test processes through their runners to badge payloads,
+//! the `just conformance-badge` preview, the master-only release publisher, and the public copy:
+//! JVM `<pct> <passed> <applicable>` and `<pct> <matched> <total>` byte reports, plus independent
+//! Native `<pct> <passed> <applicable>` counts.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -176,7 +176,7 @@ const BYTE_SHAPE: &str = "\"<pct> <matched> <total>\" with matched <= total";
 #[test]
 fn scored_shards_sum_each_reports_counts_before_deriving_its_percentage() {
     // Bytes 1/2 (50%) and 2/8 (25%) weigh 3/10 = 30.0%, not the 37.5% shard average; the case
-    // counts 1/1 and 1/2 weigh 2/3 = 66.7%, not 75%, independently of the bytes.
+    // counts 1/1 and 1/2 weigh 2/3 = 66.6% rounded down, not 75%, independently of the bytes.
     let run = run_scored_shards(
         "weighted",
         &[
@@ -189,7 +189,7 @@ fn scored_shards_sum_each_reports_counts_before_deriving_its_percentage() {
     assert_eq!(diagnostics, byte_summary("30.0 3 10"));
     assert_eq!(phases, expected_phase_timing(2, 2));
     assert_eq!(run.output.status.code(), Some(0));
-    assert_eq!(String::from_utf8(run.output.stdout).unwrap(), "66.7 2 3\n");
+    assert_eq!(String::from_utf8(run.output.stdout).unwrap(), "66.6 2 3\n");
     assert_eq!(run.bytes.as_deref(), Some("30.0 3 10\n"));
 }
 
@@ -208,7 +208,7 @@ fn scored_shards_without_a_byte_report_path_still_validate_and_print_both() {
     assert_eq!(diagnostics, byte_summary("30.0 3 10"));
     assert_eq!(phases, expected_phase_timing(2, 2));
     assert_eq!(run.output.status.code(), Some(0));
-    assert_eq!(String::from_utf8(run.output.stdout).unwrap(), "66.7 2 3\n");
+    assert_eq!(String::from_utf8(run.output.stdout).unwrap(), "66.6 2 3\n");
 }
 
 #[cfg(unix)]
@@ -236,20 +236,20 @@ fn scored_shards_report_real_scale_totals_exactly() {
     let run = run_scored_shards(
         "scale",
         &[
-            (Some("88.4 3154 3567\n"), Some("52.5 12405762 23645354\n")),
-            (Some("88.4 3153 3568\n"), Some("52.5 12405762 23645355\n")),
+            (Some("88.4 3154 3567\n"), Some("52.4 12405762 23645354\n")),
+            (Some("88.3 3153 3568\n"), Some("52.4 12405762 23645355\n")),
         ],
         true,
     );
     let (phases, diagnostics) = split_phase_timing(&run.output.stderr);
-    assert_eq!(diagnostics, byte_summary("52.5 24811524 47290709"));
+    assert_eq!(diagnostics, byte_summary("52.4 24811524 47290709"));
     assert_eq!(phases, expected_phase_timing(2, 2));
     assert_eq!(run.output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(run.output.stdout).unwrap(),
-        "88.4 6307 7135\n"
+        "88.3 6307 7135\n"
     );
-    assert_eq!(run.bytes.as_deref(), Some("52.5 24811524 47290709\n"));
+    assert_eq!(run.bytes.as_deref(), Some("52.4 24811524 47290709\n"));
 }
 
 const MALFORMED_REPORTS: [&str; 10] = [
@@ -348,20 +348,20 @@ fn scored_shards_fail_when_a_shard_writes_either_report_empty_or_not_at_all() {
 
 #[test]
 fn conformance_badge_keeps_the_original_case_payload() {
-    let output = badge_for("case-fields", "fields", "conformance", "66.7 2 3\n");
+    let output = badge_for("case-fields", "fields", "conformance", "66.6 2 3\n");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "pct=66.7\npassed=2\napplicable=3\nlabel=Kotlin 2.4.20 conformance\nmessage=66.7% (2/3)\ncolor=yellow\n"
+        "pct=66.6\npassed=2\napplicable=3\nlabel=Kotlin 2.4.20 conformance\nmessage=66.6% (2/3)\ncolor=yellow\n"
     );
 
-    let output = badge_for("case-json", "json", "conformance", "88.4 6307 7135\n");
+    let output = badge_for("case-json", "json", "conformance", "88.3 6307 7135\n");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "{\"schemaVersion\":1,\"label\":\"Kotlin 2.4.20 conformance\",\"message\":\"88.4% (6307/7135)\",\"color\":\"brightgreen\"}\n"
+        "{\"schemaVersion\":1,\"label\":\"Kotlin 2.4.20 conformance\",\"message\":\"88.3% (6307/7135)\",\"color\":\"brightgreen\"}\n"
     );
 }
 
@@ -379,13 +379,13 @@ fn jvm_byte_equality_badge_carries_the_byte_counts() {
         "bytes-json",
         "json",
         "jvm-byte-equality",
-        "52.5 24811524 47290709\n",
+        "52.4 24811524 47290709\n",
     );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "{\"schemaVersion\":1,\"label\":\"Kotlin 2.4.20 JVM byte equality\",\"message\":\"52.5% (24811524/47290709 bytes)\",\"color\":\"yellow\"}\n"
+        "{\"schemaVersion\":1,\"label\":\"Kotlin 2.4.20 JVM byte equality\",\"message\":\"52.4% (24811524/47290709 bytes)\",\"color\":\"yellow\"}\n"
     );
 
     let output = badge_for("bytes-zero", "json", "jvm-byte-equality", "0.0 0 0\n");
@@ -397,7 +397,23 @@ fn jvm_byte_equality_badge_carries_the_byte_counts() {
 }
 
 #[test]
-fn both_badges_follow_the_existing_percentage_thresholds() {
+fn native_conformance_badge_carries_its_own_case_counts() {
+    let output = badge_for(
+        "native-fields",
+        "fields",
+        "native-conformance",
+        "12.5 1 8\n",
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "pct=12.5\npassed=1\napplicable=8\nlabel=Kotlin 2.4.20 Native conformance\nmessage=12.5% (1/8)\ncolor=orange\n"
+    );
+}
+
+#[test]
+fn all_conformance_badges_follow_the_existing_percentage_thresholds() {
     let cases = [
         ("0.0 0 0\n", "red"),
         ("9.9 99 1000\n", "red"),
@@ -406,9 +422,10 @@ fn both_badges_follow_the_existing_percentage_thresholds() {
         ("50.0 1 2\n", "yellow"),
         ("69.9 699 1000\n", "yellow"),
         ("70.0 7 10\n", "brightgreen"),
+        ("99.9 3145 3146\n", "brightgreen"),
         ("100.0 4 4\n", "brightgreen"),
     ];
-    for kind in ["conformance", "jvm-byte-equality"] {
+    for kind in ["conformance", "jvm-byte-equality", "native-conformance"] {
         for (report, color) in cases {
             let output = badge_for("color", "fields", kind, report);
             assert_eq!(output.status.code(), Some(0), "{kind} report {report:?}");
@@ -427,6 +444,12 @@ fn badges_reject_an_invalid_or_inconsistent_report() {
     for (kind, name, shape, noun) in [
         ("conformance", "case report", CASE_SHAPE, "cases"),
         ("jvm-byte-equality", "JVM byte report", BYTE_SHAPE, "bytes"),
+        (
+            "native-conformance",
+            "Native case report",
+            CASE_SHAPE,
+            "cases",
+        ),
     ] {
         for report in ["", "30.0 3\n", "30.0 11 10\n", "30.0 3 10 1\n"] {
             let (output, path) = badge_report("invalid", "fields", kind, report);
@@ -480,7 +503,7 @@ fn badge_rejects_an_unknown_kind_or_mode() {
         assert_eq!(output.stdout, b"", "{mode} {kind}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(
-            stderr.starts_with("# Turn one combined box report of conformance-run.sh"),
+            stderr.starts_with("# Turn one target report into its shields.io badge"),
             "{mode} {kind}: {stderr}"
         );
     }
@@ -507,11 +530,11 @@ fn workflow_job<'a>(workflow: &'a str, job: &str) -> &'a str {
 }
 
 #[test]
-fn preview_lanes_and_release_carry_both_reports_distinctly() {
+fn preview_lanes_and_release_carry_all_target_reports_distinctly() {
     let root = repo_root();
     let justfile = fs::read_to_string(root.join("justfile")).expect("read justfile");
     let recipe = justfile
-        .split("\nconformance-badge CASES=\"\" BYTES=\"\":\n")
+        .split("\nconformance-badge CASES=\"\" BYTES=\"\" NATIVE=\"\":\n")
         .nth(1)
         .expect("conformance-badge recipe takes optional CASES and BYTES")
         .split("\n\n")
@@ -519,9 +542,11 @@ fn preview_lanes_and_release_carry_both_reports_distinctly() {
         .unwrap();
     for needle in [
         "just conformance \"$v\" \"$bytes\" > \"$cases\"",
+        "just native-conformance-run \"$(just conformance-bin)\" \"$v\" \"$native\"",
         "bash scripts/conformance-badge.sh json conformance \"$cases\" \"$v\" > docs/badges/conformance.json.tmp",
         "bash scripts/conformance-badge.sh json jvm-byte-equality \"$bytes\" \"$v\" \\\n      > docs/badges/jvm-byte-equality.json.tmp",
-        "pass CASES and BYTES from the same box run, or neither",
+        "bash scripts/conformance-badge.sh json native-conformance \"$native\" \"$v\" \\\n      > docs/badges/native-conformance.json.tmp",
+        "pass CASES, BYTES, and NATIVE together, or none",
     ] {
         assert!(
             recipe.contains(needle),
@@ -533,20 +558,35 @@ fn preview_lanes_and_release_carry_both_reports_distinctly() {
         fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow");
     let lane = workflow_job(&workflow, "conformance");
     assert!(
+        lane.contains("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
+            && lane.contains("target: [jvm, native]"),
+        "every version exposes independent JVM and Native report rows: {lane}"
+    );
+    assert!(
         lane.contains(
             "just conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\" jvm-byte-equality.txt > pct.txt\n          bash scripts/conformance-badge.sh fields conformance pct.txt \"${{ matrix.version }}\"\n          bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt \"${{ matrix.version }}\"\n"
         ),
-        "each lane writes and validates both reports of one box run: {lane}"
+        "each JVM row writes and validates both reports of one box run: {lane}"
     );
     assert!(
         lane.contains("name: pct-${{ matrix.version }}\n          path: pct.txt\n"),
-        "each lane uploads its case report"
+        "each JVM row uploads its case report"
     );
     assert!(
         lane.contains(
             "name: jvm-byte-equality-${{ matrix.version }}\n          path: jvm-byte-equality.txt\n"
         ),
-        "each lane uploads its JVM byte report as a separate artifact"
+        "each JVM row uploads its byte report as a separate artifact"
+    );
+    assert!(
+        lane.contains(
+            "just native-conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\" native-pct.txt\n          bash scripts/conformance-badge.sh fields native-conformance native-pct.txt \"${{ matrix.version }}\"\n"
+        ),
+        "each Native row writes and validates its independent report: {lane}"
+    );
+    assert!(
+        lane.contains("name: native-pct-${{ matrix.version }}\n          path: native-pct.txt\n"),
+        "each Native row uploads its case report"
     );
 
     let release = workflow_job(&workflow, "release");
@@ -557,12 +597,16 @@ fn preview_lanes_and_release_carry_both_reports_distinctly() {
     for needle in [
         "name: pct-${{ needs.versions.outputs.max }}\n",
         "name: jvm-byte-equality-${{ needs.versions.outputs.max }}\n",
+        "name: native-pct-${{ needs.versions.outputs.max }}\n",
         "id: c\n",
         "run: bash scripts/conformance-badge.sh fields conformance pct.txt \"$MAX_VERSION\" >> \"$GITHUB_OUTPUT\"\n",
         "id: b\n",
         "run: bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt \"$MAX_VERSION\" >> \"$GITHUB_OUTPUT\"\n",
+        "id: n\n",
+        "run: bash scripts/conformance-badge.sh fields native-conformance native-pct.txt \"$MAX_VERSION\" >> \"$GITHUB_OUTPUT\"\n",
         "filename: krusty-conformance.json\n          label: ${{ steps.c.outputs.label }}\n          message: ${{ steps.c.outputs.message }}\n          color: ${{ steps.c.outputs.color }}\n",
         "filename: krusty-jvm-byte-equality.json\n          label: ${{ steps.b.outputs.label }}\n          message: ${{ steps.b.outputs.message }}\n          color: ${{ steps.b.outputs.color }}\n",
+        "filename: krusty-native-conformance.json\n          label: ${{ steps.n.outputs.label }}\n          message: ${{ steps.n.outputs.message }}\n          color: ${{ steps.n.outputs.color }}\n",
     ] {
         assert!(
             release.contains(needle),
@@ -576,13 +620,13 @@ fn preview_lanes_and_release_carry_both_reports_distinctly() {
     );
     assert_eq!(
         release.matches("Schneegans/dynamic-badges-action").count(),
-        3,
-        "the release publishes the Kotlin version, conformance, and JVM byte-equality badges"
+        4,
+        "the release publishes the Kotlin version, JVM conformance/bytes, and Native conformance badges"
     );
 }
 
 #[test]
-fn readme_and_site_show_both_badges_with_distinct_endpoints() {
+fn readme_and_site_show_all_badges_with_distinct_endpoints() {
     let root = repo_root();
     let gist = "gist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2F";
     let readme = fs::read_to_string(root.join("README.md")).expect("read README");
@@ -599,7 +643,11 @@ fn readme_and_site_show_both_badges_with_distinct_endpoints() {
         ),
         (
             "krusty-jvm-byte-equality.json",
-            "JVM byte equality: share of .class bytes matching kotlinc across the same codegen/box cases",
+            "JVM byte equality: matching leading .class bytes against kotlinc across the same codegen/box cases",
+        ),
+        (
+            "krusty-native-conformance.json",
+            "Native conformance: share of applicable Native codegen/box cases whose box() returns OK",
         ),
     ] {
         assert!(

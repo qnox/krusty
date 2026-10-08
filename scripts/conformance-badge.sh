@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Turn one combined box report of conformance-run.sh into its shields.io badge. `conformance` is the
-# case report "<pct> <passed> <applicable>" (stdout); `jvm-byte-equality` is the JVM byte report
-# "<pct> <matched> <total>" of the same run (see conformance-report.sh). `just conformance-badge`
-# writes the local endpoint JSON; the master-only release job publishes the same fields from the
-# maximum version's `pct-<version>` and `jvm-byte-equality-<version>` artifacts.
+# Turn one target report into its shields.io badge. `conformance` and `native-conformance` are case
+# reports "<pct> <passed> <applicable>"; `jvm-byte-equality` is "<pct> <matched> <total>" class-file
+# bytes (see conformance-report.sh). `just conformance-badge` writes local endpoint JSON; the
+# master-only release job publishes the maximum version's reports.
 #
 #   scripts/conformance-badge.sh fields <kind> <report> <kotlin-version>   key=value lines ($GITHUB_OUTPUT)
 #   scripts/conformance-badge.sh json <kind> <report> <kotlin-version>     shields.io endpoint JSON
@@ -30,6 +29,14 @@ case "$kind" in
     unit=""
     noun=cases
     label="Kotlin $version conformance"
+    ;;
+  native-conformance)
+    name="Native case report"
+    count_key=passed
+    of_key=applicable
+    unit=""
+    noun=cases
+    label="Kotlin $version Native conformance"
     ;;
   jvm-byte-equality)
     name="JVM byte report"

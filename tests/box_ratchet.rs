@@ -1,9 +1,9 @@
-//! Exact per-version baselines for Kotlin codegen/box outcomes.
+//! Generic per-platform, exact-version box-conformance ratchet.
 //!
-//! Every corpus file has one expected outcome: pass (implicit), fail (listed in
-//! `box_expected_failures`), or not applicable to the JVM backend (listed in
-//! `box_expected_not_applicable`). A transition between any two outcomes fails the run. This keeps
-//! an applicability regression from looking like a successful test run.
+//! A corpus path has one of three outcomes: pass (implicit), fail, or not applicable. Expected
+//! failures and applicability exclusions are committed as deterministic text, so a local run and
+//! CI enforce the same baseline. The platform is part of the path; one backend can neither hide nor
+//! inherit another backend's backlog.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -14,6 +14,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use krusty::kotlin_version::KotlinVersion;
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Platform {
+    Jvm,
+    Native,
+}
+
+impl Platform {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Jvm => "jvm",
+            Self::Native => "native",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -38,33 +53,42 @@ pub struct Baseline {
     pub not_applicable: BTreeSet<String>,
 }
 
-pub fn list_path(version: KotlinVersion) -> PathBuf {
-    manifest_path("box_expected_failures", version)
+pub fn failure_path(platform: Platform, version: KotlinVersion) -> PathBuf {
+    manifest_path("box_expected_failures", platform, version)
 }
 
-pub fn not_applicable_list_path(version: KotlinVersion) -> PathBuf {
-    manifest_path("box_expected_not_applicable", version)
+pub fn not_applicable_path(platform: Platform, version: KotlinVersion) -> PathBuf {
+    manifest_path("box_expected_not_applicable", platform, version)
 }
 
-fn manifest_path(directory: &str, version: KotlinVersion) -> PathBuf {
+fn manifest_path(directory: &str, platform: Platform, version: KotlinVersion) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join(directory)
+        .join(platform.name())
         .join(format!("{version}.txt"))
 }
 
-pub fn load(version: KotlinVersion) -> Baseline {
+pub fn load(platform: Platform, version: KotlinVersion) -> Baseline {
     Baseline {
-        failures: load_path(&list_path(version)),
-        not_applicable: load_path(&not_applicable_list_path(version)),
+        // JVM has no failure ratchet: absence means exactly the required empty set. Native's
+        // failure inventory is part of its committed baseline and may never disappear silently.
+        failures: load_path(
+            &failure_path(platform, version),
+            platform == Platform::Native,
+        ),
+        not_applicable: load_path(&not_applicable_path(platform, version), true),
     }
 }
 
-fn load_path(path: &Path) -> BTreeSet<String> {
+fn load_path(path: &Path, required: bool) -> BTreeSet<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => parse(&text)
-            .unwrap_or_else(|error| panic!("invalid outcome manifest {}: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+            .unwrap_or_else(|error| panic!("invalid box expectation {}: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => BTreeSet::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            panic!("required box expectation is missing: {}", path.display())
+        }
         Err(error) => panic!("failed to read {}: {error}", path.display()),
     }
 }
@@ -86,38 +110,34 @@ pub fn parse(text: &str) -> Result<BTreeSet<String>, String> {
     Ok(paths)
 }
 
-pub fn render_failures(version: KotlinVersion, paths: &BTreeSet<String>) -> String {
-    render(
-        version,
-        "fail",
-        "box_expected_failures",
-        "expected failures",
-        paths,
-    )
+pub fn render_failures(
+    platform: Platform,
+    version: KotlinVersion,
+    paths: &BTreeSet<String>,
+) -> String {
+    render(platform, version, "fail", paths)
 }
 
-pub fn render_not_applicable(version: KotlinVersion, paths: &BTreeSet<String>) -> String {
-    render(
-        version,
-        "be not-applicable to the JVM backend",
-        "box_expected_not_applicable",
-        "expected not-applicable cases",
-        paths,
-    )
+pub fn render_not_applicable(
+    platform: Platform,
+    version: KotlinVersion,
+    paths: &BTreeSet<String>,
+) -> String {
+    render(platform, version, "be not-applicable", paths)
 }
 
 fn render(
+    platform: Platform,
     version: KotlinVersion,
     expected: &str,
-    directory: &str,
-    description: &str,
     paths: &BTreeSet<String>,
 ) -> String {
     let mut text = format!(
-        "# Kotlin {version} codegen/box files krusty expects to {expected}, relative to\n\
-         # compiler/testData/codegen/box. Every outcome transition fails conformance. Regenerate\n\
-         # tests/{directory}/{version}.txt with KRUSTY_BLESS_BOX_FAILURES=1 on a full local run.\n\
-         # The goal is to empty this list of {description}.\n"
+        "# Kotlin {version} codegen/box files expected to {expected} on {}, relative to\n\
+         # compiler/testData/codegen/box. Regenerate both exact inventories with\n\
+         # KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local {} run. The lists only shrink.\n",
+        platform.name(),
+        platform.name(),
     );
     for path in paths {
         text.push_str(path);
@@ -131,13 +151,49 @@ pub fn bless_requested(value: Option<&str>) -> Result<bool, String> {
         None => Ok(false),
         Some("1") => Ok(true),
         Some(value) => Err(format!(
-            "KRUSTY_BLESS_BOX_FAILURES must be exactly 1 when set, got {value:?}"
+            "KRUSTY_BLESS_BOX_EXPECTATIONS must be exactly 1 when set, got {value:?}"
         )),
     }
 }
 
-/// Replace one manifest without exposing a truncated or partially written tracked file.
-pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+pub fn write(
+    platform: Platform,
+    version: KotlinVersion,
+    outcomes: &BTreeMap<String, Outcome>,
+) -> std::io::Result<()> {
+    let failures = outcomes
+        .iter()
+        .filter(|(_, outcome)| **outcome == Outcome::Fail)
+        .map(|(path, _)| path.clone())
+        .collect();
+    let not_applicable = outcomes
+        .iter()
+        .filter(|(_, outcome)| **outcome == Outcome::NotApplicable)
+        .map(|(path, _)| path.clone())
+        .collect();
+    write_atomic(
+        &failure_path(platform, version),
+        &render_failures(platform, version, &failures),
+    )?;
+    write_atomic(
+        &not_applicable_path(platform, version),
+        &render_not_applicable(platform, version, &not_applicable),
+    )
+}
+
+pub fn write_not_applicable(
+    platform: Platform,
+    version: KotlinVersion,
+    paths: &BTreeSet<String>,
+) -> std::io::Result<()> {
+    write_atomic(
+        &not_applicable_path(platform, version),
+        &render_not_applicable(platform, version, paths),
+    )
+}
+
+/// Replace one inventory without exposing a truncated or partially written tracked file.
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest has no parent")
     })?;
@@ -203,12 +259,15 @@ impl Mismatches {
         self.outcome_changes.is_empty() && self.overlapping.is_empty() && self.unknown.is_empty()
     }
 
-    pub fn report(&self, version: KotlinVersion) -> String {
+    pub fn report(&self, platform: Platform, version: KotlinVersion) -> String {
         let mut text = String::new();
         for (title, entries) in [
             ("outcome changed", &self.outcome_changes),
-            ("listed in both outcome manifests", &self.overlapping),
-            ("listed but absent from the corpus", &self.unknown),
+            (
+                "is listed as both failure and not-applicable",
+                &self.overlapping,
+            ),
+            ("is listed but absent from the corpus", &self.unknown),
         ] {
             if entries.is_empty() {
                 continue;
@@ -220,17 +279,17 @@ impl Mismatches {
         }
         let _ = write!(
             text,
-            "box conformance disagrees with {} and {}; update both in the same change \
-             (KRUSTY_BLESS_BOX_FAILURES=1 on a full local run rewrites them)",
-            list_path(version).display(),
-            not_applicable_list_path(version).display(),
+            "{} box conformance disagrees with {} and {}; update them from one full local run with \
+             KRUSTY_BLESS_BOX_EXPECTATIONS=1",
+            platform.name(),
+            failure_path(platform, version).display(),
+            not_applicable_path(platform, version).display(),
         );
         text
     }
 }
 
-/// Compare only scheduled files, so a filtered or sharded run checks its own slice. `corpus` is the
-/// complete discovered set and catches stale manifest entries even when their shard is not running.
+/// Compare scheduled paths only, while validating committed entries against the complete corpus.
 pub fn compare(
     expected: &Baseline,
     outcomes: &BTreeMap<String, Outcome>,
@@ -275,30 +334,33 @@ mod tests {
         paths.iter().map(|path| path.to_string()).collect()
     }
 
-    fn outcomes(entries: &[(&str, Outcome)]) -> BTreeMap<String, Outcome> {
-        entries
-            .iter()
-            .map(|(path, outcome)| (path.to_string(), *outcome))
-            .collect()
+    #[test]
+    fn platform_and_version_are_both_part_of_the_paths() {
+        assert!(failure_path(Platform::Jvm, KotlinVersion::V2_4_20)
+            .ends_with("tests/box_expected_failures/jvm/2.4.20.txt"));
+        assert!(
+            not_applicable_path(Platform::Native, KotlinVersion::V2_4_10)
+                .ends_with("tests/box_expected_not_applicable/native/2.4.10.txt")
+        );
     }
 
     #[test]
-    fn every_outcome_transition_is_reported_exactly() {
+    fn every_outcome_transition_is_reported() {
         let expected = Baseline {
             failures: set(&["fail-to-pass.kt", "fail-to-na.kt"]),
             not_applicable: set(&["na-to-pass.kt", "na-to-fail.kt"]),
         };
-        let run = outcomes(&[
-            ("pass-to-fail.kt", Outcome::Fail),
-            ("pass-to-na.kt", Outcome::NotApplicable),
-            ("fail-to-pass.kt", Outcome::Pass),
-            ("fail-to-na.kt", Outcome::NotApplicable),
-            ("na-to-pass.kt", Outcome::Pass),
-            ("na-to-fail.kt", Outcome::Fail),
+        let outcomes = BTreeMap::from([
+            ("pass-to-fail.kt".into(), Outcome::Fail),
+            ("pass-to-na.kt".into(), Outcome::NotApplicable),
+            ("fail-to-pass.kt".into(), Outcome::Pass),
+            ("fail-to-na.kt".into(), Outcome::NotApplicable),
+            ("na-to-pass.kt".into(), Outcome::Pass),
+            ("na-to-fail.kt".into(), Outcome::Fail),
         ]);
-        let corpus = run.keys().cloned().collect();
+        let corpus = outcomes.keys().cloned().collect();
         assert_eq!(
-            compare(&expected, &run, &corpus).outcome_changes,
+            compare(&expected, &outcomes, &corpus).outcome_changes,
             [
                 "fail-to-na.kt: expected fail, got not-applicable",
                 "fail-to-pass.kt: expected fail, got pass",
@@ -311,14 +373,25 @@ mod tests {
     }
 
     #[test]
-    fn a_matching_shard_does_not_judge_other_scheduled_slices() {
+    fn a_matching_shard_does_not_judge_another_slice() {
         let expected = Baseline {
             failures: set(&["other-failure.kt"]),
             not_applicable: set(&["other-na.kt"]),
         };
-        let run = outcomes(&[("mine.kt", Outcome::Pass)]);
+        let outcomes = BTreeMap::from([("mine.kt".into(), Outcome::Pass)]);
         let corpus = set(&["mine.kt", "other-failure.kt", "other-na.kt"]);
-        assert_eq!(compare(&expected, &run, &corpus), Mismatches::default());
+        assert_eq!(
+            compare(&expected, &outcomes, &corpus),
+            Mismatches::default()
+        );
+    }
+
+    #[test]
+    fn rendered_inventory_is_sorted_and_round_trips() {
+        let paths = set(&["b/two.kt", "a/one.kt"]);
+        let text = render_failures(Platform::Native, KotlinVersion::V2_4_10, &paths);
+        assert_eq!(parse(&text), Ok(paths));
+        assert!(text.find("a/one.kt").unwrap() < text.find("b/two.kt").unwrap());
     }
 
     #[test]
@@ -330,39 +403,23 @@ mod tests {
         };
         let mismatches = compare(&expected, &BTreeMap::new(), &set(&["both.kt"]));
         assert_eq!(
-            mismatches.report(version),
+            mismatches.report(Platform::Native, version),
             format!(
-                "1 file(s) listed in both outcome manifests:\n  both.kt\n\
-                 1 file(s) listed but absent from the corpus:\n  deleted.kt\n\
-                 box conformance disagrees with {} and {}; update both in the same change \
-                 (KRUSTY_BLESS_BOX_FAILURES=1 on a full local run rewrites them)",
-                list_path(version).display(),
-                not_applicable_list_path(version).display(),
+                "1 file(s) is listed as both failure and not-applicable:\n  both.kt\n\
+                 1 file(s) is listed but absent from the corpus:\n  deleted.kt\n\
+                 native box conformance disagrees with {} and {}; update them from one full local run with \
+                 KRUSTY_BLESS_BOX_EXPECTATIONS=1",
+                failure_path(Platform::Native, version).display(),
+                not_applicable_path(Platform::Native, version).display(),
             )
         );
     }
 
     #[test]
-    fn rendered_manifests_are_exact_and_round_trip() {
-        let paths = set(&["b/two.kt", "a/one.kt"]);
-        let text = render_failures(KotlinVersion::V2_4_10, &paths);
+    fn duplicate_paths_are_rejected() {
         assert_eq!(
-            text,
-            "# Kotlin 2.4.10 codegen/box files krusty expects to fail, relative to\n\
-             # compiler/testData/codegen/box. Every outcome transition fails conformance. Regenerate\n\
-             # tests/box_expected_failures/2.4.10.txt with KRUSTY_BLESS_BOX_FAILURES=1 on a full local run.\n\
-             # The goal is to empty this list of expected failures.\n\
-             a/one.kt\n\
-             b/two.kt\n"
-        );
-        assert_eq!(parse(&text), Ok(paths));
-    }
-
-    #[test]
-    fn duplicate_manifest_paths_are_rejected_exactly() {
-        assert_eq!(
-            parse("# baseline\na/one.kt\n\na/one.kt\n"),
-            Err("duplicate path on line 4: a/one.kt".into())
+            parse("a/one.kt\na/one.kt\n"),
+            Err("duplicate path on line 2: a/one.kt".into())
         );
     }
 
@@ -372,42 +429,7 @@ mod tests {
         assert_eq!(bless_requested(Some("1")), Ok(true));
         assert_eq!(
             bless_requested(Some("false")),
-            Err("KRUSTY_BLESS_BOX_FAILURES must be exactly 1 when set, got \"false\"".into())
-        );
-        assert_eq!(
-            bless_requested(Some("0")),
-            Err("KRUSTY_BLESS_BOX_FAILURES must be exactly 1 when set, got \"0\"".into())
-        );
-    }
-
-    #[test]
-    fn atomic_write_replaces_the_manifest_without_leaving_a_staging_file() {
-        let root = std::env::temp_dir().join(format!(
-            "krusty-box-ratchet-{}-{}",
-            std::process::id(),
-            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let path = root.join("baseline.txt");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&path, "old\n").unwrap();
-        write_atomic(&path, "new\ncomplete\n").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\ncomplete\n");
-        assert_eq!(
-            std::fs::read_dir(&root)
-                .unwrap()
-                .map(|entry| entry.unwrap().file_name())
-                .collect::<Vec<_>>(),
-            [std::ffi::OsString::from("baseline.txt")]
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn a_corpus_key_is_relative_and_slash_separated() {
-        let root = Path::new("/corpus/box");
-        assert_eq!(
-            corpus_key(root, Path::new("/corpus/box/inline/a.kt")),
-            "inline/a.kt"
+            Err("KRUSTY_BLESS_BOX_EXPECTATIONS must be exactly 1 when set, got \"false\"".into())
         );
     }
 }

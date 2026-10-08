@@ -1,7 +1,6 @@
-# Kotlin 2.4.0 codegen/box files krusty expects to be not-applicable to the JVM backend, relative to
-# compiler/testData/codegen/box. Every outcome transition fails conformance. Regenerate
-# tests/box_expected_not_applicable/2.4.0.txt with KRUSTY_BLESS_BOX_FAILURES=1 on a full local run.
-# The goal is to empty this list of expected not-applicable cases.
+# Kotlin 2.4.0 codegen/box files expected to be not-applicable on jvm, relative to
+# compiler/testData/codegen/box. Regenerate both exact inventories with
+# KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local jvm run. The lists only shrink.
 annotations/instances/multiplatformInstantiation.kt
 annotations/nativeThrows.kt
 argumentOrder/varargAndDefaultParameters_ForNative.kt
