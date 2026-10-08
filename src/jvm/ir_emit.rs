@@ -480,6 +480,8 @@ pub(super) struct EmitEnv<'a> {
     function_argument_arrays: &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     override_results: &'a crate::jvm::override_results::OverrideResults,
     collection_method_entry_barriers: &'a crate::jvm::collection_barriers::MethodEntryBarriers,
+    inherited_collection_bridges:
+        &'a crate::jvm::inherited_collection_bridges::InheritedCollectionBridges,
     /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
     /// use-site wildcards is owned entirely by this emitter.
@@ -1402,6 +1404,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         function_argument_arrays: facts.metadata.function_argument_arrays,
         override_results: facts.metadata.override_results,
         collection_method_entry_barriers: facts.metadata.collection_method_entry_barriers,
+        inherited_collection_bridges: facts.metadata.inherited_collection_bridges,
         signature_symbols: facts.signature_symbols,
         dependency_callables: facts.dependency_callables,
         dispatch_classifiers: std::rc::Rc::new(
@@ -7670,6 +7673,8 @@ mod invariant_tests {
         let override_results = crate::jvm::override_results::OverrideResults::default();
         let collection_method_entry_barriers =
             crate::jvm::collection_barriers::MethodEntryBarriers::default();
+        let inherited_collection_bridges =
+            crate::jvm::inherited_collection_bridges::InheritedCollectionBridges::default();
         let local_delegate_access = crate::jvm::local_delegate_accessors::HelperAccess::default();
         let dependency_callables = crate::backend::CheckedBackendCallables::default();
         emit_all_with_checked_classifiers(
@@ -7684,6 +7689,7 @@ mod invariant_tests {
                     function_argument_arrays: &function_argument_arrays,
                     override_results: &override_results,
                     collection_method_entry_barriers: &collection_method_entry_barriers,
+                    inherited_collection_bridges: &inherited_collection_bridges,
                     emit_time_machines,
                     suspended_result_returns: &suspended_result_returns,
                     intrinsic_probe_continuations,
