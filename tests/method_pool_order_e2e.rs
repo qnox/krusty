@@ -19,6 +19,8 @@
 //! - An inherited interface forwarder interns its header, nullability annotations included, before
 //!   its `invokespecial` body.
 //! - An anonymous object's constructor interns its `this` local before the members that follow it.
+//!   A safe call in the next method does not move the constructor's parameter locals out of that
+//!   range: they belong to the constructor, not to the method that follows it.
 //! - A sealed class's nested subclasses intern with its `InnerClasses` table, after `@Metadata`,
 //!   not ahead of its constructor.
 //!
@@ -236,6 +238,49 @@ fn a_sealed_class_interns_its_nested_subclasses_with_its_inner_classes() {
          }\n",
         &["Shape"],
     );
+}
+
+/// A safe call in the method after the constructor (`eldest?.value?.close()`) is rewritten.
+/// The constructor's `$receiver` and `$super_call_param$N` locals stay with the constructor,
+/// ahead of that method. The member is an ordinary function so the comparison is the pool itself.
+#[test]
+fn an_anonymous_object_keeps_constructor_locals_when_the_next_method_is_rewritten() {
+    let src = "import java.io.Closeable\n\
+         class Host(private val limit: Int) {\n\
+         \x20   private val factor = 0.75f\n\
+         \x20   private val opened = object : java.util.LinkedHashMap<String, Closeable>(limit, factor, true) {\n\
+         \x20       fun drop(eldest: MutableMap.MutableEntry<String, Closeable>?) {\n\
+         \x20           eldest?.value?.close()\n\
+         \x20       }\n\
+         \x20   }\n\
+         }\n";
+    let classpath = [common::stdlib_jar()];
+    let jdk = common::jdk_modules();
+    let dir = common::scratch_dir().expect("scratch directory");
+    let reference_dir = dir.join("ref");
+    std::fs::create_dir_all(&reference_dir).expect("reference output directory");
+    let source = dir.join("RewrittenNext.kt");
+    std::fs::write(&source, src).expect("write fixture");
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_dir.to_string_lossy().into_owned(),
+        source.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+    let krusty = common::compile_in_process(src, "RewrittenNext", &classpath, Some(jdk.as_path()))
+        .expect("krusty compiles the fixture");
+    for class in ["Host", "Host$opened$1"] {
+        let reference =
+            std::fs::read(reference_dir.join(format!("{class}.class"))).expect("kotlinc class");
+        let ours = krusty
+            .iter()
+            .find(|(name, _)| name == class)
+            .map(|(_, bytes)| bytes.clone())
+            .expect("krusty emits the class");
+        assert_eq!(ours, reference, "{class} differs from kotlinc's build");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
