@@ -32,4 +32,8 @@ pub(crate) struct IrLiftingEntry {
     /// name are distinct containers; a target whose ABI renames one of them names and numbers its
     /// lifted callables after that realization.
     pub container: Option<super::IrEnclosure>,
+    /// Source order used to assign `$lambda$N`. A Java SAM adapter is not a source callable, so it
+    /// takes an order between the value it adapts and the next source callable; `position` stays
+    /// the stable key the frontend recorded.
+    pub order: u32,
 }

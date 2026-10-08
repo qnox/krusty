@@ -2124,7 +2124,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   one sequence per class and outermost declaration NAME, in source order, over the lambdas and the
   name-clashing local functions: overloads share it, as do constructors and `init` blocks; a lambda
   spliced at an inline call site still takes its number, and so does each accessor of a local
-  delegated property. A suspend lambda becomes a class of its own and takes none. A local class or
+  delegated property. A Java SAM adapter is the next callable in that sequence, immediately after
+  the value it adapts: inside a lambda its segment is the bare number (`nested$lambda$0$1` for the
+  `Consumer` adapter around `{ it.length }`), and inside a function or local function it is
+  `lambda$N` (`top$lambda$1`, `inLocal$loc$lambda$1`). A later source lambda in the same scope
+  takes the number after that adapter. A suspend lambda becomes a class of its own and takes none. A local class or
   anonymous object starts sequences of its own, keyed by where the file writes it: the frontend
   reads a file one top-level declaration at a time and a declaration id is only unique within one,
   so keying by id made the objects of two top-level declarations share a sequence

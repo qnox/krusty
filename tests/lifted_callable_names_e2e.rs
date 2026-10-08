@@ -187,6 +187,71 @@ fn a_suspend_lambda_takes_no_number() {
 }
 
 #[test]
+/// A Java SAM adapter is the next callable in the enclosing sequence. Inside a lambda that is a
+/// bare number (`nested$lambda$0$1`); inside a function or local function it is `lambda$N`.
+#[test]
+fn sam_adapters_share_the_enclosing_lambda_sequence() {
+    let source = "fun top(xs: java.util.stream.Stream<String>) {\n\
+            \x20   xs.forEach { it.length }\n\
+            }\n\
+            fun nested(xs: java.util.stream.Stream<String>) {\n\
+            \x20   val outer = {\n\
+            \x20       xs.forEach { it.length }\n\
+            \x20   }\n\
+            \x20   outer()\n\
+            }\n\
+            fun inLocal(xs: java.util.stream.Stream<String>) {\n\
+            \x20   fun loc() {\n\
+            \x20       xs.forEach { it.length }\n\
+            \x20   }\n\
+            \x20   loc()\n\
+            }\n\
+            fun two(xs: java.util.stream.Stream<String>, ys: java.util.stream.Stream<String>) {\n\
+            \x20   val outer = {\n\
+            \x20       xs.forEach { it.length }\n\
+            \x20       ys.forEach { it.length }\n\
+            \x20   }\n\
+            \x20   outer()\n\
+            }\n\
+            fun adapt(xs: java.util.stream.Stream<String>, f: (String) -> Unit) {\n\
+            \x20   xs.forEach(f)\n\
+            }\n\
+            fun adaptLocal(xs: java.util.stream.Stream<String>) {\n\
+            \x20   val f: (String) -> Unit = { it.length }\n\
+            \x20   xs.forEach(f)\n\
+            }\n\
+            fun adaptInside(xs: java.util.stream.Stream<String>, f: (String) -> Unit) {\n\
+            \x20   val outer = { xs.forEach(f) }\n\
+            \x20   outer()\n\
+            }\n\
+            fun ref(xs: java.util.stream.Stream<String>) {\n\
+            \x20   xs.forEach(::show)\n\
+            }\n\
+            fun show(s: String) { s.length }\n\
+            class Box {\n\
+            \x20   fun read(xs: java.util.stream.Stream<String>) {\n\
+            \x20       xs.forEach { it.length }\n\
+            \x20   }\n\
+            }\n";
+    let classes = common::classes_against_kotlinc_module(&[("SamAdapterNames.kt", source)]);
+    for class in ["SamAdapterNamesKt", "Box"] {
+        let (reference, krusty) = classes
+            .method_declarations(class)
+            .unwrap_or_else(|| panic!("both compilers write {class}"));
+        let lambdas = |methods: Vec<String>| {
+            methods
+                .into_iter()
+                .filter(|method| method.contains("$lambda$"))
+                .collect::<Vec<_>>()
+        };
+        let mut reference = lambdas(reference);
+        let mut krusty = lambdas(krusty);
+        reference.sort();
+        krusty.sort();
+        assert_eq!(krusty, reference, "{class}: SAM adapter names");
+    }
+}
+
 fn lifted_callables_run() {
     common::expect_box_same_as_kotlinc(SOURCE, "LiftedNamesRun");
 }

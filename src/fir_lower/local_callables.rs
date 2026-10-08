@@ -1680,6 +1680,7 @@ pub(super) fn record_lifting_sites(
                 lifted: site.lifted,
                 scope,
                 container,
+                order: step.position,
             },
         );
     }

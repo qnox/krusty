@@ -134,6 +134,7 @@ impl BodyLowering<'_> {
             self.ir.fn_decl_lines.insert(implementation, line);
         }
         self.record_sam_adapter_origin(implementation);
+        self.place_sam_adapter_in_lifting_sequence(implementation);
         self.ir
             .set_method_visibility(implementation, crate::types::Visibility::Private);
         self.ir.lambda_own_params_from.insert(implementation, 1);
@@ -194,7 +195,9 @@ impl BodyLowering<'_> {
     }
 
     /// Name the adapter as the next `$lambda$N` of the enclosing callable. kotlinc counts it in
-    /// the same sequence as a source lambda written at the conversion.
+    /// the same sequence as a source lambda written at the conversion. The origin ordinal is the
+    /// temporary spelling; [`Self::place_sam_adapter_in_lifting_sequence`] is what the lifted-name
+    /// pass reads, so a nested adapter is `outer$lambda$0$1` rather than another `outer$lambda$N`.
     fn record_sam_adapter_origin(&mut self, function: crate::ir::FunId) {
         let implementation_name = self.body.debug_name().unwrap_or_default().to_owned();
         let lexical_owner = self.sam_adapter_lexical_owner();
@@ -235,6 +238,133 @@ impl BodyLowering<'_> {
         );
     }
 
+    /// Count this adapter in the enclosing callable's lifting sequence, immediately after every
+    /// callable that lowering has already placed there. Source order is depth-first, so that
+    /// frontier is the value the adapter wraps; later source callables keep their positions and
+    /// take the next number.
+    fn place_sam_adapter_in_lifting_sequence(&mut self, function: crate::ir::FunId) {
+        let Some((sequence, parent_path, declaration)) = self.sam_adapter_lifting_parent() else {
+            return;
+        };
+        let lowered = self
+            .ir
+            .lifted_functions
+            .iter()
+            .filter(|(_, (existing, _))| existing == &sequence)
+            .filter_map(|(_, (_, site))| site.path.last().map(|step| step.position))
+            .collect::<std::collections::HashSet<_>>();
+        let entries = self
+            .ir
+            .lifting_sequences
+            .entry(sequence.clone())
+            .or_default();
+        let frontier = entries
+            .iter()
+            .filter(|(position, _)| lowered.contains(position))
+            .map(|(_, entry)| entry.order)
+            .max();
+        let order = frontier.map_or(0, |order| order.saturating_add(1));
+        for entry in entries.values_mut() {
+            if entry.order >= order {
+                entry.order = entry.order.saturating_add(1);
+            }
+        }
+        let position = entries
+            .keys()
+            .next_back()
+            .map_or(0, |key| key.saturating_add(1));
+        let parent_position = parent_path.last().map(|step| step.position);
+        let container = parent_position
+            .and_then(|position| entries.get(&position))
+            .and_then(|entry| entry.container)
+            .or(self.enclosure);
+        let scope = parent_path
+            .iter()
+            .rev()
+            .find(|step| step.kind == crate::lifting_provenance::LiftingCallableKind::Lambda)
+            .map(|step| step.position);
+        entries.insert(
+            position,
+            crate::ir::IrLiftingEntry {
+                kind: crate::lifting_provenance::LiftingCallableKind::Lambda,
+                name: None,
+                lifted: true,
+                scope,
+                container,
+                order,
+            },
+        );
+        let mut path = parent_path;
+        path.push(crate::fir::FirLiftingStep {
+            kind: crate::lifting_provenance::LiftingCallableKind::Lambda,
+            name: None,
+            position,
+        });
+        self.ir.lifted_functions.insert(
+            function,
+            (
+                sequence.clone(),
+                crate::fir::FirLiftingSite {
+                    owner: sequence.owner.clone(),
+                    container: sequence.container.clone(),
+                    path: path.into(),
+                    lifted: true,
+                },
+            ),
+        );
+        if let Some(source_order) = self.index.source_order(declaration) {
+            self.ir
+                .lifting_sequence_source_order
+                .entry(sequence)
+                .or_insert(source_order);
+        }
+    }
+
+    /// The sequence the adapter shares, and the path of the callable whose body contains it.
+    fn sam_adapter_lifting_parent(
+        &self,
+    ) -> Option<(
+        crate::ir::IrLiftingSequence,
+        Vec<crate::fir::FirLiftingStep>,
+        crate::fir::DeclarationId,
+    )> {
+        let declaration = crate::fir::DeclarationId::from_raw(self.body.owner().raw());
+        let source = self.index.declaration_anchor(declaration)?.source;
+        if let Some(site) = self.body.lifting_site() {
+            return Some((
+                crate::ir::IrLiftingSequence {
+                    source,
+                    owner: site.owner.clone(),
+                    container: site.container.clone(),
+                },
+                site.path.to_vec(),
+                declaration,
+            ));
+        }
+        let mut nested = Vec::new();
+        self.body.collect_lifting_sites(&mut nested);
+        if let Some(site) = nested.first() {
+            return Some((
+                crate::ir::IrLiftingSequence {
+                    source,
+                    owner: site.owner.clone(),
+                    container: site.container.clone(),
+                },
+                Vec::new(),
+                declaration,
+            ));
+        }
+        Some((
+            crate::ir::IrLiftingSequence {
+                source,
+                owner: lifting_owner_label(self.index, self.body),
+                container: lifting_container_label(self.index, self.body, declaration),
+            },
+            Vec::new(),
+            declaration,
+        ))
+    }
+
     fn sam_adapter_lexical_owner(&self) -> Option<crate::types::TypeName> {
         let owner = self.body.lexical_class_owner()?;
         let class = self
@@ -244,5 +374,50 @@ impl BodyLowering<'_> {
             .or_else(|| self.ir.checked_enum_entry_classes.get(&owner))
             .copied()?;
         Some(self.ir.classes[class as usize].fq_name_id())
+    }
+}
+
+/// The frontend's lifting owner for a declaration that lifts nothing else: a file member, or
+/// `class:<name>` for a classifier member. A body that already lifts a callable keeps that
+/// callable's owner instead.
+fn lifting_owner_label(
+    index: &crate::fir::ResolvedModuleIndex,
+    body: &crate::fir::FirBody,
+) -> Box<str> {
+    match body
+        .lexical_class_owner()
+        .and_then(|owner| index.declaration_name(owner))
+    {
+        Some(name) => format!("class:{name}").into(),
+        None => "file".into(),
+    }
+}
+
+/// The outermost declaration name the lifting sequence is keyed by.
+fn lifting_container_label(
+    index: &crate::fir::ResolvedModuleIndex,
+    body: &crate::fir::FirBody,
+    declaration: crate::fir::DeclarationId,
+) -> Box<str> {
+    let anchor = index.declaration_anchor(declaration);
+    match anchor.map(|anchor| anchor.kind) {
+        Some(crate::fir::DeclarationKind::Constructor) => "<init>".into(),
+        Some(crate::fir::DeclarationKind::Accessor) => {
+            let name = anchor
+                .and_then(|anchor| anchor.owner)
+                .and_then(|property| index.declaration_name(property))
+                .unwrap_or("x");
+            let verb = if anchor.is_some_and(|anchor| anchor.sibling == 1) {
+                "set"
+            } else {
+                "get"
+            };
+            format!("<{verb}-{name}>").into()
+        }
+        _ => body
+            .debug_name()
+            .or_else(|| index.declaration_name(declaration))
+            .unwrap_or("")
+            .into(),
     }
 }
