@@ -186,7 +186,6 @@ fn a_suspend_lambda_takes_no_number() {
     }
 }
 
-#[test]
 /// A Java SAM adapter is the next callable in the enclosing sequence. Inside a lambda that is a
 /// bare number (`nested$lambda$0$1`); inside a function or local function it is `lambda$N`.
 #[test]
@@ -252,6 +251,7 @@ fn sam_adapters_share_the_enclosing_lambda_sequence() {
     }
 }
 
+#[test]
 fn lifted_callables_run() {
     common::expect_box_same_as_kotlinc(SOURCE, "LiftedNamesRun");
 }
