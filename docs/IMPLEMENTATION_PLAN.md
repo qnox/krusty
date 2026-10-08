@@ -5160,3 +5160,12 @@ types a holder parameter from the record alone; it neither matches accessor or f
 scans a body for holder operations. A missing entry fails lowering with
 `FirFileLoweringFailure::IncompleteFact`. Tests: `ir/semantic_validation/completeness_tests.rs`,
 `fir_lower/fact_completeness_tests.rs`.
+
+## An unread inlined parameter is popped  ✅
+
+An inlined parameter the body loads only for the null check the inliner removes is evaluated and
+popped, and it takes no local. A direct vararg element used once is folded back into the array, so
+it is written where the array is filled, after the arguments before it. `String.format` therefore
+pops `StringCompanionObject.INSTANCE` and stores `""` straight into the vararg array. A parameter
+the body reads, including a used extension receiver, is still stored or read from its caller local.
+Test: `tests/inline_format_arguments_e2e.rs`.
