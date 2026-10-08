@@ -55,12 +55,16 @@ impl Emitter<'_> {
         let EmittedBlock {
             discard_after_close,
             reserved_inline_stack,
+            close_lambda_before_locals,
+            emit_after_frame_close,
         } = if self.try_emit_duplicated_safe_call(&stmts, value, true, code) {
             self.terminal_statement_target = None;
             self.statement_line = enclosing_statement_line;
             EmittedBlock {
                 discard_after_close: None,
                 reserved_inline_stack: None,
+                close_lambda_before_locals: false,
+                emit_after_frame_close: None,
             }
         } else {
             self.block_depth -= 1;
@@ -70,13 +74,20 @@ impl Emitter<'_> {
                 terminal_target,
                 delays_stack_normalization,
                 inline_stack_height,
+                true,
                 code,
             )
         };
         self.mark_initializer_line(block, true, code);
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
+            if close_lambda_before_locals {
+                self.close_spliced_lambda_frame(block, true, code);
+            }
             self.close_scope_locals(code, marked_initializer);
+        }
+        if let Some(expression) = emit_after_frame_close {
+            self.emit_discarding(expression, code);
         }
         if normalizes_inline_stack
             && (!delays_stack_normalization || reserved_inline_stack.is_some())
@@ -85,7 +96,7 @@ impl Emitter<'_> {
         }
         // The lambda locals end at this `nop`. It returns to the inline body's line, and that
         // local-end label is what keeps it when the following instruction is the next debug point.
-        if !self.ir.callable_scopes.contains(&block) {
+        if !self.ir.callable_scopes.contains(&block) && !close_lambda_before_locals {
             self.close_spliced_lambda_frame(block, false, code);
         }
         if let Some(discarded) = discard_after_close {
@@ -296,7 +307,18 @@ impl Emitter<'_> {
                 .copied()
                 .filter(|line| *line != 0)
             {
-                code.mark_line(line);
+                // The brace belongs to the lambda supplied by the inner frame's caller. It is a
+                // raw source line there, but maps through the containing frame when that caller is
+                // itself copied into another inline call.
+                if self
+                    .ir
+                    .inline_copy_provenance(block)
+                    .is_some_and(|frames| frames.len() > 1)
+                {
+                    self.mark_expression_line(block, line, code);
+                } else {
+                    code.mark_line(line);
+                }
             } else if let Some(line) = self.ir.expr_source_lines.get(&block).copied() {
                 code.forget_line();
                 self.mark_expression_line(block, line, code);
@@ -328,12 +350,16 @@ impl Emitter<'_> {
         terminal_target: Option<Label>,
         normalize_at_lambda_frame: bool,
         inline_stack_height: i32,
+        close_statement_lambda: bool,
         code: &mut CodeBuilder,
     ) -> EmittedBlock {
         let enclosing_statement_line = self.statement_line;
         self.block_depth += 1;
         let mut dead = false;
         let last_statement = stmts.len().checked_sub(1);
+        let closes_lambda_before_locals = close_statement_lambda
+            && self.opens_spliced_lambda_frame(&stmts)
+            && value.is_some_and(|value| self.unit_after_lambda_effects(value).is_some());
         let opens_lambda_frame = value.is_some_and(|value| {
             matches!(self.ir.expr(value), IrExpr::GetValue(_))
                 && stmts.iter().any(|&statement| {
@@ -383,10 +409,23 @@ impl Emitter<'_> {
             code.set_stack(base.max(0) as u16);
         }
         let mut discard_after_frame_close = None;
+        let mut close_lambda_before_locals = false;
+        let mut emit_after_frame_close = None;
         if !dead {
             if let Some(value) = value {
                 self.mark_statement_line(value, code);
-                if opens_lambda_frame {
+                if closes_lambda_before_locals {
+                    let (effects, unit) = self
+                        .unit_after_lambda_effects(value)
+                        .expect("the Unit lambda-frame shape was identified above");
+                    for effect in effects {
+                        let base = code.stack_height();
+                        self.emit(effect, code);
+                        code.set_stack(base.max(0) as u16);
+                    }
+                    close_lambda_before_locals = true;
+                    emit_after_frame_close = Some(unit);
+                } else if opens_lambda_frame {
                     self.emit_value(value, code);
                     discard_after_frame_close = Some(value);
                 } else {
@@ -405,6 +444,8 @@ impl Emitter<'_> {
         EmittedBlock {
             discard_after_close: discard_after_frame_close,
             reserved_inline_stack,
+            close_lambda_before_locals,
+            emit_after_frame_close,
         }
     }
 
@@ -551,6 +592,12 @@ pub(super) struct SlotScope {
 pub(super) struct EmittedBlock {
     pub(super) discard_after_close: Option<u32>,
     pub(super) reserved_inline_stack: Option<Vec<TempSlot>>,
+    /// A statement-position spliced lambda whose `Unit` value follows its effects closes on the
+    /// brace while its frame locals are still live, before the surrounding lexical scope ends.
+    pub(super) close_lambda_before_locals: bool,
+    /// The trailing `Unit` is emitted after the lambda's marker/local range closes. A retained
+    /// mapped inline-return line becomes its own `nop`; an ordinary discarded `Unit` emits none.
+    pub(super) emit_after_frame_close: Option<u32>,
 }
 
 /// A source local whose debug range is open: declared in the block at `depth`, live in `slot`

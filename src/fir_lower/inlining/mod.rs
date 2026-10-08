@@ -954,7 +954,7 @@ impl BodyLowering<'_> {
             nested: false,
         }] = returns[..]
         {
-            if produce_sole_tail_return(self.ir, cloned_root, tail, value, close_line) {
+            if produce_sole_tail_return(self.ir, cloned_root, tail, value, result_ty, close_line) {
                 let mut statements = operand_declarations;
                 statements.push(cloned_root);
                 let value = statements.pop();
@@ -1286,8 +1286,25 @@ impl BodyLowering<'_> {
                 },
             ));
         }
-
         let (body, _) = crate::ir::clone_expression_dag(self.ir, inline_body);
+        // An empty spliced body has no instruction after its parameter/frame locals begin. Keep
+        // the invocation's semantic source point on its terminal Unit so a backend can close the
+        // locals first and then anchor the surrounding inline body. Non-empty bodies already
+        // restore that line through their emitted effect and must not gain a duplicate boundary.
+        if let Some(unit) = unit_only_body_result(self.ir, body) {
+            if let Some(line) = self.ir.expr_source_lines.get(&invocation).copied() {
+                // With no body instruction, argument evaluation is the invocation's first
+                // physical instruction. Put that source point on the generated bindings; an
+                // enclosing inline copy maps it through the caller frame retained below.
+                for &declaration in &declarations {
+                    self.ir.expr_lines.insert(declaration, line);
+                    self.ir.copy_inline_copy_mark(invocation, declaration);
+                }
+                self.ir.copy_inline_copy_mark(invocation, unit);
+                self.ir.expr_source_lines.insert(unit, line);
+                self.ir.retain_inline_unit_line(unit);
+            }
+        }
         if indexed_parameters {
             if let Some(line) = self.ir.expr_source_lines.get(&func).copied() {
                 // The adapter was built as its own method and has no source position. The splice
@@ -1980,6 +1997,30 @@ fn specialize_checked_operation(
     }
 }
 
+/// The terminal Unit of a body made only of empty block scaffolding and Unit values. Such a body
+/// emits no operation of its own, unlike an ordinary Unit body whose effects restore the caller's
+/// line naturally.
+fn unit_only_body_result(ir: &crate::ir::IrFile, root: ExprId) -> Option<ExprId> {
+    fn is_scaffolding(ir: &crate::ir::IrFile, expression: ExprId) -> bool {
+        match ir.expr(expression) {
+            IrExpr::UnitInstance => true,
+            IrExpr::Block { stmts, value } => {
+                stmts.iter().all(|&statement| is_scaffolding(ir, statement))
+                    && value.is_none_or(|value| is_scaffolding(ir, value))
+            }
+            _ => false,
+        }
+    }
+
+    let IrExpr::Block {
+        value: Some(unit), ..
+    } = ir.expr(root)
+    else {
+        return None;
+    };
+    (matches!(ir.expr(*unit), IrExpr::UnitInstance) && is_scaffolding(ir, root)).then_some(*unit)
+}
+
 /// Rewrite `root` to PRODUCE the value of its sole rewritten return, or leave it exactly as it was.
 ///
 /// The shape is PROVED before anything changes, and proving it cannot change anything: the chain of
@@ -1993,12 +2034,35 @@ fn produce_sole_tail_return(
     root: ExprId,
     tail: ExprId,
     value: Option<ExprId>,
+    result_ty: Ty,
     close_line: Option<u32>,
 ) -> bool {
     let Some(chain) = tail_statement_block_chain(ir, root, tail) else {
         return false;
     };
-    let produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
+    let mut produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
+    if result_ty == Ty::Unit && !matches!(ir.expr(produced), IrExpr::UnitInstance) {
+        let effect = produced;
+        let unit = ir.add_expr(IrExpr::UnitInstance);
+        ir.copy_inline_copy_mark(tail, unit);
+        if let Some(line) = ir
+            .expr_source_lines
+            .get(&tail)
+            .copied()
+            .or_else(|| ir.expr_source_lines.get(&effect).copied())
+            .or_else(|| ir.fallthrough_return_line(tail))
+            .or_else(|| ir.expr_end_lines.get(&tail).copied())
+            .or_else(|| ir.expr_end_lines.get(&root).copied())
+            .or(close_line)
+        {
+            ir.expr_source_lines.insert(unit, line);
+        }
+        ir.retain_inline_unit_line(unit);
+        produced = ir.add_expr(IrExpr::Block {
+            stmts: vec![effect],
+            value: Some(unit),
+        });
+    }
     if matches!(ir.expr(produced), IrExpr::UnitInstance) {
         ir.copy_inline_copy_mark(tail, produced);
         if !ir.expr_source_lines.contains_key(&produced) {
@@ -2167,6 +2231,7 @@ mod value_rebasing_tests {
 mod tail_promotion_tests {
     use super::{produce_sole_tail_return, tail_statement_block_chain};
     use crate::ir::{ExprId, IrConst, IrExpr, IrFile};
+    use crate::types::Ty;
 
     fn statement(ir: &mut IrFile, value: i32) -> ExprId {
         ir.add_expr(IrExpr::Const(IrConst::Int(value)))
@@ -2208,6 +2273,7 @@ mod tail_promotion_tests {
             block,
             tail,
             Some(returned),
+            Ty::Int,
             None,
         ));
         assert_block(&ir, block, &[first], Some(tail));
@@ -2231,6 +2297,7 @@ mod tail_promotion_tests {
             outer,
             tail,
             Some(returned),
+            Ty::Int,
             None,
         ));
         assert_block(&ir, outer, &[], Some(inner));
@@ -2255,6 +2322,7 @@ mod tail_promotion_tests {
             block,
             tail,
             Some(returned),
+            Ty::Int,
             None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
@@ -2272,7 +2340,14 @@ mod tail_promotion_tests {
         let block = statement_block(&mut ir, vec![tail, after]);
         let before = arena(&ir);
 
-        assert!(!produce_sole_tail_return(&mut ir, block, tail, None, None,));
+        assert!(!produce_sole_tail_return(
+            &mut ir,
+            block,
+            tail,
+            None,
+            Ty::Unit,
+            None,
+        ));
         assert_eq!(
             arena(&ir),
             before,
@@ -2297,6 +2372,7 @@ mod tail_promotion_tests {
             outer,
             tail,
             Some(returned),
+            Ty::Int,
             None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
@@ -2321,6 +2397,7 @@ mod tail_promotion_tests {
             block,
             tail,
             Some(returned),
+            Ty::Int,
             None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");

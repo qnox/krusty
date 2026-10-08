@@ -17,7 +17,7 @@ use crate::types::{Ty, TypeName};
 /// Source identity for code copied from a same-module inline declaration. Common IR retains the
 /// exact callable identity, semantic owner, the callee's source file, and the call line; a target
 /// formats the physical source-map path and line range.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct IrInlineCopyProvenance {
     /// Exact common-IR declaration whose body was copied. A backend uses this identity to obtain
     /// an already-resolved physical realization; it must not reconstruct one from source names.
@@ -32,7 +32,10 @@ pub(crate) struct IrInlineCopyProvenance {
 pub(super) struct InlineExpansions {
     copies: HashSet<ExprId>,
     unread_operands: HashSet<ExprId>,
-    provenance: HashMap<ExprId, IrInlineCopyProvenance>,
+    /// Innermost-to-outermost source frames. A same-module body can already contain an inline
+    /// expansion when it is copied into another call; retaining only its first frame loses the
+    /// containing call and prevents a backend from mapping that nested source boundary.
+    provenance: HashMap<ExprId, Vec<IrInlineCopyProvenance>>,
     /// The semantic type of a materialized inline declaration before call-site specialization.
     /// Operands, unnamed generic temporaries, and result frames keep this provenance while their
     /// expressions carry the specialized semantic type. A backend may use the declaration type
@@ -49,9 +52,9 @@ impl IrFile {
         self.inline_expansions.copies.insert(copy);
     }
 
-    /// Record the declaration owner and source file whose body `copy` came from. An
-    /// already-provenanced nested inline copy keeps its inner declaration rather than being
-    /// relabelled as the outer.
+    /// Record the declaration identity, owner, and source file whose body `copy` came from. An
+    /// already-provenanced nested copy keeps its inner frames and appends this containing
+    /// expansion.
     pub(crate) fn record_inline_copy_owner(
         &mut self,
         copy: ExprId,
@@ -63,7 +66,8 @@ impl IrFile {
         self.inline_expansions
             .provenance
             .entry(copy)
-            .or_insert(IrInlineCopyProvenance {
+            .or_default()
+            .push(IrInlineCopyProvenance {
                 function,
                 owner,
                 source,
@@ -76,7 +80,12 @@ impl IrFile {
         if line == 0 {
             return;
         }
-        if let Some(provenance) = self.inline_expansions.provenance.get_mut(&copy) {
+        if let Some(provenance) = self
+            .inline_expansions
+            .provenance
+            .get_mut(&copy)
+            .and_then(|frames| frames.last_mut())
+        {
             provenance.call_line.get_or_insert(line);
         }
     }
@@ -84,8 +93,11 @@ impl IrFile {
     pub(crate) fn inline_copy_provenance(
         &self,
         expression: ExprId,
-    ) -> Option<IrInlineCopyProvenance> {
-        self.inline_expansions.provenance.get(&expression).copied()
+    ) -> Option<&[IrInlineCopyProvenance]> {
+        self.inline_expansions
+            .provenance
+            .get(&expression)
+            .map(Vec::as_slice)
     }
 
     /// `expression` now holds code the call site supplied rather than the inline body's.
@@ -103,7 +115,7 @@ impl IrFile {
         if self.is_inline_copy(source) {
             self.mark_inline_copy(target);
         }
-        if let Some(provenance) = self.inline_copy_provenance(source) {
+        if let Some(provenance) = self.inline_copy_provenance(source).map(<[_]>::to_vec) {
             self.inline_expansions.provenance.insert(target, provenance);
         }
         if self.is_unread_inline_operand(source) {
@@ -177,8 +189,10 @@ impl IrFile {
         names: &std::collections::HashMap<TypeName, TypeName>,
     ) {
         for provenance in self.inline_expansions.provenance.values_mut() {
-            if let Some(owner) = &mut provenance.owner {
-                *owner = names.get(owner).copied().unwrap_or(*owner);
+            for frame in provenance {
+                if let Some(owner) = &mut frame.owner {
+                    *owner = names.get(owner).copied().unwrap_or(*owner);
+                }
             }
         }
     }

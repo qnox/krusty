@@ -1049,6 +1049,13 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
             stmts,
             value: Some(value),
         } if matches!(ir.expr(*value), crate::ir::IrExpr::UnitInstance) => {
+            // A same-file inline expansion's terminal Unit can be semantically discarded while
+            // still owning the inlined function frame's closing source point. Keep its block
+            // intact: flattening it would also flatten its lexical scope and extend the inlined
+            // locals through the caller's return.
+            if ir.retains_inline_unit_line(*value) {
+                return;
+            }
             let effects = stmts.clone();
             if effects.is_empty() {
                 roots.pop();

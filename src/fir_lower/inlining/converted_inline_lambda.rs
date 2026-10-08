@@ -228,7 +228,7 @@ fn copied_lambda_slots(
 }
 
 /// An unnamed temporary initialized by reading another carrier slot is the same lambda.
-/// Nested `inline` calls copy a capture once per level (`use { use { shuffle(paths) } }`).
+/// Nested `inline` calls copy a capture once per level.
 fn include_forwarded_lambda_slots(
     ir: &crate::ir::IrFile,
     copies: &[(ExprId, ExprId)],
@@ -654,18 +654,24 @@ mod tests {
     }
 
     #[test]
-    fn a_lambda_invoked_inside_nested_inline_uses_is_spliced() {
+    fn a_lambda_invoked_inside_nested_inline_forwards_is_spliced() {
         let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
-            "import java.io.OutputStream\n\
-             import java.util.zip.ZipOutputStream\n\
-             inline fun zip(out: OutputStream, shuffle: (MutableList<String>) -> Unit) {\n\
-                 out.use { outputStream ->\n\
-                     ZipOutputStream(outputStream).use {\n\
-                         shuffle(mutableListOf())\n\
-                     }\n\
-                 }\n\
-             }\n\
-             fun go(out: OutputStream) = zip(out) {}\n",
+            r#"class Carrier
+             class Envelope(val carrier: Carrier)
+             class Paths
+
+             inline fun <T, R> forwardInline(value: T, block: (T) -> R): R = block(value)
+
+             inline fun zip(out: Carrier, shuffle: (Paths) -> Unit) {
+                 forwardInline(out) { carrier ->
+                     forwardInline(Envelope(carrier)) {
+                         shuffle(Paths())
+                     }
+                 }
+             }
+
+             fun go(out: Carrier) = zip(out) {}
+             "#,
             "NestedUseLambda",
         );
         let go = function_body(&ir, "go");
@@ -674,7 +680,7 @@ mod tests {
                 expression,
                 IrExpr::Lambda { .. }
             )),
-            "the lambda passed through nested uses must be spliced"
+            "the lambda passed through nested inline forwards must be spliced"
         );
         assert!(
             !subtree_contains(&ir, go, &|expression| {
