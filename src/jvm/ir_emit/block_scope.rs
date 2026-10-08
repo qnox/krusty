@@ -57,7 +57,7 @@ impl Emitter<'_> {
             reserved_inline_stack,
             close_lambda_before_locals,
             emit_after_frame_close,
-        } = if self.try_emit_duplicated_safe_call(&stmts, value, true, code) {
+        } = if self.try_emit_duplicated_safe_call(block, &stmts, value, true, code) {
             self.terminal_statement_target = None;
             self.statement_line = enclosing_statement_line;
             EmittedBlock {
@@ -139,7 +139,7 @@ impl Emitter<'_> {
         self.block_depth += 1;
         let mut dead = false;
         let mut reserved_inline_stack = None;
-        if !self.try_emit_duplicated_safe_call(stmts, value, false, code) {
+        if !self.try_emit_duplicated_safe_call(block, stmts, value, false, code) {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
             for &statement in stmts {
                 // The lambda-frame line owns any caller-stack stores that FixStack inserts at the
