@@ -142,6 +142,7 @@ impl Emitter<'_> {
     /// receiver, or any other use keeps the temporary the lowerer introduced.
     pub(super) fn try_emit_duplicated_safe_call(
         &mut self,
+        block: u32,
         stmts: &[u32],
         value: Option<u32>,
         discarded: bool,
@@ -208,10 +209,11 @@ impl Emitter<'_> {
             code.goto(end);
         }
         self.bind(null_path, code);
-        // An inlined selector ends under the dependency's source lines. The safe call's null arm
-        // returns to the caller source at `pop`; marking only the generated return would put the
-        // entry after the null arm instead of on it.
-        self.mark_statement_line(plan.guard, code);
+        // An inlined selector forgets the line in effect (`markLineNumberAfterInlineIfNeeded`).
+        // kotlinc's next mark is this null path, so the caller's line starts at the `pop` and the
+        // shared `areturn` does not gain a second entry. The temporary and the guard are
+        // generated and carry no statement line; the block does.
+        mark_safe_call_line(self, block, code);
         code.pop();
         if !discarded {
             self.emit_value(plan.null_result, code);
@@ -240,6 +242,24 @@ pub(super) fn is_safe_call_result(ir: &crate::ir::IrFile, mut expression: u32) -
             _ => return false,
         }
     }
+}
+
+/// The safe call's own source line, mapped the way every other caller expression is.
+///
+/// The duplicated temporary and its null guard are generated and have no statement line. The
+/// block the lowerer built for the safe call does.
+fn mark_safe_call_line(emitter: &mut Emitter<'_>, block: u32, code: &mut CodeBuilder) {
+    let Some(line) = emitter
+        .ir
+        .expr_source_lines
+        .get(&block)
+        .copied()
+        .or_else(|| emitter.ir.expr_lines.get(&block).copied())
+        .filter(|line| *line != 0)
+    else {
+        return;
+    };
+    emitter.mark_expression_line(block, line, code);
 }
 
 /// The physical slot read by `expression` in the body currently owned by `emitter`.
