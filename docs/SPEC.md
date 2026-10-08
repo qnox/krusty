@@ -965,6 +965,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (functions, properties, enum-entry body, constructor property parameter, multiple inheritance
   taking the most permissive visibility),
   `method_access_flags_e2e::java_package_private_override_inherits_protected_like_kotlinc`,
+  `method_access_flags_e2e::java_collection_override_inherits_protected_like_kotlinc`
+  (a protected Java collection parameter is the mutable lower bound of `(Mutable)X!`, so an
+  override written with either face is that member),
   `method_access_flags_e2e::local_override_keeps_overridden_visibility_like_kotlinc`,
   `method_access_flags_e2e::internal_override_stays_jvm_public_like_kotlinc` (JVM flags only —
   kotlinc mangles an internal member's JVM name to `f$main` and records it in the `@Metadata`
@@ -3106,8 +3109,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   at the expected constructor) now ask the declaration provider for the resolved upper face of a
   platform-flexible expectation. The JVM provider answers from its id-backed Java/Kotlin class map;
   common inference contains no collection-name table. A Kotlin-declared `MutableMap<String, Any>`
-  carries no platform mark and still rejects `Map<K, V>`, as kotlinc rejects it. Tests:
-  `tests/java_flexible_collection_e2e.rs`.
+  carries no platform mark and still rejects `Map<K, V>`, as kotlinc rejects it. A Java
+  collection parameter is the same mutable lower bound, not the read-only spelling of the JVM
+  interface. `removeEldestEntry(MutableMap.MutableEntry<String, String>?)` and
+  `removeEldestEntry(Map.Entry<String, String>?)` are therefore both the protected Java method,
+  and an override with no visibility modifier inherits `protected` on the JVM access flags and in
+  `@Metadata`. The same holds for a generic `List<T>` parameter overridden as `MutableList<T>`
+  or `List<T>`, and for a raw `Map.Entry` parameter overridden as `MutableMap.MutableEntry`.
+  Tests: `tests/java_flexible_collection_e2e.rs`,
+  `method_access_flags_e2e::java_collection_override_inherits_protected_like_kotlinc`.
 - **A lambda whose input is still an open callee formal is a postponed probe.** A generic call
   whose lambda parameter's INPUT is one of the callee's own formals (`fun <T : Any> matching(f:
   (T) -> Boolean): T`, mockk's `match { it.contains(x) }`) can only shape that lambda once `T` is

@@ -1427,7 +1427,7 @@ impl JvmLibraries {
                 if uses_java_type_semantics {
                     for (index, parameter) in params.iter_mut().enumerate() {
                         *parameter = java_type_nullability(
-                            *parameter,
+                            java_collection_return_lower_bound(*parameter),
                             m.parameter_nullability.get(index).copied().flatten(),
                         );
                     }
