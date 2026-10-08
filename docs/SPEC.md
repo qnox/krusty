@@ -15989,8 +15989,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   expansion stores `kotlin.Unit.INSTANCE` before `finally` and does not carry that slot across
   the transfer; a function declared to return `Unit` stays void. That lambda's `}` is a
   `nop` on the call-site line while its locals are still open, and `Unit.INSTANCE` follows them.
-  A value-returning splice is the other closing `nop`: the lambda locals end first, and the `nop`
-  returns to the inline body's line. A same-file expansion still
+  A value-returning splice whose value is not a local read is the other closing `nop`: the lambda
+  locals end first, and the `nop` returns to the inline body's line. A same-file expansion still
   writes `SourceDebugExtension` (one file, a second line range, and the debug stratum at the
   call). Catch, finally, and declaration marks of the copy go through that map. After inlining,
   the method's exception table is sorted by handler pc, then start pc; the standalone `use`
@@ -16004,3 +16004,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/inline_use_close_e2e.rs`, `tests/same_module_inline_frame_markers_e2e.rs`,
   `tests/inline_constructor_reference_e2e.rs`,
   `jvm::source_map::tests::a_same_file_inline_still_writes_a_map`.
+
+- **An inlined `return this` closes the spliced lambda before the load.** `also` and `apply`, and
+  any spliced lambda whose value is a plain local read, leave that read as the block's value.
+  kotlinc marks the lambda's `}` with a `nop` while the lambda locals are still open, ends those
+  locals, and — when the read is used — loads it on the call's line. A one-line brace shares the
+  body's line, so that `nop` is redundant and the trivial sweep drops it; a brace on its own line
+  stays, and the locals include it. A discarded statement-position read keeps a second `nop` on
+  the call's line after the locals end; the load and its `pop` are removed together. A computed
+  value still ends the locals first and returns to the inline body's line with a `nop` after the
+  value (`jvm/ir_emit/block_scope.rs`). Test: `tests/also_apply_result_line_e2e.rs`.
