@@ -208,12 +208,37 @@ impl Emitter<'_> {
             code.goto(end);
         }
         self.bind(null_path, code);
+        // An inlined selector ends under the dependency's source lines. The safe call's null arm
+        // returns to the caller source at `pop`; marking only the generated return would put the
+        // entry after the null arm instead of on it.
+        self.mark_statement_line(plan.guard, code);
         code.pop();
         if !discarded {
             self.emit_value(plan.null_result, code);
         }
         self.bind(end, code);
         true
+    }
+}
+
+/// Whether `expression` is the result block of a source safe call.
+///
+/// The generated null guard is the stable semantic marker. Its receiver may be statically non-null
+/// (an unnecessary safe call), in which case JVM cleanup removes the guard but kotlinc still does
+/// not add an implicit-return line after an inlined selector.
+pub(super) fn is_safe_call_result(ir: &crate::ir::IrFile, mut expression: u32) -> bool {
+    loop {
+        match ir.expr(expression) {
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => expression = *arg,
+            IrExpr::Block {
+                value: Some(value), ..
+            } => return ir.null_guards.contains(value),
+            _ => return false,
+        }
     }
 }
 

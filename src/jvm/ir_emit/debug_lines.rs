@@ -5,7 +5,7 @@
 //! are represented.
 
 use crate::fir::SyntheticOriginKind;
-use crate::ir::{ExprId, IrFile, IrNodeOrigin};
+use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin};
 use crate::jvm::classfile::CodeBuilder;
 
 use super::Emitter;
@@ -104,9 +104,11 @@ impl Emitter<'_> {
     /// while this JVM boundary maps it through the enclosing class's source map like every other
     /// copied expression.
     pub(super) fn mark_return(&mut self, returned: ExprId, code: &mut CodeBuilder) {
-        if let Some(line) = self
-            .ir
-            .implicit_return_end_line(returned)
+        let implicit_end = self.ir.implicit_return_end_line(returned).filter(|_| {
+            !matches!(self.ir.expr(returned), IrExpr::Return(Some(value))
+                if super::safe_calls::is_safe_call_result(self.ir, *value))
+        });
+        if let Some(line) = implicit_end
             .or_else(|| self.ir.expr_source_lines.get(&returned).copied())
             .or_else(|| self.ir.expr_lines.get(&returned).copied())
         {
