@@ -432,12 +432,12 @@ wait, `box` JVM round-trip) to stderr — run the e2e binary with `--nocapture` 
 
 `just coverage` prints a wall-clock line for every phase of that job, in whole seconds:
 `coverage: phase start <name>` when the phase begins and `coverage: phase <name> <seconds>s` when it
-finishes. The phases are toolchain provision, instrumentation, the CLI and language-server build
-(`build-bins`), the compiler test-binary build, the language-server test-binary build, each test
-binary (including `test-e2e`), and each coverage report. Cargo's own compile
-progress stays on stderr for those builds. `build-bins` is one cargo invocation, so krusty is
-compiled once for both binaries, and nightly rustc is asked to run one frontend job per core
-(`-Z threads`). The run ends with `coverage: phases` repeating every
+finishes. The phases are toolchain provision, instrumentation, one compiler build
+(`build-compiler`) that emits the CLI, the language server, and their test binaries, each non-e2e
+test binary, the e2e binary, and each coverage report. Cargo's own compile progress stays on stderr
+for that build. The binaries and test harnesses are one cargo invocation, so the non-test library
+is compiled once and the cfg(test) harness overlaps the binaries. Nightly rustc runs one frontend
+job per core (`-Z threads`). The run ends with `coverage: phases` repeating every
 finished phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
 `conformance-run: phase box-shard-N-of-M <seconds>s`. The shared binary job prints
