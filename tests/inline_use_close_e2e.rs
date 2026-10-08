@@ -8,14 +8,24 @@
 
 use super::common;
 
-const DISCARDED: &str = r#"import java.io.BufferedReader
-import java.io.StringReader
+const LIBRARY: &str = r#"package neutral
 
-class Holder {
-    fun bufferedReader(): BufferedReader = BufferedReader(StringReader(""))
+interface Gate { fun close() }
+
+class Reader(private val result: Int) : Gate {
+    fun read(): Int = result
+    override fun close() {}
 }
 
-inline fun <T : AutoCloseable?, R> T.consumeAndClose(block: (T) -> R): R {
+class Holder(private val result: Int) {
+    fun reader(): Reader = Reader(result)
+}
+"#;
+
+const DISCARDED: &str = r#"import neutral.Gate
+import neutral.Holder
+
+inline fun <T : Gate?, R> T.consumeAndClose(block: (T) -> R): R {
     var closed = false
     try {
         return block(this)
@@ -35,26 +45,22 @@ inline fun <T : AutoCloseable?, R> T.consumeAndClose(block: (T) -> R): R {
 
 fun load(holder: Holder): Int {
     var n = 0
-    holder.bufferedReader().consumeAndClose { r ->
+    holder.reader().consumeAndClose { r ->
         n += r.read()
     }
     return n
 }
 
 fun box(): String {
-    val n = load(Holder())
+    val n = load(Holder(-1))
     return if (n == -1) "OK" else "F:$n"
 }
 "#;
 
-const USED: &str = r#"import java.io.BufferedReader
-import java.io.StringReader
+const USED: &str = r#"import neutral.Gate
+import neutral.Holder
 
-class Holder {
-    fun bufferedReader(): BufferedReader = BufferedReader(StringReader("ab"))
-}
-
-inline fun <T : AutoCloseable?, R> T.consumeAndClose(block: (T) -> R): R {
+inline fun <T : Gate?, R> T.consumeAndClose(block: (T) -> R): R {
     var closed = false
     try {
         return block(this)
@@ -73,22 +79,36 @@ inline fun <T : AutoCloseable?, R> T.consumeAndClose(block: (T) -> R): R {
 }
 
 fun load(holder: Holder): Int {
-    val n = holder.bufferedReader().consumeAndClose { r -> r.read() }
+    val n = holder.reader().consumeAndClose { r -> r.read() }
     return n
 }
 
 fun box(): String {
-    val n = load(Holder())
-    return if (n == 'a'.code) "OK" else "F:$n"
+    val n = load(Holder(97))
+    return if (n == 97) "OK" else "F:$n"
 }
 "#;
 
 #[test]
 fn discarded_generic_use_is_byte_identical_to_kotlinc() {
-    common::assert_classes_identical_to_kotlinc_jdk("UseClose", DISCARDED, &["UseCloseKt"]);
+    let library = common::kotlinc_lib_out(&[("NeutralGate.kt", LIBRARY)])
+        .expect("reference kotlinc builds the neutral generic-bound dependency");
+    common::assert_classes_identical_to_kotlinc_against_jdk(
+        "UseClose",
+        DISCARDED,
+        &["UseCloseKt"],
+        &[library],
+    );
 }
 
 #[test]
 fn used_generic_use_is_byte_identical_to_kotlinc() {
-    common::assert_classes_identical_to_kotlinc_jdk("UseClose", USED, &["UseCloseKt"]);
+    let library = common::kotlinc_lib_out(&[("NeutralGate.kt", LIBRARY)])
+        .expect("reference kotlinc builds the neutral generic-bound dependency");
+    common::assert_classes_identical_to_kotlinc_against_jdk(
+        "UseClose",
+        USED,
+        &["UseCloseKt"],
+        &[library],
+    );
 }
