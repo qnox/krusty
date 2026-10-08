@@ -4432,7 +4432,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   debug ranges, but never relocates or synthesizes output frames: the class writer computes them once
   from the final instruction graph. Ordinary internal branches preserve any operand prefix already
   held by the caller. Exception handlers (which clear it), coroutine suspension boundaries, and
-  transfers outside the splice require earlier operands to be spilled. Relative branches are
+  transfers outside the splice require earlier operands to be spilled. Creating a closure does not:
+  its template, including an inline `use` spliced inside it, runs in the closure method, so the
+  `invokedynamic` leaves the receiver on the stack under the captures (`aload` receiver, capture
+  loads, `invokedynamic`, `invokestatic`; `tests/closure_operand_spill_e2e.rs`). An inline call
+  that splices that template into the current method still spills, because the handler is then in
+  this method. Relative branches are
   position-independent; only switch padding and absolute
   handler/external-transfer offsets cause a second layout at the real call-site offset. Proven
   end-to-end by `tests/inline_splice_e2e.rs` and the inline-HOF cases in `tests/feature_box_e2e.rs`.
