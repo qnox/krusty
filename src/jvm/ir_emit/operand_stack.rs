@@ -77,7 +77,7 @@ impl Emitter<'_> {
             IrExpr::Lambda {
                 inline_body: Some(body),
                 ..
-            } => self.must_spill_across(body),
+            } => self.must_spill_across(*body),
             _ => false,
         }
     }
