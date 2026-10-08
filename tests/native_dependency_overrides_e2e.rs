@@ -14,7 +14,7 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 /// A dependency METHOD overridden, reached through the class that declares it.
 #[test]
@@ -66,14 +66,37 @@ fn a_class_overriding_a_dependency_property_reads_it_through_its_own_type() {
     expect_native_box(source, "DependencyPropertyOverride", "OK");
 }
 
-/// A member asked of a type this file implements ITSELF declines, whatever the member.
+/// A call through the DEPENDENCY type now WORKS, where it once declined.
+///
+/// This test read the other way when it was written, and the header above still describes why: the
+/// answer for such a member is the runtime's, and the runtime answers only for the objects it makes.
+/// What changed is that a ZERO-ARGUMENT member no longer needs the runtime to answer it — the file
+/// knows every class of its own that could stand behind the type, so the call site tests the
+/// receiver and dispatches on the implementor's own slot. See
+/// `tests/native_implemented_dependency_dispatch_e2e.rs` for the mechanism and its limits.
+///
+/// A member with ARGUMENTS still declines, which the last test in this file pins.
+#[test]
+fn a_call_through_the_dependency_type_dispatches_on_the_receiver() {
+    let source = "class Pointed : Iterator<String> {\n\
+         \x20   var left = 1\n\
+         \x20   override fun hasNext(): Boolean = left > 0\n\
+         \x20   override fun next(): String { left--; return \"OK\" }\n\
+         }\n\
+         fun walk(it: Iterator<String>): String = if (it.hasNext()) it.next() else \"fail\"\n\
+         fun box(): String = walk(Pointed())\n";
+    expect_box_ok_with_stdlib(source, "DependencyTypedCall");
+    expect_native_box(source, "DependencyTypedCall", "OK");
+}
+
+/// A member asked through a dependency type dispatches to this file's exact overrides.
 ///
 /// `class Chars : CharsBase(s), CharSequence` and then `value: CharSequence` — the receiver may be
-/// a `Chars` or a string, and the table that answers `CharSequence.get` answers only for a string.
+/// a `Chars` or a string. The selected `CharSequence` declarations are not enough to choose the
+/// implementation, so native dispatch follows the recorded override identities on `Chars`.
 #[test]
-fn a_member_of_a_type_this_file_implements_declines() {
-    expect_native_decline(
-        "open class CharsBase(protected val s: String) {\n\
+fn a_member_of_a_type_this_file_implements_dispatches_to_its_overrides() {
+    let source = "open class CharsBase(protected val s: String) {\n\
          \x20   val length: Int get() = s.length\n\
          \x20   operator fun get(index: Int): Char = s[index]\n\
          \x20   fun subSequence(startIndex: Int, endIndex: Int): CharSequence =\n\
@@ -83,8 +106,7 @@ fn a_member_of_a_type_this_file_implements_declines() {
          fun box(): String {\n\
          \x20   val value: CharSequence = Chars(\"OK\")\n\
          \x20   return \"\" + value[0] + value[1]\n\
-         }\n",
-        "ImplementedDependencyMember",
-        "this file implements itself",
-    );
+         }\n";
+    expect_box_ok_with_stdlib(source, "ImplementedDependencyMember");
+    expect_native_box(source, "ImplementedDependencyMember", "OK");
 }

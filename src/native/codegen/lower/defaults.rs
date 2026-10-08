@@ -352,7 +352,11 @@ impl<'a> FileLowering<'a> {
     /// The physical parameter frame of one of a class's constructors — the primary's, or a
     /// SECONDARY's, which leads with the compiler-supplied prefix every constructor of the class
     /// shares before its own declared parameters.
-    fn constructor_frame_of(&self, class: ClassId, secondary: Option<usize>) -> Option<Vec<Ty>> {
+    pub(super) fn constructor_frame_of(
+        &self,
+        class: ClassId,
+        secondary: Option<usize>,
+    ) -> Option<Vec<Ty>> {
         let Some(index) = secondary else {
             return Some(self.constructor_frame(class));
         };
@@ -533,7 +537,9 @@ impl<'a> FileLowering<'a> {
                     }
                     let mut omitted = entry.default_parameters.clone();
                     omitted.sort_unstable();
-                    Some((class.fq_name_id(), None, omitted))
+                    let secondary = (!entry.constructor.primary())
+                        .then_some(entry.constructor.ordinal as usize - 1);
+                    Some((class.fq_name_id(), secondary, omitted))
                 })
             }))
             .collect();

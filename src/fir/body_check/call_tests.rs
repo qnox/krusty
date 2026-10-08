@@ -3938,23 +3938,6 @@ fn ordinary_map_literal_keeps_the_selected_external_call_without_splice_plan() {
 }
 
 #[test]
-fn inline_function_value_keeps_the_selected_external_call_without_splice_plan() {
-    let (body, _) = checked_function_body_with_platform(
-        "fun read(block: (String) -> Int): Int = \"value\".let(block)\n",
-        "read",
-        jvm_stdlib_semantics(),
-    );
-    let root = body.expr(root_expression(&body)).expect("root call");
-    let FirExprKind::Call(call) = &root.kind else {
-        panic!("let must remain a checked call")
-    };
-    let FirCallTarget::External { inline_plan, .. } = &call.target else {
-        panic!("stdlib let must retain its selected external identity")
-    };
-    assert!(inline_plan.is_none());
-}
-
-#[test]
 fn suspending_map_publishes_a_complete_provider_owned_collection_plan() {
     let (body, _) = checked_function_body_with_platform(
         "operator fun <K, V> Map<K, V>.iterator(): Iterator<Map.Entry<K, V>> =\n\

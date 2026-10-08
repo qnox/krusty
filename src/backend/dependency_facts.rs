@@ -24,7 +24,7 @@ use crate::libraries::{
 };
 use crate::symbol_source::SymbolSource;
 pub use crate::types::SemanticCallRole as BackendSemanticCallRole;
-use crate::types::{InlineParameterModifier, Ty, TypeName};
+use crate::types::{InlineParameterModifier, SemanticCallableOwner, Ty, TypeName};
 
 /// What the provider normalized for one selected dependency callable, copied without
 /// reinterpretation. None of it is recovered from a spelling.
@@ -41,8 +41,8 @@ pub struct BackendCallableFact {
     /// Declaration visibility. A protected member stays callable from a subclass, and a nested
     /// class of that subclass reaches it through an accessor rather than a public invoke.
     pub visibility: crate::types::Visibility,
-    /// Exact semantic declaration package, independent of the physical realization kind.
-    pub declaration_package: Option<TypeName>,
+    /// Exact semantic declaration namespace, independent of the physical realization kind.
+    pub declaration_owner: Option<SemanticCallableOwner>,
     pub kind: ExternalCallableKind,
     pub owner_is_interface: bool,
     pub compiler_intrinsic: Option<BackendCompilerIntrinsic>,
@@ -68,6 +68,7 @@ pub struct BackendCallableFact {
     pub source_receiver: Option<Ty>,
     pub context_count: usize,
     pub declared_params: Option<Box<[Ty]>>,
+    pub declared_ret: Option<Ty>,
     pub inline_modifiers: Box<[InlineParameterModifier]>,
     pub default_realization: Option<Box<DefaultCallRealization>>,
     pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
@@ -152,11 +153,16 @@ impl CheckedBackendCallables {
             let owner = facts
                 .freeze_callable(realization.getter, &mut callable)?
                 .physical_owner;
-            let result = provider
+            let getter = provider
                 .external_callable(realization.getter)
                 .ok_or(DependencyFactError::UnknownCallable(realization.getter))?
-                .callable
-                .ret;
+                .callable;
+            let result = getter
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.ret)
+                .or(getter.declared_ret)
+                .unwrap_or(getter.ret);
             if let Some(setter) = realization.setter {
                 facts.freeze_callable(setter, &mut callable)?;
             }
@@ -226,7 +232,7 @@ impl CheckedBackendCallables {
                     reflection_name: callable.reflection_name,
                     physical_owner: callable.owner,
                     visibility: callable.visibility,
-                    declaration_package: realization.declaration_package,
+                    declaration_owner: realization.declaration_owner,
                     kind: realization.kind,
                     owner_is_interface: callable.owner_is_interface,
                     compiler_intrinsic: callable.compiler_intrinsic,
@@ -243,6 +249,7 @@ impl CheckedBackendCallables {
                     source_receiver: callable.source_receiver,
                     context_count: callable.context_count,
                     declared_params: callable.declared_params,
+                    declared_ret: callable.declared_ret,
                     inline_modifiers: callable.inline_modifiers,
                     default_realization: callable.default_realization,
                     nonvirtual_realization: callable.nonvirtual_realization,

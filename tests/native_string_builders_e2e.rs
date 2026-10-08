@@ -102,6 +102,23 @@ fn append_line_adds_a_newline_and_never_the_platforms_separator() {
 }
 
 #[test]
+fn a_builder_renders_an_element_through_its_own_to_string() {
+    // `append` asks the VALUE how it renders, which for a class of the program's own is the
+    // override it declared -- the same answer `"$value"` gives and not the identity one.
+    expect_native_box(
+        "class Point(val x: Int) {\n\
+         \x20   override fun toString(): String = \"P($x)\"\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val text = StringBuilder().append(Point(1)).append(listOf(2, 3)).toString()\n\
+         \x20   return if (text == \"P(1)[2, 3]\") \"OK\" else \"fail: $text\"\n\
+         }\n",
+        "BuilderRenders",
+        "OK",
+    );
+}
+
+#[test]
 fn a_builder_holds_its_text_against_the_collector() {
     // The builder's one reference field is the byte array, and the text is traced through it.
     // Enough garbage to force collections while the builder is the only thing keeping it alive.

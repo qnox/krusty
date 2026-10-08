@@ -987,6 +987,7 @@ impl<'a> CommonIrBodySink<'a> {
                         argument_prelude: Vec::new(),
                         args: Vec::new(),
                         constructor_parameter_types: Vec::new(),
+                        constructor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
                         default_parameters: Vec::new(),
                         decl_line: 0,
                         source_order,

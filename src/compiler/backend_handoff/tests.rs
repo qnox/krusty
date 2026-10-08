@@ -750,7 +750,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
     let realization = crate::libraries::ExternalCallableRealization {
         callable: declaration,
         kind: ExternalCallableKind::Member,
-        declaration_package: None,
+        declaration_owner: None,
         parameter_identities: Box::new([]),
     };
     let queries = std::cell::Cell::new(0);

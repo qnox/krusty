@@ -1,45 +1,112 @@
 //! Mapping already-selected Kotlin stdlib declarations onto native runtime functions.
 //!
 //! The frontend has already picked an overload; nothing here is resolution. A declaration arrives
-//! as an owner, a name and its semantic parameter types, and the question is only which C function
-//! realizes it.
+//! as its semantic owner, name, receiver, parameter types, and result, and the question is only
+//! which C function realizes that complete declaration signature.
 //!
 //! A JVM provider may physically own a top-level declaration in a file facade while a klib
 //! provider owns it in the package. The provider's callable kind records that it is top-level;
 //! the backend never infers that fact from a rendered owner or a `Kt` suffix.
 
-use crate::types::{Ty, TypeName};
+use crate::types::{SemanticCallableOwner, Ty, TypeName};
 
 /// Exact selected declaration owner as the native runtime tables see it.
 ///
-/// `physical` remains the provider-interned emission identity. `package` is the semantic package
-/// frozen from the provider for a top-level declaration; a JVM facade and a KLIB package can
-/// therefore share one exact comparison without guessing from a `*Kt` suffix.
+/// `physical` remains the provider-interned emission identity. `semantic` is the exact source
+/// namespace frozen from the provider; a JVM facade and a KLIB package can therefore share one
+/// comparison, while a mapped JVM class cannot erase the Kotlin classifier that declared a member.
 #[derive(Clone, Copy)]
 pub(super) struct DeclarationOwner {
     physical: TypeName,
-    package: Option<TypeName>,
+    semantic: Option<SemanticCallableOwner>,
 }
 
 impl DeclarationOwner {
-    pub(super) fn callable(physical: TypeName, package: Option<TypeName>) -> Self {
-        Self { physical, package }
+    pub(super) fn callable(physical: TypeName, semantic: Option<SemanticCallableOwner>) -> Self {
+        Self { physical, semantic }
+    }
+
+    pub(super) fn physical(self) -> TypeName {
+        self.physical
+    }
+
+    /// Render the already-recorded semantic namespace for an unsupported-call diagnostic. This is
+    /// a boundary conversion only; dispatch continues to compare interned identities above.
+    pub(super) fn diagnostic_name(self) -> String {
+        match self.semantic {
+            Some(SemanticCallableOwner::Package(owner)) => {
+                format!("package {}", owner.render().replace('/', "."))
+            }
+            Some(SemanticCallableOwner::Classifier(owner)) => {
+                format!("classifier {}", owner.render().replace('/', "."))
+            }
+            None => "unknown semantic owner".to_string(),
+        }
+    }
+
+    pub(super) fn semantic_classifier(self) -> Option<TypeName> {
+        match self.semantic {
+            Some(SemanticCallableOwner::Classifier(owner)) => Some(owner),
+            Some(SemanticCallableOwner::Package(_)) | None => None,
+        }
     }
 
     #[cfg(test)]
     fn classifier(physical: TypeName) -> Self {
         Self {
             physical,
-            package: None,
+            semantic: Some(SemanticCallableOwner::Classifier(physical)),
         }
     }
 
-    fn package_matches(self, package: &str) -> bool {
-        self.package.is_some_and(|owner| owner.matches(package))
+    pub(super) fn package_matches(self, package: &str) -> bool {
+        matches!(
+            self.semantic,
+            Some(SemanticCallableOwner::Package(owner)) if owner.matches(package)
+        )
+    }
+
+    fn package_is(self, package: TypeName) -> bool {
+        self.semantic == Some(SemanticCallableOwner::Package(package))
     }
 
     fn classifier_matches(self, kotlin: &str) -> bool {
-        classifier_matches(self.physical, kotlin)
+        match self.semantic {
+            Some(SemanticCallableOwner::Classifier(owner)) => classifier_matches(owner, kotlin),
+            Some(SemanticCallableOwner::Package(_)) => false,
+            None => classifier_matches(self.physical, kotlin),
+        }
+    }
+}
+
+/// Complete semantic identity of one selected function declaration.
+///
+/// Runtime tables match this contract rather than treating owner, spelling, and arity as a
+/// declaration identity. Physical descriptors remain a backend representation and are not parsed
+/// to recover semantic parameter or result types.
+#[derive(Clone, Copy)]
+pub(super) struct FunctionSignature<'a> {
+    pub(super) owner: DeclarationOwner,
+    pub(super) name: &'a str,
+    pub(super) receiver: Option<Ty>,
+    pub(super) params: &'a [Ty],
+    pub(super) ret: Ty,
+}
+
+impl<'a> FunctionSignature<'a> {
+    pub(super) fn new(owner: DeclarationOwner, name: &'a str, params: &'a [Ty], ret: Ty) -> Self {
+        Self {
+            owner,
+            name,
+            receiver: None,
+            params,
+            ret,
+        }
+    }
+
+    pub(super) fn with_receiver(mut self, receiver: Option<Ty>) -> Self {
+        self.receiver = receiver;
+        self
     }
 }
 
@@ -47,7 +114,7 @@ impl DeclarationOwner {
 ///
 /// JVM mapped types are target ABI aliases, so accepting their exact interned identities here is
 /// representation normalization, not semantic lookup. No source spelling is rendered or interned.
-fn classifier_matches(owner: TypeName, kotlin: &str) -> bool {
+pub(super) fn classifier_matches(owner: TypeName, kotlin: &str) -> bool {
     if owner.matches(kotlin) {
         return true;
     }
@@ -176,6 +243,39 @@ pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'st
     })
 }
 
+/// Whether Kotlin gives this member a SPECIAL BRIDGE, so that a call through the wide type does
+/// not always reach an override at all.
+///
+/// `Map<Any, Any>.get(key: Any)` is declared with a NON-NULL parameter, and a caller holding the
+/// same object as a `Map<Any?, Any?>` may pass `null`. Kotlin does not call the override there: it
+/// answers the member's default — `null` for `get` and `remove`, `false` for a `contains`, `-1` for
+/// an `indexOf` — because the argument cannot be what the declaration accepts. The corpus asks
+/// exactly that (`specialBuiltins/notEmptyMap.kt`, `bridges/special.kt`).
+///
+/// The receiver dispatch has no bridge to put in front of an implementor's arm, so it declines
+/// these rather than calling an override Kotlin would have skipped. Every one of them takes an
+/// ARGUMENT, which is why the nullary members are unaffected.
+pub(super) fn has_special_bridge(collection: crate::types::MappedCollection, name: &str) -> bool {
+    let over_a_map = matches!(
+        collection.kind,
+        crate::types::CollectionKind::Map | crate::types::CollectionKind::MapEntry
+    );
+    let over_a_collection = matches!(
+        collection.kind,
+        crate::types::CollectionKind::Iterable
+            | crate::types::CollectionKind::Collection
+            | crate::types::CollectionKind::List
+            | crate::types::CollectionKind::Set
+    );
+    match name {
+        "get" | "containsKey" | "containsValue" | "getOrDefault" => over_a_map,
+        // `MutableCollection.remove(element)` is as special as `Map.remove(key)`.
+        "remove" => over_a_map || over_a_collection,
+        "contains" | "indexOf" | "lastIndexOf" => over_a_collection,
+        _ => false,
+    }
+}
+
 /// The one member of a functional interface the RUNTIME knows, or `None` for any other.
 ///
 /// A `fun interface` declared in this file becomes an object wearing that interface's table, so a
@@ -190,6 +290,11 @@ pub(super) fn runtime_functional_interface(
     classifier: crate::types::TypeName,
 ) -> Option<&'static str> {
     classifier_matches(classifier, "kotlin/Comparator").then_some("compare")
+}
+
+/// Whether a type is the `Comparator` the runtime makes — a function value of two arguments.
+pub(super) fn is_comparator(internal: crate::types::TypeName) -> bool {
+    runtime_functional_interface(internal).is_some()
 }
 
 /// Whether a superclass is `kotlin.Number`, the other base the runtime owns that a source class
@@ -296,42 +401,73 @@ pub(super) fn console_intrinsic(operation: ConsoleIntrinsic, params: &[Ty]) -> O
 
 /// The runtime function realizing a selected dependency callable, or `None` when the native
 /// runtime does not implement that declaration yet.
-pub(super) fn runtime_function(
-    owner: DeclarationOwner,
-    name: &str,
-    params: &[Ty],
-) -> Option<String> {
-    if owner.package_matches("kotlin") {
-        return match (name, params) {
+pub(super) fn runtime_function(signature: FunctionSignature<'_>) -> Option<String> {
+    if signature.receiver.is_some() {
+        return None;
+    }
+    if signature.owner.package_matches("kotlin") {
+        return match (
+            signature.name,
+            signature.params,
+            signature.ret.canonical_semantic(),
+        ) {
             // `TODO()`, a throw a program writes on purpose: a `Nothing`, so the caller's own
             // bottom-value contract takes over from here. `require`, `check` and `error` are
             // [`precondition`]'s, which the caller asks first; they are not named twice.
-            ("TODO", []) => Some("kt_not_implemented".to_string()),
-            ("TODO", [_]) => Some("kt_not_implemented_reason".to_string()),
+            ("TODO", [], Ty::Nothing) => Some("kt_not_implemented".to_string()),
+            ("TODO", [reason], Ty::Nothing) if classifier_is(*reason, "kotlin/String") => {
+                Some("kt_not_implemented_reason".to_string())
+            }
             _ => None,
         };
     }
-    if owner.package_matches("kotlin/math") {
-        return match (name, params) {
+    if signature.owner.package_matches("kotlin/math") {
+        return match (
+            signature.name,
+            signature.params,
+            signature.ret.canonical_semantic(),
+        ) {
             // `kotlin.math.abs`, one per width it is declared over. The operand crosses at its OWN
             // width and the answer comes back at it: `abs` of a `Long` is a `Long`, and computing it
             // at any other width would change what the minimum answers.
-            ("abs", [Ty::Int]) => Some("kt_abs_int".to_string()),
-            ("abs", [Ty::Long]) => Some("kt_abs_long".to_string()),
-            ("abs", [Ty::Float]) => Some("kt_abs_float".to_string()),
-            ("abs", [Ty::Double]) => Some("kt_abs_double".to_string()),
+            ("abs", [Ty::Int], Ty::Int) => Some("kt_abs_int".to_string()),
+            ("abs", [Ty::Long], Ty::Long) => Some("kt_abs_long".to_string()),
+            ("abs", [Ty::Float], Ty::Float) => Some("kt_abs_float".to_string()),
+            ("abs", [Ty::Double], Ty::Double) => Some("kt_abs_double".to_string()),
             _ => None,
         };
     }
-    if owner.package_matches("kotlin/collections") {
+    if signature.owner.package_matches("kotlin/collections") {
         // The overflow guard `forEachIndexed` and its relatives carry. A jar provider presents
         // those as INLINE declarations, so their bodies are spliced into the caller and this call
         // comes with them; a klib provider answers the walk itself and never mentions it. Kotlin's
         // own is `throw ArithmeticException("Index overflow has happened.")`.
-        return matches!((name, params), ("throwIndexOverflow", []))
-            .then(|| "kt_throw_index_overflow".to_string());
+        return matches!(
+            (signature.name, signature.params, signature.ret),
+            ("throwIndexOverflow", [], Ty::Unit)
+        )
+        .then(|| "kt_throw_index_overflow".to_string());
     }
     None
+}
+
+/// The exact `kotlin.internal.getProgressionLastElement` overload selected for a counted-loop
+/// header. Its implementation is part of the Native range runtime because the backend itself uses
+/// the same calculation when materializing a progression object.
+pub(super) fn progression_last_element(signature: FunctionSignature<'_>) -> Option<&'static str> {
+    if !signature.owner.package_matches("kotlin/internal")
+        || signature.name != "getProgressionLastElement"
+        || signature.receiver.is_some()
+    {
+        return None;
+    }
+    match (signature.params, signature.ret.canonical_semantic()) {
+        ([Ty::Int, Ty::Int, Ty::Int], Ty::Int) => Some("kt_progression_last_int"),
+        ([Ty::Long, Ty::Long, Ty::Long], Ty::Long) => Some("kt_progression_last_long"),
+        ([Ty::UInt, Ty::UInt, Ty::Int], Ty::UInt) => Some("kt_progression_last_uint"),
+        ([Ty::ULong, Ty::ULong, Ty::Long], Ty::ULong) => Some("kt_progression_last_ulong"),
+        _ => None,
+    }
 }
 
 /// One of `kotlin.test`'s assertions, as (runtime symbol, whether a message argument is present).
@@ -376,39 +512,6 @@ pub(super) fn assertion_call(
         _ => return None,
     }
     Some((symbol, compared))
-}
-
-/// The scope functions that have NO receiver to arrive on: `run { … }` and `with(x) { … }`.
-///
-/// The same rearrangement as the member ones beside them, reached by the other path because these
-/// take their subject as an argument rather than as a receiver. Like the others they are `inline`,
-/// so what arrives here is the shape with no body to splice — a block that is an ordinary function
-/// value — which is exactly what a klib-backed compilation produces for every one of them.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum TopLevelScope {
-    /// `run(block: () -> R): R` — the block takes nothing.
-    Block,
-    /// `with(receiver: T, block: T.() -> R): R` — the block takes the value written before it.
-    WithReceiver,
-}
-
-/// Which of the two a selected top-level declaration is, or `None` for anything else.
-///
-/// Keyed on the SHAPE as well as the name, because `kotlin.run` is two declarations: this one and
-/// `T.run(block: T.() -> R): R`, which has a receiver and is handled as a member.
-pub(super) fn top_level_scope(
-    owner: DeclarationOwner,
-    name: &str,
-    params: &[Ty],
-) -> Option<TopLevelScope> {
-    if !owner.package_matches("kotlin") {
-        return None;
-    }
-    match (name, params) {
-        ("run", [Ty::Fun(_)]) => Some(TopLevelScope::Block),
-        ("with", [_, Ty::Fun(_)]) => Some(TopLevelScope::WithReceiver),
-        _ => None,
-    }
 }
 
 /// Whether this names the REIFIED `assertFailsWith`, whose class operand is its type argument.
@@ -626,49 +729,31 @@ pub(super) fn enum_member(owner: TypeName, accessor: &str) -> Option<&'static st
     }
 }
 
-/// What a scope function's call yields once its block has run.
-///
-/// `apply`, `also`, `let` and `run` differ in exactly this and in nothing else: each evaluates the
-/// receiver once, hands it to the block, and then yields either the receiver it was called on or
-/// whatever the block returned. Kotlin's own signatures say which.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ScopeResult {
-    /// `T.apply(block: T.() -> Unit): T` and `T.also(block: (T) -> Unit): T`.
-    Receiver,
-    /// `T.let(block: (T) -> R): R` and `T.run(block: T.() -> R): R`.
-    BlockResult,
+/// Whether a declaration's owner is the file facade `lazy` and `Lazy.getValue` live in. Both are
+/// top-level declarations of `kotlin`, so they reach a backend as members of `kotlin/LazyKt`.
+pub(super) fn is_lazy_facade(owner: DeclarationOwner) -> bool {
+    owner.package_is(crate::types::wk::kotlin_package())
 }
 
-/// Which scope function a selected dependency member is, or `None` for anything else.
-///
-/// A block written at the call site never arrives here: these are `inline`, and the checked
-/// lowering splices such a block into its caller. What arrives is the call whose block is an
-/// ordinary function VALUE, which has no body to splice.
-pub(super) fn scope_function(owner: DeclarationOwner, name: &str) -> Option<ScopeResult> {
-    if !owner.package_matches("kotlin") {
-        return None;
-    }
-    match name {
-        "apply" | "also" => Some(ScopeResult::Receiver),
-        "let" | "run" => Some(ScopeResult::BlockResult),
-        _ => None,
-    }
+/// Whether a declaration's owner is the file facade `to` lives in. `kotlin.to` is a top-level
+/// extension, so it reaches a backend as a member of `kotlin/TuplesKt` — the `kotlin/io/ConsoleKt`
+/// situation again, normalized in the same place.
+pub(super) fn is_tuples_facade(owner: DeclarationOwner) -> bool {
+    owner.package_is(crate::types::wk::kotlin_package())
 }
 
-/// How a program iterates a receiver it could only type by an INTERFACE.
-///
-/// `Iterable` and `Iterator` both have a Kotlin spelling and a `java.util` one — the provider
-/// presents a Kotlin collection interface under whichever name the declaration it read carried —
-/// and normalizing that here is the point: a backend asks which of the two roles a type plays, not
-/// which library spelled it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum IterationRole {
-    /// Something a `for` loop asks for an iterator.
-    Iterable,
-    /// The iterator itself.
-    Iterator,
+/// Whether a declaration's owner is the collections file facade `listOf` and its neighbours live
+/// in. They are top-level functions of `kotlin.collections`, so they reach a backend as members of
+/// the facade class the stdlib declares them in — the `kotlin/io/ConsoleKt` situation again, and
+/// normalized in the same place.
+pub(super) fn is_collections_facade(owner: DeclarationOwner) -> bool {
+    owner.package_is(crate::types::wk::kotlin_collections_package())
 }
 
+/// Whether a selected top-level range declaration belongs to `kotlin.ranges`.
+pub(super) fn is_ranges_facade(owner: DeclarationOwner) -> bool {
+    owner.package_is(crate::types::wk::kotlin_ranges_package())
+}
 /// `Float.fromBits(n)` / `Double.fromBits(n)`, as (runtime symbol, operand, answer).
 ///
 /// An EXTENSION of the companion object, declared in `kotlin`, so the receiver is that object and
@@ -713,17 +798,25 @@ pub(super) fn float_to_bits(
     }
 }
 
+/// Whether this is the selected `Comparable.compareTo` declaration.
+///
+/// Native answers a call whose receiver is only known as `Comparable` through the runtime
+/// descriptor. This matches the complete semantic declaration signature (owner, callable name,
+/// parameter types, and result), not a provider-assigned role; the caller separately decides
+/// whether a program-defined implementor can stand behind the receiver.
+pub(super) fn is_comparable_compare_to(signature: FunctionSignature<'_>) -> bool {
+    signature.owner.classifier_matches("kotlin/Comparable")
+        && signature.name == "compareTo"
+        && matches!(signature.params, [Ty::TyParam(..)])
+        && signature.ret == Ty::Int
+}
+
 /// Whether a type name is `kotlin.Comparable` or the base whose comparison an enum inherits.
 ///
 /// Both are what a DECLARED class naming one of them makes observable: an object of the program's
 /// standing behind a `Comparable` receiver, which the runtime's descriptor tables cannot order.
 pub(super) fn is_comparable_supertype(internal: crate::types::TypeName) -> bool {
     internal == crate::types::wk::comparable() || internal == crate::types::wk::kotlin_enum()
-}
-
-/// Whether a type name is the SEQUENCE the native runtime makes.
-pub(super) fn is_sequence_type(internal: crate::types::TypeName) -> bool {
-    classifier_matches(internal, "kotlin/sequences/Sequence")
 }
 
 /// One SHAPE of the runtime's collections.
@@ -756,6 +849,563 @@ pub(super) enum CollectionShape {
     Text,
 }
 
+/// Native realization selected by one complete stdlib collection signature.
+///
+/// These are declarations whose bodies are not available through the active JVM provider. The
+/// key remains the Kotlin package, extension receiver, value parameters, and result together; a
+/// same-named user function or another overload cannot enter this table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CollectionAlgorithm {
+    Map,
+    ForEach,
+    WithIndex,
+    JoinToStringDefaults,
+    Any,
+    All,
+    None,
+    IsNotEmpty,
+    IsEmpty,
+    Count,
+    CountMatching,
+    Filter,
+    FilterNot,
+    First,
+    FirstMatching,
+    FirstOrNull,
+    Last,
+    LastMatching,
+    Fold,
+    ForEachIndexed,
+    ToList,
+    Reversed,
+    IndexOf,
+    Contains,
+    SumOfInt,
+    SumOfLong,
+    SumOfDouble,
+    PlusElement,
+    PlusAll,
+    AsSequence,
+    ToTypedArray,
+    SortedWith,
+    SortWith,
+    PlusAssignElement,
+    PlusAssignAll,
+}
+
+fn classifier_is(ty: Ty, expected: &str) -> bool {
+    ty.non_null()
+        .obj_internal()
+        .is_some_and(|owner| classifier_matches(owner, expected))
+}
+
+fn collection_element(ty: Ty) -> Option<Ty> {
+    let ty = ty.non_null();
+    if let Some(element) = ty.array_read_elem() {
+        return Some(element.canonical_semantic());
+    }
+    match ty {
+        Ty::Obj(owner, [element])
+            if classifier_matches(owner, "kotlin/collections/Iterable")
+                || classifier_matches(owner, "kotlin/collections/Iterator")
+                || classifier_matches(owner, "kotlin/collections/Collection")
+                || classifier_matches(owner, "kotlin/collections/List")
+                || classifier_matches(owner, "kotlin/collections/Set")
+                || classifier_matches(owner, "kotlin/collections/MutableCollection")
+                || classifier_matches(owner, "kotlin/collections/MutableList") =>
+        {
+            Some(
+                element
+                    .projection_inner()
+                    .unwrap_or(*element)
+                    .canonical_semantic(),
+            )
+        }
+        Ty::Obj(owner, [key, value]) if classifier_matches(owner, "kotlin/collections/Map") => {
+            Some(Ty::obj_args(
+                "kotlin/collections/Map$Entry",
+                &[
+                    key.projection_inner().unwrap_or(*key).canonical_semantic(),
+                    value
+                        .projection_inner()
+                        .unwrap_or(*value)
+                        .canonical_semantic(),
+                ],
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn unary_function(ty: Ty, parameter: Ty) -> Option<Ty> {
+    let Ty::Fun(function) = ty.non_null() else {
+        return None;
+    };
+    (function.context_count == 0
+        && !function.has_receiver
+        && !function.suspend
+        && function.params.len() == 1
+        && function.params[0].canonical_semantic() == parameter.canonical_semantic())
+    .then_some(function.ret.canonical_semantic())
+}
+
+fn binary_function(ty: Ty, first: Ty, second: Ty) -> Option<Ty> {
+    let Ty::Fun(function) = ty.non_null() else {
+        return None;
+    };
+    (function.context_count == 0
+        && !function.has_receiver
+        && !function.suspend
+        && function.params.len() == 2
+        && function.params[0].canonical_semantic() == first.canonical_semantic()
+        && function.params[1].canonical_semantic() == second.canonical_semantic())
+    .then_some(function.ret.canonical_semantic())
+}
+
+fn list_result(ty: Ty, element: Ty) -> bool {
+    matches!(
+        ty.non_null(),
+        Ty::Obj(owner, [actual])
+            if classifier_matches(owner, "kotlin/collections/List")
+                && actual.canonical_semantic() == element.canonical_semantic()
+    )
+}
+
+fn indexed_result(ty: Ty, shape: &str, element: Ty) -> bool {
+    let Ty::Obj(owner, [entry]) = ty.non_null() else {
+        return false;
+    };
+    if !classifier_matches(owner, shape) {
+        return false;
+    }
+    matches!(
+        entry.non_null(),
+        Ty::Obj(indexed, [actual])
+            if classifier_matches(indexed, "kotlin/collections/IndexedValue")
+                && actual.canonical_semantic() == element.canonical_semantic()
+    )
+}
+
+fn single_argument_result(ty: Ty, shape: &str, element: Ty) -> bool {
+    matches!(
+        ty.non_null(),
+        Ty::Obj(owner, [actual])
+            if classifier_matches(owner, shape)
+                && actual.canonical_semantic() == element.canonical_semantic()
+    )
+}
+
+fn iterable_argument(ty: Ty, element: Ty) -> bool {
+    if ty
+        .array_read_elem()
+        .is_some_and(|actual| actual.canonical_semantic() == element.canonical_semantic())
+    {
+        return true;
+    }
+    matches!(
+        ty.non_null(),
+        Ty::Obj(owner, [actual])
+            if (classifier_matches(owner, "kotlin/collections/Iterable")
+                || classifier_matches(owner, "kotlin/sequences/Sequence"))
+                && actual.projection_inner().unwrap_or(*actual).canonical_semantic()
+                    == element.canonical_semantic()
+    )
+}
+
+fn comparator_of(ty: Ty, element: Ty) -> bool {
+    matches!(
+        ty.non_null(),
+        Ty::Obj(owner, [actual])
+            if classifier_matches(owner, "kotlin/Comparator")
+                && actual.projection_inner().unwrap_or(*actual).canonical_semantic()
+                    == element.canonical_semantic()
+    )
+}
+
+/// Match the exact Kotlin declaration signature of a collection algorithm realized by the Native
+/// runtime while the active provider cannot publish its body.
+pub(super) fn collection_algorithm(
+    signature: FunctionSignature<'_>,
+) -> Option<CollectionAlgorithm> {
+    // Text walk adapters are declarations of `kotlin.text`, not `kotlin.collections`. Keep their
+    // complete signatures here rather than treating every text function as a collection operation
+    // or keying on the call-site receiver's representation.
+    if signature
+        .owner
+        .package_is(crate::types::wk::kotlin_text_package())
+    {
+        let receiver = signature.receiver?;
+        if !classifier_is(receiver, "kotlin/CharSequence") || !signature.params.is_empty() {
+            return None;
+        }
+        return match signature.name {
+            "asSequence"
+                if single_argument_result(signature.ret, "kotlin/sequences/Sequence", Ty::Char) =>
+            {
+                Some(CollectionAlgorithm::AsSequence)
+            }
+            "withIndex"
+                if indexed_result(signature.ret, "kotlin/collections/Iterable", Ty::Char) =>
+            {
+                Some(CollectionAlgorithm::WithIndex)
+            }
+            _ => None,
+        };
+    }
+    // A sequence's `withIndex` is lazy and returns another sequence. The runtime wrapper already
+    // preserves that lazy iterator boundary; only this exact declaration may select it.
+    if signature
+        .owner
+        .package_is(crate::types::wk::kotlin_sequences_package())
+    {
+        let receiver = signature.receiver?.non_null();
+        let Ty::Obj(owner, [element]) = receiver else {
+            return None;
+        };
+        let element = element
+            .projection_inner()
+            .unwrap_or(*element)
+            .canonical_semantic();
+        return (classifier_matches(owner, "kotlin/sequences/Sequence")
+            && signature.name == "withIndex"
+            && signature.params.is_empty()
+            && indexed_result(signature.ret, "kotlin/sequences/Sequence", element))
+        .then_some(CollectionAlgorithm::WithIndex);
+    }
+    if !signature
+        .owner
+        .package_is(crate::types::wk::kotlin_collections_package())
+    {
+        return None;
+    }
+    let receiver = signature.receiver?;
+    let element = collection_element(receiver)?;
+    match (signature.name, signature.params) {
+        ("map", [transform]) => {
+            let output = unary_function(*transform, element)?;
+            list_result(signature.ret, output).then_some(CollectionAlgorithm::Map)
+        }
+        ("forEach", [action]) => (unary_function(*action, element) == Some(Ty::Unit)
+            && signature.ret == Ty::Unit)
+            .then_some(CollectionAlgorithm::ForEach),
+        ("withIndex", []) => {
+            let result_shape = if classifier_is(receiver, "kotlin/collections/Iterator") {
+                "kotlin/collections/Iterator"
+            } else {
+                "kotlin/collections/Iterable"
+            };
+            indexed_result(signature.ret, result_shape, element)
+                .then_some(CollectionAlgorithm::WithIndex)
+        }
+        ("joinToString", [separator, prefix, postfix, limit, truncated, transform]) => {
+            let transform = match transform.non_null() {
+                Ty::Fun(function)
+                    if function.context_count == 0
+                        && !function.has_receiver
+                        && !function.suspend
+                        && function.params.len() == 1
+                        && function.params[0].canonical_semantic()
+                            == element.canonical_semantic()
+                        && classifier_is(function.ret, "kotlin/CharSequence") =>
+                {
+                    true
+                }
+                _ => false,
+            };
+            (classifier_is(*separator, "kotlin/CharSequence")
+                && classifier_is(*prefix, "kotlin/CharSequence")
+                && classifier_is(*postfix, "kotlin/CharSequence")
+                && limit.canonical_semantic() == Ty::Int
+                && classifier_is(*truncated, "kotlin/CharSequence")
+                && transform
+                && classifier_is(signature.ret, "kotlin/String"))
+            .then_some(CollectionAlgorithm::JoinToStringDefaults)
+        }
+        ("any", []) if signature.ret == Ty::Boolean => Some(CollectionAlgorithm::IsNotEmpty),
+        ("none", []) if signature.ret == Ty::Boolean => Some(CollectionAlgorithm::IsEmpty),
+        ("any", [predicate])
+            if unary_function(*predicate, element) == Some(Ty::Boolean)
+                && signature.ret == Ty::Boolean =>
+        {
+            Some(CollectionAlgorithm::Any)
+        }
+        ("all", [predicate])
+            if unary_function(*predicate, element) == Some(Ty::Boolean)
+                && signature.ret == Ty::Boolean =>
+        {
+            Some(CollectionAlgorithm::All)
+        }
+        ("none", [predicate])
+            if unary_function(*predicate, element) == Some(Ty::Boolean)
+                && signature.ret == Ty::Boolean =>
+        {
+            Some(CollectionAlgorithm::None)
+        }
+        ("count", []) if signature.ret == Ty::Int => Some(CollectionAlgorithm::Count),
+        ("count", [predicate])
+            if unary_function(*predicate, element) == Some(Ty::Boolean)
+                && signature.ret == Ty::Int =>
+        {
+            Some(CollectionAlgorithm::CountMatching)
+        }
+        ("filter", [predicate])
+            if unary_function(*predicate, element) == Some(Ty::Boolean)
+                && list_result(signature.ret, element) =>
+        {
+            Some(CollectionAlgorithm::Filter)
+        }
+        ("filterNot", [predicate])
+            if unary_function(*predicate, element) == Some(Ty::Boolean)
+                && list_result(signature.ret, element) =>
+        {
+            Some(CollectionAlgorithm::FilterNot)
+        }
+        ("first", []) if signature.ret.canonical_semantic() == element.canonical_semantic() => {
+            Some(CollectionAlgorithm::First)
+        }
+        ("first", [predicate])
+            if unary_function(*predicate, element) == Some(Ty::Boolean)
+                && signature.ret.canonical_semantic() == element.canonical_semantic() =>
+        {
+            Some(CollectionAlgorithm::FirstMatching)
+        }
+        ("firstOrNull", [predicate])
+            if unary_function(*predicate, element) == Some(Ty::Boolean)
+                && signature.ret.is_nullable()
+                && signature.ret.non_null().canonical_semantic()
+                    == element.non_null().canonical_semantic() =>
+        {
+            Some(CollectionAlgorithm::FirstOrNull)
+        }
+        ("last", []) if signature.ret.canonical_semantic() == element.canonical_semantic() => {
+            Some(CollectionAlgorithm::Last)
+        }
+        ("last", [predicate])
+            if unary_function(*predicate, element) == Some(Ty::Boolean)
+                && signature.ret.canonical_semantic() == element.canonical_semantic() =>
+        {
+            Some(CollectionAlgorithm::LastMatching)
+        }
+        ("fold", [initial, operation])
+            if binary_function(*operation, *initial, element)
+                == Some(initial.canonical_semantic())
+                && signature.ret.canonical_semantic() == initial.canonical_semantic() =>
+        {
+            Some(CollectionAlgorithm::Fold)
+        }
+        ("forEachIndexed", [action])
+            if binary_function(*action, Ty::Int, element) == Some(Ty::Unit)
+                && signature.ret == Ty::Unit =>
+        {
+            Some(CollectionAlgorithm::ForEachIndexed)
+        }
+        ("toList", []) if list_result(signature.ret, element) => Some(CollectionAlgorithm::ToList),
+        ("reversed", []) if list_result(signature.ret, element) => {
+            Some(CollectionAlgorithm::Reversed)
+        }
+        ("indexOf", [value])
+            if value.canonical_semantic() == element.canonical_semantic()
+                && signature.ret == Ty::Int =>
+        {
+            Some(CollectionAlgorithm::IndexOf)
+        }
+        ("contains", [value])
+            if value.canonical_semantic() == element.canonical_semantic()
+                && signature.ret == Ty::Boolean =>
+        {
+            Some(CollectionAlgorithm::Contains)
+        }
+        ("sumOf", [selector])
+            if unary_function(*selector, element) == Some(Ty::Int) && signature.ret == Ty::Int =>
+        {
+            Some(CollectionAlgorithm::SumOfInt)
+        }
+        ("sumOf", [selector])
+            if unary_function(*selector, element) == Some(Ty::Long)
+                && signature.ret == Ty::Long =>
+        {
+            Some(CollectionAlgorithm::SumOfLong)
+        }
+        ("sumOf", [selector])
+            if unary_function(*selector, element) == Some(Ty::Double)
+                && signature.ret == Ty::Double =>
+        {
+            Some(CollectionAlgorithm::SumOfDouble)
+        }
+        ("plus", [operand])
+            if operand.canonical_semantic() == element.canonical_semantic()
+                && list_result(signature.ret, element) =>
+        {
+            Some(CollectionAlgorithm::PlusElement)
+        }
+        ("plus", [operand])
+            if iterable_argument(*operand, element) && list_result(signature.ret, element) =>
+        {
+            Some(CollectionAlgorithm::PlusAll)
+        }
+        ("asSequence", [])
+            if single_argument_result(signature.ret, "kotlin/sequences/Sequence", element) =>
+        {
+            Some(CollectionAlgorithm::AsSequence)
+        }
+        ("toTypedArray", []) if single_argument_result(signature.ret, "kotlin/Array", element) => {
+            Some(CollectionAlgorithm::ToTypedArray)
+        }
+        ("sortedWith", [comparator])
+            if comparator_of(*comparator, element) && list_result(signature.ret, element) =>
+        {
+            Some(CollectionAlgorithm::SortedWith)
+        }
+        ("sortWith", [comparator])
+            if comparator_of(*comparator, element) && signature.ret == Ty::Unit =>
+        {
+            Some(CollectionAlgorithm::SortWith)
+        }
+        ("plusAssign", [operand]) if signature.ret == Ty::Unit => {
+            let Ty::Obj(owner, [receiver_element]) = receiver.non_null() else {
+                return None;
+            };
+            if !classifier_matches(owner, "kotlin/collections/MutableCollection") {
+                return None;
+            }
+            let receiver_element = receiver_element.projection_inner()?;
+            if receiver_element.canonical_semantic() == operand.canonical_semantic() {
+                return Some(CollectionAlgorithm::PlusAssignElement);
+            }
+            let all_elements = operand
+                .array_read_elem()
+                .or_else(|| {
+                    let Ty::Obj(owner, [element]) = operand.non_null() else {
+                        return None;
+                    };
+                    (classifier_matches(owner, "kotlin/collections/Iterable")
+                        || classifier_matches(owner, "kotlin/sequences/Sequence"))
+                    .then_some(element.projection_inner().unwrap_or(*element))
+                })
+                .map(Ty::canonical_semantic);
+            (all_elements == Some(receiver_element.canonical_semantic()))
+                .then_some(CollectionAlgorithm::PlusAssignAll)
+        }
+        _ => None,
+    }
+}
+
+/// Runtime realization of one exact selected iteration declaration.
+///
+/// `shape` is physical receiver representation: it says which runtime-owned objects can answer the
+/// call. Declaration identity remains the complete semantic signature. In particular, an unrelated
+/// `iterator`, `hasNext`, or `next` with the same arity never becomes an iteration operation merely
+/// because its receiver happens to have a walkable layout.
+pub(super) fn iteration_runtime_member(
+    shape: CollectionShape,
+    declaration_shape: Option<CollectionShape>,
+    result_shape: Option<CollectionShape>,
+    signature: FunctionSignature<'_>,
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    let FunctionSignature {
+        owner: _,
+        name,
+        receiver: _,
+        params,
+        ret,
+    } = signature;
+    if !params.is_empty() {
+        return None;
+    }
+
+    let iterable_declaration = matches!(
+        declaration_shape,
+        Some(
+            CollectionShape::Iterable
+                | CollectionShape::Map
+                | CollectionShape::Sequence
+                | CollectionShape::Text
+        )
+    );
+    if matches!(
+        shape,
+        CollectionShape::Iterable
+            | CollectionShape::Map
+            | CollectionShape::Sequence
+            | CollectionShape::Text
+    ) && iterable_declaration
+        && name == "iterator"
+        && result_shape == Some(CollectionShape::Iterator)
+    {
+        return Some((
+            "kt_iterable_iterator",
+            vec![Ty::obj("kotlin/Any")],
+            Ty::obj("kotlin/Any"),
+        ));
+    }
+
+    if shape != CollectionShape::Iterator {
+        return None;
+    }
+    if declaration_shape != Some(CollectionShape::Iterator) {
+        return None;
+    }
+    if name == "hasNext" && ret == Ty::Boolean {
+        return Some((
+            "kt_iterator_has_next",
+            vec![Ty::obj("kotlin/Any")],
+            Ty::Boolean,
+        ));
+    }
+    let primitive_next = signature
+        .owner
+        .semantic_classifier()
+        .and_then(primitive_iterator_element);
+    let next = match name {
+        "next" if matches!(ret, Ty::TyParam(..)) || primitive_next == Some(ret) => true,
+        "nextBoolean" if ret == Ty::Boolean => true,
+        "nextByte" if ret == Ty::Byte => true,
+        "nextChar" if ret == Ty::Char => true,
+        "nextShort" if ret == Ty::Short => true,
+        "nextInt" if ret == Ty::Int => true,
+        "nextLong" if ret == Ty::Long => true,
+        "nextFloat" if ret == Ty::Float => true,
+        "nextDouble" if ret == Ty::Double => true,
+        _ => false,
+    };
+    next.then(|| {
+        (
+            "kt_iterator_next",
+            vec![Ty::obj("kotlin/Any")],
+            Ty::obj("kotlin/Any"),
+        )
+    })
+}
+
+/// The semantic element returned by a Kotlin primitive iterator's boxed `next()` override.
+///
+/// The provider hierarchy establishes that the declaration is an iterator; the exact classifier
+/// identity establishes its element width. This is a native representation boundary, not source
+/// resolution: the runtime has one object protocol for these concrete stdlib iterator classes.
+fn primitive_iterator_element(owner: TypeName) -> Option<Ty> {
+    Some(
+        if classifier_matches(owner, "kotlin/collections/BooleanIterator") {
+            Ty::Boolean
+        } else if classifier_matches(owner, "kotlin/collections/ByteIterator") {
+            Ty::Byte
+        } else if classifier_matches(owner, "kotlin/collections/CharIterator") {
+            Ty::Char
+        } else if classifier_matches(owner, "kotlin/collections/ShortIterator") {
+            Ty::Short
+        } else if classifier_matches(owner, "kotlin/collections/IntIterator") {
+            Ty::Int
+        } else if classifier_matches(owner, "kotlin/collections/LongIterator") {
+            Ty::Long
+        } else if classifier_matches(owner, "kotlin/collections/FloatIterator") {
+            Ty::Float
+        } else if classifier_matches(owner, "kotlin/collections/DoubleIterator") {
+            Ty::Double
+        } else {
+            return None;
+        },
+    )
+}
+
 /// Whether this names `kotlin.CharSequence`, under either spelling a provider may hand over.
 ///
 /// It wears a runtime descriptor for the reason `Number` and `Comparable` do: no instances of its
@@ -765,12 +1415,19 @@ pub(super) fn is_char_sequence(internal: crate::types::TypeName) -> bool {
     classifier_matches(internal, "kotlin/CharSequence")
 }
 
-/// The string builder the runtime provides, if this names one.
+/// `x.indices` — the range of an indexable value's positions, which the provider presents as an
+/// extension property of the arrays or text file facade rather than a member.
 ///
-/// Like [`is_array_list`], `kotlin.text.StringBuilder` is declared in no file krusty compiles, so
-/// constructing one is the runtime's job rather than the generator's.
-pub(super) fn is_string_builder(internal: crate::types::TypeName) -> bool {
-    classifier_matches(internal, "kotlin/text/StringBuilder")
+/// Answering it needs the receiver's own `size`, so only the caller can decide whether THIS
+/// receiver has one; this says only that the declaration named is that extension property.
+///
+/// `name` is the PROPERTY's, not its accessor's. `indices` is realized five ways — `getIndices`
+/// for text, and one value-class-mangled spelling per unsigned array width — so a table written in
+/// accessor spellings would have to list all five and would still be guessing at the sixth.
+pub(super) fn is_indices(owner: DeclarationOwner, name: &str) -> bool {
+    name == "indices"
+        && (owner.package_is(crate::types::wk::kotlin_collections_package())
+            || owner.package_is(crate::types::wk::kotlin_text_package()))
 }
 
 /// A dependency member the runtime answers with its arguments carried as VALUES, and the signature
@@ -978,23 +1635,6 @@ pub(super) fn boxed_step(owner: DeclarationOwner, name: &str, params: &[Ty]) -> 
     Some((ty, step))
 }
 
-/// Whether a name is one of Kotlin's function types (`kotlin.Function0`..`Function22`, or the
-/// arity-less `kotlin.Function` they all extend).
-///
-/// The one dependency type whose member this target gives a FIXED slot: a function value's
-/// `invoke` sits right after `kotlin.Any`'s three, and the runtime names that number itself.
-#[cfg(test)]
-pub(super) fn is_function_type_name(owner: crate::types::TypeName) -> bool {
-    owner == crate::types::wk::function_root() || function_type_arity(owner).is_some()
-}
-
-#[cfg(test)]
-fn function_type_arity(owner: crate::types::TypeName) -> Option<usize> {
-    owner
-        .unsigned_suffix_after_prefix("kotlin/Function")
-        .or_else(|| owner.unsigned_suffix_after_prefix("kotlin/jvm/functions/Function"))
-}
-
 /// The runtime marker an `is` against one of Kotlin's REFLECTION types asks about.
 ///
 /// A property reference is an object of a type of its own — the generator emits one per property —
@@ -1051,6 +1691,57 @@ pub(super) fn property_reference_markers(mutable: bool, arity: usize) -> Vec<&'s
         });
     }
     markers
+}
+
+/// A member of the collections facade the runtime answers for an ARRAY receiver, as
+/// `(symbol, carried, answer)`.
+///
+/// Every one of these is an extension, and the facade declares the same names over lists, sequences
+/// and ranges — so the owner cannot say which receiver this is and the CALLER asks the receiver.
+/// What an entry names is the runtime function for the array case only.
+///
+/// `toList` and `reversed` answer a LIST of boxes; `reversedArray` answers an array wearing the
+/// receiver's own descriptor, which is the whole of the difference between the last two. The
+/// `content…` three are the questions `Arrays.equals`/`hashCode`/`toString` answer — an array's own
+/// `equals` is identity, and these exist precisely because a program sometimes wants the other one.
+pub(super) fn array_member(
+    owner: DeclarationOwner,
+    name: &str,
+    params: &[Ty],
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    // The unsigned arrays get their own package: Kotlin declares `UIntArray.reversed()` in
+    // `kotlin.collections.unsigned`, apart from the signed one it answers identically to. The
+    // runtime reads the element's type from the array's descriptor, so both reach one entry.
+    if !owner.package_is(crate::types::wk::kotlin_collections_package())
+        && !owner.package_is(crate::types::wk::kotlin_collections_unsigned_package())
+    {
+        return None;
+    }
+    let reference = Ty::nullable(Ty::obj("kotlin/Any"));
+    Some(match (name, params) {
+        ("toList", []) => ("kt_array_to_list", vec![reference], reference),
+        ("reversed", []) => ("kt_array_reversed", vec![reference], reference),
+        ("reversedArray", []) => ("kt_array_reversed_array", vec![reference], reference),
+        // The operand is declared nullable, and so may the receiver be: `contentEquals` is one of
+        // the few stdlib extensions written over `Array<T>?`, because comparing two arrays that
+        // may be absent is exactly what it is for. The runtime takes both as they come.
+        ("contentEquals", [_]) => (
+            "kt_array_content_equals",
+            vec![reference, reference],
+            Ty::Boolean,
+        ),
+        ("contentHashCode", []) => ("kt_array_content_hash_code", vec![reference], Ty::Int),
+        // The LENGTH is the whole of these two, and it is the same question whichever element
+        // width the array has.
+        ("isEmpty", []) => ("kt_array_is_empty", vec![reference], Ty::Boolean),
+        ("isNotEmpty", []) => ("kt_array_is_not_empty", vec![reference], Ty::Boolean),
+        ("contentToString", []) => (
+            "kt_array_content_to_string",
+            vec![reference],
+            Ty::obj("kotlin/String"),
+        ),
+        _ => return None,
+    })
 }
 
 /// `a.mod(b)` — the remainder carrying the DIVISOR's sign, as (runtime symbol, operand type): both
@@ -1291,23 +1982,21 @@ pub(super) fn runtime_companion_member(
 /// first argument. Receiver and arguments are passed as references, so a scalar receiver boxes —
 /// which is what `4.toString()` means anyway.
 pub(super) fn runtime_member(
-    owner: DeclarationOwner,
-    name: &str,
-    params: &[Ty],
-    selected_role: Option<RuntimeMemberRole>,
+    signature: FunctionSignature<'_>,
+    semantic_role: Option<crate::types::SemanticCallRole>,
 ) -> Option<&'static str> {
-    if let Some(role) = selected_role {
-        return match (role, params) {
-            (RuntimeMemberRole::ToString, []) => Some("kt_to_string"),
-            (RuntimeMemberRole::HashCode, []) => Some("kt_hash_code"),
-            (RuntimeMemberRole::Equals, [_]) => Some("kt_equals"),
+    if is_any_runtime_member(signature, semantic_role) {
+        return match signature.name {
+            "toString" => Some("kt_to_string"),
+            "hashCode" => Some("kt_hash_code"),
+            "equals" => Some("kt_equals"),
             _ => None,
         };
     }
     // `removeSuffix` is a top-level extension of `kotlin.text`, so it arrives as a member of that
     // package's file facade; everything it takes and answers is a reference, which is this path.
-    if owner.package_matches("kotlin/text") {
-        match (name, params) {
+    if signature.owner.package_matches("kotlin/text") {
+        match (signature.name, signature.params) {
             ("removeSuffix", [_]) => return Some("kt_string_remove_suffix"),
             // Text in, text out: every operand and the answer are references, so the ordinary
             // reference path carries all of them.
@@ -1326,8 +2015,11 @@ pub(super) fn runtime_member(
             _ => {}
         }
     }
-    if owner.classifier_matches("kotlin/text/StringBuilder") {
-        return match (name, params) {
+    if signature
+        .owner
+        .classifier_matches("kotlin/text/StringBuilder")
+    {
+        return match (signature.name, signature.params) {
             // A builder's `append` takes one of a dozen overloads on the JVM and one function here:
             // every operand is rendered through its own `toString`, which is the same answer for all of
             // them, and the reference path has already boxed whichever primitive arrived.
@@ -1337,20 +2029,36 @@ pub(super) fn runtime_member(
             _ => None,
         };
     }
-    match (name, params) {
-        // `equals` does not yet carry a declaration role. Keep this remaining runtime ABI bridge
-        // narrow until the provider publishes the same exact identity it already does for
-        // `hashCode` and `toString`.
-        ("equals", [_]) => Some("kt_equals"),
-        _ => None,
-    }
+    None
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RuntimeMemberRole {
-    ToString,
-    HashCode,
-    Equals,
+/// Whether the exact selected declaration is one of `Any`'s three runtime-dispatched members.
+///
+/// An override may have a physical owner of its own, so the checked hierarchy fact is retained for
+/// that case. It only admits the operation when the complete semantic signature agrees; neither a
+/// role by itself nor a coincidental callable spelling is a native implementation key. A direct
+/// `Any` declaration can be recognized by its exact owner and signature even when an older provider
+/// omitted the hierarchy fact.
+pub(super) fn is_any_runtime_member(
+    signature: FunctionSignature<'_>,
+    semantic_role: Option<crate::types::SemanticCallRole>,
+) -> bool {
+    use crate::types::SemanticCallRole;
+
+    let nullable_any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+    let exact = match (signature.name, signature.params, signature.ret) {
+        ("toString", [], result) if is_string_type(&result) => {
+            Some(SemanticCallRole::KotlinAnyToString)
+        }
+        ("hashCode", [], Ty::Int) => Some(SemanticCallRole::KotlinAnyHashCode),
+        ("equals", [parameter], Ty::Boolean) if *parameter == nullable_any => {
+            Some(SemanticCallRole::KotlinAnyEquals)
+        }
+        _ => None,
+    };
+    exact.is_some_and(|exact| {
+        semantic_role == Some(exact) || signature.owner.classifier_matches("kotlin/Any")
+    })
 }
 
 #[cfg(test)]
@@ -1365,7 +2073,9 @@ mod tests {
         let physical = crate::types::type_name(path);
         DeclarationOwner {
             physical,
-            package: Some(physical.parent().unwrap_or(TypeName::ROOT)),
+            semantic: Some(SemanticCallableOwner::Package(
+                physical.parent().unwrap_or(TypeName::ROOT),
+            )),
         }
     }
 
@@ -1373,8 +2083,192 @@ mod tests {
         let physical = crate::types::type_name(path);
         DeclarationOwner {
             physical,
-            package: Some(physical),
+            semantic: Some(SemanticCallableOwner::Package(physical)),
         }
+    }
+
+    fn function<'a>(
+        owner: DeclarationOwner,
+        name: &'a str,
+        params: &'a [Ty],
+        ret: Ty,
+    ) -> FunctionSignature<'a> {
+        FunctionSignature::new(owner, name, params, ret)
+    }
+
+    #[test]
+    fn comparable_intrinsic_requires_the_complete_declaration_signature() {
+        let parameter = Ty::ty_param("T", Ty::obj_name(crate::types::wk::any()));
+        let parameters = [parameter];
+        let comparable = member("kotlin/Comparable");
+        assert!(is_comparable_compare_to(FunctionSignature::new(
+            comparable,
+            "compareTo",
+            &parameters,
+            Ty::Int,
+        )));
+        assert!(is_comparable_compare_to(FunctionSignature::new(
+            member("java/lang/Comparable"),
+            "compareTo",
+            &parameters,
+            Ty::Int,
+        )));
+
+        assert!(!is_comparable_compare_to(FunctionSignature::new(
+            comparable,
+            "compareTo",
+            &[Ty::String],
+            Ty::Int,
+        )));
+        assert!(!is_comparable_compare_to(FunctionSignature::new(
+            comparable,
+            "compareTo",
+            &parameters,
+            Ty::Long,
+        )));
+        assert!(!is_comparable_compare_to(FunctionSignature::new(
+            comparable,
+            "compare",
+            &parameters,
+            Ty::Int,
+        )));
+    }
+
+    #[test]
+    fn iteration_runtime_members_require_complete_declaration_signatures() {
+        let element = Ty::ty_param("T", Ty::obj_name(crate::types::wk::any()));
+        let iterator = Ty::obj_args("kotlin/collections/Iterator", &[element]);
+        let no_params = [];
+        assert!(iteration_runtime_member(
+            CollectionShape::Iterable,
+            Some(CollectionShape::Iterable),
+            Some(CollectionShape::Iterator),
+            FunctionSignature::new(
+                member("kotlin/collections/Iterable"),
+                "iterator",
+                &no_params,
+                iterator,
+            ),
+        )
+        .is_some());
+        assert!(iteration_runtime_member(
+            CollectionShape::Iterable,
+            None,
+            Some(CollectionShape::Iterator),
+            FunctionSignature::new(member("sample/Iterable"), "iterator", &no_params, iterator),
+        )
+        .is_none());
+        assert!(iteration_runtime_member(
+            CollectionShape::Iterable,
+            Some(CollectionShape::Iterable),
+            None,
+            FunctionSignature::new(
+                member("kotlin/collections/Iterable"),
+                "iterator",
+                &no_params,
+                Ty::Int,
+            ),
+        )
+        .is_none());
+
+        assert!(iteration_runtime_member(
+            CollectionShape::Iterator,
+            Some(CollectionShape::Iterator),
+            None,
+            FunctionSignature::new(
+                member("java/util/Iterator"),
+                "hasNext",
+                &no_params,
+                Ty::Boolean,
+            ),
+        )
+        .is_some());
+        assert!(iteration_runtime_member(
+            CollectionShape::Iterator,
+            Some(CollectionShape::Iterator),
+            None,
+            FunctionSignature::new(
+                member("kotlin/collections/ByteIterator"),
+                "nextByte",
+                &no_params,
+                Ty::Byte,
+            ),
+        )
+        .is_some());
+        assert!(iteration_runtime_member(
+            CollectionShape::Iterator,
+            Some(CollectionShape::Iterator),
+            None,
+            FunctionSignature::new(
+                member("kotlin/collections/ByteIterator"),
+                "nextByte",
+                &no_params,
+                Ty::Int,
+            ),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn collection_algorithms_require_complete_declaration_signatures() {
+        let element = Ty::ty_param("T", Ty::obj_name(crate::types::wk::any()));
+        let iterable = Ty::obj_args("kotlin/collections/Iterable", &[element]);
+        let predicate = Ty::fun(vec![element], Ty::Boolean);
+        let list = Ty::obj_args("kotlin/collections/List", &[element]);
+        let parameters = [predicate];
+        let exact =
+            FunctionSignature::new(package("kotlin/collections"), "filter", &parameters, list)
+                .with_receiver(Some(iterable));
+        assert_eq!(
+            collection_algorithm(exact),
+            Some(CollectionAlgorithm::Filter)
+        );
+
+        let wrong_result = FunctionSignature::new(
+            package("kotlin/collections"),
+            "filter",
+            &parameters,
+            Ty::Boolean,
+        )
+        .with_receiver(Some(iterable));
+        assert_eq!(collection_algorithm(wrong_result), None);
+
+        let wrong_owner = FunctionSignature::new(package("sample"), "filter", &parameters, list)
+            .with_receiver(Some(iterable));
+        assert_eq!(collection_algorithm(wrong_owner), None);
+
+        let text_sequence = Ty::obj_args("kotlin/sequences/Sequence", &[Ty::Char]);
+        let exact_text =
+            FunctionSignature::new(package("kotlin/text"), "asSequence", &[], text_sequence)
+                .with_receiver(Some(Ty::obj("kotlin/CharSequence")));
+        assert_eq!(
+            collection_algorithm(exact_text),
+            Some(CollectionAlgorithm::AsSequence)
+        );
+        assert_eq!(
+            collection_algorithm(
+                FunctionSignature::new(package("kotlin/text"), "asSequence", &[], text_sequence,)
+                    .with_receiver(Some(Ty::String)),
+            ),
+            None,
+            "the selected declaration receiver, not the call-site string layout, is the key"
+        );
+    }
+
+    #[test]
+    fn jvm_builtin_aliases_are_normalized_only_at_the_intrinsic_boundary() {
+        assert!(classifier_matches(
+            crate::types::type_name("java/util/ArrayList"),
+            "kotlin/collections/ArrayList"
+        ));
+        assert!(classifier_matches(
+            crate::types::type_name("java/lang/Comparable"),
+            "kotlin/Comparable"
+        ));
+        assert!(!classifier_matches(
+            crate::types::type_name("sample/ArrayList"),
+            "kotlin/collections/ArrayList"
+        ));
     }
 
     /// Both providers' spellings of the same top-level declaration name the same package.
@@ -1458,7 +2352,15 @@ mod tests {
     #[test]
     fn string_plus_has_no_name_based_runtime_fallback() {
         assert_eq!(
-            runtime_member(member("java/lang/String"), "plus", &[Ty::String], None),
+            runtime_member(
+                function(
+                    member("java/lang/String"),
+                    "plus",
+                    &[Ty::String],
+                    Ty::String,
+                ),
+                None,
+            ),
             None,
             "String.plus is admitted only by its CompilerIntrinsic identity"
         );
@@ -1499,50 +2401,73 @@ mod tests {
     }
 
     #[test]
-    fn semantic_roles_admit_any_members_without_name_fallbacks() {
+    fn any_runtime_members_require_complete_declaration_signatures() {
+        use crate::types::SemanticCallRole;
+
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         assert_eq!(
-            runtime_member(member("kotlin/String"), "plus", &[any], None),
+            runtime_member(
+                function(member("kotlin/String"), "plus", &[any], Ty::String),
+                None,
+            ),
             None
         );
         assert_eq!(
             runtime_member(
-                member("kotlin/Int"),
-                "physicalNameDoesNotMatter",
-                &[],
-                Some(RuntimeMemberRole::ToString)
+                function(member("kotlin/Int"), "toString", &[], Ty::String),
+                Some(SemanticCallRole::KotlinAnyToString),
             ),
             Some("kt_to_string")
         );
         assert_eq!(
             runtime_member(
-                member("kotlin/Int"),
-                "physicalNameDoesNotMatter",
-                &[],
-                Some(RuntimeMemberRole::ToString),
+                function(
+                    member("kotlin/Int"),
+                    "physicalNameDoesNotMatter",
+                    &[],
+                    Ty::String,
+                ),
+                Some(SemanticCallRole::KotlinAnyToString),
             ),
-            Some("kt_to_string")
-        );
-        assert_eq!(
-            runtime_member(
-                member("kotlin/Any"),
-                "physicalNameDoesNotMatter",
-                &[],
-                Some(RuntimeMemberRole::HashCode)
-            ),
-            Some("kt_hash_code")
-        );
-        assert_eq!(
-            runtime_member(member("kotlin/Any"), "hashCode", &[], None),
             None,
-            "a coincidental spelling has no semantic role"
+            "the checked override fact does not replace the declaration signature"
         );
         assert_eq!(
-            runtime_member(member("kotlin/Any"), "equals", &[any], None),
+            runtime_member(
+                function(member("kotlin/Any"), "hashCode", &[], Ty::String),
+                Some(SemanticCallRole::KotlinAnyHashCode),
+            ),
+            None,
+            "the result is part of the declaration signature"
+        );
+        assert_eq!(
+            runtime_member(
+                function(member("kotlin/Any"), "hashCode", &[], Ty::Int),
+                None,
+            ),
+            Some("kt_hash_code"),
+            "the exact Any declaration does not need a duplicate backend role"
+        );
+        assert_eq!(
+            runtime_member(
+                function(member("kotlin/Any"), "equals", &[any], Ty::Boolean),
+                None,
+            ),
             Some("kt_equals")
         );
         assert_eq!(
-            runtime_member(member("kotlin/String"), "repeat", &[Ty::Int], None),
+            runtime_member(
+                function(member("sample/Unrelated"), "equals", &[any], Ty::Boolean,),
+                None,
+            ),
+            None,
+            "an unrelated declaration with the same shape is not Any.equals"
+        );
+        assert_eq!(
+            runtime_member(
+                function(member("kotlin/String"), "repeat", &[Ty::Int], Ty::String,),
+                None,
+            ),
             None,
             "an unimplemented member must decline"
         );
@@ -1565,17 +2490,23 @@ mod tests {
     #[test]
     fn an_unimplemented_declaration_is_declined_rather_than_guessed() {
         assert_eq!(
-            runtime_function(
+            runtime_function(function(
                 facade("kotlin/text/StringsKt"),
                 "repeat",
                 &[Ty::String, Ty::Int],
-            ),
+                Ty::String,
+            )),
             None,
             "a missing runtime function must produce a diagnostic, never a call to a symbol that \
              does not exist"
         );
         assert_eq!(
-            runtime_function(facade("kotlin/io/ConsoleKt"), "readLine", &[]),
+            runtime_function(function(
+                facade("kotlin/io/ConsoleKt"),
+                "readLine",
+                &[],
+                Ty::nullable(Ty::String),
+            )),
             None
         );
     }
@@ -1613,21 +2544,48 @@ mod tests {
     }
 
     #[test]
+    fn collection_roles_keep_their_special_bridges() {
+        let collection = |kind, mutable| crate::types::MappedCollection { kind, mutable };
+        assert!(has_special_bridge(
+            collection(crate::types::CollectionKind::Collection, false),
+            "contains"
+        ));
+        assert!(has_special_bridge(
+            collection(crate::types::CollectionKind::Collection, true),
+            "remove"
+        ));
+        assert!(has_special_bridge(
+            collection(crate::types::CollectionKind::Map, false),
+            "remove"
+        ));
+        assert!(!has_special_bridge(
+            collection(crate::types::CollectionKind::Collection, false),
+            "get"
+        ));
+    }
+
+    #[test]
     fn a_facade_append_is_vararg_and_only_the_builders_own_append_is_answered() {
         assert_eq!(
             runtime_member(
-                facade("kotlin/text/StringsKt"),
-                "append",
-                &[Ty::array(Ty::String)],
+                function(
+                    facade("kotlin/text/StringsKt"),
+                    "append",
+                    &[Ty::array(Ty::String)],
+                    Ty::obj("kotlin/text/StringBuilder"),
+                ),
                 None,
             ),
             None
         );
         assert_eq!(
             runtime_member(
-                member("kotlin/text/StringBuilder"),
-                "append",
-                &[Ty::String],
+                function(
+                    member("kotlin/text/StringBuilder"),
+                    "append",
+                    &[Ty::String],
+                    Ty::obj("kotlin/text/StringBuilder"),
+                ),
                 None,
             ),
             Some("kt_string_builder_append")
@@ -1638,10 +2596,52 @@ mod tests {
     fn a_precondition_is_named_by_one_table_only() {
         for name in ["require", "check"] {
             assert_eq!(
-                runtime_function(facade("kotlin/PreconditionsKt"), name, &[Ty::Boolean]),
+                runtime_function(function(
+                    facade("kotlin/PreconditionsKt"),
+                    name,
+                    &[Ty::Boolean],
+                    Ty::Unit,
+                )),
                 None
             );
             assert!(precondition(facade("kotlin/PreconditionsKt"), name, &[Ty::Boolean]).is_some());
         }
+    }
+
+    #[test]
+    fn an_inline_overflow_guard_requires_its_complete_declaration_signature() {
+        let exact = function(
+            package("kotlin/collections"),
+            "throwIndexOverflow",
+            &[],
+            Ty::Unit,
+        );
+        assert_eq!(
+            runtime_function(exact).as_deref(),
+            Some("kt_throw_index_overflow")
+        );
+        assert_eq!(
+            runtime_function(function(
+                package("kotlin/collections"),
+                "throwIndexOverflow",
+                &[],
+                Ty::Int,
+            )),
+            None,
+            "the result is part of the declaration identity"
+        );
+        assert_eq!(
+            runtime_function(
+                function(
+                    package("kotlin/collections"),
+                    "throwIndexOverflow",
+                    &[],
+                    Ty::Unit,
+                )
+                .with_receiver(Some(Ty::obj("sample/Receiver"))),
+            ),
+            None,
+            "a same-shaped extension is not the receiver-less stdlib helper"
+        );
     }
 }

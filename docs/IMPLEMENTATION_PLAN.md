@@ -4482,6 +4482,10 @@ each one lowering more and declining less:
   object), function types with a fixed `invoke` slot, SAM conversions, callable references to
   functions and properties including bound ones and dependency members, default arguments through
   one wrapper per omission shape, local functions, and the stdlib scope functions.
+- **Collections** (tier 4): arrays of every element width, lists, maps and sets as the runtime's
+  objects, ranges and progressions, iteration over each and over a class of the program that
+  implements `Iterable`/`CharSequence`, `lazy`, `Pair`, and property delegates (`ReadOnlyProperty`,
+  `ReadWriteProperty`, `Delegates.notNull`/`observable`).
 - **Cross-file calls.** A top-level function is defined as `kt_mod_<callable id>`, the checked
   callable identity, so the defining file and a caller in another file of the module name the same
   symbol without seeing each other's lowering. `Callee::Module`, and a `CrossFile` edge that still
@@ -4499,7 +4503,7 @@ each one lowering more and declining less:
   public function whose name or types this ABI cannot represent safely is named in the header and
   not declared; colliding C spellings are likewise refused rather than emitted twice. The Kotlin
   program still runs.
-  Tests: `tests/native_c_abi_e2e.rs`.
+   Tests: `tests/native_c_abi_e2e.rs`.
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host

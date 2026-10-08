@@ -1,20 +1,50 @@
 //! Normalize dependency declarations into stable provider identities.
 //!
-//! Classifier, spelling-indexed, property, and cached-inline views can discover the same physical
-//! declaration in different orders. This boundary publishes one identity and its complete source
-//! parameter/visibility facets before checked FIR carries it to a backend.
+//! Classifier, spelling-indexed, property, and cached-inline views can discover the same target
+//! declaration in different orders. This boundary publishes one identity for the joined physical
+//! realization and semantic declaration owner, plus its complete source parameter/visibility
+//! facets, before checked FIR carries it to a backend.
 
 use super::JvmLibraries;
 use crate::libraries::{
     FnKind, FunctionInfo, LibraryCallable, LibraryMember, PropKind, PropertyInfo,
 };
+use crate::types::{SemanticCallableOwner, TypeName};
 
 impl JvmLibraries {
+    pub(super) fn register_external_constructor(
+        &self,
+        owner: TypeName,
+        member: &mut LibraryMember,
+    ) {
+        let callable = LibraryCallable::constructor(owner, member);
+        let declaration_owner = Some(SemanticCallableOwner::Classifier(owner));
+        let identity = member
+            .external_identity
+            .filter(|identity| {
+                self.cp
+                    .external_callable(*identity)
+                    .is_some_and(|realization| realization.declaration_owner == declaration_owner)
+            })
+            .map(|identity| {
+                self.cp.enrich_external_callable(identity, &callable);
+                identity
+            })
+            .unwrap_or_else(|| {
+                self.cp.intern_external_callable(
+                    &callable,
+                    super::super::classpath::ExternalCallableKind::Constructor,
+                    declaration_owner,
+                )
+            });
+        member.external_identity = Some(identity);
+    }
+
     pub(super) fn register_external_callable(
         &self,
         callable: &mut LibraryCallable,
         kind: FnKind,
-        declaration_package: Option<crate::types::TypeName>,
+        declaration_owner: Option<SemanticCallableOwner>,
     ) {
         if !matches!(callable.origin, crate::libraries::Origin::Library) {
             return;
@@ -31,13 +61,26 @@ impl JvmLibraries {
         if let Some(plan) = callable.inline_body_plan.as_deref_mut() {
             self.register_inline_body_plan_dependencies(plan);
         }
+        // A declaration discovered through more than one provider view keeps the exact semantic
+        // owner published by the view that actually declared it. In particular, a Java static
+        // field can be reached through both its classifier and package lookup, but it remains a
+        // classifier declaration; re-homing it as a package callable would make its field
+        // descriptor look like a method descriptor to the backend.
+        let declaration_owner = callable.declaration_owner.or(declaration_owner);
+        callable.declaration_owner = declaration_owner;
         if let Some(identity) = callable.external_identity {
-            self.cp.enrich_external_callable(identity, callable);
-            if let Some(package) = declaration_package {
-                self.cp
-                    .publish_external_callable_declaration_package(identity, package);
+            if self
+                .cp
+                .external_callable(identity)
+                .is_some_and(|realization| realization.declaration_owner == declaration_owner)
+            {
+                self.cp.enrich_external_callable(identity, callable);
+                return;
             }
-            return;
+            // A partial provider view can carry an identity interned before its exact semantic
+            // owner was known. Re-home it under the complete declaration key instead of mutating
+            // the meaning of an identity that checked FIR may already hold.
+            callable.external_identity = None;
         }
         let kind = match kind {
             FnKind::TopLevel => super::super::classpath::ExternalCallableKind::TopLevel,
@@ -47,7 +90,7 @@ impl JvmLibraries {
         callable.external_identity = Some(self.cp.intern_external_callable(
             callable,
             kind,
-            declaration_package,
+            declaration_owner,
         ));
     }
 
@@ -63,8 +106,9 @@ impl JvmLibraries {
         callable: &mut LibraryCallable,
         kind: FnKind,
     ) {
+        let declaration_owner = callable.declaration_owner;
         callable.external_identity = None;
-        self.register_external_callable(callable, kind, None);
+        self.register_external_callable(callable, kind, declaration_owner);
     }
 
     fn register_external_inline_callable(&self, member: &mut LibraryMember, kind: FnKind) {
@@ -72,14 +116,19 @@ impl JvmLibraries {
             return;
         };
         let mut callable = FunctionInfo::classifier_member(kind, owner, member.clone()).callable;
-        self.register_external_inline_dependency_callable(&mut callable, kind);
+        callable.external_identity = None;
+        self.register_external_callable(
+            &mut callable,
+            kind,
+            Some(SemanticCallableOwner::Classifier(owner)),
+        );
         member.external_identity = callable.external_identity;
     }
 
     pub(super) fn register_external_property(
         &self,
         property: &mut PropertyInfo,
-        declaration_package: Option<crate::types::TypeName>,
+        declaration_owner: Option<SemanticCallableOwner>,
     ) {
         property.metadata_constant_read = self.java_field_is_metadata_constant_read(property);
         // A JavaBean projection reuses the Java methods' declarations; it does not declare Kotlin
@@ -115,7 +164,7 @@ impl JvmLibraries {
             "a normalized dependency property getter publishes every parameter identity"
         );
         property.getter.visibility = property.visibility;
-        self.register_external_callable(&mut property.getter, kind, declaration_package);
+        self.register_external_callable(&mut property.getter, kind, declaration_owner);
         if declares_accessors {
             if let Some(identity) = property.getter.external_identity {
                 self.cp.publish_external_callable_parameter_identities(
@@ -142,7 +191,7 @@ impl JvmLibraries {
                 setter_parameter_identities.len(),
                 "a normalized dependency property setter publishes every parameter identity"
             );
-            self.register_external_callable(setter, kind, declaration_package);
+            self.register_external_callable(setter, kind, declaration_owner);
             if declares_accessors {
                 if let Some(identity) = setter.external_identity {
                     self.cp.publish_external_callable_parameter_identities(
@@ -174,7 +223,7 @@ impl JvmLibraries {
     pub(super) fn register_external_callables(
         &self,
         callables: crate::libraries::Callables,
-        declaration_package: Option<crate::types::TypeName>,
+        declaration_owner: Option<SemanticCallableOwner>,
     ) -> crate::libraries::Callables {
         let (mut functions, mut properties) = callables.into_parts();
         for function in &mut functions.overloads {
@@ -204,7 +253,7 @@ impl JvmLibraries {
             self.register_external_callable(
                 &mut function.callable,
                 function.kind,
-                declaration_package,
+                declaration_owner,
             );
             if let (Some(identity), Some(parameter_identities)) =
                 (function.callable.external_identity, parameter_identities)
@@ -214,7 +263,7 @@ impl JvmLibraries {
             }
         }
         for property in &mut properties.overloads {
-            self.register_external_property(property, declaration_package);
+            self.register_external_property(property, declaration_owner);
         }
         crate::libraries::Callables::from_parts(functions, properties)
     }

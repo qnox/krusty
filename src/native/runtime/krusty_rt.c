@@ -2250,6 +2250,22 @@ static kt_long kt_range_last_element(kt_boolean unsigned_bounds, kt_long first, 
     return last + kt_difference_modulo(first, last, -step);
 }
 
+kt_int kt_progression_last_int(kt_int first, kt_int last, kt_int step) {
+    return (kt_int)kt_range_last_element(false, first, last, step);
+}
+
+kt_long kt_progression_last_long(kt_long first, kt_long last, kt_long step) {
+    return kt_range_last_element(false, first, last, step);
+}
+
+kt_int kt_progression_last_uint(kt_int first, kt_int last, kt_int step) {
+    return (kt_int)kt_range_last_element(true, (uint32_t)first, (uint32_t)last, step);
+}
+
+kt_long kt_progression_last_ulong(kt_long first, kt_long last, kt_long step) {
+    return kt_range_last_element(true, first, last, step);
+}
+
 static KRef kt_range_allocate(const KType *type, kt_long first, kt_long last, kt_long step) {
     KRange *range = (KRange *)kt_gc_allocate(type, sizeof(KRange));
     range->first = first;
@@ -2347,6 +2363,8 @@ kt_boolean kt_range_is_empty(KRef range) { return kt_range_empty((const KRange *
 kt_long kt_range_first(KRef range) { return ((const KRange *)range)->first; }
 
 kt_long kt_range_last(KRef range) { return ((const KRange *)range)->last; }
+
+kt_long kt_range_step_value(KRef range) { return ((const KRange *)range)->step; }
 
 /* `value in range`, in constant time. A value is a member when it lies between the ends in the
    walk's own direction (a descending progression has `first` above `last`) and sits ON the step:

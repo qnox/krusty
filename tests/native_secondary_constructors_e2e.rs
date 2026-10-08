@@ -9,8 +9,9 @@
 //! An enum CONSTANT selects the same way: `ENTRY` on an enum whose primary takes a `String` and
 //! which also declares `constructor() : this("OK")` is a call to that secondary.
 //!
-//! Kotlin admits no two constructors of one class with the same parameter list, so a secondary
-//! matching the selection IS the selection, and the primary is what remains when none does.
+//! Constructor identity is selected by the frontend and carried into common IR. Native lowering
+//! consumes that exact declaration ordinal; it does not repeat overload selection from parameter
+//! types.
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
@@ -52,6 +53,24 @@ fn an_enum_constant_reaches_the_secondary_constructor_it_selected() {
          }\n";
     expect_box_ok_with_stdlib(source, "EnumSecondaryConstructor");
     expect_native_box(source, "EnumSecondaryConstructor", "OK");
+}
+
+/// The selected secondary constructor also owns its default-argument frame. The backend must not
+/// silently use the primary constructor's defaults merely because the call supplies no operands.
+#[test]
+fn an_enum_constant_reaches_its_secondary_constructors_default() {
+    let source = "enum class My(val value: Int) {\n\
+         \x20   DEFAULT,\n\
+         \x20   PRIMARY(3);\n\
+         \x20   constructor(flag: Boolean = true) : this(if (flag) 7 else 8)\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   if (My.DEFAULT.value != 7) return \"fail secondary default\"\n\
+         \x20   if (My.PRIMARY.value != 3) return \"fail primary\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "EnumSecondaryConstructorDefault");
+    expect_native_box(source, "EnumSecondaryConstructorDefault", "OK");
 }
 
 /// A class HEADER naming the superclass's secondary constructor.

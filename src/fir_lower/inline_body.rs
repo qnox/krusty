@@ -243,6 +243,7 @@ impl BodyLowering<'_> {
             &mut statements,
             &args,
             lambda_parameter,
+            *parameter_types.get(lambda_parameter)?,
             &invocation_operands,
             frame,
             source_line,
@@ -1022,28 +1023,40 @@ impl BodyLowering<'_> {
         statements: &mut Vec<ExprId>,
         args: &[ExprId],
         lambda_parameter: usize,
+        lambda_ty: Ty,
         invocation_operands: &[(ExprId, Ty)],
         frame: &crate::fir::FirInlineBodyFrame,
         call_line: Option<u32>,
     ) -> Option<(ExprId, Option<u32>)> {
-        let lambda_slot = match self.ir.expr(*args.get(lambda_parameter)?) {
-            IrExpr::GetValue(slot) => *slot,
-            _ => return None,
+        let function = *args.get(lambda_parameter)?;
+        let invoke_function = |lowering: &mut Self| {
+            lowering
+                .invoke_external_function_value(function, lambda_ty, invocation_operands)
+                .map(|invocation| (invocation, None))
         };
-        let declaration_position = statements.iter().position(|statement| {
+        let lambda_slot = match self.ir.expr(function) {
+            IrExpr::GetValue(slot) => *slot,
+            _ => return invoke_function(self),
+        };
+        let Some(declaration_position) = statements.iter().position(|statement| {
             matches!(
                 self.ir.expr(*statement),
                 IrExpr::Variable { index, .. } if *index == lambda_slot
             )
-        })?;
+        }) else {
+            return invoke_function(self);
+        };
         let lambda = match self.ir.expr(statements[declaration_position]).clone() {
             IrExpr::Variable {
                 init: Some(lambda), ..
             } => lambda,
-            _ => return None,
+            _ => return invoke_function(self),
         };
         let (implementation, captures, inline_body, arity) =
-            inline_argument_template(self.ir, lambda)?;
+            match inline_argument_template(self.ir, lambda) {
+                Some(template) => template,
+                None => return invoke_function(self),
+            };
         if invocation_operands.len() != arity {
             return None;
         }
@@ -1174,5 +1187,35 @@ impl BodyLowering<'_> {
         self.ir.functions[implementation as usize].body = None;
         self.ir.inline_only_fns.insert(implementation);
         Some((inline_body, callee_receiver))
+    }
+
+    /// Invoke an already-evaluated function value when it has no local inline template to splice.
+    ///
+    /// A caller parameter is normally a `GetValue` whose declaration lives outside the call's
+    /// materialization statements. That absence says only that the body is not locally available;
+    /// it must not make a complete provider-owned inline plan fall back to an external stdlib call.
+    fn invoke_external_function_value(
+        &mut self,
+        function: ExprId,
+        lambda_ty: Ty,
+        invocation_operands: &[(ExprId, Ty)],
+    ) -> Option<ExprId> {
+        let Ty::Fun(signature) = lambda_ty else {
+            return None;
+        };
+        if invocation_operands.len() != signature.params.len() {
+            return None;
+        }
+        Some(
+            self.ir.add_expr(IrExpr::InvokeFunction {
+                func: function,
+                args: invocation_operands
+                    .iter()
+                    .map(|(operand, _)| *operand)
+                    .collect(),
+                params: signature.params.to_vec(),
+                ret: signature.ret,
+            }),
+        )
     }
 }

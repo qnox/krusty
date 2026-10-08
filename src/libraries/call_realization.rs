@@ -4,7 +4,7 @@ use super::{
     physical_parameter_plan, InlineKind, LibraryCallable, LibraryConst, LibraryMember,
     MemberRealization, Origin,
 };
-use crate::types::{Ty, TypeName};
+use crate::types::{SemanticCallableOwner, Ty, TypeName};
 
 /// How a provider realizes one already-selected dependency callable.
 ///
@@ -32,11 +32,10 @@ pub enum ExternalCallableKind {
 pub struct ExternalCallableRealization {
     pub callable: LibraryCallable,
     pub kind: ExternalCallableKind,
-    /// Exact semantic package that declares this package callable or projected property accessor.
-    /// Providers publish it independently of the physical realization kind and owner: a JVM
-    /// facade, mapped member, storage field, and KLIB declaration can expose the same semantic
-    /// package without sharing a physical shape.
-    pub declaration_package: Option<TypeName>,
+    /// Exact semantic namespace that declares this callable. Providers publish it independently
+    /// of the physical realization kind and owner: a JVM facade, mapped member, storage field, and
+    /// KLIB declaration can expose the same source declaration without sharing a physical shape.
+    pub declaration_owner: Option<SemanticCallableOwner>,
     /// Provider-published identities parallel to the callable's semantic source parameters. The
     /// physical parameter plan joins them to ABI-only slots such as a suspend continuation.
     /// A backend formats these for debug/metadata surfaces; it never reconstructs them from arity.
@@ -123,6 +122,7 @@ impl LibraryCallable {
             annotations: Vec::new(),
             external_default_provider: None,
             external_property_identity: None,
+            declaration_owner: None,
             owner: owner.into(),
             name: name.into(),
             physical_name: None,

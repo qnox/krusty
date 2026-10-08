@@ -28,9 +28,7 @@ use static_properties::StaticAccessor;
 
 use super::mapped_builtin_declarations::MappedBuiltinMember;
 use crate::language_version::LanguageVersion;
-use builtin_classifier_shapes::{
-    builtin_library_type, mapped_builtin_property, mapped_builtin_signature, BuiltinGenericShape,
-};
+use builtin_classifier_shapes::{mapped_builtin_property, mapped_builtin_signature};
 use builtins_customizer::JvmBuiltInsCustomizer;
 pub(in crate::jvm) use generic_signatures::parse_class_gsig;
 use generic_signatures::{
@@ -61,7 +59,7 @@ use crate::libraries::{
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{type_name, Ty, TypeName, TypeNameList};
+use crate::types::{type_name, SemanticCallableOwner, Ty, TypeName, TypeNameList};
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
     class
@@ -501,6 +499,7 @@ impl JvmLibraries {
                 )
                 .flatten();
             let mut callable = LibraryCallable {
+                declaration_owner: Some(SemanticCallableOwner::Package(pkg)),
                 annotations: meta.annotations.clone(),
                 inline: inline_kind,
                 suspend,
@@ -583,6 +582,7 @@ impl JvmLibraries {
                 builtin.ret,
                 String::new(),
             );
+            callable.declaration_owner = Some(SemanticCallableOwner::Package(pkg));
             callable.inline = inline;
             callable.suspend = builtin.is_suspend;
             callable.source_receiver = builtin.generic_sig.receiver;
@@ -2492,53 +2492,6 @@ impl JvmLibraries {
             })
         }
     }
-
-    fn builtin_library_type(&self, internal: TypeName) -> Option<LibraryType> {
-        let (kind, access, is_nested) = self.cp.builtin_classifier_shape_name(internal)?;
-        let (formals, supertype_templates) = self
-            .cp
-            .builtin_class_gsig_name(internal)
-            .unwrap_or_default();
-        let variances = self
-            .cp
-            .builtin_class_variances_name(internal)
-            .unwrap_or_else(|| vec![crate::types::TypeVariance::Invariant; formals.len()]);
-        let members = self.builtin_members_for_type_name(internal);
-        crate::trace_compiler!(
-            "resolve",
-            "builtin classifier {} members={:?}",
-            internal.render(),
-            members
-                .iter()
-                .map(|member| member.name.as_str())
-                .collect::<Vec<_>>()
-        );
-        crate::trace_compiler!(
-            "metadata_companions",
-            "builtin classifier {} resolved members={:?}",
-            internal,
-            members
-                .iter()
-                .map(|member| (member.name.as_str(), member.params.as_slice(), member.ret))
-                .collect::<Vec<_>>()
-        );
-        let mut classifier = builtin_library_type(
-            kind,
-            access,
-            is_nested,
-            self.cp.builtin_supertypes_name(internal),
-            members,
-            self.cp.builtin_constructors_name(internal),
-            BuiltinGenericShape {
-                type_params: formals,
-                type_param_variances: variances,
-                supertype_templates,
-            },
-        );
-        classifier.companion_object = self.cp.builtin_companion_object(internal);
-        classifier.constants = std::collections::HashMap::new();
-        Some(classifier)
-    }
 }
 
 /// Parse one JVM generic-signature type off the front of `s` into a signature [`Ty`], returning
@@ -3189,6 +3142,7 @@ impl JvmLibraries {
         for constructor in &mut classifier.constructors {
             self.register_external_constructor(owner, constructor);
         }
+        let declaration_owner = Some(SemanticCallableOwner::Classifier(owner));
         // Hierarchy-based member-extension lookup reads `LibraryType::members` directly rather
         // than the spelling-indexed `declared_callables` map. Normalize both views at this provider
         // boundary so selecting the same declaration through either query yields the same stable
@@ -3222,7 +3176,7 @@ impl JvmLibraries {
             // still dispatches on the declaring class/object instance. Keep those independent facts:
             // `FunctionInfo` carries semantic kind; the external identity carries the instance-member
             // realization consumed after checked FIR has supplied both receivers.
-            self.register_external_callable(&mut callable, FnKind::Member, None);
+            self.register_external_callable(&mut callable, FnKind::Member, declaration_owner);
             member.external_identity = callable.external_identity;
             member.inline_body_plan = callable.inline_body_plan;
         }
@@ -3243,28 +3197,14 @@ impl JvmLibraries {
                 member.default_realization = callable.default_realization.clone();
             }
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
-            self.register_external_callable(&mut callable, FnKind::TopLevel, None);
+            self.register_external_callable(&mut callable, FnKind::TopLevel, declaration_owner);
             member.external_identity = callable.external_identity;
             member.inline_body_plan = callable.inline_body_plan;
         }
         for declarations in classifier.declared_callables.values_mut() {
-            *declarations = self.register_external_callables(declarations.clone(), None);
+            *declarations =
+                self.register_external_callables(declarations.clone(), declaration_owner);
         }
-    }
-
-    fn register_external_constructor(&self, owner: TypeName, member: &mut LibraryMember) {
-        let callable = LibraryCallable::constructor(owner, member);
-        let identity = if let Some(identity) = member.external_identity {
-            self.cp.enrich_external_callable(identity, &callable);
-            identity
-        } else {
-            self.cp.intern_external_callable(
-                &callable,
-                super::classpath::ExternalCallableKind::Constructor,
-                None,
-            )
-        };
-        member.external_identity = Some(identity);
     }
 
     fn declared_callables_for(
@@ -3684,7 +3624,7 @@ impl JvmLibraries {
                 getter.external_identity = Some(self.cp.intern_external_callable(
                     &getter,
                     super::classpath::ExternalCallableKind::InstanceFieldRead,
-                    None,
+                    Some(SemanticCallableOwner::Classifier(cn)),
                 ));
                 let setter = (field.access & 0x0010 == 0).then(|| {
                     let setter_source_name = name.to_string();
@@ -3703,7 +3643,7 @@ impl JvmLibraries {
                     setter.external_identity = Some(self.cp.intern_external_callable(
                         &setter,
                         super::classpath::ExternalCallableKind::InstanceFieldWrite,
-                        None,
+                        Some(SemanticCallableOwner::Classifier(cn)),
                     ));
                     setter
                 });
@@ -3855,7 +3795,7 @@ impl JvmLibraries {
         }
         self.register_external_callables(
             crate::libraries::Callables::from_parts(functions, PropertySet { overloads }),
-            None,
+            Some(SemanticCallableOwner::Classifier(cn)),
         )
     }
 
@@ -4432,7 +4372,8 @@ impl JvmLibraries {
         } else {
             platform_callables
         };
-        let callables = self.register_external_callables(callables, package);
+        let callables = self
+            .register_external_callables(callables, package.map(SemanticCallableOwner::Package));
         let importable_declaration = core.importable_declaration || static_field.is_some();
         self.cp.memoize_symbols(
             namespace,

@@ -76,8 +76,15 @@ impl BodyLowering<'_, '_, '_> {
         lhs: u32,
         rhs: u32,
     ) -> Result<Option<Value>, Unsupported> {
-        let lhs_ty = self.type_of(lhs);
-        let rhs_ty = self.type_of(rhs);
+        let lhs_physical = self.type_of(lhs);
+        let rhs_physical = self.type_of(rhs);
+        // EqualityMode::Primitive is a checked semantic decision. A generic member may still hand
+        // its value back through a reference slot (`Pair<Int, _>.first: T`), while the selected
+        // call's logical result records that the value is an Int. Keep both facts: the physical
+        // type says whether to unbox, and the logical type says which scalar is inside. Treating
+        // the physical slot as the semantic type either declines here or compares two pointers.
+        let lhs_scalar = self.scalar_operand_type(lhs, lhs_physical);
+        let rhs_scalar = self.scalar_operand_type(rhs, rhs_physical);
         let Some(left) = self.expression(lhs)? else {
             return Err("a `Unit` primitive-equality operand".to_string());
         };
@@ -87,7 +94,14 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
-        let (left, right, ty, signed) = self.unify(left, lhs_ty, right, rhs_ty)?;
+        let (left, right, ty, signed) = self.unify_scalars(
+            left,
+            lhs_physical,
+            lhs_scalar,
+            right,
+            rhs_physical,
+            rhs_scalar,
+        )?;
         Ok(Some(if ty.is_float() {
             let condition = float_comparison(op).expect("primitive equality");
             self.builder.ins().fcmp(condition, left, right)
@@ -151,14 +165,29 @@ impl BodyLowering<'_, '_, '_> {
 
     /// An operator's operand as the primitive it is: a reference-carried one is a box, opened to
     /// the type its own bound names.
-    fn unboxed_operand(&mut self, value: Value, ty: Option<Ty>) -> Result<Value, Unsupported> {
-        let Some(ty) = ty else {
+    fn scalar_operand_type(&self, id: u32, physical: Option<Ty>) -> Option<Ty> {
+        self.file
+            .ir
+            .logical_types
+            .get(&id)
+            .copied()
+            .and_then(scalar_bound)
+            .or_else(|| physical.and_then(scalar_bound))
+    }
+
+    fn unboxed_operand(
+        &mut self,
+        value: Value,
+        physical: Option<Ty>,
+        scalar: Option<Ty>,
+    ) -> Result<Value, Unsupported> {
+        let Some(physical) = physical else {
             return Ok(value);
         };
-        if carrier(ty) != Carrier::Ref {
+        if carrier(physical) != Carrier::Ref {
             return Ok(value);
         }
-        let Some(scalar) = scalar_bound(ty) else {
+        let Some(scalar) = scalar else {
             return Err("an operator on a reference operand".to_string());
         };
         Ok(self
@@ -175,14 +204,28 @@ impl BodyLowering<'_, '_, '_> {
         rhs: Value,
         rhs_ty: Option<Ty>,
     ) -> Result<(Value, Value, Type, bool), Unsupported> {
+        let lhs_scalar = lhs_ty.and_then(scalar_bound);
+        let rhs_scalar = rhs_ty.and_then(scalar_bound);
+        self.unify_scalars(lhs, lhs_ty, lhs_scalar, rhs, rhs_ty, rhs_scalar)
+    }
+
+    fn unify_scalars(
+        &mut self,
+        lhs: Value,
+        lhs_physical: Option<Ty>,
+        lhs_scalar: Option<Ty>,
+        rhs: Value,
+        rhs_physical: Option<Ty>,
+        rhs_scalar: Option<Ty>,
+    ) -> Result<(Value, Value, Type, bool), Unsupported> {
         // Kotlin's arithmetic and comparison operators are the PRIMITIVE ones, so an operand whose
         // type carries as a reference here is a boxed primitive: a value of a generic type whose
         // bound is a number, which the JVM boxes for the same reason. It has to be unboxed before
         // either side's machine type means anything — this function unifies by machine type, and a
         // pointer and an `Int` unify into pointer arithmetic that reads like an answer and is not
         // one.
-        let lhs = self.unboxed_operand(lhs, lhs_ty)?;
-        let rhs = self.unboxed_operand(rhs, rhs_ty)?;
+        let lhs = self.unboxed_operand(lhs, lhs_physical, lhs_scalar)?;
+        let rhs = self.unboxed_operand(rhs, rhs_physical, rhs_scalar)?;
         let left = self.builder.func.dfg.value_type(lhs);
         let right = self.builder.func.dfg.value_type(rhs);
         if left.is_float() != right.is_float() {
@@ -197,15 +240,16 @@ impl BodyLowering<'_, '_, '_> {
         } else {
             right
         };
-        let lhs = self.resize(lhs, left, signed_of(lhs_ty), width);
-        let rhs = self.resize(rhs, right, signed_of(rhs_ty), width);
+        let lhs = self.resize(lhs, left, signed_of(lhs_scalar), width);
+        let rhs = self.resize(rhs, right, signed_of(rhs_scalar), width);
         // `Char` compares unsigned only against another `Char`: widened to `Int` it is a
         // non-negative `Int` and a signed comparison is the same thing. An UNSIGNED integer
         // compares unsigned at its own width, where the difference is the whole point — the top bit
         // is a value there and a sign everywhere else.
         let unsigned = |ty: Option<Ty>| ty.is_some_and(|ty| ty.non_null().is_unsigned());
-        let both_chars = matches!(lhs_ty, Some(Ty::Char)) && matches!(rhs_ty, Some(Ty::Char));
-        let signed = !(both_chars || unsigned(lhs_ty) || unsigned(rhs_ty));
+        let both_chars =
+            matches!(lhs_scalar, Some(Ty::Char)) && matches!(rhs_scalar, Some(Ty::Char));
+        let signed = !(both_chars || unsigned(lhs_scalar) || unsigned(rhs_scalar));
         Ok((lhs, rhs, width, signed))
     }
 
@@ -231,9 +275,18 @@ impl BodyLowering<'_, '_, '_> {
         // The type each side unboxes to, which the guard has already established is a
         // floating-point one. Kotlin does not compare a `Double` with a `Float` through `==`, so
         // two different widths here are a shape this has no rule for rather than a conversion.
-        let (Some(left_ty), Some(right_ty)) =
-            (lhs_ty.and_then(scalar_bound), rhs_ty.and_then(scalar_bound))
-        else {
+        let left_physical = self.type_of(lhs);
+        let right_physical = self.type_of(rhs);
+        let left_semantic = self.file.ir.logical_types.get(&lhs).copied().or(lhs_ty);
+        let right_semantic = self.file.ir.logical_types.get(&rhs).copied().or(rhs_ty);
+        let (Some(left_ty), Some(right_ty)) = (
+            left_semantic
+                .and_then(scalar_bound)
+                .or_else(|| left_physical.and_then(scalar_bound)),
+            right_semantic
+                .and_then(scalar_bound)
+                .or_else(|| right_physical.and_then(scalar_bound)),
+        ) else {
             return Err(
                 "an IEEE comparison whose operand names no floating-point type".to_string(),
             );
@@ -256,8 +309,8 @@ impl BodyLowering<'_, '_, '_> {
         let compare = self.builder.create_block();
         let absent = self.builder.create_block();
 
-        let left_null = self.is_null_operand(left, lhs_ty);
-        let right_null = self.is_null_operand(right, rhs_ty);
+        let left_null = self.is_null_operand(left, left_physical);
+        let right_null = self.is_null_operand(right, right_physical);
         let either = self.builder.ins().bor(left_null, right_null);
         self.builder.ins().brif(either, absent, &[], compare, &[]);
 
@@ -269,10 +322,10 @@ impl BodyLowering<'_, '_, '_> {
         self.continue_in(compare);
         self.builder.seal_block(compare);
         let left = self
-            .convert(left, lhs_ty, left_ty)?
+            .convert(left, left_physical, left_ty)?
             .expect("a floating-point target yields a value");
         let right = self
-            .convert(right, rhs_ty, right_ty)?
+            .convert(right, right_physical, right_ty)?
             .expect("a floating-point target yields a value");
         let equal = self.builder.ins().fcmp(FloatCC::Equal, left, right);
         self.builder.ins().jump(merge, &[BlockArg::Value(equal)]);
