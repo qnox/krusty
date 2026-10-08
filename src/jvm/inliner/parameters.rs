@@ -32,6 +32,9 @@ pub(crate) enum Binding {
     /// before it is placed (`markPlacesForInlineAndRemoveInlinable`), and each `invoke` of it
     /// becomes the lambda's own body, so it has no slot in the caller.
     Lambda(usize),
+    /// The body never reads this parameter once its null check is gone. The call still evaluates
+    /// the argument, then pops it, and the parameter takes no slot in the caller.
+    Unread,
     /// A value an inline lambda captured, which a regenerated anonymous object keeps in a field of
     /// its own (kotlinc's `RegeneratedLambdaFieldRemapper`): read as `aload 0; getfield`, never
     /// written, and without a slot in the object's method.
@@ -76,6 +79,8 @@ enum Remapped<'a> {
         name: &'a str,
         desc: &'a str,
     },
+    /// A parameter the prepared body no longer reads.
+    Unread,
 }
 
 impl Parameters {
@@ -133,7 +138,10 @@ impl Parameters {
                     next += parameter.category.words() as u16;
                     Some(slot)
                 }
-                Binding::CallerLocal { .. } | Binding::Lambda(_) | Binding::Field { .. } => None,
+                Binding::CallerLocal { .. }
+                | Binding::Lambda(_)
+                | Binding::Field { .. }
+                | Binding::Unread => None,
             })
             .collect()
     }
@@ -159,6 +167,7 @@ impl Parameters {
             if slot < declaration + words {
                 return match &parameter.binding {
                     Binding::Lambda(_) => Remapped::Lambda,
+                    Binding::Unread => Remapped::Unread,
                     Binding::Field { owner, name, desc } => Remapped::Field { owner, name, desc },
                     Binding::Temporary => Remapped::Frame(frame_base + temporary),
                     Binding::CallerLocal {
@@ -228,6 +237,7 @@ impl Parameters {
                         }));
                     }
                     Remapped::Lambda => return Err(InlineError::LambdaParameterAccess),
+                    Remapped::Unread => return Err(InlineError::UnreadParameterAccess),
                 },
                 Node::Insn(Insn::Iinc { slot, delta }) => {
                     let slot = match self.place(*slot, frame_base) {
@@ -241,6 +251,7 @@ impl Parameters {
                             return Err(InlineError::IncrementOfCallerValue)
                         }
                         Remapped::Lambda => return Err(InlineError::LambdaParameterAccess),
+                        Remapped::Unread => return Err(InlineError::UnreadParameterAccess),
                     };
                     out.nodes.push(Node::Insn(Insn::Iinc {
                         slot,
@@ -258,7 +269,10 @@ impl Parameters {
                     slot,
                     ..local.clone()
                 }),
-                Remapped::Caller { .. } | Remapped::Lambda | Remapped::Field { .. } => None,
+                Remapped::Caller { .. }
+                | Remapped::Lambda
+                | Remapped::Field { .. }
+                | Remapped::Unread => None,
             })
             .collect();
         Ok(out)

@@ -1066,9 +1066,11 @@ impl BodyLowering<'_> {
     /// does the last operand local whatever its value, unless it suspends (a suspension point
     /// stays a statement of its own): evaluating it where the call consumes it
     /// still runs it after every operand before it, and the target then reads an `@InlineOnly`
-    /// callee's argument in place as kotlinc does. Nested uses, including vararg elements, retain their locals because this fold only replaces
-    /// root operands. Keeping a foldable root local costs a slot and a copy the reference compiler
-    /// does not emit, and shifts every local the spliced body goes on to use.
+    /// callee's argument in place as kotlinc does. A direct element of a vararg operand folds the
+    /// same way: the array is built when that argument is evaluated, so the element runs after the
+    /// arguments before it and is stored into the array instead of into a local of its own.
+    /// Keeping a foldable local costs a slot and a copy the reference compiler does not emit, and
+    /// shifts every local the spliced body goes on to use.
     ///
     /// Only a value whose source is not written by any surviving statement qualifies, so folding it
     /// back cannot move a read across a write.
@@ -1109,9 +1111,10 @@ impl BodyLowering<'_> {
                 _ if index + 1 == statements.len() && !self.operand_suspends(init) => None,
                 _ => continue,
             };
-            // Replacement is deliberately limited to a root call operand. Require exactly one
-            // such read, and fail closed if the slot is also read by a nested operand or surviving
-            // statement; otherwise removing the declaration would leave that nested read dangling.
+            // Replacement is a root call operand, or one direct element of its vararg array.
+            // Require exactly one such read, and fail closed if the slot is also read by a nested
+            // operand or surviving statement; otherwise removing the declaration would leave that
+            // nested read dangling.
             let root_uses = args
                 .iter()
                 .chain(receiver.iter())
@@ -1119,6 +1122,24 @@ impl BodyLowering<'_> {
                     matches!(self.ir.expr(operand), IrExpr::GetValue(read) if *read == slot)
                 })
                 .count();
+            // One direct `GetValue` element of a vararg array is the same single use as a root
+            // operand: folding it back evaluates the element while the array is filled.
+            let element_uses = args
+                .iter()
+                .chain(receiver.iter())
+                .map(|&operand| {
+                    let IrExpr::Vararg { elements, .. } = self.ir.expr(operand) else {
+                        return 0;
+                    };
+                    let elements = elements.clone();
+                    elements
+                        .iter()
+                        .filter(|&&element| {
+                            matches!(self.ir.expr(element), IrExpr::GetValue(read) if *read == slot)
+                        })
+                        .count()
+                })
+                .sum::<usize>();
             let all_uses: usize = args
                 .iter()
                 .chain(receiver.iter())
@@ -1135,13 +1156,39 @@ impl BodyLowering<'_> {
                     other != index && self.writes_value(statement, source)
                 })
             });
-            if root_uses != 1 || all_uses != root_uses || rewritten {
+            let uses = root_uses + element_uses;
+            if uses != 1 || all_uses != uses || rewritten {
                 continue;
             }
             statements.remove(index);
+            let mut vararg_elements = Vec::new();
             for operand in args.iter_mut().chain(receiver.iter_mut()) {
                 if matches!(self.ir.expr(*operand), IrExpr::GetValue(read) if *read == slot) {
                     *operand = init;
+                    continue;
+                }
+                let IrExpr::Vararg { elements, .. } = self.ir.expr(*operand) else {
+                    continue;
+                };
+                let indexes = elements
+                    .clone()
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, element)| {
+                        matches!(self.ir.expr(*element), IrExpr::GetValue(read) if *read == slot)
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                if !indexes.is_empty() {
+                    vararg_elements.push((*operand, indexes));
+                }
+            }
+            for (operand, indexes) in vararg_elements {
+                let IrExpr::Vararg { elements, .. } = &mut self.ir.exprs[operand as usize] else {
+                    continue;
+                };
+                for index in indexes {
+                    elements[index] = init;
                 }
             }
         }
