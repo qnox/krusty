@@ -279,10 +279,10 @@ epoch_ms() {
 export -f epoch_ms
 
 # A run's identity must include its filter, not just the binary. The conformance split below runs the
-# SAME binary twice with different filters; keying the log on `basename` alone let pass 2 overwrite
-# pass 1's log, so a pass-1 failure was reported with pass 2's (passing) output and the real failure was
-# invisible. Slugify the filter args — dropping `--test-threads=N`, which is scheduling noise, not
-# identity — so each pass owns a distinct log and TIMINGS row.
+# SAME binary multiple times with different filters; keying the log on `basename` alone once let a
+# later passing run overwrite an earlier failure and made the real output invisible. Slugify the
+# filter args — dropping `--test-threads=N`, which is scheduling noise, not identity — so each pass
+# owns a distinct log and TIMINGS row.
 run_label() {
   printf '%s' "$1" \
     | sed -E 's/--test-threads=[0-9]+//g' \
@@ -344,14 +344,14 @@ ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
 # The conformance binary contains external corpus/reference-toolchain suites. Run it alone before
 # the product test binary to avoid core contention and to keep fast/coverage exclusion binary-scoped.
-# The Kotlin codegen corpus test is memory-heavy, so run it in its own process, then run every other
-# conformance test in a fresh process. This still executes the full conformance binary's test set; it
-# just avoids carrying earlier external-suite state into the large corpus pass on small CI machines.
-# Pass 1 is a single #[test] that parallelizes internally (rayon). Partition its sorted corpus across
-# fresh processes so every process receives the same 120-second deadline as the rest of the gate;
-# each shard retains the conformance floor and the stable modulo partition covers every case once.
-# Pass 2 is ~40 independent JVM-backed tests, so give it real threads (bounded: each can hold a
-# kotlinc-server or runner JVM, so `ncpu` capped at 4 keeps the JVM count sane on big hosts).
+# The JVM and Native Kotlin codegen corpus tests are memory-heavy, so run each in its own process,
+# then run every other conformance test in a fresh process. This still executes the full conformance
+# binary's test set; it just avoids carrying earlier external-suite state between the large corpus
+# passes on small machines. The JVM test parallelizes internally (rayon) and partitions its sorted
+# corpus across fresh processes so every shard receives the ordinary deadline. Native deliberately
+# stays in one process under its larger dedicated deadline. The remaining ~40 independent
+# JVM-backed tests get real threads (bounded: each can hold a compiler-server/runner JVM, so `ncpu`
+# capped at 4 keeps the JVM count sane on big hosts).
 conf_threads="$ncpu"; [ "$conf_threads" -gt 4 ] && conf_threads=4
 gate="$(printf '%s\n' "${bins[@]}" | grep '/conformance-' || true)"
 if [ -n "$gate" ]; then
@@ -367,8 +367,19 @@ if [ -n "$gate" ]; then
       run_one \
         "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1" "$label"
   done
+  # The native box lane compiles, links and runs every accepted case in one process under its own
+  # suite-wide deadline. It reads the same committed platform/version expectations locally and in
+  # CI; KRUSTY_BLESS_BOX_EXPECTATIONS=1 is the explicit local update path.
+  echo "run-tests.sh: conformance native-box" >&2
+  KRUSTY_REQUIRE_NATIVE_CONFORMANCE=1 \
+    KRUSTY_TEST_THREADS="$conf_threads" \
+    KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS" \
+    run_one \
+      "$logdir" \
+      "$gate::--exact kotlin_box_native_conformance::kotlin_codegen_box_native_conformance --test-threads=1" \
+      "native-box"
   KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
-    run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --test-threads=$conf_threads"
+    run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --test-threads=$conf_threads"
 fi
 jobs="${KRUSTY_TEST_JOBS:-$ncpu}"
 # Per-binary test threads for the SMALL binaries run in the cross-binary xargs pool: keep 1 so `-P jobs`

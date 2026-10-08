@@ -1,9 +1,9 @@
 name: ci
 
-# Build the conformance test binary once. Every supported Kotlin-version lane runs both its box
-# corpus and every other active test in that binary. Publish only after the combined matrix passes
-# and every version matches its exact box fail/not-applicable manifests. `ci-and-conformance` is the
-# one required check over `ci` and that whole matrix.
+# Build the conformance test binary once. Every supported Kotlin version gets independent JVM and
+# Native matrix rows: JVM runs its box corpus plus the non-box suites; Native runs its box corpus.
+# Publish only after all rows pass and every version matches its committed platform expectations.
+# `ci-and-conformance` is the one required check over `ci` and that whole matrix.
 # `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
 # match the lists on their own base and still disagree with them once both are on master.
 on:
@@ -219,11 +219,13 @@ jobs:
           echo "max=$(just max-version)" >> "$GITHUB_OUTPUT"
 
   conformance:
+    name: conformance (${{ matrix.version }}, ${{ matrix.target }})
     needs: [build-shared-bins, versions]
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJson(needs.versions.outputs.matrix) }}
+        target: [jvm, native]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -235,6 +237,7 @@ jobs:
           distribution: zulu
           java-version: '25'
       - name: cache kotlin toolchain and conformance corpora (${{ matrix.version }})
+        if: matrix.target == 'jvm'
         uses: actions/cache@v6
         with:
           path: |
@@ -245,6 +248,14 @@ jobs:
           # Do not reuse the former box-only immutable cache: it can never acquire the newly
           # required serialization/KSP inputs.
           key: kotlin-conformance-all-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      - name: cache Kotlin compiler for Native conformance (${{ matrix.version }})
+        if: matrix.target == 'native'
+        uses: actions/cache@v6
+        with:
+          path: target/cache/kotlinc/${{ matrix.version }}
+          # Do not let a Native row publish the JVM row's broader immutable cache before its
+          # serialization/KSP inputs exist. Both keys still identify one exact compiler version.
+          key: kotlin-native-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       - name: cache box corpus (${{ matrix.version }})
         uses: actions/cache@v6
         with:
@@ -255,6 +266,7 @@ jobs:
       # One archive per Kotlin version. A restored entry is replayed; a missing test compiles with
       # that lane's kotlinc. Master saves newly observed recordings under the exact version/commit.
       - name: restore recorded kotlinc bytes (${{ matrix.version }})
+        if: matrix.target == 'jvm'
         id: recorded-bytes
         uses: actions/cache/restore@v6
         with:
@@ -263,6 +275,7 @@ jobs:
           restore-keys: |
             recorded-kotlinc-bytes-conformance-${{ matrix.version }}-
       - name: select recorded-byte cache mode
+        if: matrix.target == 'jvm'
         id: recorded-mode
         env:
           CACHE_HIT: ${{ steps.recorded-bytes.outputs.cache-hit }}
@@ -285,13 +298,33 @@ jobs:
       # "<pct> <matched> <total>" (.class bytes). Printing their badge fields validates each and
       # previews, without publishing, what the master release would show.
       - name: run box conformance ${{ matrix.version }}
+        if: matrix.target == 'jvm'
         run: |
           set -euo pipefail
           chmod +x conformance-bin krusty
           just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" jvm-byte-equality.txt > pct.txt
           bash scripts/conformance-badge.sh fields conformance pct.txt "${{ matrix.version }}"
           bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "${{ matrix.version }}"
+      - name: run native box conformance ${{ matrix.version }}
+        if: matrix.target == 'native'
+        id: native_box
+        continue-on-error: true
+        run: |
+          chmod +x conformance-bin
+          just native-conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" native-pct.txt
+          bash scripts/conformance-badge.sh fields native-conformance native-pct.txt "${{ matrix.version }}"
+      - name: upload Native conformance
+        if: always() && matrix.target == 'native'
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-pct-${{ matrix.version }}
+          path: native-pct.txt
+          if-no-files-found: error
+      - name: enforce native box conformance ${{ matrix.version }}
+        if: matrix.target == 'native' && steps.native_box.outcome == 'failure'
+        run: exit 1
       - name: run non-box conformance ${{ matrix.version }}
+        if: matrix.target == 'jvm'
         env:
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_RECORD_CLASS_DUMPS: "0"
@@ -303,20 +336,20 @@ jobs:
           KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: "1"
         run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: save recorded kotlinc bytes (${{ matrix.version }})
-        if: steps.recorded-mode.outputs.write == '1'
+        if: matrix.target == 'jvm' && steps.recorded-mode.outputs.write == '1'
         uses: actions/cache/save@v6
         with:
           path: target/cache/class-dumps
           key: recorded-kotlinc-bytes-conformance-${{ matrix.version }}-${{ github.sha }}
       - name: upload pct
-        if: always()
+        if: always() && matrix.target == 'jvm'
         uses: actions/upload-artifact@v7
         with:
           name: pct-${{ matrix.version }}
           path: pct.txt
           if-no-files-found: error
       - name: upload JVM byte equality
-        if: always()
+        if: always() && matrix.target == 'jvm'
         uses: actions/upload-artifact@v7
         with:
           name: jvm-byte-equality-${{ matrix.version }}
@@ -569,9 +602,8 @@ jobs:
       - name: record the published commit
         if: steps.tip.outputs.publish == 'true'
         run: scripts/release-publisher.sh record
-      # Badges: the max version's case report (conformance) and JVM byte report (JVM byte
-      # equality), both from that version's one box run in the conformance matrix, each published
-      # to its own gist file.
+      # Badges: the max version's JVM case/byte reports and Native case report, each published to
+      # its own gist file.
       - name: download max-version pct
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: actions/download-artifact@v8
@@ -582,6 +614,11 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: jvm-byte-equality-${{ needs.versions.outputs.max }}
+      - name: download max-version Native conformance
+        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: native-pct-${{ needs.versions.outputs.max }}
       - name: compute conformance badge payload
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         id: c
@@ -594,6 +631,12 @@ jobs:
         env:
           MAX_VERSION: ${{ needs.versions.outputs.max }}
         run: bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
+      - name: compute Native conformance badge payload
+        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
+        id: n
+        env:
+          MAX_VERSION: ${{ needs.versions.outputs.max }}
+        run: bash scripts/conformance-badge.sh fields native-conformance native-pct.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
       - name: publish conformance badge → gist
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: Schneegans/dynamic-badges-action@v1.9.0
@@ -614,6 +657,16 @@ jobs:
           label: ${{ steps.b.outputs.label }}
           message: ${{ steps.b.outputs.message }}
           color: ${{ steps.b.outputs.color }}
+      - name: publish Native conformance badge → gist
+        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
+        uses: Schneegans/dynamic-badges-action@v1.9.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.CONFORMANCE_GIST_ID }}
+          filename: krusty-native-conformance.json
+          label: ${{ steps.n.outputs.label }}
+          message: ${{ steps.n.outputs.message }}
+          color: ${{ steps.n.outputs.color }}
       - name: publish kotlin-version badge → gist
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: Schneegans/dynamic-badges-action@v1.9.0

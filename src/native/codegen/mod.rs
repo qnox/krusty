@@ -27,9 +27,10 @@ use super::target::NativeTarget;
 /// The symbol every program object must define for the runtime's `_start` to call.
 pub const PROGRAM_ENTRY: &str = "kt_program_entry";
 
-/// What a `box()` program prints before its answer. The answer is every byte after the LAST
-/// occurrence, so output the program printed first cannot be mistaken for it, and an answer that
-/// spans lines is read whole. The NULs keep ordinary program output from spelling it.
+/// What a `box()` program prints before its answer. A harness requires exactly one occurrence and
+/// reads every byte after it, so an answer that spans lines is kept whole and an answer/program
+/// output containing the marker fails rather than spoofing a verdict. The NULs keep ordinary
+/// output from spelling it accidentally.
 pub const BOX_RESULT_FRAME: &str = "\u{0}krusty box result\u{0}";
 
 /// Which top-level function a program starts in.

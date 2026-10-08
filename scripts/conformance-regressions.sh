@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run every test in one prebuilt conformance binary except the box corpus.
-# The box suite stays on conformance-run.sh, once per supported Kotlin version.
+# Run every test in one prebuilt conformance binary except the JVM and Native box corpora. The JVM
+# suite keeps its scored shards; Native deliberately runs once under its larger suite deadline.
 set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
@@ -48,7 +48,10 @@ threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl 
 
 set +e
 run_with_deadline "$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
-  "$bin" --skip kotlin_codegen_box_conformance --test-threads "$threads"
+  "$bin" \
+  --skip kotlin_codegen_box_conformance \
+  --skip kotlin_codegen_box_native_conformance \
+  --test-threads "$threads"
 status=$?
 set -e
 if [ "$status" -eq 124 ]; then

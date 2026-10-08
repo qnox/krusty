@@ -1,5 +1,5 @@
-//! `scripts/check-box-lists.sh`: the box outcome manifests may only lose entries between a base and
-//! a head revision.
+//! `scripts/check-box-lists.sh`: each platform/version expectation may only lose entries between a
+//! base and a head revision.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -99,8 +99,8 @@ impl Drop for Repo {
     }
 }
 
-const FAILURES: &str = "tests/box_expected_failures/2.4.20.txt";
-const NOT_APPLICABLE: &str = "tests/box_expected_not_applicable/2.4.20.txt";
+const FAILURES: &str = "tests/box_expected_failures/native/2.4.20.txt";
+const NOT_APPLICABLE: &str = "tests/box_expected_not_applicable/jvm/2.4.20.txt";
 
 #[test]
 fn removing_entries_passes() {
@@ -131,8 +131,8 @@ fn replacing_an_entry_fails_and_names_the_added_one() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr is UTF-8"),
-        "box-lists: tests/box_expected_failures/2.4.20.txt gains 1 entry:\n    c/three.kt\n\
-         box-lists: the box outcome manifests only shrink; fix the files above instead of listing them\n"
+        "box-lists: tests/box_expected_failures/native/2.4.20.txt gains 1 entry:\n    c/three.kt\n\
+         box-lists: platform/version box expectations only shrink; fix the files above instead of listing them\n"
     );
 }
 
@@ -149,8 +149,8 @@ fn a_growing_not_applicable_manifest_fails() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr is UTF-8"),
-        "box-lists: tests/box_expected_not_applicable/2.4.20.txt gains 1 entry:\n    jvm/now_skipped.kt\n\
-         box-lists: the box outcome manifests only shrink; fix the files above instead of listing them\n"
+        "box-lists: tests/box_expected_not_applicable/jvm/2.4.20.txt gains 1 entry:\n    jvm/now_skipped.kt\n\
+         box-lists: platform/version box expectations only shrink; fix the files above instead of listing them\n"
     );
 }
 
@@ -160,7 +160,7 @@ fn a_manifest_for_a_newly_supported_version_is_exempt() {
     repo.write(FAILURES, "a/one.kt\n");
     let base = repo.commit();
     repo.write(
-        "tests/box_expected_failures/2.5.0.txt",
+        "tests/box_expected_failures/native/2.5.0.txt",
         "a/one.kt\nnew/file.kt\n",
     );
     let head = repo.commit();
