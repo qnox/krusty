@@ -42,9 +42,16 @@ pub(crate) fn number(
         let mut scopes = HashMap::<(String, Option<u32>), (u32, HashSet<&str>)>::new();
         // kotlinc's value-class lowering appends the primary `constructor-impl`, which runs the
         // `init` blocks, after the class's other declarations, so what it lifts numbers after what
-        // a secondary constructor's `constructor-impl` lifts. Positions keep their order otherwise.
+        // a secondary constructor's `constructor-impl` lifts. `order` is source order otherwise,
+        // including a SAM adapter inserted between two source callables.
         let mut ordered = entries.iter().collect::<Vec<_>>();
-        ordered.sort_by_key(|(_, entry)| in_primary_value_class_constructor(ir, entry.container));
+        ordered.sort_by_key(|(&position, entry)| {
+            (
+                in_primary_value_class_constructor(ir, entry.container),
+                entry.order,
+                position,
+            )
+        });
         for (&position, entry) in ordered {
             let container = container_segment(ir, entry.container, &sequence.container);
             containers.insert((sequence, position), container.clone());
