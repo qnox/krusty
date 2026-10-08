@@ -1080,6 +1080,11 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
                 let fid = ir
                     .data_class_member(c.fq_name_id(), IrDataClassMemberRole::Component(i as u32))
                     .expect("a data-class component records its generated identity");
+                // Like a private `copy`, a private `componentN` carries no Java nullability
+                // annotation. Its Kotlin nullability remains authoritative in `@Metadata`.
+                if ir.method_visibility(fid).is_private() {
+                    continue;
+                }
                 let function = &ir.functions[fid as usize];
                 cw.set_method_nullability(
                     &function.name,

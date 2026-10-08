@@ -1129,7 +1129,7 @@ fn assert_classes_identical_to_kotlinc_full(
 /// The semantic surfaces behind an exact class-byte mismatch. Constant-pool ordering remains part
 /// of the enclosing assertion, but this report names the header, member, code/debug, and metadata
 /// difference that must be corrected instead of reducing the failure to a class name.
-fn exact_class_difference(class: &str, reference: &[u8], ours: &[u8]) -> String {
+pub fn exact_class_difference(class: &str, reference: &[u8], ours: &[u8]) -> String {
     let header = |bytes: &[u8]| {
         let info = krusty::jvm::classreader::parse_class(bytes).expect("a readable class file");
         (

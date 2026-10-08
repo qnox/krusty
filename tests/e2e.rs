@@ -1203,6 +1203,8 @@ mod interface_static_member_refs_e2e;
 mod interface_supertype_members_e2e;
 #[path = "internal_classpath_access_e2e.rs"]
 mod internal_classpath_access_e2e;
+#[path = "internal_component_names_e2e.rs"]
+mod internal_component_names_e2e;
 #[path = "internal_member_names_e2e.rs"]
 mod internal_member_names_e2e;
 #[path = "intersection_reified_type_of_e2e.rs"]
