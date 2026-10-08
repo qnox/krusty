@@ -18,8 +18,8 @@ use crate::types::Ty;
 pub enum PlatformNarrowing {
     /// A property/local with an explicit type, a return, an assignment.
     Declaration,
-    /// A value argument (including the parameter of a non-null-typed lambda) or an extension
-    /// call's explicit receiver.
+    /// A value argument (including the parameter of a non-null-typed lambda), a default argument,
+    /// or an extension call's explicit receiver.
     Argument,
 }
 
