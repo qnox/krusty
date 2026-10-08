@@ -161,11 +161,12 @@ fn compile_both() -> Option<(std::path::PathBuf, std::path::PathBuf, std::path::
 }
 
 fn disassembly(root: &std::path::Path, class: &str, verbose: bool) -> String {
+    let classpath = root.to_string_lossy().into_owned();
     let mut args = vec!["-p", "-c", "-s"];
     if verbose {
         args.push("-v");
     }
-    args.extend(["-cp", &root.to_string_lossy(), class]);
+    args.extend(["-cp", classpath.as_str(), class]);
     common::javap(&args).unwrap_or_else(|| panic!("javap {class}"))
 }
 
