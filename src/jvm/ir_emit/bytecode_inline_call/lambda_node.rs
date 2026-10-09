@@ -577,7 +577,9 @@ impl Emitter<'_> {
             return Err("a lambda planned for the inliner started a suspension");
         }
         // kotlinc's lambda method marks its closing brace on the return a `Unit` body falls off
-        // its end into, which the inliner turns into the `nop` that keeps that line.
+        // its end into, which the inliner turns into the `nop` that keeps that line. A value
+        // template's distinct evaluated-result end is already attached to its exact expression
+        // in common IR, so it was emitted on the successful path before any local-return join.
         if !scratch.is_dead() {
             if let Some(line) = self.lambda_fallthrough_line(impl_fn) {
                 self.mark_expression_line(inline_body, line, &mut scratch);

@@ -132,6 +132,7 @@ pub(super) fn prepare_inline_template(
 ) -> Option<ExprId> {
     let returns = returns_by_body(ir, root);
     let owns_returns = returns.iter().any(|found| found.depth == 0);
+    record_evaluated_result_end(ir, root);
     for found in &returns {
         if found.depth > 0 {
             ir.checked_return_depths
@@ -213,6 +214,34 @@ pub(super) fn prepare_inline_template(
     };
     ir.logical_types.insert(frame, frame_type);
     Some(frame)
+}
+
+/// Record the end line reached only by evaluating an inline template's implicit result. The
+/// result may sit under source blocks that own preceding statements and locals; their own closing
+/// lines are not the result's end. A backend consumes this sparse decision after emitting the
+/// exact result expression, before any local-return paths rejoin it.
+fn record_evaluated_result_end(ir: &mut IrFile, root: ExprId) {
+    let template_end = ir.expr_end_lines.get(&root).copied();
+    let mut result = root;
+    loop {
+        let IrExpr::Block {
+            value: Some(inner), ..
+        } = ir.expr(result)
+        else {
+            break;
+        };
+        result = *inner;
+    }
+    if let Some(line) = ir.expr_end_lines.get(&result).copied().filter(|line| {
+        *line != 0
+            && Some(*line) != template_end
+            && ir
+                .expr_source_lines
+                .get(&result)
+                .is_some_and(|start| start != line)
+    }) {
+        ir.mark_evaluated_result_end_line(result, line);
+    }
 }
 
 /// Lambda implementation methods return language `Unit` through a value carrier. Make every
