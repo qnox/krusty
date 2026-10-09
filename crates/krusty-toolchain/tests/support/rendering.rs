@@ -9,6 +9,8 @@
 //! the command stopped is not a problem. The toolchain writes errors to stderr and warnings, before
 //! the command's result, to stdout.
 
+use super::{ExpectedDiagnostic, ExpectedSeverity};
+
 const SEVERITIES: [&str; 3] = ["WEAK WARNING", "WARNING", "ERROR"];
 const ABORT: [&str; 2] = [
     "ERROR: Aborting because there were errors in the Kotlin project file, please see above.",
@@ -22,6 +24,15 @@ fn severity(text: &str) -> Option<(&'static str, &str)> {
             .and_then(|rest| rest.strip_prefix(": "))
             .map(|message| (severity, message))
     })
+}
+
+fn expected_severity(label: &str) -> ExpectedSeverity {
+    match label {
+        "ERROR" => ExpectedSeverity::Error,
+        "WARNING" => ExpectedSeverity::Warning,
+        "WEAK WARNING" => ExpectedSeverity::WeakWarning,
+        _ => unreachable!("severity() returns only a known label"),
+    }
 }
 
 /// A box line's text: `│` and one space dropped, `Some("")` for a bare `│`.
@@ -49,7 +60,7 @@ fn starts_problem(line: &str) -> bool {
 /// The problems rendered at the start of `output`, in order, and the bytes after them: what the
 /// command printed as its result. Every line up to that point belongs to a problem's rendering or
 /// is the closing line saying the command stopped, so nothing in between is skipped unread.
-pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<String>, &'o [u8]) {
+pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<ExpectedDiagnostic>, &'o [u8]) {
     let mut lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0;
     for line in output.split_inclusive(|&byte| byte == b'\n') {
@@ -89,13 +100,19 @@ pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<String>, &'o [u8]) {
                 index += 1;
             }
             index += 1;
-            problems.push(format!("{place}{severity}: {}", message.join("\\n")));
+            problems.push(ExpectedDiagnostic {
+                severity: expected_severity(severity),
+                rendered: format!("{place}{severity}: {}", message.join("\\n")),
+            });
         } else if let Some((severity, first)) = severity(line) {
             index += 1;
             if let Some(file) = text(index).and_then(|next| next.strip_prefix(" ╰→ ")) {
                 index += 1;
                 let file = file.replace(&format!("{root}/"), "");
-                problems.push(format!("{file}: {severity}: {first}"));
+                problems.push(ExpectedDiagnostic {
+                    severity: expected_severity(severity),
+                    rendered: format!("{file}: {severity}: {first}"),
+                });
             } else {
                 // The message runs to the next blank line, which ends it.
                 let mut message = vec![first.to_string()];
@@ -106,7 +123,10 @@ pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<String>, &'o [u8]) {
                 if text(index).is_some() {
                     index += 1;
                 }
-                problems.push(format!("{severity}: {}", message.join("\\n")));
+                problems.push(ExpectedDiagnostic {
+                    severity: expected_severity(severity),
+                    rendered: format!("{severity}: {}", message.join("\\n")),
+                });
             }
         } else {
             break;
