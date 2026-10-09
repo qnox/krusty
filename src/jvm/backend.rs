@@ -1309,82 +1309,10 @@ pub fn facade_package_metadata_from_ir(
                 &Default::default(),
             )
             .then_some(physical_descriptor);
-            let mut param_annotations = ir
-                .fn_param_annotations
-                .get(&declaration.function)
-                .cloned()
-                .unwrap_or_default();
-            if declaration.receiver.is_some() && declaration.context_count < param_annotations.len()
-            {
-                param_annotations.remove(declaration.context_count);
-            }
-            let mut no_infer_params = ir
-                .fn_param_no_infer
-                .get(&declaration.function)
-                .cloned()
-                .unwrap_or_default();
-            if declaration.receiver.is_some() && declaration.context_count < no_infer_params.len() {
-                no_infer_params.remove(declaration.context_count);
-            }
-            let context_parameter_kinds = ir
-                .function_parameter_identities(declaration.function)
-                .expect("a package function metadata declaration retains parameter identities")
-                .iter()
-                .take(declaration.context_count)
-                .map(crate::jvm::parameter_names::metadata_context_kind)
-                .collect();
             crate::metadata::builder::FnMeta {
-                name: declaration.name.clone(),
-                params: declaration.params.clone(),
-                ret: declaration.ret,
-                decl_order: declaration.source_order as usize,
-                annotations: crate::metadata::MetadataAnnotations::of_optional(
-                    ir.function_annotations.get(&declaration.function),
-                ),
-                receiver: declaration.receiver,
-                param_modifiers: super::metadata_flags::declared_value_parameters(
-                    ir,
-                    declaration.function,
-                    declaration.param_defaults.iter().copied(),
-                ),
-                suspend: declaration.suspend,
                 jvm_desc,
                 jvm_name,
-                inline: declaration.inline,
-                has_function_typed_parameter: declaration.has_function_typed_parameter,
-                operator: declaration.operator,
-                infix: declaration.infix,
-                tailrec: declaration.tailrec,
-                companion: declaration.companion,
-                contract: declaration
-                    .contract
-                    .as_ref()
-                    .map(|contract| contract.to_arc()),
-                type_params: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| (parameter.name.clone(), parameter.reified))
-                    .collect(),
-                semantic_type_params: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| parameter.semantic_name.clone())
-                    .collect(),
-                type_param_bounds: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| parameter.bounds.clone())
-                    .collect(),
-                context_count: declaration.context_count,
-                context_parameter_kinds,
-                vararg_index: declaration.vararg_index,
-                visibility: declaration.visibility,
-                spellings: declaration.spellings.clone(),
-                param_annotations: param_annotations
-                    .iter()
-                    .map(crate::metadata::MetadataAnnotations::of)
-                    .collect(),
-                no_infer_params,
+                ..crate::metadata::declaration_records::package_function(ir, declaration)
             }
         })
         .collect::<Vec<_>>();
@@ -1460,53 +1388,8 @@ pub fn facade_package_metadata_from_ir(
                 )
             });
             crate::metadata::builder::PropMeta {
-                name: declaration.name.clone(),
-                ty: declaration.ty,
-                is_var: declaration.mutable,
-                type_params: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| parameter.name.clone())
-                    .collect(),
-                semantic_type_params: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| parameter.semantic_name.clone())
-                    .collect(),
-                type_param_bounds: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| parameter.bounds.clone())
-                    .collect(),
-                receiver: declaration.receiver,
-                context_params: declaration
-                    .context_parameter_names
-                    .iter()
-                    .cloned()
-                    .zip(declaration.context_parameter_kinds.iter().copied())
-                    .zip(declaration.context_parameters.iter().copied())
-                    .map(|((name, kind), ty)| (name, kind, ty))
-                    .collect(),
                 getter,
                 setter,
-                setter_parameter_name: crate::jvm::parameter_names::explicit_setter(
-                    ir,
-                    setter_function,
-                ),
-                is_const: declaration.is_const,
-                has_constant: declaration.has_constant,
-                decl_order: declaration.source_order as usize,
-                visibility: declaration.visibility,
-                spellings: declaration.spellings.clone(),
-                has_backing_field: declaration.has_backing_field,
-                modifiers: declaration.modifiers,
-                setter_visibility: declaration.setter_visibility,
-                companion,
-                accessor_annotations: ir
-                    .accessor_annotations
-                    .get(&declaration.property)
-                    .map(crate::metadata::AccessorMetadataAnnotations::of)
-                    .unwrap_or_default(),
                 field_name: field.as_ref().and_then(|(name, _)| name.clone()),
                 field_desc: field.map(|(_, descriptor)| descriptor).filter(|physical| {
                     super::metadata_method_signatures::requires_field_signature(
@@ -1515,6 +1398,11 @@ pub fn facade_package_metadata_from_ir(
                         &Default::default(),
                     )
                 }),
+                ..crate::metadata::declaration_records::package_property(
+                    ir,
+                    declaration,
+                    setter_function,
+                )
             }
         })
         .collect::<Vec<_>>();
@@ -1522,14 +1410,7 @@ pub fn facade_package_metadata_from_ir(
     let aliases = ir
         .package_type_aliases
         .iter()
-        .map(|alias| crate::metadata::builder::TypeAliasMeta {
-            name: alias.name.clone(),
-            formals: alias.formals.clone(),
-            expansion: alias.expansion,
-            visibility: alias.visibility,
-            expansion_spelling: alias.expansion_spelling.clone(),
-            decl_order: alias.source_order as usize,
-        })
+        .map(crate::metadata::declaration_records::package_alias)
         .collect::<Vec<_>>();
     let approximate = |ty| {
         crate::types::declaration_approximation(ty, &mut |classifier, index| {

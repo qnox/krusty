@@ -106,6 +106,19 @@ impl Pb {
         }
     }
 
+    /// A `repeated` scalar field with `[packed = true]`: one tag, the payload length, then every
+    /// value. Nothing is written for an empty list, as protoc's `writeTo` does.
+    pub fn field_packed_varints(&mut self, field: u32, values: &[u64]) {
+        if values.is_empty() {
+            return;
+        }
+        let mut payload = Pb::new();
+        for value in values {
+            payload.varint(*value);
+        }
+        self.field_bytes(field, payload.as_bytes());
+    }
+
     /// One element of a `repeated <message>` field (emit the tag+message once per element).
     pub fn repeated_message(&mut self, field: u32, msg: &Pb) {
         self.field_message(field, msg);

@@ -2,6 +2,7 @@
 //! declaration facts.
 
 use crate::ir::IrFile;
+pub(super) use crate::metadata::declaration_records::declared_value_parameters;
 
 pub(super) fn declaration_visibility_bits(visibility: crate::types::Visibility) -> u64 {
     match visibility {
@@ -120,25 +121,4 @@ pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -
         | tailrec
         | return_value_status
         | companion
-}
-
-/// What each value parameter of `fid` declared, extension receiver excluded: `defaults` says which
-/// write a default value, and the IR's recorded inline modifiers supply `crossinline`/`noinline`.
-pub(super) fn declared_value_parameters(
-    ir: &IrFile,
-    fid: u32,
-    defaults: impl IntoIterator<Item = bool>,
-) -> Vec<crate::metadata::DeclaredValueParameter> {
-    let modifiers = ir.declared_inline_modifiers(fid);
-    let mut declared = defaults
-        .into_iter()
-        .map(crate::metadata::DeclaredValueParameter::defaulted)
-        .collect::<Vec<_>>();
-    if declared.len() < modifiers.len() {
-        declared.resize(modifiers.len(), Default::default());
-    }
-    for (parameter, modifier) in declared.iter_mut().zip(modifiers) {
-        parameter.inline_modifier = modifier;
-    }
-    declared
 }
