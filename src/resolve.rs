@@ -32228,16 +32228,26 @@ fun use(counter: Counter) {
                           current++\n\
                       }";
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        // Keep interface search active when superclass metadata is external.
-        symbols
-            .classes
-            .get_mut(&type_name("DefaultCounter"))
-            .expect("default counter signature")
-            .super_internal = Some(type_name("platform/ClasspathBase"));
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let inputs = [crate::frontend::SourceInput::kotlin(source)];
+        let mut analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+            &inputs,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &LangFeatures::new(),
+            |_, symbols| {
+                // Keep interface search active when superclass metadata is external.
+                symbols
+                    .classes
+                    .get_mut(&type_name("DefaultCounter"))
+                    .expect("default counter signature")
+                    .super_internal = Some(type_name("platform/ClasspathBase"));
+            },
+            &mut diagnostics,
+        );
+        let info = analysis
+            .types
+            .pop()
+            .flatten()
+            .expect("production frontend must check the source");
         assert_no_diags(&diagnostics);
 
         let mut owners = info
@@ -35578,11 +35588,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         lambda_body_results,
     };
     info
-}
-
-#[cfg(test)]
-pub(crate) fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {
-    check_file_at(file, diags.current_file(), syms, diags)
 }
 
 #[cfg(test)]
