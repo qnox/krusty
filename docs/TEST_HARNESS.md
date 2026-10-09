@@ -172,11 +172,13 @@ is checked on the combined commit before master moves. A branch that falls behin
 and re-blesses.
 
 All existing platform/version manifests only shrink. The required `ci` job runs
-`scripts/check-box-lists.sh` before building and fails a pull request that adds an entry to any
+`scripts/check-outcome-lists.sh` before building and fails a pull request that adds an entry to any
 existing outcome manifest compared with its merge base, including one entry swapped for another:
 a regression is fixed, not recorded, and a fix does not pay for one. A manifest for a newly
 supported Kotlin version is exempt. Native and JVM inventories use the same script and repository
-layout.
+layout, and it covers the CLI corpus's expected failures (`tests/cli_expected_failures`) too. The CLI
+not-applicable lists are not under this gate: they record what the reference kotlinc cannot run in
+this environment, and the required reference run proves every entry against that compiler.
 
 The rest of the suite is version-sensitive too, because the supported kotlinc releases do not word
 every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
@@ -262,6 +264,39 @@ compiled live and how many invocations it made:
 class-dump: live kotlinc summary invocations=<n> tests=<n>
 class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n>
 ```
+
+## CLI Corpus Ratchet
+
+`kotlin_cli_jvm_conformance` (in the `conformance` binary) runs Kotlin's own command-line test
+corpus, `compiler/testData/cli/jvm` at the reference tag, through the krusty binary. `just box-corpus`
+provisions it in the same checkout as the box corpus. CI caches that checkout under a key versioned
+for every input it carries (`box-and-cli-corpus-v1-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
+and `just box-corpus` then fails rather than fetch into an incomplete restored checkout, so adding a
+corpus input means bumping the salt. Each case is an `.args` file and the `.out`
+file kotlinc's `AbstractCliTest` compares against: the normalized stderr followed by the exit code's
+name, so the corpus covers argument parsing, help text, configuration errors, source discovery and
+reported diagnostics.
+
+`tests/cli_expected_failures/jvm/<version>.txt` lists the cases krusty does not reproduce yet; any
+case joining or leaving it fails. Rewrite it from a full local run:
+
+```sh
+KRUSTY_BLESS_CLI_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
+  ./run-tests.sh --test conformance kotlin_cli_jvm_conformance -- --nocapture
+```
+
+`tests/cli_expected_not_applicable/jvm/<version>.txt` lists the cases the reference kotlinc does not
+reproduce outside JetBrains' environment, and the cases no released compiler can run (the `.env`
+cases), each under a comment saying why. `the_reference_compiler_reproduces_every_applicable_cli_case`
+runs kotlinc through the same runner: it must pass every unlisted case and no listed one. It takes
+minutes, so ordinary runs ignore it; `scripts/conformance-regressions.sh`, which the conformance job
+runs for every supported release, runs it explicitly under `KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS`.
+
+The corpus names JDK 8, 11, 17 and 21 homes. A case whose JDK the machine lacks fails rather than
+being skipped, so the gate never tests fewer cases than it claims. JDKs are found under
+`/usr/lib/jvm` and `/Library/Java/JavaVirtualMachines`, from `JAVA_HOME`, from the
+`JAVA_HOME_<release>_X64` variables `actions/setup-java` exports, and from
+`KRUSTY_JDK_<release>_HOME`, which overrides the rest.
 
 ## JVM processes
 

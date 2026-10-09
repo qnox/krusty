@@ -55,10 +55,14 @@ if [ "${1:-}" = "--survey" ]; then
   exit $?
 fi
 
+# A focused run whose tests read no box or CLI corpus (the KLIB semantics lane) sets
+# KRUSTY_PROVISION_BOX_CORPUS=0 so it does not fetch or cache inputs it never consumes.
 if command -v just >/dev/null 2>&1; then
   v="$(just max-version)"
   just kotlinc "$v" >/dev/null
-  just box-corpus "$v" >/dev/null
+  if [ "${KRUSTY_PROVISION_BOX_CORPUS:-1}" != 0 ]; then
+    just box-corpus "$v" >/dev/null
+  fi
 fi
 
 # Default to the fast-iteration `gate` profile (unoptimized → seconds-long rebuilds, but with

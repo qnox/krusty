@@ -124,8 +124,6 @@ mod bound_relation_type_variable_e2e;
 mod bounded_type_param_e2e;
 #[path = "box_harness_skip_semantics_e2e.rs"]
 mod box_harness_skip_semantics_e2e;
-#[path = "box_lists_guard_e2e.rs"]
-mod box_lists_guard_e2e;
 #[path = "box_runtime_reflect_e2e.rs"]
 mod box_runtime_reflect_e2e;
 #[path = "boxed_array_construction_e2e.rs"]
@@ -1567,6 +1565,8 @@ mod nullable_uint_property_e2e;
 mod open_end_range_membership_e2e;
 #[path = "optional_expectation_annotation_e2e.rs"]
 mod optional_expectation_annotation_e2e;
+#[path = "outcome_lists_guard_e2e.rs"]
+mod outcome_lists_guard_e2e;
 #[path = "override_default_stub_e2e.rs"]
 mod override_default_stub_e2e;
 #[path = "primitive_explicit_equals_e2e.rs"]

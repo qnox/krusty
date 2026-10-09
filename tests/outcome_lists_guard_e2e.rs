@@ -1,5 +1,5 @@
-//! `scripts/check-box-lists.sh`: each platform/version expectation may only lose entries between a
-//! base and a head revision.
+//! `scripts/check-outcome-lists.sh`: each platform/version expectation may only lose entries between
+//! a base and a head revision.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,9 +41,9 @@ struct Repo {
 impl Repo {
     fn new(name: &str) -> Self {
         let dir =
-            std::env::temp_dir().join(format!("krusty-box-lists-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("krusty-outcome-lists-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create box-lists repository");
+        fs::create_dir_all(&dir).expect("create outcome-lists repository");
         let repo = Self { dir };
         repo.git(&["init", "-q"]);
         repo
@@ -82,14 +82,14 @@ impl Repo {
     fn check(&self, base: &str, head: &str) -> Output {
         let script = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("scripts")
-            .join("check-box-lists.sh");
+            .join("check-outcome-lists.sh");
         isolated_command("bash")
             .arg(script)
             .arg(base)
             .arg(head)
             .current_dir(&self.dir)
             .output()
-            .expect("run check-box-lists.sh")
+            .expect("run check-outcome-lists.sh")
     }
 }
 
@@ -101,6 +101,8 @@ impl Drop for Repo {
 
 const FAILURES: &str = "tests/box_expected_failures/native/2.4.20.txt";
 const NOT_APPLICABLE: &str = "tests/box_expected_not_applicable/jvm/2.4.20.txt";
+const CLI_FAILURES: &str = "tests/cli_expected_failures/jvm/2.4.20.txt";
+const CLI_NOT_APPLICABLE: &str = "tests/cli_expected_not_applicable/jvm/2.4.20.txt";
 
 #[test]
 fn removing_entries_passes() {
@@ -131,8 +133,8 @@ fn replacing_an_entry_fails_and_names_the_added_one() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr is UTF-8"),
-        "box-lists: tests/box_expected_failures/native/2.4.20.txt gains 1 entry:\n    c/three.kt\n\
-         box-lists: platform/version box expectations only shrink; fix the files above instead of listing them\n"
+        "outcome-lists: tests/box_expected_failures/native/2.4.20.txt gains 1 entry:\n    c/three.kt\n\
+         outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
     );
 }
 
@@ -149,8 +151,8 @@ fn a_growing_not_applicable_manifest_fails() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr is UTF-8"),
-        "box-lists: tests/box_expected_not_applicable/jvm/2.4.20.txt gains 1 entry:\n    jvm/now_skipped.kt\n\
-         box-lists: platform/version box expectations only shrink; fix the files above instead of listing them\n"
+        "outcome-lists: tests/box_expected_not_applicable/jvm/2.4.20.txt gains 1 entry:\n    jvm/now_skipped.kt\n\
+         outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
     );
 }
 
@@ -184,4 +186,39 @@ fn a_branch_behind_a_base_that_since_dropped_entries_passes() {
     let output = repo.check(&base, &head);
 
     assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+#[test]
+fn a_growing_cli_expected_failure_manifest_fails() {
+    let repo = Repo::new("cli-failures");
+    repo.write(CLI_FAILURES, "# header\nhelp/usage.args\n");
+    let base = repo.commit();
+    repo.write(CLI_FAILURES, "# header\nhelp/usage.args\nwarnings/newly_broken.args\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        "outcome-lists: tests/cli_expected_failures/jvm/2.4.20.txt gains 1 entry:\n    warnings/newly_broken.args\n\
+         outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
+    );
+}
+
+#[test]
+fn the_cli_not_applicable_inventory_is_proven_by_the_reference_run_instead() {
+    let repo = Repo::new("cli-not-applicable");
+    repo.write(CLI_NOT_APPLICABLE, "# runtime JDK 8\njdkHome/jdkHome.args\n");
+    let base = repo.commit();
+    repo.write(
+        CLI_NOT_APPLICABLE,
+        "# runtime JDK 8\njdkHome/jdkHome.args\n# .env\nreadingConfigFromEnvironment/simple.args\n",
+    );
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stderr, b"");
 }
