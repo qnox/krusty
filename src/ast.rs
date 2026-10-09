@@ -636,8 +636,9 @@ pub struct TypeRef {
     /// types. JVM-erased in descriptors but kept so the front end recovers member/element types.
     pub targs: Vec<TypeRef>,
     pub span: Span,
-    /// For function types `(A, B) -> R`: the parameter types. Empty for non-function types.
-    /// When non-empty, `name` is `"<fun>"` and `arg` holds the return type.
+    /// For function types `(A, B) -> R`: the parameter types. Empty for non-function types and
+    /// zero-argument function types. `arg` holds the return type; see
+    /// [`TypeRef::is_function_type_syntax`] for the structural discriminator.
     pub fun_params: Vec<TypeRef>,
     /// Leading physical parameters that bind as context receivers in a lambda.
     pub fun_context_count: u32,

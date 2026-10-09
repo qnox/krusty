@@ -481,6 +481,59 @@ fn compact_header_types_retain_same_file_alias_uses_until_resolution() {
 }
 
 #[test]
+fn compact_header_keeps_the_exact_receiver_function_supertype_shape() {
+    let inputs = [SourceInput::kotlin(
+        "// LANGUAGE: +FunctionalTypeWithExtensionAsSupertype\n\
+         class ReceiverFunction : Int.() -> Unit { override fun invoke(value: Int) {} }",
+    )];
+    let mut diagnostics = DiagSink::new();
+    let module = stream_file_stub_inventory(
+        &inputs,
+        &LangFeatures::from_source(inputs[0].text),
+        &mut diagnostics,
+        |_, _, _| {},
+    );
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let classifier = module
+        .stubs
+        .iter()
+        .find(|stub| {
+            stub.kind == DeclarationKind::Classifier
+                && stub
+                    .lookup_name
+                    .and_then(|name| module.lookup_names.get(name))
+                    == Some("ReceiverFunction")
+        })
+        .expect("receiver-function classifier header");
+    let HeaderDeclarationKind::Classifier { supertypes, .. } =
+        module.syntax.declaration(classifier.id).unwrap().kind
+    else {
+        panic!("classifier header")
+    };
+    let [supertype] = module.syntax.type_operands(supertypes) else {
+        panic!("one declared supertype")
+    };
+    let packed = module.syntax.ty(*supertype).expect("packed supertype");
+    assert!(packed.flags.function_receiver());
+    let HeaderTypeKind::Function {
+        parameters,
+        result: Some(_),
+        context_count: 0,
+    } = packed.kind
+    else {
+        panic!("receiver function supertype must remain a function node")
+    };
+    assert_eq!(module.syntax.type_operands(parameters).len(), 1);
+    let transient = module
+        .syntax
+        .transient_type_ref(*supertype, &module.lookup_names)
+        .expect("transient function type");
+    assert!(transient.is_function_type_syntax());
+    assert!(transient.fun_has_receiver());
+    assert_eq!(transient.fun_params.len(), 1);
+}
+
+#[test]
 fn streamed_headers_pack_explicit_type_syntax_without_ast_ids() {
     let inputs = [SourceInput::kotlin(
         r#"
