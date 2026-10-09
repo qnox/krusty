@@ -32,9 +32,9 @@ mod nesting;
 mod properties;
 mod return_labels;
 mod superclass_references;
-mod type_parameters;
 mod syntax_gates;
 mod type_aliases;
+mod type_parameters;
 mod value_parameters;
 use class_recovery::error_class_decl;
 use declaration_modifiers::{
@@ -2074,7 +2074,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span: None,
+            primary_constructor_span: None,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
@@ -2464,7 +2464,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span: None,
+            primary_constructor_span: None,
             kind: ClassKind::Enum,
             singleton: false,
             enum_entries: entries,
@@ -2531,18 +2531,13 @@ impl<'a> Parser<'a> {
         // rejects it points at the modifier, not at the function's name.
         let tailrec_span = declaration_modifiers::span(self, modifiers, "tailrec");
         self.bump(); // 'fun'
-        let (type_params, non_null_type_params, reified_type_params, type_param_bounds, _) =
-            if self.at(TokenKind::Lt) {
-                self.parse_type_params(start.lo)
-            } else {
-                (
-                    Vec::new(),
-                    std::collections::HashSet::new(),
-                    std::collections::HashSet::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
-            };
+        let type_parameters::TypeParameterList {
+            names: type_params,
+            non_null: non_null_type_params,
+            reified: reified_type_params,
+            bounds: type_param_bounds,
+            ..
+        } = self.parse_type_params(start.lo);
         let lexical_type_param_lens =
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         while self.at(TokenKind::At) {
@@ -2953,26 +2948,22 @@ impl<'a> Parser<'a> {
         self.bump(); // 'class'
         let name = self.ident_or_error("class name");
         let name_span = self.declaration_name_span;
-        let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
-        {
-            self.parse_type_params(start.lo)
-        } else {
-            (
-                Vec::new(),
-                std::collections::HashSet::new(),
-                std::collections::HashSet::new(),
-                Vec::new(),
-                Vec::new(),
-            )
-        };
+        let type_parameters::TypeParameterList {
+            names: type_params,
+            bounds: type_param_bounds,
+            variances: type_param_variances,
+            ..
+        } = self.parse_type_params(start.lo);
         let lexical_type_param_lens =
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         let mut primary_constructor_annotations = Vec::new();
         let mut primary_constructor_annotation_args = Vec::new();
         // An explicit constructor prefix may continue across physical newlines.
         let mut primary_ctor_visibility = Visibility::Public;
+        let mut primary_ctor_start = self.tok().span.lo;
         if self.primary_constructor_header_follows() {
             self.skip_newlines();
+            primary_ctor_start = self.tok().span.lo;
             if self.at(TokenKind::At) || self.at_modifier() {
                 let ctor_mods = self.skip_decl_prefix();
                 // The declared constructor visibility survives into `@Metadata` (and, for
@@ -2988,9 +2979,8 @@ impl<'a> Parser<'a> {
         }
         let mut props = Vec::new();
         let mut ctor_close_lo = 0u32;
-        let primary_ctor_open = self.tok().span.lo;
         let has_primary_ctor_parens = self.eat(TokenKind::LParen);
-        let mut primary_constructor_parameters_span = None;
+        let mut primary_constructor_span = None;
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
         if has_primary_ctor_parens {
             self.skip_newlines();
@@ -3066,7 +3056,7 @@ impl<'a> Parser<'a> {
             ctor_close_lo = self.tok().span.lo;
             let close = self.tok().span;
             if self.expect(TokenKind::RParen, "')'") {
-                primary_constructor_parameters_span = Some(Span::new(primary_ctor_open, close.hi));
+                primary_constructor_span = Some(Span::new(primary_ctor_start, close.hi));
             }
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
@@ -3175,7 +3165,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span,
+            primary_constructor_span,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3429,18 +3419,12 @@ impl<'a> Parser<'a> {
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
         let name_span = self.declaration_name_span;
-        let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
-        {
-            self.parse_type_params(start.lo)
-        } else {
-            (
-                Vec::new(),
-                std::collections::HashSet::new(),
-                std::collections::HashSet::new(),
-                Vec::new(),
-                Vec::new(),
-            )
-        };
+        let type_parameters::TypeParameterList {
+            names: type_params,
+            bounds: type_param_bounds,
+            variances: type_param_variances,
+            ..
+        } = self.parse_type_params(start.lo);
         let (supertypes, _base, _base_span, _base_type_args, _base_args, _) =
             self.parse_supertypes();
         // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the
@@ -3542,7 +3526,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span: None,
+            primary_constructor_span: None,
             kind: ClassKind::Interface,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3657,7 +3641,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span: None,
+            primary_constructor_span: None,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3794,7 +3778,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span: None,
+            primary_constructor_span: None,
             kind: ClassKind::Class,
             singleton: true,
             enum_entries: Vec::new(),

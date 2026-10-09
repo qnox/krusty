@@ -27,6 +27,40 @@ pub struct LanguageGates {
     /// `FunctionalTypeWithExtensionAsSupertype`, for supertypes that expand to an extension or
     /// contextual function type.
     pub functional_type_with_extension_as_supertype: FeatureGate,
+    /// The language features kotlinc's value-class declaration checker consults.
+    pub value_classes: ValueClassRules,
+}
+
+/// The rules of kotlinc's value-class declaration checker under one file's language settings.
+#[derive(Clone, Debug, Default)]
+pub struct ValueClassRules {
+    pub arity: ValueClassArity,
+    /// `CustomEqualsInValueClasses`: a value class may declare `equals` and `hashCode`, and an
+    /// `operator fun equals` taking the class itself is its typed equality.
+    pub custom_equals: bool,
+    /// `AllowExpectValueClassesWithNoPrimaryConstructor`: an `expect` value class may leave its
+    /// primary constructor to the `actual`.
+    pub expect_without_primary_constructor: bool,
+}
+
+/// How many primary-constructor parameters a value class represented inline may declare. The
+/// reference releases differ in which feature decides it.
+#[derive(Clone, Debug)]
+pub enum ValueClassArity {
+    /// The releases that have `JvmInlineMultiFieldValueClasses` (2.4.0, 2.4.10): one parameter,
+    /// or any positive number when the feature is enabled.
+    MultiFieldFeature { enabled: bool },
+    /// The releases without it (2.4.20): exactly one. A `value class` that wrote more parameters
+    /// and no `@JvmInline` is a use of `FullValueClasses`, reported with this gate.
+    Single { full_value_classes: FeatureGate },
+}
+
+impl Default for ValueClassArity {
+    fn default() -> Self {
+        Self::Single {
+            full_value_classes: FeatureGate::default(),
+        }
+    }
 }
 
 impl LanguageGates {

@@ -112,6 +112,7 @@ impl LangFeatures {
 const MODELED_FEATURES: &[&str] = &[
     "AllowAccessToProtectedFieldFromSuperCompanion",
     "AllowEagerSupertypeAccessibilityChecks",
+    "AllowExpectValueClassesWithNoPrimaryConstructor",
     "AnnotationsInMetadata",
     "BareArrayClassLiteral",
     "CollectionLiterals",
@@ -119,6 +120,7 @@ const MODELED_FEATURES: &[&str] = &[
     "ContextParameters",
     "ContextReceivers",
     "ContextSensitiveResolutionUsingExpectedType",
+    "CustomEqualsInValueClasses",
     "DataClassCopyRespectsConstructorVisibility",
     "DeprecateNameMismatchInShortDestructuringWithParentheses",
     "EagerLambdaAnalysis",
@@ -129,6 +131,7 @@ const MODELED_FEATURES: &[&str] = &[
     "FullValueClasses",
     "FunctionalTypeWithExtensionAsSupertype",
     "ImplicitSignedToUnsignedIntegerConversion",
+    "JvmInlineMultiFieldValueClasses",
     "JvmSupportRecursiveTypeOf",
     "LocalTypeAliases",
     "MultiDollarInterpolation",
@@ -376,11 +379,15 @@ mod tests {
     #[test]
     fn modeled_features_are_sorted_kotlinc_features() {
         assert!(MODELED_FEATURES.windows(2).all(|pair| pair[0] < pair[1]));
-        let table =
-            FeatureTable::for_version(crate::kotlin_version::KotlinVersion::newest()).unwrap();
+        // A feature may belong to some supported releases only, like
+        // `JvmInlineMultiFieldValueClasses`, which 2.4.20 removed.
+        let tables = crate::kotlin_version::KotlinVersion::supported()
+            .into_iter()
+            .map(|release| FeatureTable::for_version(release).unwrap())
+            .collect::<Vec<_>>();
         for name in MODELED_FEATURES {
             assert!(
-                table.get(name).is_some(),
+                tables.iter().any(|table| table.get(name).is_some()),
                 "{name} is not a kotlinc language feature"
             );
         }

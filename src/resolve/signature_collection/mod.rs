@@ -27,7 +27,7 @@ mod supertype_cycles;
 mod top_level_conflict_identity;
 mod top_level_overload_conflicts;
 mod type_universe;
-mod value_class_declaration;
+pub(in crate::resolve) mod value_class_declaration;
 mod written_supertypes;
 
 pub(in crate::resolve) use annotation_occurrences::*;

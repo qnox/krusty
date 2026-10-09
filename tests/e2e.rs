@@ -1662,6 +1662,8 @@ mod value_class_dependency_bridge_e2e;
 mod value_class_equality_e2e;
 #[path = "value_class_equals_hash_e2e.rs"]
 mod value_class_equals_hash_e2e;
+#[path = "value_class_feature_gates_e2e.rs"]
+mod value_class_feature_gates_e2e;
 #[path = "value_class_generic_carrier_e2e.rs"]
 mod value_class_generic_carrier_e2e;
 #[path = "value_class_generic_slot_read_e2e.rs"]

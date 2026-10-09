@@ -16,11 +16,7 @@ impl Parser<'_> {
         self.bump(); // `typealias`
         let name = self.ident_or_error("typealias name");
         let name_span = self.declaration_name_span;
-        let type_params = if self.at(TokenKind::Lt) {
-            self.parse_type_params(start.lo).0
-        } else {
-            Vec::new()
-        };
+        let type_params = self.parse_type_params(start.lo).names;
         self.expect(TokenKind::Eq, "'='");
         self.skip_plain_newlines();
         let target = self.parse_type();

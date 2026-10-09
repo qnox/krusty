@@ -131,21 +131,46 @@ fn a_single_field_value_class_needs_jvm_inline_only_on_the_jvm() {
     }
 }
 
+/// kotlinc 2.4.20 reports the count rule as `value class …` and, without `FullValueClasses`, a
+/// multi-field value class as the unsupported feature. The earlier releases word the count rule
+/// `inline class …`, apply it to every arity, and on the JVM first report the missing `@JvmInline`
+/// at the declaration.
 #[test]
 fn a_wrong_parameter_count_is_reported_at_the_parameter_list_on_every_target() {
+    let current =
+        krusty::kotlin_version::target() >= krusty::kotlin_version::KotlinVersion::V2_4_20;
+    let count = |position: &str| {
+        let kind = if current { "value" } else { "inline" };
+        format!(
+            "V.kt:{position}: {kind} class must have exactly one primary constructor parameter."
+        )
+    };
+    let missing_jvm_inline =
+        "V.kt:1:1: value classes without '@JvmInline' annotation are not yet supported."
+            .to_string();
     for target in EVERY_TARGET {
+        let legacy_jvm = !current && target == CompilationTarget::Jvm;
+        let mut empty = Vec::new();
+        if legacy_jvm {
+            empty.push(missing_jvm_inline.clone());
+        }
+        empty.push(count("1:14"));
         assert_eq!(
             krusty_errors(target, "value class V()\n"),
-            vec![
-                "V.kt:1:14: value class must have exactly one primary constructor parameter."
-                    .to_string()
-            ],
+            empty,
             "{target:?}"
         );
+        let multi_field = if current {
+            vec!["V.kt:1:1: the feature \"full value classes\" is experimental and should be enabled explicitly. This can be done by supplying the compiler argument '-XXLanguage:+FullValueClasses', but note that no stability guarantees are provided."
+                .to_string()]
+        } else if legacy_jvm {
+            vec![missing_jvm_inline.clone(), count("1:14")]
+        } else {
+            vec![count("1:14")]
+        };
         assert_eq!(
             krusty_errors(target, "value class V(val x: Int, val y: Int)\n"),
-            vec!["V.kt:1:1: the feature \"full value classes\" is experimental and should be enabled explicitly. This can be done by supplying the compiler argument '-XXLanguage:+FullValueClasses', but note that no stability guarantees are provided."
-                .to_string()],
+            multi_field,
             "{target:?}"
         );
     }
@@ -154,9 +179,6 @@ fn a_wrong_parameter_count_is_reported_at_the_parameter_list_on_every_target() {
             CompilationTarget::Jvm,
             "@JvmInline\nvalue class V(val x: Int, val y: Int)\n"
         ),
-        vec![
-            "V.kt:2:14: value class must have exactly one primary constructor parameter."
-                .to_string()
-        ]
+        vec![count("2:14")]
     );
 }

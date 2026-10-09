@@ -51,12 +51,12 @@ impl Parser<'_> {
         self.bump(); // val/var
                      // Optional generic type parameters on an extension property (`val <T> T.foo: T`) —
                      // erased, but retained so they scope over the receiver, type, and accessor bodies.
-        let (type_params, _tp_non_null, reified_type_params, mut type_param_bounds, _) =
-            if self.at(TokenKind::Lt) {
-                self.parse_type_params(start.lo)
-            } else {
-                Default::default()
-            };
+        let super::type_parameters::TypeParameterList {
+            names: type_params,
+            reified: reified_type_params,
+            bounds: mut type_param_bounds,
+            ..
+        } = self.parse_type_params(start.lo);
         let lexical_type_param_lens =
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         while self.at(TokenKind::At) {

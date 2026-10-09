@@ -111,3 +111,56 @@ pub fn no_value_for_parameter_anchor() -> Anchor {
 pub fn inapplicable_member_joins_extensions() -> bool {
     since(KotlinVersion::V2_4_20)
 }
+
+/// The value-class declaration checker's diagnostics name the class by its kind: `value`,
+/// `@JvmInline value` or `final value`, as kotlinc prints it. 2.4.20 introduced that argument; the
+/// earlier releases ignore `kind` and keep their fixed words.
+///
+/// `ABSENCE_OF_PRIMARY_CONSTRUCTOR_FOR_VALUE_CLASS`.
+pub fn value_class_without_primary_constructor(kind: &str) -> String {
+    if since(KotlinVersion::V2_4_20) {
+        format!("primary constructor is required for {kind} classes.")
+    } else {
+        "primary constructor is required for value classes.".to_string()
+    }
+}
+
+/// `INLINE_CLASS_CONSTRUCTOR_WRONG_PARAMETERS_SIZE`; see [`value_class_without_primary_constructor`].
+pub fn value_class_wrong_parameter_count(kind: &str) -> String {
+    if since(KotlinVersion::V2_4_20) {
+        format!("{kind} class must have exactly one primary constructor parameter.")
+    } else {
+        "inline class must have exactly one primary constructor parameter.".to_string()
+    }
+}
+
+/// `VALUE_CLASS_EMPTY_CONSTRUCTOR`; see [`value_class_without_primary_constructor`].
+pub fn value_class_empty_constructor(kind: &str) -> String {
+    if since(KotlinVersion::V2_4_20) {
+        format!("{kind} class must have at least one primary constructor parameter.")
+    } else {
+        "value class must have at least one primary constructor parameter.".to_string()
+    }
+}
+
+/// `VALUE_CLASS_CONSTRUCTOR_NOT_FINAL_READ_ONLY_PARAMETER`; see
+/// [`value_class_without_primary_constructor`].
+pub fn value_class_parameter_not_final_read_only(kind: &str) -> String {
+    let kind = if since(KotlinVersion::V2_4_20) {
+        kind
+    } else {
+        "value"
+    };
+    format!("{kind} class primary constructor must only have final read-only ('val') property parameters.")
+}
+
+/// `VALUE_CLASS_HAS_INAPPLICABLE_PARAMETER_TYPE`, for the rendered parameter type; see
+/// [`value_class_without_primary_constructor`].
+pub fn value_class_inapplicable_parameter_type(ty: &str, kind: &str) -> String {
+    let kind = if since(KotlinVersion::V2_4_20) {
+        kind
+    } else {
+        "value"
+    };
+    format!("{kind} class cannot have value parameter of type '{ty}'.")
+}
