@@ -1,14 +1,17 @@
 //! kotlinc's command-line surface: which arguments a release accepts ([`catalog`]), how a command
 //! line is split into arguments, values and sources ([`argfile`], [`tokenize`]), and which of those
-//! arguments krusty implements ([`disposition`]). `cli` applies the parsed values.
+//! arguments krusty implements ([`disposition`]). `cli` applies the parsed values, reading the
+//! release's language features ([`language_features`]) for the arguments that select them.
 
 pub mod argfile;
 pub mod catalog;
 pub mod disposition;
+pub mod language_features;
 pub mod tokenize;
 
 pub use catalog::{ArgumentSpec, Catalog, Origin, ValueKind};
 pub use disposition::Disposition;
+pub use language_features::FeatureTable;
 pub use tokenize::{tokenize, Occurrence, Recorded, Tokenized, Value};
 
 use krusty::kotlin_version::KotlinVersion;

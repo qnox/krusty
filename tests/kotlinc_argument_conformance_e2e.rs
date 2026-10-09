@@ -19,6 +19,7 @@ use super::common;
 
 const ORACLE: &str = include_str!("kotlinc_arguments/KotlincArgumentOracle.java");
 const DUMPER: &str = include_str!("../scripts/kotlinc-arguments/DumpKotlincArguments.java");
+const FEATURE_DUMPER: &str = include_str!("../scripts/kotlinc-arguments/DumpLanguageFeatures.java");
 
 /// The reference compiler's classpath: the compiler and the standard library it runs on.
 fn compiler_classpath() -> String {
@@ -183,6 +184,23 @@ fn the_argument_table_is_what_the_reference_compiler_declares() {
     assert_eq!(
         dumped, vendored,
         "kotlinc {version} declares a different argument table; regenerate it with \
+         `just kotlinc-arguments {version}`"
+    );
+}
+
+#[test]
+fn the_language_feature_table_is_what_the_reference_compiler_declares() {
+    let (version, _) = kotlinc_report(&[]);
+    let dumped = run_java("features", "DumpLanguageFeatures", FEATURE_DUMPER);
+    let vendored_path = format!(
+        "{}/crates/krusty-cli/src/kotlinc_arguments/releases/{version}.features.tsv",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let vendored = std::fs::read_to_string(&vendored_path)
+        .unwrap_or_else(|error| panic!("{vendored_path}: {error}"));
+    assert_eq!(
+        dumped, vendored,
+        "kotlinc {version} declares a different language feature table; regenerate it with \
          `just kotlinc-arguments {version}`"
     );
 }

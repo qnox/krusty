@@ -242,6 +242,9 @@ kotlinc-arguments VERSION=`just max-version`:
     java -cp "$lib/kotlin-compiler.jar:$lib/kotlin-stdlib.jar" \
         scripts/kotlinc-arguments/DumpKotlincArguments.java \
         > "crates/krusty-cli/src/kotlinc_arguments/releases/{{VERSION}}.tsv"
+    java -cp "$lib/kotlin-compiler.jar:$lib/kotlin-stdlib.jar" \
+        scripts/kotlinc-arguments/DumpLanguageFeatures.java \
+        > "crates/krusty-cli/src/kotlinc_arguments/releases/{{VERSION}}.features.tsv"
 
 # Provision the Kotlin/Native distribution whose stdlib KLIB supplies the real metadata format.
 # The extracted root is versioned and cached beside the JVM compiler distribution.

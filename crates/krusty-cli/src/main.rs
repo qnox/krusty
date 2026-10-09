@@ -176,7 +176,9 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
 pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     let mut promoted = String::new();
     for warning in &opts.warnings {
-        match opts.warning_policy.level(warning.name) {
+        match warning.name.map_or(cli::WarningLevel::Warning, |name| {
+            opts.warning_policy.level(name)
+        }) {
             cli::WarningLevel::Warning => eprintln!("warning: {}", warning.message),
             cli::WarningLevel::Error => {
                 promoted.push_str("error: ");

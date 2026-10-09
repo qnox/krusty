@@ -1,6 +1,6 @@
 //! What krusty does with each kotlinc argument. Every argument of every supported release has
 //! exactly one disposition (`every_kotlinc_argument_has_one_disposition`), so a new release's
-//! arguments cannot reach users unclassified, and [`IGNORED`] is the complete list of kotlinc
+//! arguments cannot reach users unclassified, and [`UNSUPPORTED`] is the complete list of kotlinc
 //! arguments krusty does not implement yet.
 
 /// krusty's handling of one kotlinc argument.
@@ -8,9 +8,13 @@
 pub enum Disposition {
     /// `cli` reads the value and acts on it.
     Applied,
-    /// Accepted and dropped with a note naming it. Each entry is a conformance gap: it moves to
-    /// `Applied` (or a refusal) once krusty models it, with a test comparing kotlinc's output.
-    Ignored,
+    /// Accepted with no action because krusty already behaves as the argument requests. Each entry
+    /// has a test comparing krusty's output with kotlinc's under the argument
+    /// (`tests/inert_kotlinc_arguments_e2e.rs`).
+    Inert,
+    /// Refused: the compilation stops before emitting anything. Each entry is a conformance gap
+    /// that moves to `Applied` or `Inert` once krusty models it, with a test comparing kotlinc.
+    Unsupported,
 }
 
 /// The arguments `cli` applies, by canonical name.
@@ -50,11 +54,20 @@ pub const APPLIED: &[&str] = &[
     "-no-reflect",
     "-no-stdlib",
     "-opt-in",
+    "-progressive",
     "-version",
 ];
 
-/// kotlinc arguments krusty accepts without acting on them, by canonical name.
-pub const IGNORED: &[&str] = &[
+/// The arguments krusty accepts without acting on them, by canonical name.
+pub const INERT: &[&str] = &[
+    // krusty reads class files without checking their metadata version or pre-release flag, so it
+    // already compiles as kotlinc does once these checks are off.
+    "-Xskip-metadata-version-check",
+    "-Xskip-prerelease-check",
+];
+
+/// The kotlinc arguments krusty refuses, by canonical name.
+pub const UNSUPPORTED: &[&str] = &[
     "-Werror",
     "-Wextra",
     "-XXdebug-level-compiler-checks",
@@ -171,8 +184,6 @@ pub const IGNORED: &[&str] = &[
     "-Xsanitize-parentheses",
     "-Xscript-resolver-environment",
     "-Xseparate-kmp-compilation",
-    "-Xskip-metadata-version-check",
-    "-Xskip-prerelease-check",
     "-Xstdlib-compilation",
     "-Xstring-concat",
     "-Xsupport-compatqual-checker-framework-annotations",
@@ -203,7 +214,6 @@ pub const IGNORED: &[&str] = &[
     "-include-runtime",
     "-kotlin-home",
     "-nowarn",
-    "-progressive",
     "-script",
     "-script-templates",
     "-verbose",
@@ -214,8 +224,10 @@ pub const IGNORED: &[&str] = &[
 pub fn of(name: &str) -> Option<Disposition> {
     if APPLIED.contains(&name) {
         Some(Disposition::Applied)
-    } else if IGNORED.contains(&name) {
-        Some(Disposition::Ignored)
+    } else if INERT.contains(&name) {
+        Some(Disposition::Inert)
+    } else if UNSUPPORTED.contains(&name) {
+        Some(Disposition::Unsupported)
     } else {
         None
     }
@@ -243,12 +255,13 @@ mod tests {
                 );
             }
         }
-        for name in APPLIED.iter().chain(IGNORED) {
+        for name in APPLIED.iter().chain(INERT).chain(UNSUPPORTED) {
             assert!(known.contains(name), "{name} is not a kotlinc argument");
-            assert!(
-                !(APPLIED.contains(name) && IGNORED.contains(name)),
-                "{name} has two dispositions"
-            );
+            let lists = [APPLIED, INERT, UNSUPPORTED]
+                .iter()
+                .filter(|list| list.contains(name))
+                .count();
+            assert_eq!(lists, 1, "{name} has {lists} dispositions");
         }
     }
 }

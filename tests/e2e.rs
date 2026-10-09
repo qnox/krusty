@@ -1059,6 +1059,8 @@ mod indy_infra_e2e;
 mod indy_lambda_fallback_parity_e2e;
 #[path = "indy_lambda_parity_e2e.rs"]
 mod indy_lambda_parity_e2e;
+#[path = "inert_kotlinc_arguments_e2e.rs"]
+mod inert_kotlinc_arguments_e2e;
 #[path = "inferred_alias_abbreviation_e2e.rs"]
 mod inferred_alias_abbreviation_e2e;
 #[path = "inferred_computed_prop_e2e.rs"]
@@ -1569,6 +1571,8 @@ mod override_default_stub_e2e;
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
+#[path = "progressive_mode_e2e.rs"]
+mod progressive_mode_e2e;
 #[path = "property_accessor_annotation_e2e.rs"]
 mod property_accessor_annotation_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
@@ -1603,6 +1607,8 @@ mod suspend_value_class_results_e2e;
 mod unit_expression_body_return_line_e2e;
 #[path = "unsigned_operations_e2e.rs"]
 mod unsigned_operations_e2e;
+#[path = "unsupported_kotlinc_arguments_e2e.rs"]
+mod unsupported_kotlinc_arguments_e2e;
 #[path = "value_class_bound_reference_receiver_e2e.rs"]
 mod value_class_bound_reference_receiver_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
