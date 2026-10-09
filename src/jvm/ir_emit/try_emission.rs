@@ -167,6 +167,22 @@ impl Emitter<'_> {
         self.protected_regions.remove(index).segments
     }
 
+    /// The type a `try` leaves on the stack. A spliced inline lambda has a value even when its
+    /// semantic type is `Unit`: kotlinc parks `Unit.INSTANCE` across `finally` and only discards it
+    /// at the landing, so every consumer of such a `try` sees that reference. This is a JVM
+    /// representation choice over the semantic `try` result recorded by common IR.
+    pub(super) fn try_physical_result(
+        &self,
+        expression: u32,
+        result: crate::types::Ty,
+    ) -> crate::types::Ty {
+        if self.ir.inline_cleanup_results.contains(&expression) {
+            crate::types::stored_value_ty(result)
+        } else {
+            result
+        }
+    }
+
     /// `try { body } catch (v: E) { … } …` (no `finally`). The body value (and each catch value) is
     /// stored into a result temp, then loaded at the merge — mirroring kotlinc. The protected region
     /// covers the body+store; each catch is an exception-table handler whose frame has the caught
@@ -186,14 +202,7 @@ impl Emitter<'_> {
             result,
         } = parts;
         let inline_cleanup_result = self.ir.inline_cleanup_results.contains(&expression);
-        // A spliced inline lambda has a value even when its semantic type is `Unit`: kotlinc
-        // parks `Unit.INSTANCE` across `finally` and only discards it at the landing. This is a
-        // JVM representation choice over the semantic `try` result recorded by common IR.
-        let physical_result = if inline_cleanup_result {
-            crate::types::stored_value_ty(result)
-        } else {
-            result
-        };
+        let physical_result = self.try_physical_result(expression, result);
         let rt = ir_ty_to_jvm(&physical_result);
         // A discarded `try` runs its branches as statements: no value reaches the result temporary.
         let is_stmt = !inline_cleanup_result && (discarded || matches!(rt, Ty::Unit | Ty::Nothing));
