@@ -20,7 +20,7 @@
 
 use std::borrow::Cow;
 
-use super::{city_hash, KlibNamePath, KlibPublicIdSignature};
+use super::{city_hash, KlibAccessorIdSignature, KlibNamePath, KlibPublicIdSignature};
 
 /// A type as the signature mangler sees it.
 pub trait SignatureType: Sized {
@@ -127,6 +127,15 @@ pub struct PropertyShape<'a, T> {
     pub type_parameters: Vec<TypeParameterShape<'a, T>>,
 }
 
+/// Which accessor of a property.
+pub enum Accessor<'a, T> {
+    Getter,
+    /// A setter takes the property's type.
+    Setter {
+        value: &'a T,
+    },
+}
+
 /// A declaration's mangled signature could not be formed from its shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManglingError {
@@ -173,6 +182,43 @@ pub fn property_signature<T: SignatureType>(
 ) -> Result<KlibPublicIdSignature, ManglingError> {
     let mangled = mangle_property(&container.scopes(&property.type_parameters), property)?;
     Ok(container.signature(property.name, Some(&mangled)))
+}
+
+/// The identity of a property's getter or setter. An accessor is mangled as a function named
+/// `<get-name>` or `<set-name>` with the property's contexts, receiver and type parameters.
+pub fn accessor_signature<T: SignatureType>(
+    container: DeclarationContainer<'_, T>,
+    property: &PropertyShape<'_, T>,
+    accessor: Accessor<'_, T>,
+) -> Result<KlibAccessorIdSignature, ManglingError> {
+    let (name, params) = match accessor {
+        Accessor::Getter => (format!("<get-{}>", property.name), Vec::new()),
+        Accessor::Setter { value } => (format!("<set-{}>", property.name), vec![value]),
+    };
+    let type_parameters = property
+        .type_parameters
+        .iter()
+        .map(|parameter| TypeParameterShape {
+            name: parameter.name,
+            bounds: parameter.bounds.clone(),
+        })
+        .collect();
+    let function = CallableShape {
+        name: &name,
+        contexts: property.contexts.clone(),
+        receiver: property.receiver,
+        params,
+        vararg: None,
+        type_parameters,
+    };
+    let scopes = container.scopes(&function.type_parameters);
+    let mangled = mangle_callable(&scopes, &function)?;
+    Ok(KlibAccessorIdSignature::new(
+        property_signature(container, property)?,
+        name,
+        city_hash::city_hash64(mangled.as_bytes()),
+        0,
+    ))
 }
 
 type Scopes<'s, 'a, T> = [&'s [TypeParameterShape<'a, T>]];

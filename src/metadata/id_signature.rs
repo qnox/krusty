@@ -12,13 +12,14 @@ mod mangling;
 mod metadata_declarations;
 
 pub use mangling::{
-    callable_signature, class_signature, property_signature, CallableShape, ClassScope,
-    DeclarationContainer, ManglingError, PropertyShape, SignatureType, TypeParameterShape,
-    TypeView,
+    accessor_signature, callable_signature, class_signature, property_signature, Accessor,
+    CallableShape, ClassScope, DeclarationContainer, ManglingError, PropertyShape, SignatureType,
+    TypeParameterShape, TypeView,
 };
 pub use metadata_declarations::{
-    constructor_signature, member_signature, metadata_class_signature, package_function_signature,
-    package_property_signature, MetadataContainer,
+    constructor_signature, member_property_accessor_signature, member_signature,
+    metadata_class_signature, package_function_signature, package_property_accessor_signature,
+    package_property_signature, MetadataAccessor, MetadataContainer,
 };
 
 /// One exact qualified path in a public KLIB signature.
@@ -92,6 +93,48 @@ impl KlibPublicIdSignature {
                 .eq(declaration.iter().copied())
             && self.member_id == Some(member_id)
             && self.mask == mask
+    }
+}
+
+/// Kotlin's `AccessorIdSignature`: a getter or setter of a public property, named by the
+/// property's identity, the accessor's name (`<get-size>`) and the accessor's own member id.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct KlibAccessorIdSignature {
+    property: KlibPublicIdSignature,
+    name: String,
+    member_id: u64,
+    mask: u64,
+}
+
+impl KlibAccessorIdSignature {
+    pub(crate) fn new(
+        property: KlibPublicIdSignature,
+        name: String,
+        member_id: u64,
+        mask: u64,
+    ) -> Self {
+        Self {
+            property,
+            name,
+            member_id,
+            mask,
+        }
+    }
+
+    pub fn property(&self) -> &KlibPublicIdSignature {
+        &self.property
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn member_id(&self) -> u64 {
+        self.member_id
+    }
+
+    pub fn mask(&self) -> u64 {
+        self.mask
     }
 }
 

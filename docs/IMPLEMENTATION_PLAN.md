@@ -4572,10 +4572,10 @@ code is the one the code generator already names: provider-owned bodies through 
   from its shape, as Kotlin's `IrMangleComputer` (signature mode) and CityHash64 do. The mangler is
   target-free: a declaration model implements `SignatureType`, so the KLIB reader (over decoded
   metadata) and a KLIB writer (over krusty's own declarations) agree on one identity. Over the
-  Kotlin/Native 2.4.20 stdlib it reproduces every public function, property, constructor and class
-  signature that IR serializes; the misses are `@OptionalExpectation` annotation classes, which IR
-  omits, and non-public nested classes. The four library KLIBs above match completely. Accessor
-  signatures and enum entries are still open.
+  Kotlin/Native 2.4.20 stdlib it reproduces every public function, property, accessor, constructor
+  and class signature that IR serializes; the misses are `@OptionalExpectation` annotation classes,
+  which IR omits, and non-public nested classes. The four library KLIBs above match completely.
+  Enum entries are still open.
 - **Joining (next).** A selected dependency callable is joined to its decoded body through its
   exact public signature, never through a name or parameter tuple.
 - **Lowering (next).** The decoded body is lowered into checked common IR so the native generator

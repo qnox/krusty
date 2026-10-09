@@ -146,6 +146,8 @@ pub struct KotlinMember {
     pub params: Vec<KotlinType>,
     pub ret: KotlinType,
     pub is_property: bool,
+    /// A `var` property; never set on a function.
+    pub is_var: bool,
     pub is_operator: bool,
     pub is_infix: bool,
     pub is_abstract: bool,

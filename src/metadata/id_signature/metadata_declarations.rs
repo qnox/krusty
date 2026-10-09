@@ -7,11 +7,11 @@
 use std::borrow::Cow;
 
 use super::mangling::{
-    callable_signature, class_signature, property_signature, CallableShape, ClassScope,
-    DeclarationContainer, ManglingError, PropertyShape, SignatureType, TypeParameterShape,
-    TypeView,
+    accessor_signature, callable_signature, class_signature, property_signature, Accessor,
+    CallableShape, ClassScope, DeclarationContainer, ManglingError, PropertyShape, SignatureType,
+    TypeParameterShape, TypeView,
 };
-use super::KlibPublicIdSignature;
+use super::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::semantic::{
     KotlinConstructor, KotlinFunction, KotlinMember, KotlinProperty, KotlinType,
     KotlinTypeParameter,
@@ -166,6 +166,70 @@ pub fn package_property_signature(
     with_container(container, |container| property_signature(container, &shape))
 }
 
+/// Which accessor of a metadata property.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MetadataAccessor {
+    Getter,
+    Setter,
+}
+
+fn metadata_accessor<'a>(
+    accessor: MetadataAccessor,
+    name: &str,
+    is_var: bool,
+    ty: &'a KotlinType,
+) -> Result<Accessor<'a, KotlinType>, ManglingError> {
+    match accessor {
+        MetadataAccessor::Getter => Ok(Accessor::Getter),
+        MetadataAccessor::Setter if is_var => Ok(Accessor::Setter { value: ty }),
+        MetadataAccessor::Setter => Err(ManglingError::new(format!(
+            "property {name} is a val and has no setter"
+        ))),
+    }
+}
+
+/// A top-level property's getter or setter identity.
+pub fn package_property_accessor_signature(
+    container: MetadataContainer<'_>,
+    property: &KotlinProperty,
+    accessor: MetadataAccessor,
+) -> Result<KlibAccessorIdSignature, ManglingError> {
+    let accessor = metadata_accessor(accessor, &property.name, property.is_var, &property.ty)?;
+    let shape = PropertyShape {
+        name: &property.name,
+        contexts: property.context_params.iter().collect(),
+        receiver: property.receiver.as_ref(),
+        type_parameters: type_parameters(&property.formals),
+    };
+    with_container(container, |container| {
+        accessor_signature(container, &shape, accessor)
+    })
+}
+
+/// A member property's getter or setter identity; `container` ends with the property's class.
+pub fn member_property_accessor_signature(
+    container: MetadataContainer<'_>,
+    member: &KotlinMember,
+    accessor: MetadataAccessor,
+) -> Result<KlibAccessorIdSignature, ManglingError> {
+    if !member.is_property {
+        return Err(ManglingError::new(format!(
+            "member {} is a function and has no accessors",
+            member.name
+        )));
+    }
+    let accessor = metadata_accessor(accessor, &member.name, member.is_var, &member.ret)?;
+    let shape = PropertyShape {
+        name: &member.name,
+        contexts: member.context_params.iter().collect(),
+        receiver: member.receiver.as_ref(),
+        type_parameters: type_parameters(&member.formals),
+    };
+    with_container(container, |container| {
+        accessor_signature(container, &shape, accessor)
+    })
+}
+
 /// A class member's identity; `container` ends with the member's class.
 pub fn member_signature(
     container: MetadataContainer<'_>,
@@ -307,6 +371,7 @@ mod tests {
             params,
             ret: class("kotlin/Unit", Vec::new()),
             is_property,
+            is_var: false,
             is_operator: false,
             is_infix: false,
             is_abstract: false,
@@ -515,6 +580,65 @@ mod tests {
         };
         let signature = package_property_signature(top_level(&kotlin_text), &last_index).unwrap();
         assert_eq!(member_id(&signature), 1_266_685_057_648_611_082);
+    }
+
+    #[test]
+    fn a_getter_is_a_function_with_the_property_receiver_and_type_parameters() {
+        let kotlin_collections = package(&["kotlin", "collections"]);
+        let last_index = KotlinProperty {
+            name: "lastIndex".to_owned(),
+            receiver: Some(class("kotlin/collections/List", vec![param("T")])),
+            context_params: Vec::new(),
+            ty: class("kotlin/Int", Vec::new()),
+            formals: vec![type_parameter("T", Vec::new())],
+            visibility: Visibility::Public,
+            is_var: false,
+            context_count: 0,
+            constant: None,
+        };
+        let getter = package_property_accessor_signature(
+            top_level(&kotlin_collections),
+            &last_index,
+            MetadataAccessor::Getter,
+        )
+        .unwrap();
+        assert_eq!(getter.property().declaration().segments(), ["lastIndex"]);
+        assert_eq!(member_id(getter.property()), -7_238_914_123_027_933_299);
+        assert_eq!(getter.name(), "<get-lastIndex>");
+        assert_eq!(getter.member_id() as i64, 1_631_619_787_052_076_373);
+        assert_eq!(
+            package_property_accessor_signature(
+                top_level(&kotlin_collections),
+                &last_index,
+                MetadataAccessor::Setter,
+            )
+            .unwrap_err()
+            .to_string(),
+            "property lastIndex is a val and has no setter"
+        );
+    }
+
+    #[test]
+    fn a_setter_takes_the_property_type() {
+        let kotlin_concurrent = package(&["kotlin", "concurrent"]);
+        let parameters: [KotlinTypeParameter; 0] = [];
+        let classes = [("AtomicInt", &parameters[..])];
+        let atomic_int = MetadataContainer {
+            package: &kotlin_concurrent,
+            classes: &classes,
+        };
+        let mut value = member("value", Vec::new(), true);
+        value.ret = class("kotlin/Int", Vec::new());
+        value.is_var = true;
+        let setter =
+            member_property_accessor_signature(atomic_int, &value, MetadataAccessor::Setter)
+                .unwrap();
+        assert_eq!(
+            setter.property().declaration().segments(),
+            ["AtomicInt", "value"]
+        );
+        assert_eq!(setter.name(), "<set-value>");
+        assert_eq!(setter.member_id() as i64, -195_057_410_739_577_239);
     }
 
     #[test]

@@ -1222,6 +1222,7 @@ fn semantic_function(
         params: member_params,
         ret: ret.clone(),
         is_property: false,
+        is_var: false,
         is_operator: function.is_operator,
         is_infix: function.is_infix,
         is_abstract: function.is_abstract,
@@ -1420,6 +1421,7 @@ fn semantic_property(
         params: Vec::new(),
         ret: ret.clone(),
         is_property: true,
+        is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
         is_operator: false,
         is_infix: false,
         is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
