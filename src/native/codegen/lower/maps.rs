@@ -68,6 +68,8 @@ fn map_symbol(
     use crate::types::CollectionKind::Map;
     let reads = declaration.reads(&[Map]);
     let mutates = declaration.mutates(&[Map]);
+    // `MutableMap` redeclares the three views with mutable types, so both faces declare them.
+    let views = reads || mutates;
     Some(match (signature.name, signature.params, signature.ret) {
         // `Map.size` is a Kotlin property over a Java method, so the provider may present the
         // getter under either spelling; both name the same question.
@@ -87,13 +89,13 @@ fn map_symbol(
         ("containsValue", [value], Ty::Boolean) if reads && value.is_reference() => {
             ("kt_map_contains_value", vec![any(), any()], Ty::Boolean)
         }
-        ("keys" | "getKeys", [], ret) if reads && ret.is_reference() => {
+        ("keys" | "getKeys", [], ret) if views && ret.is_reference() => {
             ("kt_map_keys", vec![any()], any())
         }
-        ("values" | "getValues", [], ret) if reads && ret.is_reference() => {
+        ("values" | "getValues", [], ret) if views && ret.is_reference() => {
             ("kt_map_values", vec![any()], any())
         }
-        ("entries" | "getEntries", [], ret) if reads && ret.is_reference() => {
+        ("entries" | "getEntries", [], ret) if views && ret.is_reference() => {
             ("kt_map_entries", vec![any()], any())
         }
         // The mutating half. `put` answers the value that was there; `set` is `m[k] = v` and
@@ -566,6 +568,11 @@ mod tests {
         assert!(map_symbol(face(false), clear).is_none());
         assert!(map_symbol(hash_map, size).is_some());
         assert!(map_symbol(hash_map, clear).is_some());
+        // `MutableMap` redeclares `keys`, `values` and `entries`, so both faces answer them.
+        let values_type = Ty::obj_args("kotlin/collections/Collection", &[any()]);
+        let values = signature("kotlin/collections/MutableMap", "values", &[], values_type);
+        assert!(map_symbol(face(false), values).is_some());
+        assert!(map_symbol(face(true), values).is_some());
         assert!(map_symbol(
             CollectionDeclaration::Implementation(StandardCollectionImplementation::Set),
             size,
