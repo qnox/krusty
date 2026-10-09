@@ -157,38 +157,6 @@ impl ProductionSignatureSemantics<'_> {
         reference
     }
 
-    /// A superclass constructor call (`: pkg.Base(args)`) names its classifier apart from the
-    /// supertype reference, and kotlinc reports an inaccessible one at the call's callee as well.
-    /// The scope's resolver carries the declaration's lexical visibility policy, so a suppressed
-    /// declaration reports neither.
-    pub(super) fn check_superclass_call_access(
-        &self,
-        scope: crate::fir::SignatureScope,
-        callee: Span,
-        superclass: crate::types::TypeName,
-    ) {
-        let access = self
-            .with_resolver(scope, |resolver| {
-                resolver.inaccessible_classifier_access(superclass)
-            })
-            .ok();
-        crate::trace_compiler!(
-            "resolve",
-            "superclass call access declaration={:?} superclass={superclass} inaccessible={access:?}",
-            scope.owner,
-        );
-        if let Some(access) = access {
-            let display = superclass.render().replace(['/', '$'], ".");
-            self.record_classifier_access_diagnostic_at(
-                scope.owner,
-                scope.source,
-                callee,
-                superclass,
-                super::super::inaccessible_classifier_message(&display, access),
-            );
-        }
-    }
-
     /// Resolve a classifier header type in the lexical scope immediately outside the classifier
     /// body. The classifier's own type parameters remain in `lexical`, but nested declarations from
     /// its body are not visible in its supertype list (`class C : Base { interface Base }`).
