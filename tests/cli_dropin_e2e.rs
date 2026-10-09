@@ -583,8 +583,10 @@ fn werror_fails_only_when_a_warning_is_emitted() {
     fs::write(&source, "fun f(): Int = 1\n").unwrap();
     let out_dir = dir.join("out");
 
+    // The Gradle plugin always disables the implicit reflect jar. This environment has a
+    // stdlib jar and no reflect jar, so the warning policy is what the invocations test.
     let clean = Command::new(&krusty)
-        .arg("-Werror")
+        .args(["-Werror", "-no-reflect"])
         .arg("-d")
         .arg(&out_dir)
         .arg(&source)
@@ -598,7 +600,13 @@ fn werror_fails_only_when_a_warning_is_emitted() {
     assert!(out_dir.join("CleanKt.class").is_file());
 
     let redundant = Command::new(&krusty)
-        .args(["-language-version", "2.4", "-Xcontext-parameters", "-Werror"])
+        .args([
+            "-language-version",
+            "2.4",
+            "-Xcontext-parameters",
+            "-Werror",
+            "-no-reflect",
+        ])
         .arg("-d")
         .arg(dir.join("redundant"))
         .arg(&source)
@@ -616,7 +624,7 @@ fn werror_fails_only_when_a_warning_is_emitted() {
     assert!(!dir.join("redundant/CleanKt.class").exists());
 
     let explicit = Command::new(&krusty)
-        .args(["-Xexplicit-api=warning", "-Werror"])
+        .args(["-Xexplicit-api=warning", "-Werror", "-no-reflect"])
         .arg("-d")
         .arg(dir.join("explicit"))
         .arg(&source)
