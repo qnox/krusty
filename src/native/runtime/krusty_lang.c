@@ -765,13 +765,17 @@ void kt_clear_pending(void) { kt_pending = NULL; }
    answer, which this one copies, is the report's opening and then a line naming the class of the
    exception the `toString` raised; the class is read from its descriptor, which runs no program
    code. */
-void kt_check_uncaught(void) {
+void kt_check_uncaught(void) { kt_report_uncaught("main", 4); }
+
+void kt_report_uncaught(const char *thread, size_t thread_length) {
     if (kt_pending == NULL) {
         return;
     }
     KRef uncaught = kt_pending;
     kt_clear_pending();
-    kt_sys_write(2, "Exception in thread \"main\" ", 27);
+    kt_sys_write(2, "Exception in thread \"", 21);
+    kt_sys_write(2, thread, thread_length);
+    kt_sys_write(2, "\" ", 2);
     kt_int length = 0;
     KRef storage = NULL;
     const char *bytes = kt_render(uncaught, &length, &storage);
@@ -779,7 +783,9 @@ void kt_check_uncaught(void) {
         const KType *raised = kt_pending->header.type;
         kt_sys_write(2, "\nException: ", 12);
         kt_sys_write(2, raised->name, raised->name_length);
-        kt_sys_write(2, " thrown from the UncaughtExceptionHandler in thread \"main\"\n", 59);
+        kt_sys_write(2, " thrown from the UncaughtExceptionHandler in thread \"", 53);
+        kt_sys_write(2, thread, thread_length);
+        kt_sys_write(2, "\"\n", 2);
         kt_sys_exit(134);
     }
     kt_sys_write(2, bytes, (size_t)length);
