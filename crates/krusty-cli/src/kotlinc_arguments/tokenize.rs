@@ -54,6 +54,14 @@ pub struct Tokenized<'c> {
 }
 
 impl<'c> Tokenized<'c> {
+    /// Advanced options absent from the selected compiler's catalog. kotlinc warns and otherwise
+    /// ignores these; stricter frontends such as the persistent worker use the structured list to
+    /// refuse a possibly output-affecting option without mistaking deprecation/duplicate warnings
+    /// on modeled arguments for ignored semantics.
+    pub fn unknown_extra_flags(&self) -> &[String] {
+        &self.problems.unknown_extra_flags
+    }
+
     /// kotlinc's `validateArgumentsAllErrors`: any one stops the invocation before compiling.
     pub fn errors(&self) -> Vec<String> {
         let problems = &self.problems;
@@ -121,21 +129,13 @@ impl<'c> Tokenized<'c> {
                 "Advanced option value is passed in an obsolete form. Please use the '=' character to specify the value: {argument}=..."
             ));
         }
-        warnings.extend(self.deprecations());
+        for (deprecated, name) in &problems.deprecated {
+            warnings.push(format!(
+                "Argument {deprecated} is deprecated. Please use {name} instead"
+            ));
+        }
         warnings.extend(self.argfile_problems.iter().cloned());
         warnings
-    }
-
-    /// The warnings that name a deprecated spelling. The argument still takes effect under its
-    /// current name, unlike the other warnings, whose argument is ignored.
-    pub fn deprecations(&self) -> Vec<String> {
-        self.problems
-            .deprecated
-            .iter()
-            .map(|(deprecated, name)| {
-                format!("Argument {deprecated} is deprecated. Please use {name} instead")
-            })
-            .collect()
     }
 }
 

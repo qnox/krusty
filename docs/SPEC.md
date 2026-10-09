@@ -12172,6 +12172,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   each argument of each release against its disposition; `tests/unsupported_kotlinc_arguments_e2e.rs`
   and `tests/inert_kotlinc_arguments_e2e.rs` check exit code, complete stderr and output against
   kotlinc.)
+- **`-Xjdk-release` compiles against the selected JDK's own API.** As in kotlinc's
+  `configureJvmTargetAndRelease`, the release names the JVM target (`8` is `1.8`; `6`/`7` require
+  an explicit `-jvm-target 1.8`), an explicit `-jvm-target` must equal it (or be `1.8` for 6–8),
+  else `'-Xjdk-release=<r>' option conflicts with '-jvm-target <t>'`, and a release below 6 or not
+  a number is `Unknown JDK release version`. kotlinc reads a release other than the selected JDK's
+  own from that JDK's `lib/ct.sym`; krusty does not implement that view yet and refuses it before
+  compiling (`krusty: error: -Xjdk-release=<r> compiles against the JDK <r> API from ct.sym, …`).
+  The selected JDK (`-jdk-home`, else `JAVA_HOME`) names its release in its `release` file.
+  Build tools that pin a JDK pass that JDK's own release, which is the implemented case.
+  (`tests/jdk_release_e2e.rs` compares classes and the conflict error with kotlinc.)
 - **A companion object's nested classifiers are in scope in the class that declares it.** Each
   lexical class rung contributes its own nested classifiers, then those of its companion object
   (kotlinc's companion static scope), before the next enclosing rung. A body call (`Edge(2)`), a

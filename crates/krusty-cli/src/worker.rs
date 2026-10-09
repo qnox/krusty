@@ -42,9 +42,8 @@ pub struct WorkUnit {
     pub kotlinc_args: Vec<String>,
     /// Worker options that were understood but have no effect on krusty's output.
     pub inert: Vec<String>,
-    /// kotlinc's deprecated-spelling warnings, in its words. The argument still applies under its
-    /// current name; the response reports the warning as kotlinc prints it.
-    pub deprecations: Vec<String>,
+    /// kotlinc-compatible warnings produced while parsing modeled compiler arguments.
+    pub argument_warnings: Vec<String>,
     /// Resource groups from `--resources`, in request order. Each group is one
     /// `strip_prefix:add_prefix:file` argument, the spelling `builder-args.bzl` emits.
     pub resources: Vec<ResourceGroup>,
@@ -495,32 +494,22 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
         )));
     }
     // A warn-and-ignore flag (`-Xwasm-kclass-fqn`) must be intercepted as an INERT value above so
-    // Bazel sees the no-effect note; an argument kotlinc only warns about reaching this parse has
-    // no worker arm, and is refused rather than accepted with neither the warning nor a report.
-    // A deprecated spelling is not ignored: its argument applies, and the response carries the
-    // warning.
-    let ignored_warnings: Vec<&String> = parsed
-        .argument_warnings
-        .iter()
-        .filter(|warning| !parsed.argument_deprecations.contains(warning))
-        .collect();
-    if !ignored_warnings.is_empty() {
+    // Bazel sees the no-effect note. Other syntax warnings can belong to fully modeled arguments —
+    // a deprecated alias or repeated value, for example — and must reach the response rather than
+    // being misclassified as missing semantics.
+    if !parsed.unknown_extra_flags.is_empty() {
         return Err(Refusal::Unsupported(format!(
             "warn-and-ignore option(s) missing a worker inert arm: {}",
-            ignored_warnings
-                .iter()
-                .map(|warning| warning.as_str())
-                .collect::<Vec<_>>()
-                .join("; ")
+            parsed.unknown_extra_flags.join(", ")
         )));
     }
-    unit.deprecations = parsed.argument_deprecations;
     if !parsed.sources.is_empty() {
         return Err(Refusal::Malformed(format!(
             "unexpected positional kotlinc option value(s): {}",
             parsed.sources.join(", ")
         )));
     }
+    unit.argument_warnings = parsed.argument_warnings;
     Ok(unit)
 }
 
@@ -713,11 +702,11 @@ pub fn serve(
             // Report what was understood but had no effect. `WorkResponse::output` is the channel
             // bazel prints, and silently dropping an option the target set is the habit this module
             // exists to avoid.
-            let mut note: String = unit
-                .deprecations
+            let mut note = unit
+                .argument_warnings
                 .iter()
                 .map(|warning| format!("warning: {}\n", crate::kotlinc_arguments::render(warning)))
-                .collect();
+                .collect::<String>();
             if !unit.inert.is_empty() {
                 note.push_str(&format!(
                     "krusty: no effect on output: {}\n",
@@ -881,23 +870,21 @@ mod tests {
     /// driven language-feature set.
     #[test]
     fn progressive_reaches_the_shared_cli_through_every_worker_surface() {
-        for progressive in [
-            vec!["--progressive"],
-            vec!["--kotlinc-arg", "-progressive"],
-            vec!["--kotlinc-arg", "-Xprogressive"],
+        for (progressive, warnings) in [
+            (vec!["--progressive"], Vec::<String>::new()),
+            (vec!["--kotlinc-arg", "-progressive"], Vec::new()),
+            (
+                vec!["--kotlinc-arg", "-Xprogressive"],
+                vec![
+                    "Argument -Xprogressive is deprecated. Please use -progressive instead"
+                        .to_string(),
+                ],
+            ),
         ] {
             let mut request = progressive;
             request.extend(["--srcs", "A.kt", "--out", "o.jar"]);
             let unit = translate(&args(&request)).expect("progressive request translates");
-            let expected_deprecations: Vec<String> = if request.contains(&"-Xprogressive") {
-                vec![
-                    "Argument -Xprogressive is deprecated. Please use -progressive instead"
-                        .to_string(),
-                ]
-            } else {
-                Vec::new()
-            };
-            assert_eq!(unit.deprecations, expected_deprecations);
+            assert_eq!(unit.argument_warnings, warnings);
             let parsed = crate::cli::parse(unit.kotlinc_args);
             assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
             assert!(parsed
@@ -1594,11 +1581,67 @@ mod tests {
             cancel: false,
         };
         let response = serve(&request, &|_unit| Ok(()));
-        assert_eq!(response.exit_code, 0);
-        assert!(
-            response.output.contains("--x_explicit_api disable"),
-            "an inert option must be surfaced: {:?}",
-            response.output
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output: "krusty: no effect on output: --x_explicit_api disable\n".to_string(),
+                request_id: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn modeled_argument_warnings_are_reported_in_the_response() {
+        let request = WorkRequest {
+            arguments: args(&[
+                "--kotlinc-arg",
+                "-Xprogressive",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+            request_id: 5,
+            cancel: false,
+        };
+        let response = serve(&request, &|_unit| Ok(()));
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output: "warning: argument -Xprogressive is deprecated. Please use -progressive instead\n"
+                    .to_string(),
+                request_id: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn repeated_modeled_arguments_warn_without_becoming_unhandled() {
+        let request = WorkRequest {
+            arguments: args(&[
+                "--kotlinc-arg",
+                "-Xlambdas=class",
+                "--kotlinc-arg",
+                "-Xlambdas=indy",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+            request_id: 6,
+            cancel: false,
+        };
+        let response = serve(&request, &|_unit| Ok(()));
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output: "warning: argument '-Xlambdas' is passed multiple times: 'class', 'indy'. The last value will be used.\n"
+                    .to_string(),
+                request_id: 6,
+            }
         );
     }
 
