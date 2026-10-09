@@ -178,12 +178,12 @@ fn assert_diagnostics(
     );
     assert_eq!(
         common::compiler_module_warnings(&result.krusty_stderr),
-        [],
+        Vec::<String>::new(),
         "{name}"
     );
     assert_eq!(
         common::compiler_module_warnings(&result.reference_stderr),
-        [],
+        Vec::<String>::new(),
         "{name}"
     );
 }
