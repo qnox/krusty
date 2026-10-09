@@ -357,7 +357,7 @@ pub(super) fn emit_suspend_lambda_class(
     };
     cw.set_kotlin_metadata(
         3,
-        &opts.metadata_version(),
+        opts.metadata_stamp(),
         synthetic_class_xi(SYNTHETIC_LOCAL),
         &d1,
         &d2,

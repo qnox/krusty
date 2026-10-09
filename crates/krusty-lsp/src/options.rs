@@ -2,8 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use krusty::features::LangFeatures;
 use krusty::jvm::classpath::platform_jdk_modules;
+use krusty::language_settings::LanguageSettings;
+use krusty_cli::cli::LanguageArgument;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum LogLevel {
@@ -158,13 +159,14 @@ impl LspOptions {
                 }
                 "-deps-sources" => options.deps_sources = Some(true),
                 "-no-deps-sources" => options.deps_sources = Some(false),
-                _ => {
-                    if LangFeatures::new().apply_cli_arg(&argument) {
-                        options.language_arguments.push(argument);
-                    } else {
-                        return Err(format!("unsupported option '{argument}'"));
+                _ => match krusty_cli::cli::language_argument(&argument) {
+                    Some(LanguageArgument::Alone) => options.language_arguments.push(argument),
+                    Some(LanguageArgument::WithValue) => {
+                        let value = required_value(&argument, &mut args)?;
+                        options.language_arguments.extend([argument, value]);
                     }
-                }
+                    None => return Err(format!("unsupported option '{argument}'")),
+                },
             }
         }
         if client && stdio {
@@ -185,6 +187,13 @@ impl LspOptions {
         // logging owner, so the parsed selection is not part of the process configuration.
         let log = select_log(log_level_arg, &log_category_args, env)?;
         let _ = (log.level, log.categories.len());
+        // The language flags are refused here, at startup, exactly as the command line refuses
+        // them, rather than when the first analysis runs.
+        let language =
+            krusty_cli::cli::language_settings(options.language_arguments.iter().cloned());
+        if !language.errors.is_empty() {
+            return Err(language.errors.join("\n"));
+        }
         Ok(options)
     }
 
@@ -208,19 +217,15 @@ impl LspOptions {
         self.no_jdk
     }
 
-    pub fn language_features(&self) -> LangFeatures {
-        let mut features = LangFeatures::new();
-        self.apply_language_features(&mut features);
-        features
+    /// The language settings the explicit LSP flags select on their own, for analyses without a
+    /// project module.
+    pub fn language_settings(&self) -> LanguageSettings {
+        krusty_cli::cli::language_settings(self.language_arguments.iter().cloned()).settings
     }
 
-    /// Apply explicit LSP flags over project-derived features, preserving CLI order and disables.
-    pub fn apply_language_features(&self, features: &mut LangFeatures) {
-        for argument in &self.language_arguments {
-            features.apply_cli_arg(argument);
-        }
-    }
-
+    /// The kotlinc language arguments given to the server. They apply after a module's own
+    /// arguments, so an explicit flag overrides the project's choice as it would on a command
+    /// line.
     pub fn language_arguments(&self) -> &[String] {
         &self.language_arguments
     }
@@ -392,7 +397,8 @@ Usage: krusty-lsp [options]
   -deps-sources, -no-deps-sources
   --dev
   -h, --help
-      Compiler -X language flags are accepted as well.
+      kotlinc language arguments are accepted as well: -language-version, -api-version,
+      -progressive, -XXLanguage:, and the -X arguments that switch language features.
 "
     .to_string()
 }
@@ -424,6 +430,7 @@ pub fn effective_platform_classpath(jdk_home: Option<&Path>, no_jdk: bool) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use krusty::language_version::LanguageVersion;
 
     fn parse(args: &[&str]) -> Result<LspOptions, String> {
         parse_env(args, |_| None)
@@ -476,7 +483,7 @@ mod tests {
             "-cp",
             "a.jar:b/classes",
             "-no-jdk",
-            "-Xname-based-destructuring=complete",
+            "-Xname-based-destructuring=only-syntax",
         ])
         .unwrap();
         assert_eq!(
@@ -487,21 +494,32 @@ mod tests {
             effective_platform_classpath(Some(Path::new("/ignored-jdk")), true).is_empty(),
             "-no-jdk must suppress platform modules for every classpath consumer"
         );
-        let features = options.language_features();
-        assert!(features.has("NameBasedDestructuring"));
+        assert!(options
+            .language_settings()
+            .features
+            .has("NameBasedDestructuring"));
         let options = parse(&[
-            "-Xname-based-destructuring=complete",
+            "-Xname-based-destructuring=only-syntax",
             "-Xname-based-destructuring=disable",
+            "-language-version",
+            "2.3",
         ])
         .unwrap();
-        let features = options.language_features();
-        assert!(!features.has("NameBasedDestructuring"));
-        let mut project_features = LangFeatures::new();
-        project_features.enable("NameBasedDestructuring");
-        project_features.enable("EnableNameBasedDestructuringShortForm");
-        options.apply_language_features(&mut project_features);
-        assert!(!project_features.has("NameBasedDestructuring"));
-        assert!(!project_features.has("EnableNameBasedDestructuringShortForm"));
+        let language = options.language_settings();
+        assert!(!language.features.has("NameBasedDestructuring"));
+        assert_eq!(language.language_version, LanguageVersion::V2_3);
+        // The server's flags apply after a module's own arguments, as on a command line.
+        let mut module = vec!["-Xname-based-destructuring=only-syntax".to_string()];
+        module.extend_from_slice(options.language_arguments());
+        let layered = krusty_cli::cli::language_settings(module).settings;
+        assert!(!layered.features.has("NameBasedDestructuring"));
+        assert!(!layered
+            .features
+            .has("EnableNameBasedDestructuringShortForm"));
+        // A comma is part of a `-XXLanguage` feature name, as in kotlinc; a feature krusty does not
+        // implement is refused at startup.
+        assert!(parse(&["-XXLanguage:+AllowEagerSupertypeAccessibilityChecks"]).is_err());
+        assert!(parse(&["-language-version"]).is_err());
         assert!(parse(&["Main.kt"]).is_err());
         assert!(parse(&["-d", "out"]).is_err());
     }

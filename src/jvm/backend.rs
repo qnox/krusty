@@ -420,6 +420,9 @@ pub struct JvmBackend {
     /// `LanguageFeature.AnnotationsInMetadata`. This is deliberately independent of the physical
     /// metadata stamp: an internal stamp override must not change source-language semantics.
     annotations_in_metadata: bool,
+    /// Whether the language settings are pre-release, so every `@kotlin.Metadata` carries
+    /// kotlinc's pre-release flag.
+    pre_release_metadata: bool,
 }
 
 impl JvmBackend {
@@ -435,6 +438,7 @@ impl JvmBackend {
             call_assertions: true,
             metadata_version: None,
             annotations_in_metadata: true,
+            pre_release_metadata: false,
         }
     }
 
@@ -443,6 +447,23 @@ impl JvmBackend {
     pub fn with_metadata_version(mut self, version: Option<[i32; 3]>) -> JvmBackend {
         self.metadata_version = version;
         self
+    }
+
+    /// Mark every `@kotlin.Metadata` as pre-release, as kotlinc does when
+    /// `LanguageVersionSettings.isPreRelease` holds for the compilation.
+    pub fn with_pre_release_metadata(mut self, pre_release: bool) -> JvmBackend {
+        self.pre_release_metadata = pre_release;
+        self
+    }
+
+    /// The version and pre-release flag of every `@kotlin.Metadata` this backend writes.
+    fn metadata_stamp(&self) -> crate::jvm::classfile::MetadataStamp {
+        crate::jvm::classfile::MetadataStamp {
+            version: self
+                .metadata_version
+                .unwrap_or(crate::jvm::ir_emit::DEFAULT_METADATA_VERSION),
+            pre_release: self.pre_release_metadata,
+        }
     }
 
     /// Select declaration-annotation record emission from the finalized source-language feature
@@ -547,6 +568,7 @@ pub fn shipping_emit_options(
         // The shipping default language level is 2.4, where this feature is enabled. A configured
         // compiler invocation overrides it through `EmitOptions::with_annotations_in_metadata`.
         annotations_in_metadata: true,
+        pre_release_metadata: false,
     }
 }
 
@@ -890,8 +912,7 @@ impl JvmBackend {
             (module_name, facade_locals),
             self.param_assertions,
             &classifiers,
-            self.metadata_version
-                .unwrap_or(crate::jvm::ir_emit::DEFAULT_METADATA_VERSION),
+            self.metadata_stamp(),
             self.annotations_in_metadata,
         );
         let has_facade_members = metadata.is_some();
@@ -962,6 +983,7 @@ impl JvmBackend {
                 .with_param_assertions(self.param_assertions)
                 .with_metadata_version(self.metadata_version)
                 .with_annotations_in_metadata(self.annotations_in_metadata)
+                .with_pre_release_metadata(self.pre_release_metadata)
                 .with_java_parameters(self.java_parameters);
         emit_opts.inner_class_resolver = Some(inner_class_resolver);
         let run = crate::jvm::ir_emit::EmitRun::default();
@@ -1280,7 +1302,7 @@ pub fn facade_package_metadata_from_ir(
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
     symbols: &dyn crate::backend::BackendClassifierSource,
-    metadata_version: [i32; 3],
+    metadata_stamp: crate::jvm::classfile::MetadataStamp,
     annotations_in_metadata: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let functions = ir
@@ -1556,7 +1578,7 @@ pub fn facade_package_metadata_from_ir(
         (module_name, locals),
         param_assertions,
         Some(&approximate),
-        metadata_version,
+        metadata_stamp,
         annotations_in_metadata,
     )
 }
@@ -1637,7 +1659,7 @@ fn build_facade_metadata(
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
     intersection_approximation: Option<&dyn Fn(crate::types::Ty) -> Option<crate::types::Ty>>,
-    metadata_version: [i32; 3],
+    metadata_stamp: crate::jvm::classfile::MetadataStamp,
     annotations_in_metadata: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     (!functions.is_empty() || !properties.is_empty() || !aliases.is_empty()).then(|| {
@@ -1653,7 +1675,7 @@ fn build_facade_metadata(
             );
         crate::jvm::ir_emit::KotlinMetadata {
             k: 2,
-            mv: metadata_version.to_vec(),
+            stamp: metadata_stamp,
             xi: 48,
             d1: vec![d1_bytes.iter().map(|&byte| byte as char).collect()],
             d2,
@@ -1889,7 +1911,10 @@ mod tests {
             ("main", &[]),
             true,
             &NoClassifierFacts,
-            [2, 4, 0],
+            crate::jvm::classfile::MetadataStamp {
+                version: [2, 4, 0],
+                pre_release: false,
+            },
             true,
         )
         .expect("a package property requires facade metadata");

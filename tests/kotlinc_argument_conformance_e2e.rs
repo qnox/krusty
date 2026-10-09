@@ -13,15 +13,14 @@
 use std::fmt::Write as _;
 
 use krusty::kotlin_version::KotlinVersion;
-use krusty_cli::kotlinc_arguments::{
-    catalog, language_features, tokenize, Catalog, Recorded, ValueKind,
-};
+use krusty_cli::kotlinc_arguments::{catalog, tokenize, Catalog, Recorded, ValueKind};
 
 use super::common;
 
 const ORACLE: &str = include_str!("kotlinc_arguments/KotlincArgumentOracle.java");
 const DUMPER: &str = include_str!("../scripts/kotlinc-arguments/DumpKotlincArguments.java");
 const FEATURE_DUMPER: &str = include_str!("../scripts/kotlinc-arguments/DumpLanguageFeatures.java");
+const VERSION_DUMPER: &str = include_str!("../scripts/kotlinc-arguments/DumpLanguageVersions.java");
 
 /// The reference compiler's classpath: the compiler and the standard library it runs on.
 fn compiler_classpath() -> String {
@@ -190,11 +189,24 @@ fn the_argument_table_is_what_the_reference_compiler_declares() {
 fn the_language_feature_table_is_what_the_reference_compiler_declares() {
     let (version, _) = kotlinc_report(&[]);
     let dumped = run_java("features", "DumpLanguageFeatures", FEATURE_DUMPER);
-    let vendored = language_features::vendored_table(version)
+    let vendored = krusty::features::vendored_table(version)
         .unwrap_or_else(|| panic!("kotlinc {version} has no vendored language feature table"));
     assert_eq!(
         dumped, vendored,
         "kotlinc {version} declares a different language feature table; regenerate it with \
+         `just kotlinc-arguments {version}`"
+    );
+}
+
+#[test]
+fn the_language_version_policy_is_what_the_reference_compiler_declares() {
+    let (version, _) = kotlinc_report(&[]);
+    let dumped = run_java("versions", "DumpLanguageVersions", VERSION_DUMPER);
+    let vendored = krusty::features::vendored_language_versions(version)
+        .unwrap_or_else(|| panic!("kotlinc {version} has no vendored language version policy"));
+    assert_eq!(
+        dumped, vendored,
+        "kotlinc {version} declares a different language version policy; regenerate it with \
          `just kotlinc-arguments {version}`"
     );
 }

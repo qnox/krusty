@@ -483,6 +483,16 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
     if !parsed.errors.is_empty() {
         return Err(Refusal::Unsupported(parsed.errors.join("; ")));
     }
+    let feature_errors: Vec<&str> = parsed
+        .language_feature_problems
+        .iter()
+        .filter(|problem| problem.is_error)
+        .map(|problem| problem.message.as_str())
+        .chain(parsed.configuration_errors.iter().map(String::as_str))
+        .collect();
+    if !feature_errors.is_empty() {
+        return Err(Refusal::Unsupported(feature_errors.join("; ")));
+    }
     if !parsed.ignored.is_empty() {
         return Err(Refusal::Unsupported(format!(
             "compiler option(s) not modeled by krusty: {}",
@@ -887,7 +897,7 @@ mod tests {
             assert_eq!(
                 refusal,
                 Refusal::Unsupported(
-                    "krusty does not implement the kotlinc argument '-progressive'".to_string()
+                    "krusty does not implement the language feature 'ErrorAboutDataClassCopyVisibilityChange' selected by '-progressive'".to_string()
                 )
             );
         }
