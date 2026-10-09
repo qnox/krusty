@@ -848,6 +848,7 @@ impl Walk<'_> {
 /// owner's `public static final synthetic`.
 pub(super) fn emit(
     ir: &IrFile,
+    run: &EmitRun,
     plan: &StaticAccessorPlan,
     owner: StaticOwner,
     facade: &str,
@@ -856,6 +857,7 @@ pub(super) fn emit(
 ) {
     let accessor = Accessor {
         ir,
+        run,
         owner,
         facade,
         declaration_line,
@@ -916,13 +918,15 @@ struct FieldAccessorShape {
 
 fn field_accessor_shape(
     ir: &IrFile,
+    run: &EmitRun,
     class: u32,
     property: u32,
     write: bool,
 ) -> Option<FieldAccessorShape> {
     let owner = ir.classes.get(class as usize)?;
     let property = owner.properties.get(property as usize)?;
-    let field = owner.fields.get(property.backing_field? as usize)?;
+    let field_index = property.backing_field? as usize;
+    let field = owner.fields.get(field_index)?;
     let internal = owner.fq_name.render();
     let field_ty = jvm_value_ty(&field.ty);
     let field_descriptor = type_descriptor(field_ty);
@@ -940,7 +944,7 @@ fn field_accessor_shape(
         name,
         descriptor,
         internal,
-        field_name: instance_field_jvm_name(ir, owner, field),
+        field_name: instance_field_jvm_name(ir, run, owner, field_index),
         field_descriptor,
         field_ty,
         words: slot_words(field_ty),
@@ -955,6 +959,7 @@ fn field_accessor_shape(
 pub(super) fn cross_class_backing_field_method(
     cw: &mut ClassWriter,
     ir: &IrFile,
+    run: &EmitRun,
     facade: &str,
     plan: &StaticAccessorPlan,
     reader: Option<StaticOwner>,
@@ -983,7 +988,7 @@ pub(super) fn cross_class_backing_field_method(
     if !plan.declares(owner, accessor) {
         return None;
     }
-    let access = field_accessor_shape(ir, class, property, write)?;
+    let access = field_accessor_shape(ir, run, class, property, write)?;
     Some(static_methodref(
         cw,
         ir,
@@ -997,6 +1002,7 @@ pub(super) fn cross_class_backing_field_method(
 /// The accessors one static owner declares.
 struct Accessor<'a> {
     ir: &'a IrFile,
+    run: &'a EmitRun,
     owner: StaticOwner,
     facade: &'a str,
     declaration_line: u32,
@@ -1145,7 +1151,7 @@ impl Accessor<'_> {
         if self.emit_static_plain_field(class, property, false, cw) {
             return;
         }
-        let access = field_accessor_shape(self.ir, class, property, false)
+        let access = field_accessor_shape(self.ir, self.run, class, property, false)
             .expect("a planned field getter must retain its backing field");
         let mut code = CodeBuilder::new(1);
         code.mark_line(self.declaration_line);
@@ -1174,7 +1180,7 @@ impl Accessor<'_> {
         if self.emit_static_plain_field(class, property, true, cw) {
             return;
         }
-        let access = field_accessor_shape(self.ir, class, property, true)
+        let access = field_accessor_shape(self.ir, self.run, class, property, true)
             .expect("a planned field setter must retain its backing field");
         let mut code = CodeBuilder::new(1 + access.words);
         code.mark_line(self.declaration_line);
@@ -1230,7 +1236,14 @@ impl Accessor<'_> {
         let field_ty = jvm_value_ty(&field.ty);
         let field_descriptor = type_descriptor(field_ty);
         let ty = declared_property_accessor_jvm(ir, property, field);
-        let physical = instance_field_jvm_name(ir, owner, field);
+        let physical = instance_field_jvm_name(
+            ir,
+            self.run,
+            owner,
+            property
+                .backing_field
+                .expect("a bridged member property has a backing field") as usize,
+        );
         if write {
             let name = format!("access${}$p", property_setter_name(&property.name));
             let descriptor = format!("({})V", type_descriptor(ty));

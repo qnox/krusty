@@ -17,7 +17,7 @@ use super::receiver_capture_identity::{LambdaReceiverSlot, ReceiverDeclarationRo
 use crate::diag::Span;
 use crate::types::{Ty, TypeName};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ScopeKind {
@@ -1247,6 +1247,13 @@ impl<'p, B> Scope<'p, B> {
                 context_shadow_depth,
             });
         };
+        // Shadow depths are read only for named receivers, so only bindings of those names count.
+        // Skipping the rest keeps a class body of thousands of members from rescanning them all on
+        // every receiver query.
+        let receiver_names: HashSet<&str> = self
+            .ancestors()
+            .filter_map(|scope| scope.current_receiver_name.as_deref())
+            .collect();
         for scope in self.ancestors() {
             let scope_identity = scope as *const Self as usize;
             let cuts_outer = matches!(
@@ -1260,8 +1267,14 @@ impl<'p, B> Scope<'p, B> {
             if let Some(name) = scope.current_receiver_name.as_ref() {
                 *receiver_binding_counts.entry(name.clone()).or_default() += 1;
             }
-            for binding in scope.bindings.borrow().iter().rev() {
-                if binding.ns != Ns::Value {
+            let bindings = scope.bindings.borrow();
+            let counted: &[_] = if receiver_names.is_empty() {
+                &[]
+            } else {
+                &bindings
+            };
+            for binding in counted.iter().rev() {
+                if binding.ns != Ns::Value || !receiver_names.contains(binding.name.as_str()) {
                     continue;
                 }
                 if receiver_binding_counts
