@@ -24,6 +24,10 @@ typedef struct KChunk {
     void *free_list;
     size_t mapped_bytes;
     uint32_t object_size;
+    /* `2^32 / (object_size / 16)`, rounded up: which slot an offset falls in, by a multiply
+       rather than a division. See kt_slot_of. Wider than 32 bits, because one-granule slots
+       need `2^32` itself. */
+    uint64_t slot_magic;
     uint32_t object_count;
     /* Objects never yet handed out; cheaper than seeding the free list at chunk creation. */
     uint32_t high_water;
@@ -106,13 +110,37 @@ static KChunk *kt_chunk_of(uintptr_t address) {
     return NULL;
 }
 
+/* The smallest size class holding `size` bytes, or KT_CLASS_COUNT for a large object.
+
+   In 16-byte granules the classes are 1, 2, 3, 4 and then two per power of two: 6 and 8, 12 and
+   16, … up to 96 and 128. Above 4 granules, `g - 1` has its top bit at `p` and the bit below it
+   picks the lower or upper class of that pair, so the class follows from a count of leading zeros
+   instead of a walk over the table. */
 static uint32_t kt_class_for(uint32_t size) {
-    for (uint32_t i = 0; i < KT_CLASS_COUNT; i++) {
-        if (size <= kt_size_classes[i]) {
-            return i;
-        }
+    /* Checked before rounding, which would wrap a size near the 32-bit limit to a small class. */
+    if (size > kt_size_classes[KT_CLASS_COUNT - 1]) {
+        return KT_CLASS_COUNT;
     }
-    return KT_CLASS_COUNT;
+    uint32_t granules = (size + 15u) >> 4;
+    if (granules <= 4u) {
+        return granules == 0 ? 0 : granules - 1u;
+    }
+    uint32_t below = granules - 1u;
+    uint32_t top = 31u - (uint32_t)__builtin_clz(below);
+    return 2u * top + ((below >> (top - 1u)) & 1u);
+}
+
+/* The slot of `chunk` that `offset` bytes into its object area falls in.
+
+   A small chunk's slots are `k` granules of 16 bytes, at most 128, and a chunk holds at most 4096
+   granules, so multiplying the granule by the rounded-up `2^32 / k` and keeping the top half is the
+   exact quotient: the rounding error stays below `4096 / 2^32` of a slot, short of the `1 / k` gap
+   between a granule and the next slot boundary. A large chunk has one slot. */
+static uint32_t kt_slot_of(const KChunk *chunk, uintptr_t offset) {
+    if (chunk->large) {
+        return 0;
+    }
+    return (uint32_t)(((uint64_t)(offset >> 4) * chunk->slot_magic) >> 32);
 }
 
 static KChunk *kt_new_chunk(uint32_t object_size, uint32_t object_count, bool large) {
@@ -129,6 +157,10 @@ static KChunk *kt_new_chunk(uint32_t object_size, uint32_t object_count, bool la
     chunk->marked = chunk->allocated + bitmap_words;
     chunk->objects = (uint8_t *)chunk + header;
     chunk->object_size = object_size;
+    if (!large) {
+        uint64_t granules = object_size / 16u;
+        chunk->slot_magic = (((uint64_t)1 << 32) + granules - 1u) / granules;
+    }
     /* Page rounding may leave room past `object_count` objects; the bitmaps were sized for
        exactly that many, so the slack stays unused rather than unaccounted for. */
     chunk->object_count = object_count;
@@ -147,10 +179,6 @@ static bool kt_bit(const uint64_t *bits, uint32_t index) {
 
 static void kt_set_bit(uint64_t *bits, uint32_t index) {
     bits[index / 64u] |= (uint64_t)1 << (index % 64u);
-}
-
-static void kt_clear_bit(uint64_t *bits, uint32_t index) {
-    bits[index / 64u] &= ~((uint64_t)1 << (index % 64u));
 }
 
 /* ---- marking --------------------------------------------------------------------------------- */
@@ -186,7 +214,7 @@ static void kt_mark_candidate(uintptr_t address) {
     if (chunk == NULL) {
         return;
     }
-    uint32_t index = (uint32_t)((address - (uintptr_t)chunk->objects) / chunk->object_size);
+    uint32_t index = kt_slot_of(chunk, address - (uintptr_t)chunk->objects);
     if (!kt_bit(chunk->allocated, index) || kt_bit(chunk->marked, index)) {
         return;
     }
@@ -256,7 +284,7 @@ static void kt_mark_array_ending_at(uintptr_t end) {
     if (chunk == NULL) {
         return;
     }
-    uint32_t index = (uint32_t)((last - (uintptr_t)chunk->objects) / chunk->object_size);
+    uint32_t index = kt_slot_of(chunk, last - (uintptr_t)chunk->objects);
     if (!kt_bit(chunk->allocated, index)) {
         return;
     }
@@ -373,20 +401,25 @@ static size_t kt_sweep(void) {
     while (*link != NULL) {
         KChunk *chunk = *link;
         chunk->live = 0;
-        for (uint32_t index = 0; index < chunk->high_water; index++) {
-            if (!kt_bit(chunk->allocated, index)) {
-                continue;
+        /* A word of the bitmaps at a time: what was allocated and marked survives, what was
+           allocated and not marked dies, and every mark is cleared for the next collection. Bits
+           at and past `high_water` were never allocated, so they are zero in both. */
+        uint32_t words = (chunk->high_water + 63u) / 64u;
+        for (uint32_t word = 0; word < words; word++) {
+            uint64_t allocated = chunk->allocated[word];
+            uint64_t survivors = allocated & chunk->marked[word];
+            uint64_t dead = allocated & ~survivors;
+            chunk->allocated[word] = survivors;
+            chunk->marked[word] = 0;
+            chunk->live += (uint32_t)__builtin_popcountll(survivors);
+            while (dead != 0) {
+                uint32_t index = word * 64u + (uint32_t)__builtin_ctzll(dead);
+                dead &= dead - 1u;
+                void *object = chunk->objects + (size_t)index * chunk->object_size;
+                /* Thread the reuse list through the dead object itself. */
+                *(void **)object = chunk->free_list;
+                chunk->free_list = object;
             }
-            if (kt_bit(chunk->marked, index)) {
-                kt_clear_bit(chunk->marked, index);
-                chunk->live++;
-                continue;
-            }
-            kt_clear_bit(chunk->allocated, index);
-            void *object = chunk->objects + (size_t)index * chunk->object_size;
-            /* Thread the reuse list through the dead object itself. */
-            *(void **)object = chunk->free_list;
-            chunk->free_list = object;
         }
         live_bytes += (size_t)chunk->live * chunk->object_size;
         if (chunk->large && chunk->live == 0) {
@@ -449,7 +482,7 @@ static void *kt_take_from(KChunk *chunk) {
     if (chunk->free_list != NULL) {
         void *object = chunk->free_list;
         chunk->free_list = *(void **)object;
-        uint32_t index = (uint32_t)(((uint8_t *)object - chunk->objects) / chunk->object_size);
+        uint32_t index = kt_slot_of(chunk, (uintptr_t)((uint8_t *)object - chunk->objects));
         kt_set_bit(chunk->allocated, index);
         chunk->live++;
         return object;
