@@ -201,6 +201,23 @@ kt_int kt_list_size(KRef list) {
 
 kt_boolean kt_list_is_empty(KRef list) { return kt_list_size(list) == 0; }
 
+/* `Collection.size` over a receiver the static type does not narrow to a list or a set: every
+   collection this runtime makes is one of the two list shapes or something a map holds (a set, or
+   a map's key, value or entry view). The generator never reaches here with a collection of the
+   program's own; see `FileLowering::implements_collection_of`. */
+kt_int kt_collection_size(KRef collection) {
+    if (collection->header.type == &kt_type_list || kt_is_mutable_list(collection)) {
+        return kt_list_size(collection);
+    }
+    kt_int held = kt_map_collection_size(collection);
+    if (held < 0) {
+        KT_FAIL("krusty: a runtime collection was expected here\n");
+    }
+    return held;
+}
+
+kt_boolean kt_collection_is_empty(KRef collection) { return kt_collection_size(collection) == 0; }
+
 KRef kt_list_get(KRef list, kt_int index) {
     KRef elements = ((const KList *)list)->elements;
     kt_int size = kt_list_size(list);
@@ -478,6 +495,88 @@ void kt_mutable_list_clear(KRef self) {
     }
     list->size = 0;
     list->modifications++;
+}
+
+/* ---- `Collection` / `MutableCollection` members over whichever runtime collection is behind ----
+
+   A receiver typed by `Collection` itself may hold either list shape, a set, or one of a map's
+   views; the descriptor says which, and each member below hands over to that shape's own. A list
+   the runtime made read-only answers a mutation the way Kotlin's does. */
+
+static kt_boolean kt_read_only_list(KRef value) {
+    if (value->header.type != &kt_type_list) {
+        return false;
+    }
+    kt_throw(kt_throwable_new(&kt_type_unsupported_operation_exception, NULL));
+    return true;
+}
+
+/* `containsAll`: every element of `elements` is one `contains` answers for. */
+kt_boolean kt_collection_contains_all(KRef self, KRef elements) {
+    KRef iterator = kt_iterable_iterator(elements);
+    while (kt_more(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return false;
+        }
+        kt_boolean held = kt_iterable_contains(self, element);
+        if (kt_raised() || !held) {
+            return false;
+        }
+    }
+    return !kt_raised();
+}
+
+kt_boolean kt_mutable_collection_add(KRef self, KRef value) {
+    if (kt_read_only_list(self)) {
+        return false;
+    }
+    return kt_is_mutable_list(self) ? kt_mutable_list_add(self, value) : kt_set_add(self, value);
+}
+
+kt_boolean kt_mutable_collection_remove(KRef self, KRef value) {
+    if (kt_read_only_list(self)) {
+        return false;
+    }
+    return kt_is_mutable_list(self) ? kt_mutable_list_remove(self, value)
+                                    : kt_set_remove(self, value);
+}
+
+void kt_mutable_collection_clear(KRef self) {
+    if (kt_read_only_list(self)) {
+        return;
+    }
+    if (kt_is_mutable_list(self)) {
+        kt_mutable_list_clear(self);
+    } else {
+        kt_map_clear(self);
+    }
+}
+
+/* `addAll`: whether the receiver changed. A list appends every element (Kotlin's answer is that the
+   argument was not empty), by `kt_mutable_list_add_all`'s snapshot; a set adds each it lacks. */
+kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements) {
+    if (kt_read_only_list(self)) {
+        return false;
+    }
+    if (kt_is_mutable_list(self)) {
+        kt_int before = kt_list_size(self);
+        kt_mutable_list_add_all(self, elements);
+        return !kt_raised() && kt_list_size(self) != before;
+    }
+    kt_boolean changed = false;
+    KRef iterator = kt_iterable_iterator(elements);
+    while (kt_more(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return false;
+        }
+        changed = kt_set_add(self, element) || changed;
+        if (kt_raised()) {
+            return false;
+        }
+    }
+    return changed;
 }
 
 KRef kt_list_iterator(KRef list) {

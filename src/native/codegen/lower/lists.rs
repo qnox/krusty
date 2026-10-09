@@ -25,16 +25,20 @@
 
 use super::*;
 
-/// Whether a type is the read-only list the runtime builds.
+/// Whether a type is one of the list shapes the runtime builds.
 ///
-/// `Collection` is its supertype and a `listOf` result reaches a member under that spelling too;
-/// nothing else in this runtime is a `Collection`, so the two name the same objects. `Iterable` is
-/// deliberately NOT one of them — a range is one, and answering a range's `size` out of a list's
-/// header reads a bound as a pointer. A `MutableList` is absent for a plainer reason: nothing here
-/// produces one, so a program holding one has no list this runtime can answer for.
+/// `Iterable` is deliberately NOT one of them — a range is one, and answering a range's `size` out
+/// of a list's header reads a bound as a pointer.
 fn is_list(file: &FileLowering<'_>, ty: Ty) -> bool {
     file.mapped_collection(ty)
         .is_some_and(|collection| collection.kind == crate::types::CollectionKind::List)
+}
+
+/// Whether a type is `Collection` itself, which a list, a set and a map's views all are. Its
+/// members the runtime answers by the receiver's descriptor rather than by one shape's header.
+fn is_collection(file: &FileLowering<'_>, ty: Ty) -> bool {
+    file.mapped_collection(ty)
+        .is_some_and(|collection| collection.kind == crate::types::CollectionKind::Collection)
 }
 
 /// Whether the receiver has the exact standard-library declaration identity this native
@@ -187,6 +191,11 @@ fn list_symbol(
         ("contains", [element], Ty::Boolean) if element.is_reference() => {
             ("kt_list_contains", vec![any(), any()], Ty::Boolean)
         }
+        ("containsAll", [elements], Ty::Boolean) if elements.is_reference() => (
+            "kt_collection_contains_all",
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
         // The mutating half. A receiver that is not a growable list never reaches these: Kotlin
         // declares them on `MutableList` only, so naming one is already the proof.
         ("add", [element], Ty::Boolean) if element.is_reference() => {
@@ -211,6 +220,51 @@ fn list_symbol(
             ("kt_mutable_list_remove", vec![any(), any()], Ty::Boolean)
         }
         ("clear", [], Ty::Unit) => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
+        ("addAll", [elements], Ty::Boolean) if elements.is_reference() => (
+            "kt_mutable_collection_add_all",
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
+        _ => return None,
+    })
+}
+
+/// The runtime function answering one member declared on `Collection` itself, for a receiver
+/// typed by no narrower collection. Which collection stands behind it is the descriptor's to say,
+/// so each entry point asks it rather than reading one shape's header.
+fn collection_symbol(
+    declaration: crate::types::CollectionKind,
+    signature: super::super::super::intrinsics::FunctionSignature<'_>,
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    if declaration != crate::types::CollectionKind::Collection {
+        return None;
+    }
+    Some(match (signature.name, signature.params, signature.ret) {
+        ("getSize" | "size", [], Ty::Int) => ("kt_collection_size", vec![any()], Ty::Int),
+        ("isEmpty", [], Ty::Boolean) => ("kt_collection_is_empty", vec![any()], Ty::Boolean),
+        ("contains", [element], Ty::Boolean) if element.is_reference() => {
+            ("kt_iterable_contains", vec![any(), any()], Ty::Boolean)
+        }
+        ("containsAll", [elements], Ty::Boolean) if elements.is_reference() => (
+            "kt_collection_contains_all",
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
+        // The mutating half, declared on `MutableCollection`, which maps onto the same classifier.
+        ("add", [element], Ty::Boolean) if element.is_reference() => {
+            ("kt_mutable_collection_add", vec![any(), any()], Ty::Boolean)
+        }
+        ("remove", [element], Ty::Boolean) if element.is_reference() => (
+            "kt_mutable_collection_remove",
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
+        ("addAll", [elements], Ty::Boolean) if elements.is_reference() => (
+            "kt_mutable_collection_add_all",
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
+        ("clear", [], Ty::Unit) => ("kt_mutable_collection_clear", vec![any()], Ty::Unit),
         _ => return None,
     })
 }
@@ -687,7 +741,7 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<String> {
         if !self
             .type_of(receiver)
-            .is_some_and(|ty| is_list(self.file, ty))
+            .is_some_and(|ty| is_list(self.file, ty) || is_collection(self.file, ty))
         {
             return None;
         }
@@ -724,6 +778,11 @@ impl BodyLowering<'_, '_, '_> {
         } else if is_list(self.file, ty) && !self.file.implements_collection_of(ty) {
             match name {
                 "getSize" | "size" => ("kt_list_size", Ty::Int),
+                _ => return None,
+            }
+        } else if is_collection(self.file, ty) && !self.file.implements_collection_of(ty) {
+            match name {
+                "getSize" | "size" => ("kt_collection_size", Ty::Int),
                 _ => return None,
             }
         } else {
@@ -793,13 +852,18 @@ impl BodyLowering<'_, '_, '_> {
         // REPRESENTATION rather than about walking, and no thunk of a class's would reach one. A
         // file putting a class of its own behind a list declines them; see
         // [`FileLowering::implements_collection_of`].
-        if !is_list(self.file, ty) || self.file.implements_collection_of(ty) {
+        let list = is_list(self.file, ty);
+        if !(list || is_collection(self.file, ty)) || self.file.implements_collection_of(ty) {
             return None;
         }
         let semantic_owner = signature.owner.semantic_classifier()?;
         let declaration =
             classifier_shapes::mapped_collection(self.file.classifiers, semantic_owner)?.kind;
-        let (symbol, carried, answer) = list_symbol(declaration, signature, physical)?;
+        let (symbol, carried, answer) = if list {
+            list_symbol(declaration, signature, physical)?
+        } else {
+            collection_symbol(declaration, signature)?
+        };
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
     }
 

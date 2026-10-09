@@ -160,6 +160,16 @@ fn set_symbol(
         ("contains", [element], Ty::Boolean) if element.is_reference() => {
             ("kt_set_contains", vec![any(), any()], Ty::Boolean)
         }
+        ("containsAll", [elements], Ty::Boolean) if elements.is_reference() => (
+            "kt_collection_contains_all",
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
+        ("addAll", [elements], Ty::Boolean) if elements.is_reference() => (
+            "kt_mutable_collection_add_all",
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
         ("add", [element], Ty::Boolean) if element.is_reference() => {
             ("kt_set_add", vec![any(), any()], Ty::Boolean)
         }

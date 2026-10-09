@@ -385,6 +385,16 @@ KRef kt_array_content_to_string(KRef array);
 KRef kt_list_single(KRef value);
 kt_int kt_list_size(KRef list);
 kt_boolean kt_list_is_empty(KRef list);
+/* `Collection.size`: a list's, a set's or a map view's, decided by the descriptor. */
+kt_int kt_collection_size(KRef collection);
+kt_boolean kt_collection_is_empty(KRef collection);
+kt_boolean kt_collection_contains_all(KRef self, KRef elements);
+/* `MutableCollection`'s members over a growable list or a set (or a map view, which removes and
+   clears through to its map); a read-only list throws `UnsupportedOperationException`. */
+kt_boolean kt_mutable_collection_add(KRef self, KRef value);
+kt_boolean kt_mutable_collection_remove(KRef self, KRef value);
+void kt_mutable_collection_clear(KRef self);
+kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements);
 KRef kt_list_get(KRef list, kt_int index);
 /* `first()` / `last()`; both raise `NoSuchElementException` on an empty list, as Kotlin does. */
 KRef kt_list_first(KRef list);
