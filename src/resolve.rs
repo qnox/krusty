@@ -25879,9 +25879,7 @@ fun use() {
 
     #[test]
     fn nested_type_parameter_annotation_uses_lexical_classifier_identity() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 package sample
 
 annotation class Mark
@@ -25890,9 +25888,11 @@ class Host {
     annotation class Mark
     fun <@Mark T> keep(value: T): T = value
 }
-"#,
-            &mut diagnostics,
-        );
+"#;
+        let mut diagnostics = DiagSink::new();
+        let (file, symbols, _) =
+            crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
         let host = file
             .decls
             .iter()
@@ -25916,7 +25916,6 @@ class Host {
         let annotation = file.declaration_type_parameter_annotations[&method.signature_span.lo][0]
             .annotations[0]
             .clone();
-        let symbols = collect_signatures(&[file], &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         assert!(
@@ -25930,9 +25929,7 @@ class Host {
 
     #[test]
     fn nested_member_annotation_uses_lexical_classifier_identity() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 package sample
 
 annotation class Mark
@@ -25941,9 +25938,12 @@ class Host {
     annotation class Mark
     @Mark fun keep(): String = "OK"
 }
-"#,
-            &mut diagnostics,
-        );
+"#;
+        let mut diagnostics = DiagSink::new();
+        let (file, symbols, info) =
+            crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        assert!(info.is_some(), "production frontend must check the source");
         let host = file
             .decls
             .iter()
@@ -25959,8 +25959,6 @@ class Host {
             .expect("keep method")
             .annotations[0]
             .clone();
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
 
         assert!(
             symbols
@@ -25969,7 +25967,6 @@ class Host {
             "nested annotation should bind to Host.Mark, got {:?}",
             symbols.resolved_annotation(0, &annotation)
         );
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
     }
 
@@ -26025,9 +26022,7 @@ typealias Alias<@Marker(2) T> = Target<T>
 
     #[test]
     fn every_nested_declaration_type_parameter_annotation_gets_its_lexical_identity() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 package sample
 
 annotation class Mark
@@ -26076,9 +26071,11 @@ enum class EntryChoice {
 
     annotation class Mark
 }
-"#,
-            &mut diagnostics,
-        );
+"#;
+        let mut diagnostics = DiagSink::new();
+        let (file, symbols, _) =
+            crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
         let class = |name: &str| {
             file.decls
                 .iter()
@@ -26220,8 +26217,6 @@ enum class EntryChoice {
                 "sample/EntryChoice$ENTRY$EntryOnly",
             ),
         ];
-        let symbols = collect_signatures(&[file], &mut diagnostics);
-
         assert_no_diags(&diagnostics);
         for (annotation, expected) in annotations {
             assert!(
