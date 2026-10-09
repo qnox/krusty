@@ -24,6 +24,7 @@ pub const APPLIED: &[&str] = &[
     "-XXLanguage",
     "-Xcompiler-plugin",
     "-Xconsistent-data-class-copy-visibility",
+    "-Xassertions",
     "-Xcontext-parameters",
     "-Xexplicit-api",
     "-Xexplicit-backing-fields",
@@ -39,6 +40,7 @@ pub const APPLIED: &[&str] = &[
     "-Xno-param-assertions",
     "-Xplugin",
     "-Xsam-conversions",
+    "-Xstring-concat",
     "-Xsuppress-version-warnings",
     "-Xwarning-level",
     "-api-version",
@@ -60,6 +62,9 @@ pub const APPLIED: &[&str] = &[
 
 /// The arguments krusty accepts without acting on them, by canonical name.
 pub const INERT: &[&str] = &[
+    // krusty does not reserve the `kotlin` package, so it already compiles declarations there as
+    // kotlinc does once this argument lifts the reservation.
+    "-Xallow-kotlin-package",
     // krusty reads class files without checking their metadata version or pre-release flag, so it
     // already compiles as kotlinc does once these checks are off.
     "-Xskip-metadata-version-check",
@@ -80,7 +85,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xallow-condition-implies-returns-contracts",
     "-Xallow-contracts-on-more-functions",
     "-Xallow-holdsin-contract",
-    "-Xallow-kotlin-package",
     "-Xallow-no-source-files",
     "-Xallow-reified-type-in-catch",
     "-Xallow-returns-result-of",
@@ -88,7 +92,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xannotation-default-target",
     "-Xannotation-target-all",
     "-Xannotations-in-metadata",
-    "-Xassertions",
     "-Xbackend-threads",
     "-Xbuild-file",
     "-Xcheck-phase-conditions",
@@ -184,7 +187,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xscript-resolver-environment",
     "-Xseparate-kmp-compilation",
     "-Xstdlib-compilation",
-    "-Xstring-concat",
     "-Xsupport-compatqual-checker-framework-annotations",
     "-Xsuppress-api-version-greater-than-language-version-error",
     "-Xsuppress-deprecated-jvm-target-warning",

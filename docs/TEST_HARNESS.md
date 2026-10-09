@@ -564,6 +564,21 @@ backends by `TARGET_BACKEND`/`DONT_TARGET_EXACT_BACKEND`, or muted on JVM by the
 family, count in neither JVM badge's numerator nor denominator. Native applicability independently
 uses the corresponding Native target/mute directives.
 
+Both JVM compiles of a unit run under the same command line. `src/conformance/compiler_arguments.rs`
+(`unit_kotlinc_arguments`) maps the case's configuration directives (`LANGUAGE`, `API_VERSION`,
+`OPT_IN`, `EXPLICIT_API_MODE`, `ALLOW_KOTLIN_PACKAGE`, `JVM_TARGET`, `STRING_CONCAT`,
+`ASSERTIONS_MODE`, `WHEN_EXPRESSIONS`, and the unit's own `LAMBDAS`, `SAM_CONVERSIONS`,
+`JVM_DEFAULT_MODE`) to kotlinc arguments. The reference kotlinc receives them
+verbatim; krusty's gate parses them with `krusty_cli::cli::parse`, the executable's own command
+line, and compiles with the language settings and JVM backend that command line selects. Backend
+applicability depends only on the corpus target and source universe. A targeted case whose selected
+configuration krusty cannot compile remains applicable and fails with the refusal; it never moves
+to the not-applicable inventory. `RETURN_VALUE_CHECKER_MODE` is a reference-oracle setup detail:
+its `-Xreturn-value-checker` argument reaches only the reference compile
+(`reference_only_kotlinc_arguments`) because the checker does not change runtime `box()` behavior.
+Historical API levels which kotlinc's public command line cannot express fail closed until the
+differential harness can install that typed configuration on both compilers.
+
 Both lanes scan the same version-pinned corpus directory. The Native lane never inherits a JVM
 mute: it excludes a case only for a Native/ANY target directive or a true target-runtime/source
 requirement such as JVM classes. A missing harness capability is an expected failure and remains in

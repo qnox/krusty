@@ -513,6 +513,8 @@ pub(super) struct EmitEnv<'a> {
     inner_classes: crate::jvm::inner_classes::InnerClasses,
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
     java_parameters: bool,
+    /// `-Xstring-concat=inline`: build string concatenations with `StringBuilder` at every target.
+    inline_string_concat: bool,
     /// The `@kotlin.Metadata` `mv` stamp this emission writes (`-language-version`, or
     /// [`DEFAULT_METADATA_VERSION`]).
     metadata_version: [i32; 3],
@@ -700,6 +702,9 @@ pub struct EmitOptions {
         std::rc::Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
     pub java_parameters: bool,
+    /// `-Xstring-concat=inline`: build every string concatenation with `StringBuilder`, never
+    /// `invokedynamic`, whatever the class-file version.
+    pub inline_string_concat: bool,
     /// `-language-version X.Y`: the `mv` stamp of every `@kotlin.Metadata` and the version ints of
     /// the `META-INF/<module>.kotlin_module` header. `None` keeps kotlinc's no-flag stamp, the
     /// compiler's default language version [`DEFAULT_METADATA_VERSION`].
@@ -747,6 +752,12 @@ impl EmitOptions {
         self.lambda_modes = modes;
         self
     }
+
+    /// Select `-Xstring-concat=inline`, keeping every other field as configured.
+    pub fn with_inline_string_concat(mut self, inline: bool) -> Self {
+        self.inline_string_concat = inline;
+        self
+    }
 }
 
 impl Default for EmitOptions {
@@ -759,6 +770,7 @@ impl Default for EmitOptions {
             jvm_default: JvmDefaultMode::Enable,
             param_assertions: true,
             java_parameters: false,
+            inline_string_concat: false,
             lambda_modes: LambdaModes::default(),
             inner_class_resolver: None,
             value_classes: std::rc::Rc::default(),
@@ -1416,6 +1428,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
         java_parameters: opts.java_parameters,
+        inline_string_concat: opts.inline_string_concat,
         metadata_version: opts.metadata_version(),
         property_realizations: facts.property_realizations,
         property_reference_realizations: facts.property_reference_realizations,
@@ -5645,6 +5658,8 @@ struct Emitter<'a> {
     this_uninitialized: bool,
     /// Independent realization strategies for plain lambdas and SAM conversions.
     lambda_modes: LambdaModes,
+    /// `-Xstring-concat=inline`: never build a concatenation with `invokedynamic`.
+    inline_string_concat: bool,
     /// Active `finally` bodies, outermost first. A source-level control transfer executes these
     /// before leaving its protected region; the stack carries exact IR identities, not syntax.
     return_finalizers: Vec<u32>,
@@ -5737,6 +5752,7 @@ impl<'a> Emitter<'a> {
             unsigned_assignment_line: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
+            inline_string_concat: env.inline_string_concat,
             return_finalizers: Vec::new(),
             protected_regions: Vec::new(),
             terminal_statement_target: None,

@@ -164,11 +164,7 @@ impl LangFeatures {
             // `// ASSERTIONS_MODE: always-enable|always-disable` — kotlinc's `-Xassertions` mode for the
             // `assert(...)` intrinsic (modeled as pseudo-features so it flows like any other directive).
             if let Some(rest) = l.strip_prefix("// ASSERTIONS_MODE:") {
-                match rest.trim() {
-                    "always-enable" => self.enable("AssertionsAlwaysEnable"),
-                    "always-disable" => self.enable("AssertionsAlwaysDisable"),
-                    _ => {}
-                }
+                self.apply_assertions_mode(rest.trim());
             }
             // `// EXPLICIT_API_MODE: STRICT|WARNING` — kotlinc's `-Xexplicit-api` analysis mode,
             // carried the same way.
@@ -195,6 +191,21 @@ impl LangFeatures {
             "disable" => {}
             _ => return false,
         }
+        true
+    }
+
+    /// Select one of kotlinc's two unconditional `-Xassertions` modes for the `assert(...)`
+    /// intrinsic, carried as pseudo-features. Returns `false`, changing nothing, for any other
+    /// spelling, including the runtime-checked `jvm` and `legacy` modes.
+    pub fn apply_assertions_mode(&mut self, mode: &str) -> bool {
+        let feature = match mode {
+            "always-enable" => "AssertionsAlwaysEnable",
+            "always-disable" => "AssertionsAlwaysDisable",
+            _ => return false,
+        };
+        self.disable("AssertionsAlwaysEnable");
+        self.disable("AssertionsAlwaysDisable");
+        self.enable(feature);
         true
     }
 

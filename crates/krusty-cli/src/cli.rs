@@ -6,9 +6,12 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 
+use krusty::jvm::classpath::Classpath;
 use krusty::jvm::compilation_inputs::{selected_jdk_feature_release, JvmCompilationInputInventory};
 use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaModes};
+use krusty::jvm::JvmBackend;
 use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
 use krusty::plugins::cli::PluginConfig;
@@ -192,6 +195,12 @@ pub struct Options {
     /// `-Xexplicit-api=strict|warning|disable`: kotlinc's explicit API mode, applied to the
     /// language settings once they are built.
     pub explicit_api: Option<String>,
+    /// `-Xassertions=always-enable|always-disable`: an unconditional `assert(...)` mode, applied to
+    /// the language settings once they are built.
+    pub assertions: Option<String>,
+    /// `-Xstring-concat=inline`: build every string concatenation with `StringBuilder`, whatever
+    /// the JVM target.
+    pub inline_string_concat: bool,
     /// `-opt-in=<fq name>[,<fq name>…]` (also `-opt-in <value>`, repeatable): requirement markers
     /// accepted module-wide, applied to the language settings once they are built.
     pub opt_in: Vec<String>,
@@ -233,6 +242,8 @@ impl Default for Options {
             no_call_assertions: false,
             plugins: PluginConfig::default(),
             explicit_api: None,
+            assertions: None,
+            inline_string_concat: false,
             opt_in: Vec::new(),
             suppress_version_warnings: false,
         }
@@ -429,6 +440,30 @@ impl Options {
             .to_vec();
         }
         Ok(cp)
+    }
+
+    /// The JVM backend this command line selects, emitting against `classpath`. The `krusty`
+    /// executable and every in-process compile that runs under a parsed command line build their
+    /// backend here, so the two cannot select different output shapes from the same arguments.
+    pub fn jvm_backend(&self, classpath: Rc<Classpath>) -> JvmBackend {
+        // The selected source-language level stamps `@kotlin.Metadata` and `.kotlin_module`, as
+        // kotlinc does; the internal metadata override is kept separate for controlled emission
+        // comparisons.
+        let metadata_version = self
+            .metadata_version
+            .unwrap_or_else(|| self.language_settings.language_version.metadata_version());
+        JvmBackend::new(classpath)
+            .with_class_major(self.jvm_target_major)
+            .with_jvm_default(self.jvm_default)
+            .with_java_parameters(self.java_parameters)
+            .with_lambda_modes(self.lambda_modes)
+            .with_inline_string_concat(self.inline_string_concat)
+            .with_param_assertions(!self.no_param_assertions)
+            .with_call_assertions(!self.no_call_assertions)
+            .with_annotations_in_metadata(
+                self.language_settings.features.has("AnnotationsInMetadata"),
+            )
+            .with_metadata_version(Some(metadata_version))
     }
 }
 
@@ -848,6 +883,48 @@ mod tests {
             parsed.errors
         );
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
+    }
+
+    /// The unconditional assertion modes reach the frontend; the runtime-checked ones and an
+    /// unknown mode are refused, the unknown one in kotlinc's words.
+    #[test]
+    fn assertions_select_the_unconditional_modes_only() {
+        for (mode, feature) in [
+            ("always-enable", "AssertionsAlwaysEnable"),
+            ("always-disable", "AssertionsAlwaysDisable"),
+        ] {
+            let parsed = parse_args(&[&format!("-Xassertions={mode}"), "x.kt"]);
+            assert_eq!(parsed.errors, Vec::<String>::new(), "{mode}");
+            assert!(parsed.language_settings.features.has(feature), "{mode}");
+        }
+        assert_eq!(
+            parse_args(&["-Xassertions=jvm", "x.kt"]).errors,
+            vec!["-Xassertions=jvm selects an output shape krusty does not emit"]
+        );
+        assert_eq!(
+            parse_args(&["-Xassertions=sideways", "x.kt"]).errors,
+            vec![
+                "unknown assertions mode: sideways, supported modes: [always-enable, always-disable, jvm, legacy]"
+            ]
+        );
+    }
+
+    #[test]
+    fn string_concat_selects_inline_only() {
+        let parsed = parse_args(&["-Xstring-concat=inline", "x.kt"]);
+        assert_eq!(parsed.errors, Vec::<String>::new());
+        assert!(parsed.inline_string_concat);
+        assert!(!parse_args(&["x.kt"]).inline_string_concat);
+        assert_eq!(
+            parse_args(&["-Xstring-concat=indy", "x.kt"]).errors,
+            vec!["-Xstring-concat=indy selects an output shape krusty does not emit"]
+        );
+        assert_eq!(
+            parse_args(&["-Xstring-concat=sideways", "x.kt"]).errors,
+            vec![
+                "unknown `-Xstring-concat` mode: sideways\nSupported modes: inline, indy-with-constants, indy"
+            ]
+        );
     }
 
     #[test]
