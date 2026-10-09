@@ -41,6 +41,8 @@ jobs:
         env:
           RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.event.after) || github.event_name == 'merge_group' && format('{0}..{1}', github.event.merge_group.base_sha, github.event.merge_group.head_sha) || 'HEAD^1..HEAD^2' }}
         run: scripts/check-attribution.sh "$RANGE"
+      - name: validate pinned IntelliJ patch
+        run: scripts/check-intellij-patch.sh
       - name: box outcome manifests only shrink
         env:
           BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
