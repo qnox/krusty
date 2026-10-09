@@ -41,8 +41,9 @@ pub struct CheckedIrFile<'a> {
     pub native_plugins: &'a crate::plugins::registry::NativePlugins,
     pub module_name: &'a str,
     pub stems: &'a [String],
-    /// Where this file's lines are, so a backend that declines a construct can say which line.
-    pub lines: crate::diag::SourceLines<'a>,
+    /// Where each checked node came from. A backend that declines a construct reports it at the
+    /// source span of the node it declined, which common IR identifies by origin.
+    pub origins: &'a crate::fir::OriginStore,
 }
 
 /// One emitted artifact: a target-relative path and its bytes (e.g. `Foo.class`, a `.wasm` module).

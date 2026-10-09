@@ -30,6 +30,15 @@ pub enum IrNodeOrigin {
     },
 }
 
+impl IrNodeOrigin {
+    /// The checked FIR origin this node was lowered from, or was generated for.
+    pub fn fir_origin(self) -> crate::fir::OriginId {
+        match self {
+            Self::Fir(origin) | Self::Synthetic { cause: origin, .. } => origin,
+        }
+    }
+}
+
 mod annotations;
 mod bindings;
 mod bottom_values;
@@ -2686,6 +2695,14 @@ pub struct IrAppliedClassifier {
 }
 
 impl IrFile {
+    /// The checked FIR origin of an expression lowering recorded one for; `None` for a node a
+    /// later pass built.
+    pub fn node_origin(&self, expression: ExprId) -> Option<crate::fir::OriginId> {
+        self.fir_origins
+            .get(&expression)
+            .map(|origin| origin.fir_origin())
+    }
+
     /// A method's Kotlin declaration visibility. Public is the compact default for generated and
     /// ordinary declarations; every non-public source or generated method is recorded explicitly.
     pub fn method_visibility(&self, function: FunId) -> crate::types::Visibility {

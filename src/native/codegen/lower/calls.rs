@@ -19,7 +19,7 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Result<Option<Value>, Unsupported> {
         let symbol = super::super::super::symbols::module_function_symbol(target);
         if dispatch_receiver.is_some() {
-            return Err(format!("a cross-file call with a receiver (`{symbol}`)"));
+            return Err(declined!("a cross-file call with a receiver (`{symbol}`)"));
         }
         let id = self.file.import(&symbol, params, ret)?;
         let arguments = self.arguments(args, params)?;
@@ -41,7 +41,7 @@ impl BodyLowering<'_, '_, '_> {
         target: crate::fir::CallableId,
     ) -> Result<(), Unsupported> {
         let Some(record) = self.file.ir.referenced_module_callables.get(&target) else {
-            return Err("a cross-file call with no recorded source file".to_string());
+            return Err("a cross-file call with no recorded source file".into());
         };
         let init = super::super::super::symbols::file_init_symbol(record.source.source);
         let id = self.file.import(&init, &[], Ty::Unit)?;
@@ -82,7 +82,7 @@ impl BodyLowering<'_, '_, '_> {
                     Some(provider) => {
                         self.defaulted_call(provider, defaults, dispatch_receiver, args)
                     }
-                    None => Err(format!("a {} call", callee_kind(callee))),
+                    None => Err(declined!("a {} call", callee_kind(callee))),
                 }
             }
             // A static method owned by a class is, to this generator, a function with a symbol —
@@ -91,7 +91,7 @@ impl BodyLowering<'_, '_, '_> {
             // arrives this way.
             Callee::Local(function) | Callee::ClassStatic { function, .. } => {
                 if dispatch_receiver.is_some() {
-                    return Err("a static call with a receiver".to_string());
+                    return Err("a static call with a receiver".into());
                 }
                 let params =
                     super::super::super::captures::carried_parameters(self.file.ir, *function);
@@ -100,7 +100,7 @@ impl BodyLowering<'_, '_, '_> {
                     return Ok(None);
                 }
                 let Some(id) = self.file.functions[*function as usize] else {
-                    return Err(format!(
+                    return Err(declined!(
                         "a call to `{}`, which has no body",
                         self.file.ir.functions[*function as usize].name
                     ));
@@ -117,7 +117,7 @@ impl BodyLowering<'_, '_, '_> {
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
-                    return Err(format!("a `super` call without a receiver (`{name}`)"));
+                    return Err(declined!("a `super` call without a receiver (`{name}`)"));
                 };
                 let target = objects::SuperTarget {
                     owner: *owner,
@@ -134,7 +134,7 @@ impl BodyLowering<'_, '_, '_> {
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
-                    return Err(format!("a virtual call without a receiver (`{name}`)"));
+                    return Err(declined!("a virtual call without a receiver (`{name}`)"));
                 };
                 self.virtual_call(*owner, name, params.as_ref(), receiver, args)
             }
@@ -145,7 +145,7 @@ impl BodyLowering<'_, '_, '_> {
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
-                    return Err(format!("a `super` call without a receiver (`{name}`)"));
+                    return Err(declined!("a `super` call without a receiver (`{name}`)"));
                 };
                 // A diamond `super.f()` to a superinterface's DEFAULT METHOD. `Callee::Special`
                 // carries no accessor kind because it never names one.
@@ -167,7 +167,7 @@ impl BodyLowering<'_, '_, '_> {
                 ..
             } => {
                 let Some(realization) = self.file.callables.callable(*target) else {
-                    return Err("an unresolvable dependency call".to_string());
+                    return Err("an unresolvable dependency call".into());
                 };
                 // A callable reference reaches this ordinary dependency-call path, while retaining
                 // the exact compiler intrinsic the source-form operation uses.
@@ -273,7 +273,7 @@ impl BodyLowering<'_, '_, '_> {
                                         return realized;
                                     }
                                 }
-                                return Err(format!(
+                                return Err(declined!(
                                     "the member `{}.{name}` of a type this file implements itself",
                                     internal.render().replace('/', ".")
                                 ));
@@ -392,13 +392,13 @@ impl BodyLowering<'_, '_, '_> {
                             )
                         }) {
                             let [argument] = args else {
-                                return Err("a `mod` with more than one operand".to_string());
+                                return Err("a `mod` with more than one operand".into());
                             };
                             let Some(left) = self.coerce(receiver, operand)? else {
-                                return Err("a `Unit` receiver for `mod`".to_string());
+                                return Err("a `Unit` receiver for `mod`".into());
                             };
                             let Some(right) = self.coerce(*argument, operand)? else {
-                                return Err("a `Unit` operand for `mod`".to_string());
+                                return Err("a `Unit` operand for `mod`".into());
                             };
                             if self.terminated {
                                 return Ok(None);
@@ -622,7 +622,7 @@ impl BodyLowering<'_, '_, '_> {
                         let Some(symbol) =
                             super::super::super::intrinsics::runtime_member(signature)
                         else {
-                            return Err(format!(
+                            return Err(declined!(
                                 "the member `{}.{name}`",
                                 realization.physical_owner.render().replace('/', ".")
                             ));
@@ -661,7 +661,7 @@ impl BodyLowering<'_, '_, '_> {
                             let Some(symbol) = super::super::super::intrinsics::console_intrinsic(
                                 operation, params,
                             ) else {
-                                return Err(format!("a malformed `{operation:?}` call"));
+                                return Err(declined!("a malformed `{operation:?}` call"));
                             };
                             let arguments = self.arguments(args, params)?;
                             if self.terminated {
@@ -708,7 +708,7 @@ impl BodyLowering<'_, '_, '_> {
                         let Some(symbol) =
                             super::super::super::intrinsics::runtime_function(signature)
                         else {
-                            return Err(format!(
+                            return Err(declined!(
                                 "the declaration `{}.{name}` ({}; receiver {:?}; parameters {:?}; \
                                  result {:?})",
                                 realization.physical_owner.render().replace('/', "."),
@@ -741,7 +741,7 @@ impl BodyLowering<'_, '_, '_> {
                 module_default_call: false,
                 ..
             } => self.module_call(*target, params, *ret, dispatch_receiver, args),
-            other => Err(format!("a {} call", callee_kind(other))),
+            other => Err(declined!("a {} call", callee_kind(other))),
         }
     }
 }

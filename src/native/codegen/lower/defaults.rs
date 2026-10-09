@@ -77,7 +77,7 @@ impl<'a> FileLowering<'a> {
             // implements it. What has nothing to call is a body-less declaration with no receiver
             // to dispatch on; the emit side refuses a member with no slot separately.
             if declaration.body.is_none() && declaration.dispatch_receiver.is_none() {
-                return Err(format!(
+                return Err(declined!(
                     "a call with a defaulted argument to `{}`, which has no body",
                     declaration.name
                 ));
@@ -156,7 +156,7 @@ impl<'a> FileLowering<'a> {
             .get(&key.function)
             .and_then(|info| info.defaults.clone())
         else {
-            return Err(format!(
+            return Err(declined!(
                 "a call with a defaulted argument to `{}`, whose defaults were not recorded",
                 declaration.name
             ));
@@ -206,7 +206,7 @@ impl<'a> FileLowering<'a> {
             // class overrides it. A member with no slot is one this model does not dispatch — a
             // member extension today — so the call is declined rather than answered by the wrong
             // implementation.
-            return Err(format!(
+            return Err(declined!(
                 "a defaulted call to a member with no dispatch slot (`{}`)",
                 declaration.name
             ));
@@ -232,14 +232,14 @@ impl<'a> FileLowering<'a> {
             // Declaration order, because a later default may read an earlier one's parameter.
             for ordinal in &omitted {
                 let Some(Some(expression)) = defaults.get(*ordinal as usize) else {
-                    return Err(format!(
+                    return Err(declined!(
                         "an omitted argument with no default (`{}`)",
                         declaration.name
                     ));
                 };
                 let slot = (*ordinal as usize) + receiver;
                 let Some(value) = body.coerce(*expression, slots[slot])? else {
-                    return Err(format!(
+                    return Err(declined!(
                         "a `Unit` default argument (`{}`)",
                         declaration.name
                     ));
@@ -379,7 +379,7 @@ impl<'a> FileLowering<'a> {
                 let value = body.coerce(expression, slots[ordinal])?;
                 if !body.terminated {
                     let Some(value) = value else {
-                        return Err(format!(
+                        return Err(declined!(
                             "a `Unit` default argument (`{}`)",
                             declaration.name
                         ));
@@ -431,7 +431,7 @@ impl BodyLowering<'_, '_, '_> {
             .map(|(_, ty)| *ty)
             .collect();
         if args.len() != supplied.len() {
-            return Err(format!(
+            return Err(declined!(
                 "a cross-file call supplying {} of {} arguments (`{symbol}`)",
                 args.len(),
                 supplied.len()
@@ -479,7 +479,7 @@ impl BodyLowering<'_, '_, '_> {
             omitted: omitted.to_vec(),
         };
         let Some(&id) = self.file.default_wrappers.get(&key) else {
-            return Err("a call with a defaulted argument".to_string());
+            return Err("a call with a defaulted argument".into());
         };
         let declaration = &self.file.ir.functions[function as usize];
         let wants_receiver = declaration.dispatch_receiver.is_some();
@@ -499,7 +499,7 @@ impl BodyLowering<'_, '_, '_> {
                 self.null_check(object)?;
                 arguments.push(object);
             }
-            (true, None) => return Err("a defaulted member call with no receiver".to_string()),
+            (true, None) => return Err("a defaulted member call with no receiver".into()),
             (false, _) => {}
         }
         arguments.extend(self.arguments(args, &parameters)?);
@@ -657,7 +657,7 @@ impl<'a> FileLowering<'a> {
             Some(constructor) if constructor.prefix_params.is_empty() => {
                 Ok(Some(secondary as usize))
             }
-            _ => Err(format!(
+            _ => Err(declined!(
                 "a superclass call of `{}` to a constructor its superclass does not declare here",
                 declaration.fq_name()
             )),
@@ -801,12 +801,12 @@ impl<'a> FileLowering<'a> {
         let declaration = self.ir.classes[key.class as usize].clone();
         let name = declaration.fq_name();
         let Some(defaults) = self.constructor_defaults_of(key.class, key.secondary) else {
-            return Err(format!(
+            return Err(declined!(
                 "a construction with a defaulted argument of `{name}`, whose defaults were not recorded"
             ));
         };
         let Some(frame) = self.constructor_frame_of(key.class, key.secondary) else {
-            return Err(format!(
+            return Err(declined!(
                 "a construction with a defaulted argument of `{name}`, whose constructor is absent"
             ));
         };
@@ -848,13 +848,15 @@ impl<'a> FileLowering<'a> {
             // Declaration order, because a later default may read an earlier parameter.
             for ordinal in &omitted {
                 let Some(Some(expression)) = defaults.get(*ordinal as usize) else {
-                    return Err(format!(
+                    return Err(declined!(
                         "an omitted constructor argument with no default (`{name}`)"
                     ));
                 };
                 let slot = *ordinal as usize + 1;
                 let Some(value) = body.coerce(*expression, slots[slot])? else {
-                    return Err(format!("a `Unit` default constructor argument (`{name}`)"));
+                    return Err(declined!(
+                        "a `Unit` default constructor argument (`{name}`)"
+                    ));
                 };
                 if body.terminated {
                     return Ok(());
@@ -890,7 +892,7 @@ impl BodyLowering<'_, '_, '_> {
         // Which constructor the selection names — the primary's, or a secondary's, whose defaults
         // live on the constructor rather than on the class.
         let Some(secondary) = self.file.selected_constructor(class, selected) else {
-            return Err(format!(
+            return Err(declined!(
                 "a defaulted call to a constructor of `{name}` this file does not declare"
             ));
         };
@@ -900,7 +902,7 @@ impl BodyLowering<'_, '_, '_> {
             omitted: omitted.to_vec(),
         };
         let Some(&id) = self.file.default_constructors.get(&key) else {
-            return Err(format!("a constructor default argument (`{name}`)"));
+            return Err(declined!("a constructor default argument (`{name}`)"));
         };
         let parameters: Vec<Ty> = match secondary {
             // The primary's frame reads each parameter's PHYSICAL type, which a value-class
@@ -929,7 +931,7 @@ impl BodyLowering<'_, '_, '_> {
             }
         };
         if args.len() != parameters.len() {
-            return Err(format!(
+            return Err(declined!(
                 "a construction supplying {} of {} arguments (`{name}`)",
                 args.len(),
                 parameters.len()

@@ -483,22 +483,62 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
     );
 }
 
+/// Compile `sources` for the host and render every diagnostic as `file:line:column: …`, in
+/// emission order, against the files they belong to.
+fn rendered_diagnostics(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, String) {
+    let (artifacts, diags) = compile_with_sink(sources, target);
+    let files: Vec<(String, &str)> = sources
+        .iter()
+        .map(|(stem, text)| (format!("{stem}.kt"), *text))
+        .collect();
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), *text))
+        .collect();
+    (artifacts, diags.render_all(&files))
+}
+
 #[test]
-fn a_declined_construct_is_reported_at_its_source_line_in_its_own_file() {
+fn declines_with_the_same_message_are_reported_at_each_ones_own_position() {
     let Some(target) = host() else {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // The same still-declined construct as above, in the SECOND file of a module and below a line
-    // that lowers: the diagnostic names that file and line, not the module's first position.
+    // The same still-declined construct twice, at different lines and columns, in the second file
+    // of a module and below code that lowers. A file stops at its first decline, so it reports the
+    // first occurrence once; with that one gone, the second is reported at its own position. The
+    // message is identical both times: only the node decides where it lands.
     let helpers = "package demo\nfun one(): Int = 1\n";
-    let main = "package demo\n\nfun main() {\n    println(one())\n    println(runCatching { 1 }.getOrNull())\n}\n";
-    let (artifacts, diags) = compile_with_sink(&[("Helpers", helpers), ("Main", main)], target);
+    let both = "package demo\n\nfun main() {\n    println(one())\n  val a = runCatching { 1 }.getOrNull()\n    val x = 2; println(runCatching { x }.getOrNull())\n}\n";
+    let second = "package demo\n\nfun main() {\n    println(one())\n  val a = 1\n    val x = 2; println(runCatching { x }.getOrNull())\n}\n";
+    let (artifacts, rendered) =
+        rendered_diagnostics(&[("Helpers", helpers), ("Main", both)], target);
     assert_eq!(
-        diags.render_all(&[("Helpers.kt", helpers), ("Main.kt", main)]),
-        "Main.kt:5:5: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+        rendered,
+        "Main.kt:5:11: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
     );
     assert!(artifacts.iter().all(|(name, _)| name != "Main.o"));
+    let (_, rendered) = rendered_diagnostics(&[("Helpers", helpers), ("Main", second)], target);
+    assert_eq!(
+        rendered,
+        "Main.kt:6:24: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+    );
+}
+
+#[test]
+fn a_decline_nested_in_lowered_expressions_is_reported_at_the_innermost_one() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // The decline surfaces through the argument list, `listOf`, the `println` call and the
+    // statement around them; the node it names is the innermost one, the `getOrNull` call.
+    let main = "fun main() {\n    println(listOf(1, runCatching { 2 }.getOrNull()))\n}\n";
+    let (_, rendered) = rendered_diagnostics(&[("Main", main)], target);
+    assert_eq!(
+        rendered,
+        "Main.kt:2:23: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+    );
 }
 
 #[test]
