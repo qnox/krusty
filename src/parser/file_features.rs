@@ -29,4 +29,6 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.full_value_classes = features.has("FullValueClasses");
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
+    let gates = &mut file.language_gates;
+    gates.companion_blocks_and_extensions = features.gate("CompanionBlocksAndExtensions");
 }

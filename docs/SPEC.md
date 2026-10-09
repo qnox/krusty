@@ -4606,6 +4606,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or object expression, including the members of local classes) is `UNSUPPORTED_FEATURE` at the
   declaration's start, its annotations included. Nested type aliases in a classifier are
   `NestedTypeAliases`, not this feature. Tests: `tests/local_type_aliases_e2e.rs`.
+- **Companion blocks and extensions off (`CompanionBlocksAndExtensions`,
+  `-Xcompanion-blocks-and-extensions`).** Without the feature a classifier's first `companion { … }`
+  block is `UNSUPPORTED_FEATURE` at its `companion` keyword (later blocks are not reported again).
+  A file-level `companion fun C.f()`/`companion val C.p` is `UNSUPPORTED_FEATURE` and
+  `modifier 'companion' is not applicable inside 'file'.` at the modifier. A block member still
+  resolves, but each reference that selects it (call, property read or write, unqualified in the
+  class or qualified by it, callable reference) is `UNSUPPORTED_FEATURE` at the name. A written
+  companion extension is not a candidate, so a reference to it is `unresolved reference`. Tests:
+  `tests/companion_blocks_gate_e2e.rs`.
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and
   `.idea/misc.xml`; no IDE, JVM, or build tool is launched. Detection order is `Explicit` > `BSP` >

@@ -113,6 +113,7 @@ const MODELED_FEATURES: &[&str] = &[
     "AllowAccessToProtectedFieldFromSuperCompanion",
     "AnnotationsInMetadata",
     "BareArrayClassLiteral",
+    "CompanionBlocksAndExtensions",
     "ContextParameters",
     "ContextReceivers",
     "ContextSensitiveResolutionUsingExpectedType",

@@ -1687,6 +1687,8 @@ mod expect_declaration_body_e2e;
 mod all_tail_calls_e2e;
 #[path = "classpath_tail_forward_e2e.rs"]
 mod classpath_tail_forward_e2e;
+#[path = "companion_blocks_gate_e2e.rs"]
+mod companion_blocks_gate_e2e;
 #[path = "for_loop_iterable_slot_e2e.rs"]
 mod for_loop_iterable_slot_e2e;
 #[path = "inline_arguments_in_place_e2e.rs"]

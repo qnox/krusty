@@ -81,6 +81,7 @@ mod classifier_binding;
 mod collection_literals;
 #[cfg(test)]
 mod common_supertype_identity_tests;
+mod companion_reference_gate;
 mod compound_assignments;
 mod conditional_branch;
 mod constant_evaluation;
@@ -12766,6 +12767,9 @@ impl<'a> Checker<'a> {
         property: crate::libraries::PropertyInfo,
         report_diagnostics: bool,
     ) -> Ty {
+        if let Some(expr) = expr.filter(|_| report_diagnostics) {
+            self.gate_companion_property(self.member_name_span(expr, &property.name), &property);
+        }
         let access_owner = property.associated_access_owner.unwrap_or(property.owner);
         if property.visibility != Visibility::Public
             && !self.member_accessible(property.visibility, access_owner)
@@ -13693,6 +13697,7 @@ impl<'a> Checker<'a> {
             }
             TopLevelPropertySelection::None => return None,
         };
+        self.gate_companion_property(self.member_name_span(expression, name), &property.property);
         if let Some(ty) = self.record_top_level_source_constant(expression, &property.property) {
             return Some(ty);
         }
@@ -39147,6 +39152,7 @@ impl<'a> Checker<'a> {
         selected: &crate::libraries::FunctionInfo,
         ty: Ty,
     ) -> Ty {
+        self.gate_companion_function(self.member_name_span(expression, name), selected);
         let target = selected.callable.clone();
         if let Some(source_key) = selected.source_key {
             self.resolved_source_calls.insert(expression, source_key);
@@ -43243,6 +43249,7 @@ impl<'a> Checker<'a> {
             intersection_bindings,
             ..
         } = selected;
+        self.gate_companion_function(self.call_callee_name_span(call), &selected);
         self.reject_non_public_api_from_public_inline(
             call,
             Self::is_public_api_for_inline_access(
