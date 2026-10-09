@@ -32123,11 +32123,7 @@ fun use(counter: Counter) {
                           current++\n\
                           current += 1\n\
                       }";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, info, diagnostics) = retained_standalone_analysis(source);
 
         assert!(info.resolved_calls.values().any(
             |call| matches!(call, ResolvedCall::Member(member)
@@ -32139,38 +32135,28 @@ fun use(counter: Counter) {
                 if matches!(member.origin, Origin::Module { .. })
                     && member.member.name == "plus")
         ));
-        let unary = diagnostics
-            .diags
-            .iter()
-            .find(|diagnostic| {
-                diagnostic.msg
-                    == "'operator' modifier is required on 'fun unaryMinus(): Counter' defined in 'Counter'."
-            })
-            .expect("non-operator unaryMinus diagnostic");
-        assert_eq!(&source[unary.span.lo as usize..unary.span.hi as usize], "-");
-        let increment = diagnostics
-            .diags
-            .iter()
-            .find(|diagnostic| {
-                diagnostic.msg
-                    == "'operator' modifier is required on 'fun inc(): Counter' defined in 'Counter'."
-            })
-            .expect("non-operator inc diagnostic");
         assert_eq!(
-            &source[increment.span.lo as usize..increment.span.hi as usize],
-            "++"
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "'operator' modifier is required on 'fun unaryMinus(): Counter' defined in 'Counter'.",
+                "'operator' modifier is required on 'fun plus(other: Counter): Counter' defined in 'Counter'.",
+                "'operator' modifier is required on 'fun inc(): Counter' defined in 'Counter'.",
+                "'operator' modifier is required on 'fun plus(other: Int): Counter' defined in 'Counter'.",
+            ],
         );
-        let binary = diagnostics
-            .diags
-            .iter()
-            .find(|diagnostic| {
-                diagnostic.msg
-                    == "'operator' modifier is required on 'fun plus(other: Counter): Counter' defined in 'Counter'."
-            })
-            .expect("non-operator plus diagnostic");
         assert_eq!(
-            &source[binary.span.lo as usize..binary.span.hi as usize],
-            "+"
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| {
+                    &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize]
+                })
+                .collect::<Vec<_>>(),
+            ["-", "+", "++", "+="],
         );
         assert!(!info
             .stmt_lowers
