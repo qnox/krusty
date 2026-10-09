@@ -47,11 +47,15 @@ impl Reported {
     }
 }
 
-/// A module's configuration: its files, and the settings and dependencies of its JVM fragment.
+/// A module's configuration: its files, and the settings and dependencies of its JVM fragments.
 pub struct Configuration {
     pub files: ModuleFiles,
-    /// `None` when the module or its fragment is incomplete (reported).
+    /// The module as a whole (its repositories, among others); `None` when it is incomplete.
+    pub module: Option<Node>,
+    /// The main fragment; `None` when the module or one of its fragments is incomplete (reported).
     pub main: Option<Node>,
+    /// The test fragment, whose dependencies follow the main fragment's; `None` like `main`.
+    pub test: Option<Node>,
 }
 
 /// Configure every module of a project, in its order, as the toolchain builds its model: each
@@ -61,25 +65,29 @@ pub fn configure(
     modules: &[ModuleHeader],
     diagnostics: &mut Diagnostics,
 ) -> Vec<Configuration> {
-    let read: Vec<(ModuleFiles, Reported, bool)> = modules
+    let read: Vec<(ModuleFiles, Reported, Option<Node>)> = modules
         .iter()
         .map(|header| {
             let files = templates::read(root, header, diagnostics);
             let mut reported = Reported::default();
-            let complete = files.check(header.product, &mut reported, diagnostics);
-            (files, reported, complete)
+            let module = files.check(header.product, &mut reported, diagnostics);
+            (files, reported, module)
         })
         .collect();
     read.into_iter()
-        .map(|(files, mut reported, complete)| {
+        .map(|(files, mut reported, module)| {
+            let complete = module.is_some();
             let main = complete
                 .then(|| files.fragment(false, &mut reported, diagnostics))
                 .flatten();
             let test = complete
                 .then(|| files.fragment(true, &mut reported, diagnostics))
                 .flatten();
+            let complete = main.is_some() && test.is_some();
             Configuration {
-                main: main.filter(|_| test.is_some()),
+                module,
+                main: main.filter(|_| complete),
+                test: test.filter(|_| complete),
                 files,
             }
         })
@@ -120,29 +128,24 @@ impl ModuleFiles {
     }
 
     /// The module as a whole (`readModuleMergedTree`): its values seen from its own file, then
-    /// where its settings are written. `false` when it is incomplete, which leaves it without
+    /// where its settings are written. `None` when it is incomplete, which leaves it without
     /// fragments.
     fn check(
         &self,
         product: ProductType,
         reported: &mut Reported,
         diagnostics: &mut Diagnostics,
-    ) -> bool {
+    ) -> Option<Node> {
         let trees: Vec<&Node> = self.trees.iter().collect();
         let selected = Contexts {
             file: Some(self.module),
             ..Contexts::default()
         };
-        if self
-            .refine(&trees, &MODULE, selected, reported, diagnostics)
-            .is_none()
-        {
-            return false;
-        }
+        let module = self.refine(&trees, &MODULE, selected, reported, diagnostics)?;
         for tree in &self.trees {
             sections::check(tree, product, &self.files, reported, diagnostics);
         }
-        true
+        Some(module)
     }
 
     /// The dependencies and settings the JVM fragment (`test`: the test fragment) sees.

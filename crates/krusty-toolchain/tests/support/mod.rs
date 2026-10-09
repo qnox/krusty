@@ -13,7 +13,6 @@ pub mod rendering;
 
 use std::path::{Path, PathBuf};
 
-use krusty_toolchain::diagnostic::{Diagnostics, Severity};
 /// Sections that hold krusty-toolchain's deliberate difference rather than a file.
 const KRUSTY: &str = "krusty";
 const KRUSTY_REFUSAL: &str = "krusty-refusal";
@@ -154,24 +153,4 @@ pub fn materialize(temp: &TempDir, files: &[(String, String)]) -> PathBuf {
         std::fs::write(path, text).unwrap();
     }
     root
-}
-
-/// krusty-toolchain's problems as the toolchain's are read back: paths relative to `root`, line
-/// breaks as `\n`.
-pub fn reported(root: &Path, diagnostics: &Diagnostics) -> Vec<ExpectedDiagnostic> {
-    let prefix = format!("{}/", root.display());
-    diagnostics
-        .iter()
-        .map(|diagnostic| ExpectedDiagnostic {
-            severity: match diagnostic.severity {
-                Severity::Error => ExpectedSeverity::Error,
-                Severity::Warning => ExpectedSeverity::Warning,
-                Severity::WeakWarning => ExpectedSeverity::WeakWarning,
-            },
-            rendered: diagnostic
-                .to_string()
-                .replace(&prefix, "")
-                .replace('\n', "\\n"),
-        })
-        .collect()
 }

@@ -5,16 +5,18 @@
 //! boundary, YAML, the schema and the build files' readers are this crate's own.
 
 pub mod configuration;
+pub mod dependencies;
 pub mod diagnostic;
 pub mod model;
 pub mod show;
 
 mod glob;
 mod inventory;
-mod maven_version;
+mod maven;
 mod module;
 mod project;
 mod reading;
+mod resolution;
 mod schema;
 mod tree;
 mod yaml;

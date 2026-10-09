@@ -3,13 +3,16 @@
 //! severity and message, in order. The cases are in `tests/cases/settings`; the toolchain's output
 //! comes from the cached oracle (`tests/support/oracle.rs`).
 
+#[path = "support/reported.rs"]
+mod reported;
 mod support;
 
 use krusty_toolchain::diagnostic::Diagnostics;
 use krusty_toolchain::{configuration, model, show};
+use reported::reported;
 use support::kotlin::{self, Invocation};
 use support::rendering::problems;
-use support::{reported, ExpectedSeverity};
+use support::ExpectedSeverity;
 
 #[test]
 fn every_settings_case_is_shown_as_the_toolchain_shows_it() {
@@ -20,6 +23,7 @@ fn every_settings_case_is_shown_as_the_toolchain_shows_it() {
         .map(|case| Invocation {
             case: &case.name,
             files: &case.files,
+            repository: None,
             args: &["show", "settings", "--all-modules"],
         })
         .collect();

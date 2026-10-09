@@ -4,6 +4,8 @@
 //! are in `tests/cases/projects`; the toolchain's output comes from the cached oracle
 //! (`tests/support/oracle.rs`).
 
+#[path = "support/reported.rs"]
+mod reported;
 mod support;
 
 use std::path::Path;
@@ -11,9 +13,10 @@ use std::process::{Command, Output};
 
 use krusty_toolchain::diagnostic::Diagnostics;
 use krusty_toolchain::{model, show};
+use reported::reported;
 use support::kotlin::{self, Invocation};
 use support::rendering::problems;
-use support::{reported, ExpectedDiagnostic, ExpectedSeverity, KrustyExpected};
+use support::{ExpectedDiagnostic, ExpectedSeverity, KrustyExpected};
 
 fn run_toolchain(root: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_krusty-toolchain"))
@@ -32,6 +35,7 @@ fn every_project_case_is_read_as_the_toolchain_reads_it() {
         .map(|case| Invocation {
             case: &case.name,
             files: &case.files,
+            repository: None,
             args: &["show", "modules"],
         })
         .collect();

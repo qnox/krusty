@@ -1,0 +1,36 @@
+Gradle module metadata without a JVM variant for a classpath fails resolution of its artifact.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:native-only:1.0
+--- m2/org/example/native-only/1.0/native-only-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>native-only</artifactId>
+  <version>1.0</version>
+  <!-- do_not_remove: published-with-gradle-metadata -->
+</project>
+--- m2/org/example/native-only/1.0/native-only-1.0.module
+{
+  "formatVersion": "1.1",
+  "component": { "group": "org.example", "module": "native-only", "version": "1.0" },
+  "variants": [
+    {
+      "name": "linuxX64ApiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "kotlin-api",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "non-jvm",
+        "org.jetbrains.kotlin.platform.type": "native"
+      }
+    }
+  ]
+}
+--- krusty-refusal
+error	<directory>/home/.m2/repository/org/example/native-only/1.0/native-only-1.0.module: ERROR: No variant of org.example:native-only:1.0 matches the JVM compile classpath
+error	<directory>/home/.m2/repository/org/example/native-only/1.0/native-only-1.0.module: ERROR: No variant of org.example:native-only:1.0 matches the JVM runtime classpath
