@@ -27100,27 +27100,25 @@ val later = 1
 
     #[test]
     fn local_value_root_shadows_classifier_member_paths() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 enum class Kind { PENDING }
 class Holder(val PENDING: String)
 fun box(): String {
     val Kind = Holder("OK")
     return Kind.PENDING
 }
-"#,
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+"#;
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
-        let member = files[0]
+        let member = file
             .expr_arena
             .iter()
             .enumerate()
@@ -28008,21 +28006,16 @@ fun box(): String {
 
     #[test]
     fn member_extension_preserves_both_implicit_receivers() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "import test.containerTag\n\
+        let source = "import test.containerTag\n\
              import test.decorate\n\
              object Container {\n\
                  private fun String.render() = decorate() + containerTag()\n\
-             }",
-            &mut d,
-        );
+             }";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         let extension_receiver_call = named_call(&file, "decorate");
         let dispatch_receiver_call = named_call(&file, "containerTag");
-        let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+        assert_no_diags(&diagnostics);
 
         let extension = info
             .resolved_extension(extension_receiver_call)
@@ -28039,18 +28032,12 @@ fun box(): String {
 
     #[test]
     fn inherited_classpath_member_extension_property_keeps_applied_dispatch_type() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "import test.FooDerived\n\
+        let source = "import test.FooDerived\n\
              class Unspecialized : FooDerived {\n\
                  fun read(): String = \"K\".prop\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+             }";
+        let (_, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert_no_diags(&diagnostics);
 
         let selected = info
@@ -28113,9 +28100,7 @@ fun box(): String {
 
     #[test]
     fn qualified_inner_function_type_applies_explicit_outer_arguments() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file_with_detected_features(
-            "// LANGUAGE: +ProperSupportOfInnerClassesInCallableReferenceLHS\n\
+        let source = "// LANGUAGE: +ProperSupportOfInnerClassesInCallableReferenceLHS\n\
              class Outer<A> {\n\
                  inner class Inner<C> { fun <T> id(value: T): T = value }\n\
              }\n\
@@ -28123,10 +28108,7 @@ fun box(): String {
                  val reference: Outer<Int>.Inner<Int>.(String) -> String =\n\
                      Outer<Int>.Inner<Int>::id\n\
                  reference(Outer<Int>().Inner(), \"OK\")\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
+             }";
         let mut classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
         if let Some(jdk) = crate::toolchain::jdk_modules() {
             classpath.push(jdk);
@@ -28134,16 +28116,13 @@ fun box(): String {
         let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         assert_no_diags(&diagnostics);
     }
 
     #[test]
     fn inner_class_literal_lhs_applies_each_enclosing_classifier_argument() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file_with_detected_features(
-            "// LANGUAGE: +ProperSupportOfInnerClassesInCallableReferenceLHS\n\
+        let source = "// LANGUAGE: +ProperSupportOfInnerClassesInCallableReferenceLHS\n\
              class ClassReference<A> {\n\
                  inner class A<K> {\n\
                      inner class DeepInner\n\
@@ -28154,10 +28133,7 @@ fun box(): String {
                  val refBar = ClassReference<Int>.A<String>::DeepInner::class\n\
                  val raw = ClassReference.A.DeepInner::class\n\
                  val refFoo = ClassReference<Int>().A<String>().refFoo\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
+             }";
         let mut classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
         if let Some(jdk) = crate::toolchain::jdk_modules() {
             classpath.push(jdk);
@@ -28165,25 +28141,21 @@ fun box(): String {
         let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         assert_no_diags(&diagnostics);
     }
 
     #[test]
     fn member_extension_prefers_extension_receiver_members() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class Receiver(val marker: Int) {\n\
+        let source = "class Receiver(val marker: Int) {\n\
                  fun choose(): Int = marker\n\
              }\n\
              class Container(val marker: String, val dispatchOnly: String) {\n\
                  fun choose(): String = marker\n\
                  private fun Receiver.render(): Int = marker + choose()\n\
                  private fun Receiver.dispatchRead(): String = dispatchOnly\n\
-             }",
-            &mut d,
-        );
+             }";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         let marker = file
             .expr_arena
             .iter()
@@ -28203,10 +28175,7 @@ fun box(): String {
             })
             .expect("source should contain the dispatch-receiver property read");
         let choose = named_call(&file, "choose");
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+        assert_no_diags(&diagnostics);
 
         assert_eq!(info.ty(marker), Ty::Int);
         assert_eq!(info.ty(dispatch_only), Ty::String);
@@ -28272,26 +28241,21 @@ fun box(): String {
 
     #[test]
     fn java_static_accepts_anonymous_source_subclass_argument() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "import test.Factory\n\
+        let source = "import test.Factory\n\
              open class Handler\n\
              class Config\n\
              fun create(config: Config): String =\n\
-                 Factory.make(config, object : Handler() {})",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+                 Factory.make(config, object : Handler() {})";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
+        assert_no_diags(&diagnostics);
 
-        let call = files[0]
+        let call = file
             .expr_arena
             .iter()
             .enumerate()
             .find_map(|(idx, expr)| match expr {
-                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                Expr::Call { callee, .. } => match file.expr(*callee) {
                     Expr::Member { name, .. } if name == "make" => Some(ExprId(idx as u32)),
                     _ => None,
                 },
