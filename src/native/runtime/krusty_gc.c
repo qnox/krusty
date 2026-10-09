@@ -496,7 +496,22 @@ static void *kt_take_from(KChunk *chunk) {
     return NULL;
 }
 
-void *kt_gc_allocate(const KType *type, uint32_t size) {
+/* A taken slot, cleared and stamped with its type. Every slot size is a multiple of 16, so
+   clearing by words covers it exactly. */
+static void *kt_initialize(uint8_t *object, uint32_t object_size, const KType *type) {
+    kt_allocated_since_collect += object_size;
+    uint64_t *words = (uint64_t *)object;
+    for (uint32_t i = 0; i < object_size / sizeof(uint64_t); i++) {
+        words[i] = 0;
+    }
+    ((KObjectHeader *)object)->type = type;
+    return object;
+}
+
+/* Every allocation the fast path in kt_gc_allocate does not take: a collection is due, the
+   class's current chunk is full, or the object is large. Kept out of line so the common case
+   saves and restores no registers. */
+__attribute__((noinline)) static void *kt_gc_allocate_slow(const KType *type, uint32_t size) {
     /* Room for the header, which also covers the reuse-list link a swept object holds. */
     if (size < sizeof(KObjectHeader)) {
         size = sizeof(KObjectHeader);
@@ -542,15 +557,26 @@ void *kt_gc_allocate(const KType *type, uint32_t size) {
     if (object == NULL) {
         kt_fail_oom();
     }
-    kt_allocated_since_collect += object_size;
+    return kt_initialize(object, object_size, type);
+}
 
-    /* Every slot size is a multiple of 16, so clearing by words covers it exactly. */
-    uint64_t *words = (uint64_t *)object;
-    for (uint32_t i = 0; i < object_size / sizeof(uint64_t); i++) {
-        words[i] = 0;
+/* The common case first: a small object, no collection due, and room in the chunk its class last
+   allocated from. That chunk is where the slow path would start looking too, so taking from it
+   here hands out exactly the slot the slow path would. */
+void *kt_gc_allocate(const KType *type, uint32_t size) {
+    if (size <= kt_size_classes[KT_CLASS_COUNT - 1] &&
+        kt_allocated_since_collect < kt_next_collect_at) {
+        uint32_t class_index =
+            kt_class_for(size < sizeof(KObjectHeader) ? (uint32_t)sizeof(KObjectHeader) : size);
+        KChunk *chunk = kt_class_cursor[class_index];
+        if (chunk != NULL) {
+            uint8_t *object = (uint8_t *)kt_take_from(chunk);
+            if (object != NULL) {
+                return kt_initialize(object, chunk->object_size, type);
+            }
+        }
     }
-    ((KObjectHeader *)object)->type = type;
-    return object;
+    return kt_gc_allocate_slow(type, size);
 }
 
 /* ---- introspection, for tests ---------------------------------------------------------------- */
