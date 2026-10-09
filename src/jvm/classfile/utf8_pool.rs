@@ -35,6 +35,13 @@ impl Utf8Pool {
     }
 }
 
+/// The length prefix of one `CONSTANT_Utf8` entry. Callers split longer text (string constants,
+/// annotation string arrays) before it reaches the pool; a longer entry is an emitter defect, and
+/// truncating its length would write a class file no JVM can read.
+pub(super) fn entry_length(bytes: &[u8]) -> u16 {
+    u16::try_from(bytes.len()).expect("a CONSTANT_Utf8 entry holds at most 65535 bytes")
+}
+
 impl super::ConstPool {
     pub(super) fn utf8(&mut self, text: &str) -> u16 {
         if let Some(index) = self.utf8_index.get(text) {

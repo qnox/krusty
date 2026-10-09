@@ -50,6 +50,14 @@ The "extra leading `00`" is the **`UTF8_MODE_MARKER`** (`BitEncoding`): the d1 p
 `0x00` byte before the delimited `StringTableTypes`. The reader strips it before
 `parseDelimitedFrom`. krusty emits it verbatim; confirmed by the round-trips below.
 
+## `d1` parts — kotlinc's partition
+A payload larger than one `CONSTANT_Utf8` entry is written as several `d1` strings. kotlinc's
+`UtfEncodingKt.bytesToStrings` appends each char (the marker included), adds its modified-UTF-8
+width (1 for `0x01..=0x7f`, 2 for `0x00` and `0x80..=0xff`), and closes the part as soon as the
+count reaches **65534**, so a part holds 65534 bytes, or 65535 when a two-byte char crosses the
+threshold. No trailing empty part is written. `metadata::encoding::bytes_to_strings` follows the
+same rule; `tests/large_metadata_parts_e2e.rs` compares a 4000-property class byte for byte.
+
 ## Version stamp — `mv` and the `.kotlin_module` header
 
 Every emitted `@Metadata` carries `mv` (metadata version) and the `.kotlin_module` header carries
