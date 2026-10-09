@@ -100,7 +100,7 @@ pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -
     });
     // A `companion { … }` member is companion-associated, as kotlinc records it.
     let companion = if ir.companion_blocks.is_function(fid) {
-        crate::metadata::function_flags::IS_COMPANION
+        crate::metadata::function_flags::IS_STATIC
     } else {
         0
     };

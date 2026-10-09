@@ -182,10 +182,10 @@ fn sign_package(package_segments: &[String], package: &KotlinPackage, out: &mut 
                 out.public
                     .insert(metadata_enum_entry_signature(inside, entry));
             }
-            let implicit = enum_class_member_signatures(inside).unwrap();
-            out.public
-                .extend([implicit.values, implicit.value_of, implicit.entries]);
-            out.accessors.insert(implicit.entries_getter);
+            let implicit = enum_class_member_signatures(inside, class.has_enum_entries).unwrap();
+            out.public.extend([implicit.values, implicit.value_of]);
+            out.public.extend(implicit.entries);
+            out.accessors.extend(implicit.entries_getter);
         }
     }
 }

@@ -155,6 +155,8 @@ pub struct KotlinMember {
     pub is_operator: bool,
     pub is_infix: bool,
     pub is_abstract: bool,
+    /// Whether metadata declares this member static for KLIB signature mangling.
+    pub is_static: bool,
     pub return_value_status: crate::types::ReturnValueStatus,
     pub formals: Vec<KotlinTypeParameter>,
     pub ret_nullable: bool,
@@ -245,6 +247,8 @@ pub struct KotlinClass {
     pub visibility: Visibility,
     pub is_expect: bool,
     pub enum_entries: Vec<String>,
+    /// Whether this enum's metadata declares the implicit `entries` property.
+    pub has_enum_entries: bool,
     pub sealed_subclasses: Vec<String>,
     pub inline_class_property: Option<String>,
     pub modality: KotlinModality,
@@ -510,7 +514,7 @@ fn source_suspend_function_type(ty: Ty) -> Ty {
 }
 
 /// Convert a decoded Kotlin metadata type without consulting a target provider.
-pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<String, Ty>) -> Ty {
+pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<KotlinTypeParameterId, Ty>) -> Ty {
     let semantic = match ty {
         KotlinType::Class {
             internal,
@@ -524,9 +528,9 @@ pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<String, Ty>) -> Ty {
                 .collect();
             kotlin_type(internal, args, *shape)
         }
-        KotlinType::Param { name, .. } => {
+        KotlinType::Param { name, id, .. } => {
             let bound = bounds
-                .get(name)
+                .get(id)
                 .copied()
                 .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
             Ty::ty_param(name, bound)
@@ -545,16 +549,19 @@ pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<String, Ty>) -> Ty {
 /// Declared primary upper bounds keyed by the metadata type-parameter identity.
 pub fn semantic_bounds(
     params: &[KotlinTypeParameter],
-    inherited: &HashMap<String, Ty>,
-) -> HashMap<String, Ty> {
+    inherited: &HashMap<KotlinTypeParameterId, Ty>,
+) -> HashMap<KotlinTypeParameterId, Ty> {
     let mut bounds = inherited.clone();
+    for parameter in params {
+        bounds.insert(parameter.id, Ty::nullable(Ty::obj("kotlin/Any")));
+    }
     for parameter in params {
         let bound = parameter
             .bounds
             .first()
-            .map(|bound| semantic_ty(bound, &HashMap::new()))
+            .map(|bound| semantic_ty(bound, &bounds))
             .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-        bounds.insert(parameter.name.clone(), bound);
+        bounds.insert(parameter.id, bound);
     }
     bounds
 }
@@ -673,5 +680,26 @@ mod tests {
         assert_eq!(signature.params.as_slice(), &[Ty::Int]);
         assert_eq!(signature.ret, Ty::String);
         assert!(signature.suspend);
+    }
+
+    #[test]
+    fn type_parameter_bounds_are_selected_by_identity_not_spelling() {
+        let outer = KotlinTypeParameterId(1);
+        let inner = KotlinTypeParameterId(2);
+        let bounds = HashMap::from([(outer, Ty::String), (inner, Ty::obj("kotlin/Number"))]);
+        let parameter = |id| KotlinType::Param {
+            name: "T".to_owned(),
+            id,
+            nullable: false,
+        };
+
+        assert_eq!(
+            semantic_ty(&parameter(outer), &bounds).ty_param_bound(),
+            Some(Ty::String)
+        );
+        assert_eq!(
+            semantic_ty(&parameter(inner), &bounds).ty_param_bound(),
+            Some(Ty::obj("kotlin/Number"))
+        );
     }
 }

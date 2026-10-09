@@ -961,6 +961,7 @@ struct SemanticFunctionShape {
     is_abstract: bool,
     is_operator: bool,
     is_infix: bool,
+    is_static: bool,
     return_value_status: crate::types::ReturnValueStatus,
 }
 
@@ -1066,6 +1067,8 @@ fn semantic_function_shape(
         is_abstract: (flags >> 4) & 0x3 == 2,
         is_operator: flags & (1 << 8) != 0,
         is_infix: flags & (1 << 9) != 0,
+        is_static: modern_flags
+            .is_some_and(|flags| flags & crate::metadata::function_flags::IS_STATIC != 0),
         return_value_status: modern_flags.map_or_else(Default::default, |flags| {
             crate::types::ReturnValueStatus::from_metadata(
                 (flags >> crate::metadata::function_flags::RETURN_VALUE_STATUS_SHIFT) & 0x3,
@@ -1255,6 +1258,7 @@ fn semantic_function(
         is_operator: function.is_operator,
         is_infix: function.is_infix,
         is_abstract: function.is_abstract,
+        is_static: function.is_static,
         return_value_status: function.return_value_status,
         formals: formals.clone(),
         ret_nullable,
@@ -1457,6 +1461,8 @@ fn semantic_property(
         is_infix: false,
         is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
             == crate::metadata::property_flags::MODALITY_ABSTRACT,
+        is_static: modern_flags
+            .is_some_and(|flags| flags & crate::metadata::property_flags::IS_STATIC != 0),
         return_value_status: modern_flags.map_or_else(Default::default, |flags| {
             crate::types::ReturnValueStatus::from_metadata(
                 (flags >> crate::metadata::property_flags::RETURN_VALUE_STATUS_SHIFT) & 0x3,
@@ -1812,6 +1818,7 @@ fn semantic_class(
             type_params,
             nullable_member_returns,
             enum_entries,
+            has_enum_entries: header.flags & (1 << 15) != 0,
             sealed_subclasses,
             inline_class_property,
             kind: metadata::class_kind(header.flags),

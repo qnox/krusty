@@ -515,7 +515,7 @@ fn function_pb(
         | (u64::from(f.infix) << 9)
         | (u64::from(f.operator) << 8)
         | if f.companion {
-            crate::metadata::function_flags::IS_COMPANION
+            crate::metadata::function_flags::IS_STATIC
         } else {
             0
         };
@@ -1007,7 +1007,7 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
     // A `const val` sets the CONST flag bit (kotlinc: public const `10758` = `8710 | 2048`).
     let const_bit = if m.is_const { 1 << 11 } else { 0 };
     let companion_bit = if m.companion {
-        property_flags::IS_COMPANION
+        property_flags::IS_STATIC
     } else {
         0
     };

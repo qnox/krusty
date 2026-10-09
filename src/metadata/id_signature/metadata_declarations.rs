@@ -264,7 +264,7 @@ fn member_property_shape(
         receiver: member.receiver.as_ref(),
         type_parameters: type_parameters(&member.formals),
         expect: member.is_expect,
-        static_member: false,
+        static_member: member.is_static,
     })
 }
 
@@ -298,7 +298,7 @@ pub fn member_signature(
         vararg: member.vararg,
         type_parameters: type_parameters(&member.formals),
         expect: member.is_expect,
-        static_member: false,
+        static_member: member.is_static,
     };
     with_container(container, |container| callable_signature(container, &shape))
 }
@@ -331,14 +331,15 @@ pub struct EnumClassMemberSignatures {
     /// `valueOf(value: String): E`.
     pub value_of: KlibPublicIdSignature,
     /// `entries: EnumEntries<E>`, present when the enum was compiled for Kotlin 1.9 or later.
-    pub entries: KlibPublicIdSignature,
-    pub entries_getter: KlibAccessorIdSignature,
+    pub entries: Option<KlibPublicIdSignature>,
+    pub entries_getter: Option<KlibAccessorIdSignature>,
 }
 
 /// The implicit members of an enum class; `container` ends with the enum class. They carry the
 /// enum class's flags.
 pub fn enum_class_member_signatures(
     container: MetadataContainer<'_>,
+    has_enum_entries: bool,
 ) -> Result<EnumClassMemberSignatures, ManglingError> {
     let string = KotlinType::class("kotlin/String");
     let function = |name, params| CallableShape {
@@ -363,8 +364,12 @@ pub fn enum_class_member_signatures(
         Ok(EnumClassMemberSignatures {
             values: callable_signature(container, &function("values", Vec::new()))?,
             value_of: callable_signature(container, &function("valueOf", vec![&string]))?,
-            entries: property_signature(container, &entries)?,
-            entries_getter: accessor_signature(container, &entries, Accessor::Getter)?,
+            entries: has_enum_entries
+                .then(|| property_signature(container, &entries))
+                .transpose()?,
+            entries_getter: has_enum_entries
+                .then(|| accessor_signature(container, &entries, Accessor::Getter))
+                .transpose()?,
         })
     })
 }

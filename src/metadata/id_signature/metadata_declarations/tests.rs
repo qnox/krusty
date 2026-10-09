@@ -98,6 +98,7 @@ fn member(name: &str, params: Vec<KotlinType>, is_property: bool) -> KotlinMembe
         is_operator: false,
         is_infix: false,
         is_abstract: false,
+        is_static: false,
         return_value_status: ReturnValueStatus::default(),
         formals: Vec::new(),
         ret_nullable: false,
@@ -400,6 +401,32 @@ fn an_enum_entry_is_a_path_inside_its_enum_class() {
     assert_eq!(entry.declaration().segments(), ["OsFamily", "MACOSX"]);
     assert_eq!(entry.member_id(), None);
     assert_eq!(entry.mask(), 0);
+}
+
+#[test]
+fn enum_entries_signatures_follow_the_class_metadata_flag() {
+    let package = package(&["sample"]);
+    let classes = [MetadataClass {
+        name: "Direction",
+        type_params: &[],
+        expect: false,
+    }];
+    let direction = MetadataContainer {
+        package: &package,
+        classes: &classes,
+        native_interop_library: false,
+    };
+
+    let old = enum_class_member_signatures(direction, false).unwrap();
+    assert!(old.entries.is_none());
+    assert!(old.entries_getter.is_none());
+
+    let current = enum_class_member_signatures(direction, true).unwrap();
+    assert_eq!(
+        current.entries.unwrap().declaration().segments(),
+        ["Direction", "entries"]
+    );
+    assert_eq!(current.entries_getter.unwrap().name(), "<get-entries>");
 }
 
 #[test]
