@@ -10,7 +10,7 @@ use krusty::language_version::LanguageVersion;
 
 use super::{jvm_target_to_major, supported_kotlin_versions, CliWarning, Options, WarningName};
 use crate::kotlinc_arguments::catalog::FeatureToggle;
-use crate::kotlinc_arguments::{Catalog, Occurrence, Value};
+use crate::kotlinc_arguments::{Catalog, FeatureTable, Occurrence, Value};
 
 /// Record a `-jvm-default`/`-Xjvm-default` value, reporting one krusty does not model instead of
 /// silently compiling under a different interface shape than the build asked for.
@@ -221,7 +221,7 @@ pub(super) fn apply(
     opts: &mut Options,
     parsed: &mut ParsedSettings,
     occurrence: &Occurrence,
-    _catalog: &Catalog,
+    catalog: &Catalog,
 ) {
     let spec = occurrence.spec;
     let name = spec.name.as_str();
@@ -245,6 +245,15 @@ pub(super) fn apply(
                         ));
                         return;
                     };
+                    let feature_table = FeatureTable::for_version(catalog.version)
+                        .expect("every supported reference release has a language-feature table");
+                    if !feature_table.contains(feature) {
+                        opts.errors.push(format!(
+                            "unknown language feature '{feature}' selected by '-XXLanguage' for kotlinc {}",
+                            catalog.version
+                        ));
+                        return;
+                    }
                     if !krusty::features::LangFeatures::models(feature) {
                         opts.errors.push(format!(
                             "krusty does not implement the language feature '{feature}' selected by '-XXLanguage'"

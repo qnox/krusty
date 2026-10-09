@@ -1094,30 +1094,49 @@ mod tests {
         );
     }
 
-    /// Raw language toggles are validated against the selected kotlinc release, not a second
-    /// hardcoded subset. A release-declared feature is retained; an invented one is rejected.
+    /// Raw language toggles are first validated against the selected kotlinc release, then against
+    /// krusty's implemented semantic feature set. Neither list substitutes for the other.
     #[test]
     fn xxlanguage_uses_the_selected_releases_feature_table() {
-        let known = parse_args(&[
+        let known_unmodeled = parse_args(&[
             "-Xkotlin-reference-version=2.4.20",
             "-XXLanguage:+AllowEagerSupertypeAccessibilityChecks",
             "f.kt",
         ]);
-        assert!(known.errors.is_empty(), "{:?}", known.errors);
-        assert!(known
-            .language_settings
-            .features
-            .has("AllowEagerSupertypeAccessibilityChecks"));
+        assert_eq!(
+            known_unmodeled.errors,
+            ["krusty does not implement the language feature \
+              'AllowEagerSupertypeAccessibilityChecks' selected by '-XXLanguage'"
+                .to_string()]
+        );
 
-        let unknown = parse_args(&[
+        let invented = parse_args(&[
             "-Xkotlin-reference-version=2.4.20",
             "-XXLanguage:+ShapeKrustyDoesNotModel",
             "f.kt",
         ]);
         assert_eq!(
-            unknown.errors,
+            invented.errors,
             ["unknown language feature 'ShapeKrustyDoesNotModel' selected by '-XXLanguage' for kotlinc 2.4.20".to_string()]
         );
+
+        let absent_from_release = parse_args(&[
+            "-Xkotlin-reference-version=2.4.0",
+            "-XXLanguage:+FullValueClasses",
+            "f.kt",
+        ]);
+        assert_eq!(
+            absent_from_release.errors,
+            ["unknown language feature 'FullValueClasses' selected by '-XXLanguage' for kotlinc 2.4.0".to_string()]
+        );
+
+        let modeled = parse_args(&[
+            "-Xkotlin-reference-version=2.4.20",
+            "-XXLanguage:+FullValueClasses",
+            "f.kt",
+        ]);
+        assert!(modeled.errors.is_empty(), "{:?}", modeled.errors);
+        assert!(modeled.language_settings.features.has("FullValueClasses"));
     }
 
     #[test]
