@@ -826,6 +826,10 @@ mod tests {
                     "compilerOptions.allWarningsAsErrors and freeCompilerArg '-Werror' are both set; configure exactly one",
                 ),
                 (
+                    "dev-compiler-version",
+                    "Kotlin compiler 2.4.20-dev-7885 differs from Kotlin Gradle plugin 2.4.10",
+                ),
+                (
                     "empty-opt-in",
                     "compilerOptions.optIn contains an empty marker",
                 ),
@@ -982,11 +986,9 @@ mod tests {
                 "{language_2_2_run:?}",
             );
 
-            // The Kotlin repository's bootstrap compiler version and its warning/argument
-            // surface must reach krusty. A pre-release of the selected plugin release is that
-            // release; an older compiler version the repository pins for Gradle embedding is
-            // not a second krusty target.
-            let reference = format!("-Xkotlin-reference-version={kgp}");
+            // The Kotlin repository's warning and argument surface must reach krusty. Its
+            // bootstrap pre-release is not a krusty compiler version; the repository is
+            // configured to a supported release before this plugin runs.
             for case in ["all-warnings-as-errors", "free-werror"] {
                 let _ = std::fs::remove_file(&log);
                 build()
@@ -1001,32 +1003,6 @@ mod tests {
                     "{case}: {invocation:?}"
                 );
             }
-            let _ = std::fs::remove_file(&log);
-            build()
-                .property("krusty.negative", "bootstrap-compiler-version")
-                .tasks([":compiler:util:compileKotlin"])
-                .run()
-                .unwrap_or_else(|error| panic!("bootstrap compiler version: {error}"));
-            let bootstrap = single_invocation(&log);
-            assert!(
-                bootstrap.iter().any(|argument| argument == &reference),
-                "{bootstrap:?}"
-            );
-            assert!(
-                bootstrap.iter().all(|argument| !argument.contains("-dev-")),
-                "{bootstrap:?}"
-            );
-            let _ = std::fs::remove_file(&log);
-            build()
-                .property("krusty.negative", "older-compiler-version")
-                .tasks([":compiler:util:compileKotlin"])
-                .run()
-                .unwrap_or_else(|error| panic!("older compiler version: {error}"));
-            let older = single_invocation(&log);
-            assert!(
-                older.iter().any(|argument| argument == &reference),
-                "{older:?}"
-            );
             let _ = std::fs::remove_file(&log);
             build()
                 .property("krusty.negative", "repo-arguments")
@@ -2178,8 +2154,7 @@ val generateKotlin = tasks.register<GenerateKotlin>("generateKotlin") {
 kotlin {
     when (krustyNegative) {
         "compiler-version" -> compilerVersion.set("2.4.0")
-        "bootstrap-compiler-version" -> compilerVersion.set("KGP_VERSION-dev-7885")
-        "older-compiler-version" -> compilerVersion.set("2.2.21")
+        "dev-compiler-version" -> compilerVersion.set("2.4.20-dev-7885")
         else -> {}
     }
     sourceSets.named("main") {

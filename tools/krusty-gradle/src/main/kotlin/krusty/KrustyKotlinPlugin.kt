@@ -283,22 +283,10 @@ abstract class KrustyCompileTask @Inject constructor(
             )
         }
         val pluginVersion = supportedKotlinPluginVersion(kotlinPluginVersion.get())
-        val rawCompilerVersion = compilerVersion.get()
-        // A pre-release of a supported release (the Kotlin repository bootstraps with
-        // `2.4.20-dev-<n>`) is that release. A different supported release is a real
-        // semantic override and stays rejected. A version krusty does not implement, such as
-        // the 2.2.21 compiler the repository uses for Gradle-embedded modules, is not a second
-        // compiler: the task's language and API versions are forwarded, and this reference is
-        // the one krusty can emit.
-        when (val compilerRelease = kotlinReferenceRelease(rawCompilerVersion)) {
-            null -> logger.warn(
-                "krusty: Kotlin compiler $rawCompilerVersion is not a supported reference; compiling with $pluginVersion",
+        if (compilerVersion.get() != pluginVersion) {
+            throw GradleException(
+                "Kotlin compiler ${compilerVersion.get()} differs from Kotlin Gradle plugin $pluginVersion",
             )
-            else -> if (compilerRelease != pluginVersion) {
-                throw GradleException(
-                    "Kotlin compiler $rawCompilerVersion differs from Kotlin Gradle plugin $pluginVersion",
-                )
-            }
         }
         if (!compilerPluginClasspath.isEmpty) {
             arguments.add(
@@ -531,20 +519,9 @@ private fun reservedFreeArgument(argument: String): String? {
     }
 }
 
-private fun supportedKotlinPluginVersion(version: String): String {
-    val release = version.substringBefore('-')
-    return when (release) {
-        "2.4.0", "2.4.10", "2.4.20" -> release
-        else -> throw GradleException(
-            "unsupported Kotlin Gradle plugin $version; expected 2.4.0, 2.4.10, or 2.4.20",
-        )
-    }
-}
-
-private fun kotlinReferenceRelease(version: String): String? = try {
-    supportedKotlinPluginVersion(version)
-} catch (_: GradleException) {
-    null
+private fun supportedKotlinPluginVersion(version: String): String = when (version) {
+    "2.4.0", "2.4.10", "2.4.20" -> version
+    else -> throw GradleException("unsupported Kotlin Gradle plugin $version; expected 2.4.0, 2.4.10, or 2.4.20")
 }
 
 private fun MutableList<String>.addPair(name: String, value: String) {
