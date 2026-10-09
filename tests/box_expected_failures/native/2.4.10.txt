@@ -845,7 +845,6 @@ elvis/genericElvisWithMoreSpecificLHS.kt
 elvis/genericElvisWithNullLHS.kt
 elvis/ofNonNullableResultType.kt
 enum/defaultCtor/noPrimaryConstructor.kt
-enum/enumEntriesInCompanion.kt
 enum/enumEntriesMultimoduleNoMappings.kt
 enum/enumEntriesNameClashes.kt
 enum/enumEntryMembers.kt

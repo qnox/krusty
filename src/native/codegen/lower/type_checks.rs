@@ -117,6 +117,14 @@ impl<'a> FileLowering<'a> {
             {
                 "kt_type_char_sequence"
             }
+            // `EnumEntries` is sealed, so the runtime's `EnumEntriesList` is every instance there
+            // is, and it names this descriptor among its interfaces.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_enum_entries) =>
+            {
+                "kt_type_enum_entries_interface"
+            }
             // `Unit` reaches a type check spelled as the object it is rather than as the carrier
             // `Ty::Unit` names, and it is one type either way.
             _ if target
