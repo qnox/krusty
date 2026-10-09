@@ -905,7 +905,7 @@ impl BodyLowering<'_> {
     ) {
         let Some(declared) = declared
             .map(crate::fir::ResolvedTy::get)
-            .filter(|receiver| receiver.is_ty_param())
+            .filter(|receiver| receiver.non_null().is_ty_param())
         else {
             return;
         };
@@ -974,6 +974,68 @@ impl BodyLowering<'_> {
         statements.remove(position);
     }
 
+    /// An erased `FunctionN.invoke` whose result the caller uses.
+    ///
+    /// The invoke stores `Object` inside the `try`. `finally` runs, then the normal path reloads
+    /// that object and jumps over the handlers; the call site's `checkcast` or unbox is the
+    /// landing, with the value already on the stack. A `Unit` specialization stores the object
+    /// and never reloads it, so it stays an ordinary `try` statement.
+    fn guard_erased_invocation_result(
+        &mut self,
+        body: ExprId,
+        cleanup: &[crate::fir::FirInlineCall],
+        cause: Option<(u32, Ty)>,
+        result_ty: Ty,
+        plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
+    ) -> Option<ExprId> {
+        let result_slot = self.allocate_temporary();
+        let label = format!("$inline_invoke${result_slot}");
+        let initial = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let declaration = self.ir.add_expr(IrExpr::Variable {
+            index: result_slot,
+            ty: Ty::obj("java/lang/Object"),
+            init: Some(initial),
+            named: false,
+        });
+        self.ir
+            .inline_return_frames
+            .insert(declaration, label.clone());
+        let store_result = self.ir.add_expr(IrExpr::SetValue {
+            var: result_slot,
+            value: body,
+        });
+        let exit = self.ir.add_expr(IrExpr::Break {
+            label: Some(label.clone()),
+        });
+        let try_body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![store_result, exit],
+            value: None,
+        });
+        let guarded = self.guarded_try(try_body, cleanup, cause, plan_value)?;
+        let loop_body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![guarded],
+            value: None,
+        });
+        let condition = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let carried = self.ir.add_expr(IrExpr::While {
+            cond: condition,
+            body: loop_body,
+            update: None,
+            post_test: false,
+            label: Some(label),
+        });
+        let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
+        let narrowed = self.ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg: read,
+            type_operand: result_ty,
+        });
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration, carried],
+            value: Some(narrowed),
+        }))
+    }
+
     fn guard_inline_body(
         &mut self,
         body: ExprId,
@@ -982,13 +1044,17 @@ impl BodyLowering<'_> {
         result_ty: Ty,
         plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
     ) -> Option<ExprId> {
-        // `FunctionN.invoke` returns erased `Object`. The template stores that object and the
-        // call site narrows it after `finally`; a pre-zeroed specialized local would checkcast
-        // before the store and add a slot the reference compiler never writes.
+        // `FunctionN.invoke` returns erased `Object`, including when the function type is `Unit`.
+        // A used result is reloaded on the normal path after `finally`. A `Unit` specialization
+        // stores the object and does not reload it.
         let erased_invoke = matches!(
             self.ir.expr(body),
-            IrExpr::InvokeFunction { ret, .. } if !matches!(ret, Ty::Unit | Ty::Nothing)
+            IrExpr::InvokeFunction { ret, .. } if *ret != Ty::Nothing
         );
+        if erased_invoke && result_ty != Ty::Unit {
+            return self
+                .guard_erased_invocation_result(body, cleanup, cause, result_ty, plan_value);
+        }
         let slot_ty = if erased_invoke {
             Ty::obj("java/lang/Object")
         } else {
@@ -1009,6 +1075,36 @@ impl BodyLowering<'_> {
             stmts: vec![store_result],
             value: None,
         });
+        let guarded = self.guarded_try(try_body, cleanup, cause, plan_value)?;
+        // A discarded `Unit` specialization never reloads the erased object. Every other result
+        // is read after `finally` and narrowed there, not inside the protected range.
+        let value = if erased_invoke && result_ty == Ty::Unit {
+            None
+        } else {
+            let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
+            Some(if erased_invoke {
+                self.ir.add_expr(IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg: read,
+                    type_operand: result_ty,
+                })
+            } else {
+                read
+            })
+        };
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration, guarded],
+            value,
+        }))
+    }
+
+    fn guarded_try(
+        &mut self,
+        body: ExprId,
+        cleanup: &[crate::fir::FirInlineCall],
+        cause: Option<(u32, Ty)>,
+        plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
+    ) -> Option<ExprId> {
         let catches = match cause {
             None => Vec::new(),
             Some((cause_slot, cause_ty)) => {
@@ -1039,31 +1135,11 @@ impl BodyLowering<'_> {
             stmts: cleanup_calls,
             value: None,
         });
-        let guarded = self.ir.add_expr(IrExpr::Try {
-            body: try_body,
+        Some(self.ir.add_expr(IrExpr::Try {
+            body,
             catches,
             finally: Some(finally),
             result: Ty::Unit,
-        });
-        // A discarded `Unit` specialization never reloads the erased object. Every other result
-        // is read after `finally` and narrowed there, not inside the protected range.
-        let value = if erased_invoke && result_ty == Ty::Unit {
-            None
-        } else {
-            let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
-            Some(if erased_invoke {
-                self.ir.add_expr(IrExpr::TypeOp {
-                    op: crate::ir::IrTypeOp::ImplicitCoercion,
-                    arg: read,
-                    type_operand: result_ty,
-                })
-            } else {
-                read
-            })
-        };
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![declaration, guarded],
-            value,
         }))
     }
 

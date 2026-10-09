@@ -6082,11 +6082,12 @@ impl<'a> Emitter<'a> {
                         // An erased `FunctionN.invoke` stored into an `Object` slot stays `Object`.
                         // The consumer after the store narrows it; casting at the store would put
                         // the checkcast inside the protected range.
+                        // `FunctionN.invoke` returns `Object` even when the function type says
+                        // `Unit`. A `Unit` consumer pops that object; an `Object` slot stores it.
                         let keep_erased_invoke = jvm_is_erased_top(jt)
                             && matches!(
                                 self.ir.expr(value),
-                                IrExpr::InvokeFunction { ret, .. }
-                                    if !matches!(ret, Ty::Unit | Ty::Nothing)
+                                IrExpr::InvokeFunction { ret, .. } if *ret != Ty::Nothing
                             );
                         if keep_erased_invoke {
                             self.erased_invocations.insert(value);

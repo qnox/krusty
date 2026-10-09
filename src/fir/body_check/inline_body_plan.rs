@@ -132,11 +132,12 @@ fn map_recovery(
 }
 
 /// Keep an extension receiver only when it is a type parameter. Its bound is what the expansion
-/// stores; an ordinary classifier receiver is already the slot type.
+/// stores; an ordinary classifier receiver is already the slot type. A nullable occurrence
+/// (`T?` where `T : Closeable?`) is still that parameter.
 pub(super) fn type_parameter_receiver(
     receiver: Option<crate::types::Ty>,
 ) -> Option<crate::types::Ty> {
-    receiver.filter(|receiver| receiver.is_ty_param())
+    receiver.filter(|receiver| receiver.non_null().is_ty_param())
 }
 
 pub(super) fn publish(
@@ -214,7 +215,7 @@ pub(super) fn publish(
                     .map(|value| map_value(value, receiver_parameter))
                     .transpose()?,
                 declared_receiver: declared_receiver
-                    .filter(|receiver| receiver.is_ty_param())
+                    .filter(|receiver| receiver.non_null().is_ty_param())
                     .map(crate::fir::ResolvedTy::new)
                     .transpose()
                     .map_err(|_| MappingFailure::UnsupportedPlan)?,
@@ -1001,11 +1002,13 @@ mod tests {
         };
         let declared = declared_receiver
             .expect("Closeable.use stores its type-parameter receiver")
-            .get();
-        assert!(declared.is_ty_param());
+            .get()
+            .non_null();
+        assert!(declared.is_ty_param(), "{declared:?}");
         assert_eq!(
             declared.ty_param_bound().map(Ty::non_null),
-            Some(Ty::obj("java/io/Closeable"))
+            Some(Ty::obj("java/io/Closeable")),
+            "{declared:?}"
         );
         assert_eq!(*lambda_parameter, 0);
         assert_eq!(arguments.as_ref(), [crate::fir::FirInlineValue::Receiver]);
