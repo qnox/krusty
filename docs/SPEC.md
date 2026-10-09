@@ -6828,6 +6828,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A fully-qualified CONSTRUCTOR call via a package path `a.b.Ctx(x = 1, y = 2)`.** The prefix commits
   as a package and `Ctx` is one classifier edge. The checker records the selected constructor and
   result identity; lowering consumes those facts. Test: `tests/fq_ctor_call_e2e.rs`.
+- **A construction of a module class records the selected constructor declaration.** Common IR
+  maps each construction to the checked constructor declaration the checker selected, and copies
+  one module record per such declaration, and per constructor the file itself declares: the
+  constructed classifier's qualified identity and declaration flags, the constructor's flags,
+  visibility, context-parameter count, its complete declared parameter list at stored value types,
+  and an inner class's enclosing classifier. The declaring file and every constructing file copy
+  the record from the same declaration, so a backend realizes both sides of the call from
+  identical facts. Test: `a_cross_file_construction_records_the_selected_constructor_and_its_declaration`
+  in `src/fir_lower/construction_target_tests.rs`.
 - **`break` / `continue` in EXPRESSION position (`val v = x ?: continue`, a `when` arm).** Kotlin's
   `break`/`continue` are `Nothing`-typed expressions (like `return`/`throw`), not only statements — new
   `Expr::Break`/`Expr::Continue` (parsed in `parse_prefix`, typed `Ty::Nothing`, `expr_diverges`), lowered
@@ -12229,6 +12238,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_value_class_typed_member_is_carried_as_its_value`,
   `a_generic_member_is_read_at_each_instantiation`,
   `an_open_member_and_a_source_written_getter_run_in_the_declaring_file`).
+- **Native: a class declared in another file is constructed through its declaring file.** A
+  construction of a module class whose layout this file does not hold calls the allocating entry
+  point of the constructor the checker selected. Both files derive that entry point from one
+  module record of the constructor declaration: its symbol spells the class's qualified name and
+  the constructor's complete declared parameter list (behind an inner class's enclosing
+  classifier), so two constructors of one class never share it and neither file depends on the
+  other's lowering. The constructing file evaluates every argument in source order first. The
+  entry point then runs the declaring file's top-level initializer, allocates, converts each
+  declared parameter to what that file's constructor takes, and calls it; a value class answers
+  its underlying value. An inner class takes its enclosing instance first. A generic class takes
+  its declared type parameters, which each construction adapts from its own instantiation. An
+  interface, annotation, enum, object, abstract, sealed, local, or `expect` class, a private
+  constructor, a constructor with context parameters, and a call that leaves a default argument
+  to the declaration are not this call. A constructor the plan supports but the declaring file
+  cannot realize is an internal error in that file, not a missing symbol.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`a_class_is_constructed_from_the_file_that_does_not_declare_it`,
+  `a_constructed_member_var_is_updated_from_the_calling_file`,
+  `an_empty_constructor_runs_the_property_initializer`,
+  `a_secondary_constructor_in_another_file_delegates`,
+  `overloaded_constructors_in_another_file_stay_distinct`,
+  `a_constructor_reads_its_own_file_after_the_arguments_are_evaluated`,
+  `a_generic_class_is_constructed_at_each_instantiation_from_another_file`,
+  `an_inner_class_is_constructed_with_its_outer_instance`,
+  `a_value_class_constructed_in_another_file_is_its_value`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs

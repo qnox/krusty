@@ -106,10 +106,12 @@ pub use constructors::{
     IrJvmValueClassSecondaryCtor,
 };
 pub use constructors::{
+    IrCheckedConstructorTarget, IrExternalConstructorTarget, IrSecondaryCtor, IrSecondaryCtorLines,
+};
+pub use constructors::{
     IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction,
     IrCustomSerializerConstructorTarget,
 };
-pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use fields::IrField;
@@ -121,7 +123,8 @@ pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
-    IrModuleClassifier, IrModuleMemberAccess, IrModuleSource,
+    IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
+    IrModuleSource,
 };
 pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
@@ -221,36 +224,6 @@ pub struct IrCheckedEnumEntryBody {
     pub ordinal: u32,
     pub name: String,
     pub construction: ExprId,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum IrCheckedConstructorTarget {
-    Module(crate::fir::CallableId),
-    External {
-        declaration: crate::fir::ExternalCallableId,
-        classifier: TypeName,
-        parameters: Vec<Ty>,
-    },
-}
-
-/// Exact dependency constructor selected by checked FIR, with an optional backend realization.
-///
-/// `declaration` is provider-neutral and survives common lowering. A target backend fills
-/// `descriptor` from that identity before emission; common lowering never derives a physical ABI
-/// from the call site's specialized semantic parameter types.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IrExternalConstructorTarget {
-    pub declaration: crate::fir::ExternalCallableId,
-    pub descriptor: Option<String>,
-}
-
-impl IrExternalConstructorTarget {
-    pub fn unresolved(declaration: crate::fir::ExternalCallableId) -> Self {
-        Self {
-            declaration,
-            descriptor: None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1670,6 +1643,8 @@ pub struct IrFile {
     /// Referenced current-module singleton classifiers. Backends choose their storage field from
     /// this semantic singleton/companion shape without querying frontend declarations.
     pub referenced_module_classifiers: std::collections::HashMap<TypeName, IrModuleClassifier>,
+    /// Selected module constructors and their declaration records.
+    pub module_constructions: IrModuleConstructions,
     /// Complete checked applied hierarchy for every source classifier realized in this file.
     /// Common lowering copies it from the stable FIR index; target passes may inspect target-specific
     /// representation rules but must not reconstruct semantic inheritance through frontend lookup.
