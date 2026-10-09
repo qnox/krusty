@@ -351,7 +351,6 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     }
     val languageVersion = options.languageVersion.orNull?.version
     val apiVersion = options.apiVersion.orNull?.version
-    reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
     // `-Werror` is not yet modeled, so its structured equivalent stays rejected. Named
@@ -387,32 +386,11 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     }
     options.jvmTarget.orNull?.let { arguments.addPair("-jvm-target", it.target) }
     options.jvmDefault.orNull?.let { arguments.addPair("-jvm-default", it.compilerArgument) }
+    if (options.progressiveMode.getOrElse(false)) arguments.add("-progressive")
     if (options.javaParameters.getOrElse(false)) arguments.add("-java-parameters")
     if (options.noJdk.getOrElse(false)) arguments.add("-no-jdk")
     return arguments
 }
-
-private val ALLOWED_FREE_FLAGS = setOf(
-    "-Xno-param-assertions",
-    "-Xno-call-assertions",
-    "-Xcontext-parameters",
-    "-Xconsistent-data-class-copy-visibility",
-    "-Xexplicit-backing-fields",
-    "-Xmulti-dollar-interpolation",
-    "-Xnested-type-aliases",
-    "-Xskip-prerelease-check",
-    "-Xsuppress-version-warnings",
-    "-Xdont-warn-on-error-suppression",
-    "-Xrender-internal-diagnostic-names",
-    "-Xskip-metadata-version-check",
-)
-
-private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "complete", "disable")
-
-private val EXPLICIT_API_MODES = setOf("strict", "warning", "disable")
-
-private val JVM_DEFAULT_MODES = setOf("enable", "no-compatibility", "disable")
-private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disable")
 
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
@@ -431,51 +409,19 @@ private fun validateStructuredOptIns(markers: List<String>): List<String> {
     return markers
 }
 
+// Free arguments reach krusty verbatim, as KGP passes them to kotlinc: krusty parses them with
+// kotlinc's argument table, reports kotlinc's errors and warnings, and refuses an argument it does
+// not implement. Only the arguments this plugin derives from structured task inputs are refused
+// here.
 private fun validateFreeArguments(input: List<String>): ArrayList<String> {
-    val result = ArrayList<String>()
-    val seen = HashSet<String>()
     for (argument in input) {
         reservedFreeArgument(argument)?.let { owner ->
             throw GradleException(
                 "freeCompilerArg '$argument' conflicts with $owner; configure the structured Gradle input instead",
             )
         }
-        val key = when {
-            argument in ALLOWED_FREE_FLAGS -> argument
-            argument == "-jvm-default" || argument == "-Xjvm-default" -> throw GradleException(
-                "freeCompilerArg '$argument' needs the '=' form: $argument=<mode>",
-            )
-            argument.startsWith("-jvm-default=") &&
-                argument.substringAfter('=') in JVM_DEFAULT_MODES -> "-jvm-default"
-            argument.startsWith("-Xjvm-default=") &&
-                argument.substringAfter('=') in JVM_DEFAULT_LEGACY_MODES -> "-jvm-default"
-            // Several -opt-in arguments are legal (the Kotlin build applies one per opt-in); only an
-            // exact repeat is a duplicate, so the key is the argument itself.
-            argument.startsWith("-opt-in=") && argument.substringAfter('=').isNotEmpty() -> argument
-            argument == "-Werror" ->
-                throw GradleException(
-                    "krusty does not support warning policy freeCompilerArg '$argument'",
-                )
-            // The compiler owns the typed diagnostic registry and severity validation. Several
-            // entries are legal (one per diagnostic), so only an exact repeated argument shares a
-            // key at this transport boundary.
-            argument.startsWith("-Xwarning-level=") -> argument
-            argument.startsWith("-Xlambdas=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xlambdas"
-            argument.startsWith("-Xsam-conversions=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xsam-conversions"
-            // KGP's `explicitApi()` and `explicitApiWarning()` arrive as this free argument.
-            argument.startsWith("-Xexplicit-api=") &&
-                argument.substringAfter('=') in EXPLICIT_API_MODES -> "-Xexplicit-api"
-            argument == "-Xname-based-destructuring" -> "-Xname-based-destructuring"
-            argument.startsWith("-Xname-based-destructuring=") &&
-                argument.substringAfter('=') in NAME_DESTRUCTURING_MODES -> "-Xname-based-destructuring"
-            else -> throw GradleException(
-                "unsupported freeCompilerArg '$argument'; use a supported compilerOptions property",
-            )
-        }
-        if (!seen.add(key)) throw GradleException("duplicate freeCompilerArg '$key'")
-        result.add(argument)
     }
-    return result
+    return ArrayList(input)
 }
 
 private fun reservedFreeArgument(argument: String): String? {

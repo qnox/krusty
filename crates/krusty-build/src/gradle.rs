@@ -772,19 +772,11 @@ mod tests {
             for (case, expected) in [
                 (
                     "structured-option",
-                    "krusty does not support compilerOptions.progressiveMode",
+                    "krusty does not support compilerOptions.extraWarnings",
                 ),
                 (
                     "reserved-free-argument",
                     "freeCompilerArg '-d=forbidden' conflicts with the plugin-owned destination; configure the structured Gradle input instead",
-                ),
-                (
-                    "duplicate-free-argument",
-                    "duplicate freeCompilerArg '-Xlambdas'",
-                ),
-                (
-                    "unknown-free-argument",
-                    "unsupported freeCompilerArg '-Xdefinitely-unsupported'; use a supported compilerOptions property",
                 ),
                 (
                     "plugin-free-argument",
@@ -803,32 +795,12 @@ mod tests {
                     "compilerOptions.jvmDefault and freeCompilerArg '-jvm-default=disable' are both set; configure exactly one",
                 ),
                 (
-                    "jvm-default-bad-mode",
-                    "unsupported freeCompilerArg '-jvm-default=sideways'; use a supported compilerOptions property",
-                ),
-                (
                     "progressive-free-argument",
                     "freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
                 ),
                 (
-                    "jspecify-free-argument",
-                    "unsupported freeCompilerArg '-Xjspecify-annotations=strict'; use a supported compilerOptions property",
-                ),
-                (
-                    "jdk-release-free-argument",
-                    "unsupported freeCompilerArg '-Xjdk-release=8'; use a supported compilerOptions property",
-                ),
-                (
-                    "duplicate-inert-flag",
-                    "duplicate freeCompilerArg '-Xskip-prerelease-check'",
-                ),
-                (
                     "all-warnings-as-errors",
                     "krusty does not support compilerOptions.allWarningsAsErrors",
-                ),
-                (
-                    "free-werror",
-                    "krusty does not support warning policy freeCompilerArg '-Werror'",
                 ),
                 (
                     "empty-opt-in",
@@ -875,25 +847,58 @@ mod tests {
                 }
             }
 
-            // Gradle transports named warning policy without duplicating the compiler's registry.
-            // Malformed policy therefore reaches krusty and is rejected by the same parser as a
-            // direct CLI or Bazel-worker invocation.
-            for (case, argument) in [
+            // Free arguments reach krusty verbatim: the plugin keeps no copy of kotlinc's argument
+            // table. A malformed value and an argument krusty does not implement are refused by
+            // the same parser as a direct CLI or Bazel-worker invocation: krusty exits 2 with its
+            // one error line and writes nothing to the task's emptied destination.
+            let refused = |argument: &str| {
+                format!(
+                    "krusty: error: krusty does not implement the kotlinc argument '{argument}'"
+                )
+            };
+            for (case, argument, expected) in [
+                (
+                    "jvm-default-bad-mode",
+                    "-jvm-default=sideways",
+                    "krusty: error: invalid value 'sideways' for -jvm-default".to_owned(),
+                ),
+                (
+                    "jspecify-free-argument",
+                    "-Xjspecify-annotations=strict",
+                    refused("-Xjspecify-annotations=strict"),
+                ),
+                (
+                    "jdk-release-free-argument",
+                    "-Xjdk-release=17",
+                    refused("-Xjdk-release=17"),
+                ),
+                ("free-werror", "-Werror", refused("-Werror")),
                 (
                     "warning-level-bad-severity",
                     "-Xwarning-level=REDUNDANT_CLI_ARG:loud",
+                    "krusty: error: invalid severity 'loud' in \
+                     -Xwarning-level=REDUNDANT_CLI_ARG:loud; supported severities: error, \
+                     warning, disabled"
+                        .to_owned(),
                 ),
                 (
                     "warning-level-missing-colon",
                     "-Xwarning-level=REDUNDANT_CLI_ARG",
+                    "krusty: error: invalid value 'REDUNDANT_CLI_ARG' for -Xwarning-level: \
+                     expected <NAME>:<error|warning|disabled>"
+                        .to_owned(),
                 ),
             ] {
                 let _ = std::fs::remove_file(&log);
-                let result = build()
+                let rendered = match build()
                     .property("krusty.negative", case)
                     .tasks([":compiler:util:compileKotlin"])
-                    .run();
-                assert!(result.is_err(), "negative case {case} succeeded");
+                    .run()
+                {
+                    Ok(()) => panic!("negative case {case} succeeded"),
+                    Err(error) => error.to_string(),
+                };
+                assert!(log.exists(), "{case} never reached krusty: {rendered}");
                 let invocation = single_invocation(&log);
                 assert_eq!(
                     invocation
@@ -903,6 +908,26 @@ mod tests {
                     1,
                     "{case}: {invocation:?}",
                 );
+                assert_eq!(
+                    rendered
+                        .lines()
+                        .filter(|line| line.trim() == expected)
+                        .count(),
+                    1,
+                    "{case}: {rendered}",
+                );
+                assert_eq!(
+                    rendered
+                        .lines()
+                        .filter(|line| line.contains("exited with 2 for :compiler:util:"))
+                        .count(),
+                    1,
+                    "{case}: {rendered}",
+                );
+                let written = std::fs::read_dir(&kotlin_classes)
+                    .map(|entries| entries.count())
+                    .unwrap_or(0);
+                assert_eq!(written, 0, "{case} wrote to {}", kotlin_classes.display());
             }
 
             // Gradle forwards standard version values without duplicating kotlinc's
@@ -2156,13 +2181,9 @@ tasks.withType<KotlinJvmCompile>().configureEach {
         freeCompilerArgs.add("-Xconsistent-data-class-copy-visibility")
         freeCompilerArgs.add("-Xskip-prerelease-check")
         when (krustyNegative) {
-            "structured-option" -> progressiveMode.set(true)
+            "structured-option" -> extraWarnings.set(true)
             "all-warnings-as-errors" -> allWarningsAsErrors.set(true)
             "reserved-free-argument" -> freeCompilerArgs.add("-d=forbidden")
-            "duplicate-free-argument" -> freeCompilerArgs.addAll(
-                listOf("-Xlambdas=indy", "-Xlambdas=class"),
-            )
-            "unknown-free-argument" -> freeCompilerArgs.add("-Xdefinitely-unsupported")
             "plugin-free-argument" -> freeCompilerArgs.add("-Xplugin=forbidden.jar")
             "jvm-default-conflict" -> freeCompilerArgs.add("-jvm-default=disable")
             "jvm-default-bad-mode" -> freeCompilerArgs.add("-jvm-default=sideways")
@@ -2170,8 +2191,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "old-api-version" -> apiVersion.set(KotlinVersion.fromVersion("1.9"))
             "progressive-free-argument" -> freeCompilerArgs.add("-progressive")
             "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
-            "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=8")
-            "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
+            "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=17")
             "free-werror" -> freeCompilerArgs.add("-Werror")
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
             "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
