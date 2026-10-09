@@ -121,11 +121,25 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
     argv.extend(unit.kotlinc_args.iter().cloned());
     argv.extend(unit.sources.iter().map(|path| path.display().to_string()));
 
-    let opts = cli::parse(argv);
-    if !opts.errors.is_empty() {
-        return Err(format!("krusty: {}\n", opts.errors.join("; ")));
+    // A module with no Kotlin sources (an export wrapper, or a jar that only carries resources)
+    // still has a declared output. Running the compiler would also demand a Kotlin distribution
+    // the action does not have.
+    if unit.sources.is_empty() {
+        write_jar(&unit.output_jar, &[]).map_err(|error| {
+            format!(
+                "krusty: cannot write output to {}: {error}\n",
+                unit.output_jar.display()
+            )
+        })?;
+    } else {
+        let opts = cli::parse(argv);
+        if !opts.errors.is_empty() {
+            return Err(format!("krusty: {}\n", opts.errors.join("; ")));
+        }
+        compile(&opts)?;
     }
-    compile(&opts)?;
+    krusty_cli::worker::package_resources(&unit.output_jar, &unit.resources)
+        .map_err(|error| format!("krusty: {error}\n"))?;
 
     // Bazel fails an action whose DECLARED outputs are missing, so both must exist even though
     // krusty has nothing distinct to put in them.

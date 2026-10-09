@@ -132,8 +132,14 @@ Three further gaps, each stated by the worker rather than discovered later:
   change instead of only on an ABI change. Correct, just less incremental.
 * **No build-supplied compiler plugins.** A target with `--plugin-id` (the Compose plugin, the
   serialization plugin) is refused; krusty loads its own plugins, not bazel-supplied jars.
-* **No resources.** krusty's jar holds class files and the `kotlin_module` index; a target passing
-  `--resources` is refused rather than shipped a jar silently missing them.
+
+`--resources` groups (`strip_prefix:add_prefix:file`) are copied into the output jar after the
+classes. The entry name is the file path with `strip_prefix` removed and `add_prefix` prepended,
+which is the name `jvm_library` puts in the module jar. A file outside the strip prefix fails the
+action. The final entry must be a canonical relative jar path: absolute, drive-prefixed, empty,
+`.`/`..`, repeated-separator, control-character, and non-UTF-8 names fail before the jar is changed.
+A target with no `.kt` sources still writes the jar (manifest, then those resources), so an export
+wrapper that only carries a module xml succeeds.
 
 Options that are understood but change nothing krusty emits are reported in the work response, which
 bazel prints, rather than dropped in silence.
