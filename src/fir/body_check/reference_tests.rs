@@ -258,7 +258,8 @@ fn inherited_lateinit_initialization_test_uses_the_current_subclass_receiver() {
 #[test]
 fn companion_extension_function_reference_is_static_and_receiverless() {
     let (body, index) = checked_function_body(
-        "class C\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+         class C\n\
          companion fun C.answer(): String = \"OK\"\n\
          fun reference(): () -> String = C::answer\n",
         "reference",
@@ -295,7 +296,8 @@ fn companion_extension_function_reference_is_static_and_receiverless() {
 #[test]
 fn contextual_companion_reference_skips_inapplicable_instance_member() {
     let (body, index) = checked_function_body(
-        "class C {\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+             class C {\n\
              fun baz(value: Int) {}\n\
              companion { fun baz(value: String): String = value }\n\
          }\n\
@@ -330,7 +332,8 @@ fn contextual_companion_reference_skips_inapplicable_instance_member() {
 #[test]
 fn companion_extension_property_reference_is_static_and_receiverless() {
     let (body, index) = checked_function_body_with_platform(
-        "class C\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+         class C\n\
          companion val C.answer: String = \"OK\"\n\
          fun reference(): () -> String = C::answer\n",
         "reference",

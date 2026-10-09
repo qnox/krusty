@@ -1143,7 +1143,8 @@ fn imported_object_extension_property_write_keeps_its_selected_singleton_dispatc
 #[test]
 fn companion_extension_properties_keep_associated_targets_without_runtime_receivers() {
     let (body, index) = checked_function_body(
-        "class C\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+         class C\n\
          companion val C.readonly = \"O\"\n\
          companion var C.mutable = \"\"\n\
          companion fun C.getOk(): String { mutable = \"K\"; return readonly + mutable }\n",
@@ -1194,7 +1195,8 @@ fn companion_extension_properties_keep_associated_targets_without_runtime_receiv
 #[test]
 fn classifier_qualified_companion_property_write_has_no_runtime_receiver() {
     let (body, index) = checked_function_body(
-        "class C\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+         class C\n\
          companion var C.mutable: String = \"\"\n\
          fun write() { C.mutable = \"OK\" }\n",
         "write",
@@ -1224,7 +1226,7 @@ fn classifier_qualified_companion_property_write_has_no_runtime_receiver() {
 #[test]
 fn companion_block_property_shadows_same_named_companion_object_property() {
     let (body, index) = checked_function_body(
-        "// LANGUAGE: +CompanionBlocks +CompanionExtensions\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
          class C {\n\
              companion { val value: String = \"block\" }\n\
              companion object { val value: String = \"object\" }\n\
@@ -1257,7 +1259,7 @@ fn companion_block_property_shadows_same_named_companion_object_property() {
 #[test]
 fn inferred_signature_selects_companion_block_property_without_a_value_facet() {
     let (body, _) = checked_function_body(
-        "// LANGUAGE: +CompanionBlocks +CompanionExtensions\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
          interface C { companion { val value get() = \"OK\" } }\n\
          fun box() = C.value\n",
         "box",

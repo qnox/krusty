@@ -16,6 +16,7 @@ pub(super) struct SyntaxGates {
     name_based_destructuring: FeatureGate,
     unnamed_local_variables: FeatureGate,
     local_type_aliases: FeatureGate,
+    companion_blocks_and_extensions: FeatureGate,
     /// How many statements and expressions enclose the cursor.
     body_depth: u32,
 }
@@ -26,6 +27,7 @@ impl SyntaxGates {
             name_based_destructuring: features.gate("NameBasedDestructuring"),
             unnamed_local_variables: features.gate("UnnamedLocalVariables"),
             local_type_aliases: features.gate("LocalTypeAliases"),
+            companion_blocks_and_extensions: features.gate("CompanionBlocksAndExtensions"),
             body_depth: 0,
         }
     }
@@ -91,5 +93,26 @@ impl Parser<'_> {
             let gate = self.gates.local_type_aliases.clone();
             self.file.language_gates.require(&gate, start);
         }
+    }
+
+    /// The first `companion { … }` block of a classifier, at its `companion` keyword: kotlinc
+    /// reports a classifier's blocks once.
+    pub(super) fn gate_companion_block(&mut self, companion_keyword: Span) {
+        let gate = self.gates.companion_blocks_and_extensions.clone();
+        self.file.language_gates.require(&gate, companion_keyword);
+    }
+
+    /// The `companion` modifier of a companion extension. Without the feature the modifier is
+    /// also not one a file-level declaration may carry.
+    pub(super) fn gate_companion_extension(&mut self, companion_keyword: Span) {
+        let gate = self.gates.companion_blocks_and_extensions.clone();
+        if gate.is_enabled() {
+            return;
+        }
+        self.file.language_gates.require(&gate, companion_keyword);
+        self.file.language_gates.reject(
+            companion_keyword,
+            "modifier 'companion' is not applicable inside 'file'.",
+        );
     }
 }

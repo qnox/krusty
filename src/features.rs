@@ -114,6 +114,7 @@ const MODELED_FEATURES: &[&str] = &[
     "AllowEagerSupertypeAccessibilityChecks",
     "AnnotationsInMetadata",
     "BareArrayClassLiteral",
+    "CompanionBlocksAndExtensions",
     "ContextParameters",
     "ContextReceivers",
     "ContextSensitiveResolutionUsingExpectedType",

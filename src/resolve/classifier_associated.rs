@@ -419,6 +419,7 @@ impl Checker<'_> {
         let target_span = self.assignment_target_span(statement);
         match selection {
             TopLevelPropertySelection::Selected(property) => {
+                self.gate_companion_property(target_span, &property.property);
                 if property.property.setter.is_none() {
                     self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
                 }
@@ -589,6 +590,7 @@ impl Checker<'_> {
             .into_iter()
             .find(|property| property.receiver_rank == nearest && property.context_count == 0)?;
         let ty = self.property_ref_ty(0, property.setter.is_some(), &[property.ty])?;
+        self.gate_companion_property(self.member_name_span(expression, name), &property);
         self.expr_lowers.insert(
             expression,
             ExprLowering::CallableReference {

@@ -1090,7 +1090,8 @@ fn companion_extension_references_lower_as_receiverless_static_values() {
         .expect("JVM provider initialization"),
     );
     let ir = lower_single_source_with_platform(
-        "class C\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+         class C\n\
          companion fun C.function(): String = \"OK\"\n\
          companion val C.property: String = \"OK\"\n\
          fun references() {\n\
@@ -1129,7 +1130,8 @@ fn companion_extension_references_lower_as_receiverless_static_values() {
 #[test]
 fn companion_associated_function_body_and_call_have_no_runtime_receiver_slot() {
     let ir = lower_single_source(
-        "class C\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+         class C\n\
          companion fun C.echo(value: String): String = value\n\
          fun box(): String = C.echo(\"OK\")\n",
         "CompanionAssociatedCall",
