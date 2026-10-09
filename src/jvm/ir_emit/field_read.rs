@@ -18,7 +18,7 @@ impl Emitter<'_> {
         let class_decl = &self.ir.classes[class as usize];
         let field = &class_decl.fields[index as usize];
         let source_name = field.name.clone();
-        let name = instance_field_jvm_name(self.ir, class_decl, field);
+        let name = instance_field_jvm_name(self.ir, self.run, class_decl, index as usize);
         let field_ty = jvm_value_ty(&field.ty);
         let owner = class_decl.fq_name();
         let is_lateinit = field.is_lateinit();
@@ -30,6 +30,7 @@ impl Emitter<'_> {
             static_accessors::cross_class_backing_field_method(
                 self.cw,
                 self.ir,
+                self.run,
                 &self.facade,
                 &planned,
                 reader,

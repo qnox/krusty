@@ -341,6 +341,7 @@ pub(super) fn emit_suspend_lambda_class(
     // classifier emission writes on the declaration owner.
     static_accessors::emit(
         ir,
+        env.run,
         &env.run.static_accessor_plan.borrow(),
         StaticOwner::Class(c.fq_name),
         facade,

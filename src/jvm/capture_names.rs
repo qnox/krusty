@@ -241,16 +241,3 @@ fn uses_receiver_constructor_parameter(receiver: &IrCapturedReceiver) -> bool {
         IrCapturedReceiver::Enclosing { .. } | IrCapturedReceiver::Callable { .. }
     )
 }
-
-/// The capture a class stores into `field`, if that field holds a captured value.
-pub(super) fn field_capture(class: &IrClass, field: usize) -> Option<&IrConstructorCapture> {
-    class
-        .ctor_args
-        .iter()
-        .find(|argument| {
-            argument
-                .field_index
-                .is_some_and(|index| index as usize == field)
-        })
-        .and_then(|argument| argument.capture.as_ref())
-}

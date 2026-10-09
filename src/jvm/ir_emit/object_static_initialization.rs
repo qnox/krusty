@@ -49,7 +49,7 @@ pub(super) fn emit(
     // both intern at the field-table visit (after `<clinit>` and the accessors). A named object's
     // backing fields stay on the eager path this block has always used.
     if interface_companion {
-        emit_interface_companion_member_fields(ir, c, signature_formatter, fq_name, cw);
+        emit_interface_companion_member_fields(ir, env.run, c, signature_formatter, fq_name, cw);
     } else {
         for (field_index, field) in c.fields.iter().enumerate() {
             let acc = declared_field_access(c, field_index, true);
@@ -60,7 +60,7 @@ pub(super) fn emit(
                 .or(field.type_param.as_deref());
             let field_sig =
                 property_jvm_signatures(signature_formatter, &field.ty, type_parameter).field;
-            let physical_name = instance_field_jvm_name(ir, c, field);
+            let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
             cw.add_field_sig(
                 acc,
                 &physical_name,
@@ -208,6 +208,7 @@ pub(super) fn emit(
 /// backing field, attached here so its name is not interned ahead of the field visit.
 fn emit_interface_companion_member_fields(
     ir: &IrFile,
+    run: &EmitRun,
     c: &IrClass,
     signature_formatter: &JvmSignatureFormatter<'_>,
     fq_name: &str,
@@ -254,7 +255,7 @@ fn emit_interface_companion_member_fields(
                     .or(field.type_param.as_deref());
                 let field_sig =
                     property_jvm_signatures(signature_formatter, &field.ty, type_parameter).field;
-                let physical_name = instance_field_jvm_name(ir, c, field);
+                let physical_name = instance_field_jvm_name(ir, run, c, field_index);
                 let descriptor = ir_type_desc(&field.ty);
                 let nullability = field_visibility::publishes_field_nullability(c, field_index)
                     .then(|| {

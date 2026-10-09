@@ -134,7 +134,7 @@ impl Emitter<'_> {
         // A class of THIS compilation is answered from its declaration, always — never by falling through
         // to the naming-convention guess, which has no class file to ask and would mistake an interface
         // for a class (`invokevirtual` on an interface is an `IncompatibleClassChangeError`).
-        let Some(field) = field else {
+        let Some((field_index, field)) = field else {
             let ty = declared.map(|p| p.ty)?;
             return Some(PropertyAccess::Accessor {
                 owner,
@@ -179,7 +179,7 @@ impl Emitter<'_> {
         }
         Some(PropertyAccess::Field {
             owner,
-            name: instance_field_jvm_name(self.ir, class, field),
+            name: instance_field_jvm_name(self.ir, self.run, class, field_index),
             descriptor: type_descriptor(jvm_value_ty(&field.ty)),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
             is_static: static_storage(self.ir, class),

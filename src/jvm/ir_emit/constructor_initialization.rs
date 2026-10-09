@@ -90,7 +90,7 @@ impl Emitter<'_> {
                 .sum::<u16>();
             code.aload(0);
             load(param_tys[param_i], param_slot, code);
-            let physical_name = instance_field_jvm_name(self.ir, class, field);
+            let physical_name = instance_field_jvm_name(self.ir, self.run, class, field_i as usize);
             let field_ref = self.cw.fieldref(
                 owner,
                 &physical_name,
