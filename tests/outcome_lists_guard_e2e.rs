@@ -40,8 +40,10 @@ struct Repo {
 
 impl Repo {
     fn new(name: &str) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("krusty-outcome-lists-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "krusty-outcome-lists-{name}-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create outcome-lists repository");
         let repo = Self { dir };
@@ -193,7 +195,10 @@ fn a_growing_cli_expected_failure_manifest_fails() {
     let repo = Repo::new("cli-failures");
     repo.write(CLI_FAILURES, "# header\nhelp/usage.args\n");
     let base = repo.commit();
-    repo.write(CLI_FAILURES, "# header\nhelp/usage.args\nwarnings/newly_broken.args\n");
+    repo.write(
+        CLI_FAILURES,
+        "# header\nhelp/usage.args\nwarnings/newly_broken.args\n",
+    );
     let head = repo.commit();
 
     let output = repo.check(&base, &head);
@@ -209,7 +214,10 @@ fn a_growing_cli_expected_failure_manifest_fails() {
 #[test]
 fn the_cli_not_applicable_inventory_is_proven_by_the_reference_run_instead() {
     let repo = Repo::new("cli-not-applicable");
-    repo.write(CLI_NOT_APPLICABLE, "# runtime JDK 8\njdkHome/jdkHome.args\n");
+    repo.write(
+        CLI_NOT_APPLICABLE,
+        "# runtime JDK 8\njdkHome/jdkHome.args\n",
+    );
     let base = repo.commit();
     repo.write(
         CLI_NOT_APPLICABLE,
