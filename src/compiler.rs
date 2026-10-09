@@ -315,6 +315,9 @@ struct BodyCheckGroup {
     root: crate::fir::DeclarationId,
     bodies: std::collections::HashSet<crate::fir::DeclarationId>,
     work: Vec<crate::fir::BodyWorkItem>,
+    /// Local and anonymous classifiers declared inside this group's bodies. Checking those bodies
+    /// checks them, so their declaration metadata is handed off with this group's result.
+    local_classifiers: Vec<crate::fir::DeclarationId>,
 }
 
 /// Partition one active source's stable work by the parser declaration subtree needed to recreate
@@ -341,6 +344,7 @@ fn body_check_groups(
                         root,
                         bodies: std::collections::HashSet::new(),
                         work: Vec::new(),
+                        local_classifiers: Vec::new(),
                     },
                 ));
                 groups.len() - 1
@@ -441,10 +445,37 @@ fn active_body_check_groups(
         if groups.iter().any(|group| group.root == declaration) {
             continue;
         }
+        // A local classifier is checked with the body that declares it, so its metadata belongs
+        // to the innermost group whose root encloses it. A group of its own would check nothing.
+        let local = index
+            .declaration_header(declaration)
+            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS));
+        let enclosing = local
+            .then(|| active.span(file, declaration))
+            .flatten()
+            .and_then(|classifier_span| {
+                groups
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, group)| !group.work.is_empty())
+                    .filter_map(|(position, group)| {
+                        active.span(file, group.root).map(|span| (position, span))
+                    })
+                    .filter(|(_, span)| {
+                        span.lo <= classifier_span.lo && classifier_span.hi <= span.hi
+                    })
+                    .min_by_key(|(_, span)| span.hi - span.lo)
+                    .map(|(position, _)| position)
+            });
+        if let Some(position) = enclosing {
+            groups[position].local_classifiers.push(declaration);
+            continue;
+        }
         groups.push(BodyCheckGroup {
             root: declaration,
             bodies: std::collections::HashSet::new(),
             work: Vec::new(),
+            local_classifiers: Vec::new(),
         });
     }
     groups.sort_by_key(|group| {
@@ -752,15 +783,17 @@ fn consume_body_group(
         }
         return false;
     }
-    metadata_handoff::attach_checked_declaration_metadata(
-        active_file,
-        active,
-        &info,
-        source_id,
-        group.root,
-        index,
-        sink.ir_mut(),
-    );
+    for root in std::iter::once(group.root).chain(group.local_classifiers.iter().copied()) {
+        metadata_handoff::attach_checked_declaration_metadata(
+            active_file,
+            active,
+            &info,
+            source_id,
+            root,
+            index,
+            sink.ir_mut(),
+        );
+    }
     true
 }
 
