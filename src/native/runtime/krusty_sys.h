@@ -10,6 +10,7 @@
 #define KT_SYS_WRITE 1
 #define KT_SYS_MMAP 9
 #define KT_SYS_MUNMAP 11
+#define KT_SYS_MPROTECT 10
 #define KT_SYS_EXIT 231 /* exit_group */
 #define KT_SYS_EXIT_THREAD 60
 #define KT_SYS_CLONE 56
@@ -19,6 +20,7 @@
 #define KT_SYS_WRITE 64
 #define KT_SYS_MMAP 222
 #define KT_SYS_MUNMAP 215
+#define KT_SYS_MPROTECT 226
 #define KT_SYS_EXIT 94 /* exit_group */
 #define KT_SYS_EXIT_THREAD 93
 #define KT_SYS_CLONE 220
@@ -128,6 +130,14 @@ static inline void *kt_map(size_t bytes) {
 
 static inline void kt_unmap(void *address, size_t bytes) {
     kt_syscall(KT_SYS_MUNMAP, (long)address, (long)bytes, 0, 0, 0, 0);
+}
+
+/* Make the pages over `bytes` at `address` inaccessible, so touching them faults. The length is
+   rounded up to whole pages, whatever the target's page size. */
+static inline void kt_protect_none(void *address, size_t bytes) {
+    if (kt_syscall(KT_SYS_MPROTECT, (long)address, (long)bytes, 0 /* PROT_NONE */, 0, 0, 0) != 0) {
+        kt_fail_oom();
+    }
 }
 
 /* The calling thread's kernel id: how a callback from foreign code finds out which attached thread

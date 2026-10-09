@@ -1277,9 +1277,11 @@ typedef struct KThreadEntry {
    runtime has not seen, which is attached for the callback's duration. */
 void kt_callback_enter(KThreadEntry *entry, void *stack_bottom);
 
-/* Leave Kotlin for the foreign code that called in, releasing the lock. Answers the exception the
-   callback left in flight, or NULL; it is the caller's, and no longer pending anywhere. */
-KRef kt_callback_leave(KThreadEntry *entry);
+/* Leave Kotlin for the foreign code that called in, releasing the lock. An exception the callback
+   left in flight ends the process, reported on the thread's name (`main`, or `Thread-<n>` for a
+   thread foreign code started) as Kotlin reports one nothing caught: no Kotlin reference ever
+   crosses back into foreign code, where no root would hold it. */
+void kt_callback_leave(KThreadEntry *entry);
 
 /* A thread the runtime started, until it is joined. */
 typedef struct KThreadHandle KThreadHandle;

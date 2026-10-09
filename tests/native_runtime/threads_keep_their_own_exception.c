@@ -23,20 +23,21 @@ static const KType node_type = {
     .reference_offsets = node_references,
 };
 
-/* What the worker raised and handed back; read by the main thread after the join. */
-static KRef worker_raised;
-static KRef worker_thrown;
 static kt_boolean worker_started_clean;
+static kt_boolean worker_saw_its_own;
 
+/* A callback that raises and catches its own exception while the main thread has one in flight. */
 static void worker_routine(void *argument) {
     (void)argument;
     uintptr_t bottom = 0;
     KThreadEntry entry;
     kt_callback_enter(&entry, &bottom);
     worker_started_clean = kt_pending_exception() == NULL;
-    worker_thrown = kt_throwable_new(&kt_type_illegal_state_exception, NULL);
-    kt_throw(worker_thrown);
-    worker_raised = kt_callback_leave(&entry);
+    KRef thrown = kt_throwable_new(&kt_type_illegal_state_exception, NULL);
+    kt_throw(thrown);
+    worker_saw_its_own = kt_pending_exception() == thrown;
+    kt_clear_pending();
+    kt_callback_leave(&entry);
 }
 
 __attribute__((noinline)) static Node *build(int count) {
@@ -60,8 +61,9 @@ __attribute__((noinline)) static int length(Node *list) {
     return count;
 }
 
-/* The C function a Kotlin frame called, calling back into Kotlin on the same thread. */
-__attribute__((noinline)) static KRef callback_on_this_thread(void) {
+/* The C function a Kotlin frame called, calling back into Kotlin on the same thread: it raises and
+   catches an exception of its own, which must not replace its caller's. */
+__attribute__((noinline)) static void callback_on_this_thread(void) {
     uintptr_t bottom = 0;
     KThreadEntry entry;
     kt_callback_enter(&entry, &bottom);
@@ -80,15 +82,13 @@ __attribute__((noinline)) static KRef callback_on_this_thread(void) {
         KT_SYS_FAIL("a callback's own list lost nodes\n");
     }
     kt_throw(kt_throwable_new(&kt_type_illegal_state_exception, NULL));
-    return kt_callback_leave(&entry);
+    kt_clear_pending();
+    kt_callback_leave(&entry);
 }
 
 void kt_program_entry(void) {
     uintptr_t bottom = 0;
     kt_runtime_init(&bottom);
-    kt_gc_add_global_root((void **)&worker_raised);
-    kt_gc_add_global_root((void **)&worker_thrown);
-
     Node *outer = build(500);
     KRef mine = kt_throwable_new(&kt_type_illegal_state_exception, NULL);
     kt_throw(mine);
@@ -103,17 +103,14 @@ void kt_program_entry(void) {
     if (!worker_started_clean) {
         KT_SYS_FAIL("a new thread started with another thread's exception in flight\n");
     }
-    if (worker_raised == NULL || worker_raised != worker_thrown) {
-        KT_SYS_FAIL("a callback's exception was not handed back to its caller\n");
+    if (!worker_saw_its_own) {
+        KT_SYS_FAIL("a callback's exception was not its own in flight\n");
     }
 
     /* Out to foreign code, which calls back in on this thread. */
     KThread *self = kt_native_enter();
-    KRef raised = callback_on_this_thread();
+    callback_on_this_thread();
     kt_native_leave(self);
-    if (raised == NULL || raised == mine) {
-        KT_SYS_FAIL("the callback's exception was not handed back to its caller\n");
-    }
     if (kt_pending_exception() != mine) {
         KT_SYS_FAIL("a callback on this thread replaced its exception in flight\n");
     }

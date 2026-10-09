@@ -86,9 +86,7 @@ static void worker_routine(void *argument) {
     KThreadEntry entry;
     kt_callback_enter(&entry, &bottom);
     work((long)argument);
-    if (kt_callback_leave(&entry) != NULL) {
-        KT_SYS_FAIL("a worker left an exception in flight\n");
-    }
+    kt_callback_leave(&entry);
 }
 
 static void check_shared(void) {

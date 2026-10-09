@@ -9726,7 +9726,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`failed_null_casts_name_primitive_and_qualified_type_parameter_targets`).
 - **Native: threads share one heap under one mutator lock.** A static program's threads are the
   runtime's own: `kt_thread_start` registers the new thread (released, its argument a root) before
-  `clone` creates it on a stack the runtime maps, as Go does with no C library; `kt_thread_join`
+  `clone` creates it on a stack the runtime maps, as Go does with no C library, with an
+  inaccessible guard page directly below it so that a thread that overflows its stack faults
+  instead of running into a neighbouring mapping; `kt_thread_join`
   waits with the lock released and frees the stack. An exception a started thread leaves uncaught
   ends the process, reported on `Thread-<n>` as the JVM names an unnamed thread. Creating the kernel
   thread is the one replaceable step, so a program that links a C library starts them with
@@ -9742,7 +9744,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   before its first statement, and the value it held would then be in no root at all. The exception
   slot generated code reads after every call stays one global, saved into the thread on release and
   restored on acquisition, so an exception in flight is its own thread's; a callback starts with
-  none and hands what it raised back to its caller. Every hand-off is a release and an acquire, so
+  none. An exception a callback leaves uncaught ends the process, reported on the thread's name
+  (`Thread-<n>` for one foreign code started, numbered with the runtime's own), while the lock is
+  still held, as Kotlin/Native ends one that escapes a `staticCFunction`: the foreign code it would
+  return to cannot handle it, and a heap reference handed back across the release would be held by
+  no root while another thread collects. Every hand-off is a release and an acquire, so
   `@Volatile` needs nothing beyond ordinary accesses. Not yet: threads running Kotlin in parallel,
   and preemption of a thread that loops in Kotlin without calling out, which needs safepoint polls in
   generated code. Portability: what is per-OS is two primitives in `krusty_sys.h` (wait and wake on
@@ -9754,8 +9760,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`threads_started_by_foreign_code_share_the_heap_through_collections`,
   `each_thread_keeps_its_own_exception_in_flight`,
   `threads_the_runtime_starts_keep_their_argument_until_they_run`,
-  `an_exception_a_started_thread_leaves_uncaught_ends_the_process_on_its_name`),
-  `tests/native_concurrency_e2e.rs`.
+  `an_exception_a_started_thread_leaves_uncaught_ends_the_process_on_its_name`,
+  `an_exception_a_callback_leaves_uncaught_ends_the_process_holding_the_lock`,
+  `a_started_threads_stack_has_a_guard_below_it`), each run on x86_64, aarch64 and riscv64 (the
+  architectures other than the host's built with clang and lld and run under QEMU's user-mode
+  emulators, which CI installs and must use), and `tests/native_concurrency_e2e.rs`.
 - **Native runtime: exceptions and integer arithmetic.** `src/native/runtime/krusty_rt.c` raises
   what Kotlin raises and does not stop there: `kt_throw` RECORDS the exception in the one pending
   slot and returns, and the caller's check of that slot is the propagation. So every runtime entry

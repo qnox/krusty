@@ -89,6 +89,34 @@ static void kt_thread_remove(KThread *thread) {
     kt_unmap(thread, sizeof(KThread));
 }
 
+/* A thread's number in its name, `Thread-<n>`: the threads the runtime starts and those foreign code
+   attaches are numbered from 0 in the order they appear, as the JVM numbers unnamed threads. The
+   program's first thread is `main`. */
+#define KT_MAIN_THREAD UINT32_MAX
+static uint32_t kt_numbered_threads;
+
+/* End the process on the exception `thread` left in flight, if it left one, reported on the
+   thread's name as Kotlin reports an exception nothing caught. The caller holds the lock. */
+static void kt_end_on_uncaught(const KThread *thread) {
+    if (thread->number == KT_MAIN_THREAD) {
+        kt_report_uncaught("main", 4);
+        return;
+    }
+    char name[20] = "Thread-";
+    size_t length = 7;
+    char digits[10];
+    size_t count = 0;
+    uint32_t number = thread->number;
+    do {
+        digits[count++] = (char)('0' + number % 10);
+        number /= 10;
+    } while (number != 0);
+    while (count > 0) {
+        name[length++] = digits[--count];
+    }
+    kt_report_uncaught(name, length);
+}
+
 static KThread *kt_thread_of(long tid) {
     for (KThread *thread = kt_threads; thread != NULL; thread = thread->next) {
         if (thread->tid == tid) {
@@ -125,6 +153,7 @@ void kt_runtime_init(void *stack_bottom) {
     }
     kt_lock();
     kt_running = kt_thread_new((uintptr_t)stack_bottom, kt_sys_gettid());
+    kt_running->number = KT_MAIN_THREAD;
 }
 
 /* ---- out to foreign code -----------------------------------------------------------------------
@@ -221,6 +250,7 @@ void kt_callback_enter(KThreadEntry *entry, void *stack_bottom) {
     entry->attached = thread == NULL;
     if (thread == NULL) {
         thread = kt_thread_new((uintptr_t)stack_bottom, tid);
+        thread->number = kt_numbered_threads++;
     } else {
         /* A callback on a thread that is in a `kt_native_enter`: its released state describes the
            Kotlin frames waiting above this one, and is put back on the way out. Until then this
@@ -238,17 +268,20 @@ void kt_callback_enter(KThreadEntry *entry, void *stack_bottom) {
     kt_pending = NULL;
 }
 
-KRef kt_callback_leave(KThreadEntry *entry) {
+void kt_callback_leave(KThreadEntry *entry) {
     KThread *thread = entry->thread;
-    KRef raised = kt_pending;
-    kt_pending = NULL;
+    /* An exception the callback did not catch has nowhere to go: the foreign code it would return to
+       knows nothing of Kotlin exceptions, and once the lock is released a heap reference handed to it
+       would be held by no root while another thread collects. So it ends the process here, with the
+       lock still held, as Kotlin/Native ends one that escapes a `staticCFunction`. */
+    kt_end_on_uncaught(thread);
     if (entry->attached) {
         /* The thread leaves the runtime: its stack is about to be returned to whoever owns it, and
            nothing on it is a root any more. */
         kt_thread_remove(thread);
         kt_running = NULL;
         kt_unlock();
-        return raised;
+        return;
     }
     /* Back to the foreign code that called in, and through it to the Kotlin frames that called out:
        the state recorded when they did is what describes this thread again. */
@@ -258,7 +291,6 @@ KRef kt_callback_leave(KThreadEntry *entry) {
     thread->saved_sp = entry->outer_sp;
     kt_pending = entry->outer_pending;
     kt_release(thread);
-    return raised;
 }
 
 /* ---- threads the runtime starts ----------------------------------------------------------------
@@ -268,6 +300,7 @@ KRef kt_callback_leave(KThreadEntry *entry) {
    `kt_spawn` with `pthread_create`; everything around it is the same. */
 
 #define KT_THREAD_STACK_BYTES ((size_t)8 * 1024 * 1024)
+#define KT_GUARD_BYTES ((size_t)4096)
 
 /* CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM |
    CLONE_CHILD_CLEARTID: a thread of this process, whose id word the kernel clears and wakes when it
@@ -359,9 +392,6 @@ __asm__(".text\n"
 #error "krusty native: unsupported architecture"
 #endif
 
-/* Threads the runtime has started, for their names. */
-static uint32_t kt_started_threads;
-
 /* What a started thread runs first: become the holder as itself, run the routine, and leave. It
    never returns: the thread ends here, after leaving the registry, so nothing scans its stack once
    the joiner may free it. */
@@ -378,22 +408,7 @@ __attribute__((noreturn)) static void kt_thread_main(void *start) {
     KRef argument = thread->start_argument;
     thread->start_argument = NULL;
     routine(argument);
-    if (kt_pending != NULL) {
-        /* `Thread-<n>`, numbered from 0 in start order, as the JVM names an unnamed thread. */
-        char name[20] = "Thread-";
-        size_t length = 7;
-        char digits[10];
-        size_t count = 0;
-        uint32_t number = thread->number;
-        do {
-            digits[count++] = (char)('0' + number % 10);
-            number /= 10;
-        } while (number != 0);
-        while (count > 0) {
-            name[length++] = digits[--count];
-        }
-        kt_report_uncaught(name, length);
-    }
+    kt_end_on_uncaught(thread);
     kt_thread_remove(thread);
     kt_running = NULL;
     kt_unlock();
@@ -402,6 +417,9 @@ __attribute__((noreturn)) static void kt_thread_main(void *start) {
 
 static long kt_spawn(KThreadHandle *handle, KThread *thread) {
     handle->stack = kt_map(KT_THREAD_STACK_BYTES);
+    /* A guard below the stack: a thread that recurses past its stack faults on it, deterministically,
+       instead of running on into whatever the kernel mapped next to it. */
+    kt_protect_none(handle->stack, KT_GUARD_BYTES);
     __atomic_store_n(&handle->exited, 1, __ATOMIC_RELEASE);
     return kt_clone(KT_CLONE_FLAGS, (char *)handle->stack + KT_THREAD_STACK_BYTES, &handle->exited,
                     kt_thread_main, thread);
@@ -415,7 +433,7 @@ KThreadHandle *kt_thread_start(void (*routine)(KRef), KRef argument) {
     thread->released = true;
     thread->start_routine = routine;
     thread->start_argument = argument;
-    thread->number = kt_started_threads++;
+    thread->number = kt_numbered_threads++;
     KThreadHandle *handle = (KThreadHandle *)kt_map(sizeof(KThreadHandle));
     if (kt_spawn(handle, thread) <= 0) {
         KT_FAIL("krusty: could not start a thread\n");
