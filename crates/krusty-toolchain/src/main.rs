@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use krusty_toolchain::configuration;
-use krusty_toolchain::diagnostic::Diagnostics;
+use krusty_toolchain::diagnostic::{Diagnostics, Severity};
 use krusty_toolchain::model::{self, Model, Start};
 use krusty_toolchain::show;
 
@@ -114,9 +114,7 @@ fn run(command: Command) -> Result<bool, String> {
     };
     let mut diagnostics = Diagnostics::default();
     let model = model::read(start, &mut diagnostics);
-    for diagnostic in diagnostics.iter() {
-        eprintln!("{diagnostic}");
-    }
+    report(&diagnostics);
     let Some(model) = model? else {
         if !diagnostics.has_errors() {
             return Err("no Kotlin project found in the current directory or above: no project.yaml or module.yaml".to_string());
@@ -133,6 +131,17 @@ fn run(command: Command) -> Result<bool, String> {
         Show::Settings { names, all } => return show_settings(&model, &names, all),
     }
     Ok(true)
+}
+
+/// Print problems where the toolchain prints them: errors on stderr, warnings on stdout before the
+/// command's result.
+fn report(diagnostics: &Diagnostics) {
+    for diagnostic in diagnostics.iter() {
+        match diagnostic.severity {
+            Severity::Error => eprintln!("{diagnostic}"),
+            Severity::Warning | Severity::WeakWarning => println!("{diagnostic}"),
+        }
+    }
 }
 
 /// Print the settings of the modules `names` (every module when `all`, or when there is only one),
@@ -163,9 +172,7 @@ fn show_settings(model: &Model, names: &[String], all: bool) -> Result<bool, Str
     let output = show::modules_settings(&model.modules, &configured, |module| {
         all || names.is_empty() || names.contains(&module.name)
     });
-    for diagnostic in diagnostics.iter() {
-        eprintln!("{diagnostic}");
-    }
+    report(&diagnostics);
     if diagnostics.has_errors() {
         return Ok(false);
     }

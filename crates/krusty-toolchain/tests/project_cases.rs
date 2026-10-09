@@ -6,11 +6,22 @@
 
 mod support;
 
+use std::path::Path;
+use std::process::{Command, Output};
+
 use krusty_toolchain::diagnostic::Diagnostics;
 use krusty_toolchain::{model, show};
 use support::kotlin::{self, Invocation};
 use support::rendering::problems;
 use support::{is_error, reported};
+
+fn run_toolchain(root: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_krusty-toolchain"))
+        .arg(format!("--project-dir={}", root.display()))
+        .args(["show", "modules"])
+        .output()
+        .expect("run krusty-toolchain")
+}
 
 #[test]
 fn every_project_case_is_read_as_the_toolchain_reads_it() {
@@ -86,4 +97,56 @@ fn every_project_case_is_read_as_the_toolchain_reads_it() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn the_command_routes_warnings_before_its_result_on_stdout() {
+    let temp = support::TempDir::new("command-warning-stream");
+    let root = support::materialize(
+        &temp,
+        &[("project.yaml".to_string(), "modules: []\n".to_string())],
+    );
+
+    let output = run_toolchain(&root);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stderr, b"");
+    assert_eq!(
+        output.stdout,
+        format!(
+            "{}:1:1: WARNING: Project has no modules: no root module file and no modules listed in the project file\n{}",
+            root.join("project.yaml").display(),
+            show::modules_table(&[])
+        )
+        .into_bytes()
+    );
+}
+
+#[test]
+fn the_command_routes_errors_to_stderr_and_fails_without_a_result() {
+    let temp = support::TempDir::new("command-error-stream");
+    let root = support::materialize(
+        &temp,
+        &[
+            (
+                "project.yaml".to_string(),
+                "modules: [a]\nunknown: value\n".to_string(),
+            ),
+            (
+                "a/module.yaml".to_string(),
+                "product: jvm/lib\n".to_string(),
+            ),
+        ],
+    );
+
+    let output = run_toolchain(&root);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, b"");
+    assert_eq!(
+        output.stderr,
+        format!(
+            "{}:2:1: ERROR: Unknown property `unknown`\n",
+            root.join("project.yaml").display()
+        )
+        .into_bytes()
+    );
 }
