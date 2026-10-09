@@ -106,8 +106,8 @@ pub(crate) struct Regeneration<'a> {
     pub(in crate::jvm) reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
     /// The caller's class-file major version.
     pub major: u16,
-    /// The `@Metadata` version the caller writes.
-    pub metadata_version: &'a [i32],
+    /// The `@Metadata` stamp the caller writes.
+    pub metadata_stamp: crate::jvm::classfile::MetadataStamp,
     /// The call's inline lambdas the constructor call passes, which the copy inlines.
     pub lambdas: &'a [ObjectLambda<'a>],
     /// The caller's source map, which the lambdas' lines are lines of.
@@ -778,6 +778,6 @@ fn write_metadata(
             "@Metadata without extra flags",
         ));
     }
-    cw.set_kotlin_metadata(kind, regeneration.metadata_version, flags, &d1, &d2);
+    cw.set_kotlin_metadata(kind, regeneration.metadata_stamp, flags, &d1, &d2);
     Ok(())
 }

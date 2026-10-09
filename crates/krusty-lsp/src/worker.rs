@@ -13,9 +13,11 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity, Span};
-use krusty::features::LangFeatures;
+use krusty::features::FeatureSetting;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
+use krusty::language_settings::LanguageSettings;
+use krusty::language_version::LanguageVersion;
 use krusty::source::{SourceInput, SourceKind};
 use serde::{Deserialize, Serialize};
 
@@ -67,7 +69,7 @@ struct AnalysisRequest<'a, J> {
     source_kinds: &'a [u8],
     result_count: usize,
     inferred_count: usize,
-    language_features: &'a [&'a str],
+    language: WireLanguage,
     java_sources: &'a [J],
     classpath: Option<&'a [PathBuf]>,
     /// Background indexing publishes diagnostics only. Navigation indexes for those files are built
@@ -85,7 +87,7 @@ struct OwnedAnalysisRequest {
     #[serde(default)]
     inferred_count: Option<usize>,
     #[serde(default)]
-    language_features: Vec<String>,
+    language: Option<WireLanguage>,
     #[serde(default)]
     java_sources: Vec<String>,
     #[serde(default)]
@@ -97,6 +99,73 @@ struct OwnedAnalysisRequest {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// A compilation's language settings on the wire: its language and API versions and the feature
+/// settings that rebuild its features over their defaults ([`LanguageSettings::feature_settings`]).
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct WireLanguage {
+    language_version: String,
+    api_version: String,
+    features: Vec<(String, bool)>,
+}
+
+impl WireLanguage {
+    fn of(settings: &LanguageSettings) -> Self {
+        Self {
+            language_version: settings.language_version.to_string(),
+            api_version: settings.api_version.to_string(),
+            features: settings
+                .feature_settings()
+                .into_iter()
+                .map(|setting| (setting.feature, setting.enabled))
+                .collect(),
+        }
+    }
+
+    /// The settings the supervisor sent; a request without any keeps the defaults.
+    fn settings(language: Option<&Self>) -> io::Result<LanguageSettings> {
+        let Some(language) = language else {
+            return Ok(LanguageSettings::default());
+        };
+        let target = krusty::kotlin_version::target();
+        let version = |text: &str| {
+            LanguageVersion::parse_supported_for(text, target).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unsupported language level '{text}' for kotlinc {target}"),
+                )
+            })
+        };
+        let features = language
+            .features
+            .iter()
+            .map(|(feature, enabled)| FeatureSetting {
+                feature: feature.clone(),
+                enabled: *enabled,
+            })
+            .collect::<Vec<_>>();
+        LanguageSettings::new(
+            version(&language.language_version)?,
+            Some(version(&language.api_version)?),
+            &features,
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+    }
+}
+
+/// The language settings a module's kotlinc arguments select, by the command line's own rules. A
+/// language error is the analysis's error: the module is never analyzed under other settings.
+pub fn language_settings_of(arguments: &[String]) -> io::Result<LanguageSettings> {
+    let selected = krusty_cli::cli::language_settings(arguments.iter().cloned());
+    if selected.errors.is_empty() {
+        Ok(selected.settings)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            selected.errors.join("\n"),
+        ))
+    }
 }
 
 #[derive(Deserialize)]
@@ -385,7 +454,7 @@ fn encode_request<J: AsRef<str> + Serialize>(
     inputs: &[SourceInput<'_>],
     result_count: usize,
     inferred_count: usize,
-    features: &LangFeatures,
+    language: &LanguageSettings,
     java_sources: &[J],
     options: WorkerAnalysisOptions<'_>,
 ) -> io::Result<Vec<u8>> {
@@ -412,7 +481,6 @@ fn encode_request<J: AsRef<str> + Serialize>(
         .map(|source| source.kind.wire_code())
         .collect::<Vec<_>>();
     let mut request = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
-    let language_features = language_feature_names(features);
     serde_json::to_writer(
         &mut request,
         &AnalysisRequest {
@@ -420,7 +488,7 @@ fn encode_request<J: AsRef<str> + Serialize>(
             source_kinds: &source_kinds,
             result_count,
             inferred_count,
-            language_features: &language_features,
+            language: WireLanguage::of(language),
             java_sources,
             classpath: options.classpath,
             diagnostics_only: options.diagnostics_only,
@@ -465,12 +533,12 @@ fn encode_materialize_request(reference: &LibraryRef, use_sources: bool) -> io::
 
 /// Encode a dump request, carrying the module configuration through unchanged.
 ///
-/// `session_features` applies only when the target names no language arguments of its own, mirroring
-/// `analyze_inputs_prefix` (session features) versus `analyze_inputs_prefix_with_config` (the
-/// module's own arguments).
+/// `session_language` applies only when the target names no language arguments of its own,
+/// mirroring `analyze_inputs_prefix` (session settings) versus `analyze_inputs_prefix_with_config`
+/// (the module's own arguments).
 fn encode_dump_request(
     target: &DumpTarget<'_>,
-    session_features: &LangFeatures,
+    session_language: &LanguageSettings,
 ) -> io::Result<Vec<u8>> {
     let sources = target
         .sources
@@ -482,24 +550,17 @@ fn encode_dump_request(
         .iter()
         .map(|kind| kind.wire_code())
         .collect::<Vec<_>>();
-    let features = match target.language_arguments {
-        Some(arguments) => {
-            let mut features = LangFeatures::new();
-            for argument in arguments {
-                features.apply_cli_arg(argument);
-            }
-            features
-        }
-        None => session_features.clone(),
+    let language = match target.language_arguments {
+        Some(arguments) => language_settings_of(arguments)?,
+        None => session_language.clone(),
     };
-    let language_features = language_feature_names(&features);
     let request = DumpRequest {
         analysis: AnalysisRequest {
             sources: &sources,
             source_kinds: &source_kinds,
             result_count: target.result_count,
             inferred_count: target.inferred_count,
-            language_features: &language_features,
+            language: WireLanguage::of(&language),
             java_sources: target.java_sources,
             classpath: target.classpath,
             diagnostics_only: false,
@@ -513,12 +574,6 @@ fn encode_dump_request(
     serde_json::to_writer(&mut encoded, &DumpEnvelope { dump: &request })
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     Ok(encoded.bytes)
-}
-
-fn language_feature_names(features: &LangFeatures) -> Vec<&str> {
-    let mut names = features.iter().collect::<Vec<_>>();
-    names.sort_unstable();
-    names
 }
 
 impl WorkerProcess {
@@ -680,7 +735,7 @@ impl WorkerProcess {
         inputs: &[SourceInput<'_>],
         result_count: usize,
         inferred_count: usize,
-        language_features: &LangFeatures,
+        language: &LanguageSettings,
         java_sources: &[J],
         options: WorkerAnalysisOptions<'_>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
@@ -688,7 +743,7 @@ impl WorkerProcess {
             inputs,
             result_count,
             inferred_count,
-            language_features,
+            language,
             java_sources,
             options,
         )?;
@@ -754,7 +809,7 @@ pub struct AnalysisWorker {
     restart_required: bool,
     analyses: usize,
     max_analyses: usize,
-    language_features: LangFeatures,
+    language: LanguageSettings,
 }
 
 impl AnalysisWorker {
@@ -782,7 +837,7 @@ impl AnalysisWorker {
             restart_required: false,
             analyses: 0,
             max_analyses: DEFAULT_ANALYSES_PER_WORKER,
-            language_features: LangFeatures::new(),
+            language: LanguageSettings::default(),
         })
     }
 
@@ -856,13 +911,13 @@ impl AnalysisWorker {
         inferred_count: usize,
         java_sources: &[J],
     ) -> io::Result<Vec<DocumentAnalysis>> {
-        let features = self.language_features.clone();
+        let language = self.language.clone();
         self.request(|process| {
             process.analyze(
                 inputs,
                 result_count,
                 inferred_count,
-                &features,
+                &language,
                 java_sources,
                 WorkerAnalysisOptions::full(),
             )
@@ -878,16 +933,13 @@ impl AnalysisWorker {
         language_arguments: &[String],
         options: WorkerAnalysisOptions<'_>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
-        let mut features = LangFeatures::new();
-        for argument in language_arguments {
-            features.apply_cli_arg(argument);
-        }
+        let language = language_settings_of(language_arguments)?;
         self.request(|process| {
             process.analyze(
                 inputs,
                 result_count,
                 inferred_count,
-                &features,
+                &language,
                 java_sources,
                 options,
             )
@@ -911,7 +963,7 @@ impl AnalysisWorker {
     /// to the session's, and the module classpath, language arguments, and Java sources keep its
     /// view of what resolves equal too.
     pub fn dump(&mut self, target: &DumpTarget<'_>) -> io::Result<Option<DumpResponse>> {
-        let request = encode_dump_request(target, &self.language_features)?;
+        let request = encode_dump_request(target, &self.language)?;
         self.request(|process| process.dump(&request))
     }
 
@@ -953,8 +1005,8 @@ impl AnalysisWorker {
         }
     }
 
-    pub fn set_language_features(&mut self, features: LangFeatures) {
-        self.language_features = features;
+    pub fn set_language_settings(&mut self, language: LanguageSettings) {
+        self.language = language;
     }
 }
 
@@ -1174,10 +1226,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             .filter(|(_, input)| input.kind == SourceKind::Java)
             .map(|(index, _)| index as u32)
             .collect::<Vec<_>>();
-        let mut language_features = LangFeatures::new();
-        for feature in &request.language_features {
-            language_features.enable(feature);
-        }
+        let language = WireLanguage::settings(request.language.as_ref())?;
         let classpath = prepared.for_request(request.classpath.as_deref());
         let stub_overlay_set = java_stubs.install(&classpath, &request.java_sources);
         let platform = JvmLibraries::new(classpath.clone());
@@ -1186,7 +1235,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             request.result_count,
             inferred_count,
             platform,
-            &language_features,
+            &language.features,
         );
         let (analyses, implementation_relations) = if request.diagnostics_only {
             // The compiler still checks the file. Hover, tokens, and navigation are what the index
@@ -1347,10 +1396,9 @@ fn render_dump_request(
         .map(|(source, kind)| SourceInput::new(*kind, source))
         .collect::<Vec<_>>();
 
-    let mut features = LangFeatures::new();
-    for feature in &request.analysis.language_features {
-        features.enable(feature);
-    }
+    let Ok(language) = WireLanguage::settings(request.analysis.language.as_ref()) else {
+        return (None, None);
+    };
     let classpath = prepared.for_request(request.analysis.classpath.as_deref());
     // Replay the prefix the session analyzed, widened when needed so the dumped file is always
     // checked — an unchecked target would render neither types nor IR.
@@ -1372,7 +1420,7 @@ fn render_dump_request(
         result_count,
         inferred_count,
         platform,
-        &features,
+        &language.features,
     );
     let text = render_analyzed_dump(
         &analysis,
@@ -1490,7 +1538,7 @@ mod tests {
             &inputs,
             1,
             1,
-            &LangFeatures::new(),
+            &LanguageSettings::default(),
             &java,
             WorkerAnalysisOptions::full(),
         )
@@ -1658,7 +1706,7 @@ mod tests {
                 &inputs,
                 1,
                 0,
-                &LangFeatures::new(),
+                &LanguageSettings::default(),
                 &[] as &[&str],
                 WorkerAnalysisOptions::full(),
             )
@@ -1671,7 +1719,7 @@ mod tests {
                 &inputs,
                 0,
                 2,
-                &LangFeatures::new(),
+                &LanguageSettings::default(),
                 &[] as &[&str],
                 WorkerAnalysisOptions::full(),
             )
@@ -1684,7 +1732,7 @@ mod tests {
                 &inputs,
                 1,
                 1,
-                &LangFeatures::new(),
+                &LanguageSettings::default(),
                 &[String::from_utf8(vec![b'x'; MAX_SOURCE_SET_BYTES]).unwrap()],
                 WorkerAnalysisOptions::full(),
             )
@@ -1717,7 +1765,7 @@ mod tests {
             &inputs,
             1,
             1,
-            &LangFeatures::new(),
+            &LanguageSettings::default(),
             &[] as &[&str],
             WorkerAnalysisOptions::full(),
         )
@@ -1780,7 +1828,7 @@ mod tests {
             &[SourceInput::kotlin(&sources[0])],
             1,
             1,
-            &LangFeatures::new(),
+            &LanguageSettings::default(),
             &[] as &[&str],
             WorkerAnalysisOptions {
                 classpath: Some(&classpath),
@@ -1802,7 +1850,7 @@ mod tests {
                 language_arguments: None,
                 classpath: Some(&classpath),
             },
-            &LangFeatures::new(),
+            &LanguageSettings::default(),
         )
         .unwrap();
         let mut framed = Vec::new();
@@ -2110,9 +2158,9 @@ mod tests {
         ];
         let java_sources = vec!["package p; public class Widget {}".to_string()];
         let classpath = vec![PathBuf::from("module.jar")];
-        let language_arguments = vec!["-Xname-based-destructuring".to_string()];
-        let mut session = LangFeatures::new();
-        session.enable("SessionOnly");
+        let language_arguments = vec!["-Xname-based-destructuring=only-syntax".to_string()];
+        let mut session = LanguageSettings::default();
+        session.features.enable("FullValueClasses");
         let target = DumpTarget {
             sources: &sources,
             source_kinds: &[SourceKind::Kotlin, SourceKind::Java],
@@ -2149,32 +2197,24 @@ mod tests {
         assert_eq!(dump.analysis.result_count, 1);
         assert!(!dump.analysis.diagnostics_only);
         assert_eq!(dump.analysis.inferred_count, Some(2));
-        let mut module_features = LangFeatures::new();
-        for argument in &language_arguments {
-            module_features.apply_cli_arg(argument);
-        }
-        assert_eq!(
-            dump.analysis
-                .language_features
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            language_feature_names(&module_features),
+        let module = language_settings_of(&language_arguments).unwrap();
+        let carried = WireLanguage::settings(dump.analysis.language.as_ref()).unwrap();
+        assert!(
+            carried.features.enables_same_features(&module.features)
+                && (carried.language_version, carried.api_version)
+                    == (module.language_version, module.api_version),
             "the module's own language arguments must reach the worker, and must replace the \
-             session features exactly as analyze_inputs_prefix_with_config does"
+             session settings exactly as analyze_inputs_prefix_with_config does"
         );
-        assert!(!dump
-            .analysis
-            .language_features
-            .iter()
-            .any(|feature| feature == "SessionOnly"));
+        assert!(carried.features.has("NameBasedDestructuring"));
+        assert!(!carried.features.has("FullValueClasses"));
     }
 
     #[test]
-    fn dump_requests_fall_back_to_the_session_language_features() {
+    fn dump_requests_fall_back_to_the_session_language_settings() {
         let sources = vec!["fun answer(): Int = 42".to_string()];
-        let mut session = LangFeatures::new();
-        session.enable("ContextParameters");
+        let mut session = LanguageSettings::default();
+        session.features.enable("FullValueClasses");
         let target = DumpTarget {
             sources: &sources,
             source_kinds: &[SourceKind::Kotlin],
@@ -2196,14 +2236,10 @@ mod tests {
         else {
             panic!("an encoded dump request must reach the dump arm");
         };
-        assert_eq!(
-            dump.analysis
-                .language_features
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            language_feature_names(&session)
-        );
+        assert!(WireLanguage::settings(dump.analysis.language.as_ref())
+            .unwrap()
+            .features
+            .has("FullValueClasses"));
         assert_eq!(dump.analysis.classpath, None);
     }
 
@@ -2347,7 +2383,7 @@ mod tests {
             source_kinds: &source_kinds,
             result_count: sources.len(),
             inferred_count: sources.len(),
-            language_features: &[],
+            language: WireLanguage::of(&LanguageSettings::default()),
             java_sources: &[] as &[&str],
             classpath: None,
             diagnostics_only: false,
@@ -2389,7 +2425,7 @@ mod tests {
             source_kinds: &[0],
             result_count: 1,
             inferred_count: 1,
-            language_features: &[],
+            language: WireLanguage::of(&LanguageSettings::default()),
             java_sources: &[] as &[&str],
             classpath: None,
             diagnostics_only: true,
@@ -2431,7 +2467,7 @@ mod tests {
             source_kinds: &[0],
             result_count: 1,
             inferred_count: 1,
-            language_features: &[],
+            language: WireLanguage::of(&LanguageSettings::default()),
             java_sources: &[] as &[&str],
             classpath: None,
             diagnostics_only: false,
@@ -2468,7 +2504,7 @@ mod tests {
             source_kinds: &[0],
             result_count: 1,
             inferred_count: 1,
-            language_features: &[],
+            language: WireLanguage::of(&LanguageSettings::default()),
             java_sources: &[] as &[&str],
             classpath: Some(&[]),
             diagnostics_only: false,
@@ -2587,7 +2623,7 @@ mod tests {
             source_kinds: &[0],
             result_count: 1,
             inferred_count: 1,
-            language_features: &[],
+            language: WireLanguage::of(&LanguageSettings::default()),
             java_sources,
             classpath,
             diagnostics_only: false,
@@ -2640,7 +2676,7 @@ mod tests {
             source_kinds: &source_kinds,
             result_count: sources.len(),
             inferred_count: sources.len(),
-            language_features: &[],
+            language: WireLanguage::of(&LanguageSettings::default()),
             java_sources: &[] as &[&str],
             classpath: None,
             diagnostics_only: false,
@@ -2673,7 +2709,7 @@ mod tests {
             source_kinds: &source_kinds,
             result_count: sources.len(),
             inferred_count: sources.len(),
-            language_features: &[],
+            language: WireLanguage::of(&LanguageSettings::default()),
             java_sources: &java_sources,
             classpath: None,
             diagnostics_only: false,
@@ -2703,8 +2739,7 @@ mod tests {
         let request = br#"{
             "sources":["fun answer(): Int = 42"],
             "source_kinds":[0],
-            "result_count":1,
-            "language_features":[]
+            "result_count":1
         }"#;
         let mut input = Vec::new();
         write_framed(&mut input, request).unwrap();
@@ -2717,7 +2752,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_protocol_applies_project_language_features() {
+    fn worker_protocol_applies_project_language_settings() {
         let sources = ["\
 data class Entry(val first: String, val second: String)
 fun combine(entries: Array<Entry>): String {
@@ -2733,7 +2768,10 @@ fun combine(entries: Array<Entry>): String {
             source_kinds: &source_kinds,
             result_count: sources.len(),
             inferred_count: sources.len(),
-            language_features: &["NameBasedDestructuring"],
+            language: WireLanguage::of(
+                &language_settings_of(&["-XXLanguage:+NameBasedDestructuring".to_string()])
+                    .unwrap(),
+            ),
             java_sources: &[] as &[&str],
             classpath: None,
             diagnostics_only: false,
@@ -2758,7 +2796,7 @@ fun combine(entries: Array<Entry>): String {
             source_kinds: &[krusty::source::SourceKind::KotlinScript.wire_code()],
             result_count: 1,
             inferred_count: 1,
-            language_features: &[],
+            language: WireLanguage::of(&LanguageSettings::default()),
             java_sources: &[] as &[&str],
             classpath: None,
             diagnostics_only: false,
@@ -2779,7 +2817,7 @@ fun combine(entries: Array<Entry>): String {
         let kotlin = "fun use(w: p.Widget) {}";
         let request = format!(
             "{{\"sources\":[{}],\"source_kinds\":[0],\"result_count\":1,\
-              \"java_sources\":[{}],\"language_features\":[]}}",
+              \"java_sources\":[{}]}}",
             serde_json::to_string(kotlin).unwrap(),
             serde_json::to_string("package p; public class Widget {}").unwrap(),
         );

@@ -308,7 +308,8 @@ fn compile_source(
     let modes = krusty::conformance::UnitCodegenModes::of_unit([src]);
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_jvm_default(modes.jvm_default)
-        .with_lambda_modes(modes.lambdas);
+        .with_lambda_modes(modes.lambdas)
+        .with_pre_release_metadata(features.is_pre_release());
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     T_EMIT.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
@@ -547,7 +548,8 @@ fn compile_blocks_mixed(
     );
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_jvm_default(modes.jvm_default)
-        .with_lambda_modes(modes.lambdas);
+        .with_lambda_modes(modes.lambdas)
+        .with_pre_release_metadata(features.is_pre_release());
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let classes = outputs
         .into_iter()

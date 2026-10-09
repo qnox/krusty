@@ -846,6 +846,7 @@ dependencies = [
  "dhat",
  "fs2",
  "krusty",
+ "krusty-cli",
  "pprof",
  "roxmltree",
  "serde",

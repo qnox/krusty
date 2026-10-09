@@ -390,6 +390,7 @@ fn krusty_cli_diagnostics_in_process(
     );
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_annotations_in_metadata(settings.features.has("AnnotationsInMetadata"))
+        .with_pre_release_metadata(settings.features.is_pre_release())
         .with_metadata_version(Some(settings.language_version.metadata_version()));
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let rendered_files = source_paths

@@ -8,9 +8,13 @@ use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
 
-use super::{jvm_target_to_major, supported_kotlin_versions, CliWarning, Options, WarningName};
-use crate::kotlinc_arguments::catalog::FeatureToggle;
-use crate::kotlinc_arguments::{Catalog, FeatureTable, Occurrence, Value};
+use krusty::features::{FeatureTable, LangFeatures, LanguageVersionPolicy};
+
+use super::{
+    jvm_target_to_major, language_features, supported_kotlin_versions, CliWarning, Options,
+    WarningName,
+};
+use crate::kotlinc_arguments::{ArgumentSpec, Catalog, Occurrence, Recorded, Value};
 
 /// Record a `-jvm-default`/`-Xjvm-default` value, reporting one krusty does not model instead of
 /// silently compiling under a different interface shape than the build asked for.
@@ -41,80 +45,83 @@ fn parse_metadata_level(value: &str) -> Option<[i32; 3]> {
     LanguageVersion::parse_supported_metadata_stamp(value).map(LanguageVersion::metadata_version)
 }
 
-/// The named configuration warnings in kotlinc's order: language/API version status, argument
-/// lifecycle, then redundant feature arguments.
+/// The configuration warnings in kotlinc's order: the pre-release notice for manual feature
+/// settings, language/API version status, argument lifecycle, then redundant feature arguments.
 fn settings_warnings(
     settings: &LanguageSettings,
-    parsed: &ParsedSettings,
+    pre_release: Option<CliWarning>,
+    redundant: Vec<CliWarning>,
+    progressive: bool,
     suppress_version_warnings: bool,
     lifecycle: Vec<CliWarning>,
 ) -> Vec<CliWarning> {
-    // kotlinc reports `REDUNDANT_CLI_ARG` for an `@Enables` argument only, never for `-XXLanguage`.
-    let feature_arguments = &parsed.common_feature_arguments;
-    let mut warnings = Vec::new();
-    if suppress_version_warnings {
-        warnings.extend(lifecycle);
-        warnings.extend(redundant_feature_warnings(settings, feature_arguments));
-        return warnings;
-    }
-    if settings.language_version >= LanguageVersion::V2_2
-        && settings.api_version <= LanguageVersion::V2_1
-    {
-        warnings.push(CliWarning {
-            name: WarningName::DeprecatedLanguageVersion,
-            message: format!(
-                "API version {} is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.",
-                settings.api_version
-            ),
-        });
-    }
-    match settings.language_version {
-        LanguageVersion::V2_0 | LanguageVersion::V2_1 => warnings.push(CliWarning {
-            name: WarningName::DeprecatedLanguageVersion,
-            message: format!(
-                "language version {} is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.",
-                settings.language_version
-            ),
-        }),
-        LanguageVersion::V2_5 | LanguageVersion::V2_6 => warnings.push(CliWarning {
-            name: WarningName::ExperimentalLanguageVersion,
-            message: format!(
-                "language version {} is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.",
-                settings.language_version
-            ),
-        }),
-        _ => {}
+    let mut warnings: Vec<CliWarning> = pre_release.into_iter().collect();
+    if !suppress_version_warnings {
+        warnings.extend(version_warnings(settings));
+        if progressive {
+            warnings.extend(progressive_warning(settings));
+        }
     }
     warnings.extend(lifecycle);
-    warnings.extend(redundant_feature_warnings(settings, feature_arguments));
+    warnings.extend(redundant);
     warnings
 }
 
-fn redundant_feature_warnings(
-    settings: &LanguageSettings,
-    feature_arguments: &[String],
-) -> Vec<CliWarning> {
-    let mut warnings = Vec::new();
-    let mut applied = krusty::features::LangFeatures::for_versions(
-        settings.language_version,
-        settings.api_version,
-    );
-    for argument in feature_arguments {
-        let before = applied.clone();
-        let recognized = applied.apply_cli_arg(argument);
-        debug_assert!(
-            recognized,
-            "the parser retained only language feature arguments"
-        );
-        if applied == before {
-            warnings.push(CliWarning {
-                name: WarningName::RedundantCliArg,
-                message: format!(
-                    "the argument '{argument}' is redundant for the current language version {}.",
-                    settings.language_version
-                ),
-            });
+/// kotlinc's `checkProgressiveMode` warning, which has no diagnostic name, so `-Xwarning-level`
+/// does not reach it.
+fn progressive_warning(settings: &LanguageSettings) -> Option<CliWarning> {
+    let latest_stable = settings.features.versions().latest_stable();
+    (settings.language_version < latest_stable).then(|| CliWarning {
+        name: None,
+        message: format!(
+            "'-progressive' is meaningful only for the latest language version ({latest_stable}), \
+             while this build uses {}\nCompiler behavior in such mode is undefined; consider \
+             moving to the latest stable version or turning off progressive mode.",
+            settings.language_version
+        ),
+    })
+}
+
+/// kotlinc's `checkOutdatedVersions` (one deprecation, the language version's before the API
+/// version's) and `checkLanguageVersionIsStable`, over the reference release's recorded policy.
+fn version_warnings(settings: &LanguageSettings) -> Vec<CliWarning> {
+    let versions = settings.features.versions();
+    let status = |version, api: bool| {
+        if api {
+            versions.api(version)
+        } else {
+            versions.language(version)
         }
+        .unwrap_or_else(|| panic!("version {version} is outside the release's policy"))
+    };
+    let deprecated = |version, api: bool| {
+        let kind = if api { "API" } else { "language" };
+        CliWarning {
+            name: Some(WarningName::DeprecatedLanguageVersion),
+            message: format!(
+                "{kind} version {version} is deprecated and its support will be removed in a \
+                 future version of Kotlin. Update the version to {}.",
+                versions.first_non_deprecated(api)
+            ),
+        }
+    };
+    let mut warnings = Vec::new();
+    if status(settings.language_version, false).deprecated {
+        warnings.push(deprecated(settings.language_version, false));
+    } else if status(settings.api_version, true).deprecated {
+        warnings.push(deprecated(settings.api_version, true));
+    }
+    if !status(settings.language_version, false).stable {
+        warnings.push(CliWarning {
+            name: Some(WarningName::ExperimentalLanguageVersion),
+            message: format!(
+                "language version {} is experimental, there are no backwards compatibility \
+                 guarantees for new language and library features. Use the stable version {} \
+                 instead.",
+                settings.language_version,
+                versions.latest_stable()
+            ),
+        });
     }
     warnings
 }
@@ -182,20 +189,10 @@ pub(super) struct ParsedSettings {
     jvm_target: Option<String>,
     jdk_release: Option<String>,
     api_version: Option<String>,
-    /// `@Enables`/`@Disables` arguments, which kotlinc applies first.
-    common_feature_arguments: Vec<String>,
-    /// `-XXLanguage` arguments, which kotlinc applies last so they override everything else.
-    internal_feature_arguments: Vec<String>,
-}
-
-impl ParsedSettings {
-    /// The feature arguments in kotlinc's `configureLanguageFeatures` order: the `@Enables`
-    /// arguments, then `-XXLanguage`, which overrides them.
-    fn ordered_feature_arguments(&self) -> Vec<String> {
-        let mut ordered = self.common_feature_arguments.clone();
-        ordered.extend(self.internal_feature_arguments.iter().cloned());
-        ordered
-    }
+    /// The `-XXLanguage` values (`+Feature`, `-Feature`) in command-line order, which kotlinc
+    /// applies last so they override everything else.
+    manual_feature_values: Vec<String>,
+    progressive: bool,
 }
 
 /// The error for an argument krusty refuses ([`crate::kotlinc_arguments::Disposition::Unsupported`]).
@@ -217,12 +214,7 @@ pub(super) fn rendered(occurrence: &Occurrence) -> String {
     }
 }
 
-pub(super) fn apply(
-    opts: &mut Options,
-    parsed: &mut ParsedSettings,
-    occurrence: &Occurrence,
-    catalog: &Catalog,
-) {
+pub(super) fn apply(opts: &mut Options, parsed: &mut ParsedSettings, occurrence: &Occurrence) {
     let spec = occurrence.spec;
     let name = spec.name.as_str();
     let (flag, text, list) = match &occurrence.value {
@@ -230,81 +222,13 @@ pub(super) fn apply(
         Value::String(text) => (true, text.as_str(), &[][..]),
         Value::List(values) => (true, "", values.as_slice()),
     };
-    // `@Enables`/`@Disables` arguments are language-feature switches; `-XXLanguage` is the raw form.
-    if spec.changes_language_features() || name == "-XXLanguage" {
-        if name == "-XXLanguage" {
-            for value in list {
-                for toggle in value.split(',') {
-                    let Some(feature) = toggle
-                        .strip_prefix('+')
-                        .or_else(|| toggle.strip_prefix('-'))
-                        .filter(|feature| !feature.is_empty())
-                    else {
-                        opts.errors.push(format!(
-                            "invalid language feature toggle '{toggle}' in -XXLanguage: expected +Feature or -Feature"
-                        ));
-                        return;
-                    };
-                    let feature_table = FeatureTable::for_version(catalog.version)
-                        .expect("every supported reference release has a language-feature table");
-                    if !feature_table.contains(feature) {
-                        opts.errors.push(format!(
-                            "unknown language feature '{feature}' selected by '-XXLanguage' for kotlinc {}",
-                            catalog.version
-                        ));
-                        return;
-                    }
-                    if !krusty::features::LangFeatures::models(feature) {
-                        opts.errors.push(format!(
-                            "krusty does not implement the language feature '{feature}' selected by '-XXLanguage'"
-                        ));
-                        return;
-                    }
-                }
-            }
-        } else {
-            let toggle_applies = |toggle: &&FeatureToggle| match &occurrence.value {
-                Value::Bool(flag) => *flag && toggle.if_value_is.is_none(),
-                Value::String(value) => toggle.if_value_is.as_deref() == Some(value.as_str()),
-                Value::List(_) => false,
-            };
-            if let Some(toggle) = spec
-                .enables
-                .iter()
-                .filter(toggle_applies)
-                .find(|toggle| !krusty::features::LangFeatures::models(&toggle.feature))
-            {
-                opts.errors.push(format!(
-                    "krusty does not implement the language feature '{}' selected by '{}'",
-                    toggle.feature, name
-                ));
-                return;
-            }
-            // A false Boolean feature flag applies none of its `@Enables`/`@Disables` entries.
-            // Reconstructing the bare spelling would incorrectly turn it back on.
-            if matches!(&occurrence.value, Value::Bool(false)) {
-                return;
-            }
-        }
-        let spellings: Vec<String> = match &occurrence.value {
-            Value::Bool(_) => vec![name.to_string()],
-            Value::String(value) => vec![format!("{name}={value}")],
-            Value::List(values) => values
-                .iter()
-                .map(|value| format!("{name}:{value}"))
-                .collect(),
-        };
-        for spelling in spellings {
-            if opts.language_settings.features.apply_cli_arg(&spelling) {
-                if name == "-XXLanguage" {
-                    parsed.internal_feature_arguments.push(spelling);
-                } else {
-                    parsed.common_feature_arguments.push(spelling);
-                }
-            } else {
-                opts.ignored.push(spelling);
-            }
-        }
+    // `-XXLanguage` settings are read once every argument is known, after the `@Enables` and
+    // `@Disables` arguments, which `finish_language_settings` reads from their recorded values.
+    if name == "-XXLanguage" {
+        parsed.manual_feature_values.extend(list.iter().cloned());
+        return;
+    }
+    if spec.changes_language_features() {
         return;
     }
     match name {
@@ -319,6 +243,7 @@ pub(super) fn apply(
         "-module-name" => opts.module_name = text.to_string(),
         "-language-version" => parsed.language_version = Some(text.to_string()),
         "-api-version" => parsed.api_version = Some(text.to_string()),
+        "-progressive" => parsed.progressive = flag,
         "-Xmetadata-version" => match parse_metadata_level(text) {
             Some(version) => opts.metadata_version = Some(version),
             None => opts.errors.push(format!(
@@ -482,9 +407,23 @@ pub(super) fn finish_language_settings(
     opts: &mut Options,
     mut parsed: ParsedSettings,
     catalog: &Catalog,
+    explicit: &[(&ArgumentSpec, Recorded)],
     lifecycle: Vec<CliWarning>,
 ) {
     let reference_version = catalog.version;
+    let table = FeatureTable::for_version(reference_version)
+        .expect("every supported reference release has a language feature table");
+    let versions = LanguageVersionPolicy::for_release(reference_version)
+        .expect("every supported reference release has a language version policy");
+    let manual = language_features::parse_manual_settings(
+        &parsed.manual_feature_values,
+        table,
+        &mut opts.language_feature_problems,
+    );
+    if let Some(notice) = language_features::unsafe_arguments_notice(&manual) {
+        // kotlinc reports the notice before the problems found while reading the settings.
+        opts.language_feature_problems.insert(0, notice);
+    }
     let language_version = match parsed.language_version.take() {
         Some(text) => match LanguageVersion::parse_supported_for(&text, reference_version) {
             Some(version) => version,
@@ -511,12 +450,57 @@ pub(super) fn finish_language_settings(
         },
         None => None,
     };
-    let feature_arguments = parsed.ordered_feature_arguments();
-    match LanguageSettings::new(language_version, api_version, &feature_arguments) {
+    let feature_arguments = language_features::feature_arguments(explicit);
+    opts.errors
+        .extend(language_features::unmodeled_feature_errors(
+            &feature_arguments,
+        ));
+    let common = language_features::common_settings(&feature_arguments);
+    let progressive = if parsed.progressive {
+        language_features::progressive_settings(table, &common)
+    } else {
+        Vec::new()
+    };
+    let settings =
+        language_features::ordered_settings(common.clone(), progressive.clone(), &manual);
+    match LanguageSettings::for_release(reference_version, language_version, api_version, &settings)
+    {
         Ok(settings) => {
+            let (cannot_disable, pre_release) = language_features::manual_setting_checks(
+                &manual,
+                table,
+                versions,
+                language_version,
+            );
+            opts.configuration_errors.extend(cannot_disable);
+            let defaults = LangFeatures::for_release(
+                reference_version,
+                settings.language_version,
+                settings.api_version,
+            );
+            let mut before_progressive = defaults.clone();
+            for setting in &common {
+                before_progressive.set(&setting.feature, setting.enabled);
+            }
+            opts.errors
+                .extend(language_features::unmodeled_progressive_error(
+                    &progressive,
+                    &before_progressive,
+                ));
+            opts.errors
+                .extend(language_features::unmodeled_manual_errors(
+                    &manual, table, versions,
+                ));
+            let redundant = language_features::redundancy_warnings(
+                &feature_arguments,
+                &defaults,
+                settings.api_version,
+            );
             opts.warnings = settings_warnings(
                 &settings,
-                &parsed,
+                pre_release,
+                redundant,
+                parsed.progressive,
                 opts.suppress_version_warnings,
                 lifecycle,
             );

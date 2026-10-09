@@ -513,9 +513,9 @@ pub(super) struct EmitEnv<'a> {
     inner_classes: crate::jvm::inner_classes::InnerClasses,
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
     java_parameters: bool,
-    /// The `@kotlin.Metadata` `mv` stamp this emission writes (`-language-version`, or
-    /// [`DEFAULT_METADATA_VERSION`]).
-    metadata_version: [i32; 3],
+    /// The `@kotlin.Metadata` `mv` (`-language-version`, or [`DEFAULT_METADATA_VERSION`]) and
+    /// pre-release flag this emission writes.
+    metadata_stamp: crate::jvm::classfile::MetadataStamp,
 }
 
 /// `-Xlambdas` / `-Xsam-conversions`: how a lambda and a SAM conversion are realized on the JVM.
@@ -707,6 +707,10 @@ pub struct EmitOptions {
     /// Whether the finalized source-language feature set enables declaration annotation records in
     /// Kotlin metadata. Kept separate from `metadata_version`: the latter is only an output stamp.
     pub annotations_in_metadata: bool,
+    /// Whether the language settings are pre-release (an experimental language version, or an
+    /// explicitly enabled unreleased feature): every `@kotlin.Metadata` then carries kotlinc's
+    /// pre-release flag.
+    pub pre_release_metadata: bool,
 }
 
 /// The `mv` krusty writes without `-language-version`: kotlinc's default-language-version stamp.
@@ -716,6 +720,20 @@ impl EmitOptions {
     /// The `mv` this emission stamps on every `@kotlin.Metadata` (and the `.kotlin_module` header).
     pub fn metadata_version(&self) -> [i32; 3] {
         self.metadata_version.unwrap_or(DEFAULT_METADATA_VERSION)
+    }
+
+    /// The version and pre-release flag of every `@kotlin.Metadata` this emission writes.
+    pub fn metadata_stamp(&self) -> crate::jvm::classfile::MetadataStamp {
+        crate::jvm::classfile::MetadataStamp {
+            version: self.metadata_version(),
+            pre_release: self.pre_release_metadata,
+        }
+    }
+
+    /// Mark every `@kotlin.Metadata` as pre-release, keeping every other field as configured.
+    pub fn with_pre_release_metadata(mut self, pre_release: bool) -> Self {
+        self.pre_release_metadata = pre_release;
+        self
     }
 
     /// Select the `-language-version` metadata stamp, keeping every other field as configured.
@@ -764,6 +782,7 @@ impl Default for EmitOptions {
             value_classes: std::rc::Rc::default(),
             metadata_version: None,
             annotations_in_metadata: true,
+            pre_release_metadata: false,
         }
     }
 }
@@ -1416,7 +1435,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
         java_parameters: opts.java_parameters,
-        metadata_version: opts.metadata_version(),
+        metadata_stamp: opts.metadata_stamp(),
         property_realizations: facts.property_realizations,
         property_reference_realizations: facts.property_reference_realizations,
         sam_wrapper_realizations: facts.sam_wrapper_realizations,
@@ -1763,7 +1782,7 @@ fn emit_pass(
     let facade_needed = facade_has_method || facade_has_static || metadata.is_some();
     if facade_needed {
         if let Some(m) = metadata {
-            cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+            cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
         }
         out.push((facade.to_string(), env.run.finish_class(cw)));
         out.extend(drain_lambda_classes(env, opts));
@@ -3334,7 +3353,7 @@ fn emit_class(
         );
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
-        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+        cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
     }
     // Intern the `EnclosingMethod` refs, then every retained `InnerClasses` row's outer-class ref
     // and simple name, at kotlinc's post-metadata pool position, in the table's sorted order. An
@@ -3696,7 +3715,7 @@ fn emit_interface_class(
         // A compiler-generated implementation class carries the minimal synthetic-class metadata
         // record. Kotlin reflection and downstream metadata readers rely on `k=3` to classify it.
         let xi = synthetic_class_xi(SYNTHETIC_PUBLIC);
-        di.set_kotlin_metadata(3, &opts.metadata_version(), xi, &[], &[]);
+        di.set_kotlin_metadata(3, opts.metadata_stamp(), xi, &[], &[]);
         extra.push((holder, env.run.finish_class(di)));
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);
@@ -3721,7 +3740,7 @@ fn emit_interface_class(
         attach_synth_nullability(ir, c, &mut cw);
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
-        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+        cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
     }
     if emitted_default_impls {
         let holder = format!("{fq_name}$DefaultImpls");
@@ -4515,7 +4534,7 @@ fn emit_enum_class(
     // metadata must not discard the class's declared annotations.
     cw.set_class_annotations(&c.applied_annotations);
     if let Some(m) = class_metadata {
-        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+        cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
     }
     // The `EnclosingMethod` refs, then each retained row's outer-class ref and simple name, intern
     // at kotlinc's post-metadata window — the same step every other classifier path takes.
@@ -5497,8 +5516,8 @@ struct Emitter<'a> {
     run: &'a EmitRun,
     /// `-jvm-default`, so a call site can tell where an interface's `$default` synthetic lives.
     jvm_default: JvmDefaultMode,
-    /// The `@Metadata` `mv` an anonymous object regenerated by an inline call of this class carries.
-    metadata_version: [i32; 3],
+    /// The `@Metadata` stamp an anonymous object regenerated by an inline call of this class carries.
+    metadata_stamp: crate::jvm::classfile::MetadataStamp,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     sam_wrapper_realizations: &'a crate::jvm::sam_wrappers::SamWrapperRealizations,
@@ -5679,7 +5698,7 @@ impl<'a> Emitter<'a> {
             bodies: env.bodies,
             run: env.run,
             jvm_default: env.jvm_default,
-            metadata_version: env.metadata_version,
+            metadata_stamp: env.metadata_stamp,
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
             sam_wrapper_realizations: env.sam_wrapper_realizations,
