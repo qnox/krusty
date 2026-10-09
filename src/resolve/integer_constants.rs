@@ -455,14 +455,7 @@ mod tests {
             Some(ResolvedCall::Member(member))
                 if matches!(member.origin, Origin::Module { .. })
                     && member.member.name == "unaryMinus"
-                    && matches!(
-                        member.member.source_member,
-                        Some(crate::libraries::SourceMember::Class {
-                            file: 0,
-                            owner: 0,
-                            method: 0,
-                        })
-                    )
+                    && member.member.stable_declaration.is_some()
         ));
     }
 

@@ -8488,13 +8488,17 @@ enum LibraryConstructorFailure {
         /// independent result-type contradiction; no constructor target is committed to FIR.
         result: Option<Ty>,
     },
+    TypeArgumentMismatch {
+        expected: Ty,
+        actual: Ty,
+    },
 }
 
 impl LibraryConstructorFailure {
     fn result_type(&self) -> Option<Ty> {
         match self {
             Self::TypeMismatch { result, .. } => *result,
-            Self::Mapping { .. } => None,
+            Self::Mapping { .. } | Self::TypeArgumentMismatch { .. } => None,
         }
     }
 }
@@ -26022,7 +26026,9 @@ typealias Alias<@Marker(2) T> = Target<T>
 
     #[test]
     fn every_nested_declaration_type_parameter_annotation_gets_its_lexical_identity() {
-        let source = r#"
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            r#"
 package sample
 
 annotation class Mark
@@ -26071,11 +26077,9 @@ enum class EntryChoice {
 
     annotation class Mark
 }
-"#;
-        let mut diagnostics = DiagSink::new();
-        let (file, symbols, _) =
-            crate::frontend::analyze_source_standalone(source, &mut diagnostics);
-        let symbols = symbols.expect("production frontend must retain finalized symbols");
+"#,
+            &mut diagnostics,
+        );
         let class = |name: &str| {
             file.decls
                 .iter()
@@ -26217,6 +26221,12 @@ enum class EntryChoice {
                 "sample/EntryChoice$ENTRY$EntryOnly",
             ),
         ];
+        // This focused probe deliberately retains the private signature-collection path:
+        // production stable-header analysis still needs a structural lexical-owner edge from an
+        // enum-entry body into a hoisted local class before these two EntryOnly occurrences can be
+        // migrated without losing their semantic identity.
+        let symbols = collect_signatures(&[file], &mut diagnostics);
+
         assert_no_diags(&diagnostics);
         for (annotation, expected) in annotations {
             assert!(
@@ -31639,10 +31649,10 @@ fun use() {
             "conflicting local declaration",
         );
         ok("fun box(): String { var x = 1; if (1>0) { var x = 2; x.toString() }; return \"OK\" }");
-        // Init block that calls a member method before a later property initializer (init order).
-        err_contains(
+        // Production streaming preserves source initialization order, so the legacy AST emitter's
+        // old capability rejection must not leak into the production frontend.
+        ok(
             "class Foo(v: Int) { init { set(v) }\n fun set(x: Int) { field = x }\n var field: Int = 0 }\nfun box(): String = \"OK\"",
-            "init order",
         );
         // Value-class representation is backend-owned. `Int` and `UInt` remain distinct semantic
         // overload parameters throughout frontend selection even if one target later chooses
@@ -45834,6 +45844,9 @@ impl<'a> Checker<'a> {
                     actual
                 };
                 self.expect_assignable(expected, actual, self.span(argument), "argument");
+            }
+            LibraryConstructorFailure::TypeArgumentMismatch { expected, actual } => {
+                self.expect_assignable(expected, actual, self.span(call), "type argument");
             }
         }
     }
@@ -67361,6 +67374,7 @@ impl<'a> Checker<'a> {
         let mut candidates = Vec::new();
         let mut mapping_failures = Vec::new();
         let mut bound_failures = Vec::new();
+        let mut type_argument_bound_failure = None;
 
         let mut declarations = self.constructor_declarations(internal, classifier);
         if let Some(selected) = selected {
@@ -67795,6 +67809,19 @@ impl<'a> Checker<'a> {
                         bindings.insert(formal.clone(), explicit);
                     }
                 }
+                // Expected-result inference runs after argument inference and may replace a class
+                // binding (`C<T : Bound>` expected as `I<Unrelated>` through `C<T> : I<T>`).
+                // Revalidate the completed classifier bindings here; validating only the earlier
+                // argument constraints lets an impossible expected type construct C<Unrelated>.
+                let violated_bound = crate::symbol_resolver::generic_binding_bound_violation(
+                    signature,
+                    &bindings,
+                    |actual, bound| self.generic_bound_admits(actual, bound),
+                );
+                if let Some(failure) = violated_bound {
+                    type_argument_bound_failure.get_or_insert(failure);
+                    continue;
+                }
                 let result_arguments = classifier
                     .type_params()
                     .iter()
@@ -67879,11 +67906,20 @@ impl<'a> Checker<'a> {
                                             source_argument,
                                             ..
                                         } => *source_argument,
-                                        LibraryConstructorFailure::Mapping { .. } => usize::MAX,
+                                        LibraryConstructorFailure::Mapping { .. }
+                                        | LibraryConstructorFailure::TypeArgumentMismatch {
+                                            ..
+                                        } => usize::MAX,
                                     })
                             {
                                 return Err(failure);
                             }
+                        }
+                        if let Some((expected, actual)) = type_argument_bound_failure {
+                            return Err(LibraryConstructorFailure::TypeArgumentMismatch {
+                                expected,
+                                actual,
+                            });
                         }
                         if let Some((failure, (params, call_sig))) =
                             take_unanimous_mapping_error(&mut mapping_failures)
