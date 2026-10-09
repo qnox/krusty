@@ -9,6 +9,10 @@ use crate::ir::{
     IrParameterIdentity, IrParameterRole,
 };
 use crate::jvm::anonymous_context_labels;
+pub(super) use crate::metadata::declaration_records::{
+    context_kind as metadata_context_kind, explicit_setter_name as explicit_setter,
+    parameter_name as metadata, DESTRUCTURED,
+};
 
 /// Name of a JVM `LocalVariableTable` entry, or `None` for a genuinely unnamed parameter.
 pub(super) fn local_variable(
@@ -268,30 +272,6 @@ fn function_local_variable(
     local_variable(identity, "")
 }
 
-/// The name source wrote for a setter's value parameter, which Kotlin metadata records. The final
-/// semantic parameter is the setter value by the accessor contract; its typed IR identity
-/// distinguishes a written name from the compiler-generated implicit setter value.
-pub(super) fn explicit_setter(ir: &IrFile, setter: Option<u32>) -> Option<String> {
-    let identity = ir.function_parameter_identities(setter?)?.last()?;
-    (identity.role == IrParameterRole::Value
-        && identity.provenance == crate::ir::IrParameterProvenance::SourceDeclared)
-        .then(|| metadata(identity).map(str::to_owned))
-        .flatten()
-}
-
-/// Kotlin metadata accepts only a declaration/producer-published semantic name. A lambda's `_`
-/// parameter, which declares no name, is kotlinc's `<unused var>` like an anonymous context
-/// parameter; a destructuring one is `<destruct>`.
-pub(super) fn metadata(identity: &IrParameterIdentity) -> Option<&str> {
-    match identity.role {
-        IrParameterRole::AnonymousContextParameter { .. } | IrParameterRole::UnusedValue => {
-            Some("<unused var>")
-        }
-        IrParameterRole::DestructuredValue => Some(DESTRUCTURED),
-        _ => identity.source_name.as_deref(),
-    }
-}
-
 /// Kotlin metadata name for a parameter. Source names remain borrowed; a compiler-generated
 /// delegation parameter is formatted here, at the JVM boundary, from its recorded semantic role.
 pub(super) fn metadata_owned(identity: &IrParameterIdentity) -> Option<String> {
@@ -300,25 +280,6 @@ pub(super) fn metadata_owned(identity: &IrParameterIdentity) -> Option<String> {
             ordinal,
         }) => Some(format!("p{ordinal}")),
         _ => metadata(identity).map(str::to_owned),
-    }
-}
-
-/// Kotlin's special name for a parameter written as a destructuring declaration. A suspend lambda's
-/// body also reads the parameter back into a local of this name.
-pub(super) const DESTRUCTURED: &str = "<destruct>";
-
-pub(super) fn metadata_context_kind(
-    identity: &IrParameterIdentity,
-) -> crate::types::ContextParameterKind {
-    match identity.role {
-        IrParameterRole::ContextValue => crate::types::ContextParameterKind::Named,
-        IrParameterRole::AnonymousContextParameter { .. } => {
-            crate::types::ContextParameterKind::Anonymous
-        }
-        IrParameterRole::ContextReceiver { .. } => {
-            crate::types::ContextParameterKind::LegacyReceiver
-        }
-        _ => panic!("a metadata context prefix must retain its semantic role"),
     }
 }
 
