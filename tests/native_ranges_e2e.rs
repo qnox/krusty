@@ -640,3 +640,112 @@ fn unsigned_down_to_and_until_answer_values() {
         "OK",
     );
 }
+
+/// A counted `for` over a progression checks `step` before the body, the way the stdlib's `step`
+/// does. Zero and negative are `IllegalArgumentException` with `Step must be positive, was: $step.`
+/// A stored progression, a nested `step`, and an unsigned progression take the same check: the
+/// header inlines `step` rather than calling the runtime constructor that already rejects them.
+#[test]
+fn a_non_positive_progression_step_throws_before_the_loop() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   try {\n\
+         \x20       for (i in 7 downTo 1 step 0) {}\n\
+         \x20       return \"fail zero ran\"\n\
+         \x20   } catch (e: IllegalArgumentException) {\n\
+         \x20       if (e.message != \"Step must be positive, was: 0.\") return \"fail zero: ${e.message}\"\n\
+         \x20   }\n\
+         \x20   try {\n\
+         \x20       for (i in 1..8 step -1) {}\n\
+         \x20       return \"fail neg ran\"\n\
+         \x20   } catch (e: IllegalArgumentException) {\n\
+         \x20       if (e.message != \"Step must be positive, was: -1.\") return \"fail neg: ${e.message}\"\n\
+         \x20   }\n\
+         \x20   try {\n\
+         \x20       for (i in 7L downTo 1L step -1L) {}\n\
+         \x20       return \"fail long ran\"\n\
+         \x20   } catch (e: IllegalArgumentException) {\n\
+         \x20       if (e.message != \"Step must be positive, was: -1.\") return \"fail long: ${e.message}\"\n\
+         \x20   }\n\
+         \x20   try {\n\
+         \x20       for (i in 'g' downTo 'a' step 0) {}\n\
+         \x20       return \"fail char ran\"\n\
+         \x20   } catch (e: IllegalArgumentException) {\n\
+         \x20       if (e.message != \"Step must be positive, was: 0.\") return \"fail char: ${e.message}\"\n\
+         \x20   }\n\
+         \x20   try {\n\
+         \x20       for (i in 7 downTo 1 step 2 step 0) {}\n\
+         \x20       return \"fail nested ran\"\n\
+         \x20   } catch (e: IllegalArgumentException) {\n\
+         \x20       if (e.message != \"Step must be positive, was: 0.\") return \"fail nested: ${e.message}\"\n\
+         \x20   }\n\
+         \x20   try {\n\
+         \x20       val progression = 7u downTo 1u\n\
+         \x20       for (i in progression step -1) {}\n\
+         \x20       return \"fail uint ran\"\n\
+         \x20   } catch (e: IllegalArgumentException) {\n\
+         \x20       if (e.message != \"Step must be positive, was: -1.\") return \"fail uint: ${e.message}\"\n\
+         \x20   }\n\
+         \x20   fun zero() = 0\n\
+         \x20   try {\n\
+         \x20       for (i in 1..4 step zero()) {}\n\
+         \x20       return \"fail dynamic ran\"\n\
+         \x20   } catch (e: IllegalArgumentException) {\n\
+         \x20       if (e.message != \"Step must be positive, was: 0.\") return \"fail dynamic: ${e.message}\"\n\
+         \x20   }\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "IllegalProgressionStep",
+        "OK",
+    );
+}
+
+/// A non-constant positive step is checked, then walked. `downTo` negates it only after the check,
+/// so `8 downTo 1 step two()` is 8, 6, 4, 2 and not a rejection of the positive argument.
+#[test]
+fn a_non_constant_progression_step_is_walked() {
+    expect_native_box(
+        "fun two() = 2\n\
+         fun box(): String {\n\
+         \x20   var up = \"\"\n\
+         \x20   for (i in 1..8 step two()) up += \"$i,\"\n\
+         \x20   if (up != \"1,3,5,7,\") return \"fail up: $up\"\n\
+         \x20   var down = \"\"\n\
+         \x20   for (i in 8 downTo 1 step two()) down += \"$i,\"\n\
+         \x20   if (down != \"8,6,4,2,\") return \"fail down: $down\"\n\
+         \x20   var chars = \"\"\n\
+         \x20   for (i in 'a'..'h' step two()) chars += \"$i,\"\n\
+         \x20   if (chars != \"a,c,e,g,\") return \"fail char: $chars\"\n\
+         \x20   var longs = \"\"\n\
+         \x20   for (i in 1L..8L step two().toLong()) longs += \"$i,\"\n\
+         \x20   if (longs != \"1,3,5,7,\") return \"fail long: $longs\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "NonConstantProgressionStep",
+        "OK",
+    );
+}
+
+/// The stepped header evaluates the start, then the end, then the step, and only then the body.
+#[test]
+fn a_stepped_loop_evaluates_bounds_before_the_step() {
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun logged(message: String, value: Int): Int {\n\
+         \x20   log.append(message)\n\
+         \x20   return value\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   var sum = 0\n\
+         \x20   for (i in logged(\"start;\", 8) downTo logged(\"end;\", 1) step logged(\"step;\", 2)) {\n\
+         \x20       sum = sum * 10 + i\n\
+         \x20   }\n\
+         \x20   if (sum != 8642) return \"fail sum: $sum\"\n\
+         \x20   val text = log.toString()\n\
+         \x20   if (text != \"start;end;step;\") return \"fail order: $text\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "SteppedLoopEvaluationOrder",
+        "OK",
+    );
+}
