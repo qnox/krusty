@@ -184,6 +184,11 @@ const FAILURES: &[(i32, &str)] = &[
         30,
         "a mixed live set did not come through repeated collections intact",
     ),
+    (
+        31,
+        "slots freed behind where the previous allocations stopped were not reused: the heap \
+          grew while free slots existed",
+    ),
 ];
 
 fn describe(code: i32) -> String {
@@ -374,6 +379,25 @@ __attribute__((noinline)) static void test_swept_slots_are_reused(void) {
     allocate_garbage(10000);
     if (kt_gc_heap_bytes() != before) {
         fail(17);
+    }
+    clobber_stack();
+    kt_gc_collect();
+}
+
+/* 7b. Allocation resumes where it last found room, which after two batches is the oldest chunk.
+   A collection frees slots in every chunk, so the next batch must start over from the newest one
+   again rather than from where the previous batch stopped. */
+__attribute__((noinline)) static void test_a_collection_rewinds_allocation(void) {
+    allocate_garbage(20000);
+    clobber_stack();
+    kt_gc_collect();
+    allocate_garbage(20000);
+    clobber_stack();
+    kt_gc_collect();
+    size_t before = kt_gc_heap_bytes();
+    allocate_garbage(20000);
+    if (kt_gc_heap_bytes() != before) {
+        fail(31);
     }
     clobber_stack();
     kt_gc_collect();
@@ -678,6 +702,8 @@ void kt_program_entry(void) {
     test_heap_tracing_is_precise();
     clobber_stack();
     test_swept_slots_are_reused();
+    clobber_stack();
+    test_a_collection_rewinds_allocation();
     clobber_stack();
     test_large_objects();
     clobber_stack();

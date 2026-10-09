@@ -34,6 +34,10 @@ typedef struct KChunk {
 } KChunk;
 
 static KChunk *kt_class_chunks[KT_CLASS_COUNT];
+/* Where each class's next allocation starts looking. Only a sweep frees an object, so every chunk
+   an allocation has passed over since the last sweep is still full: starting there instead of at
+   the head keeps an allocation from re-walking them all. A sweep resets every cursor to its head. */
+static KChunk *kt_class_cursor[KT_CLASS_COUNT];
 static KChunk *kt_all_chunks;
 
 /* Chunks sorted by address, so a candidate root resolves by binary search. Kept in raw mapped
@@ -428,6 +432,9 @@ void kt_gc_collect(void) {
     kt_scan_registers_and_stack();
     kt_trace();
     size_t live_bytes = kt_sweep();
+    for (uint32_t i = 0; i < KT_CLASS_COUNT; i++) {
+        kt_class_cursor[i] = kt_class_chunks[i];
+    }
     /* The next collection comes after as many bytes again as survived this one (at least the
        minimum), so the heap settles at about twice the live set rather than collecting on every
        few allocations when the live set is large. */
@@ -471,10 +478,11 @@ void *kt_gc_allocate(const KType *type, uint32_t size) {
     uint32_t class_index = kt_class_for(size);
     if (class_index < KT_CLASS_COUNT) {
         object_size = kt_size_classes[class_index];
-        for (KChunk *chunk = kt_class_chunks[class_index]; chunk != NULL;
+        for (KChunk *chunk = kt_class_cursor[class_index]; chunk != NULL;
              chunk = chunk->next_in_class) {
             object = (uint8_t *)kt_take_from(chunk);
             if (object != NULL) {
+                kt_class_cursor[class_index] = chunk;
                 break;
             }
         }
@@ -482,6 +490,7 @@ void *kt_gc_allocate(const KType *type, uint32_t size) {
             KChunk *chunk = kt_new_chunk(object_size, KT_CHUNK_BYTES / object_size, false);
             chunk->next_in_class = kt_class_chunks[class_index];
             kt_class_chunks[class_index] = chunk;
+            kt_class_cursor[class_index] = chunk;
             object = (uint8_t *)kt_take_from(chunk);
         }
     } else {
