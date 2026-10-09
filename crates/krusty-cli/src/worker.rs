@@ -137,6 +137,10 @@ fn translate_language_features(
     value: &str,
     source_flag: &str,
 ) -> Result<(), Refusal> {
+    let reference = krusty::kotlin_version::configured_target()
+        .unwrap_or_else(|_| krusty::kotlin_version::KotlinVersion::newest());
+    let table = crate::kotlinc_arguments::FeatureTable::for_version(reference)
+        .expect("every supported worker reference has a feature table");
     let tokens = value.split(',').collect::<Vec<_>>();
     if tokens.iter().any(|token| token.is_empty()) {
         return Err(Refusal::Malformed(format!(
@@ -154,11 +158,11 @@ fn translate_language_features(
                 "{source_flag} {token}: feature name is empty"
             )));
         }
-        if krusty::features::LangFeatures::models(name) {
+        if table.contains(name) {
             unit.kotlinc_args.push(format!("-XXLanguage:{token}"));
         } else {
             return Err(Refusal::Unsupported(format!(
-                "{source_flag} {token}: language feature is not modeled by krusty"
+                "{source_flag} {token}: language feature is not declared by kotlinc {reference}"
             )));
         }
     }
@@ -809,16 +813,7 @@ mod tests {
 
     #[test]
     fn the_real_argument_surface_translates() {
-        // These two options are part of the real request but deliberately refused until their
-        // semantics are implemented. Keep exercising every other field of that request here.
-        let request = intellij_request()
-            .into_iter()
-            .filter(|argument| {
-                argument != "--progressive"
-                    && argument != "--x_xlanguage"
-                    && argument != "+AllowEagerSupertypeAccessibilityChecks"
-            })
-            .collect::<Vec<_>>();
+        let request = intellij_request();
         let unit = translate(&request).expect("must translate");
         assert_eq!(unit.output_jar, PathBuf::from("out/util.jar"));
         assert_eq!(unit.abi_jar, Some(PathBuf::from("out/util.abi.jar")));
@@ -861,11 +856,10 @@ mod tests {
         }
     }
 
-    /// The worker and batch surfaces must not disagree about a semantic option. Until progressive
-    /// language features are implemented, neither the rule-owned spelling nor a forwarded
-    /// kotlinc spelling may compile while silently using ordinary language semantics.
+    /// The worker and batch surfaces normalize every progressive spelling to the same release-
+    /// driven language-feature set.
     #[test]
-    fn progressive_is_refused_through_every_worker_surface() {
+    fn progressive_reaches_the_shared_cli_through_every_worker_surface() {
         for progressive in [
             vec!["--progressive"],
             vec!["--kotlinc-arg", "-progressive"],
@@ -873,13 +867,13 @@ mod tests {
         ] {
             let mut request = progressive;
             request.extend(["--srcs", "A.kt", "--out", "o.jar"]);
-            let refusal = translate(&args(&request)).unwrap_err();
-            assert_eq!(
-                refusal,
-                Refusal::Unsupported(
-                    "krusty does not implement the kotlinc argument '-progressive'".to_string()
-                )
-            );
+            let unit = translate(&args(&request)).expect("progressive request translates");
+            let parsed = crate::cli::parse(unit.kotlinc_args);
+            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert!(parsed
+                .language_settings
+                .features
+                .has("AllowEagerSupertypeAccessibilityChecks"));
         }
     }
 

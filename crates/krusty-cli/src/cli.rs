@@ -33,6 +33,10 @@ pub enum WarningName {
     ExperimentalLanguageVersion,
     RedundantCliArg,
     RemovedCliArg,
+    /// kotlinc gives the old-language-level progressive warning no public diagnostic name, so this
+    /// identity is deliberately absent from [`WarningName::parse`] and cannot be targeted by
+    /// `-Xwarning-level`.
+    UnnamedProgressiveMode,
 }
 
 impl WarningName {
@@ -268,7 +272,7 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             continue;
         }
         match kotlinc_arguments::disposition::of(&occurrence.spec.name) {
-            Some(Disposition::Applied) => apply(&mut opts, &mut parsed, occurrence),
+            Some(Disposition::Applied) => apply(&mut opts, &mut parsed, occurrence, catalog),
             Some(Disposition::Inert) => {}
             Some(Disposition::Unsupported) | None => opts.errors.push(unsupported(occurrence)),
         }
@@ -546,6 +550,37 @@ mod tests {
 
     fn parse_args(args: &[&str]) -> Options {
         parse(args.iter().map(|s| s.to_string()))
+    }
+
+    /// `-progressive` enables the selected release's progressive features, and an explicit
+    /// `-XXLanguage` still overrides one wherever it appears, as in kotlinc's
+    /// `configureLanguageFeatures`.
+    #[test]
+    fn progressive_mode_enables_the_releases_progressive_features() {
+        let feature = "AllowEagerSupertypeAccessibilityChecks";
+        let enabled = |args: &[&str]| {
+            let o = parse_args(args);
+            assert_eq!(o.errors, Vec::<String>::new());
+            assert!(o.warnings.is_empty());
+            o.language_settings.features.has(feature)
+        };
+        assert!(!enabled(&["-Xkotlin-reference-version=2.4.20", "f.kt"]));
+        assert!(enabled(&[
+            "-Xkotlin-reference-version=2.4.20",
+            "-progressive",
+            "f.kt"
+        ]));
+        assert!(!enabled(&[
+            "-Xkotlin-reference-version=2.4.10",
+            "-progressive",
+            "f.kt"
+        ]));
+        assert!(!enabled(&[
+            "-Xkotlin-reference-version=2.4.20",
+            "-XXLanguage:-AllowEagerSupertypeAccessibilityChecks",
+            "-progressive",
+            "f.kt",
+        ]));
     }
 
     /// `-Xkotlin-reference-version` selects a supported release and refuses any other, rather than
@@ -1058,25 +1093,30 @@ mod tests {
         );
     }
 
-    /// Merely retaining an arbitrary `-XXLanguage` name in `LangFeatures` does not implement the
-    /// syntax, diagnostics, or lowering it selects. The batch CLI must therefore enforce the same
-    /// semantic capability boundary as the persistent worker.
+    /// Raw language toggles are validated against the selected kotlinc release, not a second
+    /// hardcoded subset. A release-declared feature is retained; an invented one is rejected.
     #[test]
-    fn xxlanguage_refuses_features_the_compiler_does_not_model() {
-        for flag in [
+    fn xxlanguage_uses_the_selected_releases_feature_table() {
+        let known = parse_args(&[
+            "-Xkotlin-reference-version=2.4.20",
             "-XXLanguage:+AllowEagerSupertypeAccessibilityChecks",
+            "f.kt",
+        ]);
+        assert!(known.errors.is_empty(), "{:?}", known.errors);
+        assert!(known
+            .language_settings
+            .features
+            .has("AllowEagerSupertypeAccessibilityChecks"));
+
+        let unknown = parse_args(&[
+            "-Xkotlin-reference-version=2.4.20",
             "-XXLanguage:+ShapeKrustyDoesNotModel",
-        ] {
-            let parsed = parse_args(&[flag, "f.kt"]);
-            let feature = flag.rsplit_once('+').unwrap().1;
-            assert_eq!(
-                parsed.errors,
-                [format!(
-                    "krusty does not implement the language feature '{feature}' selected by '-XXLanguage'"
-                )],
-                "{flag}"
-            );
-        }
+            "f.kt",
+        ]);
+        assert_eq!(
+            unknown.errors,
+            ["unknown language feature 'ShapeKrustyDoesNotModel' selected by '-XXLanguage' for kotlinc 2.4.20".to_string()]
+        );
     }
 
     #[test]

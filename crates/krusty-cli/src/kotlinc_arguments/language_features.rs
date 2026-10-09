@@ -117,6 +117,12 @@ impl FeatureTable {
         &self.features
     }
 
+    /// Whether this exact reference release declares the language feature. Raw `-XXLanguage`
+    /// validates against kotlinc's table rather than a second krusty-owned list.
+    pub fn contains(&self, name: &str) -> bool {
+        self.features.iter().any(|feature| feature.name == name)
+    }
+
     /// The features `-progressive` enables, in declaration order.
     pub fn progressive(&self) -> impl Iterator<Item = &LanguageFeature> {
         self.features.iter().filter(|feature| feature.progressive)

@@ -309,6 +309,7 @@ mod tests {
     #[test]
     fn modeled_features_are_the_frontend_and_backend_capability_boundary() {
         assert!(LangFeatures::models("ContextParameters"));
+        assert!(LangFeatures::models("FullValueClasses"));
         assert!(!LangFeatures::models(
             "AllowEagerSupertypeAccessibilityChecks"
         ));

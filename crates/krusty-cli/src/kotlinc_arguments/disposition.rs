@@ -54,6 +54,7 @@ pub const APPLIED: &[&str] = &[
     "-no-reflect",
     "-no-stdlib",
     "-opt-in",
+    "-progressive",
     "-version",
 ];
 
@@ -213,7 +214,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-include-runtime",
     "-kotlin-home",
     "-nowarn",
-    "-progressive",
     "-script",
     "-script-templates",
     "-verbose",

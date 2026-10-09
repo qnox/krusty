@@ -135,9 +135,8 @@ fn a_colon_joined_classpath_resolves_a_dependency() {
     assert!(jar_entries(&jar).iter().any(|e| e == "app/AppKt.class"));
 }
 
-/// The rule passes the project's kotlinc flags through verbatim. The subset krusty models must
-/// reach compilation rather than being mistaken for source paths; semantic gaps are refused in
-/// the focused tests below.
+/// The rule passes the project's kotlinc flags through verbatim, so release-declared language
+/// features must reach the shared language settings rather than being mistaken for source paths.
 #[test]
 fn the_projects_kotlinc_flags_are_accepted() {
     let dir = workspace("flags");
@@ -150,6 +149,7 @@ fn the_projects_kotlinc_flags_are_accepted() {
             "-d".to_string(),
             jar.display().to_string(),
             "-Xjvm-default=all".to_string(),
+            "-XXLanguage:+AllowEagerSupertypeAccessibilityChecks".to_string(),
             "-api-version".to_string(),
             "2.4".to_string(),
             "-language-version".to_string(),
@@ -167,15 +167,15 @@ fn the_projects_kotlinc_flags_are_accepted() {
     assert!(jar_entries(&jar).iter().any(|e| e == "demo/FKt.class"));
 }
 
-/// A language-feature name is not implemented merely because the generic feature set can retain
-/// it. The project currently requests this progressive feature explicitly too, so the batch rule
-/// must refuse instead of compiling under unchanged semantics.
+/// A language-feature name declared by the selected kotlinc release is valid compiler input. The
+/// project requests this progressive diagnostic feature explicitly, and the batch surface accepts
+/// it without a krusty-only compatibility flag.
 #[test]
-fn the_projects_unmodeled_language_feature_is_refused() {
-    let dir = workspace("unmodeled-language-feature");
+fn the_projects_release_language_feature_is_accepted() {
+    let dir = workspace("release-language-feature");
     let source = dir.join("U.kt");
     std::fs::write(&source, "package demo\nfun value(): Int = 1\n").expect("write source");
-    let jar = dir.join("unmodeled-language-feature.jar");
+    let jar = dir.join("release-language-feature.jar");
     let output = run_with_param_file(
         &dir,
         &[
@@ -185,20 +185,18 @@ fn the_projects_unmodeled_language_feature_is_refused() {
             source.display().to_string(),
         ],
     );
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "krusty: error: krusty does not implement the language feature \
-         'AllowEagerSupertypeAccessibilityChecks' selected by '-XXLanguage'\n"
+    assert!(
+        output.status.success(),
+        "release-declared language feature must compile: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!jar.exists(), "a refused feature must not write the jar");
+    assert!(jar_entries(&jar).iter().any(|e| e == "demo/UKt.class"));
 }
 
-/// intellij-community also sets `-progressive`. krusty does not implement the progressive
-/// features it turns on, so the rule's action must fail with the refusal and write nothing rather
-/// than compile under semantics the project did not ask for.
+/// intellij-community also sets `-progressive`; it selects the exact progressive features from the
+/// configured reference compiler's table.
 #[test]
-fn the_projects_progressive_flag_is_refused() {
+fn the_projects_progressive_flag_is_accepted() {
     let dir = workspace("progressive");
     let source = dir.join("P.kt");
     std::fs::write(&source, "package demo\nfun value(): Int = 1\n").expect("write source");
@@ -212,12 +210,12 @@ fn the_projects_progressive_flag_is_refused() {
             source.display().to_string(),
         ],
     );
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "krusty: error: krusty does not implement the kotlinc argument '-progressive'\n"
+    assert!(
+        output.status.success(),
+        "progressive compilation must use the release table: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!jar.exists(), "a refused argument must not write the jar");
+    assert!(jar_entries(&jar).iter().any(|e| e == "demo/PKt.class"));
 }
 
 /// A failing compile must FAIL the action. A rule whose compiler exits 0 on a broken source
@@ -262,8 +260,7 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     let abi = dir.join("demo.abi.jar");
     let cri = dir.join("demo.kotlinCriStorage");
 
-    // Request 1: the options intellij-community actually builds with, less `--progressive`, which
-    // the worker refuses (`worker::tests::progressive_is_refused_through_every_worker_surface`). Request 2 supplies the same
+    // Request 1: the options intellij-community actually builds with. Request 2 supplies the same
     // codegen decisions through the rule's `kotlinc_opts` passthrough ONLY: worker defaults must not
     // overwrite them. Request 3 carries Java and must be refused WITHOUT ending the worker, so a
     // fourth request still gets served.
@@ -271,7 +268,7 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
         concat!(
             r#"{{"arguments":["--target_label","//demo:demo","--kotlin_module_name","intellij.demo","#,
             r#""--jvm_default","no-compatibility","--x_lambdas","indy","--x_sam_conversions","indy","#,
-            r#""--x_no_param_assertions","--x_no_call_assertions","--warn","off","#,
+            r#""--x_no_param_assertions","--x_no_call_assertions","--progressive","--warn","off","#,
             r#""--srcs","{src}","--out","{jar}","--abi-out","{abi}","--kotlin-cri-out","{cri}","#,
             r#""--java-count","0"],"requestId":1}}"#,
             "\n",

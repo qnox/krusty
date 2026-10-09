@@ -12155,14 +12155,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `-Xskip-prerelease-check`); or *unsupported*, which fails the command line with
   `krusty: error: krusty does not implement the kotlinc argument '<argument>'`, exit 2, before
   anything is written. An argument krusty does not implement is never dropped silently.
-  `-progressive` is unsupported: it turns on the release's progressive language features (the
+  `-progressive` turns on the selected release's progressive language features (the
   `LanguageFeature` entries with `actuallyEnabledInProgressiveMode`, vendored per release in
-  `releases/<ver>.features.tsv`), and krusty implements none of those not already on at the
-  language version (the 2.5/2.6 `Forbid…`/`Report…` errors). `@Enables` arguments apply before
-  `-XXLanguage`, which overrides them, and like kotlinc only `@Enables` arguments, never
-  `-XXLanguage`, get `REDUNDANT_CLI_ARG`. A `-XXLanguage` toggle is accepted only when the
-  compiler has an explicit semantic consumer for that feature; retaining an arbitrary feature
-  name without changing parsing, checking, lowering, or emission is not implementation.
+  `releases/<ver>.features.tsv`). `@Enables` arguments apply first, progressive features not owned
+  by one of those arguments apply next, and `-XXLanguage` overrides both. Like kotlinc, only
+  `@Enables` arguments, never `-XXLanguage`, get `REDUNDANT_CLI_ARG`. Raw `-XXLanguage` feature
+  names are validated against the selected release's same table rather than a krusty-owned list;
+  an invented name is rejected. The frontend/backend capability list remains the boundary for
+  dedicated feature-switch aliases, whose accepted spelling promises a concrete implementation.
+  An old language level under `-progressive` emits kotlinc's unnamed warning; it is deliberately
+  unavailable to named `-Xwarning-level` policy and is removed by `-Xsuppress-version-warnings`.
   (`tests/kotlinc_argument_conformance_e2e.rs` compares the table with the reference compiler and
   the parser with kotlinc's `parseCommandLineArguments` over every argument and value form;
   `crates/krusty-cli/src/kotlinc_arguments/tokenize.rs` unit tests;

@@ -1,6 +1,7 @@
 //! Applying parsed kotlinc arguments to [`Options`]: the arguments krusty implements, the language
 //! settings they select, and the source inputs.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaMode};
@@ -9,7 +10,8 @@ use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
 
 use super::{jvm_target_to_major, supported_kotlin_versions, CliWarning, Options, WarningName};
-use crate::kotlinc_arguments::{Catalog, Occurrence, Value};
+use crate::kotlinc_arguments::catalog::FeatureToggle;
+use crate::kotlinc_arguments::{Catalog, FeatureTable, Occurrence, Value};
 
 /// Record a `-jvm-default`/`-Xjvm-default` value, reporting one krusty does not model instead of
 /// silently compiling under a different interface shape than the build asked for.
@@ -45,6 +47,7 @@ fn parse_metadata_level(value: &str) -> Option<[i32; 3]> {
 fn settings_warnings(
     settings: &LanguageSettings,
     parsed: &ParsedSettings,
+    reference_version: KotlinVersion,
     suppress_version_warnings: bool,
     lifecycle: Vec<CliWarning>,
 ) -> Vec<CliWarning> {
@@ -83,6 +86,21 @@ fn settings_warnings(
             ),
         }),
         _ => {}
+    }
+    // kotlinc's `checkProgressiveMode` warning has no public diagnostic name. It is still one typed
+    // compiler warning internally; the private identity keeps named `-Xwarning-level` policy from
+    // reaching it while allowing a future global warning policy to treat it uniformly.
+    let latest_stable = LanguageVersion::default_for(reference_version);
+    if parsed.progressive && settings.language_version < latest_stable {
+        warnings.push(CliWarning {
+            name: WarningName::UnnamedProgressiveMode,
+            message: format!(
+                "'-progressive' is meaningful only for the latest language version ({latest_stable}), \
+                 while this build uses {}\nCompiler behavior in such mode is undefined; consider \
+                 moving to the latest stable version or turning off progressive mode.",
+                settings.language_version
+            ),
+        });
     }
     warnings.extend(lifecycle);
     warnings.extend(redundant_feature_warnings(settings, feature_arguments));
@@ -182,13 +200,33 @@ pub(super) struct ParsedSettings {
     common_feature_arguments: Vec<String>,
     /// `-XXLanguage` arguments, which kotlinc applies last so they override everything else.
     internal_feature_arguments: Vec<String>,
+    /// The features each `@Enables`/`@Disables` argument sets at its final value, by argument.
+    features_set_by_argument: BTreeMap<String, Vec<String>>,
+    progressive: bool,
 }
 
 impl ParsedSettings {
     /// The feature arguments in kotlinc's `configureLanguageFeatures` order: the `@Enables`
-    /// arguments, then `-XXLanguage`, which overrides them.
-    fn ordered_feature_arguments(&self) -> Vec<String> {
+    /// arguments, then `-progressive` features not explicitly owned by one of those arguments,
+    /// then `-XXLanguage`, which overrides them.
+    fn ordered_feature_arguments(&self, catalog: &Catalog) -> Vec<String> {
         let mut ordered = self.common_feature_arguments.clone();
+        if self.progressive {
+            let set: BTreeSet<&str> = self
+                .features_set_by_argument
+                .values()
+                .flatten()
+                .map(String::as_str)
+                .collect();
+            let table = FeatureTable::for_version(catalog.version)
+                .expect("every release with an argument table has a feature table");
+            ordered.extend(
+                table
+                    .progressive()
+                    .filter(|feature| !set.contains(feature.name.as_str()))
+                    .map(|feature| format!("-XXLanguage:+{}", feature.name)),
+            );
+        }
         ordered.extend(self.internal_feature_arguments.iter().cloned());
         ordered
     }
@@ -213,7 +251,12 @@ pub(super) fn rendered(occurrence: &Occurrence) -> String {
     }
 }
 
-pub(super) fn apply(opts: &mut Options, parsed: &mut ParsedSettings, occurrence: &Occurrence) {
+pub(super) fn apply(
+    opts: &mut Options,
+    parsed: &mut ParsedSettings,
+    occurrence: &Occurrence,
+    catalog: &Catalog,
+) {
     let spec = occurrence.spec;
     let name = spec.name.as_str();
     let (flag, text, list) = match &occurrence.value {
@@ -236,21 +279,22 @@ pub(super) fn apply(opts: &mut Options, parsed: &mut ParsedSettings, occurrence:
                         ));
                         return;
                     };
-                    if !krusty::features::LangFeatures::models(feature) {
+                    let table = FeatureTable::for_version(catalog.version)
+                        .expect("every release with an argument table has a feature table");
+                    if !table.contains(feature) {
                         opts.errors.push(format!(
-                            "krusty does not implement the language feature '{feature}' selected by '-XXLanguage'"
+                            "unknown language feature '{feature}' selected by '-XXLanguage' for kotlinc {}",
+                            catalog.version
                         ));
                         return;
                     }
                 }
             }
         } else {
-            let toggle_applies = |toggle: &&crate::kotlinc_arguments::catalog::FeatureToggle| {
-                match &occurrence.value {
-                    Value::Bool(flag) => *flag && toggle.if_value_is.is_none(),
-                    Value::String(value) => toggle.if_value_is.as_deref() == Some(value.as_str()),
-                    Value::List(_) => false,
-                }
+            let toggle_applies = |toggle: &&FeatureToggle| match &occurrence.value {
+                Value::Bool(flag) => *flag && toggle.if_value_is.is_none(),
+                Value::String(value) => toggle.if_value_is.as_deref() == Some(value.as_str()),
+                Value::List(_) => false,
             };
             if let Some(toggle) = spec
                 .enables
@@ -264,6 +308,15 @@ pub(super) fn apply(opts: &mut Options, parsed: &mut ParsedSettings, occurrence:
                 ));
                 return;
             }
+            parsed.features_set_by_argument.insert(
+                name.to_string(),
+                spec.enables
+                    .iter()
+                    .chain(&spec.disables)
+                    .filter(toggle_applies)
+                    .map(|toggle| toggle.feature.clone())
+                    .collect(),
+            );
             // A false Boolean feature flag applies none of its `@Enables`/`@Disables` entries.
             // Reconstructing the bare spelling would incorrectly turn it back on.
             if matches!(&occurrence.value, Value::Bool(false)) {
@@ -303,6 +356,7 @@ pub(super) fn apply(opts: &mut Options, parsed: &mut ParsedSettings, occurrence:
         "-module-name" => opts.module_name = text.to_string(),
         "-language-version" => parsed.language_version = Some(text.to_string()),
         "-api-version" => parsed.api_version = Some(text.to_string()),
+        "-progressive" => parsed.progressive = flag,
         "-Xmetadata-version" => match parse_metadata_level(text) {
             Some(version) => opts.metadata_version = Some(version),
             None => opts.errors.push(format!(
@@ -429,12 +483,13 @@ pub(super) fn finish_language_settings(
         },
         None => None,
     };
-    let feature_arguments = parsed.ordered_feature_arguments();
+    let feature_arguments = parsed.ordered_feature_arguments(catalog);
     match LanguageSettings::new(language_version, api_version, &feature_arguments) {
         Ok(settings) => {
             opts.warnings = settings_warnings(
                 &settings,
                 &parsed,
+                reference_version,
                 opts.suppress_version_warnings,
                 lifecycle,
             );
