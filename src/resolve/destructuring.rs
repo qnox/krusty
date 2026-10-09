@@ -22,11 +22,20 @@ impl Checker<'_> {
         // never miscompiled.
         let source_props = self.file.destructuring.source_properties.get(&s.0).cloned();
         let entry_types = self.file.destructuring.entry_types.get(&s.0).cloned();
+        let short_form_warnings = self.file.destructuring.warns_parenthesized_short_form
+            && self
+                .file
+                .destructuring
+                .parenthesized_short_form
+                .contains(&s);
         for (idx, entry) in entries.iter().enumerate() {
             let property = source_props
                 .as_ref()
                 .and_then(|props| props.get(idx))
                 .and_then(Option::as_ref);
+            if short_form_warnings && property.is_none() {
+                self.check_parenthesized_short_form_entry(it, idx + 1, entry);
+            }
             // A positional `_` skips that component: no binding and no `componentN` call. An
             // implicit name-based `_` is forbidden and also reads nothing. Only an explicit
             // `_ = prop` reads `prop`, so the getter runs, and then discards the value.

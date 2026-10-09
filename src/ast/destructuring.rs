@@ -42,4 +42,14 @@ pub struct DestructuringSyntax {
     pub ungated_bracket_spans: Vec<Span>,
     /// Explicit type annotations on destructured bindings, parallel to the statement's entries.
     pub entry_types: HashMap<u32, Vec<Option<TypeRef>>>,
+    /// Statements written in the parenthesized short form, whose entries carry no `val`/`var`:
+    /// `val (a, b) = e`, `for ((a, b) in xs)`, and the lambda parameter `{ (a, b) -> }`. The
+    /// square-bracket forms and the full form `(val a, val b) = e` are absent. Kotlin plans to give
+    /// this syntax name-based meaning, so its positional entries are the subject of the
+    /// `DeprecateNameMismatchInShortDestructuringWithParentheses` warnings.
+    pub parenthesized_short_form: HashSet<StmtId>,
+    /// `+DeprecateNameMismatchInShortDestructuringWithParentheses` without
+    /// `+EnableNameBasedDestructuringShortForm`: positional entries of the parenthesized short form
+    /// warn where the planned name-based reading would reject them or change their meaning.
+    pub warns_parenthesized_short_form: bool,
 }

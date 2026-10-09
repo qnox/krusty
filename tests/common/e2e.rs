@@ -641,19 +641,39 @@ pub fn reference_error_blocks_from(stderr: &str) -> Vec<String> {
 }
 
 fn error_blocks(stderr: &str, excerpted: bool) -> Vec<String> {
+    diagnostic_blocks(stderr, "error", excerpted)
+}
+
+/// Every located warning in `stderr` with its complete message, flattened like
+/// [`reference_error_blocks`]: `file:line:column: first line`, then `| line` per further message
+/// line. `excerpted` drops the trailing source-line and caret excerpt kotlinc appends.
+pub fn warning_blocks(stderr: &str, excerpted: bool) -> Vec<String> {
+    diagnostic_blocks(stderr, "warning", excerpted)
+}
+
+fn diagnostic_blocks(stderr: &str, severity: &str, excerpted: bool) -> Vec<String> {
     let located = |line: &str| {
         line.split_once(": error: ")
             .or_else(|| line.split_once(": warning: "))
             .or_else(|| line.split_once(": info: "))
             .is_some_and(|(location, _)| location.rsplitn(3, ':').count() == 3)
     };
+    let marker = format!(": {severity}: ");
     let mut blocks = Vec::new();
     let mut lines = stderr.lines().peekable();
     while let Some(line) = lines.next() {
-        if !located(line) || !line.contains(": error: ") {
+        if !located(line) || !line.contains(&marker) {
             continue;
         }
-        let Some(header) = render_errors(line).pop() else {
+        let Some(header) = rendered_diagnostics(line, &format!("{severity}:"))
+            .pop()
+            .map(|diagnostic| {
+                format!(
+                    "{}:{}:{}: {}",
+                    diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.message
+                )
+            })
+        else {
             continue;
         };
         let mut continuation = Vec::new();

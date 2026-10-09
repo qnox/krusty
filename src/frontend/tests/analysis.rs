@@ -179,6 +179,7 @@ impl ExistingLibrary {
                 } else {
                     TypeKind::Class
                 },
+                is_data: false,
                 inheritance: Default::default(),
                 supertypes,
                 supertype_templates: Vec::new(),

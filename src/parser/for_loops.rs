@@ -21,6 +21,9 @@ impl Parser<'_> {
         } else {
             None
         };
+        // Whether the pattern is the parenthesized short form `((a, b) in …)`: no entry carries
+        // `val`/`var`.
+        let mut parenthesized_short = close == Some(TokenKind::RParen);
         let destructure: Option<DestructureEntries> = if let Some(close) = close {
             self.bump();
             let mut entries = Vec::new();
@@ -35,11 +38,12 @@ impl Parser<'_> {
                 let had_kw = is_var || self.at(TokenKind::KwVal);
                 if had_kw {
                     self.bump();
+                    parenthesized_short = false;
                 }
                 let ignored =
                     self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
+                let name_span = self.syntactic_ident_span(self.tok());
                 let n = self.ident_or_error("variable name");
-                let name_span = self.declaration_name_span;
                 let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
                 let implicit =
                     close == TokenKind::RParen && (self.short_form_destructuring || had_kw);
@@ -134,7 +138,8 @@ impl Parser<'_> {
             }
             self.expect(TokenKind::RParen, "')'");
             let body = self.parse_loop_body();
-            let (body, destructured) = self.desugar_destructure_body(&name, destructure, body);
+            let (body, destructured) =
+                self.desugar_destructure_body(&name, destructure, parenthesized_short, body);
             // Iterate over `rstart`: the checker decides whether it is a counted progression.
             return self.finish_loop(
                 Stmt::ForEach {
@@ -205,7 +210,8 @@ impl Parser<'_> {
             let iterable = self.parse_for_trailing_infix(base);
             self.expect(TokenKind::RParen, "')'");
             let body = self.parse_loop_body();
-            let (body, destructured) = self.desugar_destructure_body(&name, destructure, body);
+            let (body, destructured) =
+                self.desugar_destructure_body(&name, destructure, parenthesized_short, body);
             return self.finish_loop(
                 Stmt::ForEach {
                     name,
@@ -219,7 +225,8 @@ impl Parser<'_> {
         }
         self.expect(TokenKind::RParen, "')'");
         let body = self.parse_loop_body();
-        let (body, destructured) = self.desugar_destructure_body(&name, destructure, body);
+        let (body, destructured) =
+            self.desugar_destructure_body(&name, destructure, parenthesized_short, body);
         self.finish_loop(
             Stmt::For {
                 name,
@@ -259,6 +266,7 @@ impl Parser<'_> {
         &mut self,
         temp: &str,
         destructure: Option<DestructureEntries>,
+        parenthesized_short: bool,
         body: ExprId,
     ) -> (ExprId, Option<StmtId>) {
         let Some((entries, source_props, entry_types)) = destructure else {
@@ -278,6 +286,12 @@ impl Parser<'_> {
                 .destructuring
                 .source_properties
                 .insert(dstmt.0, source_props);
+        }
+        if parenthesized_short {
+            self.file
+                .destructuring
+                .parenthesized_short_form
+                .insert(dstmt);
         }
         if entry_types.iter().any(Option::is_some) {
             self.file

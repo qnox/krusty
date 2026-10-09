@@ -24,6 +24,7 @@ pub(super) fn mapped_builtin_signature(internal: TypeName) -> Option<LibraryType
         is_nested: false,
         outer_instance: None,
         kind: crate::libraries::TypeKind::Class,
+        is_data: false,
         inheritance: Default::default(),
         supertypes: TypeNameList::new(),
         supertype_templates: Vec::new(),
@@ -157,6 +158,8 @@ pub(super) fn builtin_library_type(
         is_nested,
         outer_instance: None,
         kind,
+        // `.kotlin_builtins` declares no data class.
+        is_data: false,
         inheritance: Default::default(),
         supertypes,
         supertype_templates: generic.supertype_templates,

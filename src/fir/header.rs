@@ -1214,7 +1214,7 @@ fn extract_file_stub_inventory(
                 initialization_order: None,
                 kind: DeclarationKind::Constructor,
                 visibility: class.primary_ctor_visibility,
-                flags: DeclarationFlags::default(),
+                flags: DeclarationFlags::only(DeclarationFlags::PRIMARY_CONSTRUCTOR),
             });
         }
         if let Some(companion) = class.companion {

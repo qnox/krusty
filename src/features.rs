@@ -114,6 +114,7 @@ const MODELED_FEATURES: &[&str] = &[
     "ContextReceivers",
     "ContextSensitiveResolutionUsingExpectedType",
     "DataClassCopyRespectsConstructorVisibility",
+    "DeprecateNameMismatchInShortDestructuringWithParentheses",
     "EagerLambdaAnalysis",
     "EnableNameBasedDestructuringShortForm",
     "EnumEntries",

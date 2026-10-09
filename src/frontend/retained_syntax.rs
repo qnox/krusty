@@ -1063,6 +1063,11 @@ pub(super) fn compact(file: &mut File) {
             .into_iter()
             .filter_map(|old| statements.get(&old).copied())
             .collect();
+    file.destructuring.parenthesized_short_form =
+        std::mem::take(&mut file.destructuring.parenthesized_short_form)
+            .into_iter()
+            .filter_map(|old| statements.get(&old).copied())
+            .collect();
     file.destructuring.loops = std::mem::take(&mut file.destructuring.loops)
         .into_iter()
         .filter_map(|(old, destructure)| {

@@ -1890,6 +1890,7 @@ fn semantic_class(
             inline_class_property,
             kind: metadata::class_kind(header.flags),
             is_fun_interface: header.flags & (1 << 14) != 0,
+            is_data: header.flags & (1 << 10) != 0,
             visibility: metadata::declaration_visibility(header.flags),
             is_expect: header.flags & (1 << 12) != 0,
             modality: metadata::declaration_modality(header.flags),

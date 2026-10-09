@@ -181,6 +181,7 @@ mod tests {
             is_fun_interface: false,
             visibility: Visibility::Public,
             is_expect: false,
+            is_data: false,
             enum_entries: Vec::new(),
             has_enum_entries: false,
             sealed_subclasses: Vec::new(),

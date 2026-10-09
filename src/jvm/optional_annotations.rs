@@ -182,6 +182,7 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
         is_nested: declaration.is_nested,
         outer_instance: None,
         kind: TypeKind::Annotation,
+        is_data: false,
         inheritance: ClassifierInheritance {
             is_abstract: true,
             is_extensible: false,
