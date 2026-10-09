@@ -431,6 +431,11 @@ mod tests {
     #[test]
     fn the_class_model_uses_only_ir_contract_dependencies() {
         assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
+        // `value_classes` is the traversal every backend shares; what this file adds is the policy.
+        assert_allowed_crate_modules(
+            "src/native/value_classes.rs",
+            &["ir", "types", "value_classes"],
+        );
     }
 
     #[test]

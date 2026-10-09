@@ -176,14 +176,18 @@ pub(super) struct LambdaItems {
 /// Lay out values after the object header, each aligned to its own size — the same rule the class
 /// model applies to fields, for the same reason: the collector is told where the references are
 /// and must be told the truth.
-fn layout(types: &[Ty]) -> (Vec<u32>, u32, Vec<u32>) {
+fn layout(
+    values: &super::super::super::value_classes::NativeValueClasses,
+    types: &[Ty],
+) -> (Vec<u32>, u32, Vec<u32>) {
     let mut offsets = Vec::with_capacity(types.len());
     let mut references = Vec::new();
     let mut end = model::HEADER_SIZE;
     for ty in types {
-        let size = carrier(*ty).clif().map_or(8, |clif| clif.bytes());
+        let carried = machine_carrier(values.project(*ty));
+        let size = carried.clif().map_or(8, |clif| clif.bytes());
         let offset = end.next_multiple_of(size);
-        if carrier(*ty) == Carrier::Ref {
+        if carried == Carrier::Ref {
             references.push(offset);
         }
         offsets.push(offset);
@@ -266,15 +270,16 @@ impl<'a> FileLowering<'a> {
             // one thing two `id(::f)` written in two places share: neither the delegate nor its
             // thunk is.
             //
-            // Only over a REFERENCE. Kotlin says SAMs over lambdas are never equal, and they would
-            // be here: `id { }` at one site captures one non-capturing lambda, which is a
-            // singleton, so two conversions of it would wrap the same object. `simpleLambdas.kt`
-            // is that case, and it is why this asks what the delegate wraps rather than trusting
-            // that a SAM delegate always wraps something with an identity of its own.
+            // Only over a REFERENCE or an already-bound function VALUE. Kotlin says SAMs over
+            // lambda EXPRESSIONS are never equal, and they would be here: `id { }` at one site
+            // captures one non-capturing lambda, which is a singleton, so two conversions of it
+            // would wrap the same object. A value read back from `val f = { }` is different:
+            // both wrappers really do hold that same delegate, and their generated
+            // `FunctionAdapter.equals` compares it. `simpleLambdas.kt` is the first case; the
+            // repository's SAM-wrapper execution test pins the second.
             let sam_identity = {
-                let wrapped = captures.first().copied();
-                sam.as_ref().zip(wrapped).and_then(|(target, wrapped)| {
-                    matches!(self.ir.expr(wrapped), IrExpr::CallableReference(_)).then(|| {
+                sam.as_ref().zip(captures.first()).and_then(|(target, _)| {
+                    (target.function_adapter || target.wraps_function_value).then(|| {
                         format!(
                             "kt_refid_sam_{}",
                             super::super::super::symbols::c_identifier(&target.classifier.render())
@@ -289,7 +294,7 @@ impl<'a> FileLowering<'a> {
             let identity = identity.or(sam_identity);
             let capture_types: Vec<Ty> =
                 carried_parameters(self.ir, impl_fn)[..captures.len()].to_vec();
-            let (capture_offsets, instance_size, references) = layout(&capture_types);
+            let (capture_offsets, instance_size, references) = layout(self.values, &capture_types);
             // Where the value equality reads lands, or 0 for a reference that binds nothing. No
             // field can sit at offset 0 — the header is there — so 0 says "none" unambiguously.
             let receiver_offset = receiver_capture
@@ -526,6 +531,8 @@ impl<'a> FileLowering<'a> {
                 model::Slot::FieldGetter { .. }
                 | model::Slot::FieldSetter { .. }
                 | model::Slot::AnnotationMember { .. }
+                | model::Slot::ValueMember { .. }
+                | model::Slot::ValueBridge { .. }
                 | model::Slot::Bridge { .. }
                 | model::Slot::FunctionBridge { .. }
                 | model::Slot::AccessorBridge { .. } => {
@@ -595,7 +602,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(thunk, signature, result, &name, &mut |body, params| {
             let mut arguments = Vec::with_capacity(declared.len());
             for (offset, ty) in capture_offsets.iter().zip(&declared) {
-                let clif = carrier(*ty).clif().expect("a capture is never `Unit`");
+                let clif = body.carrier(*ty).clif().expect("a capture is never `Unit`");
                 arguments.push(
                     body.builder
                         .ins()
@@ -612,7 +619,7 @@ impl<'a> FileLowering<'a> {
             let func_ref = body.func_ref(target);
             let call = body.emit_call(func_ref, &arguments)?;
             let returned = body.builder.inst_results(call).first().copied();
-            match (returned, carrier(result)) {
+            match (returned, body.carrier(result)) {
                 (_, Carrier::Void) => {}
                 (Some(value), _) => {
                     let value = body
@@ -658,7 +665,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(thunk, signature, any(), &name, &mut |body, params| {
             let mut arguments = Vec::with_capacity(parameters.len());
             for (offset, ty) in capture_offsets.iter().zip(&parameters) {
-                let clif = carrier(*ty).clif().expect("a capture is never `Unit`");
+                let clif = body.carrier(*ty).clif().expect("a capture is never `Unit`");
                 arguments.push(
                     body.builder
                         .ins()
@@ -691,7 +698,8 @@ impl<'a> FileLowering<'a> {
 
     /// The holder type for a captured `var` of the given carrier, declared on first use.
     pub(super) fn holder_type(&mut self, elem: Ty) -> Result<DataId, Unsupported> {
-        let clif = carrier(elem)
+        let clif = self
+            .carrier(elem)
             .clif()
             .ok_or_else(|| "a captured `Unit` variable".to_string())?;
         let key = clif.to_string();
@@ -700,7 +708,7 @@ impl<'a> FileLowering<'a> {
         }
         let base = format!("kt_ref_{key}");
         let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
-        let (_, instance_size, references) = layout(&[elem]);
+        let (_, instance_size, references) = layout(self.values, &[elem]);
         let vtable = self.any_vtable()?;
         let any_type = self.import_data("kt_type_any")?;
         self.define_type_descriptor(
@@ -818,7 +826,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             &arguments,
         )?;
         match result {
-            Some(value) if carrier(ret) != Carrier::Void => self.convert(value, Some(any()), ret),
+            Some(value) if self.carrier(ret) != Carrier::Void => {
+                self.convert(value, Some(any()), ret)
+            }
             _ => Ok(None),
         }
     }
@@ -871,7 +881,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             arguments,
         )?;
         match result {
-            Some(value) if carrier(ret) != Carrier::Void => self.convert(value, Some(any()), ret),
+            Some(value) if self.carrier(ret) != Carrier::Void => {
+                self.convert(value, Some(any()), ret)
+            }
             _ => Ok(None),
         }
     }
@@ -883,7 +895,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         init: Option<u32>,
     ) -> Result<Option<Value>, Unsupported> {
         let descriptor = self.file.holder_type(elem)?;
-        let (offsets, instance_size, _) = super::functions::layout(&[elem]);
+        let (offsets, instance_size, _) = super::functions::layout(self.file.values, &[elem]);
         let value = if let Some(init) = init {
             let Some(value) = self.coerce(init, elem)? else {
                 return Err("a captured `Unit` variable".to_string());
@@ -908,8 +920,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(holder) = self.receiver(holder)? else {
             return Ok(None);
         };
-        let (offsets, _, _) = super::functions::layout(&[elem]);
-        let clif = carrier(elem)
+        let (offsets, _, _) = super::functions::layout(self.file.values, &[elem]);
+        let clif = self
+            .carrier(elem)
             .clif()
             .ok_or_else(|| "a captured `Unit` variable".to_string())?;
         Ok(Some(self.builder.ins().load(
@@ -937,7 +950,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(value) = value else {
             return Err("a `Unit` value assigned to a captured variable".to_string());
         };
-        let (offsets, _, _) = super::functions::layout(&[elem]);
+        let (offsets, _, _) = super::functions::layout(self.file.values, &[elem]);
         self.builder
             .ins()
             .store(trusted(), value, holder, offsets[0] as i32);

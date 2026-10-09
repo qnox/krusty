@@ -48,7 +48,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         runtime: impl FnOnce(&mut Self, Value) -> Result<Option<Value>, Unsupported>,
     ) -> Result<Option<Value>, Unsupported> {
         let merge = self.builder.create_block();
-        let carried = carrier(answer);
+        let carried = self.carrier(answer);
         if let Some(clif) = carried.clif() {
             self.builder.append_block_param(merge, clif);
         }
@@ -94,7 +94,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     fn unit_where_wanted(&mut self, answer: Ty) -> Result<Option<Value>, Unsupported> {
-        if self.terminated || carrier(answer) != Carrier::Ref {
+        if self.terminated || self.carrier(answer) != Carrier::Ref {
             return Ok(None);
         }
         self.runtime_call("kt_unit", &[], any(), &[])

@@ -263,7 +263,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Err("an array index of no value".to_string());
         };
         let address = self.element_address(array, index, shape.stride)?;
-        let clif = carrier(shape.stored)
+        let clif = self
+            .carrier(shape.stored)
             .clif()
             .expect("an element is never `Unit`");
         let value = self.builder.ins().load(clif, trusted(), address, 0);

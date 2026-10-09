@@ -29,6 +29,7 @@
 //! declines a superclass declared in another file and an override of a method declared outside it,
 //! so the file declines with a diagnostic instead of emitting something unverified.
 
+use super::value_classes::NativeValueClasses;
 use std::collections::HashMap;
 
 use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
@@ -62,10 +63,26 @@ impl CKind {
     }
 }
 
-/// The carrier for a Kotlin type. A nullable primitive is deliberately NOT a scalar: `Int?` has to
-/// represent `null`, so it boxes, exactly as it does on the JVM. A type parameter erases to a
-/// reference, as it does there too.
-pub(super) fn c_kind(ty: Ty) -> CKind {
+/// The carrier for a Kotlin type as this target carries it: a value class is its underlying value
+/// wherever the representation policy projects it (see `native::value_classes`).
+pub(super) fn c_kind(values: &NativeValueClasses, ty: Ty) -> CKind {
+    machine_kind(values.project(ty))
+}
+
+/// How a value of `ty` is REPRESENTED: its carrier, and the value class it is carried unboxed
+/// for, if any. Two signatures agree only where both do — a value class over `Any` and `Any` share
+/// a carrier, and still differ, because one is the value and the other a box of it.
+pub(super) fn representation(
+    values: &NativeValueClasses,
+    ty: Ty,
+) -> (CKind, Option<crate::types::TypeName>) {
+    (c_kind(values, ty), values.unboxed(ty))
+}
+
+/// The carrier for a type already projected. A nullable primitive is deliberately NOT a scalar:
+/// `Int?` has to represent `null`, so it boxes, exactly as it does on the JVM. A type parameter
+/// erases to a reference, as it does there too.
+fn machine_kind(ty: Ty) -> CKind {
     match ty {
         Ty::Unit => CKind::Void,
         Ty::Boolean => CKind::Scalar("kt_boolean"),
@@ -88,6 +105,60 @@ pub(super) fn c_kind(ty: Ty) -> CKind {
 pub(super) const ENUM_NAME_OFFSET: u32 = HEADER_SIZE;
 pub(super) const ENUM_ORDINAL_OFFSET: u32 = HEADER_SIZE + 8;
 pub(super) const ENUM_FIELDS_END: u32 = HEADER_SIZE + 12;
+
+/// The field a value class's box holds its value in: the exact backing-field coordinate common IR
+/// recorded on its sole stored property. Never chosen by position or recovered from the property's
+/// spelling; a declaration with no coordinate or more than one declines.
+pub(super) fn value_field(ir: &IrFile, class: ClassId) -> Result<u32, Unsupported> {
+    let declaration = &ir.classes[class as usize];
+    let name = declaration.fq_name();
+    let mut coordinates = declaration
+        .properties
+        .iter()
+        .filter_map(|property| property.backing_field);
+    let field = coordinates
+        .next()
+        .ok_or_else(|| format!("a value class whose property has no recorded field (`{name}`)"))?;
+    if coordinates.next().is_some() {
+        return Err(format!(
+            "a single-field value class with more than one recorded property field (`{name}`)"
+        ));
+    }
+    declaration
+        .fields
+        .get(field as usize)
+        .map(|_| field)
+        .ok_or_else(|| format!("a value class whose property field is absent (`{name}`)"))
+}
+
+/// The type a field is STORED at. A value class's box holds its value at the underlying type its
+/// checked declaration states, which a generic one's IR field does not spell: `value class W<T :
+/// Int>(val v: T)` holds an `Int` in a field the IR types `T`. Every other field is stored at its
+/// own physical type.
+pub(super) fn field_storage_ty(
+    values: &NativeValueClasses,
+    ir: &IrFile,
+    class: ClassId,
+    index: u32,
+) -> Result<Ty, Unsupported> {
+    let declaration = &ir.classes[class as usize];
+    if values.is_value_class(declaration.fq_name) {
+        if value_field(ir, class)? == index {
+            return values.underlying(declaration.fq_name).ok_or_else(|| {
+                format!(
+                    "a value class with no checked underlying type (`{}`)",
+                    declaration.fq_name()
+                )
+            });
+        }
+    }
+    Ok(super::captures::physical_ty(
+        ir,
+        class,
+        index,
+        declaration.fields[index as usize].ty,
+    ))
+}
 
 /// Whether a class is an enum: it extends `kotlin.Enum`, which no file declares.
 pub(super) fn is_enum(class: &IrClass) -> bool {
@@ -235,6 +306,13 @@ pub(super) enum Slot {
     /// identity. `hashCode` is the contract sum of `(127 * name.hashCode()) xor value.hashCode()`,
     /// and a program can read it: the corpus computes the same sum in Kotlin and compares.
     AnnotationMember { class: ClassId, member: AnyMember },
+    /// `kotlin.Any`'s three for a VALUE CLASS's box, answered by the value it holds: two boxes of
+    /// one value class are equal when their values are, and `V(x=1)` is how one renders.
+    ValueMember { class: ClassId, member: AnyMember },
+    /// A value class's own member, reached through its BOX. The member itself takes the value as
+    /// `this` — that is what a value class is — while a vtable is read off an object, so this
+    /// entry takes the box, reads the value out of it, and calls the member with that.
+    ValueBridge { class: ClassId, function: FunId },
     /// The same thing for a property ACCESSOR reached through an INTERFACE that declares it with
     /// a different representation: `interface C<T> { var size: T }` erases its accessors to a
     /// reference while `class B : C<Int>, A()` inherits an unboxed machine integer. The
@@ -370,7 +448,7 @@ pub(super) fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
 }
 
 /// Build the layout and vtable of every class in `ir`, superclasses first.
-pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
+pub(super) fn build(ir: &IrFile, values: &NativeValueClasses) -> Result<ClassModel, Unsupported> {
     for class in &ir.classes {
         check_supported(class)?;
     }
@@ -389,7 +467,7 @@ pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
                     .as_ref()
                     .expect("superclasses are laid out first")
             });
-            layout_class(ir, id, superclass, parent)?
+            layout_class(values, ir, id, superclass, parent)?
         };
         layouts[id as usize] = Some(layout);
     }
@@ -398,6 +476,23 @@ pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
         .map(|layout| layout.expect("every class was laid out"))
         .collect();
     place_interface_slots(ir, &order, &mut layouts, &interfaces)?;
+    // A value class's own members take the VALUE as `this`, and a vtable is read off its box, so
+    // every entry naming one of them reaches it through a bridge that unboxes first.
+    for (id, class) in ir.classes.iter().enumerate() {
+        if !values.is_value_class(class.fq_name) {
+            continue;
+        }
+        for slot in &mut layouts[id].vtable {
+            if let Slot::Function(function) = *slot {
+                if class.methods.contains(&function) {
+                    *slot = Slot::ValueBridge {
+                        class: id as ClassId,
+                        function,
+                    };
+                }
+            }
+        }
+    }
     Ok(ClassModel {
         layouts,
         order,
@@ -886,6 +981,7 @@ fn round_up(value: u32, alignment: u32) -> u32 {
 }
 
 fn layout_class(
+    values: &NativeValueClasses,
     ir: &IrFile,
     id: ClassId,
     superclass: Option<ClassId>,
@@ -921,7 +1017,7 @@ fn layout_class(
     for (index, field) in class.fields.iter().enumerate() {
         // A field carrying a mutable local this class captured holds the shared cell, not a copy
         // of the value the source declared — so it is a reference whatever the declaration says.
-        let kind = c_kind(super::captures::physical_ty(ir, id, index as u32, field.ty));
+        let kind = c_kind(values, field_storage_ty(values, ir, id, index as u32)?);
         if kind == CKind::Void {
             return Err(format!(
                 "a `Unit`-typed field (`{}.{}`)",
@@ -1099,7 +1195,7 @@ fn layout_class(
             // `invoke` on a class implementing a FUNCTION TYPE takes the one other fixed slot this
             // target has: the runtime names it (`KT_SLOT_INVOKE`) and every caller through a
             // function type reads it, a lambda's body included.
-            None => invoke_edge.and_then(|edge| external_invoke_slot(edge, function)),
+            None => invoke_edge.and_then(|edge| external_invoke_slot(values, edge, function)),
         };
         // Whether the FUNCTION SLOT needs a stand-in for this method: it is an `invoke` over a
         // function type that could not take the slot outright, because it does not carry
@@ -1126,7 +1222,7 @@ fn layout_class(
         // property TYPES rather than two declaration ids.
         let mut accessor_bridged: Vec<(u32, Ty, Ty, bool)> = Vec::new();
         for &overridden in overridden_functions.get(&fid).into_iter().flatten() {
-            let matches = same_representation(function, &ir.functions[overridden as usize]);
+            let matches = same_representation(values, function, &ir.functions[overridden as usize]);
             let owner = ir.functions[overridden as usize]
                 .dispatch_receiver
                 .and_then(|owner| ir.class_id_by_name(owner))
@@ -1180,7 +1276,10 @@ fn layout_class(
                             // The base declares the property with a different REPRESENTATION, so
                             // its slot cannot hold this accessor. This one takes a slot of its own
                             // and the base's gets a bridge, exactly as a method's does.
-                            Some((slot, declared)) if c_kind(declared) != c_kind(implemented) => {
+                            Some((slot, declared))
+                                if representation(values, declared)
+                                    != representation(values, implemented) =>
+                            {
                                 accessor_bridged.push((slot, declared, implemented, setter));
                                 None
                             }
@@ -1306,7 +1405,9 @@ fn layout_class(
             // above: a synthesized field access is exactly as unusable through the base's carrier
             // as a source accessor would be.
             let bridged = match replaces {
-                Some((slot, declared)) if c_kind(declared) != c_kind(property.ty) => {
+                Some((slot, declared))
+                    if representation(values, declared) != representation(values, property.ty) =>
+                {
                     Some((slot, declared))
                 }
                 _ => None,
@@ -1344,7 +1445,7 @@ fn layout_class(
         }
     }
 
-    register_inherited_interface_members(ir, class, &mut slots, &mut interface_bridges)?;
+    register_inherited_interface_members(values, ir, class, &mut slots, &mut interface_bridges)?;
 
     // Kotlin's `Enum.toString()` is the constant's name, where `kotlin.Any`'s is its identity. The
     // runtime answers it, because the storage it reads belongs to `kotlin.Enum` — a base no file
@@ -1364,10 +1465,33 @@ fn layout_class(
             vtable[slot] = Slot::AnnotationMember { class: id, member };
         }
     }
-    // A `value class` is not a one-field class, and what it IS comes from the declarations the
-    // frontend checked, not from this file's shape. This backend does not read those yet.
-    if class.is_value {
-        return Err(format!("a value class (`{}`)", class.fq_name()));
+    // An `inner` class of a value class — Kotlin admits one only with its error suppressed — holds
+    // its outer instance as a value this layout has no storage decision for yet.
+    if class.is_inner_class
+        && class
+            .ctor_args
+            .iter()
+            .take(class.constructor_prefix_count as usize)
+            .any(|argument| values.unboxed(argument.ty).is_some())
+    {
+        return Err(format!(
+            "an inner class of a value class (`{}`)",
+            class.fq_name()
+        ));
+    }
+    // A value class's box answers `kotlin.Any`'s three by the value it holds. One the class
+    // declares itself keeps its own, reached through the unboxing bridge `build` installs.
+    if values.is_value_class(class.fq_name) {
+        value_field(ir, id)?;
+        for (slot, member) in [
+            (0, AnyMember::Equals),
+            (1, AnyMember::HashCode),
+            (2, AnyMember::ToString),
+        ] {
+            if matches!(vtable[slot], Slot::Runtime(_)) {
+                vtable[slot] = Slot::ValueMember { class: id, member };
+            }
+        }
     }
 
     Ok(ClassLayout {
@@ -1390,6 +1514,7 @@ fn layout_class(
 /// which nothing in the loop over the class's OWN members could have added. The frontend records
 /// the edge on the class that brings the two together, which is this one.
 fn register_inherited_interface_members(
+    values: &NativeValueClasses,
     ir: &IrFile,
     class: &IrClass,
     slots: &mut HashMap<SlotKey, u32>,
@@ -1435,6 +1560,7 @@ fn register_inherited_interface_members(
         // property path below gives, and the same one the JVM gives by emitting a bridge method.
         let key = function_key(ir, interface, overridden);
         if !same_representation(
+            values,
             &ir.functions[implementation as usize],
             &ir.functions[overridden as usize],
         ) {
@@ -1464,7 +1590,8 @@ fn register_inherited_interface_members(
         // would have a caller read that integer as a pointer; the number takes a bridge wearing
         // the interface's carrier instead. A property is what `bridges/test7.kt` is about, which
         // is why the method check did not catch it.
-        let bridged = c_kind(edge.implementation_type) != c_kind(edge.declared_type);
+        let bridged = representation(values, edge.implementation_type)
+            != representation(values, edge.declared_type);
         for setter in [false, true] {
             let (from, to) = if setter {
                 (
@@ -1705,13 +1832,14 @@ fn overridden_property_slot(
 pub(super) const FUNCTION_SLOT: u32 = 3;
 
 fn external_invoke_slot(
+    values: &NativeValueClasses,
     edge: &crate::ir::IrFunctionOverride,
     function: &IrFunction,
 ) -> Option<u32> {
     if edge.overridden_semantic_role != Some(crate::types::SemanticCallRole::KotlinFunctionInvoke) {
         return None;
     }
-    let reference = |ty: Ty| c_kind(ty) == CKind::Ref;
+    let reference = |ty: Ty| c_kind(values, ty) == CKind::Ref;
     (function.params.iter().copied().all(reference) && reference(function.ret))
         .then_some(FUNCTION_SLOT)
 }
@@ -1833,14 +1961,18 @@ fn overridden_properties(
 /// Kotlin permits a covariant return (`A` → `B`, both references), which changes nothing here, and
 /// generic specialization (`T` → `Int`), which changes the machine representation. The second needs
 /// a [`Slot::Bridge`] in the base's slot; this is the question that says which.
-fn same_representation(implementation: &IrFunction, overridden: &IrFunction) -> bool {
+fn same_representation(
+    values: &NativeValueClasses,
+    implementation: &IrFunction,
+    overridden: &IrFunction,
+) -> bool {
     implementation.params.len() == overridden.params.len()
         && implementation
             .params
             .iter()
             .zip(&overridden.params)
-            .all(|(a, b)| c_kind(*a) == c_kind(*b))
-        && c_kind(implementation.ret) == c_kind(overridden.ret)
+            .all(|(a, b)| representation(values, *a) == representation(values, *b))
+        && representation(values, implementation.ret) == representation(values, overridden.ret)
 }
 
 #[cfg(test)]
@@ -1849,7 +1981,7 @@ mod tests {
     use crate::ir::{IrField, IrProperty, IrfFlags};
 
     fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
-        super::build(ir)
+        super::build(ir, &NativeValueClasses::default())
     }
 
     fn function(name: &str, owner: &str, params: Vec<Ty>, ret: Ty, abstract_: bool) -> IrFunction {
@@ -1875,6 +2007,51 @@ mod tests {
             default: None,
             flags: IrfFlags::default(),
         }
+    }
+
+    fn stored_property(name: &str, ty: Ty, field: u32) -> IrProperty {
+        IrProperty {
+            name: name.to_string(),
+            context_params: Vec::new(),
+            source_order: 0,
+            decl_line: 0,
+            ty,
+            type_params: Vec::new(),
+            visibility: crate::types::Visibility::Public,
+            return_value_status: Default::default(),
+            annotations: Box::new([]),
+            initializer: None,
+            has_constant_initializer: false,
+            storage_ty: None,
+            backing_field: Some(field),
+            is_var: false,
+            is_open: false,
+            modifiers: Default::default(),
+            delegate_field: None,
+            is_private: false,
+            setter_visibility: crate::types::Visibility::Public,
+            getter: None,
+            setter: None,
+            getter_jvm_name: None,
+            setter_jvm_name: None,
+            needs_access_bridge: false,
+            accessor_annotations: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_value_box_uses_the_recorded_property_field_coordinate() {
+        let mut ir = IrFile::default();
+        let mut value = IrClass::synthetic(crate::types::type_name("app/Token"));
+        value.is_value = true;
+        value.ctor_param_count = 1;
+        // The decoy has the property's spelling and occupies field zero. Only the common-IR
+        // coordinate distinguishes the actual storage field from both guesses.
+        value.fields = vec![field("payload", Ty::String), field("storage", Ty::Int)];
+        value.properties = vec![stored_property("payload", Ty::Int, 1)];
+        let class = ir.add_class(value);
+
+        assert_eq!(value_field(&ir, class), Ok(1));
     }
 
     fn class(ir: &mut IrFile, name: &str, superclass: &str, depth: u32) -> ClassId {
@@ -2393,7 +2570,7 @@ mod tests {
         );
         record_invoke(&mut ir, b, invoke, 0);
 
-        let model = super::build(&ir).expect("layout");
+        let model = super::build(&ir, &NativeValueClasses::default()).expect("layout");
         let foo_slot = model.slot(b, &SlotKey::Function(foo)).expect("foo's slot");
         assert_ne!(foo_slot, FUNCTION_SLOT);
         assert_eq!(

@@ -402,7 +402,7 @@ impl BodyLowering<'_, '_, '_> {
         let property = self.file.callables.property(target)?;
         let kind = self.file.mapped_collection(ty)?.kind;
         let (_, answer) = map_property_symbol(kind, &property.name)?;
-        if carrier(property.result) != carrier(answer) {
+        if self.file.carrier(property.result) != self.file.carrier(answer) {
             return None;
         }
         Some(property.name.to_string())

@@ -26,8 +26,9 @@ mod defaults;
 mod entry;
 mod enums;
 mod exceptions;
+mod intrinsic_operations;
 use arithmetic::{arithmetic_result, scalar_bound};
-use carrier::{box_suffix, carrier, scalar_suffix, Carrier};
+use carrier::{box_suffix, machine_carrier, scalar_suffix, Carrier};
 use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
@@ -37,9 +38,11 @@ mod implementor_dispatch;
 mod lists;
 mod local_delegates;
 mod maps;
+mod object_entries;
 mod objects;
 mod ranges;
 mod references;
+mod representation;
 mod scope;
 mod statics;
 mod strings;
@@ -62,7 +65,7 @@ use crate::ir::{
     Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
     IrLocalPropertyLayout, IrStatic, IrTypeOp,
 };
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
 use super::super::symbols::Symbols;
@@ -133,6 +136,9 @@ pub struct FileInput<'a> {
     /// [`crate::native::dependency_references`].
     pub dependency_properties:
         &'a std::collections::HashMap<u32, super::super::dependency_references::DependencyProperty>,
+    /// Which classifiers are value classes, and how this target carries each occurrence of one;
+    /// see [`crate::native::value_classes`].
+    pub value_classes: &'a super::super::value_classes::NativeValueClasses,
 }
 
 pub fn lower_file(
@@ -149,8 +155,9 @@ pub fn lower_file(
         runtime_symbols,
         abi_symbols,
         source,
+        value_classes,
     } = input;
-    let class_model = model::build(ir)?;
+    let class_model = model::build(ir, value_classes)?;
 
     let isa = isa_for(target)?;
     let builder = ObjectBuilder::new(
@@ -165,6 +172,7 @@ pub fn lower_file(
         ir,
         classifiers,
         callables,
+        values: value_classes,
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, runtime_symbols.clone()),
         model: class_model,
@@ -227,7 +235,9 @@ pub fn lower_file(
             && function.dispatch_receiver.is_none()
             && match entry {
                 Entry::Main => function.name == "main",
-                Entry::Box => function.name == "box" && carrier(function.ret) == Carrier::Ref,
+                Entry::Box => {
+                    function.name == "box" && lowering.carrier(function.ret) == Carrier::Ref
+                }
             };
         if is_entry {
             lowering.define_program_entry(index, entry, file_init, statics_init.is_some())?;
@@ -266,6 +276,8 @@ struct FileLowering<'a> {
     ir: &'a IrFile,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     callables: &'a crate::backend::CheckedBackendCallables,
+    /// Which classifiers are value classes, and which occurrences travel unboxed.
+    values: &'a super::super::value_classes::NativeValueClasses,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,
@@ -349,12 +361,12 @@ impl<'a> FileLowering<'a> {
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
         for param in params {
-            match carrier(*param).abi_param() {
+            match self.carrier(*param).abi_param() {
                 Some(abi) => signature.params.push(abi),
                 None => return Err("a `Unit` parameter".to_string()),
             }
         }
-        if let Some(abi) = carrier(ret).abi_param() {
+        if let Some(abi) = self.carrier(ret).abi_param() {
             signature.returns.push(abi);
         }
         Ok(signature)
@@ -371,7 +383,13 @@ impl<'a> FileLowering<'a> {
                     owner.render()
                 ));
             }
-            params.push(any());
+            // A value class's member takes the VALUE as `this`; its box reaches it through a
+            // bridge. Every other member takes the object, as a reference.
+            params.push(if self.values.is_value_class(owner) {
+                Ty::Obj(owner, &[])
+            } else {
+                any()
+            });
         }
         params.extend(super::super::captures::carried_parameters(self.ir, id));
         self.signature_of(&params, function.ret)
@@ -504,7 +522,7 @@ impl<'a> FileLowering<'a> {
         // Both facts about the result travel into the body: the carrier decides the shape of the
         // `return`, and the TYPE decides how a value that arrives in another representation is
         // converted into it — a carrier cannot, because `Boolean` and `UByte` share one.
-        let carried = carrier(result);
+        let carried = self.carrier(result);
         let frontend_config = self.module.target_config();
         let mut context = self.module.make_context();
         context.func.signature = signature;
@@ -721,8 +739,13 @@ pub(super) struct PendingFinally {
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
+    /// How a semantic type is carried in this file; see [`FileLowering::carrier`].
+    fn carrier(&self, ty: Ty) -> Carrier {
+        self.file.carrier(ty)
+    }
+
     fn declare_value(&mut self, slot: u32, ty: Ty) -> Result<Variable, Unsupported> {
-        let Some(clif) = carrier(ty).clif() else {
+        let Some(clif) = self.carrier(ty).clif() else {
             return Err("a `Unit`-typed local".to_string());
         };
         let variable = self.builder.declare_var(clif);
@@ -884,7 +907,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return false;
         };
         let slot = self.file.ir.classes[*class as usize].fields[*index as usize].ty;
-        match carrier(slot) {
+        match self.carrier(slot) {
             Carrier::Scalar(_, _) => is_scalar_zero(self.file.ir, *value),
             Carrier::Ref => is_null(self.file.ir, *value),
             Carrier::Void => false,
@@ -928,8 +951,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // A function whose result is a reference can still be handed `Unit` — a
                         // `Unit`-returning lambda's body returns the `Unit` OBJECT, because
                         // `FunctionN.invoke` answers with a reference whatever the lambda does.
-                        // `reference` materializes the runtime's singleton for exactly that.
-                        let value = self.reference(value)?;
+                        // `coerce` materializes the runtime's singleton for exactly that. It coerces
+                        // to the DECLARED result, not to `Any`: a value class carried as its value
+                        // is returned as that value, never boxed on the way out.
+                        let declared = self.result_type;
+                        let value = match self.coerce(value, declared)? {
+                            Some(value) => value,
+                            None => self.builder.ins().iconst(types::I64, 0),
+                        };
                         if self.terminated {
                             return Ok(());
                         }
@@ -988,7 +1017,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     Some(IrExpr::RefNew { .. }) => any(),
                     _ => ty,
                 };
-                if carrier(ty) == Carrier::Void {
+                if self.carrier(ty) == Carrier::Void {
                     if let Some(init) = init {
                         self.expression(init)?;
                     }
@@ -1256,9 +1285,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         result: Option<Ty>,
     ) -> Result<Option<Value>, Unsupported> {
         let merge = self.builder.create_block();
-        let result = result.filter(|ty| carrier(*ty) != Carrier::Void);
+        let result = result.filter(|ty| self.carrier(*ty) != Carrier::Void);
         if let Some(ty) = result {
-            let clif = carrier(ty).clif().expect("non-void carrier");
+            let clif = self.carrier(ty).clif().expect("non-void carrier");
             self.builder.append_block_param(merge, clif);
         }
 
@@ -1299,7 +1328,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 // costs a few unreachable instructions and never a wrong answer.
                 Some(ty) => {
                     self.runtime_call("kt_no_when_branch_matched", &[], Ty::Unit, &[])?;
-                    let clif = carrier(ty).clif().expect("non-void carrier");
+                    let clif = self.carrier(ty).clif().expect("non-void carrier");
                     let unreachable = match clif {
                         types::F32 => self.builder.ins().f32const(0.0),
                         types::F64 => self.builder.ins().f64const(0.0),
@@ -1359,7 +1388,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     fn zero_of(&mut self, ty: Ty) -> Value {
-        match carrier(ty) {
+        match self.carrier(ty) {
             Carrier::Scalar(t, _) if t == types::F32 => self.builder.ins().f32const(0.0),
             Carrier::Scalar(t, _) if t == types::F64 => self.builder.ins().f64const(0.0),
             Carrier::Scalar(t, _) => self.builder.ins().iconst(t, 0),
@@ -1390,7 +1419,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if !logical.is_unsigned() || !self.carried_as_scalar(id) {
             return Ok(Some(value));
         }
-        let Some(narrow) = carrier(logical).clif() else {
+        let Some(narrow) = self.carrier(logical).clif() else {
             return Ok(Some(value));
         };
         let actual = self.builder.func.dfg.value_type(value);
@@ -1403,7 +1432,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// Does this expression's machine shape hold the value itself rather than a pointer to it?
     fn carried_as_scalar(&self, id: u32) -> bool {
         self.physical_type_of(id)
-            .is_some_and(|ty| matches!(carrier(ty), Carrier::Scalar(..)))
+            .is_some_and(|ty| matches!(self.carrier(ty), Carrier::Scalar(..)))
     }
 
     fn lowered_expression(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
@@ -1953,11 +1982,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // pointer to one, and it is no WIDER than that scalar: `expression` has narrowed the value
         // to it, so the two agree. Wider would be a claim about bits that are not there, and a
         // pointer is not the value at all — `val any: Any = 7u` is still checked as `UInt`.
-        let bits = |ty: Ty| carrier(ty).clif().map(|clif| clif.bits());
+        let bits = |ty: Ty| self.carrier(ty).clif().map(|clif| clif.bits());
         match logical {
             Some(logical)
                 if logical.is_unsigned()
-                    && matches!(carrier(physical), Carrier::Scalar(..))
+                    && matches!(self.carrier(physical), Carrier::Scalar(..))
                     && bits(logical) <= bits(physical) =>
             {
                 Some(logical)
@@ -2046,7 +2075,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     };
                     result = Some(match result {
                         None => ty,
-                        Some(previous) if carrier(previous) == carrier(ty) => previous,
+                        Some(previous) if self.carrier(previous) == self.carrier(ty) => previous,
                         Some(_) => any(),
                     });
                 }
@@ -2207,7 +2236,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             // The runtime's answer is only the carrier; the checked result names
                             // the collection the read IS (`m.keys` is a `Set`). A walk over the
                             // read itself, `for (k in m.keys)`, finds its collection shape there.
-                            if carrier(*result) == carrier(answer) {
+                            if self.carrier(*result) == self.carrier(answer) {
                                 *result
                             } else {
                                 answer
@@ -2254,97 +2283,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         })
     }
 
-    /// An expression coerced to the carrier of `target`.
-    fn coerce(&mut self, arg: u32, target: Ty) -> Result<Option<Value>, Unsupported> {
-        let Some(value) = self.expression(arg)? else {
-            // `Unit` is a value in Kotlin, and a position that wants a reference wants that value:
-            // `val u: Any = Unit`, an argument of type `Any?`, a `Unit`-returning lambda's result.
-            // The runtime owns the singleton, so there is one of it program-wide.
-            if !self.terminated && carrier(target) == Carrier::Ref {
-                return self.runtime_call("kt_unit", &[], any(), &[]);
-            }
-            return Ok(None);
-        };
-        if self.terminated {
-            return Ok(Some(value));
-        }
-        let source = self.type_of(arg);
-        self.convert(value, source, target)
-    }
-
-    /// An expression in a position that requires a reference, boxing a scalar if necessary.
-    fn reference(&mut self, id: u32) -> Result<Value, Unsupported> {
-        match self.coerce(id, any())? {
-            Some(value) => Ok(value),
-            // Only a lowering that already left has no value here; anything else, including
-            // `Unit`, `coerce` materialized.
-            None => Ok(self.builder.ins().iconst(types::I64, 0)),
-        }
-    }
-
-    /// A representation change between carriers: boxing a scalar into a reference, unboxing one
-    /// out, or widening/narrowing between scalars. An undetermined source leaves the value alone.
-    fn convert(
-        &mut self,
-        value: Value,
-        source: Option<Ty>,
-        target: Ty,
-    ) -> Result<Option<Value>, Unsupported> {
-        let target_ty = target;
-        let target = carrier(target);
-        match (source.map(carrier), target) {
-            (None, target) => {
-                // The lowering could not type the expression. Its machine type is still known,
-                // and when that already is the target's carrier nothing needs doing; otherwise a
-                // conversion would be a guess, and a guess is declined.
-                let actual = self.builder.func.dfg.value_type(value);
-                match target.clif() {
-                    Some(clif) if clif == actual => Ok(Some(value)),
-                    None => Ok(None),
-                    Some(clif) => Err(format!(
-                        "a value of undetermined type (carried as `{actual}`) where a `{clif}` is \
-                         required"
-                    )),
-                }
-            }
-            (Some(Carrier::Ref), Carrier::Ref) => Ok(Some(value)),
-            (Some(source), target) if source == target => Ok(Some(value)),
-            (Some(Carrier::Scalar(_, _)), Carrier::Ref) => {
-                let ty = source.expect("known scalar");
-                let Some(suffix) = box_suffix(ty) else {
-                    return Err(format!(
-                        "a `{ty:?}` in a position that requires a reference"
-                    ));
-                };
-                self.runtime_call(
-                    &format!("kt_box_{suffix}"),
-                    &[ty],
-                    Ty::obj("kotlin/Any"),
-                    &[value],
-                )
-            }
-            (Some(Carrier::Ref), Carrier::Scalar(_, _)) => {
-                // The TARGET's own type, not one recovered from its carrier: a carrier cannot tell
-                // a `UByte` from a `Boolean`, and each unboxes through its own descriptor.
-                let ty = target_ty.non_null();
-                let Some(suffix) = box_suffix(ty) else {
-                    return Err(format!("an unboxing to `{ty:?}`"));
-                };
-                self.runtime_call(
-                    &format!("kt_unbox_{suffix}"),
-                    &[Ty::obj("kotlin/Any")],
-                    ty,
-                    &[value],
-                )
-            }
-            (Some(Carrier::Scalar(from, signed)), Carrier::Scalar(to, _)) => {
-                Ok(Some(self.resize(value, from, signed, to)))
-            }
-            (Some(_), Carrier::Void) => Ok(None),
-            (Some(Carrier::Void), _) => Err("a coercion from `Unit`".to_string()),
-        }
-    }
-
     /// A string template: each part rendered by the runtime and joined left to right.
     fn concat(&mut self, parts: &[u32]) -> Result<Option<Value>, Unsupported> {
         let Some((first, rest)) = parts.split_first() else {
@@ -2372,248 +2310,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(Some(joined))
     }
 
-    /// A compiler-selected operation on built-in types, realized by the runtime.
-    fn intrinsic(
-        &mut self,
-        operation: IrIntrinsic,
-        ret: Ty,
-        receiver: Option<u32>,
-        args: &[u32],
-    ) -> Result<Option<Value>, Unsupported> {
-        match operation {
-            // `relational_operator` records that the call came from a `ComparisonCall`, which
-            // lets a backend emit a branch instead of materializing the -1/0/1. This one answers
-            // the same VALUE either way and leaves that to Cranelift, so the hint is ignored
-            // rather than acted on.
-            IrIntrinsic::PrimitiveCompare { operand, .. } => {
-                let (Some(receiver), [argument]) = (receiver, args) else {
-                    return Err("a malformed `compareTo`".to_string());
-                };
-                // The operand type named here is the erased one, which for an unsigned value is
-                // the signed number sharing its bits — and ordering is exactly the question that
-                // reads those bits differently. The receiver's own checked type decides.
-                if let Some(element) = self
-                    .type_of(receiver)
-                    .map(Ty::non_null)
-                    .filter(|ty| ty.is_unsigned())
-                {
-                    return self.unsigned_compare(element, receiver, *argument, ret);
-                }
-                let Some(suffix) = scalar_suffix(operand) else {
-                    return Err("`compareTo` on a non-scalar operand".to_string());
-                };
-                let left = self.coerce(receiver, operand)?;
-                let right = self.coerce(*argument, operand)?;
-                if self.terminated {
-                    return Ok(None);
-                }
-                let (Some(left), Some(right)) = (left, right) else {
-                    return Err("`compareTo` on `Unit`".to_string());
-                };
-                self.runtime_call(
-                    &format!("kt_compare_{suffix}"),
-                    &[operand, operand],
-                    ret,
-                    &[left, right],
-                )
-            }
-            // `s[i]`, and the read a `for (c in s)` loop is lowered into: common lowering turns
-            // that loop into a counted one over `StringLength` and this, so the two arrive
-            // together and only one of them was answered.
-            //
-            // The runtime answers a `Char`; a site that asked for a boxed one — `for (c: Char? in
-            // s)` — gets the conversion, which is why the answer is not handed straight back.
-            IrIntrinsic::StringGet => {
-                let (Some(receiver), [index]) = (receiver, args) else {
-                    return Err("a malformed string read".to_string());
-                };
-                self.string_get(receiver, *index, ret)
-            }
-            // The frontend has already selected `kotlin.Enum.name` and lowered that declaration
-            // to this operation. Native consumes the operation identity directly; it does not
-            // rediscover the property from an owner or source spelling.
-            IrIntrinsic::EnumName => {
-                let (Some(receiver), []) = (receiver, args) else {
-                    return Err("a malformed enum name read".to_string());
-                };
-                self.enum_member("name", receiver)
-            }
-            IrIntrinsic::Ieee754Equals { operand } => {
-                let [left, right] = args else {
-                    return Err("a malformed IEEE floating-point equality".to_string());
-                };
-                let operand = operand.canonical_semantic();
-                if !matches!(operand, Ty::Float | Ty::Double) {
-                    return Err(format!(
-                        "an IEEE equality whose operand is not floating-point (`{operand:?}`)"
-                    ));
-                }
-                // Each argument's checked type carries its own nullability; the intrinsic carries
-                // the common floating declaration type. Physical carriers cannot supply either
-                // fact: a nullable float is a reference, and a property read through an interface
-                // may have a representation type that is deliberately less specific.
-                let left_ty = self.file.ir.logical_types.get(left).copied();
-                let right_ty = self.file.ir.logical_types.get(right).copied();
-                if [left_ty, right_ty]
-                    .into_iter()
-                    .any(|ty| ty.and_then(scalar_bound) != Some(operand))
-                {
-                    return Err(
-                        "an IEEE equality whose checked operands do not match its floating type"
-                            .to_string(),
-                    );
-                }
-                self.ieee_equality(IrBinOp::Eq, *left, left_ty, *right, right_ty)
-            }
-            IrIntrinsic::ArrayGet => {
-                let (Some(receiver), [index]) = (receiver, args) else {
-                    return Err("a malformed array read".to_string());
-                };
-                self.array_get(receiver, *index, ret)
-            }
-            IrIntrinsic::ArraySet => {
-                let (Some(receiver), [index, value]) = (receiver, args) else {
-                    return Err("a malformed array store".to_string());
-                };
-                self.array_set(receiver, *index, *value)
-            }
-            IrIntrinsic::ArraySize => {
-                let Some(receiver) = receiver else {
-                    return Err("a malformed array size".to_string());
-                };
-                self.array_size(receiver)
-            }
-            // `"$u"`: the frontend names the conversion rather than letting the template reach for
-            // `Any.toString()`, because the value it would reach for is the signed number sharing
-            // the bits.
-            IrIntrinsic::UnsignedToString { source } => {
-                let Some(receiver) = receiver else {
-                    return Err("a malformed unsigned `toString`".to_string());
-                };
-                let Some(realized) = self.unsigned_intrinsic_to_string(source.non_null(), receiver)
-                else {
-                    return Err(format!("an unsigned `toString` of `{source:?}`"));
-                };
-                realized
-            }
-            IrIntrinsic::StringLength => {
-                let Some(receiver) = receiver else {
-                    return Err("a malformed `String.length`".to_string());
-                };
-                let value = self.reference(receiver)?;
-                if self.terminated {
-                    return Ok(None);
-                }
-                self.runtime_call("kt_string_length", &[any()], ret, &[value])
-            }
-            IrIntrinsic::NullableAnyToString => {
-                let Some(receiver) = receiver else {
-                    return Err("a malformed `toString`".to_string());
-                };
-                let value = self.reference(receiver)?;
-                if self.terminated {
-                    return Ok(None);
-                }
-                self.runtime_call("kt_to_string", &[any()], ret, &[value])
-            }
-            IrIntrinsic::GeneratedPropertyHash { ty } => {
-                let [value] = args else {
-                    return Err("a malformed data-class field hash".to_string());
-                };
-                self.field_hash(*value, ty)
-            }
-            IrIntrinsic::GeneratedPropertyEquals { ty } => {
-                let [left, right] = args else {
-                    return Err("a malformed data-class field comparison".to_string());
-                };
-                self.field_equals(*left, *right, ty)
-            }
-            // A data class rendering an ARRAY property shows its CONTENTS, not the identity an
-            // array's own `toString` answers — `data class D(val xs: IntArray)` prints
-            // `D(xs=[1, 2])`. That is the same rendering `xs.contentToString()` asks for, and the
-            // runtime already answers it for every array it lays out.
-            IrIntrinsic::DataClassArrayToString { .. } => {
-                let [value] = args else {
-                    return Err("a malformed data-class array rendering".to_string());
-                };
-                let array = self.reference(*value)?;
-                if self.terminated {
-                    return Ok(None);
-                }
-                self.runtime_call("kt_array_content_to_string", &[any()], any(), &[array])
-            }
-            IrIntrinsic::Assert { mode } => self.checked_assertion(mode, args),
-            other => Err(format!("the `{other:?}` intrinsic")),
-        }
-    }
-
-    /// Kotlin's `assert(value)` / `assert(value) { message }`.
-    ///
-    /// The MODE decides before anything is evaluated, which is the whole of what makes this an
-    /// intrinsic rather than a call: `always-disable` evaluates NEITHER child, so a condition with
-    /// a side effect does not have it — the corpus asks that directly.
-    ///
-    /// Enabled, the condition is evaluated and branched on, and the message is computed only on
-    /// the failing side: `lazyMessage` is lazy exactly there. It crosses as the FUNCTION it is,
-    /// invoked by the runtime beside the failure it reports rather than here.
-    ///
-    /// The `Runtime` mode is the one this target does not answer. Whether assertions are on is a
-    /// question about how the program was BUILT, and nothing in this generator can see that yet —
-    /// answering it either way would be a guess a program can observe.
-    fn checked_assertion(
-        &mut self,
-        mode: crate::types::AssertionMode,
-        args: &[u32],
-    ) -> Result<Option<Value>, Unsupported> {
-        match mode {
-            crate::types::AssertionMode::AlwaysDisabled => Ok(None),
-            crate::types::AssertionMode::Runtime => Err(
-                "an `assert` whose enabling is decided at run time, which this target does not \
-                 answer yet"
-                    .to_string(),
-            ),
-            crate::types::AssertionMode::AlwaysEnabled => {
-                let [condition, message @ ..] = args else {
-                    return Err("a malformed `assert`".to_string());
-                };
-                if message.len() > 1 {
-                    return Err("an `assert` with more than a condition and a message".to_string());
-                }
-                let Some(value) = self.coerce(*condition, Ty::Boolean)? else {
-                    return Ok(None);
-                };
-                if self.terminated {
-                    return Ok(None);
-                }
-                // The message ARGUMENT is an ordinary argument and is evaluated here, before the
-                // branch: `assert(c, xs.filter { … }::message)` filters whether or not the
-                // assertion holds, and the corpus asks exactly that. What `lazyMessage` makes lazy
-                // is the INVOCATION, which happens beside the failure and nowhere else.
-                let lazy = match message {
-                    [function] => self.reference(*function)?,
-                    _ => self.builder.ins().iconst(types::I64, 0),
-                };
-                if self.terminated {
-                    return Ok(None);
-                }
-                let failed = self.builder.create_block();
-                let passed = self.builder.create_block();
-                self.builder.ins().brif(value, passed, &[], failed, &[]);
-
-                self.continue_in(failed);
-                self.builder.seal_block(failed);
-                self.runtime_call("kt_assertion_failed", &[any()], Ty::Unit, &[lazy])?;
-                if !self.terminated {
-                    self.builder.ins().jump(passed, &[]);
-                }
-
-                self.continue_in(passed);
-                self.builder.seal_block(passed);
-                Ok(None)
-            }
-        }
-    }
-
     /// One field's contribution to a data class's `hashCode`, which is the field's own `hashCode`.
     ///
     /// Kotlin's answer for each primitive is fixed, and these are those answers rather than
@@ -2623,7 +2319,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// not lost in the truncation to `Int`, and `Double` does the same to its bits. A `Float` is
     /// its bits. The smaller integers are themselves, widened.
     fn field_hash(&mut self, value: u32, ty: Ty) -> Result<Option<Value>, Unsupported> {
-        if carrier(ty) == Carrier::Ref {
+        if self.carrier(ty) == Carrier::Ref {
             // Including a nullable primitive, which is a box and hashes through its own type.
             let value = self.reference(value)?;
             if self.terminated {
@@ -2642,7 +2338,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// The hash of a value already in hand, by the same rules.
     pub(super) fn value_hash(&mut self, operand: Value, ty: Ty) -> Result<Value, Unsupported> {
-        if carrier(ty) == Carrier::Ref {
+        // A value class hashes as the value it holds, by the rule for THAT value's type.
+        let ty = self.file.values.project(ty);
+        if self.carrier(ty) == Carrier::Ref {
             return Ok(self
                 .runtime_call("kt_hash_code", &[any()], Ty::Int, &[operand])?
                 .expect("`kt_hash_code` returns an Int"));
@@ -2715,7 +2413,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         right: u32,
         ty: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        if carrier(ty) != Carrier::Ref {
+        if self.carrier(ty) != Carrier::Ref {
             let left = self.coerce(left, ty)?;
             let right = self.coerce(right, ty)?;
             if self.terminated {
@@ -2748,7 +2446,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         right: Value,
         ty: Ty,
     ) -> Result<Value, Unsupported> {
-        if carrier(ty) != Carrier::Ref {
+        // A value class compares by the value it holds, by the rule for THAT value's type.
+        let ty = self.file.values.project(ty);
+        if self.carrier(ty) != Carrier::Ref {
             // `Double.equals` is not `==`: it reads the bits, so `NaN` equals itself and the two
             // zeroes are distinct. Comparing the reinterpreted integers is exactly that rule, and
             // it is the rule Kotlin's own `equals` states — `==` on the machine answers the other
@@ -2858,14 +2558,14 @@ mod tests {
 
     #[test]
     fn a_nullable_primitive_is_carried_as_a_reference() {
-        assert_eq!(carrier(Ty::Int), Carrier::Scalar(types::I32, true));
+        assert_eq!(machine_carrier(Ty::Int), Carrier::Scalar(types::I32, true));
         assert_eq!(
-            carrier(Ty::nullable(Ty::Int)),
+            machine_carrier(Ty::nullable(Ty::Int)),
             Carrier::Ref,
             "`Int?` must represent `null`, so it boxes exactly as it does on the JVM"
         );
-        assert_eq!(carrier(Ty::Unit), Carrier::Void);
-        assert_eq!(carrier(Ty::String), Carrier::Ref);
+        assert_eq!(machine_carrier(Ty::Unit), Carrier::Void);
+        assert_eq!(machine_carrier(Ty::String), Carrier::Ref);
     }
 
     #[test]
@@ -2873,9 +2573,15 @@ mod tests {
         // `Byte` is signed and `Char` is not; passing either to the runtime in a 32-bit register
         // must extend it the way the C prototype's type does, or `kt_println_char('é')` prints a
         // negative code point.
-        assert!(carrier(Ty::Byte).abi_param().unwrap().extension == ArgumentExtension::Sext);
-        assert!(carrier(Ty::Char).abi_param().unwrap().extension == ArgumentExtension::Uext);
-        assert!(carrier(Ty::Boolean).abi_param().unwrap().extension == ArgumentExtension::Uext);
-        assert!(carrier(Ty::Int).abi_param().unwrap().extension == ArgumentExtension::None);
+        assert!(
+            machine_carrier(Ty::Byte).abi_param().unwrap().extension == ArgumentExtension::Sext
+        );
+        assert!(
+            machine_carrier(Ty::Char).abi_param().unwrap().extension == ArgumentExtension::Uext
+        );
+        assert!(
+            machine_carrier(Ty::Boolean).abi_param().unwrap().extension == ArgumentExtension::Uext
+        );
+        assert!(machine_carrier(Ty::Int).abi_param().unwrap().extension == ArgumentExtension::None);
     }
 }

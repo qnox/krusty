@@ -31,7 +31,7 @@ impl<'a> FileLowering<'a> {
         let init = self.import("kt_runtime_init", &[Ty::obj("kotlin/Any")], Ty::Unit)?;
         let exit = self.import("kt_exit", &[Ty::Int], Ty::Unit)?;
         let uncaught = self.import("kt_check_uncaught", &[], Ty::Unit)?;
-        let prints_result = carrier(self.ir.functions[main_index].ret) == Carrier::Ref;
+        let prints_result = self.carrier(self.ir.functions[main_index].ret) == Carrier::Ref;
         let println = if prints_result && entry == Entry::Main {
             Some(self.import("kt_println_any", &[any()], Ty::Unit)?)
         } else {

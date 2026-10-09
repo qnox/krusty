@@ -9815,6 +9815,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference it is handed Kotlin's `Unit` object rather than `null`.
   Tests: `tests/native_read_only_property_delegate_e2e.rs`
   (`a_unit_answering_delegate_reads_as_the_unit_object`).
+- **Native value classes: carried as the value, boxed as themselves.** A non-null occurrence is
+  its underlying value. A nullable one is too, where the value's own `null` can mean the outer one
+  (a non-null reference underneath); otherwise it is a box of the class's own type, as is every
+  occurrence in a position typed `Any`, a type parameter or an interface. Crossing between the two
+  boxes or unboxes the VALUE CLASS, so `is V`, `toString` (`V(x=1)`), `equals` and `hashCode` answer
+  as Kotlin's do, and `==` on two unboxed values compares by the underlying type's `equals`
+  (`NaN == NaN`, `0.0 != -0.0`). An `init` block runs when the value is made and never when it is
+  boxed. Its box reads the exact `IrProperty.backing_field` coordinate common lowering recorded;
+  Native never rediscovers the underlying field from a property spelling or from field position.
+  Stdlib functions over value classes remain provider-owned bodies rather than backend
+  substitutions. Tests: `tests/native_value_classes_e2e.rs`, and
+  `native::value_classes::tests` for the inventory and the policy.
 - **Native: a local classifier is named as Kotlin/Native names it.** The frontend gives a local or
   anonymous classifier an opaque identity plus its naming provenance (lexical owner, source
   segments, ordinal), and each target spells the name from that. The walk is shared
@@ -11251,15 +11263,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_runtime_e2e.rs` (`builder_append_throwing_to_string`,
   `builder_append_line_throwing_to_string`, `builder_negative_capacity`,
   `builder_from_throwing_char_sequence`).
-- **Native runtime members stop at the first program call that throws.** A runtime member that asks
-  the program's own overrides more than one question — `Pair`'s `equals`, `hashCode` and `toString`,
-  which ask each component in turn, and `Result.toString`, which renders its value or exception and
-  then builds `Success(…)`/`Failure(…)` around it — returns as soon as one of those calls comes back
-  with an exception pending. The second component is never asked, the placeholder the aborted call
-  returned (a `true`, a zero, a `null`) is never read, no text is built from it, and the exception
-  pending afterwards is the very object the call threw. That is Kotlin's answer: the generated
-  data-class members and `Result.toString` propagate the first exception from where it was thrown.
-  Tests: `tests/native_runtime_e2e.rs` (`pair_component_throws`, `result_to_string_throws`).
+- **Native runtime members stop at the first program call that throws.** `Pair`'s `equals`,
+  `hashCode` and `toString` ask each component in turn and return as soon as one of those calls
+  comes back with an exception pending. The second component is never asked, the placeholder the
+  aborted call returned (a `true`, a zero, a `null`) is never read, no text is built from it, and
+  the exception pending afterwards is the very object the call threw. That is Kotlin's answer for
+  the generated data-class members. Test: `tests/native_runtime_e2e.rs`
+  (`pair_component_throws`).
 - **A native `KClass` answers the names its descriptor publishes.** `simpleName` and
   `qualifiedName` are not derived from the descriptor's rendered name: each `KType` publishes its
   qualified and simple names and a kind (`KT_CLASS_NAMES_*` in `src/native/runtime/krusty_rt.h`).
@@ -11278,20 +11288,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   obligation to return something, never Kotlin's answer, so the drivers never read it: they discard
   it and assert the exact exception pending — its type and missing message for a raise the runtime
   makes, and the very object thrown for a raise the program's own override makes (a
-  `CharSequence`'s `length`/`get`, a builder append's `toString`, a `Pair` component, a `Result`'s
-  content, a `lazy` initializer).
+  `CharSequence`'s `length`/`get`, a builder append's `toString`, a `Pair` component, and a `lazy`
+  initializer).
   Tests: `tests/native_runtime_e2e.rs` (`unbox_null_raises`, `number_conversion_null_raises`,
   `builder_from_throwing_char_sequence`, `builder_append_throwing_to_string`,
-  `builder_append_line_throwing_to_string`, `pair_component_throws`, `result_to_string_throws`,
+  `builder_append_line_throwing_to_string`, `pair_component_throws`,
   `lazy_initializer_throws`).
-- **Native `Result` operations.** A success is its value and a failure a marker holding the
-  exception, so `Result.success(null)` is a success distinct from every failure. `isSuccess`,
-  `isFailure`, `getOrNull`, `exceptionOrNull` and `toString` (`Success(1)`, `Success(null)`,
-  `Failure(<exception's own toString>)`) answer as kotlinc 2.4.10 does on the JVM for the program
-  recorded in the driver. `getOrThrow` answers a success's value, and on a failure throws the very
-  exception it holds and answers NULL at once — never the failure marker, which is no value of the
-  program's type.
-  Tests: `tests/native_runtime_e2e.rs` (`result_operations`).
 - **A native `ReadWriteProperty` call names the two delegates it implements.**
   `kt_rw_property_get`/`kt_rw_property_set` serve exactly `Delegates.notNull()` and
   `Delegates.observable(…)`, recognized by their own descriptors. Any other receiver ends the
@@ -11320,7 +11322,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     longer (NUL padding) and between the halves of a surrogate pair — which keeps the lone high
     half, as the JVM does — growth past the capacity, identity equality and self-append.
   Tests: `tests/native_runtime_e2e.rs` (`boxing`, `number_conversions`, `pair_members`, `delegates`,
-  `builder_operations`, with `class_names` and `result_operations` above).
+  `builder_operations`, with `class_names` above).
 - **A native runtime driver's Kotlin answers are checked against Kotlin when the test runs.** A
   driver whose expected answers are Kotlin's prints what the runtime answered as a transcript, one
   observation per line, and the harness (`run_driver_against_kotlin` in

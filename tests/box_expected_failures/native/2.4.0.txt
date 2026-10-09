@@ -20,8 +20,6 @@ annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
 annotations/typeAnnotations/unsafeVarianceInDependency.kt
 argumentOrder/varargAndDefaultParameters_ForNative.kt
 arithmetic/division.kt
-arrays/arraysOfInlineClass/accessArrayOfInlineClass.kt
-arrays/arraysOfInlineClass/arrayOfInlineClassOfArrayOfInlineClass.kt
 arrays/forInUnsignedArray/forInUnsignedArray.kt
 arrays/forInUnsignedArray/forInUnsignedArrayIndices.kt
 arrays/forInUnsignedArray/forInUnsignedArrayIndicesReversed.kt
@@ -76,7 +74,6 @@ bridges/kt46389.kt
 bridges/multipleModules1.kt
 bridges/multipleModules2.kt
 bridges/noBridgeOnMutableCollectionInheritance.kt
-bridges/overrideWithValueClassReturn.kt
 bridges/special.kt
 bridges/specialGeneric.kt
 bridges/strListContains.kt
@@ -146,7 +143,6 @@ callableReference/function/kt32462.kt
 callableReference/function/local/enumExtendsTrait.kt
 callableReference/function/topLevelFromTopLevelStringNoArgs.kt
 callableReference/kt21014.kt
-callableReference/kt21092a.kt
 callableReference/kt46902.kt
 callableReference/kt47988.kt
 callableReference/kt49526a.kt
@@ -848,7 +844,6 @@ delegation/kt30102_comparable.kt
 delegation/withDefaultsMultipleFilesOrder.kt
 destructuringDeclInLambdaParam/inline.kt
 destructuringDeclInLambdaParam/stdlibUsages.kt
-devirtualization/inline_getter.kt
 diagnostics/functions/tailRecursion/recursiveCallInInlineLambda.kt
 diagnostics/functions/tailRecursion/shortCircuit.kt
 elvis/genericElvisWithMoreSpecificLHS.kt
@@ -898,7 +893,6 @@ extensionFunctions/suspendConversionForExtensionFunAsASuperType.kt
 extensionProperties/contextPropertyInInterface.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/genericContextOverride.kt
-extensionProperties/kt46952.kt
 fakeOverride/fakeOverrideWithMissingClassInSignature.kt
 fakeOverride/internalFromFriendModule.kt
 fakeOverride/intersectionInLocal.kt
@@ -935,7 +929,6 @@ funInterface/samConstructorExplicitInvocation.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/typealiasedFunInterface.kt
 function/defaults9.kt
-function/defaultsWithInlineClasses.kt
 function/manglingImportedFromObjectWithNI.kt
 function/unreachableStatementAfterReturn.kt
 functions/bigArity/instanceOfCallableReference.kt
@@ -1056,9 +1049,6 @@ inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineArgsInPlace/kt49370.kt
 inlineArgsInPlace/kt49407.kt
 inlineArgsInPlace/suspensionPointInsideArgument.kt
-inlineClass/customEquals.kt
-inlineClass/defaultEquals.kt
-inlineClass/nestedInlineClasses.kt
 inlineClass/secondaryConstructorWithGenerics.kt
 inlineClasses/anonymousObjectAsDefaultParam.kt
 inlineClasses/anonymousObjectAsDefaultParamFull.kt
@@ -1111,12 +1101,6 @@ inlineClasses/defaultParameterValues/defaultValueOfInlineClassTypeInInlineFunInI
 inlineClasses/defaultParameterValues/kt26554.kt
 inlineClasses/defaultWithInlineClassArgument.kt
 inlineClasses/defaultWithInlineClassArgumentGeneric.kt
-inlineClasses/delegationByUnderlyingType/default.kt
-inlineClasses/delegationByUnderlyingType/defaultArgument.kt
-inlineClasses/delegationByUnderlyingType/defaultArgumentGeneric.kt
-inlineClasses/delegationByUnderlyingType/defaultGeneric.kt
-inlineClasses/delegationByUnderlyingType/simple.kt
-inlineClasses/delegationByUnderlyingType/simpleGeneric.kt
 inlineClasses/dnnInValue.kt
 inlineClasses/funInterface/argumentResult.kt
 inlineClasses/funInterface/kt51121.kt
@@ -1129,13 +1113,6 @@ inlineClasses/funInterfaceDoubleSuffux2.kt
 inlineClasses/functionExpression.kt
 inlineClasses/functionExpressionGeneric.kt
 inlineClasses/genericInlineClassSynthMembers.kt
-inlineClasses/genericUnderlyingValue/array.kt
-inlineClasses/genericUnderlyingValue/arrayIC.kt
-inlineClasses/genericUnderlyingValue/primitive.kt
-inlineClasses/genericUnderlyingValue/recursive.kt
-inlineClasses/genericUnderlyingValue/simple.kt
-inlineClasses/genericUnderlyingValue/simple2.kt
-inlineClasses/genericUnderlyingValue/upperBound.kt
 inlineClasses/hiddenConstructor/constructorReferencedFromOtherFile1.kt
 inlineClasses/hiddenConstructor/constructorReferencedFromOtherFile1Generic.kt
 inlineClasses/hiddenConstructor/constructorReferencedFromOtherFile2.kt
@@ -1203,9 +1180,6 @@ inlineClasses/unboxGenericParameter/objectLiteral/resultAnyGeneric.kt
 inlineClasses/unboxParameterOfSuspendLambdaBeforeInvoke.kt
 inlineClasses/unboxParameterOfSuspendLambdaBeforeInvokeGeneric.kt
 inlineClasses/unboxResultParameterWhenCapturingToCrossinlineLambda.kt
-inlineClasses/unboxValueOfNullableInlineClassUsingInlineFunction.kt
-inlineClasses/valueClassInstanceOfNumberAndComparable.kt
-inlineClasses/valueClassInstanceOfNumberAndComparableInFunction.kt
 inlineClasses/valueClassInstanceOfNumberAndComparableInInlineFunction.kt
 inlineEvaluationOrder/alsoWithReassingment.kt
 inlineEvaluationOrder/arrayLiteral.kt
@@ -1906,13 +1880,11 @@ typealias/nestedTypeAliasesAndStaticScope.kt
 typealias/nestedTypeAliasesAndTypeArguments.kt
 typealias/privateInKlib.kt
 underscoredTypeArguments/lambdaInputType.kt
-unsignedTypes/equalsImplForInlineClassWrappingNullableInlineClass.kt
 unsignedTypes/generic.kt
 unsignedTypes/kt47716.kt
 unsignedTypes/nullableSmartcastUnsignedArray.kt
 unsignedTypes/signedToUnsignedConversions.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
-vararg/boxingArgumentsForVararg.kt
 vararg/emptyVarArg.kt
 vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt581.kt
