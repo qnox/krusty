@@ -246,7 +246,9 @@ impl Checker<'_> {
         };
         let body_scope = scope.child(ScopeKind::Block);
         let scope = &body_scope;
-        self.declare(scope, &name, elem, true); // loop variable (mutated by the lowering)
+        if !self.file.unnamed_locals.contains(&statement) {
+            self.declare(scope, &name, elem, true); // loop variable (mutated by the lowering)
+        }
         self.check_loop_body(scope, body, &label);
     }
 
@@ -286,8 +288,10 @@ impl Checker<'_> {
         };
         let body_scope = scope.child(ScopeKind::Block);
         let scope = &body_scope;
-        let flow_identity = self.declare(scope, &name, elem, false);
-        self.record_enhanced_loop_variable(flow_identity, iterable);
+        if !self.file.unnamed_locals.contains(&statement) {
+            let flow_identity = self.declare(scope, &name, elem, false);
+            self.record_enhanced_loop_variable(flow_identity, iterable);
+        }
         self.check_loop_body(scope, body, &label);
     }
 

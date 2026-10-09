@@ -2406,15 +2406,7 @@ impl BodyFirChecker<'_> {
             let body = self.checked_loop_body(
                 target,
                 &label,
-                Some((
-                    name.as_str(),
-                    LocalBinding {
-                        value: variable,
-                        ty: variable_ty,
-                        mutable: false,
-                        lateinit: false,
-                    },
-                )),
+                self.loop_variable_binding(statement, name.as_str(), variable, variable_ty),
                 source_body,
             )?;
             let header = self.iterator_loop_header_from_protocol(
@@ -2446,7 +2438,7 @@ impl BodyFirChecker<'_> {
                 // initializer runs, but `_` introduces no readable binding and therefore has no
                 // value slot for common lowering to store into. This is distinct from an ignored
                 // destructuring entry: the latter shares one already-materialized initializer.
-                if name == "_" {
+                if self.file.unnamed_locals.contains(&statement) {
                     return Ok(self.body.add_statement(FirStatement {
                         origin,
                         kind: FirStatementKind::Expression(initializer),
@@ -3210,15 +3202,7 @@ impl BodyFirChecker<'_> {
                 let body = self.checked_loop_body(
                     target,
                     label,
-                    Some((
-                        name.as_str(),
-                        LocalBinding {
-                            value: variable,
-                            ty: variable_ty,
-                            mutable: false,
-                            lateinit: false,
-                        },
-                    )),
+                    self.loop_variable_binding(statement, name.as_str(), variable, variable_ty),
                     *body,
                 )?;
                 FirStatementKind::Loop {

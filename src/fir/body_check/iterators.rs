@@ -16,6 +16,24 @@ impl BodyFirChecker<'_> {
         variable
     }
 
+    /// The loop body's binding of its variable: none for `for (_ in …)`, which names no variable,
+    /// so `` `_` `` in the body reads whatever an enclosing scope declares under that name.
+    pub(super) fn loop_variable_binding<'n>(
+        &self,
+        statement: StmtId,
+        name: &'n str,
+        value: LocalValueId,
+        ty: ResolvedTy,
+    ) -> Option<(&'n str, LocalBinding)> {
+        let binding = LocalBinding {
+            value,
+            ty,
+            mutable: false,
+            lateinit: false,
+        };
+        (!self.file.unnamed_locals.contains(&statement)).then_some((name, binding))
+    }
+
     pub(super) fn iterator_loop_header(
         &mut self,
         statement: StmtId,

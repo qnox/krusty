@@ -44,15 +44,7 @@ impl BodyFirChecker<'_> {
         let mut body = self.checked_loop_body(
             target,
             label,
-            Some((
-                name,
-                LocalBinding {
-                    value: variable,
-                    ty: element_ty,
-                    mutable: false,
-                    lateinit: false,
-                },
-            )),
+            self.loop_variable_binding(statement, name, variable, element_ty),
             body,
         )?;
         let iterable_expression = self.expression(iterable)?;

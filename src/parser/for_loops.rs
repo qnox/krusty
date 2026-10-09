@@ -75,9 +75,13 @@ impl Parser<'_> {
         } else {
             None
         };
+        // `for (_ in xs)` names no variable: the loop binds nothing, as for `val _ = e`.
+        let mut unnamed = false;
         let name = match &destructure {
             Some(_) => format!("$dest${}", start.lo),
             None => {
+                unnamed = self.at_unnamed_local_name();
+                self.gate_unnamed_local(None);
                 let n = self.ident_or_error("loop variable");
                 // An explicit loop-variable type — `for (i: Int in xs)`. The variable's type is the
                 // iterable's element type; the annotation only widens it (`for (c: Char? in str)`), so
@@ -150,6 +154,7 @@ impl Parser<'_> {
                 },
                 start,
                 destructured,
+                unnamed,
             );
         };
         let rend = self.parse_bp(9);
@@ -221,6 +226,7 @@ impl Parser<'_> {
                 },
                 start,
                 destructured,
+                unnamed,
             );
         }
         self.expect(TokenKind::RParen, "')'");
@@ -241,6 +247,7 @@ impl Parser<'_> {
             },
             start,
             destructured,
+            unnamed,
         )
     }
 
@@ -251,8 +258,12 @@ impl Parser<'_> {
         statement: Stmt,
         start: Span,
         destructured: Option<StmtId>,
+        unnamed: bool,
     ) -> StmtId {
         let statement = self.finish_stmt(statement, start);
+        if unnamed {
+            self.file.unnamed_locals.insert(statement);
+        }
         if let Some(destructure) = destructured {
             self.file.destructuring.loops.insert(statement, destructure);
         }

@@ -31,4 +31,12 @@ impl LanguageGates {
             });
         }
     }
+
+    /// Retain a syntax error that does not depend on a feature but is reported with the gates.
+    pub fn reject(&mut self, span: Span, message: &str) {
+        self.unsupported_syntax.push(UnsupportedSyntax {
+            span,
+            message: message.into(),
+        });
+    }
 }

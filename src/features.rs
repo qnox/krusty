@@ -133,6 +133,7 @@ const MODELED_FEATURES: &[&str] = &[
     "NestedTypeAliases",
     "PrioritizedEnumEntries",
     "UnitConversionsOnArbitraryExpressions",
+    "UnnamedLocalVariables",
     "WhenGuards",
 ];
 
