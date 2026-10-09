@@ -49,8 +49,7 @@ pub(super) fn runtime_symbol(
     let declaration = signature
         .owner
         .semantic_classifier()
-        .and_then(|owner| classifier_shapes::mapped_collection(file.classifiers, owner))
-        .map(|it| it.kind);
+        .and_then(|owner| classifier_shapes::collection_declaration(file.classifiers, owner));
     if collection.kind == crate::types::CollectionKind::MapEntry {
         map_entry_symbol(declaration, signature)
     } else if collection.kind == crate::types::CollectionKind::Map {
@@ -63,53 +62,57 @@ pub(super) fn runtime_symbol(
 }
 
 fn map_symbol(
-    declaration: crate::types::CollectionKind,
+    declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
-    if declaration != crate::types::CollectionKind::Map {
-        return None;
-    }
+    use crate::types::CollectionKind::Map;
+    let reads = declaration.reads(&[Map]);
+    let mutates = declaration.mutates(&[Map]);
     Some(match (signature.name, signature.params, signature.ret) {
         // `Map.size` is a Kotlin property over a Java method, so the provider may present the
         // getter under either spelling; both name the same question.
-        ("getSize" | "size", [], Ty::Int) => ("kt_map_size", vec![any()], Ty::Int),
-        ("isEmpty", [], Ty::Boolean) => ("kt_map_is_empty", vec![any()], Ty::Boolean),
-        ("get", [key], ret) if key.is_reference() && ret.is_reference() => {
+        ("getSize" | "size", [], Ty::Int) if reads => ("kt_map_size", vec![any()], Ty::Int),
+        ("isEmpty", [], Ty::Boolean) if reads => ("kt_map_is_empty", vec![any()], Ty::Boolean),
+        ("get", [key], ret) if reads && key.is_reference() && ret.is_reference() => {
             ("kt_map_get", vec![any(), any()], any())
         }
         ("getOrDefault", [key, default], ret)
-            if key.is_reference() && default.is_reference() && ret.is_reference() =>
+            if reads && key.is_reference() && default.is_reference() && ret.is_reference() =>
         {
             ("kt_map_get_or_default", vec![any(), any(), any()], any())
         }
-        ("containsKey", [key], Ty::Boolean) if key.is_reference() => {
+        ("containsKey", [key], Ty::Boolean) if reads && key.is_reference() => {
             ("kt_map_contains_key", vec![any(), any()], Ty::Boolean)
         }
-        ("containsValue", [value], Ty::Boolean) if value.is_reference() => {
+        ("containsValue", [value], Ty::Boolean) if reads && value.is_reference() => {
             ("kt_map_contains_value", vec![any(), any()], Ty::Boolean)
         }
-        ("keys" | "getKeys", [], ret) if ret.is_reference() => ("kt_map_keys", vec![any()], any()),
-        ("values" | "getValues", [], ret) if ret.is_reference() => {
+        ("keys" | "getKeys", [], ret) if reads && ret.is_reference() => {
+            ("kt_map_keys", vec![any()], any())
+        }
+        ("values" | "getValues", [], ret) if reads && ret.is_reference() => {
             ("kt_map_values", vec![any()], any())
         }
-        ("entries" | "getEntries", [], ret) if ret.is_reference() => {
+        ("entries" | "getEntries", [], ret) if reads && ret.is_reference() => {
             ("kt_map_entries", vec![any()], any())
         }
         // The mutating half. `put` answers the value that was there; `set` is `m[k] = v` and
         // answers `Unit`, so it is its own entry point rather than a result a caller has to
         // remember to drop.
         ("put", [key, value], ret)
-            if key.is_reference() && value.is_reference() && ret.is_reference() =>
+            if mutates && key.is_reference() && value.is_reference() && ret.is_reference() =>
         {
             ("kt_map_put", vec![any(), any(), any()], any())
         }
-        ("set", [key, value], Ty::Unit) if key.is_reference() && value.is_reference() => {
+        ("set", [key, value], Ty::Unit)
+            if mutates && key.is_reference() && value.is_reference() =>
+        {
             ("kt_map_set", vec![any(), any(), any()], Ty::Unit)
         }
-        ("remove", [key], ret) if key.is_reference() && ret.is_reference() => {
+        ("remove", [key], ret) if mutates && key.is_reference() && ret.is_reference() => {
             ("kt_map_remove", vec![any(), any()], any())
         }
-        ("clear", [], Ty::Unit) => ("kt_map_clear", vec![any()], Ty::Unit),
+        ("clear", [], Ty::Unit) if mutates => ("kt_map_clear", vec![any()], Ty::Unit),
         _ => return None,
     })
 }
@@ -195,7 +198,7 @@ fn set_declaration(
 /// `component1`/`component2` are what a destructuring reads, and are the same two questions under
 /// the names the convention uses.
 fn map_entry_symbol(
-    declaration: Option<crate::types::CollectionKind>,
+    declaration: Option<classifier_shapes::CollectionDeclaration>,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
     let extension_entry = if signature.owner.package_matches("kotlin/collections") {
@@ -212,7 +215,9 @@ fn map_entry_symbol(
     } else {
         None
     };
-    if declaration != Some(crate::types::CollectionKind::MapEntry) && extension_entry.is_none() {
+    let reads = declaration
+        .is_some_and(|declaration| declaration.reads(&[crate::types::CollectionKind::MapEntry]));
+    if !reads && extension_entry.is_none() {
         return None;
     }
     Some(match (signature.name, signature.params, signature.ret) {
@@ -229,16 +234,10 @@ fn map_entry_symbol(
         {
             ("kt_map_entry_value", vec![any()], any())
         }
-        ("key" | "getKey", [], ret)
-            if declaration == Some(crate::types::CollectionKind::MapEntry)
-                && ret.is_reference() =>
-        {
+        ("key" | "getKey", [], ret) if reads && ret.is_reference() => {
             ("kt_map_entry_key", vec![any()], any())
         }
-        ("value" | "getValue", [], ret)
-            if declaration == Some(crate::types::CollectionKind::MapEntry)
-                && ret.is_reference() =>
-        {
+        ("value" | "getValue", [], ret) if reads && ret.is_reference() => {
             ("kt_map_entry_value", vec![any()], any())
         }
         _ => return None,
@@ -246,32 +245,38 @@ fn map_entry_symbol(
 }
 
 /// The type one of those getters answers with, for the physical-type question.
-pub(super) fn map_getter_ty(name: &str) -> Ty {
-    match name {
-        "getSize" | "size" => Ty::Int,
-        "isEmpty" => Ty::Boolean,
-        _ => any(),
-    }
+#[derive(Clone, Copy)]
+pub(super) struct MapProperty {
+    symbol: &'static str,
+    answer: Ty,
+    name: &'static str,
 }
 
-fn map_property_symbol(
-    kind: crate::types::CollectionKind,
-    name: &str,
-) -> Option<(&'static str, Ty)> {
-    Some(match (kind, name) {
-        (
-            crate::types::CollectionKind::Map | crate::types::CollectionKind::Set,
-            "getSize" | "size",
-        ) => ("kt_map_size", Ty::Int),
-        (crate::types::CollectionKind::Map, "keys" | "getKeys") => ("kt_map_keys", any()),
-        (crate::types::CollectionKind::Map, "values" | "getValues") => ("kt_map_values", any()),
-        (crate::types::CollectionKind::Map, "entries" | "getEntries") => ("kt_map_entries", any()),
-        (crate::types::CollectionKind::MapEntry, "key" | "getKey") => ("kt_map_entry_key", any()),
-        (crate::types::CollectionKind::MapEntry, "value" | "getValue") => {
-            ("kt_map_entry_value", any())
-        }
-        _ => return None,
-    })
+impl MapProperty {
+    pub(super) fn answer(self) -> Ty {
+        self.answer
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        self.name
+    }
+
+    fn from_runtime(symbol: &'static str, answer: Ty) -> Option<Self> {
+        let name = match symbol {
+            "kt_map_size" => "size",
+            "kt_map_keys" => "keys",
+            "kt_map_values" => "values",
+            "kt_map_entries" => "entries",
+            "kt_map_entry_key" => "key",
+            "kt_map_entry_value" => "value",
+            _ => return None,
+        };
+        Some(Self {
+            symbol,
+            answer,
+            name,
+        })
+    }
 }
 
 impl BodyLowering<'_, '_, '_> {
@@ -371,11 +376,9 @@ impl BodyLowering<'_, '_, '_> {
         if self.file.implements_collection_of(ty) {
             return None;
         }
-        let declaration = signature
-            .owner
-            .semantic_classifier()
-            .and_then(|owner| classifier_shapes::mapped_collection(self.file.classifiers, owner))
-            .map(|it| it.kind);
+        let declaration = signature.owner.semantic_classifier().and_then(|owner| {
+            classifier_shapes::collection_declaration(self.file.classifiers, owner)
+        });
         let (symbol, carried, answer) = if is_map(self.file, ty) {
             if is_map_set_extension(signature) {
                 ("kt_map_set", vec![any(), any(), any()], Ty::Unit)
@@ -396,13 +399,18 @@ impl BodyLowering<'_, '_, '_> {
     /// property identity is validated by [`Self::map_getter`] before this carrier-only call.
     pub(super) fn map_property_member(
         &mut self,
-        name: &str,
+        property: MapProperty,
         receiver: u32,
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        let kind = self.file.mapped_collection(self.type_of(receiver)?)?.kind;
-        let (symbol, answer) = map_property_symbol(kind, name)?;
-        Some(self.map_call(symbol, &[any()], answer, receiver, &[], ret))
+        Some(self.map_call(
+            property.symbol,
+            &[any()],
+            property.answer,
+            receiver,
+            &[],
+            ret,
+        ))
     }
 
     /// A checked read of a map's or set's property the runtime answers — `m.size`, `m.keys` — by
@@ -411,7 +419,7 @@ impl BodyLowering<'_, '_, '_> {
         &self,
         target: crate::fir::ExternalPropertyId,
         receiver: u32,
-    ) -> Option<String> {
+    ) -> Option<MapProperty> {
         let ty = self.type_of(receiver)?;
         if self.file.implements_collection_of(ty)
             || !(is_map(self.file, ty) || is_set(self.file, ty) || is_map_entry(self.file, ty))
@@ -419,12 +427,44 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let property = self.file.callables.property(target)?;
+        let getter = self.file.callables.callable(property.getter)?;
+        let Some(crate::types::SemanticCallableOwner::Classifier(owner)) = getter.declaration_owner
+        else {
+            return None;
+        };
+        let declaration = classifier_shapes::collection_declaration(self.file.classifiers, owner)?;
+        let generic = getter.generic_sig.as_deref();
+        let params = generic
+            .map(|signature| signature.params.as_slice())
+            .or(getter.declared_params.as_deref())
+            .unwrap_or(&getter.params);
+        let result = generic
+            .map(|signature| signature.ret)
+            .or(getter.declared_ret)
+            .unwrap_or(getter.ret);
+        let name = getter.reflection_name.as_deref().unwrap_or(&getter.name);
+        let signature = super::super::super::intrinsics::FunctionSignature::new(
+            super::super::super::intrinsics::DeclarationOwner::callable(
+                getter.physical_owner,
+                getter.declaration_owner,
+            ),
+            name,
+            params,
+            result,
+        );
         let kind = self.file.mapped_collection(ty)?.kind;
-        let (_, answer) = map_property_symbol(kind, &property.name)?;
-        if self.file.carrier(property.result) != self.file.carrier(answer) {
+        let (symbol, carried, answer) = match kind {
+            crate::types::CollectionKind::Map => map_symbol(declaration, signature)?,
+            crate::types::CollectionKind::Set => set_symbol(declaration, signature)?,
+            crate::types::CollectionKind::MapEntry => {
+                map_entry_symbol(Some(declaration), signature)?
+            }
+            _ => return None,
+        };
+        if carried.len() != 1 || self.file.carrier(property.result) != self.file.carrier(answer) {
             return None;
         }
-        Some(property.name.to_string())
+        MapProperty::from_runtime(symbol, answer)
     }
 
     fn map_call(
@@ -476,26 +516,59 @@ mod tests {
 
     #[test]
     fn map_runtime_members_require_complete_signatures() {
+        use classifier_shapes::CollectionDeclaration;
         let key = Ty::ty_param("K", any());
         let value = Ty::ty_param("V", any());
+        let map = CollectionDeclaration::Interface(crate::types::MappedCollection {
+            kind: crate::types::CollectionKind::Map,
+            mutable: false,
+        });
         assert!(map_symbol(
-            crate::types::CollectionKind::Map,
+            map,
             signature("kotlin/collections/Map", "get", &[key], value),
         )
         .is_some());
         assert!(map_symbol(
-            crate::types::CollectionKind::Map,
+            map,
             signature("kotlin/collections/Map", "get", &[Ty::Int], value),
         )
         .is_none());
         assert!(map_symbol(
-            crate::types::CollectionKind::Map,
+            map,
             signature("kotlin/collections/Map", "get", &[key], Ty::Boolean),
         )
         .is_none());
         assert!(map_symbol(
-            crate::types::CollectionKind::Set,
+            CollectionDeclaration::Interface(crate::types::MappedCollection {
+                kind: crate::types::CollectionKind::Set,
+                mutable: false,
+            }),
             signature("kotlin/collections/Map", "get", &[key], value),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn map_members_match_their_exact_declaration_face() {
+        use classifier_shapes::{CollectionDeclaration, StandardCollectionImplementation};
+        let face = |mutable| {
+            CollectionDeclaration::Interface(crate::types::MappedCollection {
+                kind: crate::types::CollectionKind::Map,
+                mutable,
+            })
+        };
+        let size = signature("kotlin/collections/Map", "size", &[], Ty::Int);
+        let clear = signature("kotlin/collections/MutableMap", "clear", &[], Ty::Unit);
+        let hash_map = CollectionDeclaration::Implementation(StandardCollectionImplementation::Map);
+        assert!(map_symbol(face(false), size).is_some());
+        assert!(map_symbol(face(true), size).is_none());
+        assert!(map_symbol(face(true), clear).is_some());
+        assert!(map_symbol(face(false), clear).is_none());
+        assert!(map_symbol(hash_map, size).is_some());
+        assert!(map_symbol(hash_map, clear).is_some());
+        assert!(map_symbol(
+            CollectionDeclaration::Implementation(StandardCollectionImplementation::Set),
+            size,
         )
         .is_none());
     }

@@ -163,3 +163,19 @@ fn a_dependency_subtypes_own_mutators_are_not_the_collections() {
         "ArrayDeque.add",
     );
 }
+
+#[test]
+fn dependency_map_and_set_subtypes_do_not_borrow_runtime_properties() {
+    expect_native_decline(
+        "fun keys(values: AbstractMap<String, String>) = values.keys\n\
+         fun box(): String = \"OK\"\n",
+        "DependencySubtypeMapKeys",
+        "kotlin/collections/AbstractMap.keys",
+    );
+    expect_native_decline(
+        "fun count(values: AbstractSet<String>): Int = values.size\n\
+         fun box(): String = \"OK\"\n",
+        "DependencySubtypeSetSize",
+        "kotlin/collections/AbstractCollection.size",
+    );
+}
