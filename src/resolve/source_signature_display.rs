@@ -9,7 +9,10 @@ use std::fmt::{self, Write};
 use crate::ast::{Expr, File, FunBody, FunDecl, TypeRef};
 use crate::types::Ty;
 
-use super::streamed_callable_header_by_declaration;
+use super::{
+    source_type_resolution::{function_type_ref_shape, FunctionTypeRefShape},
+    streamed_callable_header_by_declaration,
+};
 
 pub(super) struct BoundedSourceDisplay {
     text: String,
@@ -42,30 +45,6 @@ impl fmt::Write for BoundedSourceDisplay {
         self.text.push_str(text);
         Ok(())
     }
-}
-
-/// One normalized source arrow-function type shape.
-#[derive(Clone, Copy)]
-pub(super) struct FunctionTypeRefShape<'a> {
-    pub(super) params: &'a [TypeRef],
-    pub(super) ret: Option<&'a TypeRef>,
-    pub(super) context_count: usize,
-    pub(super) has_receiver: bool,
-    pub(super) suspend: bool,
-}
-
-pub(super) fn function_type_ref_shape(ty: &TypeRef) -> Option<FunctionTypeRefShape<'_>> {
-    if !ty.fun_params.is_empty() || ty.name == "<fun>" {
-        return Some(FunctionTypeRefShape {
-            params: &ty.fun_params,
-            ret: ty.arg.as_deref(),
-            context_count: (ty.fun_context_count as usize).min(ty.fun_params.len()),
-            has_receiver: ty.fun_has_receiver(),
-            suspend: ty.fun_suspend(),
-        });
-    }
-
-    None
 }
 
 pub(super) fn write_source_type_leaf(out: &mut BoundedSourceDisplay, ty: &TypeRef) -> fmt::Result {
