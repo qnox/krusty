@@ -42,6 +42,9 @@ pub struct WorkUnit {
     pub kotlinc_args: Vec<String>,
     /// Worker options that were understood but have no effect on krusty's output.
     pub inert: Vec<String>,
+    /// kotlinc's deprecated-spelling warnings, in its words. The argument still applies under its
+    /// current name; the response reports the warning as kotlinc prints it.
+    pub deprecations: Vec<String>,
     /// Resource groups from `--resources`, in request order. Each group is one
     /// `strip_prefix:add_prefix:file` argument, the spelling `builder-args.bzl` emits.
     pub resources: Vec<ResourceGroup>,
@@ -494,12 +497,24 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
     // A warn-and-ignore flag (`-Xwasm-kclass-fqn`) must be intercepted as an INERT value above so
     // Bazel sees the no-effect note; an argument kotlinc only warns about reaching this parse has
     // no worker arm, and is refused rather than accepted with neither the warning nor a report.
-    if !parsed.argument_warnings.is_empty() {
+    // A deprecated spelling is not ignored: its argument applies, and the response carries the
+    // warning.
+    let ignored_warnings: Vec<&String> = parsed
+        .argument_warnings
+        .iter()
+        .filter(|warning| !parsed.argument_deprecations.contains(warning))
+        .collect();
+    if !ignored_warnings.is_empty() {
         return Err(Refusal::Unsupported(format!(
             "warn-and-ignore option(s) missing a worker inert arm: {}",
-            parsed.argument_warnings.join("; ")
+            ignored_warnings
+                .iter()
+                .map(|warning| warning.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
         )));
     }
+    unit.deprecations = parsed.argument_deprecations;
     if !parsed.sources.is_empty() {
         return Err(Refusal::Malformed(format!(
             "unexpected positional kotlinc option value(s): {}",
@@ -698,11 +713,17 @@ pub fn serve(
             // Report what was understood but had no effect. `WorkResponse::output` is the channel
             // bazel prints, and silently dropping an option the target set is the habit this module
             // exists to avoid.
-            let note = if unit.inert.is_empty() {
-                String::new()
-            } else {
-                format!("krusty: no effect on output: {}\n", unit.inert.join(" "))
-            };
+            let mut note: String = unit
+                .deprecations
+                .iter()
+                .map(|warning| format!("warning: {}\n", crate::kotlinc_arguments::render(warning)))
+                .collect();
+            if !unit.inert.is_empty() {
+                note.push_str(&format!(
+                    "krusty: no effect on output: {}\n",
+                    unit.inert.join(" ")
+                ));
+            }
             match compile(unit) {
                 Ok(()) => WorkResponse {
                     exit_code: 0,
@@ -868,6 +889,15 @@ mod tests {
             let mut request = progressive;
             request.extend(["--srcs", "A.kt", "--out", "o.jar"]);
             let unit = translate(&args(&request)).expect("progressive request translates");
+            let expected_deprecations: Vec<String> = if request.contains(&"-Xprogressive") {
+                vec![
+                    "Argument -Xprogressive is deprecated. Please use -progressive instead"
+                        .to_string(),
+                ]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(unit.deprecations, expected_deprecations);
             let parsed = crate::cli::parse(unit.kotlinc_args);
             assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
             assert!(parsed
