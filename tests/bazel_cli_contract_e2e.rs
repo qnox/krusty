@@ -135,8 +135,9 @@ fn a_colon_joined_classpath_resolves_a_dependency() {
     assert!(jar_entries(&jar).iter().any(|e| e == "app/AppKt.class"));
 }
 
-/// The rule passes the project's kotlinc flags through verbatim, so krusty must accept the ones
-/// intellij-community actually sets without treating them as source paths.
+/// The rule passes the project's kotlinc flags through verbatim. The subset krusty models must
+/// reach compilation rather than being mistaken for source paths; semantic gaps are refused in
+/// the focused tests below.
 #[test]
 fn the_projects_kotlinc_flags_are_accepted() {
     let dir = workspace("flags");
@@ -149,7 +150,6 @@ fn the_projects_kotlinc_flags_are_accepted() {
             "-d".to_string(),
             jar.display().to_string(),
             "-Xjvm-default=all".to_string(),
-            "-XXLanguage:+AllowEagerSupertypeAccessibilityChecks".to_string(),
             "-api-version".to_string(),
             "2.4".to_string(),
             "-language-version".to_string(),
@@ -165,6 +165,33 @@ fn the_projects_kotlinc_flags_are_accepted() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(jar_entries(&jar).iter().any(|e| e == "demo/FKt.class"));
+}
+
+/// A language-feature name is not implemented merely because the generic feature set can retain
+/// it. The project currently requests this progressive feature explicitly too, so the batch rule
+/// must refuse instead of compiling under unchanged semantics.
+#[test]
+fn the_projects_unmodeled_language_feature_is_refused() {
+    let dir = workspace("unmodeled-language-feature");
+    let source = dir.join("U.kt");
+    std::fs::write(&source, "package demo\nfun value(): Int = 1\n").expect("write source");
+    let jar = dir.join("unmodeled-language-feature.jar");
+    let output = run_with_param_file(
+        &dir,
+        &[
+            "-d".to_string(),
+            jar.display().to_string(),
+            "-XXLanguage:+AllowEagerSupertypeAccessibilityChecks".to_string(),
+            source.display().to_string(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "krusty: error: krusty does not implement the language feature \
+         'AllowEagerSupertypeAccessibilityChecks' selected by '-XXLanguage'\n"
+    );
+    assert!(!jar.exists(), "a refused feature must not write the jar");
 }
 
 /// intellij-community also sets `-progressive`. krusty does not implement the progressive

@@ -84,6 +84,15 @@ fn language_level_enables(language_version: LanguageVersion, since: (u16, u16)) 
 }
 
 impl LangFeatures {
+    /// Whether krusty's frontend/backend has an explicit semantic consumer for this kotlinc
+    /// `LanguageFeature`. Command-line boundaries use this to refuse toggles that would otherwise
+    /// be recorded by name without changing compilation semantics.
+    pub fn models(name: &str) -> bool {
+        OBSERVED_FEATURES
+            .iter()
+            .any(|(observed, _)| *observed == name)
+    }
+
     /// The public source-language level from which this feature baseline was derived.
     ///
     /// Ordered feature overrides do not replace the language level: consumers that implement a
@@ -294,6 +303,14 @@ mod tests {
         assert!(!g.has("NameBasedDestructuring"));
         assert!(!g.has("EnableNameBasedDestructuringShortForm"));
         assert!(!g.apply_cli_arg("foo.kt"));
+    }
+
+    #[test]
+    fn modeled_features_are_the_frontend_and_backend_capability_boundary() {
+        assert!(LangFeatures::models("ContextParameters"));
+        assert!(!LangFeatures::models(
+            "AllowEagerSupertypeAccessibilityChecks"
+        ));
     }
 
     #[test]

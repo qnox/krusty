@@ -223,6 +223,28 @@ pub(super) fn apply(opts: &mut Options, parsed: &mut ParsedSettings, occurrence:
     };
     // `@Enables`/`@Disables` arguments are language-feature switches; `-XXLanguage` is the raw form.
     if spec.changes_language_features() || name == "-XXLanguage" {
+        if name == "-XXLanguage" {
+            for value in list {
+                for toggle in value.split(',') {
+                    let Some(feature) = toggle
+                        .strip_prefix('+')
+                        .or_else(|| toggle.strip_prefix('-'))
+                        .filter(|feature| !feature.is_empty())
+                    else {
+                        opts.errors.push(format!(
+                            "invalid language feature toggle '{toggle}' in -XXLanguage: expected +Feature or -Feature"
+                        ));
+                        return;
+                    };
+                    if !krusty::features::LangFeatures::models(feature) {
+                        opts.errors.push(format!(
+                            "krusty does not implement the language feature '{feature}' selected by '-XXLanguage'"
+                        ));
+                        return;
+                    }
+                }
+            }
+        }
         let spellings: Vec<String> = match &occurrence.value {
             Value::Bool(_) => vec![name.to_string()],
             Value::String(value) => vec![format!("{name}={value}")],

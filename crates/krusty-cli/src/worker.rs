@@ -137,19 +137,6 @@ fn translate_language_features(
     value: &str,
     source_flag: &str,
 ) -> Result<(), Refusal> {
-    const MODELED: &[&str] = &[
-        "AllowAccessToProtectedFieldFromSuperCompanion",
-        "ContextParameters",
-        "DataClassCopyRespectsConstructorVisibility",
-        "EnableNameBasedDestructuringShortForm",
-        "ExplicitBackingFields",
-        "ExplicitContextArguments",
-        "ImplicitSignedToUnsignedIntegerConversion",
-        "MultiDollarInterpolation",
-        "MultiPlatformProjects",
-        "NameBasedDestructuring",
-        "WhenGuards",
-    ];
     let tokens = value.split(',').collect::<Vec<_>>();
     if tokens.iter().any(|token| token.is_empty()) {
         return Err(Refusal::Malformed(format!(
@@ -167,9 +154,7 @@ fn translate_language_features(
                 "{source_flag} {token}: feature name is empty"
             )));
         }
-        if name == "AllowEagerSupertypeAccessibilityChecks" {
-            unit.inert.push(format!("{source_flag} {token}"));
-        } else if MODELED.contains(&name) {
+        if krusty::features::LangFeatures::models(name) {
             unit.kotlinc_args.push(format!("-XXLanguage:{token}"));
         } else {
             return Err(Refusal::Unsupported(format!(
@@ -824,11 +809,15 @@ mod tests {
 
     #[test]
     fn the_real_argument_surface_translates() {
-        // `--progressive` is part of the real request but deliberately refused below until its
+        // These two options are part of the real request but deliberately refused until their
         // semantics are implemented. Keep exercising every other field of that request here.
         let request = intellij_request()
             .into_iter()
-            .filter(|argument| argument != "--progressive")
+            .filter(|argument| {
+                argument != "--progressive"
+                    && argument != "--x_xlanguage"
+                    && argument != "+AllowEagerSupertypeAccessibilityChecks"
+            })
             .collect::<Vec<_>>();
         let unit = translate(&request).expect("must translate");
         assert_eq!(unit.output_jar, PathBuf::from("out/util.jar"));
@@ -867,10 +856,7 @@ mod tests {
                 unit.kotlinc_args
             );
         }
-        for inert in [
-            "--warn off",
-            "--x_xlanguage +AllowEagerSupertypeAccessibilityChecks",
-        ] {
+        for inert in ["--warn off"] {
             assert!(unit.inert.iter().any(|value| value == inert), "{inert}");
         }
     }

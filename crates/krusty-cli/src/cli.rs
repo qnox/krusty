@@ -1030,6 +1030,27 @@ mod tests {
         );
     }
 
+    /// Merely retaining an arbitrary `-XXLanguage` name in `LangFeatures` does not implement the
+    /// syntax, diagnostics, or lowering it selects. The batch CLI must therefore enforce the same
+    /// semantic capability boundary as the persistent worker.
+    #[test]
+    fn xxlanguage_refuses_features_the_compiler_does_not_model() {
+        for flag in [
+            "-XXLanguage:+AllowEagerSupertypeAccessibilityChecks",
+            "-XXLanguage:+ShapeKrustyDoesNotModel",
+        ] {
+            let parsed = parse_args(&[flag, "f.kt"]);
+            let feature = flag.rsplit_once('+').unwrap().1;
+            assert_eq!(
+                parsed.errors,
+                [format!(
+                    "krusty does not implement the language feature '{feature}' selected by '-XXLanguage'"
+                )],
+                "{flag}"
+            );
+        }
+    }
+
     #[test]
     fn accepted_levels_and_no_option_default_follow_the_selected_kotlinc_release() {
         let no_option = parse_args(&["-Xkotlin-reference-version=2.4.10", "f.kt"]);

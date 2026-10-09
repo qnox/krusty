@@ -12160,7 +12160,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `releases/<ver>.features.tsv`), and krusty implements none of those not already on at the
   language version (the 2.5/2.6 `Forbid…`/`Report…` errors). `@Enables` arguments apply before
   `-XXLanguage`, which overrides them, and like kotlinc only `@Enables` arguments, never
-  `-XXLanguage`, get `REDUNDANT_CLI_ARG`.
+  `-XXLanguage`, get `REDUNDANT_CLI_ARG`. A `-XXLanguage` toggle is accepted only when the
+  compiler has an explicit semantic consumer for that feature; retaining an arbitrary feature
+  name without changing parsing, checking, lowering, or emission is not implementation.
   (`tests/kotlinc_argument_conformance_e2e.rs` compares the table with the reference compiler and
   the parser with kotlinc's `parseCommandLineArguments` over every argument and value form;
   `crates/krusty-cli/src/kotlinc_arguments/tokenize.rs` unit tests;
