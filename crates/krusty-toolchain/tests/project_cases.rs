@@ -13,7 +13,7 @@ use krusty_toolchain::diagnostic::Diagnostics;
 use krusty_toolchain::{model, show};
 use support::kotlin::{self, Invocation};
 use support::rendering::problems;
-use support::{is_error, reported};
+use support::{reported, ExpectedDiagnostic, ExpectedSeverity, KrustyExpected};
 
 fn run_toolchain(root: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_krusty-toolchain"))
@@ -55,31 +55,46 @@ fn every_project_case_is_read_as_the_toolchain_reads_it() {
         let actual = reported(&root, &diagnostics);
         match &case.krusty {
             Some(krusty) => {
-                // krusty-toolchain differs only by refusing, in its own name, or where the
-                // toolchain rejects the project too.
-                let refuses = krusty
-                    .iter()
-                    .any(|line| line.contains("ERROR: krusty-toolchain "));
-                if !krusty.iter().any(|line| is_error(line)) || !refuses && errors.is_empty() {
-                    failures.push(format!("{name}: krusty-toolchain differs without refusing"));
-                }
-                if errors.iter().chain(&warnings).eq(krusty.iter()) {
+                let expected = match krusty {
+                    KrustyExpected::Difference(diagnostics)
+                    | KrustyExpected::Refusal(diagnostics) => diagnostics,
+                };
+                let toolchain_diagnostics: Vec<ExpectedDiagnostic> =
+                    errors.iter().chain(&warnings).cloned().collect();
+                if &toolchain_diagnostics == expected {
                     failures.push(format!(
                         "{name}: the `krusty` section is what the toolchain reports"
                     ));
                 }
-                if &actual != krusty {
+                if &actual != expected {
                     failures.push(format!(
-                        "{name}:\n  expected {krusty:#?}\n  actual   {actual:#?}"
+                        "{name}:\n  expected {:#?}\n  actual   {actual:#?}",
+                        expected
                     ));
                 }
             }
             None => {
-                let (actual_errors, actual_warnings): (Vec<String>, Vec<String>) =
-                    actual.into_iter().partition(|line| is_error(line));
-                if actual_errors != errors || actual_warnings != warnings {
+                let mut actual_errors = Vec::new();
+                let mut actual_warnings = Vec::new();
+                for diagnostic in actual {
+                    match diagnostic.severity {
+                        ExpectedSeverity::Error => actual_errors.push(diagnostic.rendered),
+                        ExpectedSeverity::Warning | ExpectedSeverity::WeakWarning => {
+                            actual_warnings.push(diagnostic.rendered)
+                        }
+                    }
+                }
+                let expected_errors: Vec<String> = errors
+                    .iter()
+                    .map(|diagnostic| diagnostic.rendered.clone())
+                    .collect();
+                let expected_warnings: Vec<String> = warnings
+                    .iter()
+                    .map(|diagnostic| diagnostic.rendered.clone())
+                    .collect();
+                if actual_errors != expected_errors || actual_warnings != expected_warnings {
                     failures.push(format!(
-                        "{name}:\n  expected errors {errors:#?}\n  actual   errors {actual_errors:#?}\n  expected warnings {warnings:#?}\n  actual   warnings {actual_warnings:#?}"
+                        "{name}:\n  expected errors {expected_errors:#?}\n  actual   errors {actual_errors:#?}\n  expected warnings {expected_warnings:#?}\n  actual   warnings {actual_warnings:#?}"
                     ));
                 }
                 // The command's result, byte for byte: the module table, or nothing.

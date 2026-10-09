@@ -5,6 +5,6 @@ modules: [a]
 product: jvm/lib
 test-layout: default
 description@jvm: x
---- krusty
-a/module.yaml:3:1: ERROR: krusty-toolchain reads JVM modules only; it refuses the qualifier `@jvm` on `description`
-a/module.yaml:2:1: ERROR: Unknown property `test-layout`
+--- krusty-refusal
+error	a/module.yaml:3:1: ERROR: krusty-toolchain reads JVM modules only; it refuses the qualifier `@jvm` on `description`
+error	a/module.yaml:2:1: ERROR: Unknown property `test-layout`
