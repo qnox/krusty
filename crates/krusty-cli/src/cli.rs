@@ -14,6 +14,7 @@ use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaModes};
 use krusty::jvm::JvmBackend;
 use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
+use krusty::language_version::LanguageVersion;
 use krusty::plugins::cli::PluginConfig;
 use krusty::plugins::registry::{Activation, NativePlugins, PluginRegistry};
 
@@ -464,6 +465,36 @@ impl Options {
                 self.language_settings.features.has("AnnotationsInMetadata"),
             )
             .with_metadata_version(Some(metadata_version))
+    }
+
+    /// Replace the source/API level after ordinary command-line parsing while preserving every
+    /// other language setting that parsing selected. The conformance harness uses this for Kotlin
+    /// 1.x levels which current kotlinc still models but no longer accepts on its public CLI.
+    pub fn override_language_versions(
+        &mut self,
+        language_version: LanguageVersion,
+        api_version: Option<LanguageVersion>,
+        feature_arguments: &[String],
+    ) -> Result<(), String> {
+        let settings = LanguageSettings::new(language_version, api_version, feature_arguments)?;
+        self.install_language_settings(settings);
+        Ok(())
+    }
+
+    /// Apply the non-version language modes retained by [`Options`] to a freshly based setting.
+    /// Both normal CLI finalization and the typed conformance override go through this boundary so
+    /// changing the version cannot discard opt-ins, explicit-API mode, or assertion mode.
+    pub(super) fn install_language_settings(&mut self, mut settings: LanguageSettings) {
+        if let Some(mode) = &self.explicit_api {
+            settings.features.apply_explicit_api_mode(mode);
+        }
+        if let Some(mode) = &self.assertions {
+            settings.features.apply_assertions_mode(mode);
+        }
+        for marker in &self.opt_in {
+            settings.features.opt_in(marker);
+        }
+        self.language_settings = settings;
     }
 }
 

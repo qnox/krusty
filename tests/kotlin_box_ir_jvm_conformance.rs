@@ -310,11 +310,7 @@ fn unit_options<'a>(
             .filter(|argument| argument.starts_with("-XXLanguage:"))
             .cloned()
             .collect();
-        options.language_settings = krusty::language_settings::LanguageSettings::new(
-            language_version,
-            api_version,
-            &feature_arguments,
-        )?;
+        options.override_language_versions(language_version, api_version, &feature_arguments)?;
     }
     Ok(options)
 }
@@ -342,6 +338,28 @@ fn historical_levels_reach_the_typed_configuration_channel() {
     assert_eq!(
         options.language_settings.api_version,
         krusty::language_version::LanguageVersion::new(1, 8)
+    );
+}
+
+#[test]
+fn typed_levels_preserve_every_other_language_setting() {
+    let source = "// LANGUAGE_VERSION: 1.9\n\
+                  // API_VERSION: 1.8\n\
+                  // LANGUAGE: +MultiPlatformProjects\n\
+                  // OPT_IN: sample.ExperimentalApi\n\
+                  // EXPLICIT_API_MODE: STRICT\n\
+                  // ASSERTIONS_MODE: always-disable\n\
+                  fun box() = \"OK\"\n";
+    let options = unit_options(source, []).expect("the complete typed configuration is retained");
+    let features = &options.language_settings.features;
+
+    assert!(!features.has("ContextParameters"));
+    assert!(features.has("MultiPlatformProjects"));
+    assert!(features.has("ExplicitApiStrict"));
+    assert!(features.has("AssertionsAlwaysDisable"));
+    assert_eq!(
+        features.opted_in().collect::<Vec<_>>(),
+        ["sample.ExperimentalApi"]
     );
 }
 

@@ -543,18 +543,7 @@ pub(super) fn finish_language_settings(
                 opts.suppress_version_warnings,
                 lifecycle,
             );
-            opts.language_settings = settings;
-            if let Some(mode) = &opts.explicit_api {
-                opts.language_settings
-                    .features
-                    .apply_explicit_api_mode(mode);
-            }
-            if let Some(mode) = &opts.assertions {
-                opts.language_settings.features.apply_assertions_mode(mode);
-            }
-            for marker in &opts.opt_in {
-                opts.language_settings.features.opt_in(marker);
-            }
+            opts.install_language_settings(settings);
         }
         Err(error) => opts.errors.push(error),
     }
