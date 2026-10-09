@@ -23,8 +23,8 @@ The reference is Kotlin Toolchain 0.13.0.
   messages. A YAML syntax error is reported with the parser's
   message where the toolchain's PSI parser would recover.
 - Module globs follow `java.nio` `glob:` semantics (`sun.nio.fs.Globs`) after the toolchain's
-  normalisation; `glob.rs` is checked against a corpus recorded from the JDK
-  (`scripts/kotlin-toolchain/GlobOracle.java`, `tests/recorded/globs.tsv`). Matches are sorted.
+  normalisation; `glob.rs` is checked against the JDK matcher on every case in
+  `tests/cases/globs.tsv` (see "Differential tests"). Matches are sorted.
 - Every file-system look and read goes through `inventory.rs`: bounded, sorted, and never through a
   symbolic link. A link met on the way to a module, inside a walked region, or as a build file
   (`project.yaml`, `module.yaml`, `project.amper`, `module.amper`, `plugin.yaml`) is an error naming
@@ -55,23 +55,28 @@ krusty-toolchain refuses, with an error naming itself:
 
 ## Differential tests
 
-`tests/recorded/projects/*.case` hold a project's files and what `kotlin show modules` reported for
-them: every problem (file relative to the root, line, column, severity, message) and, when the
-project is read without errors, the module table. `tests/project_cases.rs` materialises each case
-and requires the same problems in the same order and a byte-identical table. A `--- krusty` section
-records what krusty-toolchain reports instead where it deliberately differs; it must be a refusal in
-krusty-toolchain's name, or the toolchain must reject the case too.
+JetBrains' `kotlin` is the oracle, used the way krusty's tests use `kotlinc`: the repository holds
+only the inputs, and the reference's output is cached. `tests/cases/projects/*.case` hold a
+project's files (and, in a `--- krusty` section, what krusty-toolchain reports where it
+deliberately differs; that must be a refusal in krusty-toolchain's name, or the toolchain must
+reject the case too). `tests/project_cases.rs` runs `kotlin show modules` on each case through the
+toolchain's own wrapper, `scripts/kotlin-toolchain/kotlin`, which pins the exact distribution, and
+requires krusty-toolchain to report the same problems (file, line, column, severity, message) in
+the same order and, on success, the same module table, byte for byte. Module globs are checked the
+same way against the JDK matcher: `tests/cases/globs.tsv` lists patterns and paths, and
+`scripts/kotlin-toolchain/GlobOracle.java` judges them on the JDK `JAVA_HOME` names.
 
-Re-record after changing a case or moving to another toolchain version:
+`tests/support/oracle.rs` caches each reference's exit code and raw output (stdout and stderr in
+the order written; only a JVM's `Picked up JAVA_TOOL_OPTIONS` line is dropped) under
+`target/cache/kotlin-toolchain-oracle` (or `KRUSTY_TOOLCHAIN_ORACLE_DIR`), keyed by the reference's
+identity (the wrapper's bytes, or the JDK's `release` record and `GlobOracle.java`) and every
+input. A cached entry is replayed. A missing one fails locally; record it from the reference with
 
 ```text
-export JAVA_HOME=<JDK 25> LC_ALL=C.UTF-8 KOTLIN_CLI_NO_WELCOME_BANNER=1
-python3 scripts/kotlin-toolchain/record_projects.py scripts/kotlin-toolchain/kotlin \
-  crates/krusty-toolchain/tests/recorded/projects/*.case
+KRUSTY_RECORD=1 cargo test -p krusty-toolchain
 ```
 
-`scripts/kotlin-toolchain/kotlin` is the toolchain's own wrapper, pinning the version and checksum
-of the distribution it runs. The committed recordings keep these tests fast and offline; the
-`kotlin-toolchain` CI job (a gate of `ci-and-conformance`) keeps them true by running
-`scripts/kotlin-toolchain/verify_recordings.sh`, which re-records every project case through that
-wrapper and the glob corpus through `GlobOracle.java` on a JDK 25, and fails on any difference.
+(`KRUSTY_RECORD=1` re-runs every entry; `KRUSTY_TOOLCHAIN_RUN_MISSING=1` runs only missing ones).
+The `ci` job restores the cache master saved, runs the references for whatever is missing, and
+master saves the result, so a new case or a new toolchain version is checked against the live
+toolchain without running it for every case on every pull request.

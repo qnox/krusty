@@ -1,9 +1,0 @@
-A null list item.
---- project.yaml
-modules:
-  - null
-  - libs/a
---- libs/a/module.yaml
-product: jvm/lib
---- expected
-project.yaml:2:5: ERROR: `null` value is unexpected here. Use quotes to treat it as a regular string literal

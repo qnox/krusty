@@ -1,0 +1,5 @@
+A listed path that is a file.
+--- project.yaml
+modules: [f]
+--- f
+x

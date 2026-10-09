@@ -1,9 +1,0 @@
-A mapping in the list.
---- project.yaml
-modules:
-  - a: b
-  - libs/a
---- libs/a/module.yaml
-product: jvm/lib
---- expected
-project.yaml:2:5: ERROR: Expected `string`, but got `mapping {}`

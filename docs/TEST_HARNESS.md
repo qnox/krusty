@@ -289,8 +289,7 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs core `ci`, `klib-semantics`, `kotlin-toolchain` (krusty-toolchain's recordings re-recorded
-from Kotlin Toolchain and the JDK), the whole `conformance` matrix, `build-gradle-plugin`, and the
+It needs core `ci`, `klib-semantics`, the whole `conformance` matrix, `build-gradle-plugin`, and the
 whole `gradle` compatibility matrix. Every supported Kotlin version has distinct JVM and Native
 conformance rows; the JVM row also owns the non-box suite. The job is scheduled with `if: always()`,
 because a required check that is skipped counts as passing, and it fails unless every dependency

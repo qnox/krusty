@@ -1,8 +1,0 @@
-A description that is not a string.
---- project.yaml
-modules: [a]
---- a/module.yaml
-product: jvm/lib
-description: [x]
---- expected
-a/module.yaml:2:14: ERROR: Expected `string | null`, but got `sequence []`

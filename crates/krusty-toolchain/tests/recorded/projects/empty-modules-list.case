@@ -1,9 +1,0 @@
-An empty modules list and no root module.
---- project.yaml
-modules: []
---- expected
-project.yaml:1:1: WARNING: Project has no modules: no root module file and no modules listed in the project file
---- stdout
-╭──────┬──────┬───────────────────╮
-│ Name │ Type │ Short description │
-╰──────┴──────┴───────────────────╯

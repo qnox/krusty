@@ -516,14 +516,18 @@ mod tests {
         }
     }
 
-    /// `tests/recorded/globs.tsv`, recorded by `scripts/kotlin-toolchain/GlobOracle.java` from the JDK
-    /// matcher and the toolchain's normalization: every pattern's normalized form, then either each
-    /// path's verdict or the exception message.
+    /// Every pattern and path in `tests/cases/globs.tsv`, as the JDK matcher judges them after the
+    /// toolchain's normalization (`scripts/kotlin-toolchain/GlobOracle.java`, through the cached
+    /// oracle): the normalized form, then either each path's verdict or the exception message.
     #[test]
-    fn a_recorded_jdk_corpus_matches() {
-        let recorded = include_str!("../tests/recorded/globs.tsv");
+    fn the_jdk_matcher_agrees_on_every_case() {
+        let cases = include_str!("../tests/cases/globs.tsv");
+        let jdk = crate::jdk_globs::jdk_globs("globs", cases);
+        assert_eq!(jdk.code, 0, "{}", String::from_utf8_lossy(&jdk.output));
+        let judged = String::from_utf8(jdk.output).expect("the oracle prints UTF-8");
+        assert_eq!(judged.lines().count(), cases.lines().count(), "{judged}");
         let mut mismatches = Vec::new();
-        for line in recorded.lines() {
+        for line in judged.lines() {
             let mut fields = line.split('\t');
             let pattern = fields.next().expect("pattern");
             let normalized = fields.next().expect("normalized pattern");

@@ -1,6 +1,0 @@
-A listed path that does not exist.
---- project.yaml
-modules: [f]
---- expected
-project.yaml:1:11: ERROR: Unresolved module path `f`
-project.yaml:1:1: WARNING: Project has no modules: no root module file and no modules listed in the project file

@@ -14,3 +14,11 @@ mod module;
 mod project;
 mod reading;
 mod yaml;
+
+// The references the unit tests compare with, shared with the integration tests.
+#[cfg(test)]
+#[path = "../tests/support/jdk_globs.rs"]
+mod jdk_globs;
+#[cfg(test)]
+#[path = "../tests/support/oracle.rs"]
+mod oracle;

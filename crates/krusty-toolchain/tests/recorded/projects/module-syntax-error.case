@@ -1,9 +1,0 @@
-A module file YAML cannot parse. The toolchain recovers an unclosed flow sequence; krusty-toolchain reports the syntax error.
---- project.yaml
-modules: [a]
---- a/module.yaml
-product: [jvm/lib
---- krusty
-a/module.yaml:2:1: ERROR: while parsing a flow sequence, expected ',' or ']'
---- expected
-a/module.yaml:1:10: ERROR: Expected `ModuleProduct ( "lib" | "jvm/app" | "jvm/lib" | "kmp/lib" | "jvm/amper-plugin" | "android/app" | "ios/app" | "macos/app" | "linux/app" | "windows/app" | "wasm-js/app" | "wasm-wasi/app" | "js/app" | {..} )`, but got `sequence []`

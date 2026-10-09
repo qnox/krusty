@@ -3,8 +3,8 @@ name: ci
 # Build the conformance test binary once. Every supported Kotlin version gets independent JVM and
 # Native matrix rows: JVM runs its box corpus plus the non-box suites; Native runs its box corpus.
 # Publish only after all rows pass and every version matches its committed platform expectations.
-# `ci-and-conformance` is the one required check over core CI, KLIB semantics, the Kotlin Toolchain
-# recordings, conformance, and Gradle release/compatibility validation.
+# `ci-and-conformance` is the one required check over core CI, KLIB semantics, conformance, and
+# Gradle release/compatibility validation.
 # `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
 # match the lists on their own base and still disagree with them once both are on master.
 on:
@@ -92,6 +92,22 @@ jobs:
           key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
           restore-keys: |
             recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-
+      # krusty-toolchain's references (JetBrains' `kotlin` and the JDK glob matcher) are cached the
+      # same way: restored from the base, run only for a missing entry, saved by master.
+      # `tests/support/oracle.rs` keys each entry by the reference's identity and its inputs.
+      - name: restore Kotlin Toolchain oracle output
+        id: toolchain-oracle
+        uses: actions/cache/restore@v6
+        with:
+          path: target/cache/kotlin-toolchain-oracle
+          key: kotlin-toolchain-oracle-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          restore-keys: |
+            kotlin-toolchain-oracle-
+      - name: cache Kotlin Toolchain distribution
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/JetBrains/Kotlin/cli
+          key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
       - name: select recorded-byte cache mode
         id: recorded-mode
         env:
@@ -121,6 +137,7 @@ jobs:
           KRUSTY_RECORD_CLASS_DUMPS: ${{ steps.recorded-mode.outputs.record }}
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
+          KRUSTY_TOOLCHAIN_RUN_MISSING: 1
         run: just ci
       - name: save recorded kotlinc bytes
         if: steps.recorded-mode.outputs.write == '1'
@@ -128,6 +145,12 @@ jobs:
         with:
           path: target/cache/class-dumps
           key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ github.sha }}
+      - name: save Kotlin Toolchain oracle output
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.toolchain-oracle.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: target/cache/kotlin-toolchain-oracle
+          key: kotlin-toolchain-oracle-${{ github.sha }}
 
   # Real Kotlin/Native metadata, provisioned rather than silently skipped. This lane validates the
   # common KLIB semantic boundary only; serialized IR bodies have their own follow-up.
@@ -164,25 +187,6 @@ jobs:
           key: klib-semantics-box-corpus-mock-jdk-${{ hashFiles('kotlin-versions') }}
       - name: decode the Kotlin/Native stdlib through common metadata
         run: just klib-semantics
-
-  # krusty-toolchain's differential corpora re-recorded from the live references: every project case
-  # from Kotlin Toolchain `kotlin show modules` (the pinned wrapper in `scripts/kotlin-toolchain`)
-  # and the module-glob corpus from the JDK. Any difference from the committed recordings fails.
-  kotlin-toolchain:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v6.0.1
-        with:
-          distribution: zulu
-          java-version: '25'
-      - name: cache Kotlin Toolchain distribution
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/JetBrains/Kotlin/cli
-          key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
-      - name: re-record against Kotlin Toolchain and the JDK
-        run: scripts/kotlin-toolchain/verify_recordings.sh
 
   # One gate build of the binaries the matrices run. Conformance uses the test binary and the
   # CLI. Gradle uses the same CLI and the krusty-build test binary; it does not compile krusty.
@@ -387,12 +391,12 @@ jobs:
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
   # check that is skipped counts as passing, so this job is always scheduled and fails itself unless
-  # core CI, KLIB semantics, the Kotlin Toolchain recordings, the complete conformance matrix, the
-  # plugin build, and the complete Gradle matrix succeeded. A failed shared build or version inventory skips a consumer, which
+  # core CI, KLIB semantics, the complete conformance matrix, the plugin build, and the complete
+  # Gradle matrix succeeded. A failed shared build or version inventory skips a consumer, which
   # fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, klib-semantics, kotlin-toolchain, conformance, build-gradle-plugin, gradle]
+    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -400,24 +404,21 @@ jobs:
         env:
           CI_RESULT: ${{ needs.ci.result }}
           KLIB_RESULT: ${{ needs.klib-semantics.result }}
-          KOTLIN_TOOLCHAIN_RESULT: ${{ needs.kotlin-toolchain.result }}
           CONFORMANCE_RESULT: ${{ needs.conformance.result }}
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
         run: |
           echo "ci: $CI_RESULT"
           echo "klib-semantics: $KLIB_RESULT"
-          echo "kotlin-toolchain: $KOTLIN_TOOLCHAIN_RESULT"
           echo "conformance: $CONFORMANCE_RESULT"
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
           if [ "$CI_RESULT" != success ] \
             || [ "$KLIB_RESULT" != success ] \
-            || [ "$KOTLIN_TOOLCHAIN_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ]; then
-            echo "core CI, KLIB semantics, Kotlin Toolchain recordings, conformance, and every Gradle gate must succeed" >&2
+            echo "core CI, KLIB semantics, conformance, and every Gradle gate must succeed" >&2
             exit 1
           fi
 

@@ -1,8 +1,0 @@
-A path leaving the root that does not exist.
---- project.yaml
-modules: [../nowhere-at-all]
---- libs/a/module.yaml
-product: jvm/lib
---- expected
-project.yaml:1:11: ERROR: Unresolved module path `../nowhere-at-all`
-project.yaml:1:1: WARNING: Project has no modules: no root module file and no modules listed in the project file
