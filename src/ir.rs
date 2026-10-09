@@ -1892,6 +1892,10 @@ pub struct IrFile {
     /// nested in it writes [`IrExpr::SetFrameResult`], which every renumbering of either body
     /// leaves pointing at the same frame.
     pub inline_return_frames: std::collections::HashMap<ExprId, String>,
+    /// `try` expressions whose result is the value of a spliced inline lambda protected by the
+    /// inline call's cleanup. This is semantic inline-frame provenance: a backend chooses how the
+    /// result crosses `finally`; common IR does not prescribe a local slot, reload, or branch.
+    pub inline_cleanup_results: std::collections::HashSet<ExprId>,
     /// Sparse construction facts keyed by the ordinary [`IrExpr::New`] identity. Common lowering
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
     /// must realize annotation instances through a platform-specific implementation class.

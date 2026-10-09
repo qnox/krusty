@@ -354,6 +354,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(callable_reference_enclosures);
     copy_map!(checked_return_depths);
     copy_map!(inline_return_frames);
+    if ir.inline_cleanup_results.contains(&source) {
+        ir.inline_cleanup_results.insert(target);
+    }
     copy_map!(annotation_constructions);
     copy_map!(generated_secondary_constructor_calls);
     copy_map!(expr_lines);

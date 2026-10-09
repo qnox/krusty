@@ -16,7 +16,7 @@ use crate::jvm::classfile::{CodeBuilder, Label};
 use crate::types::Ty;
 
 use super::frame_map::{FrameKey, TempRole, TempSlot};
-use super::{ir_ty_to_jvm, load, local_variable_desc, slot_words, store, Emitter};
+use super::{discard, ir_ty_to_jvm, load, local_variable_desc, slot_words, store, Emitter};
 
 /// The operands of an IR `try` being emitted, as `IrExpr::Try` holds them.
 pub(super) struct TryParts<'a> {
@@ -185,9 +185,18 @@ impl Emitter<'_> {
             finally,
             result,
         } = parts;
-        let rt = ir_ty_to_jvm(&result);
+        let inline_cleanup_result = self.ir.inline_cleanup_results.contains(&expression);
+        // A spliced inline lambda has a value even when its semantic type is `Unit`: kotlinc
+        // parks `Unit.INSTANCE` across `finally` and only discards it at the landing. This is a
+        // JVM representation choice over the semantic `try` result recorded by common IR.
+        let physical_result = if inline_cleanup_result {
+            crate::types::stored_value_ty(result)
+        } else {
+            result
+        };
+        let rt = ir_ty_to_jvm(&physical_result);
         // A discarded `try` runs its branches as statements: no value reaches the result temporary.
-        let is_stmt = discarded || matches!(rt, Ty::Unit | Ty::Nothing);
+        let is_stmt = !inline_cleanup_result && (discarded || matches!(rt, Ty::Unit | Ty::Nothing));
         // A `finally` that diverges (`finally { throw }`) never falls through to `after`.
         let fin_diverges = finally.is_some_and(|f| self.discarding_diverges(f));
 
@@ -252,6 +261,13 @@ impl Emitter<'_> {
             .filter(|_| !is_stmt)
             .map(TempSlot::slot);
         if stores_body {
+            // The call's line owns the synthetic result store. A trailing same-line `nop` already
+            // carries that mark and will be removed onto the store; otherwise force a fresh mark
+            // after the inlined body's own closing line.
+            if inline_cleanup_result && !code.line_marked_on_trailing_nop() {
+                code.forget_line();
+                self.mark_expression_start(expression, code);
+            }
             store(rt, result_slot.unwrap(), code);
         }
         if let Some(finalizer) = finally {
@@ -287,6 +303,13 @@ impl Emitter<'_> {
                 // with this copy: the handler copies below are reached on edges that never stored it.
                 let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
                 self.emit_finalizer_copy(f, code);
+                if inline_cleanup_result && !fin_diverges {
+                    load(
+                        rt,
+                        result_slot.expect("an inline cleanup result owns a temporary"),
+                        code,
+                    );
+                }
                 if let Some(parked) = parked {
                     self.release_temporary(parked);
                 }
@@ -418,6 +441,13 @@ impl Emitter<'_> {
                     // Same as the normal path: this catch stored the result, and `after` loads it.
                     let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
                     self.emit_finalizer_copy(f, code);
+                    if inline_cleanup_result && !fin_diverges {
+                        load(
+                            rt,
+                            result_slot.expect("an inline cleanup result owns a temporary"),
+                            code,
+                        );
+                    }
                     if let Some(parked) = parked {
                         self.release_temporary(parked);
                     }
@@ -501,8 +531,11 @@ impl Emitter<'_> {
             // numeric key into the semantic slot map.
             let result_lease = result_slot.map(|slot| self.lease_temporary(slot, rt));
             self.bind(after, code);
-            if let Some(slot) = result_slot {
+            if let Some(slot) = result_slot.filter(|_| !inline_cleanup_result) {
                 load(rt, slot, code);
+            }
+            if inline_cleanup_result && discarded {
+                discard(rt, code);
             }
             if let Some(lease) = result_lease {
                 self.release_temporary(lease);

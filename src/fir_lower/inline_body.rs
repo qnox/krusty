@@ -252,6 +252,7 @@ impl BodyLowering<'_> {
             &invocation_operands,
             frame,
             source_line,
+            !cleanup.is_empty(),
         )?;
 
         let value = if let Some(recovery) = recovery {
@@ -262,7 +263,14 @@ impl BodyLowering<'_> {
         } else if cleanup.is_empty() {
             inline_body
         } else {
-            self.guard_inline_body(inline_body, cleanup, cause, result.get(), plan_value)?
+            self.guard_inline_body(
+                inline_body,
+                cleanup,
+                cause,
+                result.get(),
+                source_line,
+                plan_value,
+            )?
         };
         let expansion = if let Some(returned_value) = returned_value {
             statements.push(value);
@@ -1011,7 +1019,7 @@ impl BodyLowering<'_> {
             stmts: vec![store_result, exit],
             value: None,
         });
-        let guarded = self.guarded_try(try_body, cleanup, cause, plan_value)?;
+        let guarded = self.guarded_try(try_body, cleanup, cause, Ty::Unit, plan_value)?;
         let loop_body = self.ir.add_expr(IrExpr::Block {
             stmts: vec![guarded],
             value: None,
@@ -1042,6 +1050,7 @@ impl BodyLowering<'_> {
         cleanup: &[crate::fir::FirInlineCall],
         cause: Option<(u32, Ty)>,
         result_ty: Ty,
+        source_line: Option<u32>,
         plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
     ) -> Option<ExprId> {
         // `FunctionN.invoke` returns erased `Object`, including when the function type is `Unit`.
@@ -1055,27 +1064,16 @@ impl BodyLowering<'_> {
             return self
                 .guard_erased_invocation_result(body, cleanup, cause, result_ty, plan_value);
         }
-        let result_slot = self.allocate_temporary();
-        let declaration = self.ir.add_expr(IrExpr::Variable {
-            index: result_slot,
-            ty: result_ty,
-            init: None,
-            named: false,
-        });
-        let store_result = self.ir.add_expr(IrExpr::SetValue {
-            var: result_slot,
-            value: body,
-        });
-        let try_body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![store_result],
-            value: None,
-        });
-        let guarded = self.guarded_try(try_body, cleanup, cause, plan_value)?;
-        let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![declaration, guarded],
-            value: Some(read),
-        }))
+        // The protected expression has a semantic result. Keep it as the `try` result instead of
+        // inventing a source-absent loop and local solely to prescribe a JVM store/reload shape.
+        // Backends decide how that value crosses the cleanup; the JVM uses the provenance marker
+        // below to reproduce kotlinc's physical temporary and landing sequence.
+        let guarded = self.guarded_try(body, cleanup, cause, result_ty, plan_value)?;
+        if let Some(line) = source_line {
+            self.ir.expr_source_lines.insert(guarded, line);
+        }
+        self.ir.inline_cleanup_results.insert(guarded);
+        Some(guarded)
     }
 
     fn guarded_try(
@@ -1083,6 +1081,7 @@ impl BodyLowering<'_> {
         body: ExprId,
         cleanup: &[crate::fir::FirInlineCall],
         cause: Option<(u32, Ty)>,
+        result: Ty,
         plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
     ) -> Option<ExprId> {
         let catches = match cause {
@@ -1119,7 +1118,7 @@ impl BodyLowering<'_> {
             body,
             catches,
             finally: Some(finally),
-            result: Ty::Unit,
+            result,
         }))
     }
 
@@ -1192,6 +1191,7 @@ impl BodyLowering<'_> {
         invocation_operands: &[(ExprId, Ty)],
         frame: &crate::fir::FirInlineBodyFrame,
         call_line: Option<u32>,
+        preamble_in_body: bool,
     ) -> Option<(ExprId, Option<u32>)> {
         let function = *args.get(lambda_parameter)?;
         let invoke_function = |lowering: &mut Self| {
@@ -1240,6 +1240,12 @@ impl BodyLowering<'_> {
                 formal_slots.push(*slot);
                 continue;
             }
+            // A capture that is already a plain local reads that local. kotlinc's inliner
+            // remaps the load; copying it would be a second live slot the caller never names.
+            if let IrExpr::GetValue(slot) = self.ir.expr(capture) {
+                formal_slots.push(*slot);
+                continue;
+            }
             let slot = self.allocate_temporary();
             let ty = *self
                 .ir
@@ -1264,6 +1270,9 @@ impl BodyLowering<'_> {
         );
         let capture_count = u32::try_from(formal_slots.len()).ok()?;
         let mut callee_receiver = None;
+        // The lambda's parameters and its `$i$a$` marker are inside the protected region, after
+        // the `try`'s opening `nop`. They are not statements of the call that precede it.
+        let mut preamble = Vec::new();
         let receiver_parameter = self
             .ir
             .lambda_origins
@@ -1299,7 +1308,7 @@ impl BodyLowering<'_> {
                     declaration,
                     crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver { implementation },
                 );
-                statements.push(declaration);
+                preamble.push(declaration);
                 formal_slots.push(slot);
                 continue;
             }
@@ -1325,7 +1334,7 @@ impl BodyLowering<'_> {
                             crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { depth: 0 },
                         );
                     }
-                    statements.push(declaration);
+                    preamble.push(declaration);
                     formal_slots.push(slot);
                 }
             }
@@ -1343,7 +1352,7 @@ impl BodyLowering<'_> {
                 self.ir.inline_synthetic_lines.insert(marker);
             }
         }
-        statements.push(marker);
+        preamble.push(marker);
 
         let local_base = self.next_temporary;
         let local_count =
@@ -1351,7 +1360,51 @@ impl BodyLowering<'_> {
         self.next_temporary = local_base.checked_add(local_count)?;
         self.ir.functions[implementation as usize].body = None;
         self.ir.inline_only_fns.insert(implementation);
+        // A `finally` protects the lambda parameters and its inline-frame marker, so they open the
+        // spliced body. A call without one keeps them as statements ahead of the body; that is
+        // where an inlined `return this` closes the frame before the read.
+        let inline_body = if preamble_in_body {
+            self.prepend_lambda_preamble(inline_body, preamble)
+        } else {
+            statements.extend(preamble);
+            inline_body
+        };
         Some((inline_body, callee_receiver))
+    }
+
+    /// The lambda parameter bindings and `$i$a$` marker open the spliced body, so they sit inside
+    /// the call's protected region rather than ahead of it.
+    fn prepend_lambda_preamble(&mut self, body: ExprId, preamble: Vec<ExprId>) -> ExprId {
+        if preamble.is_empty() {
+            return body;
+        }
+        match self.ir.expr(body).clone() {
+            IrExpr::Block { mut stmts, value } => {
+                let mut combined = preamble;
+                combined.append(&mut stmts);
+                self.ir.exprs[body as usize] = IrExpr::Block {
+                    stmts: combined,
+                    value,
+                };
+                body
+            }
+            _ => {
+                let wrapped = self.ir.add_expr(IrExpr::Block {
+                    stmts: preamble,
+                    value: Some(body),
+                });
+                if let Some(&end) = self.ir.expr_end_lines.get(&body) {
+                    self.ir.expr_end_lines.insert(wrapped, end);
+                }
+                if let Some(&line) = self.ir.expr_source_lines.get(&body) {
+                    self.ir.expr_source_lines.insert(wrapped, line);
+                }
+                if let Some(&ty) = self.ir.logical_types.get(&body) {
+                    self.ir.logical_types.insert(wrapped, ty);
+                }
+                wrapped
+            }
+        }
     }
 
     /// Invoke an already-evaluated function value when it has no local inline template to splice.

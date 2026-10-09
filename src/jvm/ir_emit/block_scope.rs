@@ -187,7 +187,8 @@ impl Emitter<'_> {
                     // `{ effects; }` coerced to `Unit` is `Block { effects, value: UnitInstance }`.
                     // The lambda `}` stands between those effects and `Unit.INSTANCE`.
                     if self.opens_spliced_lambda_frame(stmts) {
-                        if let Some((effects, unit)) = self.unit_after_lambda_effects(value) {
+                        if let Some((effects, unit)) = self.unit_after_lambda_effects(stmts, value)
+                        {
                             for effect in effects {
                                 let base = code.stack_height();
                                 self.emit(effect, code);
@@ -253,10 +254,23 @@ impl Emitter<'_> {
         self.statement_line = enclosing_statement_line;
     }
 
-    /// An inlined `return this` (`also`, `apply`): the block's value is a plain local read and
-    /// the block opened a spliced lambda frame.
+    /// An inlined `return this` (`also`, `apply`): the block's value reads a local this block
+    /// declared, and the block opened a spliced lambda frame. A read of an outer capture is the
+    /// lambda's own value and stays inside the frame.
     fn spliced_lambda_result_read(&self, stmts: &[u32], value: u32) -> bool {
-        self.opens_spliced_lambda_frame(stmts) && matches!(self.ir.expr(value), IrExpr::GetValue(_))
+        let IrExpr::GetValue(slot) = self.ir.expr(value) else {
+            return false;
+        };
+        self.opens_spliced_lambda_frame(stmts)
+            && stmts.iter().any(|&statement| {
+                matches!(
+                    self.ir.expr(statement),
+                    IrExpr::Variable { index, .. } if *index == *slot
+                ) && !matches!(
+                    self.ir.debug_local_provenance(statement),
+                    Some(crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { .. })
+                )
+            })
     }
 
     /// The spliced lambda's closing brace, while its locals are still open.
@@ -335,7 +349,17 @@ impl Emitter<'_> {
     }
 
     /// Effects of a `Unit` coercion, then the `Unit` value that follows the lambda's closing brace.
-    fn unit_after_lambda_effects(&self, value: u32) -> Option<(Vec<u32>, u32)> {
+    fn unit_after_lambda_effects(
+        &self,
+        outer_stmts: &[u32],
+        value: u32,
+    ) -> Option<(Vec<u32>, u32)> {
+        if !self.opens_spliced_lambda_frame(outer_stmts) {
+            return None;
+        }
+        if matches!(self.ir.expr(value), IrExpr::UnitInstance) {
+            return Some((Vec::new(), value));
+        }
         let IrExpr::Block {
             stmts,
             value: Some(unit),
@@ -463,9 +487,10 @@ impl Emitter<'_> {
         self.block_depth += 1;
         let mut dead = false;
         let last_statement = stmts.len().checked_sub(1);
-        let closes_lambda_before_locals = close_statement_lambda
-            && self.opens_spliced_lambda_frame(&stmts)
-            && value.is_some_and(|value| self.unit_after_lambda_effects(value).is_some());
+        let mut lambda_unit_after_effects = close_statement_lambda
+            .then(|| value.and_then(|value| self.unit_after_lambda_effects(&stmts, value)))
+            .flatten();
+        let closes_lambda_before_locals = lambda_unit_after_effects.is_some();
         let opens_lambda_frame = value.is_some_and(|value| {
             matches!(self.ir.expr(value), IrExpr::GetValue(_))
                 && stmts.iter().any(|&statement| {
@@ -521,8 +546,8 @@ impl Emitter<'_> {
             if let Some(value) = value {
                 self.mark_statement_line(value, code);
                 if closes_lambda_before_locals {
-                    let (effects, unit) = self
-                        .unit_after_lambda_effects(value)
+                    let (effects, unit) = lambda_unit_after_effects
+                        .take()
                         .expect("the Unit lambda-frame shape was identified above");
                     for effect in effects {
                         let base = code.stack_height();

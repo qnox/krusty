@@ -353,6 +353,18 @@ impl CodeBuilder {
         }
     }
 
+    /// The line in effect was marked on a trailing `nop`.
+    ///
+    /// A following store on that same line keeps this mark: cleanup removes the `nop` and the
+    /// entry lands on the store. Marking the store again would leave the `nop` as the only
+    /// instruction of its line, which the cleanup then keeps.
+    pub(crate) fn line_marked_on_trailing_nop(&self) -> bool {
+        let Some(&(pc, _)) = self.line_marks.last() else {
+            return false;
+        };
+        self.bytes.len() == usize::from(pc) + 1 && self.bytes.last() == Some(&0)
+    }
+
     /// Forget which line is in effect, so the next mark is written even for the same line: kotlinc
     /// resets its last line number after an inlined call (`markLineNumberAfterInlineIfNeeded`),
     /// whose code ran under the callee's lines rather than the caller's.
