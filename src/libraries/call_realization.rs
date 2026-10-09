@@ -6,6 +6,10 @@ use super::{
 };
 use crate::types::{SemanticCallableOwner, Ty, TypeName};
 
+/// The serialized-IR identity a KLIB provider publishes with a realization. It is part of this
+/// provider-to-backend contract, so backends name it here rather than reaching into metadata.
+pub use crate::metadata::id_signature::KlibDeclarationSignature;
+
 /// How a provider realizes one already-selected dependency callable.
 ///
 /// The identity a consumer holds is opaque and provider-assigned; this is what the provider hands
@@ -40,6 +44,10 @@ pub struct ExternalCallableRealization {
     /// physical parameter plan joins them to ABI-only slots such as a suspend continuation.
     /// A backend formats these for debug/metadata surfaces; it never reconstructs them from arity.
     pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
+    /// Exact serialized-IR identity of the declaration, published by a KLIB provider so a backend
+    /// can join this selection to its decoded IR body. Providers without serialized IR publish
+    /// `None`; a consumer never reconstructs it from the callable's spelling or shape.
+    pub declaration_signature: Option<KlibDeclarationSignature>,
 }
 
 /// A provider's realization of one normalized Kotlin property. FIR carries only its opaque

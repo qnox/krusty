@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 use crate::libraries::{
-    DefaultCallRealization, ExternalCallableKind, GenericSig, InlineKind, MemberRealization,
-    NonvirtualCallRealization,
+    DefaultCallRealization, ExternalCallableKind, GenericSig, InlineKind, KlibDeclarationSignature,
+    MemberRealization, NonvirtualCallRealization,
 };
 use crate::symbol_source::SymbolSource;
 pub use crate::types::SemanticCallRole as BackendSemanticCallRole;
@@ -74,6 +74,8 @@ pub struct BackendCallableFact {
     pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
     pub overridden_call_realizations: Box<[crate::libraries::OverriddenCallRealization]>,
     pub generic_sig: Option<Box<GenericSig>>,
+    /// Exact serialized-IR identity the provider published for this declaration, if any.
+    pub declaration_signature: Option<KlibDeclarationSignature>,
 }
 
 impl BackendCallableFact {
@@ -225,6 +227,7 @@ impl CheckedBackendCallables {
                 let realization =
                     provider(identity).ok_or(DependencyFactError::UnknownCallable(identity))?;
                 let parameter_identities = realization.parameter_identities;
+                let declaration_signature = realization.declaration_signature;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
@@ -255,6 +258,7 @@ impl CheckedBackendCallables {
                     nonvirtual_realization: callable.nonvirtual_realization,
                     overridden_call_realizations: callable.overridden_call_realizations,
                     generic_sig: callable.generic_sig,
+                    declaration_signature,
                 })
             }
         };
