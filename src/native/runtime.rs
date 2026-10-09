@@ -17,7 +17,7 @@
 //! Only the compiler-provided freestanding headers are used (`stdint.h`, `stddef.h`, `stdbool.h`),
 //! which C11 §4 guarantees exist without a hosted implementation.
 //!
-//! The runtime is eight translation units over three headers:
+//! The runtime is nine translation units over three headers:
 //!
 //! * `SYS_HEADER` (`krusty_sys.h`) is the kernel interface — the syscall shim per architecture
 //!   and the page-mapping primitives over it. It is the whole of the target-specific surface, a
@@ -40,6 +40,10 @@
 //! * `krusty_gc.c` is the heap: allocator and a mark-sweep collector with conservative roots and a
 //!   precisely traced heap. It knows nothing about any particular type; every object tells it,
 //!   through its `KType` descriptor, which of its fields are references.
+//! * `krusty_threads.c` is the mutator lock and the registry of threads that run Kotlin. The
+//!   runtime starts no thread; one that foreign code started attaches when it calls into Kotlin.
+//!   A thread holds the lock while it runs Kotlin and releases it in foreign code, recording its
+//!   registers and stack pointer, which is what the collector scans it by.
 //! * `krusty_start.c` is `_start`, which with no C library the runtime must supply itself.
 //!
 //! Every value the runtime allocates, it allocates through the collector.

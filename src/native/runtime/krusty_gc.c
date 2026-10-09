@@ -1,7 +1,6 @@
 /* krusty native runtime: the garbage collector. Hand-written freestanding C; build.rs compiles it
    into the runtime for every target. */
-#include "krusty_rt.h"
-#include "krusty_sys.h"
+#include "krusty_internal.h"
 
 /* ---- heap geometry --------------------------------------------------------------------------- */
 
@@ -279,9 +278,6 @@ static void kt_mark_scanned(uintptr_t address) {
 
 /* ---- roots ----------------------------------------------------------------------------------- */
 
-/* Where the program's stack began, recorded by kt_runtime_init. */
-static uintptr_t kt_stack_bottom;
-
 /* Global reference slots the emitted program declares (top-level properties). Registered rather
    than discovered, because a freestanding program has no portable way to find its own data
    section, and guessing at one would either miss roots or scan unrelated memory. The program
@@ -308,22 +304,22 @@ void kt_gc_add_global_root(void **slot) {
     kt_globals[kt_global_count++] = slot;
 }
 
-void kt_runtime_init(void *stack_bottom) { kt_stack_bottom = (uintptr_t)stack_bottom; }
-
 /* Scan a stack range word by word. A reference is stored aligned, so stepping by pointer size is
    sufficient. */
-static void kt_scan_range(uintptr_t low, uintptr_t high) {
+void kt_gc_scan_range(uintptr_t low, uintptr_t high) {
     low = (low + sizeof(void *) - 1) & ~(uintptr_t)(sizeof(void *) - 1);
     for (uintptr_t at = low; at + sizeof(void *) <= high; at += sizeof(void *)) {
         kt_mark_scanned(kt_load_word((const void *)at));
     }
 }
 
+void kt_gc_scan_word(uintptr_t word) { kt_mark_scanned(word); }
+
 /* Spill the callee-saved registers to the stack so the scan below sees them. A reference whose
    only copy is in a register is invisible to a stack scan, and would be collected while live.
    Not inlined: the scan starts at this frame's `saved`, which must be the deepest frame with
    anything to find. */
-__attribute__((noinline)) static void kt_scan_registers_and_stack(void) {
+__attribute__((noinline)) static void kt_scan_registers_and_stack(uintptr_t stack_bottom) {
     uintptr_t saved[16];
     for (unsigned i = 0; i < 16; i++) {
         saved[i] = 0;
@@ -359,8 +355,8 @@ __attribute__((noinline)) static void kt_scan_registers_and_stack(void) {
         kt_mark_scanned(saved[i]);
     }
 
-    /* Every frame between this one and the program's entry lies above `saved`. */
-    kt_scan_range((uintptr_t)&saved[0], kt_stack_bottom);
+    /* Every frame between this one and the thread's entry into Kotlin lies above `saved`. */
+    kt_gc_scan_range((uintptr_t)&saved[0], stack_bottom);
 }
 
 /* ---- collection ------------------------------------------------------------------------------ */
@@ -407,7 +403,8 @@ void kt_gc_collect(void) {
     /* Without the stack bottom there are no roots, and "no roots" would free everything the
        program holds. That is a bug in whoever produced the entry point, and it must not look
        like a subtle memory corruption. */
-    if (kt_stack_bottom == 0) {
+    uintptr_t stack_bottom = kt_threads_running_bottom();
+    if (stack_bottom == 0) {
         KT_SYS_FAIL("krusty: collection before kt_runtime_init recorded the stack\n");
     }
     /* Nothing a collection calls allocates from the collected heap, so a collection never starts
@@ -425,7 +422,10 @@ void kt_gc_collect(void) {
             kt_mark_candidate(value);
         }
     }
-    kt_scan_registers_and_stack();
+    kt_scan_registers_and_stack(stack_bottom);
+    /* Every other attached thread is released, since this one holds the lock: its frames, its
+       registers as it left them, and its exception in flight. */
+    kt_threads_scan_released();
     kt_trace();
     size_t live_bytes = kt_sweep();
     /* The next collection comes after as many bytes again as survived this one (at least the

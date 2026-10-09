@@ -147,9 +147,10 @@ typedef struct KObjectHeader {
 
 /* ---- memory ---------------------------------------------------------------------------------- */
 
-/* Record where the program's stack begins. Roots are found by scanning the stack from the
-   collector's own frame up to this address, so it must be called from the outermost frame BEFORE
-   anything allocates; the generated entry point does so with the address of a local. */
+/* Record where the program's stack begins, and attach the calling thread as the first one that
+   runs Kotlin, holding the mutator lock (`krusty_threads.c`). Roots are found by scanning the stack
+   from the collector's own frame up to this address, so it must be called from the outermost frame
+   BEFORE anything allocates; the generated entry point does so with the address of a local. */
 void kt_runtime_init(void *stack_bottom);
 
 /* Allocate `size` zeroed bytes (at least the header) for an object of `type`, collecting first if
@@ -1237,5 +1238,46 @@ void kt_println_unit(void);
 
 /* The generated entry point calls this after running the program's `main`. */
 void kt_exit(kt_int status);
+
+/* ---- threads ----------------------------------------------------------------------------------
+
+   Every thread that runs Kotlin shares one heap, and one MUTATOR LOCK keeps it consistent: a thread
+   holds the lock while it runs Kotlin or the runtime and releases it while it runs foreign code. So
+   a call from Kotlin into C that may block is bracketed by `kt_native_enter`/`kt_native_leave`, and
+   a call from C into Kotlin (a callback, or the start routine of a thread C created) by
+   `kt_callback_enter`/`kt_callback_leave`. The runtime itself starts no thread. */
+
+/* How many callee-saved registers a released thread records: the most any supported architecture
+   has (RISC-V's s0-s11). */
+#define KT_SAVED_REGISTERS 12
+
+typedef struct KThread KThread;
+
+/* Release the lock for a call into foreign code, recording the caller's callee-saved registers and
+   stack pointer so its frames stay roots while it is away. Pass the answer to `kt_native_leave`
+   when the foreign call returns. */
+KThread *kt_native_enter(void);
+void kt_native_leave(KThread *thread);
+
+/* What a callback keeps on its own frame between entering Kotlin and leaving it. */
+typedef struct KThreadEntry {
+    KThread *thread;
+    /* Whether this entry attached the thread, and so detaches it on the way out. */
+    bool attached;
+    /* A thread that was already attached, in a `kt_native_enter`: its released state, put back on
+       the way out. */
+    uintptr_t outer_registers[KT_SAVED_REGISTERS];
+    uintptr_t outer_sp;
+    KRef outer_pending;
+} KThreadEntry;
+
+/* Enter Kotlin from foreign code, taking the lock. `stack_bottom` is the address of a local in the
+   caller's frame, above every Kotlin frame the callback will run; it matters only for a thread the
+   runtime has not seen, which is attached for the callback's duration. */
+void kt_callback_enter(KThreadEntry *entry, void *stack_bottom);
+
+/* Leave Kotlin for the foreign code that called in, releasing the lock. Answers the exception the
+   callback left in flight, or NULL; it is the caller's, and no longer pending anywhere. */
+KRef kt_callback_leave(KThreadEntry *entry);
 
 #endif /* KRUSTY_RT_H */

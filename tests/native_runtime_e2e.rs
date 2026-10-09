@@ -607,6 +607,16 @@ fn a_collection_started_during_a_collection_fails() {
 }
 
 #[test]
+fn threads_started_by_foreign_code_share_the_heap_through_collections() {
+    run_driver("threads_share_the_heap");
+}
+
+#[test]
+fn each_thread_keeps_its_own_exception_in_flight() {
+    run_driver("threads_keep_their_own_exception");
+}
+
+#[test]
 fn a_double_or_float_renders_as_the_jvm_renders_it() {
     run_driver("fp_render_known_answers");
 }
@@ -1981,6 +1991,7 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
              cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
@@ -2005,7 +2016,7 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
          /// The runtime sources every target's objects were compiled from, in the table's order. Only\n\
          /// the test that checks the table against them reads it.\n\
          #[cfg(test)]\n\
-         pub const SOURCES: &[&str] = &[\"krusty_rt.c\", \"krusty_collections.c\", \"krusty_maps.c\", \"krusty_classes.c\", \"krusty_lang.c\", \"krusty_fp.c\", \"krusty_gc.c\", \"krusty_start.c\"];\n"
+         pub const SOURCES: &[&str] = &[\"krusty_rt.c\", \"krusty_collections.c\", \"krusty_maps.c\", \"krusty_classes.c\", \"krusty_lang.c\", \"krusty_fp.c\", \"krusty_gc.c\", \"krusty_threads.c\", \"krusty_start.c\"];\n"
     );
 }
 
@@ -2042,6 +2053,7 @@ fn a_failing_runtime_compiler_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
@@ -2103,6 +2115,7 @@ fn a_runtime_compiler_that_emits_another_machines_code_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
@@ -2177,6 +2190,7 @@ fn a_runtime_object_aligned_past_the_targets_page_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\

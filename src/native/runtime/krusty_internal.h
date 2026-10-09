@@ -49,6 +49,30 @@ struct KObject {
     } as;
 };
 
+/* A thread that runs Kotlin (`krusty_threads.c`). The first two fields are stored by assembly, at
+   the offsets that file asserts. */
+struct KThread {
+    /* While released: the callee-saved registers as the code that released it left them. */
+    uintptr_t registers[KT_SAVED_REGISTERS];
+    /* While released: the stack pointer of that code. Its Kotlin frames lie between this and
+       `stack_bottom`. */
+    uintptr_t saved_sp;
+    uintptr_t stack_bottom;
+    /* While released: its exception in flight, which `kt_pending` holds while it runs. */
+    KRef pending;
+    long tid;
+    bool released;
+    KThread *next;
+};
+
+/* The roots a collection finds outside its own stack, which `krusty_threads.c` knows and
+   `krusty_gc.c` marks: the bottom of the holder's stack (0 before `kt_runtime_init`), and every
+   released thread's recorded registers, exception and stack, handed to the two scanners below. */
+uintptr_t kt_threads_running_bottom(void);
+void kt_threads_scan_released(void);
+void kt_gc_scan_word(uintptr_t word);
+void kt_gc_scan_range(uintptr_t low, uintptr_t high);
+
 /* A `ByteArray`, the storage of a string's text, and its body. */
 typedef KArray KByteArray;
 

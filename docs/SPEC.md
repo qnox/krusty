@@ -9724,6 +9724,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_null_cast_to_an_erased_type_parameter_names_it_by_its_owner`),
   `tests/unboxing_coercion_e2e.rs`
   (`failed_null_casts_name_primitive_and_qualified_type_parameter_targets`).
+- **Native: threads share one heap under one mutator lock.** The runtime starts no thread. A thread
+  that foreign code starts (`pthread_create` through C interop) attaches when it calls into Kotlin
+  (`kt_callback_enter`) and detaches when that outermost call returns; a callback on a thread that
+  is already attached re-enters as that thread, found by its kernel thread id. Every attached thread
+  shares the heap, as Kotlin/Native's memory model has them share it. One lock keeps it consistent:
+  a thread holds it while it runs Kotlin or the runtime, and releases it for a call into foreign
+  code (`kt_native_enter`/`kt_native_leave`), which is where threads block. So collection stays a
+  stop-the-world mark-sweep without safepoints: the collector holds the lock, and every other
+  attached thread is released with its callee-saved registers and stack pointer recorded. The entry
+  that records them is assembly, because a C function's prologue may reuse a callee-saved register
+  before its first statement, and the value it held would then be in no root at all. The exception
+  slot generated code reads after every call stays one global, saved into the thread on release and
+  restored on acquisition, so an exception in flight is its own thread's; a callback starts with
+  none and hands what it raised back to its caller. Every hand-off is a release and an acquire, so
+  `@Volatile` needs nothing beyond ordinary accesses. Not yet: threads running Kotlin in parallel,
+  and preemption of a thread that loops in Kotlin without calling out, which needs safepoint polls in
+  generated code. Portability: what is per-OS is two primitives in `krusty_sys.h` (wait and wake on
+  a word, and the calling thread's id; Linux's futex and gettid) and the assembly register spill,
+  per architecture as the syscall shim already is. A macOS or Windows runtime supplies its own pair
+  (`__ulock_wait`/`__ulock_wake` and `pthread_threadid_np`; `WaitOnAddress`/`WakeByAddressSingle`
+  and `GetCurrentThreadId`) and keeps the lock, the registry and the scan unchanged; the runtime is
+  cross-compiled per target by clang as before. Tests: `tests/native_runtime_e2e.rs`
+  (`threads_started_by_foreign_code_share_the_heap_through_collections`,
+  `each_thread_keeps_its_own_exception_in_flight`), `tests/native_concurrency_e2e.rs`.
 - **Native runtime: exceptions and integer arithmetic.** `src/native/runtime/krusty_rt.c` raises
   what Kotlin raises and does not stop there: `kt_throw` RECORDS the exception in the one pending
   slot and returns, and the caller's check of that slot is the propagation. So every runtime entry

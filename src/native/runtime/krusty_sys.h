@@ -11,11 +11,15 @@
 #define KT_SYS_MMAP 9
 #define KT_SYS_MUNMAP 11
 #define KT_SYS_EXIT 231 /* exit_group */
+#define KT_SYS_GETTID 186
+#define KT_SYS_FUTEX 202
 #elif defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
 #define KT_SYS_WRITE 64
 #define KT_SYS_MMAP 222
 #define KT_SYS_MUNMAP 215
 #define KT_SYS_EXIT 94 /* exit_group */
+#define KT_SYS_GETTID 178
+#define KT_SYS_FUTEX 98
 #else
 #error "krusty native: unsupported architecture"
 #endif
@@ -113,6 +117,24 @@ static inline void *kt_map(size_t bytes) {
 
 static inline void kt_unmap(void *address, size_t bytes) {
     kt_syscall(KT_SYS_MUNMAP, (long)address, (long)bytes, 0, 0, 0, 0);
+}
+
+/* The calling thread's kernel id: how a callback from foreign code finds out which attached thread
+   it is on, with no thread-local storage to ask. */
+static inline long kt_sys_gettid(void) { return kt_syscall(KT_SYS_GETTID, 0, 0, 0, 0, 0, 0); }
+
+/* Sleep while `*word` still holds `expected`, and wake one sleeper on `word`. Process-private
+   futexes: the mutator lock is never shared with another process. A wait can return early, on a
+   signal or a wake meant for someone else, so a caller re-checks its condition. */
+#define KT_FUTEX_WAIT_PRIVATE 128
+#define KT_FUTEX_WAKE_PRIVATE 129
+
+static inline void kt_sys_futex_wait(uint32_t *word, uint32_t expected) {
+    kt_syscall(KT_SYS_FUTEX, (long)word, KT_FUTEX_WAIT_PRIVATE, (long)expected, 0, 0, 0);
+}
+
+static inline void kt_sys_futex_wake(uint32_t *word, int count) {
+    kt_syscall(KT_SYS_FUTEX, (long)word, KT_FUTEX_WAKE_PRIVATE, count, 0, 0, 0);
 }
 
 #endif /* KRUSTY_SYS_H */
