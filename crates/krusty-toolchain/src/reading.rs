@@ -147,13 +147,11 @@ impl<'a> FileReader<'a> {
         }
     }
 
-    /// The text of a scalar key.
+    /// The text of a scalar key as written, which is what the toolchain matches and prints: a
+    /// quoted key loses its quotes but keeps its escapes.
     pub fn key(&self, key: NodeId) -> &'a str {
         let document: &'a Document = self.document;
-        match &document.node(key).kind {
-            NodeKind::Scalar { value, .. } => value,
-            _ => unreachable!("yaml.rs refuses non-scalar keys"),
-        }
+        document.spelling(key)
     }
 
     pub fn error(&mut self, node: NodeId, message: impl Into<String>) {

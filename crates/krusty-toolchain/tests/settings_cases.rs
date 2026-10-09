@@ -14,7 +14,7 @@ use support::{is_error, reported};
 #[test]
 fn every_settings_case_is_shown_as_the_toolchain_shows_it() {
     let cases = support::cases("settings");
-    assert_eq!(cases.len(), 13, "the cases are missing");
+    assert_eq!(cases.len(), 15, "the cases are missing");
     let invocations: Vec<Invocation<'_>> = cases
         .iter()
         .map(|case| Invocation {

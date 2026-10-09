@@ -98,6 +98,8 @@ pub struct Node {
     pub span: Span,
     /// Where the node's `!tag` is written.
     tag: Option<Position>,
+    /// A quoted scalar's text between its quotes, as written: escapes unprocessed.
+    spelling: Option<String>,
 }
 
 /// A parsed file. An empty file is a document whose root is `None`.
@@ -150,6 +152,17 @@ impl Document {
     /// Where the tag written on `id` is, if it has one.
     pub fn tag(&self, id: NodeId) -> Option<Position> {
         self.node(id).tag
+    }
+
+    /// The text of scalar `id` as written in the file: a quoted scalar's text between its quotes,
+    /// with escapes unprocessed, and otherwise its value.
+    pub fn spelling(&self, id: NodeId) -> &str {
+        let node = self.node(id);
+        match (&node.spelling, &node.kind) {
+            (Some(spelling), _) => spelling,
+            (None, NodeKind::Scalar { value, .. }) => value,
+            (None, _) => "",
+        }
     }
 
     /// Parse `text` under `limits`.
@@ -249,6 +262,12 @@ impl Builder<'_> {
                         ScalarStyle::Literal => Style::Literal,
                         ScalarStyle::Folded => Style::Folded,
                     };
+                    let spelling = match style {
+                        Style::SingleQuoted | Style::DoubleQuoted => {
+                            Some(self.between_quotes(Span::from_parser(span)))
+                        }
+                        _ => None,
+                    };
                     let id = self.push(
                         NodeKind::Scalar {
                             value: value.into_owned(),
@@ -257,6 +276,7 @@ impl Builder<'_> {
                         span,
                         tag,
                     )?;
+                    self.nodes[id.0 as usize].spelling = spelling;
                     self.attach(id)?;
                 }
                 Event::SequenceStart(anchor, tag) => {
@@ -368,6 +388,37 @@ impl Builder<'_> {
         found
     }
 
+    /// The source text of a quoted scalar spanning `span`, without its quotes.
+    fn between_quotes(&self, span: Span) -> String {
+        let mut text = String::new();
+        for line in span.start.line..=span.end.line {
+            let source = self.lines.get(line - 1).copied().unwrap_or("");
+            let from = if line == span.start.line {
+                span.start.column
+            } else {
+                1
+            };
+            let to = if line == span.end.line {
+                span.end.column - 1
+            } else {
+                source.chars().count()
+            };
+            if line != span.start.line {
+                text.push('\n');
+            }
+            text.extend(
+                source
+                    .chars()
+                    .skip(from - 1)
+                    .take(to.saturating_sub(from - 1)),
+            );
+        }
+        let mut chars = text.chars();
+        chars.next();
+        chars.next_back();
+        chars.as_str().to_string()
+    }
+
     fn push(
         &mut self,
         kind: NodeKind,
@@ -389,7 +440,12 @@ impl Builder<'_> {
         if let Some(tag) = tag {
             span.start = tag;
         }
-        self.nodes.push(Node { kind, span, tag });
+        self.nodes.push(Node {
+            kind,
+            span,
+            tag,
+            spelling: None,
+        });
         Ok(id)
     }
 
@@ -516,6 +572,20 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect()
+    }
+
+    #[test]
+    fn a_quoted_scalar_keeps_its_spelling_between_its_quotes() {
+        let text = "\"q\\\"\\u00e9\": 'it''s'\nplain: !t \"a\n  b\"\n";
+        let document = parse(text).unwrap().document;
+        let NodeKind::Mapping(entries) = &document.node(document.root().unwrap()).kind else {
+            panic!("root is a mapping");
+        };
+        let spellings: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|&(key, value)| (document.spelling(key), document.spelling(value)))
+            .collect();
+        assert_eq!(spellings, [(r#"q\"\u00e9"#, "it''s"), ("plain", "a\n  b")]);
     }
 
     #[test]

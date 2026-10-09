@@ -90,14 +90,18 @@ toolchain's own wrapper, `scripts/kotlin-toolchain/kotlin`, which pins the exact
 requires krusty-toolchain to report the same problems (file, line, column, severity, message) in
 the same order: the errors the toolchain writes to stderr, which must hold nothing else, and the
 warnings it writes to stdout. What stdout holds after the warnings is the command's result, and
-must equal krusty-toolchain's module table byte for byte (nothing, when the command fails). Module globs are checked the
-same way against the JDK matcher: `tests/cases/globs.tsv` lists patterns and paths, and
-`scripts/kotlin-toolchain/GlobOracle.java` judges them on the JDK `JAVA_HOME` names.
+must equal krusty-toolchain's module table byte for byte (nothing, when the command fails).
+Module globs are checked the same way against the JDK matcher: `tests/cases/globs.tsv` lists
+patterns and paths, and `scripts/kotlin-toolchain/GlobOracle.java` judges them on the JDK
+`JAVA_HOME` names.
 
 `tests/cases/settings/*.case` are checked the same way with `kotlin show settings --all-modules`:
 `tests/settings_cases.rs` requires the same problems and requires what stdout holds after the
 warnings to equal krusty-toolchain's settings byte for byte, including the line naming each module,
-which the toolchain pads to 1,500 columns.
+which the toolchain pads to 1,500 columns. Strings are printed as the toolchain's `YamlSerializer`
+prints them: a value as it is, and a free-form map's key as written in the file, inside double
+quotes, neither escaped (`tests/cases/settings/hostile-strings.case`). Keys are matched as written
+too: a quoted key keeps its escapes.
 
 `tests/support/oracle.rs` caches each reference's exit code and raw stdout and stderr (only a JVM's
 `Picked up JAVA_TOOL_OPTIONS` line is dropped from stderr) under
