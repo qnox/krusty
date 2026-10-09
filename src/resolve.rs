@@ -249,7 +249,6 @@ use capture_analysis::{local_class_declarations, local_fun_body_uses_any, used_n
 use capture_storage::{
     anonymous_descendant_writes_name, local_class_capture_expressions, AnonymousSuperReadProvenance,
 };
-use collection_literals::{default_factory, standard_factory};
 use constant_evaluation::source_literal_constant;
 pub(crate) use constant_evaluation::{checked_constant_expression, CheckedConstantExpression};
 pub(crate) use context_capture::{selected_context_values, SelectedContextSources};
@@ -15922,322 +15921,6 @@ impl<'a> Checker<'a> {
             }
         }
         Ty::obj_args_name(owner, &arguments)
-    }
-
-    fn check_collection_literal(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        args: &[ExprId],
-        span: Span,
-        expected: Option<Ty>,
-    ) -> Ty {
-        // Expected-type rechecking replaces the literal's expectation-free `listOf` probe with its
-        // selected construction. Type substitutions and source-slot mapping belong to that target,
-        // just like `resolved_calls`; retaining either from the discarded probe can attach a generic
-        // argument to a non-generic companion `of` declaration in checked FIR.
-        self.resolved_call_type_args.remove(&call);
-        self.resolved_call_type_argument_bounds.remove(&call);
-        self.resolved_call_arg_slots.remove(&call);
-        let expected = expected
-            .filter(|expected| *expected != Ty::Error)
-            .map(Ty::non_null);
-
-        // Array literals are compiler-provided constructions, selected from the expected array
-        // classifier rather than from the provisional parser spelling. Primitive and unsigned
-        // arrays use their specialized vararg creator; `Array<T>` uses the reference creator.
-        if let Some((expected, element)) = expected.zip(expected.and_then(Ty::array_elem)) {
-            let synthetic = if matches!(expected, Ty::Obj(owner, _) if owner.matches("kotlin/Array"))
-            {
-                crate::synthetics::lookup("arrayOf")
-            } else {
-                crate::synthetics::by_kind(crate::synthetics::SyntheticKind::PrimitiveVararg(
-                    element,
-                ))
-            };
-            let Some(synthetic) = synthetic else {
-                self.diags.error(
-                    span,
-                    format!(
-                        "collection literal cannot construct '{}'",
-                        expected.source_name()
-                    ),
-                );
-                return Ty::Error;
-            };
-            let Some(result) =
-                self.check_array_builtin(scope, call, synthetic, args, span, Some(element))
-            else {
-                return Ty::Error;
-            };
-            self.expr_lowers
-                .insert(call, ExprLowering::CompilerSynthetic(synthetic.kind));
-            return result;
-        }
-
-        let classifier = expected.and_then(Ty::kotlin_class_internal);
-        let standard_element_expectation = classifier
-            .and_then(standard_factory)
-            .and_then(|_| expected.and_then(|expected| expected.type_args().first().copied()))
-            .map(|element| element.projection_inner().unwrap_or(element));
-        let argument_types = args
-            .iter()
-            .map(|&argument| match standard_element_expectation {
-                Some(element) => self.expr_expected(scope, argument, element),
-                None => self.expr(scope, argument),
-            })
-            .collect::<Vec<_>>();
-
-        // Keep the value facet selected for the expected classifier. The declaration owner is not
-        // necessarily this singleton: a companion may inherit `of` from an ordinary base class.
-        // The receiver therefore has to travel independently from the selected callable identity.
-        let companion_dispatch =
-            classifier.and_then(|classifier| self.classifier_singleton_value(classifier));
-
-        // The expected classifier's companion operator is the first language strategy. Its raw
-        // declarations enter the same applicability and overload-selection engine as an ordinary
-        // call; only declarations explicitly marked `operator` are eligible for this syntax.
-        let companion_candidates = classifier
-            .map(|classifier| {
-                let mut candidates = self
-                    .resolver()
-                    .classifier_call_candidates(classifier, "of")
-                    .map(|(_, candidates)| candidates)
-                    .unwrap_or_default();
-                candidates.extend(
-                    self.resolver()
-                        .classifier_associated_callables(classifier, "of"),
-                );
-                candidates
-                    .into_iter()
-                    .filter(|candidate| candidate.flags.operator)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        crate::trace_compiler!(
-            "resolve",
-            "collection literal expected={expected:?} classifier={classifier:?} companion_candidates={:?}",
-            companion_candidates
-                .iter()
-                .map(|candidate| (
-                    candidate.callable.owner,
-                    candidate.callable.name.as_str(),
-                    candidate.semantic_params(),
-                    candidate.callable.ret,
-                ))
-                .collect::<Vec<_>>(),
-        );
-        let companion_selection = (!companion_candidates.is_empty()).then(|| {
-            self.select_callable_candidate(
-                scope,
-                CallArgs {
-                    call,
-                    args,
-                    arg_tys: &argument_types,
-                },
-                &[],
-                classifier.map(Ty::obj_name),
-                CallResultConstraint::direct(expected),
-                companion_candidates,
-            )
-        });
-        match companion_selection.flatten() {
-            Some(CallableCandidateSelection::Selected(selected)) => {
-                let selected = *selected;
-                if !self.member_accessible(selected.visibility, selected.callable.owner) {
-                    self.reject_if_inaccessible(
-                        selected.visibility,
-                        "of",
-                        selected.callable.owner,
-                        span,
-                    );
-                    return Ty::Error;
-                }
-                // An associated `operator fun of` has no value operand: it is recorded as the
-                // receiver-less call its provider shape already is.
-                if selected.kind == crate::libraries::FnKind::TopLevel {
-                    let argument_names = self.file.call_arg_names.get(&call.0).cloned();
-                    return self.finish_top_level_call(
-                        scope,
-                        call,
-                        args,
-                        &argument_types,
-                        argument_names.as_deref(),
-                        selected,
-                        &[],
-                        None,
-                    );
-                }
-                let Some(shape) = self.contextual_call_shape(
-                    scope,
-                    &selected.applied_params(),
-                    &selected.call_sig,
-                    selected.context_count,
-                    None,
-                ) else {
-                    return Ty::Error;
-                };
-                if !self.expect_selected_call_args(
-                    scope,
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys: &argument_types,
-                    },
-                    &shape.params,
-                    &shape.params,
-                    &shape.call_sig,
-                    None,
-                ) {
-                    return Ty::Error;
-                }
-                if let Some(signature) = selected.generic_sig.as_ref() {
-                    let resolved = signature
-                        .formals
-                        .iter()
-                        .map(|formal| selected.bindings.get(formal).copied())
-                        .collect::<Vec<_>>();
-                    if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
-                        self.resolved_call_type_args.insert(call, resolved);
-                    }
-                }
-                self.record_selected_sam_arguments(scope, args, &selected.applied_params());
-                let result = selected.callable.ret;
-                let mut member = selected.member_with_return(result);
-                // An `operator fun of` is an ordinary member of the classifier's value facet, and
-                // this syntax writes no receiver expression to carry that instance. Keep the
-                // already-resolved singleton independently of the declaration owner: an inherited
-                // operator's owner is its base class, not the companion object that dispatches it.
-                if member.singleton_dispatch.is_none()
-                    && member.implicit_classifier_callable.is_none()
-                {
-                    member.singleton_dispatch = companion_dispatch.map(|singleton| {
-                        Box::new(crate::libraries::SingletonDispatch {
-                            classifier: singleton.classifier,
-                        })
-                    });
-                }
-                self.resolved_calls
-                    .insert(call, ResolvedCall::Companion(member));
-                return result;
-            }
-            Some(CallableCandidateSelection::MissingContext(_)) => {
-                self.diags.error(
-                    span,
-                    "no implicit value is available for collection literal factory context parameters"
-                        .to_string(),
-                );
-                return Ty::Error;
-            }
-            Some(CallableCandidateSelection::Ambiguous(_)) => {
-                self.diags.error(
-                    span,
-                    "collection literal factory overload ambiguity".to_string(),
-                );
-                return Ty::Error;
-            }
-            None => {}
-        }
-
-        // Built-in collection interfaces use Kotlin's qualified factory convention after the
-        // companion strategy. With no expected type the language fallback is immutable `List`.
-        let factory = classifier
-            .and_then(standard_factory)
-            .or_else(|| expected.is_none().then(default_factory));
-        if let Some(factory) = factory {
-            let candidates = self
-                .resolver_in_scope(std::slice::from_ref(&factory.package))
-                .top_level_candidates(factory.callable);
-            let selection = self.select_callable_candidate(
-                scope,
-                CallArgs {
-                    call,
-                    args,
-                    arg_tys: &argument_types,
-                },
-                &[],
-                None,
-                CallResultConstraint::direct(expected),
-                candidates,
-            );
-            match selection {
-                Some(CallableCandidateSelection::Selected(selected)) => {
-                    return self.finish_top_level_call(
-                        scope,
-                        call,
-                        args,
-                        &argument_types,
-                        None,
-                        *selected,
-                        &[],
-                        None,
-                    );
-                }
-                Some(CallableCandidateSelection::MissingContext(_)) => {
-                    self.diags.error(
-                        span,
-                        "no implicit value is available for collection literal factory context parameters"
-                            .to_string(),
-                    );
-                    return Ty::Error;
-                }
-                Some(CallableCandidateSelection::Ambiguous(_)) => {
-                    self.diags.error(
-                        span,
-                        "collection literal factory overload ambiguity".to_string(),
-                    );
-                    return Ty::Error;
-                }
-                None => {
-                    self.diags.error(
-                        span,
-                        format!(
-                            "no applicable standard collection factory '{}'",
-                            factory.callable
-                        ),
-                    );
-                    return Ty::Error;
-                }
-            }
-        }
-
-        self.diags.error(
-            span,
-            match expected {
-                Some(expected) => format!(
-                    "no applicable 'operator fun of' for collection literal type '{}'",
-                    expected.source_name()
-                ),
-                None => "not enough information to infer collection literal type".to_string(),
-            },
-        );
-        Ty::Error
-    }
-
-    /// Whether a selected parameter can supply a language-defined construction strategy for a
-    /// collection literal. This is intentionally a target-availability query, not a second call
-    /// resolver: overload applicability for the factory itself is checked exactly once when the
-    /// enclosing callable has won and `check_collection_literal` commits the expression.
-    fn collection_literal_target_available(&self, expected: Ty) -> bool {
-        let expected = expected.non_null();
-        if expected.array_elem().is_some() {
-            return true;
-        }
-        let Some(classifier) = expected.kotlin_class_internal() else {
-            return false;
-        };
-        if standard_factory(classifier).is_some() {
-            return true;
-        }
-        self.resolver()
-            .classifier_call_candidates(classifier, "of")
-            .into_iter()
-            .flat_map(|(_, candidates)| candidates)
-            .chain(
-                self.resolver()
-                    .classifier_associated_callables(classifier, "of"),
-            )
-            .any(|candidate| candidate.flags.operator)
     }
 
     fn check_call(
@@ -34274,6 +33957,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         checked_local_classifier_identities: HashMap::new(),
         checked_local_classifier_type_arguments: HashMap::new(),
         signature_default_expression_depth: 0,
+        annotation_argument_depth: 0,
         anonymous_lexical_scope: AnonymousLexicalClassScope::default(),
         capture_scope: None,
         loop_labels: Vec::new(),
@@ -37039,6 +36723,9 @@ struct Checker<'a> {
     /// Classifiers entered there belong to the retained fragment; classifiers merely crossed while
     /// rebuilding its enclosing lexical scope do not.
     signature_default_expression_depth: u32,
+    /// Nonzero while an annotation application's argument is checked: an annotation context, where
+    /// `[…]` is an array literal at every language level.
+    annotation_argument_depth: u32,
     /// The file's anonymous-object ownership graph and (in capture-discovery mode) the narrowed set
     /// of declarations to walk. Both are per-FILE facts every classifier check needs, and a local
     /// class is entered from a statement deep inside a body — threading them down as parameters
@@ -49087,7 +48774,9 @@ impl<'a> Checker<'a> {
             // each ELEMENT against that declared element type: otherwise a class literal or enum
             // entry inside one is never resolved, and an element-typed expectation (a vararg element
             // passed positionally) could accept an array and write the wrong constant tag.
+            self.annotation_argument_depth += 1;
             self.check_annotation_argument_value(scope, argument, expected);
+            self.annotation_argument_depth -= 1;
         }
         true
     }

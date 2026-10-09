@@ -2703,6 +2703,9 @@ impl<'a> Parser<'a> {
         }
         let (receiver, name) = self.parse_receiver_and_declaration_name("extension function name");
         let name_span = self.declaration_name_span;
+        if let Some(operator) = operator_span {
+            self.gate_operator(&name, operator);
+        }
         let mut params = self.parse_param_list();
         // Context parameters (`context(a: A) fun f()`), parsed at the declaration site into
         // `pending_context_params`, become LEADING value parameters (kotlinc's ABI) — prepend them and
