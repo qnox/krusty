@@ -1159,6 +1159,8 @@ mod inline_splice_e2e;
 mod inline_splice_ldc_wide_e2e;
 #[path = "inline_tail_expansion_shape_e2e.rs"]
 mod inline_tail_expansion_shape_e2e;
+#[path = "inline_try_close_line_e2e.rs"]
+mod inline_try_close_line_e2e;
 #[path = "inline_use_close_e2e.rs"]
 mod inline_use_close_e2e;
 #[path = "inline_value_class_lambda_e2e.rs"]

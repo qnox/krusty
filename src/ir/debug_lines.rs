@@ -25,6 +25,10 @@ pub(super) struct GeneratedLineMarks {
     /// expression-bodied callable instead maps its generated return instruction to the end of the
     /// body expression.
     implicit_return_ends: HashMap<ExprId, u32>,
+    /// An inline template's implicit result expression -> the source line entered only after that
+    /// expression evaluated successfully. A local return can bypass this point, so it belongs to
+    /// the result itself rather than to the template's shared return join.
+    evaluated_result_ends: HashMap<ExprId, u32>,
     /// Return a block body falls off its end into → the body's closing `}` line, which kotlinc's
     /// `setExtraLineNumberForVoidReturningFunction` marks BEFORE the returned value is loaded.
     fallthrough_returns: HashMap<ExprId, u32>,
@@ -53,6 +57,19 @@ impl IrFile {
         self.generated_lines
             .implicit_return_ends
             .get(&returned)
+            .copied()
+    }
+
+    pub(crate) fn mark_evaluated_result_end_line(&mut self, result: ExprId, line: u32) {
+        self.generated_lines
+            .evaluated_result_ends
+            .insert(result, line);
+    }
+
+    pub(crate) fn evaluated_result_end_line(&self, result: ExprId) -> Option<u32> {
+        self.generated_lines
+            .evaluated_result_ends
+            .get(&result)
             .copied()
     }
 
@@ -130,6 +147,9 @@ impl IrFile {
         let marks = &mut self.generated_lines;
         if let Some(&line) = marks.implicit_return_ends.get(&source) {
             marks.implicit_return_ends.insert(target, line);
+        }
+        if let Some(&line) = marks.evaluated_result_ends.get(&source) {
+            marks.evaluated_result_ends.insert(target, line);
         }
         if let Some(&line) = marks.dispatches.get(&source) {
             marks.dispatches.insert(target, line);

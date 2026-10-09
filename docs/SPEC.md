@@ -847,6 +847,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   local-variable table lists the marker, then those locals, then the parameters. A block nested
   inside those statements still closes where that block ends. Test:
   `tests/inline_repeat_local_e2e.rs`.
+- **An inlined lambda's implicit-result end stays on the path that evaluated it.** Common IR
+  records the exact result expression and its end line; the backend marks that line after the
+  expression succeeds, before local-return paths rejoin it. For a returned `try`, the `nop`
+  therefore carries the `try`'s closing line and stays inside the lambda's locals. A `return@`
+  from an earlier statement bypasses it, while a returned name has no result-end mark. Test:
+  `tests/inline_try_close_line_e2e.rs`.
 - **An `@InlineOnly` call reads a local through a representation-preserving coercion.**
   `println(message)` widens a non-null `String` to `Any?`. That coercion emits no bytecode, so
   kotlinc's `genOrGetLocal` still loads the caller's local after `getstatic System.out`. A
