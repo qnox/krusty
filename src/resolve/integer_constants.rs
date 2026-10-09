@@ -273,9 +273,14 @@ mod tests {
     use crate::lexer::lex;
     use crate::libraries::Origin;
     use crate::parser::parse;
-    use crate::resolve::{
-        check_file, signature_collection::collect_signatures, ExprLowering, ResolvedCall,
-    };
+    use crate::resolve::{ExprLowering, ResolvedCall};
+
+    fn analyze(source: &str) -> (crate::ast::File, crate::resolve::TypeInfo, DiagSink) {
+        let mut diagnostics = DiagSink::new();
+        let (file, _, info) = crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        let info = info.expect("production retained analysis must check the source");
+        (file, info, diagnostics)
+    }
 
     fn signed(values: &[i32]) -> CallArgKind {
         let values = values
@@ -425,21 +430,16 @@ mod tests {
                           fun unaryMinus(): Int = 1\n\
                       }\n\
                       fun use(counter: Counter): Int = counter.unaryMinus()";
-        let mut diagnostics = DiagSink::new();
-        let tokens = lex(source, &mut diagnostics);
-        let file = parse(source, &tokens, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (file, info, diagnostics) = analyze(source);
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-        let call = files[0]
+        let call = file
             .expr_arena
             .iter()
             .enumerate()
             .find_map(|(index, expression)| match expression {
                 Expr::Call { callee, .. }
-                    if matches!(files[0].expr(*callee), Expr::Member { name, .. } if name == "unaryMinus") =>
+                    if matches!(file.expr(*callee), Expr::Member { name, .. } if name == "unaryMinus") =>
                 {
                     Some(ExprId(index as u32))
                 }
@@ -455,14 +455,7 @@ mod tests {
             Some(ResolvedCall::Member(member))
                 if matches!(member.origin, Origin::Module { .. })
                     && member.member.name == "unaryMinus"
-                    && matches!(
-                        member.member.source_member,
-                        Some(crate::libraries::SourceMember::Class {
-                            file: 0,
-                            owner: 0,
-                            method: 0,
-                        })
-                    )
+                    && member.member.stable_declaration.is_some()
         ));
     }
 
@@ -475,12 +468,7 @@ mod tests {
                           val widened: Long = typed\n\
                           return \"OK\"\n\
                       }";
-        let mut diagnostics = DiagSink::new();
-        let tokens = lex(source, &mut diagnostics);
-        let file = parse(source, &tokens, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (file, info, diagnostics) = analyze(source);
         let messages = diagnostics
             .diags
             .iter()
@@ -490,7 +478,7 @@ mod tests {
             messages,
             vec!["initializer type mismatch: expected 'Long', actual 'Int'.".to_string()]
         );
-        let sums = files[0]
+        let sums = file
             .expr_arena
             .iter()
             .enumerate()
@@ -510,14 +498,9 @@ mod tests {
     #[test]
     fn overflowing_int_constant_in_a_long_conditional_stays_int() {
         let source = "fun returned(flag: Boolean): Long = if (flag) 2147483647 + 1 else 0\n";
-        let mut diagnostics = DiagSink::new();
-        let tokens = lex(source, &mut diagnostics);
-        let file = parse(source, &tokens, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (file, info, diagnostics) = analyze(source);
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-        let sums = files[0]
+        let sums = file
             .expr_arena
             .iter()
             .enumerate()
@@ -546,12 +529,7 @@ mod tests {
                           val narrow: Byte = 1 / 0\n\
                           return \"OK\"\n\
                       }";
-        let mut diagnostics = DiagSink::new();
-        let tokens = lex(source, &mut diagnostics);
-        let file = parse(source, &tokens, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (file, info, diagnostics) = analyze(source);
         let messages = diagnostics
             .diags
             .iter()
@@ -566,13 +544,13 @@ mod tests {
             ]
         );
         let context = CheckedConstantExpression {
-            file: &files[0],
+            file: &file,
             expression_types: &info.expr_types,
             resolved_constants: &info.resolved_constants,
             resolved_calls: &info.resolved_calls,
             resolved_operator_calls: &info.resolved_operator_calls,
         };
-        let division = files[0]
+        let division = file
             .expr_arena
             .iter()
             .enumerate()
@@ -581,7 +559,7 @@ mod tests {
                 _ => None,
             })
             .expect("division");
-        let remainder = files[0]
+        let remainder = file
             .expr_arena
             .iter()
             .enumerate()

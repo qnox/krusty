@@ -1095,6 +1095,8 @@ mod inline_crossinline_object_e2e;
 mod inline_deep_coverage_e2e;
 #[path = "inline_default_stub_e2e.rs"]
 mod inline_default_stub_e2e;
+#[path = "inline_early_return_cleanup_e2e.rs"]
+mod inline_early_return_cleanup_e2e;
 #[path = "inline_end_branch_e2e.rs"]
 mod inline_end_branch_e2e;
 #[path = "inline_erased_capture_e2e.rs"]
@@ -1389,6 +1391,8 @@ mod local_class_capture_constructors_e2e;
 mod local_class_e2e;
 #[path = "local_class_inherited_members_e2e.rs"]
 mod local_class_inherited_members_e2e;
+#[path = "local_class_member_annotations_e2e.rs"]
+mod local_class_member_annotations_e2e;
 #[path = "local_class_nullability_e2e.rs"]
 mod local_class_nullability_e2e;
 #[path = "local_class_scope_e2e.rs"]
@@ -1593,6 +1597,8 @@ mod suspend_argument_operands_e2e;
 mod suspend_coroutine_inline_e2e;
 #[path = "suspend_function_boxing_e2e.rs"]
 mod suspend_function_boxing_e2e;
+#[path = "suspend_lambda_private_property_e2e.rs"]
+mod suspend_lambda_private_property_e2e;
 #[path = "suspend_lambda_shared_capture_e2e.rs"]
 mod suspend_lambda_shared_capture_e2e;
 #[path = "suspend_result_nullability_e2e.rs"]
@@ -1784,6 +1790,8 @@ mod native_dependency_property_reference_e2e;
 mod native_dependency_reference_e2e;
 #[path = "native_enum_defaults_e2e.rs"]
 mod native_enum_defaults_e2e;
+#[path = "native_enum_entries_e2e.rs"]
+mod native_enum_entries_e2e;
 #[path = "native_enum_entry_interface_e2e.rs"]
 mod native_enum_entry_interface_e2e;
 #[path = "native_exceptions_e2e.rs"]

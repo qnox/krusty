@@ -86,6 +86,40 @@ pub(crate) struct StringTable<'a> {
     /// classifier context of its own, so a target that emits intersections must supply the checked
     /// semantic lookup at the serialization boundary; absence is an error, never invariant fallback.
     intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
+    /// `Some` when the messages are written for a KLIB `PackageFragment` rather than a JVM
+    /// `@Metadata` annotation: the two carry the same declaration schema but name classes and
+    /// place types differently (see [`KlibTables`]).
+    klib: Option<KlibTables>,
+}
+
+/// What a KLIB fragment records beside its plain strings, and how it differs from the JVM carrier.
+///
+/// A class is named through the fragment's `QualifiedNameTable` — one `QualifiedName` per package or
+/// class segment, each pointing at its parent — instead of a `d2` string with a `StringTableTypes`
+/// record. And a declaration's types live in its container's `TypeTable` (the package's, or each
+/// class's own), referenced by id (`return_type_id`, `Argument.type_id`, …) rather than inlined.
+/// Both tables intern in first-use order, which is the order the serializer builds messages in, so
+/// a type is interned at the moment it is attached, after its arguments.
+#[derive(Default)]
+struct KlibTables {
+    qualified_names: Vec<Pb>,
+    qualified_index: HashMap<Vec<u8>, u32>,
+    /// One table per open container, innermost last.
+    type_tables: Vec<KlibTypeTable>,
+}
+
+#[derive(Default)]
+struct KlibTypeTable {
+    types: Vec<Pb>,
+    index: HashMap<Vec<u8>, u32>,
+}
+
+/// `QualifiedName.kind`: what one segment of a qualified name is.
+#[derive(Clone, Copy)]
+enum QualifiedNameKind {
+    Class = 0,
+    /// The protobuf default, so a package segment omits the field.
+    Package = 1,
 }
 
 impl<'a> StringTable<'a> {
@@ -111,6 +145,162 @@ impl<'a> StringTable<'a> {
         }
     }
 
+    /// A table for a KLIB `PackageFragment`: plain strings, qualified names and type tables.
+    pub(crate) fn klib() -> Self {
+        Self {
+            klib: Some(KlibTables::default()),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn is_klib(&self) -> bool {
+        self.klib.is_some()
+    }
+
+    /// The extension field a `Type` carries its annotations in: `JvmProtoBuf.typeAnnotation`
+    /// (100) or `KlibMetadataProtoBuf.typeAnnotation` (170).
+    pub(crate) fn type_annotation_field(&self) -> u32 {
+        if self.is_klib() {
+            170
+        } else {
+            100
+        }
+    }
+
+    /// Open a container's `TypeTable`; the declarations attached until [`Self::close_type_table`]
+    /// reference types in it. A no-op for the JVM carrier, which inlines types.
+    pub(crate) fn open_type_table(&mut self) {
+        if let Some(klib) = &mut self.klib {
+            klib.type_tables.push(KlibTypeTable::default());
+        }
+    }
+
+    /// The `TypeTable` message of the innermost open container, or `None` when it holds no type.
+    pub(crate) fn close_type_table(&mut self) -> Option<Pb> {
+        let table = self.klib.as_mut()?.type_tables.pop()?;
+        (!table.types.is_empty()).then(|| {
+            let mut message = Pb::new();
+            for ty in &table.types {
+                message.repeated_message(1, ty); // TypeTable.type = 1
+            }
+            message
+        })
+    }
+
+    /// The id of `ty` in the innermost open type table, interning it there; `None` for the JVM
+    /// carrier, whose messages inline every type.
+    pub(crate) fn type_id(&mut self, ty: &Pb) -> Option<u32> {
+        let table = self
+            .klib
+            .as_mut()?
+            .type_tables
+            .last_mut()
+            .expect("a KLIB type is attached inside an open container");
+        let key = ty.canonical().into_bytes();
+        if let Some(&id) = table.index.get(&key) {
+            return Some(id);
+        }
+        let id = table.types.len() as u32;
+        table.types.push(ty.clone());
+        table.index.insert(key, id);
+        Some(id)
+    }
+
+    /// Attach `ty` to `message`: inline as `inline_field` for the JVM carrier, by type-table id as
+    /// `id_field` for a KLIB.
+    pub(crate) fn put_type(&mut self, message: &mut Pb, inline_field: u32, id_field: u32, ty: &Pb) {
+        match self.type_id(ty) {
+            Some(id) => message.field_varint(id_field, u64::from(id)),
+            None => message.field_message(inline_field, ty),
+        }
+    }
+
+    /// The serialized `QualifiedNameTable` of a KLIB fragment.
+    pub(crate) fn qualified_name_table(&self) -> Pb {
+        let mut table = Pb::new();
+        for name in self.klib.iter().flat_map(|klib| &klib.qualified_names) {
+            table.repeated_message(1, name); // QualifiedNameTable.qualified_name = 1
+        }
+        table
+    }
+
+    /// The serialized `StringTable` of a KLIB fragment.
+    pub(crate) fn string_table(&self) -> Pb {
+        let mut table = Pb::new();
+        for string in &self.strings {
+            table.field_bytes(1, string.as_bytes()); // StringTable.string = 1
+        }
+        table
+    }
+
+    /// The qualified-name id of the package `segments`, interning each enclosing package first;
+    /// `None` for the root package, which has no entry.
+    pub(crate) fn klib_package(&mut self, segments: &[&str]) -> Option<u32> {
+        let mut parent = None;
+        for segment in segments {
+            parent = Some(self.klib_qualified_name(parent, segment, QualifiedNameKind::Package));
+        }
+        parent
+    }
+
+    fn klib_qualified_name(
+        &mut self,
+        parent: Option<u32>,
+        short_name: &str,
+        kind: QualifiedNameKind,
+    ) -> u32 {
+        let short_name = self.local(short_name);
+        let mut name = Pb::new();
+        if let Some(parent) = parent {
+            name.field_varint(1, u64::from(parent)); // QualifiedName.parent_qualified_name = 1
+        }
+        name.field_varint(2, u64::from(short_name)); // QualifiedName.short_name = 2
+        if let QualifiedNameKind::Class = kind {
+            name.field_varint(3, kind as u64); // QualifiedName.kind = 3
+        }
+        let klib = self
+            .klib
+            .as_mut()
+            .expect("qualified names exist only in a KLIB fragment");
+        let key = name.as_bytes().to_vec();
+        if let Some(&index) = klib.qualified_index.get(&key) {
+            return index;
+        }
+        let index = klib.qualified_names.len() as u32;
+        klib.qualified_names.push(name);
+        klib.qualified_index.insert(key, index);
+        index
+    }
+
+    /// A classifier's qualified-name id: its package's segments, then each enclosing class, then
+    /// itself, every parent interned before its child.
+    fn klib_class_id(&mut self, classifier: TypeName) -> u32 {
+        let mut nested = Vec::new();
+        let mut outer = classifier;
+        while let Some(owner) = outer.nested_owner() {
+            nested.push(
+                outer
+                    .nested_segment_within(owner)
+                    .expect("a recorded nested owner must own the classifier segment"),
+            );
+            outer = owner;
+        }
+        let mut package = Vec::new();
+        let mut path = outer.parent();
+        while let Some(segment) = path.filter(|segment| *segment != TypeName::ROOT) {
+            package.push(segment.segment_ref());
+            path = segment.parent();
+        }
+        package.reverse();
+        let parent = self.klib_package(&package);
+        let mut id =
+            self.klib_qualified_name(parent, outer.segment_ref(), QualifiedNameKind::Class);
+        for segment in nested.into_iter().rev() {
+            id = self.klib_qualified_name(Some(id), segment, QualifiedNameKind::Class);
+        }
+        id
+    }
+
     /// Append `string` with its own `record`, registered under `name` in [`Self::names`].
     fn push(&mut self, name: String, string: String, record: Pb) -> u32 {
         let index = self.strings.len() as u32;
@@ -132,6 +322,14 @@ impl<'a> StringTable<'a> {
     /// `getQualifiedClassNameIndex` does: an empty string carrying the predefined index.
     pub(crate) fn builtin(&mut self, predefined: usize) -> u32 {
         let name = PREDEFINED_STRINGS[predefined];
+        if self.klib.is_some() {
+            let mut segments = name.split('.');
+            let top_level = segments.next().expect("split yields at least one segment");
+            let classifier = segments.fold(crate::types::type_name(top_level), |owner, nested| {
+                owner.nested_child(nested)
+            });
+            return self.klib_class_id(classifier);
+        }
         if let Some(index) = self.non_local_name(name) {
             return index;
         }
@@ -149,6 +347,13 @@ impl<'a> StringTable<'a> {
     }
 
     pub(crate) fn class_id(&mut self, classifier: TypeName) -> u32 {
+        if self.klib.is_some() {
+            assert!(
+                !self.local_classifiers.contains(&classifier),
+                "a KLIB fragment does not record local classifiers"
+            );
+            return self.klib_class_id(classifier);
+        }
         if self.local_classifiers.contains(&classifier) {
             let literal = self.local_class_literal(classifier);
             return self.class_literal(literal, true);
@@ -572,7 +777,7 @@ fn encode_type_with_parameter(
             expansion,
         )?;
         message.field_varint(4, capability as u64);
-        message.field_message(5, &upper);
+        strings.put_type(&mut message, 5, 8, &upper); // Type.flexible_upper_bound(_id) = 5 / 8
     }
     if let Some(index) = forced_parameter {
         if nullable {
@@ -618,7 +823,7 @@ fn encode_type_with_parameter(
                 }
             }
             let annotations = type_annotations(strings, spelled);
-            add_type_annotations(&mut message, annotations);
+            add_type_annotations(&mut message, strings, annotations);
         }
         Ty::Obj(classifier, arguments) => {
             // kotlinc interns the enclosing classifier before recursively interning its arguments,
@@ -640,19 +845,19 @@ fn encode_type_with_parameter(
             if expansion == Expansion::Expanded {
                 encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
             }
-            add_type_annotations(&mut message, annotations);
+            add_type_annotations(&mut message, strings, annotations);
         }
         Ty::Unit => {
             encode_classifier(&mut message, strings, "kotlin/Unit", nullable);
             let annotations = type_annotations(strings, spelled);
             encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
-            add_type_annotations(&mut message, annotations);
+            add_type_annotations(&mut message, strings, annotations);
         }
         Ty::Nothing => {
             encode_classifier(&mut message, strings, "kotlin/Nothing", nullable);
             let annotations = type_annotations(strings, spelled);
             encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
-            add_type_annotations(&mut message, annotations);
+            add_type_annotations(&mut message, strings, annotations);
         }
         Ty::Fun(signature) => {
             let arity = signature.params.len() + usize::from(signature.suspend);
@@ -698,7 +903,7 @@ fn encode_type_with_parameter(
             if signature.context_count > 0 {
                 add_context_function_annotation(&mut message, strings, signature.context_count);
             }
-            add_type_annotations(&mut message, annotations);
+            add_type_annotations(&mut message, strings, annotations);
             if signature.suspend {
                 message.field_varint(1, 1); // Type.flags: SUSPEND_TYPE
             }
@@ -777,17 +982,16 @@ fn encode_arguments(
         }
         // A use-site projection wraps the argument; the abbreviation belongs to the type INSIDE it
         // (`List<out Cargo>` records `Argument{projection, type={Payload, abbreviated=Cargo}}`).
-        encoded_argument.field_message(
-            2,
-            &encode_type_with_parameter(
-                strings,
-                argument,
-                spelled.arg(index),
-                type_parameters,
-                None,
-                expansion,
-            )?,
-        );
+        let argument = encode_type_with_parameter(
+            strings,
+            argument,
+            spelled.arg(index),
+            type_parameters,
+            None,
+            expansion,
+        )?;
+        // Argument.type(_id) = 2 / 3
+        strings.put_type(&mut encoded_argument, 2, 3, &argument);
         message.repeated_message(2, &encoded_argument);
     }
     Ok(())
@@ -829,17 +1033,16 @@ pub(crate) fn encode_alias_reference(
         if let Some(projection) = projection {
             encoded_argument.field_varint(1, projection);
         }
-        encoded_argument.field_message(
-            2,
-            &encode_type_with_parameter(
-                strings,
-                ty,
-                argument_spelling,
-                type_parameters,
-                None,
-                arguments,
-            )?,
-        );
+        let argument = encode_type_with_parameter(
+            strings,
+            ty,
+            argument_spelling,
+            type_parameters,
+            None,
+            arguments,
+        )?;
+        // Argument.type(_id) = 2 / 3
+        strings.put_type(&mut encoded_argument, 2, 3, &argument);
         message.repeated_message(2, &encoded_argument);
     }
     if nullable {
@@ -849,7 +1052,8 @@ pub(crate) fn encode_alias_reference(
                                                // The reference records only what this occurrence wrote, never what the alias's own right-hand
                                                // side applies to its expansion.
     for annotation in &spelled.annotations {
-        message.field_message(100, &encode_type_annotation(strings, annotation.checked()));
+        let annotation = encode_type_annotation(strings, annotation.checked());
+        message.field_message(strings.type_annotation_field(), &annotation);
     }
     Ok(Some(message))
 }
@@ -882,7 +1086,7 @@ fn encode_abbreviation(
     else {
         return Ok(());
     };
-    message.field_message(13, &abbreviated); // Type.abbreviated_type = 13
+    strings.put_type(message, 13, 14, &abbreviated); // Type.abbreviated_type(_id) = 13 / 14
     Ok(())
 }
 
@@ -893,9 +1097,9 @@ fn encode_abbreviation(
 ///
 /// kotlinc interns these annotations BEFORE the node's abbreviation even though `abbreviated_type`
 /// (f13) is written ahead of them, so callers build the messages first with [`type_annotations`].
-fn add_type_annotations(message: &mut Pb, annotations: Vec<Pb>) {
+fn add_type_annotations(message: &mut Pb, strings: &StringTable<'_>, annotations: Vec<Pb>) {
     for annotation in &annotations {
-        message.field_message(100, annotation);
+        message.field_message(strings.type_annotation_field(), annotation);
     }
 }
 
@@ -943,7 +1147,7 @@ pub(crate) fn add_extension_function_annotation(message: &mut Pb, strings: &mut 
     let annotation_id = strings.class_id(crate::types::type_name("kotlin/ExtensionFunctionType"));
     let mut annotation = Pb::new();
     annotation.field_varint(1, annotation_id as u64);
-    message.field_message(100, &annotation);
+    message.field_message(strings.type_annotation_field(), &annotation);
 }
 
 /// `@ContextFunctionTypeParams(count = N)` on a context function type. The count is the number of
@@ -967,7 +1171,7 @@ pub(crate) fn add_context_function_annotation(
     let mut annotation = Pb::new();
     annotation.field_varint(1, annotation_id as u64);
     annotation.field_message(2, &argument);
-    message.field_message(100, &annotation);
+    message.field_message(strings.type_annotation_field(), &annotation);
 }
 
 fn zigzag_i64(value: i64) -> u64 {
@@ -991,16 +1195,20 @@ pub(crate) fn encode_metadata_type_parameter(
         crate::types::TypeVariance::Out => message.field_varint(4, 1),
         crate::types::TypeVariance::Invariant => {}
     }
+    let mut bound_ids = Vec::new();
     for (index, bound) in parameter.upper_bounds.iter().enumerate() {
         let spelled = parameter
             .upper_bound_spellings
             .get(index)
             .unwrap_or(Spelled::NONE);
-        message.field_message(
-            5,
-            &encode_declared_type(strings, *bound, spelled, type_parameters)?,
-        );
+        let bound = encode_declared_type(strings, *bound, spelled, type_parameters)?;
+        match strings.type_id(&bound) {
+            Some(id) => bound_ids.push(u64::from(id)),
+            None => message.field_message(5, &bound), // TypeParameter.upper_bound = 5
+        }
     }
+    // TypeParameter.upper_bound_id = 6, packed.
+    message.field_packed_varints(6, &bound_ids);
     Ok(message)
 }
 

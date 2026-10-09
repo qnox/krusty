@@ -7218,7 +7218,7 @@ impl<'a> Emitter<'a> {
             IrExpr::NewArray { array_type, .. } => ir_ty_to_jvm(array_type),
             IrExpr::UnitInstance => Ty::obj("kotlin/Unit"),
             IrExpr::CurrentContinuation => Ty::obj("kotlin/coroutines/Continuation"),
-            IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
+            IrExpr::Try { result, .. } => ir_ty_to_jvm(&self.try_physical_result(e, *result)),
             other => diverging_value_type::diverging_value_ty(other).unwrap_or(Ty::Error),
         }
     }

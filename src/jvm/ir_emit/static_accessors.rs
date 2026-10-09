@@ -784,8 +784,17 @@ impl Walk<'_> {
         expression: crate::ir::ExprId,
         read: bool,
     ) -> Option<(StaticOwner, StaticAccessor)> {
+        // A backend pass that moved the read into a new slot keeps its stable operation identity,
+        // which is what the realization is recorded under: a suspend lambda's body is rebuilt
+        // into its class's `invokeSuspend`.
+        let operation = match self.ir.expr(expression) {
+            IrExpr::PropertyRead { operation, .. } | IrExpr::PropertyWrite { operation, .. } => {
+                operation.unwrap_or(expression)
+            }
+            _ => expression,
+        };
         let crate::jvm::property_realizations::PropertyRealization::Local(target) =
-            self.property_realizations.get(expression)?
+            self.property_realizations.get(operation)?
         else {
             return None;
         };

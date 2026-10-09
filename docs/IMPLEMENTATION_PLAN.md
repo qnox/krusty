@@ -4550,6 +4550,36 @@ each one lowering more and declining less:
   skip and a wrong answer a failure. Every architecture is linked on one host
   (`one_host_links_a_static_executable_for_every_supported_architecture`).
 
+## Native dependency bodies — decoded KLIB IR  ◐
+
+A native program that calls library code needs that code's bodies, and a KLIB stores them as
+serialized backend IR under `default/ir/`. Today the native backend realizes the stdlib it supports
+through hand-written runtime functions, and no other dependency can be linked. The route to library
+code is the one the code generator already names: provider-owned bodies through common lowering.
+
+- **Decoding (done).** `metadata::klib_ir::read_declaration_trees` decodes every top-level
+  declaration of a KLIB, members and bodies included, into one index-based arena per declaration
+  (`metadata/klib_ir/tree.rs`). It covers every operation of the Kotlin 2.4 schema and the pre-2.4
+  member-access and operation layouts that libraries compiled by older Kotlin still carry. Symbols
+  stay exact serialized identities: a public `CommonIdSignature`, a public property's accessor, or
+  a file-local slot that is never matched by spelling. The Kotlin/Native 2.4.20 stdlib decodes
+  completely (11,969 function bodies); so do the linuxX64 KLIBs of kotlinx-coroutines-core 1.11.0,
+  kotlinx-serialization-json 1.9.0, ktor-server-cio 3.6.0 and kaml 0.104.0. A tree keeps every
+  serialized declaration and expression fact (origins, raw flags, declaration and type annotations,
+  value-class representations, type-alias expansions, inlined-block file entries) except source
+  coordinates; `IrFile`-level facts are outside the trees.
+- **Joining (next).** A selected dependency callable is joined to its decoded body through its
+  exact public signature, never through a name or parameter tuple.
+- **Lowering (next).** The decoded body is lowered into checked common IR so the native generator
+  compiles it as it compiles a module function; a body using an operation the lowering does not
+  model declines by name.
+- Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`. End-to-end coverage comes through
+  the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
+  topology, where krusty compiles each dependency module to a KLIB itself (metadata and serialized
+  IR) and then compiles the main module against it; kotlinc only supplies the expected output.
+  That needs a KLIB writer whose output this decoder reads back, and lands with lowering, the first
+  consumer of the trees.
+
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
 Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how
@@ -5231,3 +5261,30 @@ caller's own access. A nested copy marks the outer frame's line on a `nop` befor
 the caller continues. A private inline function with no default, expanded only from
 non-inline callers, still reads the field directly. Test:
 `tests/private_inline_property_access_e2e.rs`.
+
+## KLIB writer — krusty compiles a module to a Kotlin library  ◐
+
+A non-JVM dependency is distributed as a KLIB, and a dependent compilation reads its declarations
+(and, on Native, its bodies) from it. For krusty to build a multi-module Native program it has to
+write the dependency libraries itself; kotlinc only supplies the expected program output.
+
+- **Metadata container (this slice).** `klib::backend::KlibBackend` is a `Backend` that writes one
+  `PackageFragment` per checked file and lays them out with `klib::write::KlibWriter` (manifest,
+  `linkdata/module`, `package_<fq>/<n>_<seg>.knm`, `root_package/`). The records come from the same
+  builders as JVM `@Metadata` (`metadata::builder`), fed by target-free declaration records
+  (`metadata::declaration_records`); `metadata::klib_fragment` owns only the carrier: the fragment's
+  `StringTable` and `QualifiedNameTable`, per-container type tables, the file and constant-value
+  extensions, and the package name. The manifest is the reference compiler's for a metadata
+  library (`kotlinc-native -p library -Xmetadata-klib`); its `metadata_version` comes from the
+  compilation's finalized language level or `-Xmetadata-version` (`klib::write::KlibStamp`), never
+  from the selected reference release. Top-level functions, properties and typealiases are written;
+  a class is declined by name. Unit tests beside `klib::write` and `metadata::klib_fragment` check
+  the layout and read fragments back through the ordinary KLIB reader. The library has no
+  serialized IR, so a dependent Native program cannot link a body from it yet: this is not module
+  support.
+- **Class metadata (next).** The class record written for the KLIB carrier.
+- **Serialized IR (next).** Bodies are written as the IR the `metadata::klib_ir` decoder reads back.
+- **Native `// MODULE:` box cases (later).** The shared Native box harness writes each dependency
+  module's KLIB with this backend, the dependent compilation reads it through the KLIB library
+  provider, and Native links and runs `box()`; the expected-failure ratchet records each case until
+  it runs.
