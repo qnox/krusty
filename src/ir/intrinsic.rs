@@ -51,6 +51,10 @@ pub enum IrIntrinsic {
     /// Read the context from the current suspend continuation. The JVM coroutine pass replaces
     /// this operation with the continuation parameter's `Continuation.getContext()` call.
     CoroutineContext,
+    /// One step of the coroutine protocol a target's shared state machine performs
+    /// (`backend::coroutines::state_machine`). Produced only by that lowering, never by common
+    /// lowering, so a target whose own coroutine pass runs instead never meets it.
+    Coroutine(IrCoroutineOperation),
     UnsignedToString {
         source: Ty,
     },
@@ -78,4 +82,22 @@ pub enum IrIntrinsic {
     DataClassArrayToString {
         ty: Ty,
     },
+}
+
+/// The coroutine-protocol operations a shared state machine needs from its target's runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrCoroutineOperation {
+    /// The marker a suspend function returns when it suspended (`COROUTINE_SUSPENDED`). No
+    /// arguments.
+    Suspended,
+    /// The raw resumption value carrying a failure (`Result.failure(exception)`). Argument: the
+    /// exception.
+    Failure,
+    /// Throw the exception a raw resumption value carries, if it carries one. Argument: the value.
+    ThrowOnFailure,
+    /// `continuation.resumeWith(result)` on any continuation, the raw value standing for the
+    /// `Result`. Arguments: the continuation and the raw value.
+    ResumeWith,
+    /// `continuation.context`. Argument: the continuation.
+    ContextOf,
 }

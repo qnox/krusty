@@ -107,6 +107,18 @@ impl Backend for CraneliftBackend {
         // The accessors a reference to a DEPENDENCY property is reached through, which the
         // generator's own object is built from; see `native::dependency_references`.
         let properties = super::dependency_references::realize_properties(&mut file.ir);
+        // Suspend functions take the continuation-passing signature, and each that suspends gets
+        // the frame class its state machine runs in; see `native::coroutines`.
+        let coroutines = match super::coroutines::realize(&mut file.ir, &stem) {
+            Ok(coroutines) => coroutines,
+            Err(unsupported) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("krusty: the native backend does not support {unsupported} yet"),
+                );
+                return Vec::new();
+            }
+        };
         if state.runtime_symbols.is_none() {
             match super::linker::runtime_symbols(self.target) {
                 Ok(symbols) => state.runtime_symbols = Some(symbols),
@@ -147,6 +159,7 @@ impl Backend for CraneliftBackend {
                 abi_symbols: &mut state.abi_symbols,
                 dependency_properties: &properties,
                 value_classes: &value_classes,
+                coroutines: &coroutines,
                 source: file.source,
             },
             self.target,

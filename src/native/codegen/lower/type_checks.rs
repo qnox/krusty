@@ -198,6 +198,21 @@ impl<'a> FileLowering<'a> {
                     .and_then(super::super::super::intrinsics::reflection_type_descriptor)
                     .expect("just matched")
             }
+            // A failed `Result`, which this target carries as the runtime's own object; see
+            // `krusty_coroutines.c`.
+            _ if target
+                .obj_internal()
+                .is_some_and(|name| name == crate::types::type_name("kotlin/Result$Failure")) =>
+            {
+                "kt_type_result_failure"
+            }
+            // A boxed `Result`, which the runtime lays out.
+            _ if target
+                .obj_internal()
+                .is_some_and(|name| name == crate::types::type_name("kotlin/Result")) =>
+            {
+                "kt_type_result"
+            }
             _ => return Ok(None),
         };
         self.import_data(symbol).map(Some)

@@ -4831,6 +4831,13 @@ impl JvmLibraries {
                             annotations: m.annotations.clone(),
                             reflection_name: Some(m.name.clone()),
                             physical_name: m.physical_name.clone(),
+                            // Keep the declaration signature on the provider identity as well as
+                            // on the overload candidate. Checked FIR carries only that identity to
+                            // a backend; dropping this copy made declaration-exact realization see
+                            // generic parameters through `declared_params` but only the erased
+                            // classifier through `declared_ret` (`Result.success<T>` became
+                            // `success(T): Result`).
+                            generic_sig: generic_sig.clone().map(Box::new),
                             inline: m.inline,
                             suspend,
                             context_count: m.context_count,
@@ -5875,6 +5882,36 @@ mod tests {
             Ty::nullable(Ty::String),
             "specialized Supplier return must retain the applied nullable type argument"
         );
+    }
+
+    #[test]
+    fn selected_generic_member_identity_keeps_its_complete_declaration_signature() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let companion = libraries
+            .classifier_record(type_name("kotlin/Result$Companion"))
+            .expect("Result.Companion classifier");
+        let success = companion
+            .declared_callables
+            .get("success")
+            .expect("Result.Companion.success declarations")
+            .functions()
+            .iter()
+            .find(|function| function.callable.params.len() == 1)
+            .expect("Result.Companion.success declaration");
+        let signature = success
+            .callable
+            .generic_sig
+            .as_deref()
+            .expect("selected identity keeps its generic declaration");
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        assert_eq!(signature.formals, ["T"]);
+        assert_eq!(signature.params, [parameter]);
+        assert_eq!(signature.ret, Ty::obj_args("kotlin/Result", &[parameter]));
     }
 
     #[test]

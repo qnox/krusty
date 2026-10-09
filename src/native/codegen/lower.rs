@@ -21,6 +21,7 @@ mod carrier;
 mod classes_literal;
 mod classifier_shapes;
 mod compiler_intrinsics;
+mod continuations;
 mod declared_capabilities;
 mod defaults;
 mod entry;
@@ -142,6 +143,9 @@ pub struct FileInput<'a> {
     /// Which classifiers are value classes, and how this target carries each occurrence of one;
     /// see [`crate::native::value_classes`].
     pub value_classes: &'a super::super::value_classes::NativeValueClasses,
+    /// The frame classes suspend functions run in, whose descriptors publish how the runtime
+    /// resumes them; see [`crate::native::coroutines`].
+    pub coroutines: &'a super::super::coroutines::NativeCoroutines,
 }
 
 pub fn lower_file(
@@ -160,6 +164,7 @@ pub fn lower_file(
         abi_symbols,
         source,
         value_classes,
+        coroutines,
     } = input;
     let class_model = model::build(ir, value_classes)?;
 
@@ -177,6 +182,7 @@ pub fn lower_file(
         classifiers,
         callables,
         values: value_classes,
+        coroutines,
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, runtime_symbols.clone()),
         model: class_model,
@@ -286,6 +292,8 @@ struct FileLowering<'a> {
     callables: &'a crate::backend::CheckedBackendCallables,
     /// Which classifiers are value classes, and which occurrences travel unboxed.
     values: &'a super::super::value_classes::NativeValueClasses,
+    /// The frame classes of this file's suspend functions.
+    coroutines: &'a super::super::coroutines::NativeCoroutines,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,
@@ -368,10 +376,11 @@ struct FileLowering<'a> {
 impl<'a> FileLowering<'a> {
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
+        // A `Unit` parameter, like a `Unit` local, holds no machine value: there is one `Unit`.
+        // The caller evaluates its argument for effect and passes nothing.
         for param in params {
-            match self.carrier(*param).abi_param() {
-                Some(abi) => signature.params.push(abi),
-                None => return Err("a `Unit` parameter".to_string()),
+            if let Some(abi) = self.carrier(*param).abi_param() {
+                signature.params.push(abi);
             }
         }
         if let Some(abi) = self.carrier(ret).abi_param() {
@@ -641,7 +650,15 @@ impl<'a> FileLowering<'a> {
             ret,
             &name,
             &mut |lowering, params| {
-                for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
+                let mut params = params.iter();
+                for (slot, ty) in slots.iter().enumerate() {
+                    if lowering.carrier(*ty) == Carrier::Void {
+                        lowering.unit_values.insert(slot as u32);
+                        continue;
+                    }
+                    let Some(value) = params.next() else {
+                        return Err("fewer machine parameters than value slots".to_string());
+                    };
                     let variable = lowering.declare_value(slot as u32, *ty)?;
                     lowering.builder.def_var(variable, *value);
                 }
@@ -1600,6 +1617,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::EnclosingInstance {
                 receiver, inner, ..
             } => self.enclosing_instance(receiver, inner),
+            // `COROUTINE_SUSPENDED`, `Continuation.context` and `Result.isSuccess`, the runtime's.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver,
+                result,
+                ..
+            }) if self.coroutine_property(target).is_some() => {
+                let symbol = self
+                    .coroutine_property(target)
+                    .expect("checked by the guard");
+                self.coroutine_property_read(symbol, receiver, result)
+            }
             // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from the
             // storage that base contributes.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -2497,6 +2526,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             };
             if self.terminated {
                 return Ok(values);
+            }
+            // A `Unit` parameter takes no machine value; its argument ran for effect.
+            let unit_parameter = parameters
+                .get(index)
+                .is_some_and(|&ty| self.carrier(ty) == Carrier::Void);
+            if unit_parameter {
+                continue;
             }
             let Some(value) = value else {
                 return Err("a `Unit` argument".to_string());

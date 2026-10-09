@@ -419,7 +419,8 @@ fn callee(callee: &mut Callee, names: &HashMap<TypeName, TypeName>) {
                 | super::IrIntrinsic::StringLength
                 | super::IrIntrinsic::EnumName
                 | super::IrIntrinsic::NullableAnyToString
-                | super::IrIntrinsic::CoroutineContext => {}
+                | super::IrIntrinsic::CoroutineContext
+                | super::IrIntrinsic::Coroutine(_) => {}
             }
         }
         Callee::CrossFile {

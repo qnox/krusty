@@ -46,7 +46,11 @@ mod ktype {
     pub const SIMPLE_NAME: u32 = 136;
     pub const SIMPLE_NAME_LENGTH: u32 = 144;
     pub const CLASS_NAMES: u32 = 148;
-    pub const SIZE: usize = 152;
+    /// How the runtime resumes a continuation of a class of this file, and reads its context;
+    /// see `super::continuations`. Absent for every type but such a class.
+    pub const CONTINUATION_RESUME_WITH: u32 = 152;
+    pub const CONTINUATION_CONTEXT: u32 = 160;
+    pub const SIZE: usize = 168;
 }
 
 const CLASS_NAMES_MEMBER: u32 = 1;
@@ -161,6 +165,8 @@ pub(super) struct DescriptorShape<'s> {
     /// runtime may be asked to walk. Empty for everything else, which is every type emitted here
     /// but a class.
     pub(super) walk: WalkMembers,
+    /// How the runtime resumes this type as a `Continuation`; empty unless it is one.
+    pub(super) continuation: super::continuations::ContinuationMembers,
     /// Source reflection identity already classified from common-IR declaration facts. These are
     /// independent of `kotlin_name`: rendered physical names cannot recover source nesting or a
     /// backticked segment containing `$`/`.`.
@@ -249,8 +255,19 @@ impl<'a> FileLowering<'a> {
             }
             let singleton = if self.ir.classes[class as usize].is_object {
                 let slot = self.declare_local_data(&format!("kt_singleton_{base}"), true)?;
-                let getter =
-                    self.declare_local_function(&format!("kt_singleton_{base}_get"), &[], any())?;
+                let getter = if module_visible_object(&self.ir.classes[class as usize]) {
+                    // Another file of the module reaches this instance by the classifier alone;
+                    // see `symbols::module_object_symbol`.
+                    let name = super::super::super::symbols::module_object_symbol(
+                        self.ir.classes[class as usize].fq_name,
+                    );
+                    let signature = self.signature_of(&[], any())?;
+                    self.module
+                        .declare_function(&name, Linkage::Export, &signature)
+                        .map_err(|error| format!("declaring `{name}` ({error})"))?
+                } else {
+                    self.declare_local_function(&format!("kt_singleton_{base}_get"), &[], any())?
+                };
                 Some((slot, getter))
             } else {
                 None
@@ -467,6 +484,7 @@ impl<'a> FileLowering<'a> {
             interfaces,
             reference_target,
             walk,
+            continuation,
             qualified_name,
             simple_name,
             class_names,
@@ -567,6 +585,8 @@ impl<'a> FileLowering<'a> {
             (ktype::WALK_NEXT, walk.next),
             (ktype::WALK_LENGTH, walk.length),
             (ktype::WALK_CHAR_AT, walk.char_at),
+            (ktype::CONTINUATION_RESUME_WITH, continuation.resume_with),
+            (ktype::CONTINUATION_CONTEXT, continuation.context),
         ] {
             let Some(thunk) = thunk else {
                 continue;
@@ -694,6 +714,7 @@ impl<'a> FileLowering<'a> {
             }
         }
         let walk = self.define_walk_members(class, &base)?;
+        let continuation = self.define_continuation_members(class, &base)?;
         let (qualified_name, simple_name, class_names) = self.reflection_names(class);
         self.define_type_descriptor(
             descriptor,
@@ -707,6 +728,7 @@ impl<'a> FileLowering<'a> {
                 interfaces: &interfaces,
                 reference_target: None,
                 walk,
+                continuation,
                 qualified_name: qualified_name.as_deref(),
                 simple_name: simple_name.as_deref(),
                 class_names,
@@ -2654,6 +2676,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if super::super::super::intrinsics::is_stateless_runtime_object(classifier) {
             return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
         }
+        let declared_elsewhere_in_module = self.file.ir.class_id_by_name(classifier).is_none()
+            && self
+                .file
+                .classifiers
+                .classifier(classifier)
+                .is_some_and(|fact| fact.source);
+        if declared_elsewhere_in_module {
+            // An object of another file of the module, reached through the getter that file
+            // exports under the classifier's own identity.
+            let symbol = super::super::super::symbols::module_object_symbol(classifier);
+            let getter = self.file.import(&symbol, &[], any())?;
+            let func_ref = self.func_ref(getter);
+            let call = self.emit_call(func_ref, &[])?;
+            return Ok(Some(self.builder.inst_results(call)[0]));
+        }
         let class = self.file.class_of(classifier, "the object")?;
         let Some((_, getter)) = self.file.classes[class as usize].singleton else {
             return Err(format!(
@@ -2904,3 +2941,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 /// Marks a checked property that turned out to be top-level, so the caller routes it to
 /// `super::statics` instead of looking for a class member. Never reaches a diagnostic.
 pub(super) const TOP_LEVEL: &str = "\u{0}top-level";
+
+/// Whether an `object` is one another file of the module can name: a declaration at a stable
+/// qualified identity, not a local or anonymous one whose name only its own file realizes.
+fn module_visible_object(class: &crate::ir::IrClass) -> bool {
+    class.is_source_declared && !class.is_local_class && !class.is_anonymous_object
+}

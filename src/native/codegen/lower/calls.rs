@@ -219,6 +219,11 @@ impl BodyLowering<'_, '_, '_> {
                 )
                 .with_receiver(declared_receiver)
                 .with_overridden(&realization.overridden_declarations);
+                if let Some(realized) =
+                    self.coroutine_call(signature, dispatch_receiver, args, *ret)
+                {
+                    return realized;
+                }
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.

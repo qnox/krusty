@@ -4606,6 +4606,24 @@ code is the one the code generator already names: provider-owned bodies through 
   That needs a KLIB writer whose output this decoder reads back, and lands with lowering, the first
   consumer of the trees.
 
+## Native coroutines — the shared CPS state machine  ◐
+
+Suspend functions compile on Native through the same lowering the JVM uses. The target-neutral
+normalizations live in `backend::coroutines`: they put every suspension at a statement boundary,
+linearize `finally`, and hoist operand suspensions. Native then builds one CPS state machine per
+function over plain common IR. A later Wasm backend will share the same design: the trailing
+continuation parameter, no stack switching, and typed spill fields.
+
+- ✅ Shared normalizations, with temporaries typed from recorded IR types.
+- ✅ The Native state machine, frame classes, suspend lambdas and references, `coroutineContext`,
+  and the runtime continuation protocol. The `coroutines/` box cases go from 44 to 380 passing
+  of 512.
+- ☐ The remaining declines: library bodies the Native backend cannot link yet (`sequence`,
+  `listOfNotNull`), lambdas whose captures and parameters disagree in count, classes implementing
+  more than one function type, suspend `fun interface`s, and supertypes declared in another file.
+- ☐ kotlinx-coroutines from KLIBs, once dependency bodies lower (see "Native dependency bodies").
+- ☐ The Native suspend ABI section in `docs/NATIVE.md`.
+
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
 Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how

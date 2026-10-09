@@ -67,24 +67,18 @@ pub(crate) use value_class_results::completion_box;
 use value_class_results::{boxed_carrier, boxed_on_resume, resumed_carrier};
 mod value_liveness;
 
-use crate::backend::coroutines::desugar_value_try;
-use crate::backend::coroutines::desugar_value_when;
 pub(in crate::jvm) use crate::backend::coroutines::suspend_call_fid;
 use crate::backend::coroutines::{
-    count_suspensions, expr_calls_suspend, is_suspension_point, recorded_suspension_result,
-    value_class_suspension_result,
+    count_suspensions, desugar_tail_suspend, desugar_value_try, desugar_value_when,
+    diverging_control_core, expr_calls_suspend, expr_has_return, function_value_types,
+    hoist_spliced_inline_bodies, hoist_suspensions, is_suspension_point, linearize_finally_returns,
+    linearize_suspending_finally, max_value_index, normalize_block_inits,
+    normalize_statement_try_results, promote_diverging_tail_to_statement,
+    recorded_suspension_result, separate_catches_from_finally, splice_return_blocks,
+    split_unit_conditional_returns, stmt_diverges, suspension_completion, unwrap_suspend_cast,
+    value_class_suspension_result, CoroutineRepresentation, FinallySuspension,
+    SuspensionCompletion, SuspensionTyping,
 };
-use crate::backend::coroutines::{diverging_control_core, splice_return_blocks};
-use crate::backend::coroutines::{expr_contains_owned_loop_jump, expr_has_return, stmt_diverges};
-use crate::backend::coroutines::{function_value_types, max_value_index};
-use crate::backend::coroutines::{hoist_spliced_inline_bodies, hoist_suspensions};
-use crate::backend::coroutines::{
-    normalize_block_inits, normalize_statement_try_results, split_unit_conditional_returns,
-};
-use crate::backend::coroutines::{
-    suspension_completion, unwrap_suspend_cast, SuspensionCompletion,
-};
-use crate::backend::coroutines::{CoroutineRepresentation, SuspensionTyping};
 use crate::ir::{
     for_each_child, Callee, ClassId, ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp,
 };
@@ -106,6 +100,10 @@ struct JvmCoroutineRepresentation;
 impl CoroutineRepresentation for JvmCoroutineRepresentation {
     fn zero(&self, ty: &Ty) -> IrConst {
         IrConst::zero_for_value_type(super::physical_type::ir_ty_to_jvm(ty))
+    }
+
+    fn throwable(&self) -> crate::types::TypeName {
+        crate::types::type_name("java/lang/Throwable")
     }
 }
 
@@ -383,9 +381,15 @@ pub(crate) fn lower_suspend(
             // parameter; its structured try/finally already implements returns correctly. Pending
             // completion is required only when this body will actually be split into machine states.
             if expr_calls_suspend(ir, b, &suspend_set) {
-                linearize_finally_returns(ir, b, &ret_ty);
+                linearize_finally_returns(ir, &JvmCoroutineRepresentation, b, &ret_ty);
             }
-            linearize_suspending_finally(ir, b, &suspend_set);
+            linearize_suspending_finally(
+                ir,
+                &JvmCoroutineRepresentation,
+                b,
+                &suspend_set,
+                FinallySuspension::InCleanup,
+            );
             normalize_block_inits(ir, b);
             // The value-`try`/`when` desugars bind each branch's value to a local, which can leave a
             // suspension NESTED in that bound value (`v = Sub(mk().tag)`) — a position the FIRST
@@ -651,409 +655,6 @@ fn adopt_cps_signature(ir: &mut IrFile, fid: u32) -> u32 {
     }
     let f = &ir.functions[fid as usize];
     f.params.len() as u32 - 1 + u32::from(!f.is_static)
-}
-
-/// Canonicalize `try { body } catch { arms } finally { cleanup }` as an inner `try/catch` wrapped by
-/// an outer `try/finally`. This is Kotlin's exact control-flow composition: the cleanup observes normal
-/// completion of either the body or a selected catch, and also every exception escaping the inner
-/// region. Keeping one handler responsibility per `IrExpr::Try` lets the state-machine handler stack
-/// compose nested regions instead of growing a second catch-plus-finally implementation.
-fn separate_catches_from_finally(ir: &mut IrFile, expression: ExprId) {
-    let mut children = Vec::new();
-    for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
-    for child in children {
-        separate_catches_from_finally(ir, child);
-    }
-    let IrExpr::Try {
-        body,
-        catches,
-        finally: Some(finally),
-        result,
-    } = ir.exprs[expression as usize].clone()
-    else {
-        return;
-    };
-    if catches.is_empty() {
-        return;
-    }
-    let inner = ir.add_expr(IrExpr::Try {
-        body,
-        catches,
-        finally: None,
-        result,
-    });
-    let outer_body = if result == Ty::Unit {
-        ir.add_expr(IrExpr::Block {
-            stmts: vec![inner],
-            value: None,
-        })
-    } else {
-        ir.add_expr(IrExpr::Block {
-            stmts: Vec::new(),
-            value: Some(inner),
-        })
-    };
-    ir.exprs[expression as usize] = IrExpr::Try {
-        body: outer_body,
-        catches: Vec::new(),
-        finally: Some(finally),
-        result,
-    };
-}
-
-/// Make a suspending `finally` an ordinary state-machine sequence while preserving the exceptional
-/// path. Value-producing tries have already been bound to storage before this runs, and combined
-/// catch/finally regions have already been split, so the remaining node is statement-shaped:
-///
-/// ```text
-/// var pending: Throwable? = null
-/// try { body } catch (e: Throwable) { pending = e }
-/// finallyBody
-/// if (pending != null) throw pending
-/// ```
-///
-/// `pending` is an ordinary compiler temp. The normal liveness pass sees its read after the finally
-/// suspension and allocates the continuation spill; no backend-only field identity is invented here.
-fn linearize_suspending_finally(ir: &mut IrFile, expression: ExprId, suspend_set: &HashSet<u32>) {
-    if matches!(ir.exprs[expression as usize], IrExpr::Lambda { .. }) {
-        return;
-    }
-    let mut children = Vec::new();
-    for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
-    for child in children {
-        linearize_suspending_finally(ir, child, suspend_set);
-    }
-    let IrExpr::Try {
-        body,
-        catches,
-        finally: Some(finally),
-        result,
-    } = ir.exprs[expression as usize].clone()
-    else {
-        return;
-    };
-    if !catches.is_empty()
-        || result != Ty::Unit
-        || !expr_calls_suspend(ir, finally, suspend_set)
-        || expr_has_return(ir, body)
-        || expr_contains_owned_loop_jump(ir, body)
-    {
-        return;
-    }
-
-    let pending = max_value_index(ir) + 1;
-    let pending_ty = Ty::nullable(Ty::obj("java/lang/Throwable"));
-    let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-    let declaration = ir.add_expr(IrExpr::Variable {
-        index: pending,
-        ty: pending_ty,
-        init: Some(null),
-        named: false,
-    });
-    let catch_var = pending + 1;
-    let caught = ir.add_expr(IrExpr::GetValue(catch_var));
-    let remember = ir.add_expr(IrExpr::SetValue {
-        var: pending,
-        value: caught,
-    });
-    let catch_body = ir.add_expr(IrExpr::Block {
-        stmts: vec![remember],
-        value: None,
-    });
-    let protected = ir.add_expr(IrExpr::Try {
-        body,
-        catches: vec![crate::ir::IrCatch::generated(
-            catch_var,
-            type_name("java/lang/Throwable"),
-            catch_body,
-        )],
-        finally: None,
-        result: Ty::Unit,
-    });
-    let pending_read = ir.add_expr(IrExpr::GetValue(pending));
-    let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-    let has_exception = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Ne,
-        lhs: pending_read,
-        rhs: null,
-    });
-    let exception = ir.add_expr(IrExpr::GetValue(pending));
-    let throw = ir.add_expr(IrExpr::Throw { operand: exception });
-    let throw_block = ir.add_expr(IrExpr::Block {
-        stmts: vec![throw],
-        value: None,
-    });
-    let no_exception = ir.add_expr(IrExpr::Block {
-        stmts: Vec::new(),
-        value: None,
-    });
-    let rethrow = ir.add_expr(IrExpr::When {
-        branches: vec![(Some(has_exception), throw_block), (None, no_exception)],
-    });
-    ir.exprs[expression as usize] = IrExpr::Block {
-        stmts: vec![declaration, protected, finally, rethrow],
-        value: None,
-    };
-}
-
-/// Route function returns through each enclosing `finally`. The return expression is evaluated once
-/// into a typed pending-value local; a labeled break leaves a one-shot loop around the protected body;
-/// after cleanup, the completion-kind dispatch performs the actual return. An exception or a return
-/// from the finally itself naturally bypasses/overrides that pending completion.
-fn linearize_finally_returns(ir: &mut IrFile, expression: ExprId, return_ty: &Ty) {
-    if matches!(ir.exprs[expression as usize], IrExpr::Lambda { .. }) {
-        return;
-    }
-    let mut children = Vec::new();
-    for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
-    for child in children {
-        linearize_finally_returns(ir, child, return_ty);
-    }
-    let IrExpr::Try {
-        body,
-        catches,
-        finally: Some(finally),
-        result,
-    } = ir.exprs[expression as usize].clone()
-    else {
-        return;
-    };
-    if result != Ty::Unit || !expr_has_return(ir, body) {
-        return;
-    }
-
-    let completion = max_value_index(ir) + 1;
-    let pending_value = completion + 1;
-    let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-    let completion_decl = ir.add_expr(IrExpr::Variable {
-        index: completion,
-        ty: Ty::Int,
-        init: Some(zero),
-        named: false,
-    });
-    let stored_return_ty = if *return_ty == Ty::Unit {
-        Ty::obj("kotlin/Unit")
-    } else {
-        *return_ty
-    };
-    let default_return = zero_value(ir, &stored_return_ty);
-    let return_decl = ir.add_expr(IrExpr::Variable {
-        index: pending_value,
-        ty: stored_return_ty,
-        init: Some(default_return),
-        named: false,
-    });
-    let label = format!("$finally$return${expression}");
-    rewrite_returns_to_pending(
-        ir,
-        body,
-        &label,
-        completion,
-        pending_value,
-        *return_ty == Ty::Unit,
-    );
-    let leave = ir.add_expr(IrExpr::Break {
-        label: Some(label.clone()),
-    });
-    let loop_body = ir.add_expr(IrExpr::Block {
-        stmts: vec![body, leave],
-        value: None,
-    });
-    let always = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-    let protected_loop = ir.add_expr(IrExpr::While {
-        cond: always,
-        body: loop_body,
-        update: None,
-        post_test: false,
-        label: Some(label),
-    });
-    let protected_body = ir.add_expr(IrExpr::Block {
-        stmts: vec![protected_loop],
-        value: None,
-    });
-    let protected = ir.add_expr(IrExpr::Try {
-        body: protected_body,
-        catches,
-        finally: Some(finally),
-        result: Ty::Unit,
-    });
-    let completion_read = ir.add_expr(IrExpr::GetValue(completion));
-    let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-    let has_return = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Ne,
-        lhs: completion_read,
-        rhs: zero,
-    });
-    let return_value = ir.add_expr(IrExpr::GetValue(pending_value));
-    let perform_return = ir.add_expr(IrExpr::Return(Some(return_value)));
-    let return_block = ir.add_expr(IrExpr::Block {
-        stmts: vec![perform_return],
-        value: None,
-    });
-    let fallthrough = ir.add_expr(IrExpr::Block {
-        stmts: Vec::new(),
-        value: None,
-    });
-    let dispatch = ir.add_expr(IrExpr::When {
-        branches: vec![(Some(has_return), return_block), (None, fallthrough)],
-    });
-    ir.exprs[expression as usize] = IrExpr::Block {
-        stmts: vec![completion_decl, return_decl, protected, dispatch],
-        value: None,
-    };
-}
-
-fn rewrite_returns_to_pending(
-    ir: &mut IrFile,
-    expression: ExprId,
-    label: &str,
-    completion: u32,
-    pending_value: u32,
-    unit_return: bool,
-) {
-    match ir.exprs[expression as usize].clone() {
-        IrExpr::Lambda { .. } => return,
-        IrExpr::Return(value) => {
-            // A checked `Unit` expression may have a physical void coercion: it must execute for
-            // effect, but it cannot be used as the operand of the pending-value store. Materialize
-            // the semantic singleton after evaluation, exactly as an ordinary JVM `Unit` return.
-            let effect = unit_return.then_some(value).flatten();
-            let value = if unit_return {
-                ir.add_expr(IrExpr::UnitInstance)
-            } else {
-                value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance))
-            };
-            let store_value = ir.add_expr(IrExpr::SetValue {
-                var: pending_value,
-                value,
-            });
-            let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-            let mark_return = ir.add_expr(IrExpr::SetValue {
-                var: completion,
-                value: one,
-            });
-            let leave = ir.add_expr(IrExpr::Break {
-                label: Some(label.to_string()),
-            });
-            let stmts = effect
-                .into_iter()
-                .chain([store_value, mark_return, leave])
-                .collect();
-            ir.exprs[expression as usize] = IrExpr::Block { stmts, value: None };
-        }
-        _ => {
-            let mut children = Vec::new();
-            for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
-            for child in children {
-                rewrite_returns_to_pending(
-                    ir,
-                    child,
-                    label,
-                    completion,
-                    pending_value,
-                    unit_return,
-                );
-            }
-        }
-    }
-}
-
-/// Rewrite each `return <suspend call>` in `b` into `val tmp = <suspend call>; return tmp` (a fresh
-/// local typed `ret_ty`), so a tail-position suspension is handled as an ordinary bound-local
-/// suspension point. Runs before the CPS rewrite, so `ret_ty` is the function's declared return type.
-///
-/// Descends into STATEMENT-position `when` arms and nested blocks: `when (n) { 0 -> return a() }` puts
-/// the suspending `return` one level down, where the flattener (which models a suspending `Variable`
-/// init, not a suspending `Return`) would otherwise bail out of the whole file.
-fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
-    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
-        return;
-    };
-    let mut new_stmts = Vec::with_capacity(stmts.len() + 1);
-    let mut changed = false;
-    for s in stmts {
-        if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
-            if is_suspension_point(ir, e, suspend_set) {
-                let tmp = max_value_index(ir) + 1;
-                let var = ir.add_expr(IrExpr::Variable {
-                    index: tmp,
-                    ty: ret_ty.clone(),
-                    init: Some(e),
-                    named: false,
-                });
-                let get = ir.add_expr(IrExpr::GetValue(tmp));
-                let ret = ir.add_expr(IrExpr::Return(Some(get)));
-                new_stmts.push(var);
-                new_stmts.push(ret);
-                changed = true;
-                continue;
-            }
-        }
-        desugar_returns_under(ir, s, suspend_set, ret_ty);
-        new_stmts.push(s);
-    }
-    if changed {
-        ir.exprs[b as usize] = IrExpr::Block {
-            stmts: new_stmts,
-            value,
-        };
-    }
-}
-
-/// A checked block can retain an exhaustive conditional as its syntactic value even when every arm
-/// returns or throws. Such a value never reaches the operand stack; make it an ordinary terminal
-/// statement so suspension normalization can descend into its arms and the state-machine builder
-/// does not mistake it for an unsupported value-producing tail.
-fn promote_diverging_tail_to_statement(ir: &mut IrFile, body: ExprId) {
-    let IrExpr::Block {
-        mut stmts,
-        value: Some(value),
-    } = ir.exprs[body as usize].clone()
-    else {
-        return;
-    };
-    if !stmt_diverges(ir, value) {
-        return;
-    }
-    stmts.push(value);
-    ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
-}
-
-/// Apply [`desugar_tail_suspend`]'s rewrite to the `return`s nested inside a statement — the arms of a
-/// statement-position `when`, and any block reachable through them.
-///
-/// A `Lambda` body is a SEPARATE state machine with its own return semantics, so it is never descended
-/// into (matching the flattener's own treatment).
-fn desugar_returns_under(ir: &mut IrFile, s: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
-    match ir.exprs[s as usize].clone() {
-        IrExpr::Block { .. } => desugar_tail_suspend(ir, s, suspend_set, ret_ty),
-        IrExpr::When { branches } => {
-            for (_, body) in branches {
-                // A bare `0 -> return a()` arm: the arm body IS the `Return`, so it becomes the
-                // two-statement block the flattener can walk.
-                if let IrExpr::Return(Some(e)) = ir.exprs[body as usize] {
-                    if is_suspension_point(ir, e, suspend_set) {
-                        let tmp = max_value_index(ir) + 1;
-                        let var = ir.add_expr(IrExpr::Variable {
-                            index: tmp,
-                            ty: *ret_ty,
-                            init: Some(e),
-                            named: false,
-                        });
-                        let get = ir.add_expr(IrExpr::GetValue(tmp));
-                        let ret = ir.add_expr(IrExpr::Return(Some(get)));
-                        ir.exprs[body as usize] = IrExpr::Block {
-                            stmts: vec![var, ret],
-                            value: None,
-                        };
-                        continue;
-                    }
-                }
-                desugar_returns_under(ir, body, suspend_set, ret_ty);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Snapshot the semantic types in one function's value-index namespace before suspend hoisting.

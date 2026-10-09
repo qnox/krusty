@@ -24,6 +24,28 @@ pub(super) fn file_init_symbol(source: crate::fir::SourceFileId) -> String {
     format!("kt_fileinit_{}", source.raw())
 }
 
+/// Symbol of the instance getter of an `object` another file of the module may name.
+///
+/// Derived from the classifier's qualified identity, the way [`module_function_symbol`] is from a
+/// callable's, so the declaring file and every user agree without seeing each other's lowering.
+/// The spelling is escaped INJECTIVELY rather than through [`c_identifier`]: `a.b_c` and `a_b.c`
+/// are two objects and must not share a symbol.
+pub(super) fn module_object_symbol(classifier: crate::types::TypeName) -> String {
+    let mut out = String::from("kt_obj_");
+    for character in classifier.render().chars() {
+        match character {
+            'a'..='z' | 'A'..='Z' | '0'..='9' => out.push(character),
+            '_' => out.push_str("_U"),
+            '/' => out.push_str("_S"),
+            '$' => out.push_str("_D"),
+            '.' => out.push_str("_P"),
+            other => out.push_str(&format!("_x{:x}_", other as u32)),
+        }
+    }
+    out.push_str("_get");
+    out
+}
+
 pub(super) fn c_identifier(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for character in name.chars() {

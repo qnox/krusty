@@ -50,7 +50,7 @@ struct Site {
 }
 
 /// The site an expression creates, or `None` when it creates none.
-fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
+fn closure_site(expr: &IrExpr) -> Option<Site> {
     match expr {
         // The declared arity is deliberately not read here: the implementation function's own
         // parameters are the source of truth, and a suspend lambda's body carries a continuation
@@ -60,7 +60,7 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
             captures,
             sam,
             ..
-        } => Some(Ok(Site {
+        } => Some(Site {
             impl_fn: *impl_fn,
             captures: captures.clone(),
             sam: sam.clone(),
@@ -68,32 +68,30 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
             // so it and the flag below are decided in `declare_lambdas` rather than here.
             identity: None,
             receiver_capture: None,
-        })),
-        IrExpr::CallableReference(reference) => Some(if reference.declaration_suspend {
-            Err("a suspend callable reference".to_string())
-        } else {
-            Ok(Site {
-                impl_fn: reference.adapter,
-                // The adapter's frame is the referenced declaration's captures, then the bound
-                // receiver, then the parameters the caller supplies — see
-                // `fir_lower::local_callables`, which counts `own_start` in exactly that order.
-                // A reference with no captures of its own is the only shape where the two orders
-                // coincide, and it used to be the only shape emitted with this pair.
-                captures: reference
-                    .captures
-                    .iter()
-                    .copied()
-                    .chain(reference.bound_receiver)
-                    .collect(),
-                // A callable reference converted to a `fun interface` arrives as a lambda with a
-                // SAM target, not as a reference, so there is none to carry here.
-                sam: None,
-                identity: Some(reference_identity(reference)),
-                receiver_capture: reference
-                    .bound_receiver
-                    .is_some()
-                    .then_some(reference.captures.len()),
-            })
+        }),
+        // A reference to a suspend declaration has a suspend adapter, which `native::coroutines`
+        // gives the continuation parameter every suspend function value's `invoke` passes.
+        IrExpr::CallableReference(reference) => Some(Site {
+            impl_fn: reference.adapter,
+            // The adapter's frame is the referenced declaration's captures, then the bound
+            // receiver, then the parameters the caller supplies — see
+            // `fir_lower::local_callables`, which counts `own_start` in exactly that order.
+            // A reference with no captures of its own is the only shape where the two orders
+            // coincide, and it used to be the only shape emitted with this pair.
+            captures: reference
+                .captures
+                .iter()
+                .copied()
+                .chain(reference.bound_receiver)
+                .collect(),
+            // A callable reference converted to a `fun interface` arrives as a lambda with a
+            // SAM target, not as a reference, so there is none to carry here.
+            sam: None,
+            identity: Some(reference_identity(reference)),
+            receiver_capture: reference
+                .bound_receiver
+                .is_some()
+                .then_some(reference.captures.len()),
         }),
         _ => None,
     }
@@ -157,7 +155,11 @@ fn reference_identity(reference: &crate::ir::IrCallableReference) -> String {
     } else {
         "u"
     };
-    format!("kt_refid_{bound}_{named}")
+    // `::f` and `::f` converted to a suspend function type are different wrappers, never equal.
+    let converted = matches!(reference.function_type.non_null(), Ty::Fun(function)
+        if function.suspend && !reference.declaration_suspend);
+    let suspend = if converted { "_suspend" } else { "" };
+    format!("kt_refid_{bound}_{named}{suspend}")
 }
 
 /// The emitted pieces of one lambda site.
@@ -228,7 +230,7 @@ impl<'a> FileLowering<'a> {
                 sam,
                 identity,
                 mut receiver_capture,
-            } = site?;
+            } = site;
             let body = self
                 .ir
                 .functions
@@ -341,6 +343,7 @@ impl<'a> FileLowering<'a> {
                             interfaces: &interfaces,
                             reference_target: marker,
                             walk: super::objects::WalkMembers::default(),
+                            continuation: Default::default(),
                             qualified_name: None,
                             simple_name: None,
                             class_names: 0,
@@ -413,6 +416,7 @@ impl<'a> FileLowering<'a> {
                             interfaces: &markers,
                             reference_target: marker,
                             walk: super::objects::WalkMembers::default(),
+                            continuation: Default::default(),
                             qualified_name: None,
                             simple_name: None,
                             class_names: 0,
@@ -602,7 +606,9 @@ impl<'a> FileLowering<'a> {
         self.emit_function(thunk, signature, result, &name, &mut |body, params| {
             let mut arguments = Vec::with_capacity(declared.len());
             for (offset, ty) in capture_offsets.iter().zip(&declared) {
-                let clif = body.carrier(*ty).clif().expect("a capture is never `Unit`");
+                let Some(clif) = body.carrier(*ty).clif() else {
+                    return Err("a `Unit` capture".to_string());
+                };
                 arguments.push(
                     body.builder
                         .ins()
@@ -665,7 +671,9 @@ impl<'a> FileLowering<'a> {
         self.emit_function(thunk, signature, any(), &name, &mut |body, params| {
             let mut arguments = Vec::with_capacity(parameters.len());
             for (offset, ty) in capture_offsets.iter().zip(&parameters) {
-                let clif = body.carrier(*ty).clif().expect("a capture is never `Unit`");
+                let Some(clif) = body.carrier(*ty).clif() else {
+                    return Err("a `Unit` capture".to_string());
+                };
                 arguments.push(
                     body.builder
                         .ins()
@@ -673,10 +681,11 @@ impl<'a> FileLowering<'a> {
                 );
             }
             for (index, ty) in parameters[capture_offsets.len()..].iter().enumerate() {
-                let Some(value) = body.convert(params[index + 1], Some(any()), *ty)? else {
-                    return Err("a `Unit` lambda parameter".to_string());
-                };
-                arguments.push(value);
+                // A `Unit` parameter of the body takes no machine value: the `Unit` the caller
+                // passed is the only one there is.
+                if let Some(value) = body.convert(params[index + 1], Some(any()), *ty)? {
+                    arguments.push(value);
+                }
             }
             let func_ref = body.func_ref(target);
             let call = body.emit_call(func_ref, &arguments)?;
@@ -723,6 +732,7 @@ impl<'a> FileLowering<'a> {
                 interfaces: &[],
                 reference_target: None,
                 walk: super::objects::WalkMembers::default(),
+                continuation: Default::default(),
                 qualified_name: None,
                 simple_name: None,
                 class_names: 0,
@@ -737,7 +747,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// Allocate a function value and fill in what it captured.
     pub(super) fn lambda(&mut self, site: u32) -> Result<Option<Value>, Unsupported> {
         let Site { captures, sam, .. } =
-            closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here")?;
+            closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here");
         // Converting a NULLABLE function value to a `fun interface` yields null when the value is
         // null — `isNull(nullableFun(true))` must answer true, not call `invoke` on a wrapper
         // around nothing. The checked lowering expresses such a conversion as a lambda whose one
@@ -756,7 +766,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     fn wrap_closure(&mut self, site: u32) -> Result<Option<Value>, Unsupported> {
         let Site {
             impl_fn, captures, ..
-        } = closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here")?;
+        } = closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here");
         let items = self
             .file
             .lambdas
@@ -807,15 +817,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         };
         let mut arguments = Vec::with_capacity(args.len());
         for (argument, ty) in args.iter().zip(params) {
-            let Some(value) = self.coerce(*argument, *ty)? else {
-                return Err("a `Unit` argument to a function value".to_string());
+            // A function value takes every argument as a reference, so a `Unit` one is the
+            // runtime's `Unit` object, which `reference` materializes.
+            let value = if self.carrier(*ty) == Carrier::Void {
+                self.reference(*argument)?
+            } else {
+                let Some(value) = self.coerce(*argument, *ty)? else {
+                    return Ok(None);
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                self.convert(value, Some(*ty), any())?
+                    .expect("a non-`Unit` value converts to a reference")
             };
             if self.terminated {
                 return Ok(None);
             }
-            let Some(value) = self.convert(value, Some(*ty), any())? else {
-                return Err("a `Unit` argument to a function value".to_string());
-            };
             arguments.push(value);
         }
         let result = self.dispatch(

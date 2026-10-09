@@ -160,15 +160,15 @@ fn a_suspend_function_that_never_suspends_is_an_ordinary_function() {
 }
 
 #[test]
-fn a_real_suspension_is_declined_rather_than_dropped() {
+fn a_real_suspension_compiles_to_a_state_machine_rather_than_a_straight_call() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     }
     // The boundary that matters. A function that actually suspends needs a state machine to
-    // resume into, and there is none here — so it must be REFUSED. Compiling it into a straight
-    // call would produce a program that runs a coroutine's body to its first suspension and then
-    // silently carries on, which is the failure this backend refuses to have.
+    // resume into. Compiling it into a straight call would run a coroutine's body to its first
+    // suspension and then silently carry on; the suspend lowering builds that machine instead, so
+    // the file compiles cleanly. That it RESUMES correctly is `native_coroutines_e2e`'s to show.
     let (artifacts, diagnostics) = compile(
         "import kotlin.coroutines.intrinsics.*\n\
          suspend fun pause(): Int =\n\
@@ -176,13 +176,8 @@ fn a_real_suspension_is_declined_rather_than_dropped() {
          suspend fun outer(): Int = pause()\n\
          fun main() { println(\"unreachable\") }\n",
     );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("does not support")),
-        "a real suspension must be declined, got {diagnostics:?}"
-    );
-    assert!(artifacts.is_empty(), "a declined file must emit no object");
+    assert_eq!(diagnostics, Vec::<String>::new());
+    assert!(!artifacts.is_empty(), "a compiled file emits its object");
 }
 
 #[test]

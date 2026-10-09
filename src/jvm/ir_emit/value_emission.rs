@@ -823,6 +823,9 @@ impl super::Emitter<'_> {
                             "CoroutineContext intrinsic must be realized by the CPS pass before emit"
                         )
                     }
+                    crate::ir::IrIntrinsic::Coroutine(_) => {
+                        unreachable!("the JVM runs its own coroutine pass, not the shared machine")
+                    }
                     // kotlinc's string concatenation renders a value-class operand through the
                     // class's own `toString-impl`, not the `toString()` intrinsic an explicit call
                     // selects.

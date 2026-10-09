@@ -47,6 +47,7 @@ const SOURCES: &[&str] = &[
     "krusty_fp.c",
     "krusty_gc.c",
     "krusty_threads.c",
+    "krusty_coroutines.c",
     "krusty_start.c",
 ];
 const HEADERS: &[&str] = &["krusty_sys.h", "krusty_rt.h", "krusty_internal.h"];
