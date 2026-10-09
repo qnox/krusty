@@ -1515,6 +1515,20 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_uses_the_recorded_physical_type_before_the_logical_type() {
+        let mut ir = IrFile::default();
+        let expression = ir.add_expr(IrExpr::UnitInstance);
+        ir.logical_types.insert(expression, Ty::Int);
+        ir.physical_types
+            .insert(expression, Ty::obj("java/lang/Integer"));
+
+        assert_eq!(
+            recorded_operand_type(&ir, expression, &HashMap::new()),
+            Some(Ty::obj("java/lang/Integer"))
+        );
+    }
+
+    #[test]
     fn a_shared_operand_is_hoisted_independently_at_each_use() {
         let mut ir = IrFile::default();
         let suspension = ir.add_expr(IrExpr::UnitInstance);
