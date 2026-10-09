@@ -179,6 +179,13 @@ impl BodyFirChecker<'_> {
                         inline_plan: super::inline_body_plan::publish(
                             member.member.inline_body_plan.as_deref(),
                             None,
+                            super::inline_body_plan::type_parameter_receiver(
+                                member
+                                    .member
+                                    .generic_sig
+                                    .as_ref()
+                                    .and_then(|signature| signature.receiver),
+                            ),
                         )
                         .map_err(|_| {
                             self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
@@ -238,6 +245,12 @@ impl BodyFirChecker<'_> {
                         inline_plan: super::inline_body_plan::publish(
                             callable.inline_body_plan.as_deref(),
                             Some(0),
+                            super::inline_body_plan::type_parameter_receiver(
+                                callable
+                                    .generic_sig
+                                    .as_deref()
+                                    .and_then(|signature| signature.receiver),
+                            ),
                         )
                         .map_err(|_| {
                             self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
@@ -316,6 +329,7 @@ impl BodyFirChecker<'_> {
                         can_inline: inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
                             inline_body_plan.as_deref(),
+                            None,
                             None,
                         )
                         .map_err(|_| {

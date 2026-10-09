@@ -105,6 +105,7 @@ impl BodyLowering<'_> {
             recovery,
             plan_defaults,
             returned_value,
+            declared_receiver,
         ) = match plan {
             crate::fir::FirInlineBodyPlan::Iteration {
                 frame,
@@ -169,6 +170,7 @@ impl BodyLowering<'_> {
                 recovery,
                 defaults,
                 result: returned,
+                declared_receiver,
             } => (
                 frame,
                 *lambda_parameter,
@@ -179,6 +181,7 @@ impl BodyLowering<'_> {
                 recovery.as_deref(),
                 defaults,
                 *returned,
+                *declared_receiver,
             ),
         };
         let lambda_parameter = lambda_parameter as usize;
@@ -194,6 +197,8 @@ impl BodyLowering<'_> {
                 extension_receiver_parameter: None,
                 mode: SelectedOperandMode::Materialized,
             })?;
+        self.record_inlined_type_parameter_receiver(&statements, receiver, declared_receiver);
+        self.reuse_plain_function_argument(&mut statements, &mut args, lambda_parameter);
         for omitted in &defaults {
             let default = plan_defaults
                 .iter()
@@ -889,6 +894,86 @@ impl BodyLowering<'_> {
         })
     }
 
+    /// The spilled extension receiver of an inlined type parameter keeps the declaration type.
+    /// Emission stores that parameter as its erased bound and casts back only where a use needs
+    /// the call-site class.
+    fn record_inlined_type_parameter_receiver(
+        &mut self,
+        statements: &[ExprId],
+        receiver: Option<ExprId>,
+        declared: Option<crate::fir::ResolvedTy>,
+    ) {
+        let Some(declared) = declared
+            .map(crate::fir::ResolvedTy::get)
+            .filter(|receiver| receiver.is_ty_param())
+        else {
+            return;
+        };
+        let Some(receiver) = receiver else {
+            return;
+        };
+        let IrExpr::GetValue(slot) = *self.ir.expr(receiver) else {
+            return;
+        };
+        let Some(&declaration) = statements.iter().find(|statement| {
+            matches!(
+                self.ir.expr(**statement),
+                IrExpr::Variable { index, .. } if *index == slot
+            )
+        }) else {
+            return;
+        };
+        self.ir.record_inline_declared_type(declaration, declared);
+    }
+
+    /// A function argument that is already a local is invoked from that local.
+    ///
+    /// The plan materializes every operand so a lambda literal can be found and spliced. A plain
+    /// local has no template: the copy would be a second slot the reference compiler does not
+    /// emit, and the invocation reads the caller's parameter directly.
+    fn reuse_plain_function_argument(
+        &mut self,
+        statements: &mut Vec<ExprId>,
+        args: &mut [ExprId],
+        lambda_parameter: usize,
+    ) {
+        let Some(&function) = args.get(lambda_parameter) else {
+            return;
+        };
+        let IrExpr::GetValue(slot) = *self.ir.expr(function) else {
+            return;
+        };
+        let Some(position) = statements.iter().position(|statement| {
+            matches!(
+                self.ir.expr(*statement),
+                IrExpr::Variable {
+                    index,
+                    init: Some(init),
+                    ..
+                } if *index == slot && matches!(self.ir.expr(*init), IrExpr::GetValue(_))
+            )
+        }) else {
+            return;
+        };
+        let reads = args
+            .iter()
+            .filter(
+                |&&operand| matches!(self.ir.expr(operand), IrExpr::GetValue(read) if *read == slot),
+            )
+            .count();
+        if reads != 1 {
+            return;
+        }
+        let IrExpr::Variable {
+            init: Some(init), ..
+        } = *self.ir.expr(statements[position])
+        else {
+            return;
+        };
+        args[lambda_parameter] = init;
+        statements.remove(position);
+    }
+
     fn guard_inline_body(
         &mut self,
         body: ExprId,
@@ -897,14 +982,23 @@ impl BodyLowering<'_> {
         result_ty: Ty,
         plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
     ) -> Option<ExprId> {
+        // `FunctionN.invoke` returns erased `Object`. The template stores that object and the
+        // call site narrows it after `finally`; a pre-zeroed specialized local would checkcast
+        // before the store and add a slot the reference compiler never writes.
+        let erased_invoke = matches!(
+            self.ir.expr(body),
+            IrExpr::InvokeFunction { ret, .. } if !matches!(ret, Ty::Unit | Ty::Nothing)
+        );
+        let slot_ty = if erased_invoke {
+            Ty::obj("java/lang/Object")
+        } else {
+            result_ty
+        };
         let result_slot = self.allocate_temporary();
-        let initial = self
-            .ir
-            .add_expr(IrExpr::Const(IrConst::zero_for_value_type(result_ty)));
         let declaration = self.ir.add_expr(IrExpr::Variable {
             index: result_slot,
-            ty: result_ty,
-            init: Some(initial),
+            ty: slot_ty,
+            init: None,
             named: false,
         });
         let store_result = self.ir.add_expr(IrExpr::SetValue {
@@ -951,10 +1045,25 @@ impl BodyLowering<'_> {
             finally: Some(finally),
             result: Ty::Unit,
         });
-        let value = self.ir.add_expr(IrExpr::GetValue(result_slot));
+        // A discarded `Unit` specialization never reloads the erased object. Every other result
+        // is read after `finally` and narrowed there, not inside the protected range.
+        let value = if erased_invoke && result_ty == Ty::Unit {
+            None
+        } else {
+            let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
+            Some(if erased_invoke {
+                self.ir.add_expr(IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg: read,
+                    type_operand: result_ty,
+                })
+            } else {
+                read
+            })
+        };
         Some(self.ir.add_expr(IrExpr::Block {
             stmts: vec![declaration, guarded],
-            value: Some(value),
+            value,
         }))
     }
 

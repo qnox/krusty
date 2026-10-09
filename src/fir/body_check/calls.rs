@@ -1153,6 +1153,13 @@ impl BodyFirChecker<'_> {
                         inline_plan: publish_inline_body_plan(
                             selected.member.inline_body_plan.as_deref(),
                             None,
+                            super::inline_body_plan::type_parameter_receiver(
+                                selected
+                                    .member
+                                    .generic_sig
+                                    .as_ref()
+                                    .and_then(|signature| signature.receiver),
+                            ),
                         )
                         .map_err(|_| {
                             self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
@@ -1237,6 +1244,13 @@ impl BodyFirChecker<'_> {
                         inline_plan: publish_inline_body_plan(
                             selected.callable.inline_body_plan.as_deref(),
                             Some(context_count),
+                            super::inline_body_plan::type_parameter_receiver(
+                                selected
+                                    .callable
+                                    .generic_sig
+                                    .as_deref()
+                                    .and_then(|signature| signature.receiver),
+                            ),
                         )
                         .map_err(|_| {
                             self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
@@ -1328,10 +1342,14 @@ impl BodyFirChecker<'_> {
                         semantic_role: None,
                         suspend: *suspend,
                         can_inline: inline.can_inline(),
-                        inline_plan: publish_inline_body_plan(inline_body_plan.as_deref(), None)
-                            .map_err(|_| {
-                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
-                            })?,
+                        inline_plan: publish_inline_body_plan(
+                            inline_body_plan.as_deref(),
+                            None,
+                            None,
+                        )
+                        .map_err(|_| {
+                            self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                        })?,
                         extension_receiver_parameter: Some(extension_parameter),
                     }
                 };
@@ -1751,7 +1769,7 @@ impl BodyFirChecker<'_> {
                 semantic_role,
                 suspend,
                 can_inline,
-                inline_plan: publish_inline_body_plan(inline_plan, inline_receiver_parameter)
+                inline_plan: publish_inline_body_plan(inline_plan, inline_receiver_parameter, None)
                     .map_err(|_| {
                         self.failure(
                             self.file.expr_span(expression),
