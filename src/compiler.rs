@@ -259,6 +259,7 @@ pub fn emit_analyzed<B: Backend>(
             &symbols,
             module_name,
             stems,
+            source.lines(),
             diags,
         ) else {
             continue;

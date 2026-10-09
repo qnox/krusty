@@ -25,6 +25,7 @@ pub(super) fn checked_ir_file<'a>(
     symbols: &'a PassTwoSymbols,
     module_name: &'a str,
     stems: &'a [String],
+    lines: crate::diag::SourceLines<'a>,
     diags: &mut DiagSink,
 ) -> Option<CheckedIrFile<'a>> {
     let callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
@@ -45,5 +46,6 @@ pub(super) fn checked_ir_file<'a>(
         native_plugins: symbols.native_plugins(),
         module_name,
         stems,
+        lines,
     })
 }

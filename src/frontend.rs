@@ -96,6 +96,11 @@ pub(crate) struct ReparseSource {
 }
 
 impl ReparseSource {
+    /// Where this source's lines are, without its text.
+    pub(crate) fn lines(&self) -> crate::diag::SourceLines<'_> {
+        crate::diag::SourceLines::new(&self.text)
+    }
+
     pub(crate) fn visit_declaration_units(
         &self,
         diags: &mut DiagSink,

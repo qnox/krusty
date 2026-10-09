@@ -279,7 +279,193 @@ impl<'a> FileLowering<'a> {
     }
 }
 
+/// The mask words a module default entry takes after the function's frame: bit `k % 32` of word
+/// `k / 32` marks parameter `k` as omitted.
+pub(super) fn module_default_masks(parameters: usize) -> Vec<Ty> {
+    vec![Ty::Int; parameters.div_ceil(32)]
+}
+
+/// A top-level function another file of the module calls with arguments left out.
+///
+/// A per-shape wrapper cannot serve that call. The caller's file does not hold the defaults, and
+/// this file is compiled without knowing which shapes other files leave out. So every top-level
+/// function that declares a default also exports one entry taking its whole frame and a mask of
+/// the omitted ordinals; the caller puts a zero in each omitted slot and sets its bit, and the
+/// entry evaluates the marked defaults in declaration order before calling the function.
+impl<'a> FileLowering<'a> {
+    pub(super) fn declare_module_default_entries(&mut self) -> Result<(), Unsupported> {
+        let mut functions: Vec<(crate::fir::CallableId, u32)> = self
+            .ir
+            .checked_callable_functions
+            .iter()
+            .filter(|(_, &function)| {
+                let declaration = &self.ir.functions[function as usize];
+                declaration.dispatch_receiver.is_none()
+                    && self.functions[function as usize].is_some()
+                    && self
+                        .ir
+                        .fn_params
+                        .get(&function)
+                        .and_then(|info| info.defaults.as_ref())
+                        .is_some_and(|defaults| defaults.iter().any(Option::is_some))
+            })
+            .map(|(callable, &function)| (*callable, function))
+            .collect();
+        // The map's order is not the object's: emit in function order so builds are reproducible.
+        functions.sort_unstable_by_key(|(_, function)| *function);
+        for (callable, function) in functions {
+            let declaration = &self.ir.functions[function as usize];
+            let mut parameters = declaration.params.clone();
+            parameters.extend(module_default_masks(declaration.params.len()));
+            let signature = self.signature_of(&parameters, declaration.ret)?;
+            let symbol = super::super::super::symbols::module_default_symbol(callable);
+            let id = self
+                .module
+                .declare_function(&symbol, Linkage::Hidden, &signature)
+                .map_err(|error| format!("declaring `{symbol}` ({error})"))?;
+            self.module_default_entries.push((function, id));
+        }
+        Ok(())
+    }
+
+    pub(super) fn define_module_default_entries(&mut self) -> Result<(), Unsupported> {
+        for (function, id) in self.module_default_entries.clone() {
+            self.define_module_default_entry(function, id)?;
+        }
+        Ok(())
+    }
+
+    fn define_module_default_entry(
+        &mut self,
+        function: u32,
+        id: FuncId,
+    ) -> Result<(), Unsupported> {
+        let declaration = self.ir.functions[function as usize].clone();
+        let defaults = self.ir.fn_params[&function]
+            .defaults
+            .clone()
+            .expect("declared only for a function with defaults");
+        let mut parameters = declaration.params.clone();
+        parameters.extend(module_default_masks(declaration.params.len()));
+        let signature = self.signature_of(&parameters, declaration.ret)?;
+        let target =
+            self.functions[function as usize].expect("declared only for a defined function");
+        let slots = captures::carried_parameters(self.ir, function);
+        let name = format!("{}$defaults", declaration.name);
+        let result = declaration.ret;
+        self.emit_function(id, signature, result, &name, &mut |body, params| {
+            // The callee's own frame, every parameter at its own ordinal and each slot declared
+            // once, so a default reading an earlier parameter finds what was put there.
+            let mut variables = Vec::with_capacity(slots.len());
+            for (slot, ty) in slots.iter().enumerate() {
+                let variable = body.declare_value(slot as u32, *ty)?;
+                body.builder.def_var(variable, params[slot]);
+                variables.push(variable);
+            }
+            let masks = &params[slots.len()..];
+            // Declaration order, because a later default may read an earlier one's parameter.
+            for (ordinal, default) in defaults.iter().enumerate() {
+                let Some(expression) = *default else {
+                    continue;
+                };
+                let omitted = body
+                    .builder
+                    .ins()
+                    .band_imm_u(masks[ordinal / 32], 1i64 << (ordinal % 32));
+                let fill = body.builder.create_block();
+                let next = body.builder.create_block();
+                body.builder.ins().brif(omitted, fill, &[], next, &[]);
+                body.continue_in(fill);
+                let value = body.coerce(expression, slots[ordinal])?;
+                if !body.terminated {
+                    let Some(value) = value else {
+                        return Err(format!(
+                            "a `Unit` default argument (`{}`)",
+                            declaration.name
+                        ));
+                    };
+                    body.builder.def_var(variables[ordinal], value);
+                    body.builder.ins().jump(next, &[]);
+                }
+                body.continue_in(next);
+            }
+            let arguments: Vec<Value> = variables
+                .iter()
+                .map(|variable| body.builder.use_var(*variable))
+                .collect();
+            let func_ref = body.func_ref(target);
+            let call = body.emit_call(func_ref, &arguments)?;
+            match body.builder.inst_results(call).first().copied() {
+                Some(value) if body.carrier(result) != Carrier::Void => {
+                    body.builder.ins().return_(&[value]);
+                }
+                _ => {
+                    body.builder.ins().return_(&[]);
+                }
+            }
+            body.terminate();
+            Ok(())
+        })
+    }
+}
+
 impl BodyLowering<'_, '_, '_> {
+    /// A call to a top-level function in another file that leaves arguments out, through the
+    /// entry that file exports for it: zeros in the omitted slots, and their bits in the mask.
+    pub(super) fn module_defaulted_call(
+        &mut self,
+        target: crate::fir::CallableId,
+        params: &[Ty],
+        ret: Ty,
+        omitted: &[u32],
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let symbol = super::super::super::symbols::module_default_symbol(target);
+        let mut signature = params.to_vec();
+        signature.extend(module_default_masks(params.len()));
+        let id = self.file.import(&symbol, &signature, ret)?;
+        let supplied: Vec<Ty> = params
+            .iter()
+            .enumerate()
+            .filter(|(ordinal, _)| !omitted.contains(&(*ordinal as u32)))
+            .map(|(_, ty)| *ty)
+            .collect();
+        if args.len() != supplied.len() {
+            return Err(format!(
+                "a cross-file call supplying {} of {} arguments (`{symbol}`)",
+                args.len(),
+                supplied.len()
+            ));
+        }
+        let mut supplied = self.arguments(args, &supplied)?.into_iter();
+        if self.terminated {
+            return Ok(None);
+        }
+        let mut masks = vec![0u32; params.len().div_ceil(32)];
+        let mut arguments = Vec::with_capacity(signature.len());
+        for (ordinal, ty) in params.iter().enumerate() {
+            if omitted.contains(&(ordinal as u32)) {
+                masks[ordinal / 32] |= 1 << (ordinal % 32);
+                arguments.push(self.zero_of(*ty));
+            } else {
+                arguments.push(supplied.next().expect("counted above"));
+            }
+        }
+        for mask in masks {
+            arguments.push(
+                self.builder
+                    .ins()
+                    .iconst(types::I32, i64::from(mask as i32)),
+            );
+        }
+        // As for a call that supplies everything: operands first, then the defining file's
+        // initializer, then the call — whose defaults may read that file's top-level state.
+        self.initialize_defining_file(target)?;
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &arguments)?;
+        Ok(self.builder.inst_results(call).first().copied())
+    }
+
     /// Call through the wrapper for this omission shape.
     pub(super) fn defaulted_call(
         &mut self,

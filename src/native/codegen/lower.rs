@@ -75,6 +75,13 @@ use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 /// The construct a lowering declined, phrased for a diagnostic.
 pub type Unsupported = String;
 
+/// A file the lowering declined: the construct, and the source line it was declined at when the
+/// innermost expression or statement it surfaced through has one.
+pub struct Declined {
+    pub construct: Unsupported,
+    pub line: Option<u32>,
+}
+
 /// One lowered Kotlin file.
 pub struct Lowered {
     /// A relocatable ELF object.
@@ -150,7 +157,7 @@ pub fn lower_file(
     stem: &str,
     entry: Entry,
     verify: bool,
-) -> Result<Lowered, Unsupported> {
+) -> Result<Lowered, Declined> {
     let FileInput {
         ir,
         classifiers,
@@ -161,15 +168,19 @@ pub fn lower_file(
         source,
         value_classes,
     } = input;
-    let class_model = model::build(ir, value_classes)?;
+    let unplaced = |construct| Declined {
+        construct,
+        line: None,
+    };
+    let class_model = model::build(ir, value_classes).map_err(unplaced)?;
 
-    let isa = isa_for(target, verify)?;
+    let isa = isa_for(target, verify).map_err(unplaced)?;
     let builder = ObjectBuilder::new(
         isa,
         format!("{stem}.o"),
         cranelift_module::default_libcall_names(),
     )
-    .map_err(|error| format!("object builder ({error})"))?;
+    .map_err(|error| unplaced(format!("object builder ({error})")))?;
     let mut module = ObjectModule::new(builder);
 
     let mut lowering = FileLowering {
@@ -191,6 +202,7 @@ pub fn lower_file(
         lambdas: HashMap::new(),
         local_delegate_helpers: HashMap::new(),
         default_wrappers: HashMap::new(),
+        module_default_entries: Vec::new(),
         default_constructors: HashMap::new(),
         enum_entries: HashMap::new(),
         reference_identities: HashMap::new(),
@@ -206,78 +218,124 @@ pub fn lower_file(
         walkable_classes: std::collections::HashMap::new(),
         declares_its_own_comparable: declares_its_own_comparable(ir),
         implemented_dependencies: implemented_dependencies(ir),
+        decline_site: None,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
     // bodies are lowered.
     lowering.resolve_walkable_classes();
-    lowering.declare_functions()?;
-    lowering.declare_classes()?;
-    lowering.declare_statics()?;
-    lowering.declare_lambdas()?;
-    lowering.declare_local_delegate_helpers()?;
-    lowering.declare_default_wrappers()?;
-    lowering.declare_default_constructors()?;
-    lowering.declare_enum_entries()?;
-    // Constructors are bodies too, so property-reference artifacts must exist before classes are
-    // defined: a class initializer may itself contain `C::property`.
-    lowering.declare_property_references()?;
-    lowering.declare_local_property_references()?;
-    lowering.define_local_delegate_helpers()?;
-    lowering.define_classes()?;
-    lowering.define_default_wrappers()?;
-    lowering.define_default_constructors()?;
-    lowering.define_enum_entries()?;
-    let statics_init = lowering.define_statics_init()?;
-    let file_init = lowering.define_file_init(source, statics_init)?;
-    let program_entry = match entry {
-        // The frontend selected the file's `main` and its form; the backend only realizes it.
-        Entry::Main => ir.entry_point.map(|point| {
-            (
-                point.function as usize,
-                point.parameters == MainEntryParameters::Arguments,
-            )
-        }),
-        // A `box` case answers through a parameterless `box(): String`, the test corpus's own
-        // convention rather than a Kotlin entry point.
-        Entry::Box => ir
-            .functions
-            .iter()
-            .position(|function| {
-                function.params.is_empty()
-                    && function.is_static
-                    && function.dispatch_receiver.is_none()
-                    && function.name == "box"
-                    && lowering.carrier(function.ret) == Carrier::Ref
-            })
-            .map(|index| (index, false)),
-    };
-    let mut defines_entry = false;
-    for index in 0..ir.functions.len() {
-        lowering.define_function(index)?;
-        if let Some((_, takes_arguments)) = program_entry.filter(|(chosen, _)| *chosen == index) {
-            lowering.define_program_entry(
-                index,
-                entry,
-                file_init,
-                statics_init.is_some(),
-                takes_arguments,
-            )?;
-            defines_entry = true;
-        }
-    }
-    let abi = super::super::c_abi::file_records(ir, abi_symbols);
-    lowering.define_c_exports(file_init, &abi)?;
-
+    let lowered = lowering.lower_declarations(entry, source, abi_symbols);
+    let site = lowering.decline_site.take();
+    let (defines_entry, abi) = lowered.map_err(|construct| Declined {
+        line: site
+            .filter(|(declined, _)| *declined == construct)
+            .map(|(_, line)| line),
+        construct,
+    })?;
     let object = module
         .finish()
         .emit()
-        .map_err(|error| format!("object emission ({error})"))?;
+        .map_err(|error| unplaced(format!("object emission ({error})")))?;
     Ok(Lowered {
         object,
         defines_entry,
         abi,
     })
+}
+
+impl FileLowering<'_> {
+    /// Declare and define everything the file holds, answering whether it defines the program
+    /// entry and what it adds to the module's C header.
+    fn lower_declarations(
+        &mut self,
+        entry: Entry,
+        source: crate::fir::SourceFileId,
+        abi_symbols: &mut std::collections::HashSet<String>,
+    ) -> Result<(bool, Vec<super::super::c_abi::Record>), Unsupported> {
+        let lowering = self;
+        let ir = lowering.ir;
+        lowering.declare_functions()?;
+        lowering.declare_classes()?;
+        lowering.declare_statics()?;
+        lowering.declare_lambdas()?;
+        lowering.declare_local_delegate_helpers()?;
+        lowering.declare_default_wrappers()?;
+        lowering.declare_module_default_entries()?;
+        lowering.declare_default_constructors()?;
+        lowering.declare_enum_entries()?;
+        // Constructors are bodies too, so property-reference artifacts must exist before classes are
+        // defined: a class initializer may itself contain `C::property`.
+        lowering.declare_property_references()?;
+        lowering.declare_local_property_references()?;
+        lowering.define_local_delegate_helpers()?;
+        lowering.define_classes()?;
+        lowering.define_default_wrappers()?;
+        lowering.define_module_default_entries()?;
+        lowering.define_default_constructors()?;
+        lowering.define_enum_entries()?;
+        let statics_init = lowering.define_statics_init()?;
+        let file_init = lowering.define_file_init(source, statics_init)?;
+        let program_entry = match entry {
+            // The frontend selected the file's `main` and its form; the backend only realizes it.
+            Entry::Main => ir.entry_point.map(|point| {
+                (
+                    point.function as usize,
+                    point.parameters == MainEntryParameters::Arguments,
+                )
+            }),
+            // A `box` case answers through a parameterless `box(): String`, the test corpus's own
+            // convention rather than a Kotlin entry point.
+            Entry::Box => ir
+                .functions
+                .iter()
+                .position(|function| {
+                    function.params.is_empty()
+                        && function.is_static
+                        && function.dispatch_receiver.is_none()
+                        && function.name == "box"
+                        && lowering.carrier(function.ret) == Carrier::Ref
+                })
+                .map(|index| (index, false)),
+        };
+        let mut defines_entry = false;
+        for index in 0..ir.functions.len() {
+            lowering.define_function(index)?;
+            if let Some((_, takes_arguments)) =
+                program_entry.filter(|(chosen, _)| *chosen == index)
+            {
+                lowering.define_program_entry(
+                    index,
+                    entry,
+                    file_init,
+                    statics_init.is_some(),
+                    takes_arguments,
+                )?;
+                defines_entry = true;
+            }
+        }
+        let abi = super::super::c_abi::file_records(ir, abi_symbols);
+        lowering.define_c_exports(file_init, &abi)?;
+        Ok((defines_entry, abi))
+    }
+
+    /// Remember the line a decline surfaced at, unless a more deeply nested expression already
+    /// placed this same decline. Only a failing lowering pays for this.
+    fn place_decline(&mut self, id: u32, construct: Unsupported) -> Unsupported {
+        if self
+            .decline_site
+            .as_ref()
+            .is_some_and(|(placed, _)| *placed == construct)
+        {
+            return construct;
+        }
+        let line = [&self.ir.expr_source_lines, &self.ir.expr_lines]
+            .into_iter()
+            .find_map(|lines| lines.get(&id).copied().filter(|line| *line != 0));
+        if let Some(line) = line {
+            self.decline_site = Some((construct.clone(), line));
+        }
+        construct
+    }
 }
 
 struct FileLowering<'a> {
@@ -315,6 +373,12 @@ struct FileLowering<'a> {
     local_delegate_helpers: HashMap<(u32, bool), FuncId>,
     /// One wrapper per omission shape a call in this file uses.
     default_wrappers: HashMap<defaults::Omission, FuncId>,
+    /// The entry each top-level function with defaults exports for callers in other files, by IR
+    /// function, in function order.
+    module_default_entries: Vec<(u32, FuncId)>,
+    /// A decline raised while lowering an expression, and the line of the innermost one with a
+    /// line it surfaced through; see [`FileLowering::place_decline`].
+    decline_site: Option<(Unsupported, u32)>,
     /// The same, for a construction that leaves arguments out.
     default_constructors: HashMap<defaults::CtorOmission, FuncId>,
     /// Per enum class, its constants' static slots and getters, in declaration order.
@@ -923,6 +987,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     fn statement(&mut self, id: u32) -> Result<(), Unsupported> {
+        self.statement_effect(id)
+            .map_err(|construct| self.file.place_decline(id, construct))
+    }
+
+    fn statement_effect(&mut self, id: u32) -> Result<(), Unsupported> {
         // `var x = 0` in a class body stores NOTHING. The rule is Kotlin's, it is observable
         // rather than an optimization, and the IR is what knows which store is a declaration's —
         // see `property_initializer_stores`. A fresh object's storage is already zero here, as it
@@ -1411,6 +1480,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// rather than about a node are said here, and cover every route in rather than the routes
     /// thought of one at a time.
     fn expression(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
+        self.expression_value(id)
+            .map_err(|construct| self.file.place_decline(id, construct))
+    }
+
+    fn expression_value(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
         let logical = self.file.ir.logical_types.get(&id).copied();
         let value = self.lowered_expression(id)?;
         let (Some(value), Some(logical)) = (value, logical) else {
@@ -2129,6 +2203,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 Callee::External { ret, .. }
                 | Callee::Intrinsic { ret, .. }
+                | Callee::Module { ret, .. }
                 | Callee::ModuleWithDefaults { ret, .. }
                 | Callee::Super { ret, .. } => *ret,
                 Callee::Special { source, .. } => {

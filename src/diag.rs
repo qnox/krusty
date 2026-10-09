@@ -334,6 +334,43 @@ impl DiagSink {
     }
 }
 
+/// A source file's line positions, for a phase that knows a construct's line but holds no source.
+///
+/// It answers where a line is and nothing else: the text stays behind it, so a backend can place a
+/// diagnostic without being able to read, match, or reparse what it points at. Lines are found by
+/// a scan on demand, because only a failing compilation asks.
+#[derive(Clone, Copy)]
+pub struct SourceLines<'a> {
+    text: &'a str,
+}
+
+impl<'a> SourceLines<'a> {
+    pub fn new(text: &'a str) -> Self {
+        Self { text }
+    }
+
+    /// The span of a 1-based line's content, from its first non-blank character to its end.
+    pub fn line_span(&self, line: u32) -> Option<Span> {
+        let index = usize::try_from(line.checked_sub(1)?).ok()?;
+        let start = if index == 0 {
+            0
+        } else {
+            self.text
+                .bytes()
+                .enumerate()
+                .filter(|(_, byte)| *byte == b'\n')
+                .nth(index - 1)?
+                .0
+                + 1
+        };
+        let rest = &self.text[start..];
+        let end = start + rest.find('\n').unwrap_or(rest.len());
+        let content = &self.text[start..end];
+        let lo = start + (content.len() - content.trim_start().len());
+        Some(Span::new(u32::try_from(lo).ok()?, u32::try_from(end).ok()?))
+    }
+}
+
 /// 1-based line and column for a byte offset.
 pub fn line_col(src: &str, offset: u32) -> (usize, usize) {
     let off = (offset as usize).min(src.len());
@@ -356,6 +393,20 @@ pub fn line_col(src: &str, offset: u32) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_lines_place_a_line_at_its_first_non_blank_character() {
+        let text = "package demo\n\n    fun f() = 1\nlast";
+        let lines = SourceLines::new(text);
+        assert_eq!(lines.line_span(1), Some(Span::new(0, 12)));
+        assert_eq!(lines.line_span(2), Some(Span::new(13, 13)));
+        let third = lines.line_span(3).expect("third line");
+        assert_eq!(line_col(text, third.lo), (3, 5));
+        assert_eq!(&text[third.lo as usize..third.hi as usize], "fun f() = 1");
+        assert_eq!(lines.line_span(4), Some(Span::new(30, 34)));
+        assert_eq!(lines.line_span(5), None);
+        assert_eq!(lines.line_span(0), None);
+    }
 
     #[test]
     fn line_col_basic() {

@@ -41,6 +41,8 @@ pub struct CheckedIrFile<'a> {
     pub native_plugins: &'a crate::plugins::registry::NativePlugins,
     pub module_name: &'a str,
     pub stems: &'a [String],
+    /// Where this file's lines are, so a backend that declines a construct can say which line.
+    pub lines: crate::diag::SourceLines<'a>,
 }
 
 /// One emitted artifact: a target-relative path and its bytes (e.g. `Foo.class`, a `.wasm` module).

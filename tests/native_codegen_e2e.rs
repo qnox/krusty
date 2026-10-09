@@ -63,6 +63,11 @@ fn objects_of(artifacts: &[Artifact]) -> Vec<&[u8]> {
 }
 
 fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Vec<String>) {
+    let (artifacts, diags) = compile_with_sink(sources, target);
+    (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
+}
+
+fn compile_with_sink(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, DiagSink) {
     let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
     let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
     let platform = Box::new(
@@ -87,7 +92,7 @@ fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Ve
     );
     let backend = CraneliftBackend::new(target).verified();
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
-    (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
+    (artifacts, diags)
 }
 
 /// Compile, link with krusty's linker, run, and return stdout.
@@ -476,6 +481,24 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         "a declined file must emit no object: {:?}",
         artifacts.iter().map(|(name, _)| name).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn a_declined_construct_is_reported_at_its_source_line_in_its_own_file() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // The same still-declined construct as above, in the SECOND file of a module and below a line
+    // that lowers: the diagnostic names that file and line, not the module's first position.
+    let helpers = "package demo\nfun one(): Int = 1\n";
+    let main = "package demo\n\nfun main() {\n    println(one())\n    println(runCatching { 1 }.getOrNull())\n}\n";
+    let (artifacts, diags) = compile_with_sink(&[("Helpers", helpers), ("Main", main)], target);
+    assert_eq!(
+        diags.render_all(&[("Helpers.kt", helpers), ("Main.kt", main)]),
+        "Main.kt:5:5: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+    );
+    assert!(artifacts.iter().all(|(name, _)| name != "Main.o"));
 }
 
 #[test]

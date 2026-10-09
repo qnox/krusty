@@ -36,7 +36,7 @@ impl BodyLowering<'_, '_, '_> {
     }
 
     /// Run the defining file's top-level initializers before using anything it exports.
-    fn initialize_defining_file(
+    pub(super) fn initialize_defining_file(
         &mut self,
         target: crate::fir::CallableId,
     ) -> Result<(), Unsupported> {
@@ -64,6 +64,19 @@ impl BodyLowering<'_, '_, '_> {
             | Callee::ClassStaticWithDefaults {
                 function, defaults, ..
             } => self.defaulted_call(*function, defaults, dispatch_receiver, args),
+            // A top-level function in another file: that file exports the entry that fills the
+            // omitted arguments, because only it holds their defaults.
+            Callee::ModuleWithDefaults {
+                target,
+                default_provider: crate::fir::ResolvedFunctionOverrideTarget::Module(provider),
+                params,
+                ret,
+                defaults,
+                dispatch_receiver_ty: None,
+                ..
+            } if provider == target && dispatch_receiver.is_none() => {
+                self.module_defaulted_call(*target, params, *ret, defaults, args)
+            }
             Callee::ModuleWithDefaults { defaults, .. } => {
                 match self.file.inherited_default_provider(callee) {
                     Some(provider) => {

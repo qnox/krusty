@@ -155,10 +155,17 @@ impl Backend for CraneliftBackend {
             self.verify,
         ) {
             Ok(lowered) => lowered,
-            Err(unsupported) => {
+            Err(declined) => {
+                let span = declined
+                    .line
+                    .and_then(|line| file.lines.line_span(line))
+                    .unwrap_or(crate::diag::Span::new(0, 0));
                 diags.error(
-                    crate::diag::Span::new(0, 0),
-                    format!("krusty: the native backend does not support {unsupported} yet"),
+                    span,
+                    format!(
+                        "krusty: the native backend does not support {} yet",
+                        declined.construct
+                    ),
                 );
                 return Vec::new();
             }
