@@ -15,18 +15,21 @@
 //! starting it again — which is what the JVM's re-entrant class initialization does.
 //!
 //! **`values()` is a fresh array each call**, which is Kotlin's contract: the caller may write to
-//! it without another caller seeing the change. `valueOf` compares the argument against each
+//! it without another caller seeing the change. **`entries` is one list per enum**, made over an
+//! array of its own the first time it is asked for and kept in a static slot, as Kotlin/Native's
+//! `$ENTRIES` is: every read answers the same object. `valueOf` compares the argument against each
 //! constant's name in declaration order, and fails loudly on no match, as Kotlin does.
 
 use super::*;
 use crate::types::TypeName;
 
 /// What one enum class needs: a slot per constant, a flag saying the class has been initialized,
-/// and the initializer itself.
+/// the slot keeping its `entries` list once made, and the initializer itself.
 #[derive(Clone)]
 pub(super) struct EnumItems {
     pub(super) slots: Vec<DataId>,
     flag: DataId,
+    entries: DataId,
     initializer: FuncId,
 }
 
@@ -60,6 +63,7 @@ impl<'a> FileLowering<'a> {
                 slots.push(self.declare_local_data(&format!("kt_enum_{symbol}"), true)?);
             }
             let flag = self.declare_local_data(&format!("kt_enum_{base}_ready"), true)?;
+            let entries = self.declare_local_data(&format!("kt_enum_{base}_entries"), true)?;
             let initializer =
                 self.declare_local_function(&format!("kt_enum_{base}_init"), &[], Ty::Unit)?;
             self.enum_entries.insert(
@@ -67,6 +71,7 @@ impl<'a> FileLowering<'a> {
                 EnumItems {
                     slots,
                     flag,
+                    entries,
                     initializer,
                 },
             );
@@ -133,12 +138,17 @@ impl<'a> FileLowering<'a> {
                 .define_data(*slot, &description)
                 .map_err(|error| format!("defining an enum constant's slot ({error})"))?;
         }
-        let mut description = DataDescription::new();
-        description.define_zeroinit(8);
-        description.set_align(8);
-        self.module
-            .define_data(items.flag, &description)
-            .map_err(|error| format!("defining an enum's initialization flag ({error})"))?;
+        for (slot, what) in [
+            (items.flag, "initialization flag"),
+            (items.entries, "entries slot"),
+        ] {
+            let mut description = DataDescription::new();
+            description.define_zeroinit(8);
+            description.set_align(8);
+            self.module
+                .define_data(slot, &description)
+                .map_err(|error| format!("defining an enum's {what} ({error})"))?;
+        }
 
         let companion = declaration
             .companion_class
@@ -354,6 +364,47 @@ impl BodyLowering<'_, '_, '_> {
                 .store(trusted(), value, array, offset as i32);
         }
         Ok(Some(array))
+    }
+
+    /// `Color.entries` and `enumEntries<Color>()`: the enum's one `EnumEntriesList`, made over a
+    /// fresh `values()` array on the first read and kept, rooted, in the enum's entries slot.
+    ///
+    /// The enum is built first on every read, as reading Kotlin/Native's `$ENTRIES` initializes
+    /// the class: a constant whose construction threw throws again here rather than being skipped
+    /// by a list that outlived it.
+    pub(super) fn enum_entries(
+        &mut self,
+        classifier: TypeName,
+    ) -> Result<Option<Value>, Unsupported> {
+        let class = self.file.class_of(classifier, "the enum")?;
+        let slot = self.file.enum_entries[&class].entries;
+        self.build_enum(class)?;
+        let address = self.data_address(slot);
+        let kept = self.builder.ins().load(types::I64, trusted(), address, 0);
+        let make = self.builder.create_block();
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, types::I64);
+        let missing = self.is_null(kept);
+        self.builder
+            .ins()
+            .brif(missing, make, &[], merge, &[BlockArg::Value(kept)]);
+
+        self.continue_in(make);
+        self.builder.seal_block(make);
+        let values = self
+            .enum_values(classifier)?
+            .expect("`values()` answers the array");
+        let list = self
+            .runtime_call("kt_enum_entries_of", &[any()], any(), &[values])?
+            .expect("`kt_enum_entries_of` returns the list");
+        // Rooted once, by the read that fills the slot: no later read finds it empty.
+        self.runtime_call("kt_gc_add_global_root", &[any()], Ty::Unit, &[address])?;
+        self.builder.ins().store(trusted(), list, address, 0);
+        self.builder.ins().jump(merge, &[BlockArg::Value(list)]);
+
+        self.continue_in(merge);
+        self.builder.seal_block(merge);
+        Ok(Some(self.builder.block_params(merge)[0]))
     }
 
     /// `Color.valueOf(text)`: the constant of that name, or a loud failure.

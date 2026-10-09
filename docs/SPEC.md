@@ -9714,6 +9714,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   result boundary. Tests: `tests/native_boxed_numbers_e2e.rs`
   (`a_generic_result_widened_to_a_nullable_primitive_keeps_its_null`); the box corpus's
   `boxing/kt84727.kt` in the native lane.
+- **Native: `E.entries` and `enumEntries<E>()` are one `EnumEntriesList` per enum.** Kotlin/Native
+  keeps an enum's entries in a static `$ENTRIES` list made over the constants. The generator keeps
+  the same list in a static slot per enum, rooted for the collector, and fills it on the first read
+  from a fresh `values()` array. Every read first initializes the enum, as reading `$ENTRIES` does.
+  So `E.entries === E.entries`, and `enumEntries<E>()` (realized after inline specialization)
+  answers the same object. The list is a read-only list of the runtime's, so it equals, hashes and
+  renders like `listOf` of the same constants. Its class is `kotlin.enums.EnumEntriesList`, and its
+  iterator is `kotlin.collections.AbstractList.IteratorImpl`, both checked against kotlinc-native
+  2.4.20. An `is EnumEntries<*>` check still declines: the runtime has no marker for that
+  interface. Tests: `tests/native_enum_entries_e2e.rs`.
 - **Native: a null cast to an erased type parameter names the parameter.** `null as T` with
   `T : Any` has no descriptor left to test against, yet it still raises a NullPointerException.
   Kotlin/Native 2.4.10 and 2.4.20 raise it with no message. krusty uses the JVM's text, rendered
