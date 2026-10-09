@@ -662,6 +662,21 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         workflow.contains("recorded-kotlinc-bytes-conformance-${{ matrix.version }}-"),
         "recorded kotlinc bytes must be isolated by matrix version"
     );
+    let box_step = &workflow[workflow
+        .find("      - name: run box conformance ${{ matrix.version }}\n")
+        .expect("workflow has a JVM box conformance step")
+        ..native_box_run];
+    for needle in [
+        "KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: \"600\"",
+        "KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps",
+        "KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}",
+        "KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}",
+    ] {
+        assert!(
+            box_step.contains(needle),
+            "a cold JVM box lane must have time to populate its selected byte cache ({needle})"
+        );
+    }
     assert!(
         !workflow.contains("recorded-native-outcomes-")
             && !workflow.contains("KRUSTY_NATIVE_OUTCOME_CACHE"),
