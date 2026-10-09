@@ -90,10 +90,25 @@ pub enum KlibIrType {
         arguments: Vec<KlibIrTypeArgument>,
         /// Constructors of the type's annotations (`@ExtensionFunctionType`, ...).
         annotations: Vec<KlibIrAnnotation>,
+        /// The type alias this type was written as, recorded by KLIBs older than Kotlin 2.4.
+        abbreviation: Option<KlibIrTypeAbbreviation>,
     },
     DefinitelyNotNull(KlibIrTypeId),
-    Dynamic,
-    Error,
+    Dynamic {
+        annotations: Vec<KlibIrAnnotation>,
+    },
+    Error {
+        annotations: Vec<KlibIrAnnotation>,
+    },
+}
+
+/// `IrTypeAbbreviation`: a type alias application that expanded to the enclosing type.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KlibIrTypeAbbreviation {
+    pub type_alias: KlibIrSymbol,
+    pub marked_nullable: bool,
+    pub arguments: Vec<KlibIrTypeArgument>,
+    pub annotations: Vec<KlibIrAnnotation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -508,11 +523,19 @@ pub struct KlibIrTypeAlias {
     pub type_parameters: Vec<KlibIrTypeParameter>,
 }
 
-/// A value class's single underlying property and its type.
+/// How a value class stores its value.
 #[derive(Clone, Debug, PartialEq)]
-pub struct KlibIrInlineClassRepresentation {
-    pub underlying_property: String,
-    pub underlying_type: KlibIrTypeId,
+pub enum KlibIrValueClassRepresentation {
+    /// One underlying property (`IrInlineClassRepresentation`).
+    Inline {
+        underlying_property: String,
+        underlying_type: KlibIrTypeId,
+    },
+    /// Several underlying properties, in declaration order
+    /// (`IrMultiFieldValueClassRepresentation`, serialized by Kotlin 2.4.0 and 2.4.10 only).
+    MultiField {
+        underlying_properties: Vec<(String, KlibIrTypeId)>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -523,6 +546,6 @@ pub struct KlibIrClass {
     pub type_parameters: Vec<KlibIrTypeParameter>,
     pub supertypes: Vec<KlibIrTypeId>,
     pub members: Vec<KlibIrMember>,
-    pub inline_class_representation: Option<KlibIrInlineClassRepresentation>,
+    pub value_class_representation: Option<KlibIrValueClassRepresentation>,
     pub sealed_subclasses: Vec<KlibIrSymbol>,
 }

@@ -20,11 +20,11 @@ use super::tree::{
     KlibIrAnnotation, KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrBranch, KlibIrCatch,
     KlibIrClass, KlibIrClassId, KlibIrDeclarationBase, KlibIrEnumEntry, KlibIrExpr, KlibIrExprId,
     KlibIrExprKind, KlibIrField, KlibIrFileEntry, KlibIrFunction, KlibIrFunctionId,
-    KlibIrInlineClassRepresentation, KlibIrLocalDelegatedProperty, KlibIrLoop, KlibIrMember,
-    KlibIrMemberAccess, KlibIrNullability, KlibIrParameter, KlibIrProperty, KlibIrStatement,
-    KlibIrSyntheticBody, KlibIrType, KlibIrTypeAlias, KlibIrTypeArgument, KlibIrTypeId,
-    KlibIrTypeOperator, KlibIrTypeParameter, KlibIrVarargElement, KlibIrVariable, KlibIrVariableId,
-    KlibIrVariance,
+    KlibIrLocalDelegatedProperty, KlibIrLoop, KlibIrMember, KlibIrMemberAccess, KlibIrNullability,
+    KlibIrParameter, KlibIrProperty, KlibIrStatement, KlibIrSyntheticBody, KlibIrType,
+    KlibIrTypeAbbreviation, KlibIrTypeAlias, KlibIrTypeArgument, KlibIrTypeId, KlibIrTypeOperator,
+    KlibIrTypeParameter, KlibIrValueClassRepresentation, KlibIrVarargElement, KlibIrVariable,
+    KlibIrVariableId, KlibIrVariance,
 };
 use super::wire::{
     declaration_index, entries, message, packed_field, packed_values, read_per_file_table,
@@ -417,33 +417,26 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
                         other => return Err(ty.error(format!("unknown nullability {other}"))),
                     }
                 };
-                let mut arguments = Vec::new();
-                for code in ty.packed(4, "type argument")? {
-                    arguments.push(if code == 0 {
-                        KlibIrTypeArgument::Star
-                    } else {
-                        let variance = match code & 3 {
-                            1 => KlibIrVariance::Invariant,
-                            2 => KlibIrVariance::In,
-                            3 => KlibIrVariance::Out,
-                            _ => return Err(ty.error("type argument has no variance")),
-                        };
-                        KlibIrTypeArgument::Type {
-                            variance,
-                            ty: self.ty(code >> 2)?,
-                        }
-                    });
-                }
+                let arguments = self.type_arguments(&ty, 4)?;
                 let annotations = self.annotations(&ty, 1)?;
+                let abbreviation = ty
+                    .message(5, "type abbreviation")?
+                    .map(|abbreviation| self.type_abbreviation(&abbreviation))
+                    .transpose()?;
                 KlibIrType::Simple {
                     classifier,
                     nullability,
                     arguments,
                     annotations,
+                    abbreviation,
                 }
             }
-            2 => KlibIrType::Dynamic,
-            3 => KlibIrType::Error,
+            2 => KlibIrType::Dynamic {
+                annotations: self.annotations(&ty, 1)?,
+            },
+            3 => KlibIrType::Error {
+                annotations: self.annotations(&ty, 1)?,
+            },
             4 => match ty.packed(1, "definitely-not-null operand")?.as_slice() {
                 [operand] => KlibIrType::DefinitelyNotNull(self.ty(*operand)?),
                 operands => {
@@ -454,6 +447,44 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
                 }
             },
             _ => unreachable!("the oneof range is 1..=5"),
+        })
+    }
+
+    /// Packed type arguments: 0 is a star, otherwise `(type index << 2) | (variance + 1)`.
+    fn type_arguments(
+        &mut self,
+        msg: &Msg<'_>,
+        number: u64,
+    ) -> Result<Vec<KlibIrTypeArgument>, KlibIrDecodeError> {
+        let mut arguments = Vec::new();
+        for code in msg.packed(number, "type argument")? {
+            arguments.push(if code == 0 {
+                KlibIrTypeArgument::Star
+            } else {
+                let variance = match code & 3 {
+                    1 => KlibIrVariance::Invariant,
+                    2 => KlibIrVariance::In,
+                    3 => KlibIrVariance::Out,
+                    _ => return Err(msg.error("type argument has no variance")),
+                };
+                KlibIrTypeArgument::Type {
+                    variance,
+                    ty: self.ty(code >> 2)?,
+                }
+            });
+        }
+        Ok(arguments)
+    }
+
+    fn type_abbreviation(
+        &mut self,
+        msg: &Msg<'_>,
+    ) -> Result<KlibIrTypeAbbreviation, KlibIrDecodeError> {
+        Ok(KlibIrTypeAbbreviation {
+            type_alias: self.required_symbol(msg, 2, "abbreviated type alias")?,
+            marked_nullable: msg.required_varint(3, "abbreviation has_question_mark")? != 0,
+            arguments: self.type_arguments(msg, 4)?,
+            annotations: self.annotations(msg, 1)?,
         })
     }
 
@@ -1311,19 +1342,7 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             .into_iter()
             .map(|raw| self.ty(raw))
             .collect::<Result<_, _>>()?;
-        let inline_class_representation = msg
-            .message(7, "inline class representation")?
-            .map(|representation| {
-                Ok::<_, KlibIrDecodeError>(KlibIrInlineClassRepresentation {
-                    underlying_property: self.string(
-                        representation.required_varint(1, "underlying property")?,
-                        "underlying property",
-                    )?,
-                    underlying_type: self
-                        .ty(representation.required_varint(2, "underlying type")?)?,
-                })
-            })
-            .transpose()?;
+        let value_class_representation = self.value_class_representation(msg)?;
         let sealed_subclasses = msg
             .packed(8, "sealed subclass")?
             .into_iter()
@@ -1337,10 +1356,53 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             type_parameters,
             supertypes,
             members,
-            inline_class_representation,
+            value_class_representation,
             sealed_subclasses,
         });
         Ok(id)
+    }
+
+    /// `IrClass.inline_class_representation` (field 7) or, from Kotlin 2.4.0 and 2.4.10,
+    /// `multi_field_value_class_representation` (field 9): at most one of them.
+    fn value_class_representation(
+        &mut self,
+        class: &Msg<'_>,
+    ) -> Result<Option<KlibIrValueClassRepresentation>, KlibIrDecodeError> {
+        match (
+            class.message(7, "inline class representation")?,
+            class.message(9, "multi-field value class representation")?,
+        ) {
+            (None, None) => Ok(None),
+            (Some(inline), None) => Ok(Some(KlibIrValueClassRepresentation::Inline {
+                underlying_property: self.string(
+                    inline.required_varint(1, "underlying property")?,
+                    "underlying property",
+                )?,
+                underlying_type: self.ty(inline.required_varint(2, "underlying type")?)?,
+            })),
+            (None, Some(multi)) => {
+                let names = multi.packed(1, "underlying property name")?;
+                let types = multi.packed(2, "underlying property type")?;
+                if names.len() != types.len() {
+                    return Err(multi.error(format!(
+                        "multi-field value class has {} property names and {} types",
+                        names.len(),
+                        types.len()
+                    )));
+                }
+                let underlying_properties = names
+                    .into_iter()
+                    .zip(types)
+                    .map(|(name, ty)| Ok((self.string(name, "underlying property")?, self.ty(ty)?)))
+                    .collect::<Result<_, KlibIrDecodeError>>()?;
+                Ok(Some(KlibIrValueClassRepresentation::MultiField {
+                    underlying_properties,
+                }))
+            }
+            (Some(_), Some(_)) => {
+                Err(class.error("class is both a single-field and a multi-field value class"))
+            }
+        }
     }
 
     /// One `IrDeclaration` that may stand at file or class level.
@@ -1716,14 +1778,114 @@ mod tests {
         let class = arena.class(id);
         assert_eq!(class.base, expected_base(0, CLASS, 0x2a));
         assert_eq!(class.name, "Box");
-        let Some(representation) = &class.inline_class_representation else {
+        let Some(KlibIrValueClassRepresentation::Inline {
+            underlying_property,
+            underlying_type,
+        }) = &class.value_class_representation
+        else {
             panic!("{class:?}");
         };
-        assert_eq!(representation.underlying_property, "value");
+        assert_eq!(underlying_property, "value");
         assert!(matches!(
-            arena.ty(representation.underlying_type),
+            arena.ty(*underlying_type),
             KlibIrType::Simple { classifier, .. } if classifier == &expected_base(0, CLASS, 0).symbol
         ));
+    }
+
+    /// A class named `Box` carrying `IrMultiFieldValueClassRepresentation` with these names and
+    /// types (string and type table indices).
+    fn multi_field_class(names: &[u64], types: &[u64]) -> Vec<u8> {
+        let packed = |values: &[u64]| {
+            let mut bytes = Vec::new();
+            for value in values {
+                push_varint(*value, &mut bytes);
+            }
+            bytes
+        };
+        let mut class = declaration_base(symbol(0, CLASS), 0);
+        class.extend(varint_field(2, 1));
+        let mut representation = bytes_field(1, &packed(names));
+        representation.extend(bytes_field(2, &packed(types)));
+        class.extend(bytes_field(9, &representation));
+        bytes_field(2, &class)
+    }
+
+    #[test]
+    fn a_multi_field_value_class_keeps_each_underlying_property_in_order() {
+        let (arena, member) = decode_member(&multi_field_class(&[3, 5], &[0, 1]));
+        let KlibIrMember::Class(id) = member else {
+            panic!("{member:?}");
+        };
+        let Some(KlibIrValueClassRepresentation::MultiField {
+            underlying_properties,
+        }) = &arena.class(id).value_class_representation
+        else {
+            panic!("{:?}", arena.class(id));
+        };
+        let classifiers = underlying_properties
+            .iter()
+            .map(|(name, ty)| match arena.ty(*ty) {
+                KlibIrType::Simple { classifier, .. } => (name.as_str(), classifier.kind),
+                other => panic!("{other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            classifiers,
+            [
+                ("value", super::super::KlibIrSymbolKind::Class),
+                ("T", super::super::KlibIrSymbolKind::TypeParameter),
+            ]
+        );
+    }
+
+    fn member_error(declaration: &[u8]) -> String {
+        let strings = declaration_strings();
+        let signatures = [
+            public_signature(0, 1),
+            local_signature(9),
+            public_signature(0, 6),
+        ];
+        let signatures = signatures.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let types = [bytes_field(5, &varint_field(2, symbol(0, CLASS)))];
+        let mut file = FileTables {
+            strings: &strings,
+            signatures: SignatureTable::new(0, &signatures, &strings),
+            types: types.iter().map(Vec::as_slice).collect(),
+            bodies: Vec::new(),
+        };
+        TreeDecoder::new(&mut file)
+            .member(&Msg::parse(declaration, 0, DECLARATIONS).unwrap())
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn a_multi_field_value_class_with_unpaired_names_and_types_is_an_error() {
+        let declaration = multi_field_class(&[3, 5], &[0]);
+        // The representation's 7 payload bytes end the declaration: names (4) then types (3).
+        let representation = declaration.len() - 7;
+        assert_eq!(
+            member_error(&declaration),
+            format!(
+                "invalid KLIB IR irDeclarations.knd at byte {representation}: multi-field value \
+                 class has 2 property names and 1 types"
+            )
+        );
+    }
+
+    #[test]
+    fn a_class_with_both_value_class_representations_is_an_error() {
+        let mut class = declaration_base(symbol(0, CLASS), 0);
+        class.extend(varint_field(2, 1));
+        let mut inline = varint_field(1, 3);
+        inline.extend(varint_field(2, 0));
+        class.extend(bytes_field(7, &inline));
+        class.extend(bytes_field(9, &[]));
+        assert_eq!(
+            member_error(&bytes_field(2, &class)),
+            "invalid KLIB IR irDeclarations.knd at byte 2: class is both a single-field and a \
+             multi-field value class"
+        );
     }
 
     #[test]
