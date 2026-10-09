@@ -822,12 +822,8 @@ mod tests {
                     "duplicate freeCompilerArg '-Xskip-prerelease-check'",
                 ),
                 (
-                    "all-warnings-as-errors",
-                    "krusty does not support compilerOptions.allWarningsAsErrors",
-                ),
-                (
-                    "free-werror",
-                    "krusty does not support warning policy freeCompilerArg '-Werror'",
+                    "dev-compiler-version",
+                    "Kotlin compiler 2.4.10-dev-7885 differs from Kotlin Gradle plugin 2.4.10",
                 ),
                 (
                     "empty-opt-in",
@@ -985,6 +981,60 @@ mod tests {
                     .all(|argument| !argument.starts_with("-Xmetadata-version")),
                 "{language_2_2_run:?}",
             );
+
+            // `-Werror` and `allWarningsAsErrors` both reach krusty as one warning policy. Setting
+            // both is idempotent, like kotlinc's command line, rather than a transport conflict.
+            for case in ["all-warnings-as-errors", "free-werror", "werror-overlap"] {
+                let _ = std::fs::remove_file(&log);
+                build()
+                    .property("krusty.negative", case)
+                    .tasks([":compiler:util:compileKotlin"])
+                    .run()
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                let invocation = single_invocation(&log);
+                assert_eq!(
+                    invocation
+                        .iter()
+                        .filter(|argument| argument.as_str() == "-Werror")
+                        .count(),
+                    1,
+                    "{case}: {invocation:?}"
+                );
+            }
+
+            // A named level remains an override when the structured global policy is enabled.
+            // `-Xcontext-parameters` is redundant at language level 2.4, so success proves that
+            // the transported `:warning` exception was applied rather than promoted by `-Werror`.
+            let _ = std::fs::remove_file(&log);
+            let output = build()
+                .property("krusty.negative", "werror-warning-exception")
+                .tasks([":compiler:util:compileKotlin"])
+                .run_output()
+                .unwrap_or_else(|error| panic!("werror warning exception: {error}"));
+            let expected_warning = "warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.";
+            assert_eq!(
+                output
+                    .lines()
+                    .filter(|line| line.trim() == expected_warning)
+                    .count(),
+                1,
+                "werror warning exception output:\n{output}"
+            );
+            let invocation = single_invocation(&log);
+            for expected in [
+                "-Werror",
+                "-Xcontext-parameters",
+                "-Xwarning-level=REDUNDANT_CLI_ARG:warning",
+            ] {
+                assert_eq!(
+                    invocation
+                        .iter()
+                        .filter(|argument| argument.as_str() == expected)
+                        .count(),
+                    1,
+                    "{expected}: {invocation:?}"
+                );
+            }
         }
 
         let _ = std::fs::remove_dir_all(&root);
@@ -2112,8 +2162,9 @@ val generateKotlin = tasks.register<GenerateKotlin>("generateKotlin") {
 }
 
 kotlin {
-    if (krustyNegative == "compiler-version") {
-        compilerVersion.set("2.4.0")
+    when (krustyNegative) {
+        "compiler-version" -> compilerVersion.set("2.4.0")
+        else -> {}
     }
     sourceSets.named("main") {
         kotlin.srcDir("src")
@@ -2122,6 +2173,16 @@ kotlin {
     }
     sourceSets.named("test") {
         kotlin.srcDir("test-src")
+    }
+}
+
+// Override krusty's own task input, not KotlinTopLevelExtension.compilerVersion: changing the
+// latter asks KGP to resolve a different build-tools implementation before krusty can validate it.
+afterEvaluate {
+    if (krustyNegative == "dev-compiler-version") {
+        tasks.withType<krusty.KrustyCompileTask>().configureEach {
+            compilerVersion.set("KGP_VERSION-dev-7885")
+        }
     }
 }
 
@@ -2171,6 +2232,15 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=8")
             "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
             "free-werror" -> freeCompilerArgs.add("-Werror")
+            "werror-overlap" -> {
+                allWarningsAsErrors.set(true)
+                freeCompilerArgs.add("-Werror")
+            }
+            "werror-warning-exception" -> {
+                allWarningsAsErrors.set(true)
+                freeCompilerArgs.add("-Xcontext-parameters")
+                freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:warning")
+            }
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
             "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
             "warning-level-missing-colon" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG")
