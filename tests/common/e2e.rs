@@ -1101,3 +1101,30 @@ pub fn front_end_diagnostics_located(
         })
         .collect()
 }
+
+/// Every file below `dir`, by its path relative to `dir`, with its bytes, sorted. A missing
+/// directory is an empty output.
+pub fn output_tree(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.expect("compiler output entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let name = path
+                    .strip_prefix(dir)
+                    .expect("a file below the output root")
+                    .to_string_lossy()
+                    .into_owned();
+                found.push((name, std::fs::read(&path).expect("read an output file")));
+            }
+        }
+    }
+    found.sort();
+    found
+}

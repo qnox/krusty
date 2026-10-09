@@ -12220,6 +12220,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   each argument of each release against its disposition; `tests/unsupported_kotlinc_arguments_e2e.rs`
   and `tests/inert_kotlinc_arguments_e2e.rs` check exit code, complete stderr and output against
   kotlinc.)
+- **A supertype missing from the classpath is `MISSING_DEPENDENCY_SUPERCLASS`.** As kotlinc's
+  `FirMissingDependencySupertype*` checkers, a classpath classifier naming a supertype that no
+  source or classpath entry provides makes every use that depends on that hierarchy an error:
+  `cannot access '<missing>' which is a supertype of '<classifier>'. Check your module classpath
+  for missing or conflicting dependencies.`, once per missing supertype in depth-first order.
+  Only an edge out of a classpath classifier is a missing dependency; an unresolvable supertype
+  the module itself names is an unresolved reference. It is reported at a class or object that
+  inherits one (from its `class`/`object` keyword through its name; a nameless companion and an
+  object expression whole; a local class as `<local>.L`, an object expression as
+  `<package>.<anonymous>`), at a type parameter whose bound inherits one (an inline bound with
+  the parameter, a `where` bound at the parameter name), and at each qualified access: the
+  selected name of a call, property read or write, callable reference, `componentN`, the
+  operator of a binary operator, a whole index expression, the iterable of a `for` loop. An
+  access checks its dispatch receiver, then the selected member's owner and an extension's
+  declared receiver, each classifier once; an unresolved call checks its explicit receiver and
+  is reported ahead of the unresolved reference. A constructor call, or an access whose dispatch
+  receiver already reported, is kotlinc's eager check: the warning `… This may be forbidden soon.
+  Check the module classpath for missing or conflicting dependencies.`, an error under
+  `AllowEagerSupertypeAccessibilityChecks`. A compilation with no JDK on its classpath skips the
+  check: every JDK supertype of a library classifier is absent there by configuration. (kotlinc
+  `-no-jdk` reports those too, `kotlin.String`'s included.)
+  (`tests/missing_dependency_supertypes_e2e.rs` builds the library chain with krusty and compares
+  exit code, every diagnostic's file, line, column, message and order, and the output tree with
+  kotlinc, with and without the feature.)
 - **`-Xjdk-release` compiles against the selected JDK's own API.** As in kotlinc's
   `configureJvmTargetAndRelease`, the release names the JVM target (`8` is `1.8`; `6`/`7` require
   an explicit `-jvm-target 1.8`), an explicit `-jvm-target` must equal it (or be `1.8` for 6–8),

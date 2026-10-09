@@ -829,15 +829,11 @@ mod tests {
 
     #[test]
     fn the_real_argument_surface_translates() {
-        // These two options are part of the real request but deliberately refused until their
-        // semantics are implemented. Keep exercising every other field of that request here.
+        // `--progressive` is part of the real request but refused while it turns on features krusty
+        // does not implement. Keep exercising every other field of that request here.
         let request = intellij_request()
             .into_iter()
-            .filter(|argument| {
-                argument != "--progressive"
-                    && argument != "--x_xlanguage"
-                    && argument != "+AllowEagerSupertypeAccessibilityChecks"
-            })
+            .filter(|argument| argument != "--progressive")
             .collect::<Vec<_>>();
         let unit = translate(&request).expect("must translate");
         assert_eq!(unit.output_jar, PathBuf::from("out/util.jar"));

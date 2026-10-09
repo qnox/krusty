@@ -212,6 +212,7 @@ impl Parser<'_> {
         let prefix = std::mem::take(&mut self.declaration_prefix);
         let after = self.tok().span;
         let mut keys = vec![start, after.lo];
+        let mut classifier_keyword = None;
         let mut index = self.i;
         while self.t.get(index).is_some_and(|token| {
             ["data", "enum", "annotation", "companion"]
@@ -231,6 +232,7 @@ impl Parser<'_> {
                 || self.token_keyword_text(**token, "interface")
         }) {
             keys.push(keyword.span.lo);
+            classifier_keyword = Some(keyword.span);
             if let Some(name) = self.t.get(index + 1).filter(|t| t.kind == TokenKind::Ident) {
                 keys.push(name.span.lo);
             }
@@ -240,6 +242,8 @@ impl Parser<'_> {
             DeclarationPrefix {
                 start: prefix.first_modifier.unwrap_or(after),
                 visibility: prefix.visibility,
+                declaration_start: start,
+                classifier_keyword,
             },
         );
     }

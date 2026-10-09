@@ -156,6 +156,7 @@ fn the_projects_kotlinc_flags_are_accepted() {
             "2.4".to_string(),
             "-jvm-target".to_string(),
             "21".to_string(),
+            "-XXLanguage:+AllowEagerSupertypeAccessibilityChecks".to_string(),
             source.display().to_string(),
         ],
     );
@@ -168,10 +169,10 @@ fn the_projects_kotlinc_flags_are_accepted() {
 }
 
 /// A language-feature name is not implemented merely because the generic feature set can retain
-/// it. The project currently requests this progressive feature explicitly too, so the batch rule
-/// must refuse instead of compiling under unchanged semantics.
+/// it. The batch rule must refuse a feature krusty does not model instead of compiling under
+/// unchanged semantics.
 #[test]
-fn the_projects_unmodeled_language_feature_is_refused() {
+fn an_unmodeled_language_feature_is_refused() {
     let dir = workspace("unmodeled-language-feature");
     let source = dir.join("U.kt");
     std::fs::write(&source, "package demo\nfun value(): Int = 1\n").expect("write source");
@@ -181,7 +182,7 @@ fn the_projects_unmodeled_language_feature_is_refused() {
         &[
             "-d".to_string(),
             jar.display().to_string(),
-            "-XXLanguage:+AllowEagerSupertypeAccessibilityChecks".to_string(),
+            "-XXLanguage:+ErrorAboutDataClassCopyVisibilityChange".to_string(),
             source.display().to_string(),
         ],
     );
@@ -189,7 +190,7 @@ fn the_projects_unmodeled_language_feature_is_refused() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         "krusty: error: krusty does not implement the language feature \
-         'AllowEagerSupertypeAccessibilityChecks' selected by '-XXLanguage'\n"
+         'ErrorAboutDataClassCopyVisibilityChange' selected by '-XXLanguage'\n"
     );
     assert!(!jar.exists(), "a refused feature must not write the jar");
 }

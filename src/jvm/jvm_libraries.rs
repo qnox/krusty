@@ -4971,6 +4971,10 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         Some("JVM")
     }
 
+    fn has_platform_classes(&self) -> bool {
+        self.cp.has_platform_classes()
+    }
+
     fn install_source_module_headers(
         &self,
         sources: &[crate::libraries::PlatformSourceHeaderInput<'_>],

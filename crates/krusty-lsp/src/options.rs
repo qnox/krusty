@@ -518,7 +518,7 @@ mod tests {
             .has("EnableNameBasedDestructuringShortForm"));
         // A comma is part of a `-XXLanguage` feature name, as in kotlinc; a feature krusty does not
         // implement is refused at startup.
-        assert!(parse(&["-XXLanguage:+AllowEagerSupertypeAccessibilityChecks"]).is_err());
+        assert!(parse(&["-XXLanguage:+ErrorAboutDataClassCopyVisibilityChange"]).is_err());
         assert!(parse(&["-language-version"]).is_err());
         assert!(parse(&["Main.kt"]).is_err());
         assert!(parse(&["-d", "out"]).is_err());

@@ -1394,32 +1394,32 @@ mod tests {
         for setting in ["+", "-"] {
             let o = parse_args(&[
                 "-Xkotlin-reference-version=2.4.20",
-                &format!("-XXLanguage:{setting}AllowEagerSupertypeAccessibilityChecks"),
+                &format!("-XXLanguage:{setting}ErrorAboutDataClassCopyVisibilityChange"),
                 "f.kt",
             ]);
             assert_eq!(
                 o.errors,
                 ["krusty does not implement the language feature \
-                  'AllowEagerSupertypeAccessibilityChecks' selected by '-XXLanguage'"
+                  'ErrorAboutDataClassCopyVisibilityChange' selected by '-XXLanguage'"
                     .to_string()]
             );
         }
         let enabled = parse_args(&[
             "-Xkotlin-reference-version=2.4.20",
-            "-XXLanguage:+AllowEagerSupertypeAccessibilityChecks",
+            "-XXLanguage:+ErrorAboutDataClassCopyVisibilityChange",
             "f.kt",
         ]);
         assert!(enabled.language_feature_problems.is_empty());
         let disabled = parse_args(&[
             "-Xkotlin-reference-version=2.4.20",
-            "-XXLanguage:-AllowEagerSupertypeAccessibilityChecks",
+            "-XXLanguage:-ErrorAboutDataClassCopyVisibilityChange",
             "f.kt",
         ]);
         assert_eq!(
             disabled.language_feature_problems,
             [ArgumentProblem::warning(
                 "ATTENTION!\nThis build uses unsafe internal compiler arguments:\n\n\
-                 -XXLanguage:-AllowEagerSupertypeAccessibilityChecks\n\n\
+                 -XXLanguage:-ErrorAboutDataClassCopyVisibilityChange\n\n\
                  This mode is not recommended for production use,\n\
                  as no stability/compatibility guarantees are given on\n\
                  compiler or generated code. Use it at your own risk!\n"

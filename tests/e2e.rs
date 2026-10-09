@@ -1537,6 +1537,8 @@ mod method_access_flags_e2e;
 mod method_generic_signature_e2e;
 #[path = "method_pool_order_e2e.rs"]
 mod method_pool_order_e2e;
+#[path = "missing_dependency_supertypes_e2e.rs"]
+mod missing_dependency_supertypes_e2e;
 #[path = "missing_return_check_e2e.rs"]
 mod missing_return_check_e2e;
 #[path = "mixed_numeric_comparison_e2e.rs"]

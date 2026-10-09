@@ -107,6 +107,7 @@ impl LangFeatures {
 /// turn it on and get that behaviour.
 const MODELED_FEATURES: &[&str] = &[
     "AllowAccessToProtectedFieldFromSuperCompanion",
+    "AllowEagerSupertypeAccessibilityChecks",
     "AnnotationsInMetadata",
     "BareArrayClassLiteral",
     "ContextParameters",
@@ -374,8 +375,11 @@ mod tests {
     fn modeled_features_are_the_frontend_and_backend_capability_boundary() {
         assert!(LangFeatures::models("ContextParameters"));
         assert!(LangFeatures::models("FullValueClasses"));
-        assert!(!LangFeatures::models(
+        assert!(LangFeatures::models(
             "AllowEagerSupertypeAccessibilityChecks"
+        ));
+        assert!(!LangFeatures::models(
+            "ErrorAboutDataClassCopyVisibilityChange"
         ));
     }
 

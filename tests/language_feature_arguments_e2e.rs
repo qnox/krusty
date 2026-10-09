@@ -8,33 +8,6 @@ use super::common;
 
 const SOURCE: &str = "package p\nclass Box(val v: String)\nfun box(): String = Box(\"OK\").v\n";
 
-/// Every file below `dir`, by its path relative to `dir`, with its bytes. A missing directory is an
-/// empty output.
-fn output_tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut found = Vec::new();
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(next) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&next) else {
-            continue;
-        };
-        for entry in entries {
-            let path = entry.expect("compiler output entry").path();
-            if path.is_dir() {
-                pending.push(path);
-            } else {
-                let name = path
-                    .strip_prefix(dir)
-                    .expect("a file below the output root")
-                    .to_string_lossy()
-                    .into_owned();
-                found.push((name, std::fs::read(&path).expect("read an output file")));
-            }
-        }
-    }
-    found.sort();
-    found
-}
-
 /// Compile [`SOURCE`] with both compilers under `arguments`; both must exit alike, report the same
 /// words, and write the same output tree byte for byte, which is empty when they fail.
 fn assert_like_kotlinc(arguments: &[&str]) {
@@ -61,13 +34,17 @@ fn assert_like_kotlinc(arguments: &[&str]) {
         (Some(kotlinc_code), kotlinc_stderr.as_str()),
         "{arguments:?}"
     );
-    let expected = output_tree(&path("kotlinc"));
+    let expected = common::output_tree(&path("kotlinc"));
     assert_eq!(
         expected.is_empty(),
         kotlinc_code != 0,
         "kotlinc writes output exactly when it succeeds"
     );
-    assert_eq!(output_tree(&path("krusty")), expected, "{arguments:?}");
+    assert_eq!(
+        common::output_tree(&path("krusty")),
+        expected,
+        "{arguments:?}"
+    );
     let _ = std::fs::remove_dir_all(work);
 }
 
