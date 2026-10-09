@@ -16,7 +16,7 @@ fn abstract_writer_classpath() -> std::path::PathBuf {
 
 fn expect_box_with_classpath(source: &str, stem: &str, dependency: &std::path::Path) {
     let classpath = [dependency.to_path_buf()];
-    let reference = common::e2e::kotlinc_box_result_with_classpath(source, &classpath);
+    let reference = common::kotlinc_box_result_with_classpath(source, &classpath);
     assert_eq!(reference, "OK", "{stem}: kotlinc fixture must succeed");
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
@@ -143,17 +143,17 @@ class ValueSource : Source() {
 
 fun box(): String = ValueSource().value()
 "#;
-    common::e2e::expect_box_same_as_kotlinc(source, "sealed-own-abstract");
+    common::expect_box_same_as_kotlinc(source, "sealed-own-abstract");
 }
 
 fn assert_diagnostics(
     name: &str,
     source: &str,
     classpath: &[std::path::PathBuf],
-    krusty: common::e2e::CompilerError,
-    reference: common::e2e::CompilerError,
+    krusty: common::CompilerError,
+    reference: common::CompilerError,
 ) {
-    let result = common::e2e::compiler_diagnostics(&[(name, source)], classpath);
+    let result = common::compiler_diagnostics(&[(name, source)], classpath);
     assert_eq!(result.krusty_code, 1, "{name}: {}", result.krusty_stderr);
     assert_eq!(
         result.reference_code, 1,
@@ -161,13 +161,30 @@ fn assert_diagnostics(
         result.reference_stderr
     );
     assert_eq!(result.krusty_stdout, "", "{name}");
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), [krusty]);
     assert_eq!(
-        common::e2e::compiler_errors(&result.krusty_stderr),
-        [krusty]
+        common::compiler_errors(&result.reference_stderr),
+        [reference]
     );
     assert_eq!(
-        common::e2e::compiler_errors(&result.reference_stderr),
-        [reference]
+        common::compiler_warnings(&result.krusty_stderr),
+        [],
+        "{name}"
+    );
+    assert_eq!(
+        common::compiler_warnings(&result.reference_stderr),
+        [],
+        "{name}"
+    );
+    assert_eq!(
+        common::compiler_module_warnings(&result.krusty_stderr),
+        [],
+        "{name}"
+    );
+    assert_eq!(
+        common::compiler_module_warnings(&result.reference_stderr),
+        [],
+        "{name}"
     );
 }
 
@@ -176,7 +193,7 @@ fn assert_diagnostics(
 /// messages, counts and order are part of the regression contract.
 #[test]
 fn concrete_and_open_classes_must_discharge_both_abstract_obligation_sources() {
-    use common::e2e::CompilerError;
+    use common::CompilerError;
 
     let dependency = abstract_writer_classpath();
     for (name, prefix, column) in [
