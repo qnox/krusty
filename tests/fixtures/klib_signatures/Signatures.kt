@@ -42,3 +42,16 @@ expect fun platform(): Int
 expect class Box() {
     fun open(): Int
 }
+
+/** A companion-block member signs `#static`; a companion extension signs `#companion@` and its class. */
+class Registry {
+    companion {
+        fun create(): Registry = Registry()
+        val size: Int get() = 0
+        var label: String = ""
+    }
+}
+
+companion fun Registry.named(name: String): Registry = Registry()
+
+companion val Registry.capacity: Int get() = 1

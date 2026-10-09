@@ -4574,8 +4574,11 @@ code is the one the code generator already names: provider-owned bodies through 
   metadata) and a KLIB writer (over krusty's own declarations) agree on one identity. A type
   parameter is located by its declaration identity (metadata's `TypeParameter.id`), never by its
   spelling. The mask is an explicit input: `IS_EXPECT` from the declaration's and its classes'
-  metadata flags, `IS_NATIVE_INTEROP_LIBRARY` from the library. Enum classes get their implicit
-  `values`, `valueOf` and `entries` (static members, `#static`). The unit tests pin a kotlinc-native
+  metadata flags, `IS_NATIVE_INTEROP_LIBRARY` from the library. Metadata's `isStatic` marks a
+  `companion { … }` block member, signed `#static`, and a companion extension, whose recorded
+  receiver is the extended class and is signed `#companion@<ClassId>` in place of a receiver. Enum
+  classes get their implicit static `values` and `valueOf`, and `entries` only when the class
+  metadata sets `hasEnumEntries`. The unit tests pin a kotlinc-native
   fixture KLIB (`tests/fixtures/klib_signatures`) whose metadata must sign every declaration and
   accessor exactly as its IR declares them. Over the Kotlin/Native 2.4.20 stdlib it also reproduces
   every public function, property, accessor, constructor and class signature; the misses are

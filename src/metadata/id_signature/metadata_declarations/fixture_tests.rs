@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! kotlinc-native -p library -Xmulti-platform -Xexpect-actual-classes \
-//!     -Xfragments=common,native \
+//!     -XXLanguage:+CompanionBlocksAndExtensions -Xfragments=common,native \
 //!     -Xfragment-sources=common:Signatures.kt,native:NativeSignatures.kt \
 //!     -Xfragment-refines=native:common -o signatures Signatures.kt NativeSignatures.kt
 //! ```
@@ -227,8 +227,8 @@ fn metadata_signs_every_declaration_exactly_as_the_serialized_ir() {
         "computed from metadata but not declared by IR"
     );
     assert_eq!(serialized, computed);
-    assert_eq!(serialized.public.len(), 32);
-    assert_eq!(serialized.accessors.len(), 8);
+    assert_eq!(serialized.public.len(), 39);
+    assert_eq!(serialized.accessors.len(), 12);
 
     // Renaming every type parameter leaves the member ids alone; only the paths differ.
     let member_id = |path: &str| {
@@ -242,4 +242,50 @@ fn metadata_signs_every_declaration_exactly_as_the_serialized_ir() {
     assert_eq!(member_id("Outer.shadow"), member_id("Renamed.shadow"));
     assert_eq!(member_id("Outer.keep"), member_id("Renamed.keep"));
     assert_ne!(member_id("Outer.shadow"), member_id("Outer.keep"));
+}
+
+/// Companion-block members and companion extensions are the declarations metadata marks static;
+/// the exact comparison above holds only because their signatures carry `#static`.
+#[test]
+fn metadata_marks_companion_block_members_and_companion_extensions_static() {
+    let archive = fixture();
+    let mut statics = Vec::new();
+    for fragment in archive.package_fragments() {
+        let bytes = archive.read(&fragment.entry).expect("fragment reads");
+        let package = parse_package_fragment_checked(&bytes).expect("fragment decodes");
+        statics.extend(
+            package
+                .functions
+                .iter()
+                .filter(|function| function.is_static)
+                .map(|function| function.name.clone()),
+        );
+        statics.extend(
+            package
+                .properties
+                .iter()
+                .filter(|property| property.is_static)
+                .map(|property| property.name.clone()),
+        );
+        for (qualified, class) in &package.classes {
+            statics.extend(
+                class
+                    .members
+                    .iter()
+                    .filter(|member| member.is_static)
+                    .map(|member| format!("{qualified}.{}", member.name)),
+            );
+        }
+    }
+    statics.sort();
+    assert_eq!(
+        statics,
+        [
+            "capacity",
+            "fixture/signatures/Registry.create",
+            "fixture/signatures/Registry.label",
+            "fixture/signatures/Registry.size",
+            "named",
+        ]
+    );
 }

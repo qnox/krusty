@@ -36,6 +36,22 @@ const IS_NATIVE_INTEROP_LIBRARY: u64 = 1 << 2;
 /// `MangleConstant.STATIC_MEMBER_MARK`.
 const STATIC_MEMBER: &str = "#static";
 
+/// `MangleConstant.COMPANION_EXTENSION_MARK`, followed by `@` and the extended class's id.
+const COMPANION_EXTENSION: &str = "#companion@";
+
+/// How a declaration is reached, which the mangler marks before its contexts and receiver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Placement<'a> {
+    /// A top-level declaration, or a class member with a dispatch receiver.
+    Ordinary,
+    /// A class member without a dispatch receiver: a `companion { … }` block member, or an enum
+    /// class's `values`, `valueOf` or `entries`.
+    Static,
+    /// A companion extension (`companion fun C.name`) of the class whose `ClassId` string
+    /// (`package/path/Outer.Inner`) this is. It takes the place of an extension receiver.
+    CompanionExtension { class_id: &'a str },
+}
+
 /// A type as the signature mangler sees it.
 pub trait SignatureType: Sized {
     /// The identity of a type parameter's declaration. Mangling locates a referenced parameter
@@ -160,8 +176,7 @@ pub struct CallableShape<'a, T: SignatureType> {
     pub vararg: Option<usize>,
     pub type_parameters: Vec<TypeParameterShape<'a, T>>,
     pub expect: bool,
-    /// A class member without a dispatch receiver: an enum class's `values` or `valueOf`.
-    pub static_member: bool,
+    pub placement: Placement<'a>,
 }
 
 /// A property.
@@ -171,8 +186,7 @@ pub struct PropertyShape<'a, T: SignatureType> {
     pub receiver: Option<&'a T>,
     pub type_parameters: Vec<TypeParameterShape<'a, T>>,
     pub expect: bool,
-    /// A class member without a dispatch receiver: an enum class's `entries`.
-    pub static_member: bool,
+    pub placement: Placement<'a>,
 }
 
 /// Which accessor of a property.
@@ -261,7 +275,7 @@ pub fn accessor_signature<T: SignatureType>(
         vararg: None,
         type_parameters: property.type_parameters.clone(),
         expect: property.expect,
-        static_member: property.static_member,
+        placement: property.placement,
     };
     let mangled = mangle_callable(&container.scopes(&function.type_parameters), &function)?;
     let property_signature = property_signature(container, property)?;
@@ -290,9 +304,7 @@ fn mangle_callable<T: SignatureType>(
         }
     }
     let mut out = String::from(callable.name);
-    if callable.static_member {
-        out.push_str(STATIC_MEMBER);
-    }
+    placement(callable.placement, callable.receiver, &mut out)?;
     contexts(&callable.contexts, scopes, &mut out)?;
     if let Some(receiver) = callable.receiver {
         out.push('@');
@@ -318,9 +330,7 @@ fn mangle_property<T: SignatureType>(
     property: &PropertyShape<'_, T>,
 ) -> Result<String, ManglingError> {
     let mut out = String::new();
-    if property.static_member {
-        out.push_str(STATIC_MEMBER);
-    }
+    placement(property.placement, property.receiver, &mut out)?;
     contexts(&property.contexts, scopes, &mut out)?;
     if let Some(receiver) = property.receiver {
         out.push('@');
@@ -329,6 +339,27 @@ fn mangle_property<T: SignatureType>(
     type_parameters(&property.type_parameters, scopes, &mut out)?;
     out.push_str(property.name);
     Ok(out)
+}
+
+fn placement<T>(
+    placement: Placement<'_>,
+    receiver: Option<&T>,
+    out: &mut String,
+) -> Result<(), ManglingError> {
+    match placement {
+        Placement::Ordinary => {}
+        Placement::Static => out.push_str(STATIC_MEMBER),
+        Placement::CompanionExtension { .. } if receiver.is_some() => {
+            return Err(ManglingError::new(
+                "a companion extension has no extension receiver of its own",
+            ));
+        }
+        Placement::CompanionExtension { class_id } => {
+            out.push_str(COMPANION_EXTENSION);
+            out.push_str(class_id);
+        }
+    }
+    Ok(())
 }
 
 /// Context parameters are written only when there are any.

@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use super::mangling::{
     accessor_signature, callable_signature, class_signature, enum_entry_signature,
     property_signature, Accessor, CallableShape, ClassScope, DeclarationContainer, ManglingError,
-    PropertyShape, SignatureType, TypeParameterShape, TypeView,
+    Placement, PropertyShape, SignatureType, TypeParameterShape, TypeView,
 };
 use super::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::semantic::{
@@ -154,6 +154,32 @@ pub fn metadata_enum_entry_signature(
     with_container(container, |container| enum_entry_signature(container, name))
 }
 
+/// How a metadata declaration is reached and the extension receiver its signature writes.
+/// Metadata marks both a `companion { … }` block member and a companion extension `isStatic`;
+/// only the companion extension records a receiver, which is the class it extends.
+fn placement<'a>(
+    name: &str,
+    is_static: bool,
+    receiver: Option<&'a KotlinType>,
+) -> Result<(Placement<'a>, Option<&'a KotlinType>), ManglingError> {
+    match (is_static, receiver) {
+        (false, receiver) => Ok((Placement::Ordinary, receiver)),
+        (true, None) => Ok((Placement::Static, None)),
+        (
+            true,
+            Some(KotlinType::Class {
+                internal,
+                args,
+                nullable: false,
+                ..
+            }),
+        ) if args.is_empty() => Ok((Placement::CompanionExtension { class_id: internal }, None)),
+        (true, Some(_)) => Err(ManglingError::new(format!(
+            "companion extension {name} extends a type that is not a class"
+        ))),
+    }
+}
+
 /// A top-level function's identity.
 pub fn package_function_signature(
     container: MetadataContainer<'_>,
@@ -181,28 +207,40 @@ pub fn package_function_signature(
             })
         })
         .transpose()?;
+    let (placement, receiver) = placement(
+        &function.name,
+        function.is_static,
+        function.receiver.as_ref(),
+    )?;
     let shape = CallableShape {
         name: &function.name,
         contexts: contexts.iter().collect(),
-        receiver: function.receiver.as_ref(),
+        receiver,
         params: params.iter().collect(),
         vararg,
         type_parameters: type_parameters(&function.formals),
         expect: function.is_expect,
-        static_member: false,
+        placement,
     };
     with_container(container, |container| callable_signature(container, &shape))
 }
 
-fn package_property_shape(property: &KotlinProperty) -> PropertyShape<'_, KotlinType> {
-    PropertyShape {
+fn package_property_shape(
+    property: &KotlinProperty,
+) -> Result<PropertyShape<'_, KotlinType>, ManglingError> {
+    let (placement, receiver) = placement(
+        &property.name,
+        property.is_static,
+        property.receiver.as_ref(),
+    )?;
+    Ok(PropertyShape {
         name: &property.name,
         contexts: property.context_params.iter().collect(),
-        receiver: property.receiver.as_ref(),
+        receiver,
         type_parameters: type_parameters(&property.formals),
         expect: property.is_expect,
-        static_member: false,
-    }
+        placement,
+    })
 }
 
 /// A top-level property's identity.
@@ -210,7 +248,7 @@ pub fn package_property_signature(
     container: MetadataContainer<'_>,
     property: &KotlinProperty,
 ) -> Result<KlibPublicIdSignature, ManglingError> {
-    let shape = package_property_shape(property);
+    let shape = package_property_shape(property)?;
     with_container(container, |container| property_signature(container, &shape))
 }
 
@@ -243,7 +281,7 @@ pub fn package_property_accessor_signature(
     accessor: MetadataAccessor,
 ) -> Result<KlibAccessorIdSignature, ManglingError> {
     let accessor = metadata_accessor(accessor, &property.name, property.is_var, &property.ty)?;
-    let shape = package_property_shape(property);
+    let shape = package_property_shape(property)?;
     with_container(container, |container| {
         accessor_signature(container, &shape, accessor)
     })
@@ -258,13 +296,15 @@ fn member_property_shape(
             member.name
         )));
     }
+    let (placement, receiver) =
+        placement(&member.name, member.is_static, member.receiver.as_ref())?;
     Ok(PropertyShape {
         name: &member.name,
         contexts: member.context_params.iter().collect(),
-        receiver: member.receiver.as_ref(),
+        receiver,
         type_parameters: type_parameters(&member.formals),
         expect: member.is_expect,
-        static_member: member.is_static,
+        placement,
     })
 }
 
@@ -290,15 +330,17 @@ pub fn member_signature(
         let shape = member_property_shape(member)?;
         return with_container(container, |container| property_signature(container, &shape));
     }
+    let (placement, receiver) =
+        placement(&member.name, member.is_static, member.receiver.as_ref())?;
     let shape = CallableShape {
         name: &member.name,
         contexts: member.context_params.iter().collect(),
-        receiver: member.receiver.as_ref(),
+        receiver,
         params: member.params.iter().collect(),
         vararg: member.vararg,
         type_parameters: type_parameters(&member.formals),
         expect: member.is_expect,
-        static_member: member.is_static,
+        placement,
     };
     with_container(container, |container| callable_signature(container, &shape))
 }
@@ -318,7 +360,7 @@ pub fn constructor_signature(
         vararg: constructor.vararg,
         type_parameters: Vec::new(),
         expect: false,
-        static_member: false,
+        placement: Placement::Ordinary,
     };
     with_container(container, |container| callable_signature(container, &shape))
 }
@@ -350,7 +392,7 @@ pub fn enum_class_member_signatures(
         vararg: None,
         type_parameters: Vec::new(),
         expect: false,
-        static_member: true,
+        placement: Placement::Static,
     };
     let entries = PropertyShape {
         name: "entries",
@@ -358,7 +400,7 @@ pub fn enum_class_member_signatures(
         receiver: None,
         type_parameters: Vec::new(),
         expect: false,
-        static_member: true,
+        placement: Placement::Static,
     };
     with_container(container, |container| {
         Ok(EnumClassMemberSignatures {

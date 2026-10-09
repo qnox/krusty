@@ -2685,6 +2685,7 @@ pub struct BuiltinConstructor {
 /// (`E` unbounded, `T : Comparable<T>`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltinTypeParam {
+    pub id: crate::metadata::semantic::KotlinTypeParameterId,
     pub name: String,
     pub bounds: Vec<BuiltinTy>,
     pub variance: crate::types::TypeVariance,

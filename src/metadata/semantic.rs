@@ -184,6 +184,9 @@ pub struct KotlinFunction {
     pub is_operator: bool,
     pub is_infix: bool,
     pub is_expect: bool,
+    /// Whether metadata declares this function static: a companion extension
+    /// (`companion fun C.name`), which KLIB signature mangling marks static.
+    pub is_static: bool,
     pub context_count: usize,
     /// Qualified identities of annotations declared on this function.
     pub annotations: Vec<crate::types::TypeName>,
@@ -208,6 +211,9 @@ pub struct KotlinProperty {
     pub visibility: Visibility,
     pub is_var: bool,
     pub is_expect: bool,
+    /// Whether metadata declares this property static: a companion extension property
+    /// (`companion val C.name`), which KLIB signature mangling marks static.
+    pub is_static: bool,
     pub context_count: usize,
     pub constant: Option<crate::libraries::LibConst>,
 }

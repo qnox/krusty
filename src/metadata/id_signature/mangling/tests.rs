@@ -45,7 +45,7 @@ fn function<'a>(
         vararg: None,
         type_parameters,
         expect: false,
-        static_member: false,
+        placement: Placement::Ordinary,
     }
 }
 
@@ -194,7 +194,7 @@ fn every_declaration_of_an_interop_library_is_marked() {
         receiver: None,
         type_parameters: Vec::new(),
         expect: true,
-        static_member: false,
+        placement: Placement::Ordinary,
     };
     let setter = accessor_signature(interop, &errno, Accessor::Setter { value: &int }).unwrap();
     assert_eq!(setter.mask(), 5);
@@ -223,5 +223,60 @@ fn a_vararg_index_outside_the_value_parameters_is_an_error() {
             .unwrap_err()
             .to_string(),
         "f marks parameter 1 as vararg but has 1 value parameters"
+    );
+}
+
+/// A companion extension's `ClassId` takes the place of its extension receiver and it is not
+/// `#static`; a companion-block member is `#static`. Ids from kotlinc-native 2.4.20.
+#[test]
+fn a_companion_extension_names_its_class_and_a_companion_block_member_is_static() {
+    let package = ["fixture".to_owned(), "signatures".to_owned()];
+    let string = Model::Class("kotlin.String", Vec::new());
+    let companion = Placement::CompanionExtension {
+        class_id: "fixture/signatures/Registry",
+    };
+    let mut named = function("named", vec![&string], Vec::new());
+    named.placement = companion;
+    assert_eq!(
+        callable_signature(top_level(&package), &named)
+            .unwrap()
+            .member_id()
+            .map(|id| id as i64),
+        Some(5_839_546_477_226_615_603)
+    );
+    let capacity = PropertyShape {
+        name: "capacity",
+        contexts: Vec::new(),
+        receiver: None,
+        type_parameters: Vec::new(),
+        expect: false,
+        placement: companion,
+    };
+    assert_eq!(
+        property_signature(top_level(&package), &capacity)
+            .unwrap()
+            .member_id()
+            .map(|id| id as i64),
+        Some(-2_355_867_111_305_705_361)
+    );
+    let getter = accessor_signature(top_level(&package), &capacity, Accessor::Getter).unwrap();
+    assert_eq!(getter.member_id() as i64, 4_019_905_350_587_221_818);
+
+    let mut create = function("create", Vec::new(), Vec::new());
+    create.placement = Placement::Static;
+    assert_eq!(
+        callable_signature(top_level(&package), &create)
+            .unwrap()
+            .member_id(),
+        Some(mangled_id("create#static(){}"))
+    );
+
+    let registry = Model::Class("fixture.signatures.Registry", Vec::new());
+    named.receiver = Some(&registry);
+    assert_eq!(
+        callable_signature(top_level(&package), &named)
+            .unwrap_err()
+            .to_string(),
+        "a companion extension has no extension receiver of its own"
     );
 }

@@ -1287,6 +1287,7 @@ fn semantic_function(
         is_operator: function.is_operator,
         is_infix: function.is_infix,
         is_expect: function.is_expect,
+        is_static: function.is_static,
         context_count: context_types.len(),
         annotations,
     });
@@ -1432,6 +1433,9 @@ fn semantic_property(
     let flags = modern_flags
         .or(compatibility_flags)
         .unwrap_or(crate::metadata::property_flags::DEFAULT);
+    // The static bit exists only in the modern flag layout.
+    let is_static =
+        modern_flags.is_some_and(|flags| flags & crate::metadata::property_flags::IS_STATIC != 0);
     let receiver = match (receiver_body, receiver_id) {
         (None, None) => None,
         (body, id) => Some(tables.type_ref(body, id, &type_parameters, "property receiver")?),
@@ -1461,8 +1465,7 @@ fn semantic_property(
         is_infix: false,
         is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
             == crate::metadata::property_flags::MODALITY_ABSTRACT,
-        is_static: modern_flags
-            .is_some_and(|flags| flags & crate::metadata::property_flags::IS_STATIC != 0),
+        is_static,
         return_value_status: modern_flags.map_or_else(Default::default, |flags| {
             crate::types::ReturnValueStatus::from_metadata(
                 (flags >> crate::metadata::property_flags::RETURN_VALUE_STATUS_SHIFT) & 0x3,
@@ -1484,6 +1487,7 @@ fn semantic_property(
         visibility,
         is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
         is_expect: flags & crate::metadata::property_flags::IS_EXPECT != 0,
+        is_static,
         context_count: context_params.len(),
         context_params,
         constant,

@@ -77,6 +77,7 @@ fn function(
         is_operator: false,
         is_infix: false,
         is_expect: false,
+        is_static: false,
         context_count: 0,
         annotations: Vec::new(),
     }
@@ -233,6 +234,7 @@ fn an_extension_property_with_a_type_parameter() {
         visibility: Visibility::Public,
         is_var: false,
         is_expect: false,
+        is_static: false,
         context_count: 0,
         constant: None,
     };
@@ -312,6 +314,7 @@ fn an_extension_property_without_type_parameters() {
         visibility: Visibility::Public,
         is_var: false,
         is_expect: false,
+        is_static: false,
         context_count: 0,
         constant: None,
     };
@@ -331,6 +334,7 @@ fn a_getter_is_a_function_with_the_property_receiver_and_type_parameters() {
         visibility: Visibility::Public,
         is_var: false,
         is_expect: false,
+        is_static: false,
         context_count: 0,
         constant: None,
     };
