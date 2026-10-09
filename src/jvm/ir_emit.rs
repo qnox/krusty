@@ -322,6 +322,9 @@ fn marker_accessor_emitted_last(ir: &IrFile, class: &IrClass) -> bool {
 /// (a backend bug to fix) from an unsupported construct (skip the file).
 #[derive(Default)]
 pub(crate) struct EmitRun {
+    /// Complete physical instance-field names, built at most once for each class touched by this
+    /// emission run and reused by every field declaration, accessor, metadata, and bytecode use.
+    instance_field_names: std::cell::RefCell<instance_field_names::InstanceFieldNamePlans>,
     /// The reason an inline splice failed during emission (a required stdlib-inline call the backend
     /// could not splice), else `None`.
     inline_bail: std::cell::RefCell<Option<String>>,
@@ -929,7 +932,12 @@ fn attach_declared_method_debug(
 /// reference gets `@Nullable` (primitives get nothing). Covers the ctor's reference params, each
 /// getter's reference return, and each `var` setter's reference param — the shape kotlinc emits for a
 /// class with reference-typed properties. Call after `attach_synth_debug_tables`.
-fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
+fn attach_synth_nullability(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    run: &EmitRun,
+    cw: &mut ClassWriter,
+) {
     cw.realize_leading_late_fields(); // The fields heading the table annotate first.
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     // A reference type (descriptor `L…;`/`[…`) gets `@NotNull` unless it is `Ty::Nullable`, then
@@ -948,7 +956,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
                 continue;
             }
             if let Some(a) = ann(&f.name, f.ty) {
-                cw.set_field_nullability(&instance_field_jvm_name(ir, c, f), a);
+                cw.set_field_nullability(&instance_field_jvm_name(ir, run, c, index), a);
             }
         }
     }
@@ -1749,6 +1757,7 @@ fn emit_pass(
     // A facade's accessors map to the file's first line.
     static_accessors::emit(
         ir,
+        env.run,
         &env.run.static_accessor_plan.borrow(),
         StaticOwner::Facade,
         facade,
@@ -2210,6 +2219,7 @@ fn emit_declared_property_accessors(
         formatter,
         param_assertions,
         override_results: env.override_results,
+        run: env.run,
     };
     for property in &c.properties {
         declared_property_accessor::emit(
@@ -2285,6 +2295,7 @@ fn emit_scheduled_member(
                 formatter: signature_formatter,
                 param_assertions,
                 override_results: env.override_results,
+                run: env.run,
             };
             declared_property_accessor::emit(
                 &accessor_owner,
@@ -2708,7 +2719,7 @@ fn emit_class(
             .map(|(_, parameter)| parameter.as_str())
             .or(field.type_param.as_deref());
         let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter).field;
-        let physical_name = instance_field_jvm_name(ir, c, field);
+        let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let field_desc = type_descriptor(jvm_value_ty(ty));
         // Coroutine continuation fields are compiler-generated storage rather than Kotlin
         // properties, so they are visited eagerly and receive no nullability annotation. Declared
@@ -2944,7 +2955,7 @@ fn emit_class(
                             }
                             ctor.aload(0);
                             load(*t, slot, &mut ctor);
-                            let physical_name = instance_field_jvm_name(ir, c, &c.fields[field_i]);
+                            let physical_name = instance_field_jvm_name(ir, env.run, c, field_i);
                             let fref =
                                 e.cw.fieldref(&fq_name, &physical_name, &type_descriptor(*t));
                             ctor.putfield(fref, slot_words(*t) as i32);
@@ -3227,6 +3238,7 @@ fn emit_class(
     static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
     static_accessors::emit(
         ir,
+        env.run,
         &env.run.static_accessor_plan.borrow(),
         StaticOwner::Class(c.fq_name),
         facade,
@@ -3265,7 +3277,7 @@ fn emit_class(
     let early_value_nullability =
         c.is_value && computed.is_some() && !is_coroutine_state_machine(c);
     if early_value_nullability {
-        attach_synth_nullability(ir, c, &mut cw);
+        attach_synth_nullability(ir, c, env.run, &mut cw);
     }
     cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
@@ -3289,7 +3301,7 @@ fn emit_class(
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         if !early_value_nullability {
-            attach_synth_nullability(ir, c, &mut cw);
+            attach_synth_nullability(ir, c, env.run, &mut cw);
         }
     }
     if continuation_metadata.is_some() {
@@ -3640,6 +3652,7 @@ fn emit_interface_class(
     // defaults this interface does not redeclare.
     static_accessors::emit(
         ir,
+        env.run,
         &env.run.static_accessor_plan.borrow(),
         StaticOwner::Class(c.fq_name),
         facade,
@@ -3718,7 +3731,7 @@ fn emit_interface_class(
             synth_debug_tables::PrimaryConstructorDebug::default(),
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
-        attach_synth_nullability(ir, c, &mut cw);
+        attach_synth_nullability(ir, c, env.run, &mut cw);
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
@@ -4487,7 +4500,7 @@ fn emit_enum_class(
             },
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
-        attach_synth_nullability(ir, c, &mut cw);
+        attach_synth_nullability(ir, c, env.run, &mut cw);
         // kotlinc's synthesized enum members: `valueOf` names its parameter `value` in a
         // LocalVariableTable (with no LineNumberTable), and `getEntries` returns `@NotNull`.
         // `values()` gets neither.
@@ -6632,7 +6645,7 @@ impl<'a> Emitter<'a> {
         if let Some(setter) = setter.filter(|_| !direct_field || field.is_none()) {
             return Some(accessor(setter));
         }
-        let field = field?;
+        let (field_index, field) = field?;
         if !direct_field {
             return Some(PropertyAccess::Accessor {
                 owner,
@@ -6645,7 +6658,7 @@ impl<'a> Emitter<'a> {
         }
         Some(PropertyAccess::Field {
             owner,
-            name: instance_field_jvm_name(self.ir, class, field),
+            name: instance_field_jvm_name(self.ir, self.run, class, field_index),
             descriptor: type_descriptor(jvm_value_ty(&field.ty)),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
             is_static: static_storage(self.ir, class),
@@ -7202,7 +7215,7 @@ impl<'a> Emitter<'a> {
             IrExpr::NewArray { array_type, .. } => ir_ty_to_jvm(array_type),
             IrExpr::UnitInstance => Ty::obj("kotlin/Unit"),
             IrExpr::CurrentContinuation => Ty::obj("kotlin/coroutines/Continuation"),
-            IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
+            IrExpr::Try { result, .. } => ir_ty_to_jvm(&self.try_physical_result(e, *result)),
             other => diverging_value_type::diverging_value_ty(other).unwrap_or(Ty::Error),
         }
     }

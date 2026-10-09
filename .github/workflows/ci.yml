@@ -111,6 +111,12 @@ jobs:
           echo "record=$record" >> "$GITHUB_OUTPUT"
           echo "write=$write" >> "$GITHUB_OUTPUT"
           echo "compile_missing=$compile_missing" >> "$GITHUB_OUTPUT"
+      # The native runtime's thread drivers run on every supported architecture: built for each
+      # with clang and lld, and run under QEMU's user-mode emulators (tests/native_runtime_e2e.rs).
+      - name: install cross-architecture runners
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user lld
       - name: just ci
         env:
           # The e2e suite is one process. An instrumented run is about seventeen minutes; thirty

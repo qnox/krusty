@@ -54,7 +54,7 @@ impl Emitter<'_> {
         let field = class.fields.get(field_index as usize)?;
         Some(StoredConstructorProperty {
             class_name: class.fq_name(),
-            field_name: instance_field_jvm_name(self.ir, class, field),
+            field_name: instance_field_jvm_name(self.ir, self.run, class, field_index as usize),
             ty: field.ty,
         })
     }
@@ -84,7 +84,7 @@ impl Emitter<'_> {
             .flatten();
         let class_decl = &self.ir.classes[class as usize];
         let field = &class_decl.fields[index as usize];
-        let name = instance_field_jvm_name(self.ir, class_decl, field);
+        let name = instance_field_jvm_name(self.ir, self.run, class_decl, index as usize);
         let field_ty = jvm_value_ty(&field.ty);
         let owner = class_decl.fq_name();
         if static_storage(self.ir, class_decl) {
@@ -99,6 +99,7 @@ impl Emitter<'_> {
             super::static_accessors::cross_class_backing_field_method(
                 self.cw,
                 self.ir,
+                self.run,
                 &self.facade,
                 &planned,
                 reader,
@@ -215,7 +216,7 @@ impl Emitter<'_> {
             return false;
         }
         let owner = class_decl.fq_name();
-        let name = instance_field_jvm_name(self.ir, class_decl, field);
+        let name = instance_field_jvm_name(self.ir, self.run, class_decl, index as usize);
 
         self.emit_value(receiver, code);
         code.dup();

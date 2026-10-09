@@ -9714,6 +9714,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   result boundary. Tests: `tests/native_boxed_numbers_e2e.rs`
   (`a_generic_result_widened_to_a_nullable_primitive_keeps_its_null`); the box corpus's
   `boxing/kt84727.kt` in the native lane.
+- **Native: `E.entries` and `enumEntries<E>()` are one `EnumEntriesList` per enum.** Kotlin/Native
+  assigns an enum's `$ENTRIES` during class initialization, after every constant and before the
+  companion. The enum's initializer does the same: it builds the list over a fresh `values()` array
+  into a static slot rooted for the collector, and a failed initialization withdraws it with the
+  constants. A read initializes the enum, then loads the slot. A constant's own construction reads
+  `null`, and the companion reads every constant, as kotlinc-native 2.4.20 does.
+  `enumEntries<E>()`, realized after inline specialization, reads the same slot, so
+  `E.entries === E.entries === enumEntries<E>()`. The list's class is
+  `kotlin.enums.EnumEntriesList` and implements `kotlin.enums.EnumEntries` besides `List`,
+  `Collection`, `Iterable` and `RandomAccess`, so `is`, `as?` and `as` against `EnumEntries` hold
+  for it and fail for any other list. It equals, hashes and renders like `listOf` of the same
+  constants, and its iterator is `kotlin.collections.AbstractList.IteratorImpl`. The one divergence
+  is the existing enum retry rule: after a failed initialization krusty builds the enum again on the
+  next access, where Kotlin/Native and the JVM fail every later access; a successful rebuild's
+  entries hold the rebuilt constants. Tests: `tests/native_enum_entries_e2e.rs`.
 - **Native: a null cast to an erased type parameter names the parameter.** `null as T` with
   `T : Any` has no descriptor left to test against, yet it still raises a NullPointerException.
   Kotlin/Native 2.4.10 and 2.4.20 raise it with no message. krusty uses the JVM's text, rendered
@@ -9724,6 +9739,47 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_null_cast_to_an_erased_type_parameter_names_it_by_its_owner`),
   `tests/unboxing_coercion_e2e.rs`
   (`failed_null_casts_name_primitive_and_qualified_type_parameter_targets`).
+- **Native: threads share one heap under one mutator lock.** A static program's threads are the
+  runtime's own: `kt_thread_start` registers the new thread (released, its argument a root) before
+  `clone` creates it on a stack the runtime maps, as Go does with no C library, with an
+  inaccessible guard page directly below it so that a thread that overflows its stack faults
+  instead of running into a neighbouring mapping; `kt_thread_join`
+  waits with the lock released and frees the stack. An exception a started thread leaves uncaught
+  ends the process, reported on `Thread-<n>` as the JVM names an unnamed thread. Creating the kernel
+  thread is the one replaceable step, so a program that links a C library starts them with
+  `pthread_create` instead. A thread that foreign code starts attaches when it calls into Kotlin
+  (`kt_callback_enter`) and detaches when that outermost call returns; a callback on a thread that
+  is already attached re-enters as that thread, found by its kernel thread id. Every attached thread
+  shares the heap, as Kotlin/Native's memory model has them share it. One lock keeps it consistent:
+  a thread holds it while it runs Kotlin or the runtime, and releases it for a call into foreign
+  code (`kt_native_enter`/`kt_native_leave`), which is where threads block. So collection stays a
+  stop-the-world mark-sweep without safepoints: the collector holds the lock, and every other
+  attached thread is released with its callee-saved registers and stack pointer recorded. The entry
+  that records them is assembly, because a C function's prologue may reuse a callee-saved register
+  before its first statement, and the value it held would then be in no root at all. The exception
+  slot generated code reads after every call stays one global, saved into the thread on release and
+  restored on acquisition, so an exception in flight is its own thread's; a callback starts with
+  none. An exception a callback leaves uncaught ends the process, reported on the thread's name
+  (`Thread-<n>` for one foreign code started, numbered with the runtime's own), while the lock is
+  still held, as Kotlin/Native ends one that escapes a `staticCFunction`: the foreign code it would
+  return to cannot handle it, and a heap reference handed back across the release would be held by
+  no root while another thread collects. Every hand-off is a release and an acquire, so
+  `@Volatile` needs nothing beyond ordinary accesses. Not yet: threads running Kotlin in parallel,
+  and preemption of a thread that loops in Kotlin without calling out, which needs safepoint polls in
+  generated code. Portability: what is per-OS is two primitives in `krusty_sys.h` (wait and wake on
+  a word, and the calling thread's id; Linux's futex and gettid) and the assembly register spill,
+  per architecture as the syscall shim already is. A macOS or Windows runtime supplies its own pair
+  (`__ulock_wait`/`__ulock_wake` and `pthread_threadid_np`; `WaitOnAddress`/`WakeByAddressSingle`
+  and `GetCurrentThreadId`) and keeps the lock, the registry and the scan unchanged; the runtime is
+  cross-compiled per target by clang as before. Tests: `tests/native_runtime_e2e.rs`
+  (`threads_started_by_foreign_code_share_the_heap_through_collections`,
+  `each_thread_keeps_its_own_exception_in_flight`,
+  `threads_the_runtime_starts_keep_their_argument_until_they_run`,
+  `an_exception_a_started_thread_leaves_uncaught_ends_the_process_on_its_name`,
+  `an_exception_a_callback_leaves_uncaught_ends_the_process_holding_the_lock`,
+  `a_started_threads_stack_has_a_guard_below_it`), each run on x86_64, aarch64 and riscv64 (the
+  architectures other than the host's built with clang and lld and run under QEMU's user-mode
+  emulators, which CI installs and must use), and `tests/native_concurrency_e2e.rs`.
 - **Native: the process boundary — `main(args)` and standard input.** The program's entry is the
   `main` the frontend selected (`IrFile::entry_point`): the backend realizes that record and reads
   its form only to decide whether to build and pass the argument array, so `main(args:

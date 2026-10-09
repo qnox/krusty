@@ -89,6 +89,42 @@ const KType kt_type_list = {KT_ANONYMOUS("kotlin.collections.List"),
                             .interfaces = kt_list_interfaces,
                             .interface_count = sizeof(kt_list_interfaces) / sizeof(KType *)};
 
+/* `kotlin.enums.EnumEntries`, the interface `E.entries` is typed as. Like the collection
+   interfaces it has no instances of its own, and lists its bases flattened. */
+static const KType *const kt_enum_entries_bases[] = {
+    &kt_type_list_interface, &kt_type_collection_interface, &kt_type_iterable_interface};
+const KType kt_type_enum_entries_interface = {
+    KT_NAMED("kotlin.enums.", "EnumEntries"),
+    .instance_size = sizeof(KObjectHeader),
+    .super = &kt_type_any,
+    .vtable = kt_any_vtable,
+    .vtable_length = 3,
+    .interfaces = kt_enum_entries_bases,
+    .interface_count = sizeof(kt_enum_entries_bases) / sizeof(KType *)};
+
+/* `E.entries`: the same read-only list over an array of the constants, under the class
+   Kotlin/Native's `enumEntries(values)` answers, and an `EnumEntries` besides every interface
+   `listOf`'s list is. */
+static const KType *const kt_enum_entries_interfaces[] = {
+    &kt_type_enum_entries_interface, &kt_type_list_interface, &kt_type_collection_interface,
+    &kt_type_iterable_interface, &kt_type_random_access_interface};
+static const KType kt_type_enum_entries = {
+    KT_NAMED("kotlin.enums.", "EnumEntriesList"),
+    .instance_size = sizeof(KList),
+    .reference_count = 1,
+    .reference_offsets = kt_list_offsets,
+    .super = &kt_type_any,
+    .vtable = kt_list_vtable,
+    .vtable_length = 3,
+    .interfaces = kt_enum_entries_interfaces,
+    .interface_count = sizeof(kt_enum_entries_interfaces) / sizeof(KType *)};
+
+/* Either class of the immutable list; both are a `KList` over an array that is every element. */
+static kt_boolean kt_is_read_only_list(KRef value) {
+    return value != NULL &&
+           (value->header.type == &kt_type_list || value->header.type == &kt_type_enum_entries);
+}
+
 /* ---- a growable list ------------------------------------------------------------------------
 
    `ArrayList`/`MutableList`. The same shape as `KList` with a SIZE beside the storage, because the
@@ -163,10 +199,14 @@ const KType kt_type_list_iterator = {KT_ANONYMOUS("kotlin.collections.Iterator")
                                      KT_LIST_ITERATOR_TYPE};
 static const KType kt_type_array_list_iterator = {KT_NAMED("kotlin.collections.ArrayList.", "Itr"),
                                                   KT_LIST_ITERATOR_TYPE};
+/* `EnumEntriesList` is an `AbstractList`, and its iterator is that class's own. */
+static const KType kt_type_abstract_list_iterator = {
+    KT_NAMED("kotlin.collections.AbstractList.", "IteratorImpl"), KT_LIST_ITERATOR_TYPE};
 
 static kt_boolean kt_is_list_iterator(KRef value) {
     return value != NULL && (value->header.type == &kt_type_list_iterator ||
-                             value->header.type == &kt_type_array_list_iterator);
+                             value->header.type == &kt_type_array_list_iterator ||
+                             value->header.type == &kt_type_abstract_list_iterator);
 }
 
 KRef kt_list_of(KRef elements) {
@@ -178,6 +218,13 @@ KRef kt_list_of(KRef elements) {
 }
 
 KRef kt_list_empty(void) { return kt_list_of(kt_array_new(&kt_type_array, 0)); }
+
+/* `E.entries` over `values`, an array the caller made for it alone and never writes again. */
+KRef kt_enum_entries_of(KRef values) {
+    KList *list = (KList *)kt_gc_allocate(&kt_type_enum_entries, sizeof(KList));
+    list->elements = values;
+    return (KRef)list;
+}
 
 
 /* `listOf(x)` — Kotlin's own single-element overload, which is a DIFFERENT declaration from the
@@ -200,6 +247,23 @@ kt_int kt_list_size(KRef list) {
 }
 
 kt_boolean kt_list_is_empty(KRef list) { return kt_list_size(list) == 0; }
+
+/* `Collection.size` over a receiver the static type does not narrow to a list or a set: every
+   collection this runtime makes is one of the two list shapes or something a map holds (a set, or
+   a map's key, value or entry view). The generator never reaches here with a collection of the
+   program's own; see `FileLowering::implements_collection_of`. */
+kt_int kt_collection_size(KRef collection) {
+    if (collection->header.type == &kt_type_list || kt_is_mutable_list(collection)) {
+        return kt_list_size(collection);
+    }
+    kt_int held = kt_map_collection_size(collection);
+    if (held < 0) {
+        KT_FAIL("krusty: a runtime collection was expected here\n");
+    }
+    return held;
+}
+
+kt_boolean kt_collection_is_empty(KRef collection) { return kt_collection_size(collection) == 0; }
 
 KRef kt_list_get(KRef list, kt_int index) {
     KRef elements = ((const KList *)list)->elements;
@@ -395,7 +459,7 @@ void kt_mutable_list_plus_assign(KRef self, KRef value) { kt_mutable_list_add(se
    to it would see its own list modified at the second step. */
 void kt_mutable_list_add_all(KRef self, KRef elements) {
     if (elements != NULL
-        && (elements->header.type == &kt_type_list || kt_is_mutable_list(elements))) {
+        && (kt_is_read_only_list(elements) || kt_is_mutable_list(elements))) {
         kt_int count = kt_list_size(elements);
         for (kt_int at = 0; at < count; at++) {
             kt_mutable_list_add(self, kt_list_get(elements, at));
@@ -480,9 +544,95 @@ void kt_mutable_list_clear(KRef self) {
     list->modifications++;
 }
 
+/* ---- `Collection` / `MutableCollection` members over whichever runtime collection is behind ----
+
+   A receiver typed by `Collection` itself may hold either list shape, a set, or one of a map's
+   views; the descriptor says which, and each member below hands over to that shape's own. A list
+   the runtime made read-only answers a mutation the way Kotlin's does. */
+
+static kt_boolean kt_read_only_list(KRef value) {
+    if (value->header.type != &kt_type_list) {
+        return false;
+    }
+    kt_throw(kt_throwable_new(&kt_type_unsupported_operation_exception, NULL));
+    return true;
+}
+
+/* `containsAll`: every element of `elements` is one `contains` answers for. */
+kt_boolean kt_collection_contains_all(KRef self, KRef elements) {
+    KRef iterator = kt_iterable_iterator(elements);
+    while (kt_more(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return false;
+        }
+        kt_boolean held = kt_iterable_contains(self, element);
+        if (kt_raised() || !held) {
+            return false;
+        }
+    }
+    return !kt_raised();
+}
+
+kt_boolean kt_mutable_collection_add(KRef self, KRef value) {
+    if (kt_read_only_list(self)) {
+        return false;
+    }
+    return kt_is_mutable_list(self) ? kt_mutable_list_add(self, value) : kt_set_add(self, value);
+}
+
+kt_boolean kt_mutable_collection_remove(KRef self, KRef value) {
+    if (kt_read_only_list(self)) {
+        return false;
+    }
+    return kt_is_mutable_list(self) ? kt_mutable_list_remove(self, value)
+                                    : kt_set_remove(self, value);
+}
+
+void kt_mutable_collection_clear(KRef self) {
+    if (kt_read_only_list(self)) {
+        return;
+    }
+    if (kt_is_mutable_list(self)) {
+        kt_mutable_list_clear(self);
+    } else {
+        kt_map_clear(self);
+    }
+}
+
+/* `addAll`: whether the receiver changed. A list appends every element (Kotlin's answer is that the
+   argument was not empty), by `kt_mutable_list_add_all`'s snapshot; a set adds each it lacks. */
+kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements) {
+    if (kt_read_only_list(self)) {
+        return false;
+    }
+    if (kt_is_mutable_list(self)) {
+        kt_int before = kt_list_size(self);
+        kt_mutable_list_add_all(self, elements);
+        return !kt_raised() && kt_list_size(self) != before;
+    }
+    kt_boolean changed = false;
+    KRef iterator = kt_iterable_iterator(elements);
+    while (kt_more(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return false;
+        }
+        changed = kt_set_add(self, element) || changed;
+        if (kt_raised()) {
+            return false;
+        }
+    }
+    return changed;
+}
+
 KRef kt_list_iterator(KRef list) {
-    const KType *type = kt_is_mutable_list(list) ? &kt_type_array_list_iterator
-                                                 : &kt_type_list_iterator;
+    const KType *type = &kt_type_list_iterator;
+    if (kt_is_mutable_list(list)) {
+        type = &kt_type_array_list_iterator;
+    } else if (list->header.type == &kt_type_enum_entries) {
+        type = &kt_type_abstract_list_iterator;
+    }
     KListIterator *iterator = (KListIterator *)kt_gc_allocate(type, sizeof(KListIterator));
     iterator->list = list;
     iterator->at = 0;
@@ -1176,7 +1326,7 @@ KRef kt_iterable_iterator(KRef iterable) {
     /* Either list shape: the one list iterator serves both, because its cursor is an index and the
        bound it compares against is `kt_list_size`, which both answer. */
     if (iterable != NULL
-        && (iterable->header.type == &kt_type_list || kt_is_mutable_list(iterable))) {
+        && (kt_is_read_only_list(iterable) || kt_is_mutable_list(iterable))) {
         return kt_list_iterator(iterable);
     }
     if (iterable != NULL && kt_is_array(iterable->header.type)) {
@@ -1272,7 +1422,7 @@ static kt_int kt_iterable_size(KRef iterable) {
         kt_null_receiver();
         return 0;
     }
-    if (iterable->header.type == &kt_type_list || kt_is_mutable_list(iterable)) {
+    if (kt_is_read_only_list(iterable) || kt_is_mutable_list(iterable)) {
         return kt_list_size(iterable);
     }
     kt_int held = kt_map_collection_size(iterable);
@@ -2031,7 +2181,7 @@ static kt_boolean kt_list_equals(KRef self, KRef other) {
     }
     kt_int size = kt_list_size(self);
     KRef left = ((const KList *)self)->elements;
-    if (other->header.type == &kt_type_list || kt_is_mutable_list(other)) {
+    if (kt_is_read_only_list(other) || kt_is_mutable_list(other)) {
         if (size != kt_list_size(other)) {
             return false;
         }

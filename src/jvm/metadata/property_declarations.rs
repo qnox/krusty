@@ -376,9 +376,8 @@ pub(super) fn decode_properties(
             receiver_class,
             is_extension: receiver_body.is_some(),
             is_companion_block_member: receiver_body.is_none()
-                && modern_flags.is_some_and(|flags| {
-                    flags & crate::metadata::property_flags::IS_COMPANION != 0
-                }),
+                && modern_flags
+                    .is_some_and(|flags| flags & crate::metadata::property_flags::IS_STATIC != 0),
         });
     }
     Ok(out)

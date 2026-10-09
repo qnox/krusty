@@ -195,7 +195,7 @@ impl super::Emitter<'_> {
                 // The null comparison itself is built in lowering from the ordinary comparison node,
                 // so the branch/stackmap shape stays the one every other comparison uses.
                 let c = &self.ir.classes[*class as usize];
-                let name = instance_field_jvm_name(self.ir, c, &c.fields[*index as usize]);
+                let name = instance_field_jvm_name(self.ir, self.run, c, *index as usize);
                 let fty = c.fields[*index as usize].ty;
                 let jt = jvm_value_ty(&fty);
                 let owner = c.fq_name();

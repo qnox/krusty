@@ -312,3 +312,16 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("primitive class literal at run time"), "OK");
 }
+
+#[test]
+fn unit_class_literal_is_the_unit_object_class() {
+    // `Unit` is `void` only as a return type; its class literal is `kotlin.Unit`'s own class.
+    const SRC: &str = "import kotlin.reflect.KClass\n\
+fun name(c: KClass<*>) = c.java.name\n\
+fun box(): String {\n\
+    val unit: KClass<Unit> = Unit::class\n\
+    val result = name(Unit::class) + \",\" + Unit::class.java.name + \",\" + unit.simpleName + \",\" + Nothing::class.java.name\n\
+    return if (result == \"kotlin.Unit,kotlin.Unit,Unit,java.lang.Void\") \"OK\" else \"fail: $result\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "UnitClassLiteral");
+}

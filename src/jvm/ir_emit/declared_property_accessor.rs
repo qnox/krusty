@@ -10,6 +10,7 @@ pub(super) struct AccessorOwner<'a> {
     pub(super) formatter: &'a JvmSignatureFormatter<'a>,
     pub(super) param_assertions: bool,
     pub(super) override_results: &'a crate::jvm::override_results::OverrideResults,
+    pub(super) run: &'a EmitRun,
 }
 
 /// Emit `property`'s synthesized accessor on `side`, unless the class declares that accessor itself.
@@ -26,6 +27,7 @@ pub(super) fn emit(
         formatter,
         param_assertions,
         override_results,
+        run,
     } = *owner;
     // `@JvmField` IS the declaration's realization: the field is the property's public face and
     // kotlinc emits no accessor beside it. Synthesizing one here would advertise a method the
@@ -102,7 +104,7 @@ pub(super) fn emit(
             &[],
         );
         let mut g = CodeBuilder::new(1);
-        let physical_name = instance_field_jvm_name(ir, c, field);
+        let physical_name = instance_field_jvm_name(ir, run, c, field_index as usize);
         let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
         if static_storage(ir, c) {
             g.getstatic(fref, slot_words(field_jt) as i32);
@@ -199,7 +201,7 @@ pub(super) fn emit(
             }
             load(accessor_jt, 1, &mut st);
             emit_backing_field_write_adaptation(ir, cw, &mut st, property, accessor_jt, field_jt);
-            let physical_name = instance_field_jvm_name(ir, c, field);
+            let physical_name = instance_field_jvm_name(ir, run, c, field_index as usize);
             let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
             if statics_storage {
                 st.putstatic(fref, slot_words(field_jt) as i32);
