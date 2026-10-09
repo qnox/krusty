@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use krusty::jvm::compilation_inputs::JvmCompilationInputInventory;
+use krusty::jvm::compilation_inputs::{selected_jdk_feature_release, JvmCompilationInputInventory};
 use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaModes};
 use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
@@ -19,8 +19,8 @@ use crate::kotlinc_arguments::{self, Catalog, Disposition, Lifecycle, Origin};
 mod arguments;
 
 use arguments::{
-    apply, collect_sources, finish_language_settings, take_reference_version, unsupported,
-    ParsedSettings,
+    apply, collect_sources, finish_jvm_target, finish_language_settings, take_reference_version,
+    unsupported, ParsedSettings,
 };
 
 /// Stable diagnostic names exposed through kotlinc's `-Xwarning-level` contract. A name enters
@@ -178,6 +178,10 @@ pub struct Options {
     /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
+    /// `-Xjdk-release=<v>`: the JDK release whose API the sources compile against. kotlinc also
+    /// derives the JVM target from it. krusty compiles against the selected JDK's own API only, so
+    /// [`Options::check_jdk_release`] refuses a release other than that JDK's.
+    pub jdk_release: Option<u16>,
     /// The compiler-plugin switches (`-Xplugin`, `-P`, `-Xcompiler-plugin`), resolved against krusty's
     /// extension registry by [`Options::resolve_plugins`].
     pub plugins: PluginConfig,
@@ -223,6 +227,7 @@ impl Default for Options {
             no_reflect: false,
             no_jdk: false,
             jvm_target_major: None,
+            jdk_release: None,
             kotlin_reference_version: None,
             metadata_version: None,
             jvm_default: JvmDefaultMode::default(),
@@ -298,6 +303,7 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             message: kotlinc_arguments::render(&message),
         })
         .collect();
+    finish_jvm_target(&mut opts, &parsed);
     finish_language_settings(&mut opts, parsed, catalog, lifecycle);
     opts
 }
@@ -371,6 +377,30 @@ fn plugin_jar_problems(plugins: &PluginConfig) -> Vec<String> {
 }
 
 impl Options {
+    /// Refuse an `-Xjdk-release` whose API krusty would not compile against. kotlinc compiles
+    /// against the JDK's own modules when the release is the JDK's own, and against that release's
+    /// signatures in the JDK's `lib/ct.sym` otherwise; krusty implements only the first. Kept out
+    /// of `parse` so parsing stays env-independent.
+    pub fn check_jdk_release(&self) -> Result<(), String> {
+        let Some(release) = self.jdk_release else {
+            return Ok(());
+        };
+        if self.no_jdk {
+            return Ok(());
+        }
+        match selected_jdk_feature_release(self.jdk_home.as_deref()) {
+            Some(jdk) if jdk == release => Ok(()),
+            Some(jdk) => Err(format!(
+                "-Xjdk-release={release} compiles against the JDK {release} API from ct.sym, \
+                 which krusty does not implement; the selected JDK is {jdk}"
+            )),
+            None => Err(format!(
+                "-Xjdk-release={release} needs the selected JDK's release, and its `release` file \
+                 does not name one"
+            )),
+        }
+    }
+
     /// The classpath to drive resolution with: the user's `-cp` entries plus kotlinc's implicit
     /// standard library and JDK modules, unless their corresponding `-no-*` option disables them.
     /// Kept out of `parse` so parsing stays env-independent.

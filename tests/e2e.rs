@@ -1285,6 +1285,8 @@ mod java_static_callable_reference_e2e;
 mod java_static_field_e2e;
 #[path = "java_supertype_type_arguments_e2e.rs"]
 mod java_supertype_type_arguments_e2e;
+#[path = "jdk_release_e2e.rs"]
+mod jdk_release_e2e;
 #[path = "jimage_compressed_e2e.rs"]
 mod jimage_compressed_e2e;
 #[path = "js_backend_coverage_e2e.rs"]

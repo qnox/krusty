@@ -210,6 +210,8 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     for problem in cli::classpath_entry_problems(&opts.classpath) {
         eprintln!("{problem}");
     }
+    opts.check_jdk_release()
+        .map_err(|error| format!("krusty: error: {error}\n"))?;
     let effective_classpath = opts
         .effective_classpath()
         .map_err(|error| format!("krusty: {error}\n"))?;
