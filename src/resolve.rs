@@ -212,7 +212,8 @@ use signature_collection::{
     TopLevelFunctionConflictGroups, TopLevelFunctionConflictKey,
     TopLevelFunctionConflictRegistration,
 };
-pub use signature_collection::{collect_signatures, collect_signatures_with_cp};
+#[cfg(test)]
+pub(crate) use signature_collection::{collect_signatures, collect_signatures_with_cp};
 pub(crate) use signature_collection::{
     collect_signatures_with_cp_and_plugins, collect_signatures_with_cp_headers_and_local_contexts,
 };
@@ -35992,11 +35993,13 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     info
 }
 
-pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {
+#[cfg(test)]
+pub(crate) fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {
     check_file_at(file, diags.current_file(), syms, diags)
 }
 
-pub fn check_file_at(
+#[cfg(test)]
+pub(crate) fn check_file_at(
     file: &File,
     file_index: u32,
     syms: &mut SymbolTable,
@@ -36005,7 +36008,8 @@ pub fn check_file_at(
     check_file_on_checker_stack(file, file_index, None, syms, diags)
 }
 
-pub fn check_file_in_source_set(
+#[cfg(test)]
+pub(crate) fn check_file_in_source_set(
     files: &[File],
     file_index: u32,
     syms: &mut SymbolTable,
@@ -36120,6 +36124,7 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
 /// reaching [`crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH`]. This keeps the explicit depth guard —
 /// not the calling thread's stack — authoritative without moving non-`Send` symbols or
 /// caller-defined platform state (see [`crate::wide_stack`]).
+#[cfg(test)]
 fn check_file_on_checker_stack(
     file: &File,
     file_index: u32,
