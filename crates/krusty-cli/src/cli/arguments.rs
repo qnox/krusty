@@ -195,6 +195,9 @@ pub(super) fn take_reference_version(arguments: Vec<String>, opts: &mut Options)
 #[derive(Default)]
 pub(super) struct ParsedSettings {
     language_version: Option<String>,
+    /// The last `-jvm-target` and `-Xjdk-release` values, settled together by [`finish_jvm_target`].
+    jvm_target: Option<String>,
+    jdk_release: Option<String>,
     api_version: Option<String>,
     /// `@Enables`/`@Disables` arguments, which kotlinc applies first.
     common_feature_arguments: Vec<String>,
@@ -403,10 +406,8 @@ pub(super) fn apply(
         "-no-jdk" => opts.no_jdk = flag,
         // Honor the target: it sets the emitted class-file version. An unrecognized value is
         // reported like any other ignored option rather than silently defaulting.
-        "-jvm-target" => match jvm_target_to_major(text) {
-            Some(major) => opts.jvm_target_major = Some(major),
-            None => opts.ignored.push(format!("-jvm-target {text}")),
-        },
+        "-jvm-target" => parsed.jvm_target = Some(text.to_string()),
+        "-Xjdk-release" => parsed.jdk_release = Some(text.to_string()),
         // `-jvm-default` decides the JVM shape of an interface's members with bodies; the legacy
         // `-Xjvm-default` spelling names the same three shapes differently.
         "-jvm-default" => apply_jvm_default(opts, name, text, JvmDefaultMode::parse),
@@ -448,6 +449,74 @@ pub(super) fn apply(
         "-help" | "-X" => opts.print_help |= flag,
         _ => unreachable!("{name} is listed as applied but has no rule"),
     }
+}
+
+/// Settle the JVM target from `-jvm-target` and `-Xjdk-release`, as kotlinc's
+/// `configureJvmTargetAndRelease` does: a release names the target unless it predates 1.8, and an
+/// explicit target must agree with it.
+pub(super) fn finish_jvm_target(opts: &mut Options, parsed: &ParsedSettings) {
+    let target = parsed.jvm_target.as_deref();
+    let target = match parsed.jdk_release.as_deref() {
+        None => target,
+        Some(release) => {
+            let value = match release {
+                "1.6" => Some(6),
+                "1.7" => Some(7),
+                "1.8" => Some(8),
+                _ => release.parse::<u16>().ok(),
+            };
+            match value {
+                Some(value) if value >= 6 => {
+                    opts.jdk_release = Some(value);
+                    if let Some(target) = target {
+                        if !jvm_target_matches_release(target, release) {
+                            let suggestion = if value < 8 {
+                                "Please change the value of the 'jvm-target' option to 1.8"
+                            } else {
+                                "Please remove the '-jvm-target' option"
+                            };
+                            opts.errors.push(format!(
+                                "'-Xjdk-release={release}' option conflicts with '-jvm-target {target}'. {suggestion}"
+                            ));
+                        }
+                    }
+                }
+                _ => opts
+                    .errors
+                    .push(format!("Unknown JDK release version: {release}")),
+            }
+            match release {
+                "6" | "1.6" | "7" | "1.7" => {
+                    if target.is_none() {
+                        opts.errors.push(format!(
+                            "'-Xjdk-release={release}' option requires JVM target explicitly set to 1.8. \
+                             Please specify the '-jvm-target' option"
+                        ));
+                    }
+                    target
+                }
+                "8" => Some("1.8"),
+                _ => Some(release),
+            }
+        }
+    };
+    // Honor the target: it sets the emitted class-file version. An unrecognized value is reported
+    // like any other ignored option rather than silently defaulting.
+    if let Some(target) = target {
+        match jvm_target_to_major(target) {
+            Some(major) => opts.jvm_target_major = Some(major),
+            None => opts.ignored.push(format!("-jvm-target {target}")),
+        }
+    }
+}
+
+/// kotlinc's `isCompatibleJvmTargetAndRelease`: target 1.8 also serves releases 6 and 7, so the
+/// standard library can compile against them.
+fn jvm_target_matches_release(target: &str, release: &str) -> bool {
+    if target == "1.8" {
+        return matches!(release, "6" | "1.6" | "7" | "1.7" | "8" | "1.8");
+    }
+    target == release
 }
 
 pub(super) fn finish_language_settings(
