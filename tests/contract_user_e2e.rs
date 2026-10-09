@@ -5,6 +5,7 @@
 //! (`returns(true) implies (this@f is Err)`). Round-tripped on the JVM.
 
 use super::common;
+use super::diagnostics_parity_support::{errors, ObservedError};
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
@@ -81,6 +82,89 @@ fun box(): String = if (\"ab\".use() && !(null as String?).use()) \"OK\" else \"
         run(SRC).expect("implicit receiver contract smartcast compiles + runs"),
         "OK"
     );
+}
+
+const COMPETING_RECEIVERS: &str = "import kotlin.contracts.ExperimentalContracts\n\
+import kotlin.contracts.contract\n\
+\n\
+class Left(val v: String)\n\
+class Right(val v: Int)\n\
+\n\
+@OptIn(ExperimentalContracts::class)\n\
+fun Left?.ready(): Boolean {\n\
+\x20   contract { returns(true) implies (this@ready != null) }\n\
+\x20   return this != null\n\
+}\n\
+\n\
+fun Left?.innerSelected(inner: Left?): Int = inner.run {\n\
+\x20   if (ready()) this.v.length + this@innerSelected.v.length else -1\n\
+}\n\
+\n\
+fun Left?.outerSelected(inner: Right?): Int = inner.run {\n\
+\x20   if (ready()) this@outerSelected.v.length + this.v else -1\n\
+}\n";
+
+/// Two nullable implicit receivers compete for `ready()`, and both expose a member `v`. The
+/// contract narrows exactly the receiver overload selection bound: the innermost `Left?` in
+/// `innerSelected`, the OUTER `Left?` in `outerSelected`, where the nearer `Right?` is not
+/// applicable. The other receiver stays nullable, so kotlinc and krusty report the same two errors.
+#[test]
+fn implicit_receiver_contract_narrows_only_the_selected_receiver() {
+    let result = common::compiler_diagnostics(
+        &[("Receivers.kt", COMPETING_RECEIVERS)],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    let expected = vec![
+        ObservedError {
+            file: "Receivers.kt".to_string(),
+            line: 14,
+            column: 52,
+            message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable \
+                      receiver of type 'Left?'."
+                .to_string(),
+        },
+        ObservedError {
+            file: "Receivers.kt".to_string(),
+            line: 18,
+            column: 52,
+            message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable \
+                      receiver of type 'Right?'."
+                .to_string(),
+        },
+    ];
+    let mut krusty = errors(&result.krusty_stderr);
+    krusty.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+    assert_eq!(errors(&result.reference_stderr), expected);
+}
+
+/// The same competing receivers, each body using only the receiver its contract proved.
+#[test]
+fn implicit_receiver_contract_selected_receiver_runs() {
+    const SRC: &str = "import kotlin.contracts.ExperimentalContracts\n\
+import kotlin.contracts.contract\n\
+class Left(val v: String)\n\
+class Right(val v: Int)\n\
+@OptIn(ExperimentalContracts::class)\n\
+fun Left?.ready(): Boolean {\n\
+\x20   contract { returns(true) implies (this@ready != null) }\n\
+\x20   return this != null\n\
+}\n\
+fun Left?.innerSelected(inner: Left?): Int = inner.run {\n\
+\x20   if (ready()) this.v.length + (this@innerSelected?.v?.length ?: 10) else -1\n\
+}\n\
+fun Left?.outerSelected(inner: Right?): Int = inner.run {\n\
+\x20   if (ready()) this@outerSelected.v.length + (this?.v ?: 100) else -1\n\
+}\n\
+fun box(): String {\n\
+\x20   val a = (null as Left?).innerSelected(Left(\"ab\"))\n\
+\x20   val b = Left(\"xyz\").innerSelected(null)\n\
+\x20   val c = Left(\"four\").outerSelected(null)\n\
+\x20   val d = (null as Left?).outerSelected(Right(1))\n\
+\x20   return if (a == 12 && b == -1 && c == 104 && d == -1) \"OK\" else \"FAIL $a $b $c $d\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "ImplicitReceiverContractRun");
 }
 
 #[test]
