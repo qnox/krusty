@@ -7,10 +7,13 @@
 //! whole file is a `SEVERITY: message` line followed by ` ╰→ file`; one with the project as a whole
 //! is a `SEVERITY: message` line whose message runs to the next blank line. The closing line saying
 //! the command stopped is not a problem. The toolchain writes errors to stderr and warnings, before
-//! the command's result, to stdout.
+//! the command's result, to stdout. A conflict between two values is printed as its message alone,
+//! values and places on the indented lines after it; it is an error.
 
 use super::{ExpectedDiagnostic, ExpectedSeverity};
 
+/// A conflict between values is printed without a severity; it is an error.
+const CONFLICT: &str = "Conflicting values for property ";
 const SEVERITIES: [&str; 3] = ["WEAK WARNING", "WARNING", "ERROR"];
 const ABORT: [&str; 2] = [
     "ERROR: Aborting because there were errors in the Kotlin project file, please see above.",
@@ -50,6 +53,7 @@ fn location(root: &str, text: &str) -> Option<String> {
 /// Whether `line` starts a problem's rendering or is the closing line.
 fn starts_problem(line: &str) -> bool {
     ABORT.contains(&line)
+        || line.starts_with(CONFLICT)
         || severity(line).is_some()
         || line
             .trim_start()
@@ -128,6 +132,22 @@ pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<ExpectedDiagnostic>, &
                     rendered: format!("{severity}: {}", message.join("\\n")),
                 });
             }
+        } else if line.starts_with(CONFLICT) {
+            // Its values and their places run on indented lines, a blank line separating values.
+            let mut message = vec![line.replace(&format!("{root}/"), "")];
+            index += 1;
+            while let Some(next) = text(index).filter(|next| {
+                next.starts_with(' ')
+                    || next.is_empty()
+                        && text(index + 1).is_some_and(|after| after.starts_with("  - "))
+            }) {
+                index += 1;
+                message.push(next.replace(&format!("{root}/"), ""));
+            }
+            problems.push(ExpectedDiagnostic {
+                severity: ExpectedSeverity::Error,
+                rendered: format!("ERROR: {}", message.join("\\n")),
+            });
         } else {
             break;
         }

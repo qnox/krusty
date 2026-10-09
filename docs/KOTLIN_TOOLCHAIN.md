@@ -9,12 +9,43 @@ The reference is Kotlin Toolchain 0.13.0.
 
 - `krusty-toolchain [--project-dir=<path>] show modules [--format=plain|table]` prints exactly what
   `kotlin show modules` prints.
+- `krusty-toolchain [--project-dir=<path>] show settings [-m <module>]... [--all-modules]` prints
+  exactly what `kotlin show settings` prints for a JVM module's main fragment: every setting with
+  where its value comes from (a file, the default, or a default derived from another setting).
+- `krusty-toolchain [--project-dir=<path>] show dependencies [-m <module>]... [--all-modules]
+  [--include-tests]` prints exactly what `kotlin show dependencies` prints: each module's resolved
+  dependency graph for the compile and runtime classpaths of its main (and test) fragment. See
+  [Dependency resolution](#dependency-resolution).
 - Project discovery: the nearest directory at or above the current one with a `project.yaml`. A
   module file passed on the way that the project does not list makes its directory a single-module
   project.
 - `project.yaml`: `modules` (plain paths and globs) and `plugins`.
-- `module.yaml`: `product` and `description`. The other module properties are recognised (so a
-  misspelt one is reported) but not yet read.
+- `module.yaml` and the templates it applies (`apply`, transitively): `product`, `description`,
+  `dependencies` and `settings`, with `test-` and `@jvm` variants, read against the toolchain's
+  schema (`src/schema`). Of `repositories`, only `mavenLocal` is used; `layout` and `tasks` are
+  read but not yet used;
+  `plugins`, `mavenPlugins`, `aliases` and `pluginInfo` are accepted without being read.
+
+## Settings
+
+A module's files are read into value trees (`src/tree`): each value knows the file it is written
+in, whether it is a test value, and whether it is qualified `@jvm`. Refinement merges the trees as
+one fragment sees them, as the toolchain's `TreeRefiner` does: the most specific value of a
+property wins (the module beats its templates, a template beats the templates it applies, `@jvm`
+beats unqualified, a test value beats a main one in the test fragment); lists concatenate and
+objects merge, least specific first; equally specific different values are a conflict. Defaults
+fill what nothing set, defaults that name another setting are resolved after refinement, and an
+object missing a required property is reported and dropped.
+
+The module is refined as a whole and then as its main and test fragments, as the toolchain does,
+and each conflict is reported once. Settings written where they have no effect are reported as the
+toolchain reports them: a platform-agnostic setting under `@jvm`, a setting for another platform,
+and an application setting in a library. The `android` section is accepted without being read,
+since krusty-toolchain builds no Android modules and the toolchain only warns about it on a JVM
+module.
+
+Versions compare as Maven compares them (`maven_version.rs`), as the toolchain does for
+`compileIncrementally`.
 
 ## Reading rules
 
@@ -39,8 +70,50 @@ The reference is Kotlin Toolchain 0.13.0.
   Project-file errors stop before module files are read; module-file errors stop before module names
   are compared.
 
-The library's public surface is the command boundary: `model` (read a project), `diagnostic` and
-`show`. Discovery, the file-system inventory, YAML and the build-file readers are private.
+## Dependency resolution
+
+`src/maven` reads artifacts and `src/resolution` resolves graphs, ported from the toolchain's
+`dependency-resolution` and `frontend/dr`:
+
+- Artifacts are read from the toolchain's shared cache, `<cache root>/.m2.cache` (the cache root is
+  `KOTLIN_SHARED_CACHE_DIR`, else the platform's user cache directory followed by
+  `JetBrains/Kotlin`), and, when a module lists `mavenLocal` in its `repositories`, first from the
+  local Maven repository (`<localRepository>` of `~/.m2/settings.xml` or
+  `$M2_HOME/conf/settings.xml`, else `~/.m2/repository`). Only an absent settings file, or one
+  without `<localRepository>`, falls through to the next; one that cannot be read, is not
+  well-formed, or sets an empty location or one through a property is an error, where the
+  toolchain silently reads another repository. `mavenLocal` applies to the whole project. A file
+  is read from the first repository that has it; one that is there but cannot be read is a
+  problem, not a reason to read the next. Coordinates name a file only when each part
+  (every group segment, the artifact, version and classifier) is one file name: not empty, `.` or
+  `..`, and without `/`, `\`, `:` or NUL.
+- Every artifact in a printed graph must be read completely. An artifact in no repository
+  (krusty-toolchain does not download yet), metadata that does not parse, a classpath no variant
+  or more than one variant matches, and coordinates that name no file are errors, reported with
+  the metadata file and, when its parser says, the line and column, module by module and in the
+  order the graphs meet them, and `show dependencies` then prints no graph and fails. The
+  toolchain downloads what is missing and, for the rest, logs a warning or nothing and prints the
+  graph; these are deliberate differences.
+- An artifact's dependencies come from its Gradle module metadata when its POM carries the
+  `published-with-gradle-metadata` marker or it has no POM (the JVM variant for the classpath,
+  with platform dependencies, `available-at` and constraints), else from its effective POM
+  (parents, profiles for the module's JDK version, properties, imported BOMs, dependency
+  management, and the POM scopes of each classpath).
+- A graph is resolved in waves: within a wave, nodes requesting different versions of one
+  `group:module` are a conflict and are not expanded; between waves, every such node aligns on the
+  highest version (Maven's `ComparableVersion`), dependencies declared without a version take the
+  version their module's BOMs manage, and the nodes that changed are resolved again.
+- Each module is resolved on its own: its main and test fragments, each as one graph holding the
+  compile and the runtime classpath, with the modules it depends on, what they export to its
+  compile classpath and all they need at runtime, and the implicit dependencies the toolchain adds
+  (the standard library, the test framework, and the runtime libraries of enabled features).
+- What an artifact declares is read once per run for every module that reads it alike (the same
+  JDK version and `excludeDependencies`), and parsed POMs, effective POMs and module metadata
+  once per run.
+
+The library's public surface is the command boundary: `model` (read a project), `configuration`,
+`dependencies`, `diagnostic` and `show`. Discovery, the file-system inventory, YAML,
+the build-file readers, Maven metadata and resolution are private.
 
 ## Deliberate refusals
 
@@ -64,9 +137,30 @@ toolchain's own wrapper, `scripts/kotlin-toolchain/kotlin`, which pins the exact
 requires krusty-toolchain to report the same problems (file, line, column, severity, message) in
 the same order: the errors the toolchain writes to stderr, which must hold nothing else, and the
 warnings it writes to stdout. What stdout holds after the warnings is the command's result, and
-must equal krusty-toolchain's module table byte for byte (nothing, when the command fails). Module globs are checked the
-same way against the JDK matcher: `tests/cases/globs.tsv` lists patterns and paths, and
-`scripts/kotlin-toolchain/GlobOracle.java` judges them on the JDK `JAVA_HOME` names.
+must equal krusty-toolchain's module table byte for byte (nothing, when the command fails).
+Module globs are checked the same way against the JDK matcher: `tests/cases/globs.tsv` lists
+patterns and paths, and `scripts/kotlin-toolchain/GlobOracle.java` judges them on the JDK
+`JAVA_HOME` names.
+
+`tests/cases/settings/*.case` are checked the same way with `kotlin show settings --all-modules`:
+`tests/settings_cases.rs` requires the same problems and requires what stdout holds after the
+warnings to equal krusty-toolchain's settings byte for byte, including the line naming each module,
+which the toolchain pads to 1,500 columns. Strings are printed as the toolchain's `YamlSerializer`
+prints them: a value as it is, and a free-form map's key as written in the file, inside double
+quotes, neither escaped (`tests/cases/settings/hostile-strings.case`). Keys are matched as written
+too: a quoted key keeps its escapes.
+
+`tests/cases/dependencies/*.case` are checked with `kotlin show dependencies --all-modules
+--include-tests` on a project that resolves from a local Maven repository (`mavenLocal`):
+`tests/cases/dependencies/repository` (the standard library and the test framework) with the
+case's `m2/<path>` sections added, in the home directory both are given (`HOME` for
+krusty-toolchain, `-Duser.home` for the toolchain's JVM), with a fresh `KOTLIN_SHARED_CACHE_DIR`
+and an unreachable proxy, so every artifact a case resolves is in that repository.
+`tests/dependency_cases.rs` runs `krusty-toolchain` in the same layout and requires the same exit
+status, stdout and stderr, byte for byte, once each run's own directory is replaced by the same
+placeholder. Where krusty-toolchain refuses an artifact it cannot read completely, the case's
+`--- krusty-refusal` section holds its errors, `error` and a tab before each rendered line: they
+must be its complete stderr, with exit status 1 and nothing on stdout.
 
 `tests/support/oracle.rs` caches each reference's exit code and raw stdout and stderr (only a JVM's
 `Picked up JAVA_TOOL_OPTIONS` line is dropped from stderr) under

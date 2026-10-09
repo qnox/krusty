@@ -4,38 +4,19 @@
 //! are in `tests/cases/projects`; the toolchain's output comes from the cached oracle
 //! (`tests/support/oracle.rs`).
 
+#[path = "support/reported.rs"]
+mod reported;
 mod support;
 
 use std::path::Path;
 use std::process::{Command, Output};
 
-use krusty_toolchain::diagnostic::{Diagnostics, Severity};
+use krusty_toolchain::diagnostic::Diagnostics;
 use krusty_toolchain::{model, show};
+use reported::reported;
 use support::kotlin::{self, Invocation};
 use support::rendering::problems;
-use support::{ExpectedDiagnostic, ExpectedSeverity};
-
-fn expected_severity(severity: Severity) -> ExpectedSeverity {
-    match severity {
-        Severity::Error => ExpectedSeverity::Error,
-        Severity::Warning => ExpectedSeverity::Warning,
-        Severity::WeakWarning => ExpectedSeverity::WeakWarning,
-    }
-}
-
-fn reported(root: &Path, diagnostics: &Diagnostics) -> Vec<ExpectedDiagnostic> {
-    let prefix = format!("{}/", root.display());
-    diagnostics
-        .iter()
-        .map(|diagnostic| ExpectedDiagnostic {
-            severity: expected_severity(diagnostic.severity),
-            rendered: diagnostic
-                .to_string()
-                .replace(&prefix, "")
-                .replace('\n', "\\n"),
-        })
-        .collect()
-}
+use support::{ExpectedDiagnostic, ExpectedSeverity, KrustyExpected};
 
 fn run_toolchain(root: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_krusty-toolchain"))
@@ -54,6 +35,7 @@ fn every_project_case_is_read_as_the_toolchain_reads_it() {
         .map(|case| Invocation {
             case: &case.name,
             files: &case.files,
+            repository: None,
             args: &["show", "modules"],
         })
         .collect();
@@ -77,17 +59,21 @@ fn every_project_case_is_read_as_the_toolchain_reads_it() {
         let actual = reported(&root, &diagnostics);
         match &case.krusty {
             Some(krusty) => {
+                let expected = match krusty {
+                    KrustyExpected::Difference(diagnostics)
+                    | KrustyExpected::Refusal(diagnostics) => diagnostics,
+                };
                 let toolchain_diagnostics: Vec<ExpectedDiagnostic> =
                     errors.iter().chain(&warnings).cloned().collect();
-                if toolchain_diagnostics == krusty.diagnostics() {
+                if &toolchain_diagnostics == expected {
                     failures.push(format!(
                         "{name}: the `krusty` section is what the toolchain reports"
                     ));
                 }
-                if actual != krusty.diagnostics() {
+                if &actual != expected {
                     failures.push(format!(
                         "{name}:\n  expected {:#?}\n  actual   {actual:#?}",
-                        krusty.diagnostics()
+                        expected
                     ));
                 }
             }

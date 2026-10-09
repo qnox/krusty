@@ -82,7 +82,7 @@ impl<'a> FileReader<'a> {
     }
 
     /// Refuse a custom tag on `node`. The top node's tag is accepted, as the toolchain accepts it.
-    fn meet(&mut self, node: NodeId) {
+    pub fn meet(&mut self, node: NodeId) {
         let Some(position) = self.document.tag(node) else {
             return;
         };
@@ -123,6 +123,12 @@ impl<'a> FileReader<'a> {
     /// What `node` holds, met by the reader: a custom tag on it is refused.
     pub fn value(&mut self, node: NodeId) -> Value<'a> {
         self.meet(node);
+        self.shape(node)
+    }
+
+    /// What `node` holds, looked at without meeting it: for inferring what a value is before it
+    /// is read.
+    pub fn shape(&self, node: NodeId) -> Value<'a> {
         let document: &'a Document = self.document;
         match &document.node(node).kind {
             NodeKind::Scalar { value, style } if *style == Style::Plain && value.is_empty() => {
@@ -141,13 +147,11 @@ impl<'a> FileReader<'a> {
         }
     }
 
-    /// The text of a scalar key.
+    /// The text of a scalar key as written, which is what the toolchain matches and prints: a
+    /// quoted key loses its quotes but keeps its escapes.
     pub fn key(&self, key: NodeId) -> &'a str {
         let document: &'a Document = self.document;
-        match &document.node(key).kind {
-            NodeKind::Scalar { value, .. } => value,
-            _ => unreachable!("yaml.rs refuses non-scalar keys"),
-        }
+        document.spelling(key)
     }
 
     pub fn error(&mut self, node: NodeId, message: impl Into<String>) {

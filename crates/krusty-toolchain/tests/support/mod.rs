@@ -36,14 +36,6 @@ pub enum KrustyExpected {
     Refusal(Vec<ExpectedDiagnostic>),
 }
 
-impl KrustyExpected {
-    pub fn diagnostics(&self) -> &[ExpectedDiagnostic] {
-        match self {
-            Self::Difference(diagnostics) | Self::Refusal(diagnostics) => diagnostics,
-        }
-    }
-}
-
 pub struct Case {
     pub name: String,
     /// The project's files, by `/`-separated path below its root.
