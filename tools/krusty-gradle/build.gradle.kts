@@ -19,6 +19,27 @@ dependencies {
     compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.4.0")
 }
 
+// The plugin reads the compiler's own vendored kotlinc argument tables, so it resolves the same
+// short and deprecated spellings the compiler does without keeping a copy of its own.
+val kotlincArgumentTables = fileTree("../../crates/krusty-cli/src/kotlinc_arguments/releases") {
+    include("*.tsv")
+    exclude("*.features.tsv")
+}
+val kotlincArgumentResources = layout.buildDirectory.dir("generated/kotlinc-arguments")
+val kotlincArgumentTable = tasks.register("kotlincArgumentTable") {
+    val tables = kotlincArgumentTables
+    val output = kotlincArgumentResources.map { it.file("krusty/kotlinc-arguments.tsv") }
+    inputs.files(tables)
+    outputs.file(output)
+    doLast {
+        val text = tables.files.sortedBy { it.name }.joinToString("") { it.readText() }
+        output.get().asFile.apply { parentFile.mkdirs() }.writeText(text)
+    }
+}
+sourceSets.main {
+    resources.srcDir(files(kotlincArgumentResources).builtBy(kotlincArgumentTable))
+}
+
 gradlePlugin {
     plugins {
         create("krusty") {

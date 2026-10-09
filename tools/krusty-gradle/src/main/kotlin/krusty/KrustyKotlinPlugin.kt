@@ -409,41 +409,6 @@ private fun validateStructuredOptIns(markers: List<String>): List<String> {
     return markers
 }
 
-// Free arguments reach krusty verbatim, as KGP passes them to kotlinc: krusty parses them with
-// kotlinc's argument table, reports kotlinc's errors and warnings, and refuses an argument it does
-// not implement. Only the arguments this plugin derives from structured task inputs are refused
-// here.
-private fun validateFreeArguments(input: List<String>): ArrayList<String> {
-    for (argument in input) {
-        reservedFreeArgument(argument)?.let { owner ->
-            throw GradleException(
-                "freeCompilerArg '$argument' conflicts with $owner; configure the structured Gradle input instead",
-            )
-        }
-    }
-    return ArrayList(input)
-}
-
-private fun reservedFreeArgument(argument: String): String? {
-    fun isOption(vararg names: String): Boolean = names.any { argument == it || argument.startsWith("$it=") }
-    return when {
-        isOption("-d") -> "the plugin-owned destination"
-        isOption("-cp", "-classpath", "-class-path") -> "the task libraries classpath"
-        isOption("-Xfriend-paths") -> "the task friend paths"
-        isOption("-module-name") -> "compilerOptions.moduleName"
-        isOption("-jvm-target") -> "compilerOptions.jvmTarget"
-        isOption("-java-parameters") -> "compilerOptions.javaParameters"
-        isOption("-jdk-home", "-no-jdk") -> "compilerOptions.noJdk and the Java toolchain"
-        isOption("-no-stdlib", "-no-reflect") -> "the plugin-owned dependency policy"
-        isOption("-Xkotlin-reference-version") -> "the Kotlin Gradle plugin version"
-        isOption("-language-version") -> "compilerOptions.languageVersion"
-        isOption("-api-version") -> "compilerOptions.apiVersion"
-        isOption("-progressive") -> "compilerOptions.progressiveMode"
-        isOption("-Xplugin", "-P") -> "compiler plugin configuration"
-        else -> null
-    }
-}
-
 private fun supportedKotlinPluginVersion(version: String): String = when (version) {
     "2.4.0", "2.4.10", "2.4.20" -> version
     else -> throw GradleException("unsupported Kotlin Gradle plugin $version; expected 2.4.0, 2.4.10, or 2.4.20")

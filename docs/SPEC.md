@@ -12167,7 +12167,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unavailable to named `-Xwarning-level` policy and is removed by `-Xsuppress-version-warnings`.
   The Gradle plugin forwards `freeCompilerArgs` verbatim, so a free argument meets the same
   dispositions as on the command line; it refuses only the arguments it derives from structured
-  task inputs (`-d`, `-classpath`, `-module-name`, …), which a free copy would contradict.
+  task inputs (`-d`, `-classpath`, `-module-name`, …), which a free copy would contradict. It
+  walks the free arguments as kotlinc's parser does, resolving short and deprecated spellings
+  (`-cp`, `-Xprogressive`, `-module`) through the compiler's own vendored release tables, and
+  refuses `--`, any `@argfile`, and a free source path, since each could reach a plugin-owned
+  argument or input without naming it.
   (`tests/kotlinc_argument_conformance_e2e.rs` compares the table with the reference compiler and
   the parser with kotlinc's `parseCommandLineArguments` over every argument and value form;
   `crates/krusty-cli/src/kotlinc_arguments/tokenize.rs` unit tests;

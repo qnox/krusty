@@ -799,6 +799,38 @@ mod tests {
                     "freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
                 ),
                 (
+                    "free-end-of-options",
+                    "freeCompilerArg '--' would make the arguments after it sources; add sources to the task's source set instead",
+                ),
+                (
+                    "free-argfile",
+                    "freeCompilerArg '@overrides.args' is an argument file, which could hide plugin-owned arguments; pass its arguments as freeCompilerArgs instead",
+                ),
+                (
+                    "free-source",
+                    "freeCompilerArg 'Extra.kt' would be compiled as a source; add sources to the task's source set instead",
+                ),
+                (
+                    "classpath-alias",
+                    "freeCompilerArg '-cp' conflicts with the task libraries classpath; configure the structured Gradle input instead",
+                ),
+                (
+                    "progressive-alias",
+                    "freeCompilerArg '-Xprogressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
+                ),
+                (
+                    "compiler-plugin-alias",
+                    "freeCompilerArg '-Xcompiler-plugin=forbidden.jar' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
+                ),
+                (
+                    "reference-version-free-argument",
+                    "freeCompilerArg '-Xkotlin-reference-version=2.4.0' conflicts with the Kotlin Gradle plugin version; configure the structured Gradle input instead",
+                ),
+                (
+                    "dependency-policy-free-argument",
+                    "freeCompilerArg '-no-stdlib=false' conflicts with the plugin-owned dependency policy; configure the structured Gradle input instead",
+                ),
+                (
                     "all-warnings-as-errors",
                     "krusty does not support compilerOptions.allWarningsAsErrors",
                 ),
@@ -875,6 +907,7 @@ mod tests {
                     refused("-Xjdk-release=17"),
                 ),
                 ("free-werror", "-Werror", refused("-Werror")),
+                ("progressive-mode", "-progressive", refused("-progressive")),
                 (
                     "warning-level-bad-severity",
                     "-Xwarning-level=REDUNDANT_CLI_ARG:loud",
@@ -2192,6 +2225,15 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "old-language-version" -> languageVersion.set(KotlinVersion.fromVersion("1.9"))
             "old-api-version" -> apiVersion.set(KotlinVersion.fromVersion("1.9"))
             "progressive-free-argument" -> freeCompilerArgs.add("-progressive")
+            "progressive-mode" -> progressiveMode.set(true)
+            "free-end-of-options" -> freeCompilerArgs.addAll("--", "-d", "elsewhere")
+            "free-argfile" -> freeCompilerArgs.add("@overrides.args")
+            "free-source" -> freeCompilerArgs.add("Extra.kt")
+            "classpath-alias" -> freeCompilerArgs.addAll("-cp", "elsewhere.jar")
+            "progressive-alias" -> freeCompilerArgs.add("-Xprogressive")
+            "compiler-plugin-alias" -> freeCompilerArgs.add("-Xcompiler-plugin=forbidden.jar")
+            "reference-version-free-argument" -> freeCompilerArgs.add("-Xkotlin-reference-version=2.4.0")
+            "dependency-policy-free-argument" -> freeCompilerArgs.add("-no-stdlib=false")
             "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
             "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=17")
             "free-werror" -> freeCompilerArgs.add("-Werror")
