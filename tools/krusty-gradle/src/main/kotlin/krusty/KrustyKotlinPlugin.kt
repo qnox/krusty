@@ -127,9 +127,11 @@ private fun replaceKotlinJvmCompiles(
             libraries.from(kotlinTask.libraries)
             friendPaths.from(kotlinTask.friendPaths)
             destinationDirectory.set(kotlinTask.destinationDirectory)
-            compilerArguments.set(project.provider {
-                compilerArguments(kotlinTask)
-            })
+            compilerArguments.set(
+                pluginVersion.map { version ->
+                    compilerArguments(kotlinTask, supportedKotlinPluginVersion(version))
+                },
+            )
             kotlinTarget.set(kotlinTask.compilerOptions.jvmTarget.map { it.target })
             targetValidationMode.set(kotlinTask.jvmTargetValidationMode.map { it.name })
             kotlinPluginVersion.set(pluginVersion)
@@ -344,7 +346,7 @@ private fun validateJvmTargets(kotlin: String, java: String, mode: String, warn:
     }
 }
 
-private fun compilerArguments(task: KotlinJvmCompile): List<String> {
+private fun compilerArguments(task: KotlinJvmCompile, kotlinVersion: String): List<String> {
     val options = task.compilerOptions
     fun reject(condition: Boolean, name: String) {
         if (condition) throw GradleException("krusty does not support compilerOptions.$name")
@@ -363,7 +365,7 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
 
     val structuredOptIns = validateStructuredOptIns(options.optIn.getOrElse(emptyList()))
     val freeArguments = options.freeCompilerArgs.getOrElse(emptyList())
-    val arguments = validateFreeArguments(freeArguments)
+    val arguments = validateFreeArguments(freeArguments, kotlinVersion)
     structuredOptIns.firstOrNull { marker -> "-opt-in=$marker" in freeArguments }?.let { marker ->
         throw GradleException(
             "compilerOptions.optIn and freeCompilerArg '-opt-in=$marker' both request marker '$marker'; configure exactly one",

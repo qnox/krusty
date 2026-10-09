@@ -11,13 +11,8 @@ import org.gradle.api.GradleException
 /** A kotlinc argument's canonical name, and whether a bare occurrence consumes the next token. */
 private class KotlincArgument(val name: String, val takesValue: Boolean)
 
-/**
- * Every spelling (name, short name, deprecated name) that a supported kotlinc release declares,
- * read from the release tables the compiler itself vendors. A spelling is reserved if any
- * supported release gives it to a reserved argument.
- */
-private val kotlincArguments: Map<String, KotlincArgument> by lazy {
-    val resource = "/krusty/kotlinc-arguments.tsv"
+private fun readKotlincArguments(table: String): Map<String, KotlincArgument> {
+    val resource = "/krusty/kotlinc-arguments/$table.tsv"
     val text = KrustyKotlinPlugin::class.java.getResource(resource)?.readText()
         ?: throw GradleException("the krusty plugin is missing its kotlinc argument table $resource")
     val arguments = HashMap<String, KotlincArgument>()
@@ -29,7 +24,21 @@ private val kotlincArguments: Map<String, KotlincArgument> by lazy {
             if (spelling.isNotEmpty()) arguments[spelling] = argument
         }
     }
-    arguments
+    return arguments
+}
+
+/**
+ * Every spelling (name, short name, deprecated name) that the selected kotlinc release declares,
+ * read from the same release table the compiler vendors. 2.4.10 has the same measured argument
+ * surface as 2.4.0, so both versions deliberately share that immutable table.
+ */
+private val kotlincArgumentsByVersion: Map<String, Map<String, KotlincArgument>> by lazy {
+    val v2_4_0 = readKotlincArguments("2.4.0")
+    mapOf(
+        "2.4.0" to v2_4_0,
+        "2.4.10" to v2_4_0,
+        "2.4.20" to readKotlincArguments("2.4.20"),
+    )
 }
 
 /** The structured input that owns each argument the plugin derives, by canonical name. */
@@ -62,7 +71,9 @@ private val reservedArguments: Map<String, String> = mapOf(
  * plugin-owned argument. kotlinc expands an `@argfile` wherever it appears, before parsing, so a
  * token starting with `@` is refused in any position.
  */
-internal fun validateFreeArguments(input: List<String>): ArrayList<String> {
+internal fun validateFreeArguments(input: List<String>, kotlinVersion: String): ArrayList<String> {
+    val kotlincArguments = kotlincArgumentsByVersion[kotlinVersion]
+        ?: throw GradleException("the krusty plugin has no kotlinc argument table for Kotlin $kotlinVersion")
     input.firstOrNull { it.startsWith("@") }?.let { argument ->
         throw GradleException(
             "freeCompilerArg '$argument' is an argument file, which could hide plugin-owned arguments; pass its arguments as freeCompilerArgs instead",

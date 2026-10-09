@@ -768,6 +768,44 @@ mod tests {
             .exists());
         assert!(module_metadata.is_file());
 
+        // A value-taking option introduced in 2.4.20 must consume its following token only under
+        // that release's grammar. Under 2.4.0/2.4.10, the same token is an unknown -X option and
+        // the following free -d remains visible to the plugin-owned destination check.
+        let _ = std::fs::remove_file(&log);
+        let release_boundary = build()
+            .property("krusty.negative", "release-specific-argument-boundary")
+            .tasks([":compiler:util:compileKotlin"])
+            .run();
+        assert!(
+            release_boundary.is_err(),
+            "release boundary probe succeeded"
+        );
+        if kgp == "2.4.20" {
+            let invocation = single_invocation(&log);
+            assert!(has_pair(
+                &invocation,
+                "-Xintellij-plugin-root",
+                "-d=forbidden"
+            ));
+        } else {
+            let rendered = release_boundary.unwrap_err().to_string();
+            assert_eq!(
+                rendered
+                    .lines()
+                    .filter(|line| {
+                        line.trim()
+                            == "> freeCompilerArg '-d=forbidden' conflicts with the plugin-owned destination; configure the structured Gradle input instead"
+                    })
+                    .count(),
+                1,
+                "{kgp}: {rendered}",
+            );
+            assert!(
+                !log.exists(),
+                "{kgp}: release boundary must fail before exec"
+            );
+        }
+
         if kgp == "2.4.10" {
             for (case, expected) in [
                 (
@@ -2234,6 +2272,10 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "compiler-plugin-alias" -> freeCompilerArgs.add("-Xcompiler-plugin=forbidden.jar")
             "reference-version-free-argument" -> freeCompilerArgs.add("-Xkotlin-reference-version=2.4.0")
             "dependency-policy-free-argument" -> freeCompilerArgs.add("-no-stdlib=false")
+            "release-specific-argument-boundary" -> freeCompilerArgs.addAll(
+                "-Xintellij-plugin-root",
+                "-d=forbidden",
+            )
             "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
             "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=17")
             "free-werror" -> freeCompilerArgs.add("-Werror")

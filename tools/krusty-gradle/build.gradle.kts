@@ -1,4 +1,5 @@
 import org.gradle.api.publish.maven.MavenPublication
+import org.gradle.api.tasks.Sync
 import org.gradle.api.tasks.bundling.AbstractArchiveTask
 
 plugins {
@@ -19,25 +20,19 @@ dependencies {
     compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.4.0")
 }
 
-// The plugin reads the compiler's own vendored kotlinc argument tables, so it resolves the same
-// short and deprecated spellings the compiler does without keeping a copy of its own.
-val kotlincArgumentTables = fileTree("../../crates/krusty-cli/src/kotlinc_arguments/releases") {
-    include("*.tsv")
-    exclude("*.features.tsv")
-}
+// Package the compiler's vendored tables separately. The plugin selects the table for the exact
+// Kotlin Gradle plugin version; merging releases would let an option from one release consume a
+// plugin-owned token under another release's grammar.
 val kotlincArgumentResources = layout.buildDirectory.dir("generated/kotlinc-arguments")
-val kotlincArgumentTable = tasks.register("kotlincArgumentTable") {
-    val tables = kotlincArgumentTables
-    val output = kotlincArgumentResources.map { it.file("krusty/kotlinc-arguments.tsv") }
-    inputs.files(tables)
-    outputs.file(output)
-    doLast {
-        val text = tables.files.sortedBy { it.name }.joinToString("") { it.readText() }
-        output.get().asFile.apply { parentFile.mkdirs() }.writeText(text)
+val kotlincArgumentTables = tasks.register<Sync>("kotlincArgumentTables") {
+    from("../../crates/krusty-cli/src/kotlinc_arguments/releases") {
+        include("*.tsv")
+        exclude("*.features.tsv")
     }
+    into(kotlincArgumentResources.map { it.dir("krusty/kotlinc-arguments") })
 }
 sourceSets.main {
-    resources.srcDir(files(kotlincArgumentResources).builtBy(kotlincArgumentTable))
+    resources.srcDir(files(kotlincArgumentResources).builtBy(kotlincArgumentTables))
 }
 
 gradlePlugin {
