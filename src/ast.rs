@@ -19,6 +19,7 @@ mod constructors;
 mod declaration_prefixes;
 pub(crate) mod definitely_evaluated;
 mod destructuring;
+mod language_gates;
 mod operators;
 mod type_refs;
 pub use type_refs::TrFlags;
@@ -29,6 +30,7 @@ pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
 pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
+pub use language_gates::{LanguageGates, UnsupportedSyntax};
 pub use operators::{BinOp, UnOp};
 pub use use_site_annotations::UseSiteAnnotation;
 
@@ -1544,6 +1546,7 @@ pub struct ExpectDeclaration {
 #[derive(Default)]
 pub struct File {
     pub package: Option<String>,
+    pub language_gates: LanguageGates,
     pub is_script: bool,
     /// Common-source role supplied by the source-set driver, not parsed from Kotlin syntax.
     pub is_common: bool,
