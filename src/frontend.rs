@@ -11,6 +11,7 @@ pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as Frontend
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 use crate::plugins::registry::NativePlugins;
 
+mod expect_value_classes;
 mod explicit_api;
 mod header_validation;
 mod inline_preparation;
@@ -1127,6 +1128,12 @@ where
     // diagnostic itself names the declaration as the reference compiler's renderer does, so it is
     // reported once resolution has published the types it renders.
     assert!(checked_count <= inferred_count && inferred_count <= files.len());
+    // Header errors of `expect` value classes, which actualization may remove before checking.
+    // kotlinc stops before actualization on them too.
+    for (index, file) in files.iter().enumerate() {
+        diags.set_file(index as u32);
+        expect_bodies_rejected |= expect_value_classes::validate(file, diags);
+    }
     let mut pass1_headers = pass1_builder.finish();
     // Answered here, while every file's syntax is still live and the compact inventory that
     // interned it is already built: each `actual` is paired with its stable identity at the moment

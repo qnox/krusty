@@ -99,6 +99,8 @@ mod control_flow_join;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
 mod function_supertypes;
+mod operator_declarations;
+mod value_class_checks;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
@@ -23177,7 +23179,7 @@ impl<'a> Checker<'a> {
                 crate::symbol_resolver::ty_subst_keep_unbound(semantic, &semantic_erasure);
             (physical, semantic)
         };
-        self.check_operator_declaration(f, semantic_ret_ty);
+        self.check_operator_declaration(f, semantic_ret_ty, false);
 
         let generic_sig = (!f.type_params.is_empty()).then(|| {
             let formal_bounds = f
@@ -47362,40 +47364,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_operator_declaration(&mut self, function: &FunDecl, ret: Ty) {
-        // A delegated-property convention is called from a GENERATED accessor, which has no scope
-        // to fill an implicit context from. The declaration is rejected here, so the property that
-        // uses it reports no applicable convention rather than reaching a call whose argument list
-        // cannot be mapped onto the declaration's slots.
-        if function.is_operator()
-            && crate::resolve::delegated_properties::DELEGATE_CONVENTION_NAMES
-                .contains(&function.name.as_str())
-            && !crate::resolve::delegated_properties::is_usable_delegate_convention(
-                true,
-                function.context_count,
-            )
-        {
-            self.diags.error(
-                function
-                    .context_span
-                    .expect("a function with context parameters must retain its clause span"),
-                "context parameters on delegation operators are unsupported.".to_string(),
-            );
-        }
-        if function.is_operator()
-            && function.name == "hasNext"
-            && !matches!(ret.canonical_semantic(), Ty::Boolean | Ty::Error)
-        {
-            self.diags.error(
-                function
-                    .operator_span
-                    .expect("an operator function must retain its modifier span"),
-                "'operator' modifier is not applicable to function: must return 'Boolean'."
-                    .to_string(),
-            );
-        }
-    }
-
     fn annotation_shape(&self, internal: TypeName) -> Option<AnnotationShape> {
         let classifier = self.resolver().classifier(internal)?;
         let application = classifier.annotation_application()?;
@@ -48149,7 +48117,7 @@ impl<'a> Checker<'a> {
             // to infer on their lexical rung below.
             && !self.has_finalized_signature(stable_declaration);
         if !self.signature_defaults_only && !infer_ret {
-            self.check_operator_declaration(f, self.ret_ty);
+            self.check_operator_declaration(f, self.ret_ty, false);
         }
         // Default arguments are evaluated in the caller's context. The extension receiver and
         // preceding value parameters are available, while later parameters are not.
@@ -48223,7 +48191,7 @@ impl<'a> Checker<'a> {
             }
         }
         if infer_ret {
-            self.check_operator_declaration(f, self.ret_ty);
+            self.check_operator_declaration(f, self.ret_ty, false);
         }
         self.report_inferred_nothing_return(f, self.ret_ty, false);
         if f.receiver.is_some() && companion_classifier.is_none() {
@@ -49524,6 +49492,8 @@ impl<'a> Checker<'a> {
         }
         self.validate_class_superclass(d, cl, current_owner);
         self.check_function_supertypes(scope, cl, &class_tparams);
+        self.check_value_class_declaration(scope, d, cl, current_owner, &class_tparams);
+        self.check_operator_equals_members(scope, d, cl, current_owner);
         // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so
         // does a LOCAL class — it is entered from the body it was written in and captures the
         // enclosing instance, so the outer receivers and type parameters stay reachable.
@@ -52604,7 +52574,7 @@ impl<'a> Checker<'a> {
                 );
             }
             if !self.signature_defaults_only && !infer_ret {
-                self.check_operator_declaration(f, self.ret_ty);
+                self.check_operator_declaration(f, self.ret_ty, true);
             }
             if infer_ret {
                 if let FunBody::Expr(e) = &f.body {
@@ -52672,7 +52642,7 @@ impl<'a> Checker<'a> {
             }
         }
         if infer_ret {
-            self.check_operator_declaration(f, self.ret_ty);
+            self.check_operator_declaration(f, self.ret_ty, true);
         }
         self.report_inferred_nothing_return(f, self.ret_ty, f.is_override());
         if f.receiver.is_some() {

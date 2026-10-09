@@ -1280,14 +1280,19 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     let value_representation = c.value_modifier_span.map(|value_keyword| {
                         ValueClassDeclaration {
                             value_keyword,
-                            parameters: c.primary_constructor_parameters_span,
+                            constructor: c.primary_constructor_span,
                             parameter_count: classifier_header.primary_parameters.len(),
                             jvm_inline: has_jvm_inline,
                             final_class: classifier_flags.has(ClassFlags::FINAL),
+                            expect: file
+                                .expect_decls
+                                .iter()
+                                .any(|expect| expect.declaration == d),
                         }
                         .representation(
                             target,
                             file.full_value_classes,
+                            &file.language_gates.value_classes,
                             diags,
                         )
                     });

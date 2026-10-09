@@ -2,6 +2,20 @@
 
 use super::{Parser, TokenKind};
 use crate::ast::{AnnotatedTypeParameter, TypeRef};
+use crate::diag::Span;
+
+/// One declaration's type-parameter list as written; empty when the declaration has none.
+#[derive(Default)]
+pub(super) struct TypeParameterList {
+    pub(super) names: Vec<String>,
+    /// The parameters bounded by a non-null `Any` (`T : Any`).
+    pub(super) non_null: std::collections::HashSet<String>,
+    /// The `reified` parameters, which an `inline` function may use concretely (`is T`, `as T`,
+    /// `T::class`) and which codegen specializes per call site.
+    pub(super) reified: std::collections::HashSet<String>,
+    pub(super) bounds: Vec<(String, TypeRef)>,
+    pub(super) variances: Vec<crate::types::TypeVariance>,
+}
 
 impl Parser<'_> {
     /// Parse an optional `where T : Bound, U : Bound2` clause and retain each bound's owner.
@@ -58,27 +72,24 @@ impl Parser<'_> {
         bounds
     }
 
-    /// Parse `<T, reified U : Bound, out V>` and preserve semantic bounds plus source ownership.
-    #[allow(clippy::type_complexity)]
-    pub(super) fn parse_type_params(
-        &mut self,
-        declaration_start: u32,
-    ) -> (
-        Vec<String>,
-        std::collections::HashSet<String>,
-        std::collections::HashSet<String>,
-        Vec<(String, TypeRef)>,
-        Vec<crate::types::TypeVariance>,
-    ) {
-        let mut names = Vec::new();
-        let mut non_null = std::collections::HashSet::new();
-        let mut reified = std::collections::HashSet::new();
-        let mut bounds = Vec::new();
-        let mut variances = Vec::new();
+    /// Parse the `<T, reified U : Bound, out V>` type-parameter list of the declaration starting at
+    /// `declaration_start`, if one follows, preserving semantic bounds plus source ownership; an
+    /// absent list is empty. The list's own span is recorded under the same key, for diagnostics
+    /// about the list as a whole.
+    pub(super) fn parse_type_params(&mut self, declaration_start: u32) -> TypeParameterList {
+        let mut list = TypeParameterList::default();
+        let open = self.tok().span;
         self.type_parameter_spans.clear();
         if !self.eat(TokenKind::Lt) {
-            return (names, non_null, reified, bounds, variances);
+            return list;
         }
+        let TypeParameterList {
+            names,
+            non_null,
+            reified,
+            bounds,
+            variances,
+        } = &mut list;
         loop {
             self.skip_plain_newlines();
             let parameter_start = self.tok().span.lo;
@@ -160,7 +171,11 @@ impl Parser<'_> {
                 break;
             }
         }
+        let close = self.tok().span;
         self.expect(TokenKind::Gt, "'>'");
-        (names, non_null, reified, bounds, variances)
+        self.file
+            .type_parameter_lists
+            .insert(declaration_start, Span::new(open.lo, close.hi));
+        list
     }
 }

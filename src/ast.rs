@@ -30,7 +30,7 @@ pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
 pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
-pub use language_gates::{LanguageGates, UnsupportedSyntax};
+pub use language_gates::{LanguageGates, UnsupportedSyntax, ValueClassArity, ValueClassRules};
 pub use operators::{BinOp, UnOp};
 pub use use_site_annotations::UseSiteAnnotation;
 
@@ -1052,9 +1052,10 @@ pub struct ClassDecl {
     /// Span of the `value` keyword. Absent for a legacy `inline class` and for an ordinary class.
     /// The missing-`@JvmInline` diagnostic points here.
     pub value_modifier_span: Option<Span>,
-    /// Span of the primary constructor's parameter list, `(` through `)`. Absent when the class
-    /// writes no parameter list.
-    pub primary_constructor_parameters_span: Option<Span>,
+    /// Span of the written primary constructor, from its modifiers or `constructor` keyword (or
+    /// its `(` when it writes neither) through its `)`. Absent when the class writes no parameter
+    /// list.
+    pub primary_constructor_span: Option<Span>,
     /// `enum class Name { A, B }` — the entries in declaration order (extends `java/lang/Enum`). Each
     /// [`AstEnumEntry`] carries its own name / constructor args / body methods / body properties.
     pub enum_entries: Vec<AstEnumEntry>,
@@ -1864,6 +1865,9 @@ pub struct File {
     /// reference: `<T : B>` and `where T : B` both map `B` to the parameter as `<…>` wrote it,
     /// annotations and inline bound included, which is where kotlinc reports about the parameter.
     pub type_parameter_bound_owners: std::collections::HashMap<u32, crate::diag::Span>,
+    /// The `<…>` type-parameter list of each declaration that writes one, keyed like
+    /// [`Self::declaration_type_parameter_annotations`].
+    pub type_parameter_lists: std::collections::HashMap<u32, Span>,
     /// Signature starts for typealiases with declaration type parameters. Typealiases currently live
     /// in the structural alias tables rather than `Decl`; this exact owner set lets semantic annotation
     /// resolution use file scope without guessing from names or source text.

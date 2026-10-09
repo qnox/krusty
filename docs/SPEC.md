@@ -1594,7 +1594,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc-wasm and kotlinc-native 2.4.20:
   - No parameter list: `primary constructor is required for value classes.` at `value`; with
     `FullValueClasses` a final class reports `… for final value classes.`.
-  - `()`: `value class must have exactly one primary constructor parameter.` at the parameter list;
+  - `()`: `value class must have exactly one primary constructor parameter.` at the primary
+    constructor;
     with `FullValueClasses` an unannotated final class reports `final value class must have at least
     one primary constructor parameter.` there, and an annotated one `@JvmInline value class must
     have exactly one primary constructor parameter.`.
@@ -4688,6 +4689,45 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   an extension or context function type as a supertype of a class, interface or object expression
   is `extension or contextual function type is not allowed as a supertype.` at the supertype
   reference. A plain function type is unaffected. Tests: `tests/function_type_supertypes_e2e.rs`.
+- **Multi-field `@JvmInline` value classes (`JvmInlineMultiFieldValueClasses`, 2.4.0 and 2.4.10
+  only).** Without the feature a value class represented inline (with `@JvmInline`, or without it
+  and without `FullValueClasses`) must declare exactly one primary-constructor parameter: `inline
+  class must have exactly one primary constructor parameter.` at the parameter list (2.4.20: `value
+  class` / `@JvmInline value class`, by whether `FullValueClasses` is on). With it the count is any
+  positive number (`value class must have at least one primary constructor parameter.` for none),
+  each parameter is checked (`val` only, not `Unit`/`Nothing`), and a multi-field class has no
+  default arguments. 2.4.20 has no such feature: a `value class` without `@JvmInline` and with more
+  than one parameter is `UNSUPPORTED_FEATURE(FullValueClasses)` at `value`, and the missing
+  `@JvmInline` error is then reported only for a one-parameter class. A missing primary
+  constructor is `primary constructor is required for value classes.` at `value`. A failed
+  primary-constructor check ends the class's checking. These per-release rules refine the
+  target-explicit constructor-cardinality rules above: signature collection reports the
+  constructor diagnostics once, at the written primary constructor (its modifiers or
+  `constructor` keyword through `)`), while it decides the representation; the body checker
+  consults the same verdict before checking the parameters. krusty does not flatten a multi-field
+  inline class yet: it is collected as an ordinary class, so accepted fixtures only declare one. Not modelled: the value-class
+  placement, modality, supertype, delegation and recursion checks, and the annotation-target
+  restrictions kotlinc gates on this feature. Tests: `tests/value_class_feature_gates_e2e.rs`.
+- **Custom `equals` in value classes (`CustomEqualsInValueClasses`).** Without the feature `equals`
+  and `hashCode` are reserved member names of a value class represented inline, like `box` and
+  `unbox` (`member name '…' is reserved for future releases.` at the member name; inherited from an
+  interface with a body: `… but is implemented in supertype 'I'.` at the `class` keyword). An
+  `operator fun equals` must be a member (`must be a member function.`) and override `Any.equals`
+  (`must override 'equals()' in Any.`); with the feature, an inline value class may instead define
+  `operator fun equals(other: C<*>): Boolean`, the message then naming that form. A typed equality
+  has no type parameters (`type parameters are prohibited here.`) and only star-projected
+  arguments; an `Any.equals` override without one is warned as boxing. Not modelled: the
+  operator-equals warnings of anonymous objects and enum entries. Tests:
+  `tests/value_class_feature_gates_e2e.rs`.
+- **`expect` value classes without a primary constructor
+  (`AllowExpectValueClassesWithNoPrimaryConstructor`, 2.4.20 only).** Without the feature a
+  top-level `expect value class` without a primary constructor is `primary constructor is required
+  for value classes.` at `value`, whether or not its `actual` declares one. With it the constructor
+  is left to the `actual`, and the class may declare no secondary constructor (`expect value class
+  without primary constructor cannot have secondary constructors.` at each). Not modelled: an
+  annotated `expect` class under `FullValueClasses`. A matched `expect` value class with a secondary
+  constructor in a source set with another error still reaches a recovery internal error. Tests:
+  `tests/value_class_feature_gates_e2e.rs`.
 
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and
