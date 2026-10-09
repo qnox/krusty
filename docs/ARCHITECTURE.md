@@ -96,6 +96,8 @@ reject the build, so neither is replaced and neither joins `krustyCompile`.
 The adapter derives Kotlin semantics from `KotlinBasePlugin.pluginVersion`. It reads the experimental
 Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to reject an
 override which would make those semantics diverge; it does not use the experimental compiler path.
+A pre-release, RC, or dev suffix is a different version and is rejected. `allWarningsAsErrors` is
+forwarded as `-Werror`.
 
 Gradle owns incremental invalidation. An unchanged replacement task is UP-TO-DATE and does not run
 krusty. Once any source, classpath, friend path, plugin, compiler option, or compiler binary changes,

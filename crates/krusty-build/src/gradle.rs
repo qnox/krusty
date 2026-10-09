@@ -822,12 +822,12 @@ mod tests {
                     "duplicate freeCompilerArg '-Xskip-prerelease-check'",
                 ),
                 (
-                    "all-warnings-as-errors",
-                    "krusty does not support compilerOptions.allWarningsAsErrors",
+                    "werror-overlap",
+                    "compilerOptions.allWarningsAsErrors and freeCompilerArg '-Werror' are both set; configure exactly one",
                 ),
                 (
-                    "free-werror",
-                    "krusty does not support warning policy freeCompilerArg '-Werror'",
+                    "dev-compiler-version",
+                    "Kotlin compiler 2.4.20-dev-7885 differs from Kotlin Gradle plugin 2.4.10",
                 ),
                 (
                     "empty-opt-in",
@@ -985,6 +985,23 @@ mod tests {
                     .all(|argument| !argument.starts_with("-Xmetadata-version")),
                 "{language_2_2_run:?}",
             );
+
+            // `-Werror` and `allWarningsAsErrors` both reach krusty as one warning policy.
+            // A pre-release compilerVersion is not that release: it is rejected.
+            for case in ["all-warnings-as-errors", "free-werror"] {
+                let _ = std::fs::remove_file(&log);
+                build()
+                    .property("krusty.negative", case)
+                    .tasks([":compiler:util:compileKotlin"])
+                    .run()
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                let invocation = single_invocation(&log);
+                assert_eq!(
+                    invocation.iter().filter(|argument| argument.as_str() == "-Werror").count(),
+                    1,
+                    "{case}: {invocation:?}"
+                );
+            }
         }
 
         let _ = std::fs::remove_dir_all(&root);
@@ -2112,8 +2129,10 @@ val generateKotlin = tasks.register<GenerateKotlin>("generateKotlin") {
 }
 
 kotlin {
-    if (krustyNegative == "compiler-version") {
-        compilerVersion.set("2.4.0")
+    when (krustyNegative) {
+        "compiler-version" -> compilerVersion.set("2.4.0")
+        "dev-compiler-version" -> compilerVersion.set("2.4.20-dev-7885")
+        else -> {}
     }
     sourceSets.named("main") {
         kotlin.srcDir("src")
@@ -2171,6 +2190,10 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=8")
             "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
             "free-werror" -> freeCompilerArgs.add("-Werror")
+            "werror-overlap" -> {
+                allWarningsAsErrors.set(true)
+                freeCompilerArgs.add("-Werror")
+            }
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
             "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
             "warning-level-missing-colon" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG")

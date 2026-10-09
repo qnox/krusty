@@ -353,10 +353,9 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
-    // `-Werror` is not yet modeled, so its structured equivalent stays rejected. Named
-    // `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is the
-    // authoritative place to validate names and apply severities.
-    reject(options.allWarningsAsErrors.getOrElse(false), "allWarningsAsErrors")
+    // Named `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is
+    // the authoritative place to validate names and apply severities. `-Werror` is the global
+    // form of that policy: the compiler fails the compilation when any warning is emitted.
     reject(options.verbose.getOrElse(false), "verbose")
     reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
     reject(task.useModuleDetection.getOrElse(false), "useModuleDetection")
@@ -376,6 +375,11 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
             )
         }
     }
+    if (options.allWarningsAsErrors.getOrElse(false) && "-Werror" in freeArguments) {
+        throw GradleException(
+            "compilerOptions.allWarningsAsErrors and freeCompilerArg '-Werror' are both set; configure exactly one",
+        )
+    }
     languageVersion?.let { arguments.addPair("-language-version", it) }
     apiVersion?.let { arguments.addPair("-api-version", it) }
     structuredOptIns.forEach { marker ->
@@ -388,10 +392,12 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     options.jvmDefault.orNull?.let { arguments.addPair("-jvm-default", it.compilerArgument) }
     if (options.javaParameters.getOrElse(false)) arguments.add("-java-parameters")
     if (options.noJdk.getOrElse(false)) arguments.add("-no-jdk")
+    if (options.allWarningsAsErrors.getOrElse(false)) arguments.add("-Werror")
     return arguments
 }
 
 private val ALLOWED_FREE_FLAGS = setOf(
+    "-Werror",
     "-Xno-param-assertions",
     "-Xno-call-assertions",
     "-Xcontext-parameters",
@@ -451,10 +457,6 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
             // Several -opt-in arguments are legal (the Kotlin build applies one per opt-in); only an
             // exact repeat is a duplicate, so the key is the argument itself.
             argument.startsWith("-opt-in=") && argument.substringAfter('=').isNotEmpty() -> argument
-            argument == "-Werror" ->
-                throw GradleException(
-                    "krusty does not support warning policy freeCompilerArg '$argument'",
-                )
             // The compiler owns the typed diagnostic registry and severity validation. Several
             // entries are legal (one per diagnostic), so only an exact repeated argument shares a
             // key at this transport boundary.
