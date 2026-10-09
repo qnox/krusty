@@ -262,7 +262,8 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     let abi = dir.join("demo.abi.jar");
     let cri = dir.join("demo.kotlinCriStorage");
 
-    // Request 1: the options intellij-community actually builds with. Request 2 supplies the same
+    // Request 1: the options intellij-community actually builds with, less `--progressive`, which
+    // the worker refuses (`worker::tests::progressive_is_refused_through_every_worker_surface`). Request 2 supplies the same
     // codegen decisions through the rule's `kotlinc_opts` passthrough ONLY: worker defaults must not
     // overwrite them. Request 3 carries Java and must be refused WITHOUT ending the worker, so a
     // fourth request still gets served.
@@ -270,7 +271,7 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
         concat!(
             r#"{{"arguments":["--target_label","//demo:demo","--kotlin_module_name","intellij.demo","#,
             r#""--jvm_default","no-compatibility","--x_lambdas","indy","--x_sam_conversions","indy","#,
-            r#""--x_no_param_assertions","--x_no_call_assertions","--progressive","--warn","off","#,
+            r#""--x_no_param_assertions","--x_no_call_assertions","--warn","off","#,
             r#""--srcs","{src}","--out","{jar}","--abi-out","{abi}","--kotlin-cri-out","{cri}","#,
             r#""--java-count","0"],"requestId":1}}"#,
             "\n",
