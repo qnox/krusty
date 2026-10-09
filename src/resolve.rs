@@ -25994,33 +25994,25 @@ class Host {
 
     #[test]
     fn declaration_type_parameter_annotation_arguments_are_checked() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 annotation class Marker(val value: String)
 class Box<@Marker(1) T>
 class Target<T>
 typealias Alias<@Marker(2) T> = Target<T>
-"#,
-            &mut diagnostics,
-        );
-        let files = [file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+"#;
+        let (_, _, diagnostics) = retained_standalone_analysis(source);
 
         assert_eq!(
             diagnostics
                 .diags
                 .iter()
-                .filter(|diagnostic| {
-                    diagnostic.msg
-                        == "argument type mismatch: actual type is 'Int', but 'String' was expected."
-                })
-                .count(),
-            2,
-            "class and typealias annotations must use the normal argument checker: {:?}",
-            diagnostics.diags
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "argument type mismatch: actual type is 'Int', but 'String' was expected.",
+                "argument type mismatch: actual type is 'Int', but 'String' was expected.",
+            ],
+            "class and typealias annotations must use the normal argument checker",
         );
     }
 
@@ -29013,37 +29005,28 @@ fun box(): String {
             fun top(): Int = knownPair(a = 1, 2, 3)\n\
             fun member(): String = \"\".known(a = 1, 2, 3)\n\
             fun extension(): Int = \"\".mixExt(a = 1, 2, 3)";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         let expected = [
             "too many arguments for 'fun knownPair(a: Int, b: Int): Int'.",
             "too many arguments for 'fun known(a: Int, b: Int = ...): String'.",
             "too many arguments for 'fun mixExt(a: Int, b: Int): Int'.",
         ];
-        for message in expected {
-            let diagnostic = diagnostics
+        assert_eq!(
+            diagnostics
                 .diags
                 .iter()
-                .find(|diagnostic| diagnostic.msg == message)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "missing {message:?}; got {:?}",
-                        diagnostics
-                            .diags
-                            .iter()
-                            .map(|diagnostic| &diagnostic.msg)
-                            .collect::<Vec<_>>()
-                    )
-                });
-            assert_eq!(
-                &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
-                "3"
-            );
-        }
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+        );
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize])
+                .collect::<Vec<_>>(),
+            ["3", "3", "3"],
+        );
     }
 
     #[test]
@@ -29301,26 +29284,25 @@ fun box(): String {
 
     #[test]
     fn rejected_reference_range_does_not_record_partial_operator_calls() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class VR {\n\
+        let source = "class VR {\n\
              \x20 operator fun contains(v: V): Int = 1\n\
              }\n\
              class V {\n\
              \x20 operator fun rangeTo(o: V): VR = VR()\n\
              }\n\
-             fun box(): Boolean = V() in V()..V()",
-            &mut d,
+             fun box(): Boolean = V() in V()..V()";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
+        assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
+        assert_eq!(
+            diagnostics.diags[0].msg,
+            "operator 'contains' cannot be applied to range 'VR' and 'V'"
         );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert!(
-            !d.diags.is_empty(),
-            "invalid contains return should reject the in-range expression"
+        assert_eq!(
+            &source[diagnostics.diags[0].span.lo as usize..diagnostics.diags[0].span.hi as usize],
+            "V() in V()..V()"
         );
 
-        let in_range = files[0]
+        let in_range = file
             .expr_arena
             .iter()
             .enumerate()
@@ -30057,27 +30039,17 @@ fun box(): String {
              fun bad(): Outer.Inner = Outer.Inner(z = 1)",
         ];
         for source in cases {
-            let mut diagnostics = DiagSink::new();
-            let file = parse_file(source, &mut diagnostics);
-            let files = vec![file];
-            let mut symbols =
-                collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-            let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+            let (_, _, diagnostics) =
+                retained_platform_analysis(source, Box::new(FakeMemberPlatform));
 
-            let diagnostic = diagnostics
-                .diags
-                .iter()
-                .find(|diagnostic| diagnostic.msg == "no parameter with name 'z' found.")
-                .unwrap_or_else(|| {
-                    panic!(
-                        "expected canonical unknown-name diagnostic for {source:?}, got {:?}",
-                        diagnostics
-                            .diags
-                            .iter()
-                            .map(|diagnostic| &diagnostic.msg)
-                            .collect::<Vec<_>>()
-                    )
-                });
+            assert_eq!(
+                diagnostics.diags.len(),
+                1,
+                "{source}: {:?}",
+                diagnostics.diags
+            );
+            let diagnostic = &diagnostics.diags[0];
+            assert_eq!(diagnostic.msg, "no parameter with name 'z' found.");
             assert_eq!(
                 &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
                 "z"
@@ -30279,8 +30251,7 @@ fun box(): String {
     #[test]
     fn source_function_supertype_keeps_its_callable_shape() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file_with_detected_features(
-            "// LANGUAGE: +FunctionalTypeWithExtensionAsSupertype +RefinedVarargConversionRulesForCallableReferences\n\
+        let source = "// LANGUAGE: +FunctionalTypeWithExtensionAsSupertype +RefinedVarargConversionRulesForCallableReferences\n\
              import kotlin.coroutines.*\n\
              fun accept(block: suspend Int.() -> Unit) {}\n\
              class A : Int.() -> Unit { override fun invoke(value: Int) {} }\n\
@@ -30322,10 +30293,7 @@ fun box(): String {
                  val r2 = use1(oouter::Inner1).result\n\
                  val r3 = use0(oouter::Inner2).result\n\
                  val r4 = use1(oouter::Inner2).result\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
+             }";
         let mut classpath =
             crate::toolchain::classpath_jars_for("// WITH_STDLIB\n// WITH_COROUTINES");
         if let Some(jdk) = crate::toolchain::jdk_modules() {
@@ -30334,7 +30302,11 @@ fun box(): String {
         let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
+        let (file, symbols, info) =
+            crate::frontend::analyze_source(source, Box::new(platform), &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        let _ = info.expect("production frontend must check the source");
+        let files = vec![file];
         let class = symbols
             .class_by_type_name(type_name("A"))
             .expect("source class A must be registered");
@@ -30480,8 +30452,7 @@ fun box(): String {
                 "startCoroutine metadata has no extension applicable to {start_receiver:?}; raw={raw_start_shapes:#?}"
             );
         }
-        check_file(&files[0], &mut symbols, &mut diagnostics);
-        assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
+        assert_no_diags(&diagnostics);
     }
 
     #[test]
@@ -31218,18 +31189,17 @@ fun use() {
     #[test]
     fn contextual_callable_refs_cover_generic_vararg_and_imported_object_members() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "import Host.hostFoo\n\
+        let source = "import Host.hostFoo\n\
              fun <T> consume(block: (Any, T) -> String): String = \"\"\n\
              fun of(vararg values: Any): String = \"\"\n\
              fun withO(block: (String) -> String): String = \"\"\n\
              object Host { fun hostFoo(vararg values: String): String = \"\" }\n\
-             fun use() { consume(::of); withO(::hostFoo) }",
-            &mut diagnostics,
-        );
+             fun use() { consume(::of); withO(::hostFoo) }";
+        let (file, symbols, info) =
+            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        let _ = info.expect("production frontend must check the source");
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
         {
             let scope = CheckerScope::root();
             let mut probe_diagnostics = DiagSink::new();
@@ -31266,8 +31236,7 @@ fun use() {
                 );
             }
         }
-        check_file(&files[0], &mut symbols, &mut diagnostics);
-        assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
+        assert_no_diags(&diagnostics);
     }
 
     #[test]
@@ -32015,17 +31984,11 @@ fun use() {
     #[test]
     fn val_reassignment_diagnostic_points_at_assignment_target() {
         let source = "fun reassignValue(): Int {\n  val value = 1\n  value = 2\n  return value\n}";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, _, diagnostics) = retained_standalone_analysis(source);
 
-        let diagnostic = diagnostics
-            .diags
-            .iter()
-            .find(|diagnostic| diagnostic.msg == "'val' cannot be reassigned.")
-            .expect("immutable-write diagnostic");
+        assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
+        let diagnostic = &diagnostics.diags[0];
+        assert_eq!(diagnostic.msg, "'val' cannot be reassigned.");
         assert_eq!(
             &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
             "value"
@@ -32054,17 +32017,11 @@ fun use() {
     fn missing_required_argument_diagnostic_points_at_callee() {
         let source = "fun pair(left: Int, right: String): Int = left\n\
                       fun missingArgument(): Int = pair(1)";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, _, diagnostics) = retained_standalone_analysis(source);
 
-        let diagnostic = diagnostics
-            .diags
-            .iter()
-            .find(|diagnostic| diagnostic.msg == "no value passed for parameter 'right'.")
-            .expect("missing-argument diagnostic");
+        assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
+        let diagnostic = &diagnostics.diags[0];
+        assert_eq!(diagnostic.msg, "no value passed for parameter 'right'.");
         assert_eq!(
             &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
             missing_argument_anchor("1", "pair")
@@ -32080,17 +32037,11 @@ fun use() {
     fn missing_named_argument_diagnostic_points_at_callee() {
         let source = "fun namedPair(left: Int, right: String): Int = left\n\
                       fun missingNamedArgument(): Int = namedPair(left = 1)";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, _, diagnostics) = retained_standalone_analysis(source);
 
-        let diagnostic = diagnostics
-            .diags
-            .iter()
-            .find(|diagnostic| diagnostic.msg == "no value passed for parameter 'right'.")
-            .expect("missing-named-argument diagnostic");
+        assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
+        let diagnostic = &diagnostics.diags[0];
+        assert_eq!(diagnostic.msg, "no value passed for parameter 'right'.");
         assert_eq!(
             &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
             missing_argument_anchor("left", "namedPair")
@@ -32146,11 +32097,7 @@ fun use() {
                       fun callableProperty(value: Holder?): Int = value.block()\n\
                       fun nullableInvoke(block: (() -> Int)?): Int = block.invoke()\n\
                       fun nullableEquals(value: Any?): Boolean = value.equals(null)";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, _, diagnostics) = retained_standalone_analysis(source);
 
         assert_eq!(
             diagnostics
@@ -32199,11 +32146,7 @@ fun use() {
     fn explicit_non_null_generic_extension_rejects_nullable_receiver() {
         let source = "fun <T : Any> T.rejectsNullable(): Int = 1\n\
                       fun invalid(value: String?): Int = value.rejectsNullable()";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, _, diagnostics) = retained_standalone_analysis(source);
 
         assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
         assert_eq!(
@@ -32391,19 +32334,12 @@ fun use() {
     fn nullable_inaccessible_callable_property_reports_access_once() {
         let source = "class C(private val block: () -> Int)\n\
                       fun invalid(value: C?): Int = value.block()";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, _, diagnostics) = retained_standalone_analysis(source);
 
         assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
-        assert!(
-            diagnostics.diags[0]
-                .msg
-                .contains("cannot access 'block': it is private in 'C'"),
-            "{:?}",
-            diagnostics.diags
+        assert_eq!(
+            diagnostics.diags[0].msg,
+            "cannot access 'block': it is private in 'C'"
         );
     }
 
