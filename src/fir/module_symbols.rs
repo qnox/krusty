@@ -497,11 +497,17 @@ impl<'a> StreamedModuleSymbols<'a> {
                 flags.has(DeclarationFlags::INTERFACE),
                 name,
             );
-            if stable_functions.is_empty() && self.declares_hidden_deprecated_function(owner, name)
+            if stable_functions
+                .iter()
+                .any(|function| function.flags.deprecated_hidden)
             {
                 projected.hidden_deprecated_callables.insert(name.clone());
             }
-            projected.members.extend(stable_members);
+            projected.members.extend(
+                stable_members
+                    .into_iter()
+                    .filter(|member| !member.deprecated_hidden()),
+            );
             let functions = FunctionSet {
                 overloads: direct_function_names
                     .contains(name)
@@ -541,21 +547,6 @@ impl<'a> StreamedModuleSymbols<'a> {
             .declaration_applied_annotations(declaration)
             .iter()
             .any(crate::types::ResolvedAnnotation::is_deprecated_hidden)
-    }
-
-    fn declares_hidden_deprecated_function(&self, owner: DeclarationId, name: &str) -> bool {
-        self.index
-            .owned_declarations(owner)
-            .iter()
-            .any(|declaration| {
-                self.index
-                    .declaration_header(*declaration)
-                    .is_some_and(|header| {
-                        header.kind == DeclarationKind::Function && header.owner == Some(owner)
-                    })
-                    && self.index.declaration_name(*declaration) == Some(name)
-                    && self.declaration_is_deprecated_hidden(*declaration)
-            })
     }
 
     fn semantic_callable(
@@ -744,6 +735,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             infix: header.flags.has(DeclarationFlags::INFIX),
             is_abstract: header.flags.has(DeclarationFlags::ABSTRACT),
             is_final: header.flags.has(DeclarationFlags::FINAL),
+            deprecated_hidden: false,
             inherited_by_delegation: false,
             return_value_status: None,
         };
@@ -903,15 +895,22 @@ impl<'a> StreamedModuleSymbols<'a> {
             if header.kind != DeclarationKind::Function
                 || header.owner != Some(owner)
                 || self.index.declaration_name(declaration) != Some(name)
-                || self.declaration_is_deprecated_hidden(declaration)
             {
                 continue;
             }
+            let deprecated_hidden = self.declaration_is_deprecated_hidden(declaration);
+            // Kotlin members are final by default. An override stays open unless it writes
+            // `final`; interface declarations are likewise overridable without an `open` token.
+            let is_final = header.flags.has(DeclarationFlags::FINAL)
+                || (!is_interface
+                    && !header.flags.has(DeclarationFlags::OPEN)
+                    && !header.flags.has(DeclarationFlags::ABSTRACT)
+                    && !header.flags.has(DeclarationFlags::OVERRIDE));
             let Some(callable_header) = self.index.callable_for_declaration(declaration) else {
                 continue;
             };
             let Some(signature) = self.index.signature(declaration) else {
-                if let Some(function) = self.failed_function_projection(
+                if let Some(mut function) = self.failed_function_projection(
                     declaration,
                     name,
                     if callable_header.shape.extension_receiver.is_some() {
@@ -926,6 +925,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                         .map(|receiver| receiver.get()),
                     is_interface,
                 ) {
+                    function.flags.is_final = is_final;
+                    function.flags.deprecated_hidden = deprecated_hidden;
                     functions.push(function);
                 }
                 continue;
@@ -1008,7 +1009,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                 operator: header.flags.has(DeclarationFlags::OPERATOR),
                 infix: header.flags.has(DeclarationFlags::INFIX),
                 is_abstract: header.flags.has(DeclarationFlags::ABSTRACT),
-                is_final: header.flags.has(DeclarationFlags::FINAL),
+                is_final,
+                deprecated_hidden,
                 inherited_by_delegation: false,
                 return_value_status: None,
             };
@@ -1034,7 +1036,8 @@ impl<'a> StreamedModuleSymbols<'a> {
             member.generic_sig = generic_sig;
             member.set_is_interface(is_interface);
             member.set_is_abstract(header.flags.has(DeclarationFlags::ABSTRACT));
-            member.set_is_final(header.flags.has(DeclarationFlags::FINAL));
+            member.set_is_final(is_final);
+            member.set_deprecated_hidden(deprecated_hidden);
             member.set_suspend(header.flags.has(DeclarationFlags::SUSPEND));
             member.set_is_operator(header.flags.has(DeclarationFlags::OPERATOR));
             member.set_is_infix(header.flags.has(DeclarationFlags::INFIX));
@@ -1467,6 +1470,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 infix: header.flags.has(DeclarationFlags::INFIX),
                 is_abstract: header.flags.has(DeclarationFlags::ABSTRACT),
                 is_final: header.flags.has(DeclarationFlags::FINAL),
+                deprecated_hidden: false,
                 inherited_by_delegation: false,
                 return_value_status: None,
             };

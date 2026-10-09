@@ -556,6 +556,7 @@ impl JvmLibraries {
                     infix: meta.is_infix,
                     is_abstract: false,
                     is_final: true,
+                    deprecated_hidden: false,
                     inherited_by_delegation: false,
                     return_value_status: None,
                 },
@@ -627,6 +628,7 @@ impl JvmLibraries {
                 infix: builtin.is_infix,
                 is_abstract: false,
                 is_final: true,
+                deprecated_hidden: false,
                 inherited_by_delegation: false,
                 return_value_status: None,
             };
@@ -811,6 +813,7 @@ impl JvmLibraries {
                     infix: function.is_infix(),
                     is_abstract: false,
                     is_final: function.is_final(),
+                    deprecated_hidden: false,
                     inherited_by_delegation: false,
                     return_value_status: Some(function.return_value_status),
                 },
@@ -1361,11 +1364,9 @@ impl JvmLibraries {
                     .filter(|declaration| {
                         if self.since_kotlin_withheld(declaration.since_kotlin()) {
                             self.note_api_withheld(internal_name, &declaration.kotlin_name);
+                            return false;
                         }
-                        !self.hides_callable(
-                            declaration.deprecated_hidden(),
-                            declaration.since_kotlin(),
-                        )
+                        true
                     })
                     .filter_map(|declaration| {
                         let descriptor = declaration.jvm_desc?;
@@ -1539,6 +1540,7 @@ impl JvmLibraries {
                     member.set_is_member_extension(declaration.is_extension());
                     member.set_is_operator(declaration.is_operator());
                     member.set_is_infix(declaration.is_infix());
+                    member.set_deprecated_hidden(declaration.deprecated_hidden());
                     member.call_sig = declaration.member_call_sig();
                     member.declared_ret = metadata_declared_nonnull_return(declaration);
                 } else if let Some(declaration) = constructor_declaration {
@@ -2370,18 +2372,25 @@ impl JvmLibraries {
             // The members half of the same decision (see the supertype block below): for a mapped
             // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
             // joins them, with anything the class file already states under a physical name dropped.
-            let hidden_deprecated_callables = if kotlin_scope_is_authoritative {
-                members
-                    .iter()
-                    .filter(|member| {
-                        mapped_builtin_member_status(internal_name, ci.this_class, member)
-                            == MappedBuiltinMemberStatus::DeprecatedHidden
-                    })
-                    .map(|member| member.name.clone())
-                    .collect()
-            } else {
-                std::collections::HashSet::new()
-            };
+            let mut hidden_deprecated_callables = meta_fns
+                .iter()
+                .filter(|declaration| {
+                    declaration.deprecated_hidden()
+                        && !self.since_kotlin_withheld(declaration.since_kotlin())
+                })
+                .map(|declaration| declaration.kotlin_name.clone())
+                .collect::<std::collections::HashSet<_>>();
+            if kotlin_scope_is_authoritative {
+                hidden_deprecated_callables.extend(
+                    members
+                        .iter()
+                        .filter(|member| {
+                            mapped_builtin_member_status(internal_name, ci.this_class, member)
+                                == MappedBuiltinMemberStatus::DeprecatedHidden
+                        })
+                        .map(|member| member.name.clone()),
+                );
+            }
             if kotlin_scope_is_authoritative {
                 // Retain only physical members admitted to this mapped Kotlin declaration by the
                 // provider-owned, versioned JVM-builtins policy.
@@ -3899,6 +3908,15 @@ impl JvmLibraries {
                             classifier.insert_declared_callables(name, declarations);
                         }
                     }
+                    // `declared_callables` is the declaration-facing model used by override
+                    // planning. The flat capability view is call-facing, so HIDDEN declarations
+                    // remain absent there as they are from ordinary overload selection.
+                    classifier
+                        .members
+                        .retain(|member| !member.deprecated_hidden());
+                    classifier
+                        .companion
+                        .retain(|member| !member.deprecated_hidden());
                     self.building_types.borrow_mut().remove(&internal_name);
                     crate::libraries::add_core_builtin_declarations(&mut classifier, internal_name);
                     // Core declarations added after classpath decoding are ordinary provider
@@ -4277,6 +4295,7 @@ impl JvmLibraries {
                         infix: mf.is_infix(),
                         is_abstract: false,
                         is_final: mf.is_final(),
+                        deprecated_hidden: false,
                         inherited_by_delegation: false,
                         return_value_status: Some(mf.return_value_status),
                     },
@@ -4910,6 +4929,7 @@ impl JvmLibraries {
                                 infix: m.is_infix(),
                                 is_abstract: m.is_abstract(),
                                 is_final: m.is_final(),
+                                deprecated_hidden: m.deprecated_hidden(),
                                 inherited_by_delegation: m.inherited_by_delegation(),
                                 return_value_status: m.return_value_status,
                             },

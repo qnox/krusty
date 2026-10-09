@@ -153,6 +153,9 @@ impl LmFlags {
     /// bit so plugin-generated constructions can select that declaration without assuming list
     /// order or accepting a same-shaped secondary constructor.
     const IS_PRIMARY_CONSTRUCTOR: u16 = 1 << 9;
+    /// `@Deprecated(level = HIDDEN)`: retained for override matching and binary compatibility,
+    /// but excluded from ordinary call candidates.
+    const DEPRECATED_HIDDEN: u16 = 1 << 10;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -207,6 +210,10 @@ impl LmFlags {
     #[inline]
     pub const fn with_is_primary_constructor(self, on: bool) -> Self {
         self.with(Self::IS_PRIMARY_CONSTRUCTOR, on)
+    }
+    #[inline]
+    pub const fn with_deprecated_hidden(self, on: bool) -> Self {
+        self.with(Self::DEPRECATED_HIDDEN, on)
     }
 }
 
@@ -795,12 +802,20 @@ impl LibraryMember {
         self.flags.has(LmFlags::IS_PRIMARY_CONSTRUCTOR)
     }
     #[inline]
+    pub fn deprecated_hidden(&self) -> bool {
+        self.flags.has(LmFlags::DEPRECATED_HIDDEN)
+    }
+    #[inline]
     pub fn set_ret_nullable(&mut self, on: bool) {
         self.flags = self.flags.with_ret_nullable(on);
     }
     #[inline]
     pub fn set_is_primary_constructor(&mut self, on: bool) {
         self.flags = self.flags.with_is_primary_constructor(on);
+    }
+    #[inline]
+    pub fn set_deprecated_hidden(&mut self, on: bool) {
+        self.flags = self.flags.with_deprecated_hidden(on);
     }
     #[inline]
     pub fn set_is_interface(&mut self, on: bool) {
@@ -1929,6 +1944,7 @@ impl FunctionInfo {
         member.set_is_infix(self.flags.infix);
         member.set_is_abstract(self.flags.is_abstract);
         member.set_is_final(self.flags.is_final);
+        member.set_deprecated_hidden(self.flags.deprecated_hidden);
         member.return_value_status = self.flags.return_value_status;
         // Interface-ness travels with the selected overload for the same reason `suspend` does: it is a
         // fact about the DECLARATION, and the emit site may have no way to re-derive it (a mapped
@@ -2026,6 +2042,9 @@ pub struct FnFlags {
     /// The declaration cannot be overridden. This is source modality, independent of a target's
     /// physical access flags.
     pub is_final: bool,
+    /// The declaration remains available to override matching but is absent from ordinary call
+    /// resolution because it is `@Deprecated(level = HIDDEN)`.
+    pub deprecated_hidden: bool,
     /// See [`LibraryMember::inherited_by_delegation`].
     pub inherited_by_delegation: bool,
     /// See [`LibraryMember::return_value_status`]. A current-module declaration leaves this `None`:

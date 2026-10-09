@@ -121,6 +121,7 @@ impl FunctionInfo {
         candidate.flags.infix = member.is_infix();
         candidate.flags.is_abstract = member.is_abstract();
         candidate.flags.is_final = member.is_final();
+        candidate.flags.deprecated_hidden = member.deprecated_hidden();
         candidate.flags.inherited_by_delegation = member.inherited_by_delegation();
         candidate.flags.return_value_status = member.return_value_status;
         candidate.callable.annotations = member.annotations.clone();
