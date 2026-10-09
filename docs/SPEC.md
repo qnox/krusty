@@ -827,7 +827,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that is a plain read or constant, or the trailing run of such operands whatever their values
   (unless one suspends), is passed directly, which keeps the source evaluation order. A direct
   element of a vararg operand folds the same way, so `String.format("%s", "")` stores the format
-  string and then writes `""` into the array. An `@InlineOnly` parameter the body loads only for
+  string and then writes `""` into the array. An empty vararg is `iconst_0; anewarray` and stores
+  nothing, so the same call reads it in place: a callee that spreads the parameter
+  (`aload; aload; arraylength`) duplicates that array and leaves the receiver on the stack.
+  `Path.outputStream()` is that shape. A vararg that contains an element still stores the array,
+  and that call keeps the ordinary parameter slots. An `@InlineOnly` parameter the body loads only for
   its null check (`String.Companion.format`'s receiver) is evaluated and popped and takes no local.
   An ordinary inline function stores that parameter anyway, so the caller's `$iv` local exists
   (`tests/delegated_properties_array_e2e.rs`). A preserved

@@ -102,6 +102,25 @@ fn an_inline_only_println_of_a_local_loads_the_local_after_system_out() {
 }
 
 #[test]
+fn an_empty_inline_vararg_is_duplicated_on_the_stack_like_kotlinc() {
+    // `Path.outputStream()` is `@InlineOnly` and spreads its vararg:
+    // `aload receiver; aload options; aload options; arraylength; copyOf`. With no options the
+    // array is `iconst_0; anewarray`. kotlinc leaves the receiver on the stack and duplicates
+    // that array. Storing both parameters first is a different method. A vararg that contains an
+    // element still stores the array, and the receiver with it.
+    let src = "import java.nio.file.Path\n\
+        import java.nio.file.StandardOpenOption\n\
+        import kotlin.io.path.outputStream\n\
+        fun open(p: Path) = p.outputStream()\n\
+        fun openCreate(p: Path) = p.outputStream(StandardOpenOption.CREATE)\n";
+    common::assert_classes_identical_to_kotlinc_jdk(
+        "EmptyVarargInPlace",
+        src,
+        &["EmptyVarargInPlaceKt"],
+    );
+}
+
+#[test]
 fn inline_only_arguments_read_in_place_still_run() {
     common::expect_box_ok_with_stdlib(
         &format!(
