@@ -2446,7 +2446,7 @@ impl BodyFirChecker<'_> {
                 // initializer runs, but `_` introduces no readable binding and therefore has no
                 // value slot for common lowering to store into. This is distinct from an ignored
                 // destructuring entry: the latter shares one already-materialized initializer.
-                if name == "_" {
+                if self.file.unnamed_locals.contains(&statement) {
                     return Ok(self.body.add_statement(FirStatement {
                         origin,
                         kind: FirStatementKind::Expression(initializer),

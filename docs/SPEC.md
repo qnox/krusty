@@ -4594,6 +4594,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its message from there, including name-based destructuring's. Parse-time gates are kept on the
   file (`File::language_gates`) and reported by the frontend in source order with every other
   diagnostic. Tests: `src/features/unsupported.rs`.
+- **Unnamed local variables (`UnnamedLocalVariables`).** A local `val _ = e` evaluates `e` and binds
+  nothing, so several may share a scope. Without the feature kotlinc reports `UNSUPPORTED_FEATURE`
+  at the `_` of each local property, `for` variable and `when` subject variable, including the
+  locals of a local class's members; a destructuring entry, a `catch` parameter and the escaped
+  `` `_` `` are not unnamed. `var _` is additionally `'var' properties require a name.` at the
+  `var` keyword, whatever the feature. An untyped `when (val _ = e)` uses `e` itself as the subject.
+  Tests: `tests/unnamed_local_variables_e2e.rs`.
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and
   `.idea/misc.xml`; no IDE, JVM, or build tool is launched. Detection order is `Explicit` > `BSP` >

@@ -1056,6 +1056,10 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, sites)| statements.get(&old).copied().map(|new| (new, sites)))
         .collect();
+    file.unnamed_locals = std::mem::take(&mut file.unnamed_locals)
+        .into_iter()
+        .filter_map(|old| statements.get(&old).copied())
+        .collect();
     file.destructuring.lambda_parameters =
         std::mem::take(&mut file.destructuring.lambda_parameters)
             .into_iter()

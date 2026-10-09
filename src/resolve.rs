@@ -22325,8 +22325,9 @@ impl<'a> Checker<'a> {
         // Legal *nested* shadowing (`val x` inside a block, shadowing an outer `val x`) lowers
         // fine — each declaration gets a fresh slot and the lowering's scope is truncated at block
         // exit, restoring the outer mapping (verified). Only a same-scope *redeclaration* is
-        // rejected (kotlinc errors on it too — conflicting declarations).
-        if self.declared_in_current_scope(scope, &name) {
+        // rejected (kotlinc errors on it too — conflicting declarations). An unnamed `_` local
+        // declares nothing to conflict with.
+        if !self.file.unnamed_locals.contains(&s) && self.declared_in_current_scope(scope, &name) {
             self.diags.error(
                 self.file.stmt_spans[s.0 as usize],
                 format!("krusty: conflicting local declaration '{name}'"),
@@ -22434,6 +22435,10 @@ impl<'a> Checker<'a> {
         } else {
             bound_ty
         };
+        // An unnamed local is checked like any other but binds nothing a later name could read.
+        if self.file.unnamed_locals.contains(&s) {
+            return;
+        }
         // A callable reference assigned to an explicitly declared function type has already been
         // adapted to that type. Keep the declared semantic shape on the local: the reference's raw
         // signature may spell a receiver as its first ordinary parameter (`Foo::Inner`), while the

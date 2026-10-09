@@ -1420,7 +1420,10 @@ impl Parser<'_> {
             if self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar) {
                 let vstart = self.tok().span;
                 let is_var = self.at(TokenKind::KwVar);
+                let keyword = self.tok().span;
                 self.bump(); // 'val' / 'var'
+                self.gate_unnamed_local(is_var.then_some(keyword));
+                let unnamed = self.at_unnamed_local_name();
                 let name = self.ident_or_error("variable name");
                 let ty = if self.eat(TokenKind::Colon) {
                     self.skip_plain_newlines();
@@ -1437,22 +1440,31 @@ impl Parser<'_> {
                 // A `when` subject initializer may start on the next line.
                 self.skip_newlines();
                 let init = self.parse_expr();
-                self.file.value_operator_spans.insert(init.0, operator);
                 self.skip_newlines();
                 self.expect(TokenKind::RParen, "')'");
-                let sp = Span::new(vstart.lo, self.file.expr_spans[init.0 as usize].hi);
-                let stmt = self.file.add_stmt(
-                    Stmt::Local {
-                        is_var,
-                        name: name.clone(),
-                        ty,
-                        init,
-                    },
-                    sp,
-                );
-                let nm = self.file.add_expr(Expr::Name(name), sp);
-                subject_var = Some((stmt, nm));
-                Some(nm)
+                // An unnamed, untyped subject variable binds nothing a branch could read: the
+                // subject is its initializer.
+                if unnamed && ty.is_none() {
+                    Some(init)
+                } else {
+                    self.file.value_operator_spans.insert(init.0, operator);
+                    let sp = Span::new(vstart.lo, self.file.expr_spans[init.0 as usize].hi);
+                    let stmt = self.file.add_stmt(
+                        Stmt::Local {
+                            is_var,
+                            name: name.clone(),
+                            ty,
+                            init,
+                        },
+                        sp,
+                    );
+                    if unnamed {
+                        self.file.unnamed_locals.insert(stmt);
+                    }
+                    let nm = self.file.add_expr(Expr::Name(name), sp);
+                    subject_var = Some((stmt, nm));
+                    Some(nm)
+                }
             } else {
                 let e = self.parse_expr();
                 self.skip_newlines();

@@ -51,7 +51,10 @@ fn nullable_narrow_integer_constant_expression_retains_numeric_conversion() {
 
 #[test]
 fn unnamed_local_evaluates_its_initializer_without_allocating_storage() {
-    let (body, _) = checked_function_body("fun call() {}\nfun use() { val _ = call() }\n", "use");
+    let (body, _) = checked_function_body(
+        "// LANGUAGE: +UnnamedLocalVariables\nfun call() {}\nfun use() { val _ = call() }\n",
+        "use",
+    );
     let FirExprKind::Block { statements, .. } = &body
         .expr(root_expression(&body))
         .expect("function block")
