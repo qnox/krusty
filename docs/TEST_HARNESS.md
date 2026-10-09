@@ -263,6 +263,29 @@ class-dump: live kotlinc summary invocations=<n> tests=<n>
 class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n>
 ```
 
+## CLI Corpus Ratchet
+
+`kotlin_cli_jvm_conformance` (in the `conformance` binary) runs Kotlin's own command-line test
+corpus, `compiler/testData/cli/jvm` at the reference tag, through the krusty binary. `just box-corpus`
+provisions it in the same checkout as the box corpus. Each case is an `.args` file and the `.out`
+file kotlinc's `AbstractCliTest` compares against: the normalized stderr followed by the exit code's
+name, so the corpus covers argument parsing, help text, configuration errors, source discovery and
+reported diagnostics.
+
+`tests/cli_expected_failures/jvm/<version>.txt` lists the cases krusty does not reproduce yet; any
+case joining or leaving it fails. Rewrite it from a full local run:
+
+```sh
+KRUSTY_BLESS_CLI_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
+  ./run-tests.sh --test conformance kotlin_cli_jvm_conformance -- --nocapture
+```
+
+`tests/cli_expected_not_applicable/jvm/<version>.txt` lists the cases the reference kotlinc does not
+reproduce outside JetBrains' environment, each under a comment saying why. The ignored
+`the_reference_compiler_reproduces_every_applicable_cli_case` runs kotlinc through the same runner
+and must pass every other case. Cases needing a JDK the machine lacks are skipped at run time; point
+`KRUSTY_JDK_<release>_HOME` (8, 11, 17, 21) at one to include them.
+
 ## JVM processes
 
 kotlinc, `javac`, and `java` that the suite runs on every test are pooled. A cache hit does not
