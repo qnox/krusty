@@ -2220,7 +2220,7 @@ mod tests {
                 type_arguments: vec![Some(inner)],
                 argument_slots: vec![Some(argument)],
             }],
-            classifier_annotations: std::collections::HashMap::new(),
+            classifier_annotations: &crate::plugins::ClassifierAnnotationMap::new(),
             call_resolver: None,
         };
         let mut plans = Vec::new();
@@ -2269,7 +2269,7 @@ mod tests {
         SerializationPlugin::default().plan_frontend_expressions(
             &FrontendExpressionContext {
                 calls: vec![call.clone()],
-                classifier_annotations: std::collections::HashMap::new(),
+                classifier_annotations: &crate::plugins::ClassifierAnnotationMap::new(),
                 call_resolver: None,
             },
             &mut plans,
@@ -2298,7 +2298,7 @@ mod tests {
         SerializationPlugin::default().plan_frontend_expressions(
             &FrontendExpressionContext {
                 calls: vec![unrelated],
-                classifier_annotations: std::collections::HashMap::new(),
+                classifier_annotations: &crate::plugins::ClassifierAnnotationMap::new(),
                 call_resolver: None,
             },
             &mut plans,
