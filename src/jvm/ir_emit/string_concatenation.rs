@@ -6,7 +6,12 @@
 use super::*;
 
 impl Emitter<'_> {
-    pub(super) fn emit_string_concat(&mut self, parts: &[u32], code: &mut CodeBuilder) {
+    pub(super) fn emit_string_concat(
+        &mut self,
+        concat: u32,
+        parts: &[u32],
+        code: &mut CodeBuilder,
+    ) {
         if parts.len() == 1 {
             let part = parts[0];
             if matches!(self.ir.expr(part), IrExpr::Const(IrConst::String(_))) {
@@ -49,11 +54,15 @@ impl Emitter<'_> {
                 .iter()
                 .map(|&part| self.spill_string_part(part, code))
                 .collect::<Vec<_>>();
+            // Spilling the parts leaves the last part's line in effect. The builder is the
+            // concatenation, so it opens on the concatenation's line.
+            self.mark_expression_start(concat, code);
             code.new_obj(builder);
             code.dup();
             code.invokespecial(constructor, 0, 0);
             for &(slot, ty, _) in &temps {
                 load(ty, slot, code);
+                self.mark_expression_start(concat, code);
                 self.append_top(ty, code);
             }
             self.release_operand_spills(&temps);
@@ -62,7 +71,7 @@ impl Emitter<'_> {
             code.dup();
             code.invokespecial(constructor, 0, 0);
             for &part in parts {
-                self.append_part(part, code);
+                self.append_part(concat, part, code);
             }
         }
         let to_string = self.cw.methodref(
@@ -91,7 +100,7 @@ impl Emitter<'_> {
         self.spill_operand(part, ty, code)
     }
 
-    fn append(&mut self, expression: u32, code: &mut CodeBuilder) {
+    fn append(&mut self, concat: u32, expression: u32, code: &mut CodeBuilder) {
         let ty = self.value_ty(expression);
         let semantic = self
             .ir
@@ -102,6 +111,7 @@ impl Emitter<'_> {
         if ty == Ty::Unit {
             let unit = Ty::obj("kotlin/Unit");
             self.emit_value_as(expression, unit, code);
+            self.mark_expression_start(concat, code);
             self.append_top(unit, code);
             return;
         }
@@ -118,6 +128,7 @@ impl Emitter<'_> {
                 ..
             }
         ) {
+            self.mark_expression_start(concat, code);
             self.append_top(Ty::obj("java/lang/Object"), code);
             return;
         }
@@ -128,16 +139,19 @@ impl Emitter<'_> {
                     .cw
                     .methodref(&owner.render(), "toString-impl", &descriptor);
                 code.invokestatic(method, slot_words(carrier) as i32, 1);
+                self.mark_expression_start(concat, code);
                 self.append_top(Ty::String, code);
                 return;
             }
             // A value class rendered through its `toString-impl` is appended at its own static type,
             // which selects `append(Object)` as kotlinc does, although the rendered text is a String.
             if self.is_value_class_ty(&semantic) {
+                self.mark_expression_start(concat, code);
                 self.append_top(Ty::obj("java/lang/Object"), code);
                 return;
             }
         }
+        self.mark_expression_start(concat, code);
         self.append_top(ty, code);
     }
 
@@ -224,7 +238,7 @@ impl Emitter<'_> {
 
     /// Append one string-template part to the `StringBuilder` beneath it. A single-character string
     /// constant appends as a `char` (kotlinc emits `append(C)` with the char constant, not `append(String)`).
-    fn append_part(&mut self, part: u32, code: &mut CodeBuilder) {
+    fn append_part(&mut self, concat: u32, part: u32, code: &mut CodeBuilder) {
         // "single character" is one UTF-16 code UNIT — the width of a `Char` — so a supplementary
         // character (two units) stays on the `append(String)` path, as it must.
         let single_unit = if let IrExpr::Const(IrConst::String(string)) = self.ir.expr(part) {
@@ -233,10 +247,13 @@ impl Emitter<'_> {
             None
         };
         if let Some(unit) = single_unit {
+            // A one-unit literal does not open its own line. It stays on the concatenation's
+            // line, including when the literal itself is written on a later line.
             code.push_int(unit as i32, self.cw);
+            self.mark_expression_start(concat, code);
             self.append_top(Ty::Char, code);
         } else {
-            self.append(part, code);
+            self.append(concat, part, code);
         }
     }
 

@@ -1409,7 +1409,7 @@ impl super::Emitter<'_> {
                     _ => code.ineg(),
                 }
             }
-            IrExpr::StringConcat(parts) => self.emit_string_concat(parts, code),
+            IrExpr::StringConcat(parts) => self.emit_string_concat(e, parts, code),
             IrExpr::EnumEntry { classifier, name } => {
                 let fq_name = classifier.render();
                 let desc = format!("L{fq_name};");

@@ -1682,6 +1682,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     (kotlinc's form). "One character" must be counted in code units, not `char`s: a supplementary
     character is two units and does not fit a `Char`, so appending it that way would truncate it
     through `i2c`. It stays on the `append(String)` path.
+  - Each part of that concatenation is marked on its own line, and the `append` that consumes it
+    is marked on the concatenation's line. A run of neighbouring constants keeps the first
+    constant's line, so a later literal folded into the run does not open a line of its own. An
+    interpolation written on another line therefore shows that line on its value and the
+    concatenation's line on the following `append`. Test:
+    `tests/string_template_append_line_e2e.rs`.
   - The generic class reader decodes `CONSTANT_Utf8` to the same code-unit value and carries it through
     `ConstVal`/`LibConst`, so a separately compiled **classpath** `const val` preserves an unpaired
     surrogate too. Names and descriptors still require scalar text; an invalid name fails soft rather
