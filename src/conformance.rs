@@ -12,7 +12,8 @@ mod reference_jvm;
 pub use box_jdk::{box_jdk_kind, BoxJdk, BoxJdkKind, BoxJdkRoots};
 pub use codegen_modes::{unsupported_codegen_mode_directive, UnitCodegenModes};
 pub use compiler_arguments::{
-    case_kotlinc_arguments, reference_only_kotlinc_arguments, unit_kotlinc_arguments,
+    case_kotlinc_arguments, reference_only_kotlinc_arguments, unit_compiler_configuration,
+    unit_kotlinc_arguments, UnitCompilerConfiguration,
 };
 pub use reference_jvm::{reference_jvm_acceptance, ReferenceJvmAcceptance};
 

@@ -2,12 +2,24 @@
 //!
 //! Kotlin's test infrastructure configures each test's compiler from directives in the test source.
 //! The box gate compiles every unit twice, with krusty and with the reference kotlinc, and the two
-//! compilations must be configured identically. [`unit_kotlinc_arguments`] is the one translation
-//! from directives to kotlinc arguments: the reference compiler receives the arguments verbatim and
-//! krusty reads them through its kotlinc-compatible command line, so a directive krusty does not
-//! implement is refused exactly as the same argument would be on a real build.
+//! compilations must be configured identically. [`unit_compiler_configuration`] is the one
+//! translation from directives: ordinary settings become kotlinc arguments, while historical
+//! language/API levels use the typed channel which Kotlin's own test runner uses.
 
 use super::{directive, UnitCodegenModes};
+use crate::language_version::LanguageVersion;
+
+/// Compiler configuration selected by a box test for one compilation unit.
+///
+/// Most settings remain ordinary kotlinc arguments. Language/API levels also retain their exact
+/// typed identity; this is the only way to carry historical levels which current kotlinc releases
+/// still model internally but no longer accept on the public command line.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnitCompilerConfiguration {
+    pub arguments: Vec<String>,
+    pub language_version: Option<LanguageVersion>,
+    pub api_version: Option<LanguageVersion>,
+}
 
 /// The kotlinc arguments one compilation unit of a case compiles under: the case-wide arguments of
 /// [`case_kotlinc_arguments`], then the code-generation modes the unit's own Kotlin sources select
@@ -21,11 +33,41 @@ pub fn unit_kotlinc_arguments<'a>(
     Ok(arguments)
 }
 
+/// The complete compiler configuration for one unit, including historical levels which cannot be
+/// represented by the current kotlinc command line.
+pub fn unit_compiler_configuration<'a>(
+    case: &str,
+    unit: impl IntoIterator<Item = &'a str>,
+) -> Result<UnitCompilerConfiguration, String> {
+    let mut configuration = case_compiler_configuration(case)?;
+    configuration
+        .arguments
+        .extend(UnitCodegenModes::of_unit(unit).kotlinc_args());
+    Ok(configuration)
+}
+
+fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, String> {
+    let mut arguments = case_cli_arguments(src)?;
+    let language_version = exact_version(src, "LANGUAGE_VERSION")?;
+    let api_version = exact_version(src, "API_VERSION")?;
+    if let Some(version) = last_value(src, "LANGUAGE_VERSION") {
+        if !predates_kotlin_2(version) {
+            arguments.extend(["-language-version".to_string(), version.to_string()]);
+        }
+    }
+    Ok(UnitCompilerConfiguration {
+        arguments,
+        language_version,
+        api_version,
+    })
+}
+
 /// The kotlinc arguments the case-wide directives of `src` select, in directive order per kind:
 ///
 /// | directive | argument |
 /// |---|---|
 /// | `// LANGUAGE: +A -B` | `-XXLanguage:+A`, `-XXLanguage:-B` |
+/// | `// LANGUAGE_VERSION: X` | `-language-version X` (see below) |
 /// | `// API_VERSION: X` | `-api-version X` (see below) |
 /// | `// OPT_IN: a.B, c.D` | `-opt-in=a.B`, `-opt-in=c.D` |
 /// | `// EXPLICIT_API_MODE: STRICT` | `-Xexplicit-api=strict` |
@@ -39,15 +81,35 @@ pub fn unit_kotlinc_arguments<'a>(
 /// to [`unit_kotlinc_arguments`]; a value of one that names no mode fails closed here, so no unit
 /// compiles under a guessed default.
 ///
-/// An `// API_VERSION:` below 2.0 cannot be represented by kotlinc 2.4's public command line:
-/// Kotlin's own test runner installs it directly in the compiler configuration. Refuse that case
-/// here until the differential harness has the same typed configuration channel; silently omitting
-/// it would compile a different program at the default API level.
+/// A language/API level below 2.0 is carried by [`unit_compiler_configuration`]'s typed channel;
+/// current kotlinc releases no longer accept it on the public command line. Calling this
+/// argument-only API for such a case fails closed.
 ///
 /// A case declaring a type in the reserved `kotlin` package needs `-Xallow-kotlin-package` whether
 /// or not it says so: several corpus cases declare one without the directive, and kotlinc rejects
 /// them without the argument.
 pub fn case_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
+    let configuration = case_compiler_configuration(src)?;
+    if let Some(version) = configuration
+        .language_version
+        .filter(|version| version.major < 2)
+    {
+        return Err(format!(
+            "box directive `// LANGUAGE_VERSION: {version}` requires `unit_compiler_configuration`"
+        ));
+    }
+    if let Some(version) = configuration
+        .api_version
+        .filter(|version| version.major < 2)
+    {
+        return Err(format!(
+            "box directive `// API_VERSION: {version}` requires `unit_compiler_configuration`"
+        ));
+    }
+    Ok(configuration.arguments)
+}
+
+fn case_cli_arguments(src: &str) -> Result<Vec<String>, String> {
     if let Some(directive) = super::unsupported_codegen_mode_directive(src) {
         return Err(format!(
             "box directive `{directive}` names no code-generation mode"
@@ -59,12 +121,9 @@ pub fn case_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
         .map(|token| format!("-XXLanguage:{token}"))
         .collect();
     if let Some(version) = last_value(src, "API_VERSION") {
-        if predates_kotlin_2(version) {
-            return Err(format!(
-                "box directive `// API_VERSION: {version}` requires the typed compiler-configuration channel"
-            ));
+        if !predates_kotlin_2(version) {
+            arguments.extend(["-api-version".to_string(), version.to_string()]);
         }
-        arguments.extend(["-api-version".to_string(), version.to_string()]);
     }
     arguments.extend(
         values(src, "OPT_IN")
@@ -145,6 +204,15 @@ fn predates_kotlin_2(version: &str) -> bool {
         .split_once('.')
         .and_then(|(major, _)| major.parse::<u32>().ok())
         .is_some_and(|major| major < 2)
+}
+
+fn exact_version(src: &str, directive: &str) -> Result<Option<LanguageVersion>, String> {
+    let Some(version) = last_value(src, directive) else {
+        return Ok(None);
+    };
+    LanguageVersion::from_major_minor_text(version)
+        .map(Some)
+        .ok_or_else(|| format!("box directive `// {directive}: {version}` names no language level"))
 }
 
 /// Whether any source file declares the top-level package `kotlin` or a `kotlin.*` subpackage,
@@ -229,20 +297,44 @@ mod tests {
     }
 
     #[test]
-    fn a_kotlin_1_api_version_fails_closed_instead_of_selecting_the_default_api() {
+    fn kotlin_1_levels_use_the_typed_configuration_channel() {
+        assert_eq!(
+            unit_compiler_configuration(
+                "// LANGUAGE_VERSION: 1.8\n// API_VERSION: 1.3\nfun box() = \"OK\"\n",
+                ["fun box() = \"OK\"\n"]
+            ),
+            Ok(UnitCompilerConfiguration {
+                arguments: Vec::new(),
+                language_version: Some(LanguageVersion::new(1, 8)),
+                api_version: Some(LanguageVersion::new(1, 3)),
+            })
+        );
         assert_eq!(
             case_kotlinc_arguments("// API_VERSION: 1.9\nfun box() = \"OK\"\n"),
             Err(
-                "box directive `// API_VERSION: 1.9` requires the typed compiler-configuration channel"
+                "box directive `// API_VERSION: 1.9` requires `unit_compiler_configuration`"
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn current_levels_use_the_same_typed_identity_as_the_cli_arguments() {
         assert_eq!(
-            case_kotlinc_arguments("// API_VERSION: 1.3\nfun box() = \"OK\"\n"),
-            Err(
-                "box directive `// API_VERSION: 1.3` requires the typed compiler-configuration channel"
-                    .to_string()
-            )
+            unit_compiler_configuration(
+                "// LANGUAGE_VERSION: 2.2\n// API_VERSION: 2.1\nfun box() = \"OK\"\n",
+                ["fun box() = \"OK\"\n"]
+            ),
+            Ok(UnitCompilerConfiguration {
+                arguments: vec![
+                    "-api-version".to_string(),
+                    "2.1".to_string(),
+                    "-language-version".to_string(),
+                    "2.2".to_string(),
+                ],
+                language_version: Some(LanguageVersion::new(2, 2)),
+                api_version: Some(LanguageVersion::new(2, 1)),
+            })
         );
     }
 

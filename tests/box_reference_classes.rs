@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use krusty::conformance::{
     directive, inject_support_module, module_units, reference_only_kotlinc_arguments, split_files,
-    split_modules, unit_kotlinc_arguments, BoxJdk, FragmentUnit,
+    split_modules, unit_compiler_configuration, BoxJdk, FragmentUnit,
 };
 
 use super::common::{self, byte_dump};
@@ -38,10 +38,10 @@ pub const MAIN_MODULE: &str = "main";
 /// fragments instead of a flat `-Xcommon-sources` split (changing even a successful MPP case's
 /// bytes-exact invocation), so cases that `v3` cached must recompile. `v5` compiles each unit under
 /// its own `// LAMBDAS:`/`// SAM_CONVERSIONS:`/`// JVM_DEFAULT_MODE:` modes and keys on the producing
-/// JDK, so a `v4` entry compiled under kotlinc's default modes or another JDK is never replayed.
+/// JDK, so an older entry compiled under kotlinc's default modes or another JDK is never replayed.
 /// Every directive-selected argument rides its unit's `unit_arguments` and the test-only feature
 /// property rides `jvm_properties`, so a change of either re-keys itself.
-const REF_CACHE_SALT: &str = "ref-classes-v5-unit-modes-and-producing-jdk";
+const REF_CACHE_SALT: &str = "ref-classes-v6-typed-language-settings";
 
 /// A reference `.class` inventory grouped by module identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -190,6 +190,16 @@ fn cache_key(
         .iter()
         .map(|unit| (unit.module.as_str(), unit.arguments.as_slice()))
         .collect();
+    let unit_language_settings: Vec<_> = units
+        .iter()
+        .map(|unit| {
+            (
+                unit.module.as_str(),
+                unit.language_version,
+                unit.api_version,
+            )
+        })
+        .collect();
     let (compiler_id, compiler_len) = compiler_identity();
     let producing_jdk = producing_jdk_identity()?;
     Ok(ReferenceCacheInputs {
@@ -199,6 +209,7 @@ fn cache_key(
         base_args: &base_args,
         jvm_properties,
         unit_arguments: &unit_arguments,
+        unit_language_settings: &unit_language_settings,
         compiler_id: compiler_id.as_deref(),
         compiler_len,
         producing_jdk,
@@ -358,6 +369,12 @@ pub struct ReferenceCacheInputs<'a> {
     pub jvm_properties: &'a [String],
     /// Each compilation unit's module and its directive-selected arguments, in build order.
     pub unit_arguments: &'a [(&'a str, &'a [String])],
+    /// Exact language/API levels installed through kotlinc's typed configuration channel.
+    pub unit_language_settings: &'a [(
+        &'a str,
+        Option<krusty::language_version::LanguageVersion>,
+        Option<krusty::language_version::LanguageVersion>,
+    )],
     pub compiler_id: Option<&'a str>,
     pub compiler_len: u64,
     /// The JDK the reference kotlinc and javac run on, from
@@ -390,6 +407,28 @@ impl ReferenceCacheInputs<'_> {
             parts.push(count);
             parts.extend(args.iter().map(|arg| arg.as_bytes()));
         }
+        let setting_bytes: Vec<[u8; 8]> = self
+            .unit_language_settings
+            .iter()
+            .map(|(_, language, api)| {
+                let [language_major, language_minor] = language
+                    .map(|version| [version.major, version.minor])
+                    .unwrap_or([u16::MAX, u16::MAX]);
+                let [api_major, api_minor] = api
+                    .map(|version| [version.major, version.minor])
+                    .unwrap_or([u16::MAX, u16::MAX]);
+                let mut bytes = [0; 8];
+                bytes[0..2].copy_from_slice(&language_major.to_le_bytes());
+                bytes[2..4].copy_from_slice(&language_minor.to_le_bytes());
+                bytes[4..6].copy_from_slice(&api_major.to_le_bytes());
+                bytes[6..8].copy_from_slice(&api_minor.to_le_bytes());
+                bytes
+            })
+            .collect();
+        for ((module, _, _), settings) in self.unit_language_settings.iter().zip(&setting_bytes) {
+            parts.push(module.as_bytes());
+            parts.push(settings);
+        }
         // The exact compiler identity isolates one release/RC's bytes from another's; the jar length
         // guards a same-identity rebuild. An unpublished compiler never reaches the cache, but still
         // contributes a stable key so an in-run second lookup matches.
@@ -411,7 +450,7 @@ const TEST_ONLY_LANGUAGE_FEATURES: &[&str] = &["ImplicitSignedToUnsignedIntegerC
 /// `kotlinc.test.allow.testonly.language.features` property when a unit's arguments enable a
 /// test-only feature, which the persistent server applies on its own property-keyed pool rather
 /// than passing to the compiler. Every other directive is an argument of the unit
-/// ([`unit_kotlinc_arguments`]), shared with krusty's own compile of the case.
+/// ([`unit_compiler_configuration`]), shared with krusty's own compile of the case.
 fn reference_jvm_properties(units: &[PlannedUnit]) -> Vec<String> {
     let enables_test_only_feature = units
         .iter()
@@ -449,21 +488,26 @@ struct PlannedUnit {
     deps: Vec<String>,
     friends: Vec<String>,
     arguments: Vec<String>,
+    language_version: Option<krusty::language_version::LanguageVersion>,
+    api_version: Option<krusty::language_version::LanguageVersion>,
 }
 
 /// Split a case into the units krusty compiles it as: a `// MODULE:` build's folded units, else
 /// one `main` unit of its `// FILE:` blocks or of the whole source. `// WITH_COROUTINES` adds the
 /// generated helpers exactly where krusty does. Each unit's arguments come from
-/// [`unit_kotlinc_arguments`], the selection the gate's own compile of that unit parses, followed by
+/// [`unit_compiler_configuration`], the selection the gate's own compile of that unit parses,
+/// followed by
 /// the case's [`reference_only_kotlinc_arguments`].
 fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<PlannedUnit>, String> {
     let reference_only = reference_only_kotlinc_arguments(src)
         .map_err(|error| format!("reference oracle: {error}"))?;
-    let arguments = |kotlin: &[(String, String)]| {
-        unit_kotlinc_arguments(src, kotlin.iter().map(|(_, source)| source.as_str()))
-            .map(|mut arguments| {
-                arguments.extend(reference_only.iter().cloned());
-                arguments
+    let configuration = |kotlin: &[(String, String)]| {
+        unit_compiler_configuration(src, kotlin.iter().map(|(_, source)| source.as_str()))
+            .map(|mut configuration| {
+                configuration
+                    .arguments
+                    .extend(reference_only.iter().cloned());
+                configuration
             })
             .map_err(|error| format!("reference oracle: {error}"))
     };
@@ -477,8 +521,11 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
         return module_units(&modules)
             .into_iter()
             .map(|unit| {
+                let configuration = configuration(&unit.files)?;
                 Ok(PlannedUnit {
-                    arguments: arguments(&unit.files)?,
+                    arguments: configuration.arguments,
+                    language_version: configuration.language_version,
+                    api_version: configuration.api_version,
                     module: unit.name,
                     kotlin: unit.files,
                     java: unit.java_files,
@@ -497,8 +544,11 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
     if directive(src, "WITH_COROUTINES") {
         kotlin.push(("CoroutineUtil".to_string(), coroutine_helpers.to_string()));
     }
+    let configuration = configuration(&kotlin)?;
     Ok(vec![PlannedUnit {
-        arguments: arguments(&kotlin)?,
+        arguments: configuration.arguments,
+        language_version: configuration.language_version,
+        api_version: configuration.api_version,
         module: MAIN_MODULE.to_string(),
         kotlin,
         java,
@@ -540,6 +590,8 @@ fn compile_all(
                 java: &unit.java,
                 fragments: &unit.fragments,
                 arguments: &unit.arguments,
+                language_version: unit.language_version,
+                api_version: unit.api_version,
                 classpath: &classpath,
                 friend_paths: &friends,
             },
@@ -567,6 +619,8 @@ struct Unit<'a> {
     java: &'a [(String, String)],
     fragments: &'a [FragmentUnit],
     arguments: &'a [String],
+    language_version: Option<krusty::language_version::LanguageVersion>,
+    api_version: Option<krusty::language_version::LanguageVersion>,
     classpath: &'a [PathBuf],
     friend_paths: &'a [PathBuf],
 }
@@ -638,7 +692,16 @@ fn compile_unit(
         }
         // This inventory's own cache is keyed by every input and the exact compiler, so a miss
         // compiles live rather than also replaying or recording through the recorded-byte archive.
-        let (code, diagnostics) = common::kotlinc_server::kotlinc_compile_unrecorded(&args)
+        let (code, diagnostics) =
+            common::kotlinc_server::kotlinc_compile_unrecorded_with_language_settings(
+                &args,
+                unit.language_version
+                    .map(|version| version.to_string())
+                    .as_deref(),
+                unit.api_version
+                    .map(|version| version.to_string())
+                    .as_deref(),
+            )
             .ok_or_else(|| "kotlinc unavailable".to_string())?;
         if code != 0 {
             return Err(reference_compile_error(unit.module, &diagnostics));
@@ -882,6 +945,7 @@ mod tests {
             base_args,
             jvm_properties: &[],
             unit_arguments,
+            unit_language_settings: &[(MAIN_MODULE, None, None)],
             compiler_id: Some("2.4.20"),
             compiler_len: 100,
             producing_jdk: b"JAVA_VERSION=\"21.0.12\"",
@@ -967,6 +1031,79 @@ mod tests {
                 ..base
             }
             .fingerprint()
+        );
+    }
+
+    #[test]
+    fn cache_key_isolates_typed_language_and_api_levels() {
+        let jar = classpath("/a.jar");
+        let base = key_inputs(&jar, PLAIN_UNIT);
+        let historical = [(
+            MAIN_MODULE,
+            None,
+            Some(krusty::language_version::LanguageVersion::new(1, 8)),
+        )];
+        assert_ne!(
+            base.fingerprint(),
+            ReferenceCacheInputs {
+                unit_language_settings: &historical,
+                ..base
+            }
+            .fingerprint()
+        );
+    }
+
+    #[test]
+    fn typed_historical_levels_control_the_reference_compile() {
+        if !kotlinc_available() {
+            return;
+        }
+        let root = common::scratch_dir().expect("allocate a compile directory");
+        let api_source = root.join("HistoricalApi.kt");
+        std::fs::write(
+            &api_source,
+            "enum class Entry { VALUE }\nfun selected() = Entry.entries\n",
+        )
+        .expect("write the API source");
+        let language_source = root.join("HistoricalLanguage.kt");
+        std::fs::write(&language_source, "class Selected\n").expect("write the language source");
+        let compile = |source: &Path, output: &str, language, api| {
+            common::kotlinc_server::kotlinc_compile_unrecorded_with_language_settings(
+                &[
+                    "-d".to_string(),
+                    root.join(output).to_string_lossy().into_owned(),
+                    source.to_string_lossy().into_owned(),
+                ],
+                language,
+                api,
+            )
+            .expect("reference compiler is provisioned")
+        };
+        let (old_api_code, _) = compile(&api_source, "api-1.8", None, Some("1.8"));
+        let (new_api_code, new_api_diagnostics) =
+            compile(&api_source, "api-1.9", None, Some("1.9"));
+        let (old_language_code, old_language_diagnostics) =
+            compile(&language_source, "language-1.4", Some("1.4"), Some("1.4"));
+        let (new_language_code, new_language_diagnostics) =
+            compile(&language_source, "language-1.5", Some("1.5"), Some("1.5"));
+        let old_language_class =
+            std::fs::read(root.join("language-1.4/Selected.class")).expect("read 1.4 class");
+        let new_language_class =
+            std::fs::read(root.join("language-1.5/Selected.class")).expect("read 1.5 class");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_ne!(old_api_code, 0, "API 1.8 must hide Enum.entries");
+        assert_eq!((new_api_code, new_api_diagnostics.as_str()), (0, ""));
+        assert_eq!(
+            (old_language_code, old_language_diagnostics.as_str()),
+            (0, "")
+        );
+        assert_eq!(
+            (new_language_code, new_language_diagnostics.as_str()),
+            (0, "")
+        );
+        assert_ne!(
+            old_language_class, new_language_class,
+            "the exact language level must reach kotlinc's metadata stamp"
         );
     }
 

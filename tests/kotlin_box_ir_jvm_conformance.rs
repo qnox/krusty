@@ -275,25 +275,48 @@ impl Drop for OverlayGuard {
 }
 
 /// The command line krusty compiles one unit of `case` under: the directive arguments the reference
-/// compile of the same unit receives ([`krusty::conformance::unit_kotlinc_arguments`]), read by
-/// krusty's kotlinc-compatible command line. `Err` carries every refusal, in order.
+/// compile of the same unit receives ([`krusty::conformance::unit_compiler_configuration`]).
+/// Ordinary arguments pass through krusty's compatible CLI; exact levels additionally use the
+/// harness's typed configuration channel, which also carries historical levels. `Err` carries every
+/// refusal, in order.
 fn unit_options<'a>(
     case: &str,
     unit: impl IntoIterator<Item = &'a str>,
 ) -> Result<krusty_cli::cli::Options, String> {
-    let arguments = krusty::conformance::unit_kotlinc_arguments(case, unit)?;
-    let options = krusty_cli::cli::parse(arguments);
+    let configuration = krusty::conformance::unit_compiler_configuration(case, unit)?;
+    let mut options = krusty_cli::cli::parse(configuration.arguments.clone());
     let refusals: Vec<&str> = options
         .argument_errors
         .iter()
         .chain(&options.errors)
         .map(String::as_str)
         .collect();
-    if refusals.is_empty() {
-        Ok(options)
-    } else {
-        Err(refusals.join("\n"))
+    if !refusals.is_empty() {
+        return Err(refusals.join("\n"));
     }
+    if configuration.language_version.is_some() || configuration.api_version.is_some() {
+        let language_version = configuration
+            .language_version
+            .unwrap_or(options.language_settings.language_version);
+        let api_version = configuration.api_version.or_else(|| {
+            configuration
+                .language_version
+                .is_none()
+                .then_some(options.language_settings.api_version)
+        });
+        let feature_arguments: Vec<String> = configuration
+            .arguments
+            .iter()
+            .filter(|argument| argument.starts_with("-XXLanguage:"))
+            .cloned()
+            .collect();
+        options.language_settings = krusty::language_settings::LanguageSettings::new(
+            language_version,
+            api_version,
+            &feature_arguments,
+        )?;
+    }
+    Ok(options)
 }
 
 /// Whether the corpus case targets this gate. Compiler coverage is deliberately absent: a targeted
@@ -308,16 +331,18 @@ fn gate_applicable(src: &str, no_run: bool) -> bool {
 }
 
 #[test]
-fn a_missing_configuration_channel_does_not_remove_a_targeted_case() {
-    let source = "// API_VERSION: 1.9\nfun box() = \"OK\"\n";
+fn historical_levels_reach_the_typed_configuration_channel() {
+    let source = "// LANGUAGE_VERSION: 1.9\n// API_VERSION: 1.8\nfun box() = \"OK\"\n";
     assert!(gate_applicable(source, false));
-    match unit_options(source, []) {
-        Ok(_) => panic!("the unrepresentable API level must fail closed"),
-        Err(error) => assert_eq!(
-            error,
-            "box directive `// API_VERSION: 1.9` requires the typed compiler-configuration channel"
-        ),
-    }
+    let options = unit_options(source, []).expect("historical levels are typed harness inputs");
+    assert_eq!(
+        options.language_settings.language_version,
+        krusty::language_version::LanguageVersion::new(1, 9)
+    );
+    assert_eq!(
+        options.language_settings.api_version,
+        krusty::language_version::LanguageVersion::new(1, 8)
+    );
 }
 
 /// The JVM library provider a unit analyzes against, at the API version its command line selects.
