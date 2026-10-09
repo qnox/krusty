@@ -46,6 +46,15 @@ pub struct CheckedIrFile<'a> {
     pub origins: &'a crate::fir::OriginStore,
 }
 
+impl CheckedIrFile<'_> {
+    /// The source file (by index into the module's sources) and span a checked node came from.
+    pub fn origin_span(&self, origin: crate::fir::OriginId) -> Option<(u32, crate::diag::Span)> {
+        self.origins
+            .source_span(origin)
+            .map(|(source, span)| (source.raw(), span))
+    }
+}
+
 /// One emitted artifact: a target-relative path and its bytes (e.g. `Foo.class`, a `.wasm` module).
 pub type Artifact = (String, Vec<u8>);
 

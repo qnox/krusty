@@ -1780,9 +1780,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .expect("checked by the guard");
                 match self.list_property_member(&name, receiver, Ty::Int) {
                     Some(realized) => realized,
-                    None => Err(declined!(
-                        "`{name}` of a receiver that is not a collection"
-                    )),
+                    None => Err(declined!("`{name}` of a receiver that is not a collection")),
                 }
             }
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
