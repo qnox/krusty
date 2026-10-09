@@ -1,0 +1,9 @@
+A two-level glob.
+--- project.yaml
+modules: ["*/*"]
+--- libs/a/module.yaml
+product: jvm/lib
+--- apps/b/module.yaml
+product: jvm/lib
+--- c/module.yaml
+product: jvm/lib

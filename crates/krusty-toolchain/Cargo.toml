@@ -19,3 +19,7 @@ serde_json = "1"
 [[bin]]
 name = "krusty-toolchain"
 path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW`, so a build file is opened without following a symbolic link (`inventory.rs`).
+libc = "0.2"

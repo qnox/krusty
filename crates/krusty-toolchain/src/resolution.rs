@@ -5,11 +5,13 @@
 mod bom_versions;
 mod declarations;
 mod graph;
+mod problems;
 mod roots;
 mod waves;
 
 pub use declarations::{read as read_declarations, ModuleDeclarations};
-pub use graph::{ConstraintNode, Graph, Holder, Key, Kind, MavenNode, ModuleNode, NodeId};
+pub use graph::{Graph, Key, Kind, NodeId};
+pub use problems::collect as collect_problems;
 pub use roots::ModuleGraph;
 
 use crate::maven::{ArtifactResolver, Metadata};

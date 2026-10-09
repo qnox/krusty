@@ -1,104 +1,184 @@
-//! `show dependencies` prints exactly what JetBrains' `kotlin show dependencies --all-modules
-//! --include-tests` printed for each recorded project, resolving from the same local Maven
-//! repository and nothing else. The cases are in `tests/recorded/dependencies`, with the artifacts
-//! every case resolves (the Kotlin standard library and the test framework) in its `repository`;
-//! re-record them with `scripts/kotlin-toolchain/record_projects.py --dependencies`.
+//! `krusty-toolchain show dependencies --all-modules --include-tests` does exactly what JetBrains'
+//! `kotlin` does for each case: the same exit status, stdout and stderr, byte for byte, once each
+//! run's own directory is replaced by one placeholder. Both resolve from the same local Maven
+//! repository and nothing else (`support::kotlin::Resolving`): `tests/cases/dependencies/repository`
+//! (the standard library and the test framework) with the case's `m2/<path>` sections added. The
+//! toolchain's output comes from the cached oracle (`tests/support/oracle.rs`).
+//!
+//! Where an artifact cannot be read completely (it is in no repository, its metadata is not
+//! well-formed, no variant or more than one matches, its coordinates name no file), the toolchain
+//! downloads, or logs and prints the graph anyway; krusty-toolchain refuses. Such a case's
+//! `krusty` section holds the complete stderr krusty-toolchain prints, which must be all it
+//! prints, with exit status 1, and must not be what the toolchain prints.
 
+#[path = "support/rendering.rs"]
+mod rendering;
 mod support;
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use krusty_toolchain::diagnostic::Diagnostics;
-use krusty_toolchain::maven::{Metadata, Store};
-use krusty_toolchain::{configuration, model, resolution, show};
+use rendering::problems;
+use support::kotlin::{self, Invocation, Resolving};
+use support::oracle::Output;
 
-use support::{materialize, reported, Case, REPOSITORY_SECTION};
+const ARGS: &[&str] = &["show", "dependencies", "--all-modules", "--include-tests"];
+/// A case's sections below this directory are files of its local Maven repository.
+const REPOSITORY_SECTION: &str = "m2/";
+const PLACEHOLDER: &str = "<directory>";
 
-/// The case's local Maven repository, beside its project as the recorder makes it: the shared
-/// `tests/recorded/dependencies/repository` with the case's `m2/<path>` sections added.
-fn local_repository(case: &Case, beside: &Path) -> PathBuf {
-    let local = beside.join("m2");
-    copy_tree(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/recorded/dependencies/repository"),
-        &local,
-    );
-    for (file, text) in &case.files {
-        if let Some(file) = file.strip_prefix(REPOSITORY_SECTION) {
-            let path = local.join(file);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
-        }
-    }
-    local
+/// Files by `/`-separated path.
+type Files = Vec<(String, String)>;
+
+/// A case's inputs: its project, and its local Maven repository.
+struct Inputs {
+    project: Files,
+    repository: Files,
 }
 
-fn copy_tree(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
+/// The files below `directory`, by `/`-separated path.
+fn files_below(directory: &Path, prefix: &str, files: &mut Files) {
+    for entry in std::fs::read_dir(directory).unwrap() {
         let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
+        let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
         if entry.file_type().unwrap().is_dir() {
-            copy_tree(&entry.path(), &target);
+            files_below(&entry.path(), &format!("{name}/"), files);
         } else {
-            std::fs::copy(entry.path(), target).unwrap();
+            files.push((name, std::fs::read_to_string(entry.path()).unwrap()));
         }
     }
+}
+
+/// What krusty-toolchain does for a case, laid out as the oracle lays out `kotlin`'s run.
+fn krusty_toolchain(name: &str, inputs: &Inputs) -> Output {
+    let temp = support::TempDir::new(&format!("dependency-case-{name}"));
+    let directory: PathBuf = temp.0.clone();
+    let root = support::materialize(&temp, &inputs.project);
+    Resolving::write_repository(&directory, &inputs.repository);
+    let ran = Command::new(env!("CARGO_BIN_EXE_krusty-toolchain"))
+        .args(ARGS)
+        .current_dir(&root)
+        .env("HOME", directory.join(Resolving::HOME))
+        .env("KOTLIN_SHARED_CACHE_DIR", directory.join(Resolving::CACHE))
+        .env_remove("AMPER_SHARED_CACHE_DIR")
+        .env_remove("M2_HOME")
+        .output()
+        .expect("run krusty-toolchain");
+    Output {
+        root: directory.display().to_string(),
+        code: ran
+            .status
+            .code()
+            .expect("krusty-toolchain exits with a code"),
+        stdout: ran.stdout,
+        stderr: ran.stderr,
+    }
+}
+
+/// `bytes` with every mention of the run's `directory` replaced by the placeholder.
+fn placed(directory: &str, bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).replace(directory, PLACEHOLDER)
 }
 
 #[test]
-fn every_recorded_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
-    let cases = support::cases("dependencies", &["expected", "dependencies"]);
-    assert_eq!(cases.len(), 6, "the recorded cases are missing");
+fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
+    let cases = support::cases("dependencies");
+    assert!(cases.len() >= 6, "the cases are missing");
+    let mut shared = Vec::new();
+    files_below(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/dependencies/repository"),
+        "",
+        &mut shared,
+    );
+    let inputs: Vec<Inputs> = cases
+        .iter()
+        .map(|case| {
+            let mut repository = shared.clone();
+            let mut project = Vec::new();
+            for (file, text) in &case.files {
+                match file.strip_prefix(REPOSITORY_SECTION) {
+                    Some(file) => repository.push((file.to_string(), text.clone())),
+                    None => project.push((file.clone(), text.clone())),
+                }
+            }
+            Inputs {
+                project,
+                repository,
+            }
+        })
+        .collect();
+    let invocations: Vec<Invocation<'_>> = cases
+        .iter()
+        .zip(&inputs)
+        .map(|(case, inputs)| Invocation {
+            case: &case.name,
+            files: &inputs.project,
+            args: ARGS,
+            repository: Some(&inputs.repository),
+        })
+        .collect();
+    let outputs = kotlin::kotlin_all(&invocations);
     let mut failures = Vec::new();
-    for case in &cases {
-        let (_temp, root) = materialize("dependencies", case);
-        let beside = root.parent().unwrap();
-        let local = local_repository(case, beside);
-        let mut diagnostics = Diagnostics::default();
-        let model = model::read(model::Start::Discover(&root), &mut diagnostics)
-            .unwrap_or_else(|error| panic!("{}: {error}", case.name))
-            .unwrap_or_else(|| panic!("{}: the project was not read", case.name));
-        let configured = configuration::configure(&root, &model.modules, &mut diagnostics);
-        let actual = reported(&root, &diagnostics);
-        let expected = case.section("expected").cloned().unwrap_or_default();
-        if actual != expected {
+    for ((case, inputs), toolchain) in cases.iter().zip(&inputs).zip(outputs) {
+        let name = &case.name;
+        let actual = krusty_toolchain(name, inputs);
+        // The toolchain's problems, read back from its rendering: errors on stderr, which holds
+        // nothing else, and warnings on stdout before the graphs.
+        let project_root = format!("{}/{}", toolchain.root, Resolving::PROJECT);
+        let (errors, unread) = problems(&project_root, &toolchain.stderr);
+        if !unread.is_empty() {
             failures.push(format!(
-                "{}:\n  expected {expected:#?}\n  actual   {actual:#?}",
-                case.name
+                "{name}: the toolchain's stderr holds more than problems:\n{}",
+                placed(&toolchain.root, unread)
             ));
             continue;
         }
-        let declarations = resolution::read_declarations(&model.modules, &configured)
-            .unwrap_or_else(|error| panic!("{}: {error}", case.name));
-        // An empty cache: everything is read from the case's repository.
-        let store = Store::with_local(&local, &beside.join("cache"));
-        let metadata = Metadata::new(&store);
-        let mut resolvers = resolution::Resolvers::new(&metadata);
-        let mut printed = String::new();
-        for (index, module) in model.modules.iter().enumerate() {
-            let (mut graphs, resolver) = resolvers.resolve_module(&declarations, index, true);
-            printed.push_str(&show::module_dependencies(
-                &module.name,
-                &mut graphs,
-                resolver,
-            ));
+        let (warnings, result) = problems(&project_root, &toolchain.stdout);
+        let lines = |problems: &[String]| -> String {
+            problems
+                .iter()
+                .map(|problem| format!("{problem}\n"))
+                .collect()
+        };
+        let expected = (
+            toolchain.code,
+            format!("{}{}", lines(&warnings), placed(&toolchain.root, result)),
+            lines(&errors),
+        );
+        // krusty-toolchain's, with paths relative to the project as the toolchain's are read back.
+        let relative = |bytes: &[u8]| {
+            let project = format!("{}/{}/", actual.root, Resolving::PROJECT);
+            placed(
+                &actual.root,
+                String::from_utf8_lossy(bytes)
+                    .replace(&project, "")
+                    .as_bytes(),
+            )
+        };
+        let printed = (
+            actual.code,
+            relative(&actual.stdout),
+            relative(&actual.stderr),
+        );
+        if let Some(krusty) = &case.krusty {
+            let refusal = (1, String::new(), format!("{}\n", krusty.join("\n")));
+            if printed != refusal {
+                failures.push(format!(
+                    "{name}: krusty-toolchain exited {} with stdout\n{}\nstderr\n{}\nthe `krusty` section expects exit 1, no stdout and stderr\n{}",
+                    printed.0, printed.1, printed.2, refusal.2
+                ));
+            }
+            if expected == refusal {
+                failures.push(format!(
+                    "{name}: the `krusty` section is what the toolchain does"
+                ));
+            }
+            continue;
         }
-        let mut lines: Vec<String> = printed
-            .lines()
-            .map(|line| line.trim_end().to_string())
-            .collect();
-        while lines.last().is_some_and(String::is_empty) {
-            lines.pop();
-        }
-        if Some(&lines) != case.section("dependencies") {
+        if printed != expected {
             failures.push(format!(
-                "{}: printed\n{}\nrecorded\n{}",
-                case.name,
-                lines.join("\n"),
-                case.section("dependencies")
-                    .cloned()
-                    .unwrap_or_default()
-                    .join("\n")
+                "{name}: krusty-toolchain exited {} with stdout\n{}\nstderr\n{}\nthe toolchain exited {} with stdout\n{}\nstderr\n{}",
+                printed.0, printed.1, printed.2, expected.0, expected.1, expected.2
             ));
         }
     }

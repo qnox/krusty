@@ -4,7 +4,7 @@
 
 use serde_json::{Map, Value};
 
-use super::RichVersion;
+use super::{ParseError, RichVersion};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capability {
@@ -185,13 +185,21 @@ fn variant(object: &Map<String, Value>) -> Result<Variant, String> {
 }
 
 /// The variants of a `.module` file.
-pub fn parse(text: &str) -> Result<Vec<Variant>, String> {
-    let document: Value = serde_json::from_str(text)
-        .map_err(|error| format!("the module metadata is not JSON: {error}"))?;
+pub fn parse(text: &str) -> Result<Vec<Variant>, ParseError> {
+    let document: Value = serde_json::from_str(text).map_err(|error| {
+        ParseError::at(
+            error.line(),
+            error.column(),
+            &format!("the module metadata is not JSON: {error}"),
+            &format!(" at line {} column {}", error.line(), error.column()),
+        )
+    })?;
     let document = document
         .as_object()
         .ok_or("the module metadata is not a JSON object")?;
-    objects(document, "variants").map(variant).collect()
+    Ok(objects(document, "variants")
+        .map(variant)
+        .collect::<Result<_, String>>()?)
 }
 
 #[cfg(test)]

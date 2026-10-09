@@ -1,0 +1,14 @@
+A POM that is not well-formed XML fails resolution of its artifact.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:broken:1.0
+--- m2/org/example/broken/1.0/broken-1.0.pom
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example
+</project>
+--- krusty
+<directory>/home/.m2/repository/org/example/broken/1.0/broken-1.0.pom:4:1: ERROR: Unable to parse the POM of org.example:broken:1.0: the POM is not well-formed XML: expected 'groupId' tag, not 'project'

@@ -7,9 +7,10 @@ use std::hash::Hash;
 use std::rc::Rc;
 
 use super::gradle_module::{self, Variant};
+use super::metadata::missing;
 use super::pom::Pom;
 use super::variants::{without_documentation_and_metadata, Requested};
-use super::{Coordinates, Metadata, RichVersion};
+use super::{Coordinates, Metadata, Problem, RichVersion, StoredFile};
 
 /// The POM marker of a library whose Gradle module metadata is authoritative.
 const GRADLE_METADATA_MARKER: &str = "do_not_remove: published-with-gradle-metadata";
@@ -81,7 +82,7 @@ pub struct Declared {
     pub children: Vec<ArtifactId>,
     pub constraints: Vec<ConstraintId>,
     /// Why the artifact could not be (completely) read.
-    pub problems: Vec<String>,
+    pub problems: Vec<Problem>,
     /// The artifacts reading it read too.
     reads: Vec<(ArtifactId, Scope)>,
 }
@@ -91,7 +92,7 @@ pub struct Declared {
 struct Read {
     children: Vec<Artifact>,
     constraints: Vec<Constraint>,
-    problems: Vec<String>,
+    problems: Vec<Problem>,
 }
 
 /// Values numbered in the order they are first seen.
@@ -257,25 +258,29 @@ impl<'a> ArtifactResolver<'a> {
             return Read::default();
         }
         let metadata = coordinates.metadata();
-        let pom_text = self.metadata.file(&metadata, "pom");
-        let gradle_metadata = pom_text
-            .as_deref()
-            .is_none_or(|text| text.contains(GRADLE_METADATA_MARKER));
+        let failed = |problem: Problem| Read {
+            problems: vec![problem],
+            ..Read::default()
+        };
+        let pom = match self.metadata.file(&metadata, "pom") {
+            Ok(pom) => pom,
+            Err(problem) => return failed(problem),
+        };
+        let gradle_metadata = pom
+            .as_ref()
+            .is_none_or(|pom| pom.text.contains(GRADLE_METADATA_MARKER));
         if gradle_metadata {
-            if let Some(module_text) = self.metadata.file(&metadata, "module") {
-                return self.read_module(artifact, scope, &module_text, pom_text.is_some());
+            match self.metadata.file(&metadata, "module") {
+                Ok(Some(module)) => {
+                    return self.read_module(artifact, scope, &module, pom.is_some())
+                }
+                Ok(None) => {}
+                Err(problem) => return failed(problem),
             }
         }
-        match pom_text {
+        match pom {
             Some(_) => self.read_pom(artifact, scope),
-            None => Read {
-                problems: vec![format!(
-                    "Unable to resolve dependency {}: neither its POM nor its module metadata is in {}",
-                    coordinates.pretty(None),
-                    self.metadata.store().path(&metadata, "pom").parent().map(|path| path.display().to_string()).unwrap_or_default()
-                )],
-                ..Read::default()
-            },
+            None => failed(missing(coordinates, "POM or module metadata")),
         }
     }
 
@@ -328,24 +333,22 @@ impl<'a> ArtifactResolver<'a> {
         &mut self,
         artifact: &Artifact,
         scope: Scope,
-        text: &str,
+        file: &StoredFile,
         has_pom: bool,
     ) -> Read {
         let variants: Rc<[Variant]> = match self
             .metadata
-            .variants(&artifact.coordinates.metadata(), text)
+            .variants(&artifact.coordinates.metadata(), file)
         {
             Ok(variants) => variants,
             Err(problem) => {
                 return Read {
-                    problems: vec![format!(
-                        "Unable to parse the module metadata of {}: {problem}",
-                        artifact.coordinates.pretty(None)
-                    )],
+                    problems: vec![problem],
                     ..Read::default()
                 }
             }
         };
+        let in_file = |message: String| Problem::in_file(&file.path, None, message);
         let coordinates = &artifact.coordinates;
         let version = coordinates.version.clone().unwrap_or_default();
         let requested = Requested {
@@ -378,10 +381,10 @@ impl<'a> ArtifactResolver<'a> {
         } else if artifact.is_bom {
             let valid = requested.bom_variants(&variants, scope);
             if valid.is_empty() {
-                declared.problems.push(format!(
+                declared.problems.push(in_file(format!(
                     "{} is declared as a BOM, but it is a regular library",
                     coordinates.pretty(None)
-                ));
+                )));
             }
             for variant in valid
                 .iter()
@@ -399,22 +402,23 @@ impl<'a> ArtifactResolver<'a> {
         } else {
             let valid = requested.variants(&variants, scope);
             if valid.is_empty() {
-                declared.problems.push(format!(
+                declared.problems.push(in_file(format!(
                     "No variant of {} matches the JVM {} classpath",
                     coordinates.pretty(None),
                     scope.name().to_lowercase()
-                ));
+                )));
             } else if without_documentation_and_metadata(&valid) > 1 {
-                declared.problems.push(format!(
-                    "More than one variant of {} matches: {}",
+                declared.problems.push(in_file(format!(
+                    "More than one variant of {} matches the JVM {} classpath: {}",
                     coordinates.pretty(None),
+                    scope.name().to_lowercase(),
                     valid
                         .iter()
                         .filter(|variant| !variant.is_documentation_or_metadata())
                         .map(|variant| variant.name.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
-                ));
+                )));
             }
             for variant in valid
                 .iter()
@@ -449,7 +453,7 @@ impl<'a> ArtifactResolver<'a> {
         &mut self,
         variant: &Variant,
         context: &VariantContext<'_>,
-        problems: &mut Vec<String>,
+        problems: &mut Vec<Problem>,
     ) -> Vec<Artifact> {
         let mut bom_constraints: Option<Vec<Constraint>> = None;
         let mut artifacts = Vec::new();
@@ -461,7 +465,7 @@ impl<'a> ArtifactResolver<'a> {
                 Some(version) => Some(version.clone()),
                 None => variant_constraint(variant, dependency).or_else(|| {
                     let constraints = bom_constraints
-                        .get_or_insert_with(|| self.bom_constraints(variant, context));
+                        .get_or_insert_with(|| self.bom_constraints(variant, context, problems));
                     constraints
                         .iter()
                         .find(|constraint| {
@@ -487,6 +491,7 @@ impl<'a> ArtifactResolver<'a> {
         &mut self,
         variant: &Variant,
         context: &VariantContext<'_>,
+        problems: &mut Vec<Problem>,
     ) -> Vec<Constraint> {
         let mut found = Vec::new();
         for dependency in variant
@@ -519,11 +524,15 @@ impl<'a> ArtifactResolver<'a> {
             );
         }
         if found.is_empty() && context.has_pom {
-            if let Ok(effective) = self
+            match self
                 .metadata
                 .effective_pom(&context.artifact.coordinates.metadata(), &self.jdk_version)
             {
-                return pom_constraints(&effective.pom);
+                Ok(effective) => {
+                    problems.extend(effective.problems.iter().cloned());
+                    return pom_constraints(&effective.pom);
+                }
+                Err(failures) => problems.extend(failures),
             }
         }
         found
@@ -535,16 +544,16 @@ impl<'a> ArtifactResolver<'a> {
         dependency: &gradle_module::Dependency,
         version: Option<&RichVersion>,
         context: &VariantContext<'_>,
-        problems: &mut Vec<String>,
+        problems: &mut Vec<Problem>,
     ) -> Artifact {
         let resolved = version.and_then(RichVersion::resolve);
         if version.is_some() && resolved.is_none() {
-            problems.push(format!(
+            problems.push(Problem::general(format!(
                 "Unable to determine the version of {}:{} required by {}: no version attribute is defined",
                 dependency.group,
                 dependency.module,
                 context.artifact.coordinates.pretty(None)
-            ));
+            )));
         }
         Artifact {
             coordinates: Coordinates::with_selector(

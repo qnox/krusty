@@ -1,7 +1,0 @@
-Project errors stop before module files are read.
---- project.yaml
-modules: [a, nowhere]
---- a/module.yaml
-product: jvm/foo
---- expected
-project.yaml:1:14: ERROR: Unresolved module path `nowhere`

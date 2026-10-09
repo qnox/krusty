@@ -53,6 +53,25 @@ fn settings(settings: &Node, product: ProductType, files: &Files) -> String {
     )
 }
 
+/// Text as `YamlSerializer` writes it.
+enum Text<'a> {
+    /// A string value: verbatim, never quoted or escaped, whatever it holds.
+    Scalar(&'a str),
+    /// A free-form map's key, as written in the file (a quoted key without its quotes, escapes
+    /// unprocessed): inside double quotes, with nothing escaped.
+    MapKey(&'a str),
+    /// An object's property name: as it is.
+    Property(&'a str),
+}
+
+/// The one place text is quoted (or not) on its way out.
+fn serialized(text: Text<'_>) -> String {
+    match text {
+        Text::Scalar(text) | Text::Property(text) => text.to_string(),
+        Text::MapKey(key) => format!("\"{key}\""),
+    }
+}
+
 struct Printer<'a> {
     product: ProductType,
     files: &'a Files,
@@ -98,7 +117,7 @@ impl Printer<'_> {
             Value::Null => format!("null{comment}"),
             Value::Boolean(value) => format!("{value}{comment}"),
             Value::Int(value) => format!("{value}{comment}"),
-            Value::String(value) => format!("{value}{comment}"),
+            Value::String(value) => format!("{}{comment}", serialized(Text::Scalar(value))),
             Value::Enum(_, value) => format!("{value}{comment}"),
             // The toolchain joins the path's names, so an absolute path loses its root.
             Value::Path(path) => {
@@ -129,7 +148,7 @@ impl Printer<'_> {
                 entries,
             } => entries
                 .iter()
-                .map(|entry| self.key_value(&format!("\"{}\"", entry.key), &entry.value))
+                .map(|entry| self.key_value(&serialized(Text::MapKey(&entry.key)), &entry.value))
                 .collect::<Vec<_>>()
                 .join("\n"),
             Value::Mapping {
@@ -141,7 +160,7 @@ impl Printer<'_> {
                     .filter(|entry| {
                         entry.property.is_some_and(|property| {
                             !property.hidden
-                                && (!property.jvm_app_only || self.product == ProductType::JvmApp)
+                                && (!property.jvm_app_only || self.product == ProductType::App)
                                 && property.platforms.includes_jvm()
                         })
                     })
@@ -152,7 +171,9 @@ impl Printer<'_> {
                 shown.sort_by(|a, b| a.key.encode_utf16().cmp(b.key.encode_utf16()));
                 shown
                     .iter()
-                    .map(|entry| self.key_value(&entry.key, &entry.value))
+                    .map(|entry| {
+                        self.key_value(&serialized(Text::Property(&entry.key)), &entry.value)
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
@@ -170,19 +191,5 @@ impl Printer<'_> {
         } else {
             format!("{key}:\n{}", prepend_indent(&serialized, INDENT))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::module_banner;
-
-    #[test]
-    fn a_module_is_named_on_a_line_as_wide_as_the_toolchain_prints_it() {
-        let banner = module_banner("app");
-        let lines: Vec<&str> = banner.split_terminator('\n').collect();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], format!("Module: app{}", " ".repeat(1489)));
-        assert_eq!(lines[1], " ".repeat(1500));
     }
 }

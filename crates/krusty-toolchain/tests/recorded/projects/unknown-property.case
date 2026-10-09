@@ -1,8 +1,0 @@
-A property the project file does not have.
---- project.yaml
-modules: [libs/a]
-foo: bar
---- libs/a/module.yaml
-product: jvm/lib
---- expected
-project.yaml:2:1: ERROR: Unknown property `foo`

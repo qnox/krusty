@@ -46,7 +46,7 @@ pub static INTERNAL: ObjectType = ObjectType::new(
     &[
         EXPORTED,
         SCOPE,
-        property("path", Type::Path, Default::Required).from_key(),
+        property("path", Type::Path, Default::Required).read_from_key(),
     ],
 );
 
@@ -55,7 +55,7 @@ pub static CATALOG: ObjectType = ObjectType::new(
     &[
         EXPORTED,
         SCOPE,
-        property("catalogKey", Type::String, Default::Required).from_key(),
+        property("catalogKey", Type::String, Default::Required).read_from_key(),
     ],
 );
 
@@ -70,7 +70,7 @@ pub static BOM: ObjectType = ObjectType::new(
 
 pub static UNSCOPED_MODULE: ObjectType = ObjectType::new(
     "UnscopedModuleDependency",
-    &[property("path", Type::Path, Default::Required).from_key()],
+    &[property("path", Type::Path, Default::Required).read_from_key()],
 );
 
 pub static UNSCOPED_EXTERNAL_MAVEN: ObjectType = ObjectType {
@@ -81,7 +81,7 @@ pub static UNSCOPED_EXTERNAL_MAVEN: ObjectType = ObjectType {
 
 pub static UNSCOPED_CATALOG: ObjectType = ObjectType::new(
     "UnscopedCatalogDependency",
-    &[property("catalogKey", Type::String, Default::Required).from_key()],
+    &[property("catalogKey", Type::String, Default::Required).read_from_key()],
 );
 
 pub static UNSCOPED_BOM: ObjectType = ObjectType::new(

@@ -46,7 +46,7 @@ pub(super) fn check(
                         Diagnostic::warning(Severity::Warning, path, Some(*position), message);
                     reported.push(warning, diagnostics);
                 }
-                if property.jvm_app_only && product != ProductType::JvmApp {
+                if property.jvm_app_only && product != ProductType::App {
                     let message = format!(
                         "Setting `{key}` cannot be applied to product type `{}`. Supported product types are: `jvm/app`",
                         product.name()

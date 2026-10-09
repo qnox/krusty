@@ -1,0 +1,12 @@
+Two templates the module applies setting one value differently.
+--- module.yaml
+product: jvm/lib
+apply: [ a.module-template.yaml, b.module-template.yaml ]
+--- a.module-template.yaml
+settings:
+  jvm:
+    release: 21
+--- b.module-template.yaml
+settings:
+  jvm:
+    release: 22

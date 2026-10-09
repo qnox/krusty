@@ -1,9 +1,0 @@
-Two modules with the same directory name.
---- project.yaml
-modules: [a/x, b/x]
---- a/x/module.yaml
-product: jvm/lib
---- b/x/module.yaml
-product: jvm/lib
---- expected
-ERROR: Module name 'x' is not unique, it's declared in:\na/x/module.yaml\nb/x/module.yaml

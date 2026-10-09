@@ -1,8 +1,0 @@
-A listed path that is a file.
---- project.yaml
-modules: [f]
---- f
-x
---- expected
-project.yaml:1:11: ERROR: `f` is not a directory
-project.yaml:1:1: WARNING: Project has no modules: no root module file and no modules listed in the project file

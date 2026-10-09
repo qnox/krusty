@@ -1,0 +1,7 @@
+A JVM product with another platform.
+--- project.yaml
+modules: [a]
+--- a/module.yaml
+product:
+  type: jvm/lib
+  platforms: [jvm, android]

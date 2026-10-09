@@ -1,0 +1,20 @@
+Gradle module metadata that is not valid JSON fails resolution of its artifact.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:broken:1.0
+--- m2/org/example/broken/1.0/broken-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>broken</artifactId>
+  <version>1.0</version>
+  <!-- do_not_remove: published-with-gradle-metadata -->
+</project>
+--- m2/org/example/broken/1.0/broken-1.0.module
+{ "formatVersion": "1.1", "component": { "group": "org.example", 
+--- krusty
+<directory>/home/.m2/repository/org/example/broken/1.0/broken-1.0.module:2:1: ERROR: Unable to parse the module metadata of org.example:broken:1.0: the module metadata is not JSON: EOF while parsing a value

@@ -7,11 +7,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use krusty_toolchain::configuration;
-use krusty_toolchain::diagnostic::Diagnostics;
-use krusty_toolchain::maven::{Metadata, Store};
+use krusty_toolchain::dependencies;
+use krusty_toolchain::diagnostic::{Diagnostics, Severity};
 use krusty_toolchain::model::{self, Model, Start};
-use krusty_toolchain::module::ModuleHeader;
-use krusty_toolchain::resolution;
 use krusty_toolchain::show;
 
 const USAGE: &str =
@@ -137,9 +135,7 @@ fn run(command: Command) -> Result<bool, String> {
     };
     let mut diagnostics = Diagnostics::default();
     let model = model::read(start, &mut diagnostics);
-    for diagnostic in diagnostics.iter() {
-        eprintln!("{diagnostic}");
-    }
+    report(&diagnostics);
     let Some(model) = model? else {
         if !diagnostics.has_errors() {
             return Err("no Kotlin project found in the current directory or above: no project.yaml or module.yaml".to_string());
@@ -162,9 +158,20 @@ fn run(command: Command) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Print problems where the toolchain prints them: errors on stderr, warnings on stdout before the
+/// command's result.
+fn report(diagnostics: &Diagnostics) {
+    for diagnostic in diagnostics.iter() {
+        match diagnostic.severity {
+            Severity::Error => eprintln!("{diagnostic}"),
+            Severity::Warning | Severity::WeakWarning => println!("{diagnostic}"),
+        }
+    }
+}
+
 /// The modules `selection` names (every module when `all`, or when there is only one), in the
 /// project's order.
-fn selected<'m>(model: &'m Model, selection: &Selection) -> Result<Vec<&'m ModuleHeader>, String> {
+fn selected<'m>(model: &'m Model, selection: &Selection) -> Result<Vec<&'m str>, String> {
     let Selection { names, all } = selection;
     if names.is_empty() && !all && model.modules.len() > 1 {
         return Err("Please specify the module(s) to inspect with -m, or use --all-modules to inspect all modules".to_string());
@@ -189,6 +196,7 @@ fn selected<'m>(model: &'m Model, selection: &Selection) -> Result<Vec<&'m Modul
         .modules
         .iter()
         .filter(|module| *all || names.is_empty() || names.contains(&module.name))
+        .map(|module| module.name.as_str())
         .collect())
 }
 
@@ -199,11 +207,9 @@ fn show_settings(model: &Model, selection: &Selection) -> Result<bool, String> {
     let configured =
         configuration::configure(&model.project.root, &model.modules, &mut diagnostics);
     let output = show::modules_settings(&model.modules, &configured, |module| {
-        shown.iter().any(|selected| std::ptr::eq(*selected, module))
+        shown.contains(&module.name.as_str())
     });
-    for diagnostic in diagnostics.iter() {
-        eprintln!("{diagnostic}");
-    }
+    report(&diagnostics);
     if diagnostics.has_errors() {
         return Ok(false);
     }
@@ -222,37 +228,22 @@ fn show_dependencies(
     let mut diagnostics = Diagnostics::default();
     let configured =
         configuration::configure(&model.project.root, &model.modules, &mut diagnostics);
-    for diagnostic in diagnostics.iter() {
-        eprintln!("{diagnostic}");
+    if diagnostics.has_errors() {
+        report(&diagnostics);
+        return Ok(false);
     }
+    let output = dependencies::show(
+        model,
+        &configured,
+        |module| shown.contains(&module.name.as_str()),
+        include_tests,
+        &mut diagnostics,
+    )?;
+    report(&diagnostics);
     if diagnostics.has_errors() {
         return Ok(false);
     }
-    let declarations = resolution::read_declarations(&model.modules, &configured)?;
-    let root = Store::default_root()
-        .ok_or("cannot locate the user cache directory: set KOTLIN_SHARED_CACHE_DIR")?;
-    // The local Maven repository is read, before the cache, when any module lists it.
-    let local = declarations
-        .iter()
-        .any(|module| module.maven_local)
-        .then(Store::local_repository)
-        .flatten();
-    let store = match local {
-        Some(local) => Store::with_local(&local, &root),
-        None => Store::new(&root),
-    };
-    let metadata = Metadata::new(&store);
-    let mut resolvers = resolution::Resolvers::new(&metadata);
-    for (index, module) in model.modules.iter().enumerate() {
-        if !shown.iter().any(|selected| std::ptr::eq(*selected, module)) {
-            continue;
-        }
-        let (mut graphs, resolver) = resolvers.resolve_module(&declarations, index, include_tests);
-        print!(
-            "{}",
-            show::module_dependencies(&module.name, &mut graphs, resolver)
-        );
-    }
+    print!("{output}");
     Ok(true)
 }
 

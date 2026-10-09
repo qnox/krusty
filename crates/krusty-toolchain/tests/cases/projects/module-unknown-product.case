@@ -1,0 +1,5 @@
+An unknown product type.
+--- project.yaml
+modules: [a]
+--- a/module.yaml
+product: jvm/foo

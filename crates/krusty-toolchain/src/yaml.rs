@@ -7,8 +7,8 @@
 //! reading continues so every such problem in the file is reported, as the toolchain reports them:
 //!
 //! * anchors and aliases are refused at the `&` or `*`;
-//! * a `!!` tag is refused at the tag; any other tag is kept for the schema to judge
-//!   ([`Document::tag`]), never dropped silently;
+//! * a `!!` tag is refused at the tag; where any other tag is written is kept on its node
+//!   ([`Document::tag`]) for the reader to refuse, never dropped silently;
 //! * a second document (`---`) is refused.
 //!
 //! Beyond the toolchain's own rules, krusty refuses outright (as the first and only problem):
@@ -96,8 +96,10 @@ pub enum NodeKind {
 pub struct Node {
     pub kind: NodeKind,
     pub span: Span,
-    /// The node's `!tag`, and where it is written.
-    tag: Option<(String, Position)>,
+    /// Where the node's `!tag` is written.
+    tag: Option<Position>,
+    /// A quoted scalar's text between its quotes, as written: escapes unprocessed.
+    spelling: Option<String>,
 }
 
 /// A parsed file. An empty file is a document whose root is `None`.
@@ -147,27 +149,20 @@ impl Document {
         &self.nodes[id.0 as usize]
     }
 
-    /// The tag written on `id` (`!name` for a local tag), for the callers whose schema has tags.
-    pub fn tag(&self, id: NodeId) -> Option<&str> {
-        self.node(id).tag.as_ref().map(|(tag, _)| tag.as_str())
+    /// Where the tag written on `id` is, if it has one.
+    pub fn tag(&self, id: NodeId) -> Option<Position> {
+        self.node(id).tag
     }
 
-    /// The tag written on `id` and where it is written.
-    pub fn tag_at(&self, id: NodeId) -> Option<(&str, Position)> {
-        self.node(id)
-            .tag
-            .as_ref()
-            .map(|(tag, position)| (tag.as_str(), *position))
-    }
-
-    /// Every tagged node with where its tag is written, so a caller whose schema has no tags can
-    /// refuse them all.
-    pub fn tagged(&self) -> impl Iterator<Item = (NodeId, Position)> + '_ {
-        self.nodes.iter().enumerate().filter_map(|(index, node)| {
-            node.tag
-                .as_ref()
-                .map(|(_, position)| (NodeId(index as u32), *position))
-        })
+    /// The text of scalar `id` as written in the file: a quoted scalar's text between its quotes,
+    /// with escapes unprocessed, and otherwise its value.
+    pub fn spelling(&self, id: NodeId) -> &str {
+        let node = self.node(id);
+        match (&node.spelling, &node.kind) {
+            (Some(spelling), _) => spelling,
+            (None, NodeKind::Scalar { value, .. }) => value,
+            (None, _) => "",
+        }
     }
 
     /// Parse `text` under `limits`.
@@ -267,6 +262,12 @@ impl Builder<'_> {
                         ScalarStyle::Literal => Style::Literal,
                         ScalarStyle::Folded => Style::Folded,
                     };
+                    let spelling = match style {
+                        Style::SingleQuoted | Style::DoubleQuoted => {
+                            Some(self.between_quotes(Span::from_parser(span)))
+                        }
+                        _ => None,
+                    };
                     let id = self.push(
                         NodeKind::Scalar {
                             value: value.into_owned(),
@@ -275,6 +276,7 @@ impl Builder<'_> {
                         span,
                         tag,
                     )?;
+                    self.nodes[id.0 as usize].spelling = spelling;
                     self.attach(id)?;
                 }
                 Event::SequenceStart(anchor, tag) => {
@@ -307,7 +309,7 @@ impl Builder<'_> {
         })
     }
 
-    /// Report a node's anchor and `!!` tag, and return the tag the schema should see. The parser's
+    /// Report a node's anchor and `!!` tag, and return where the tag the reader should see is. The parser's
     /// events carry neither property's position, so both are found by reading back from the
     /// node's content over whitespace and the property tokens themselves.
     fn properties(
@@ -315,7 +317,7 @@ impl Builder<'_> {
         anchor: usize,
         tag: Option<String>,
         span: ParserSpan,
-    ) -> Option<(String, Position)> {
+    ) -> Option<Position> {
         if anchor == 0 && tag.is_none() {
             return None;
         }
@@ -336,7 +338,7 @@ impl Builder<'_> {
             });
             return None;
         }
-        Some((tag, at))
+        Some(at)
     }
 
     /// The `&` and `!` property tokens immediately before `content`.
@@ -386,11 +388,42 @@ impl Builder<'_> {
         found
     }
 
+    /// The source text of a quoted scalar spanning `span`, without its quotes.
+    fn between_quotes(&self, span: Span) -> String {
+        let mut text = String::new();
+        for line in span.start.line..=span.end.line {
+            let source = self.lines.get(line - 1).copied().unwrap_or("");
+            let from = if line == span.start.line {
+                span.start.column
+            } else {
+                1
+            };
+            let to = if line == span.end.line {
+                span.end.column - 1
+            } else {
+                source.chars().count()
+            };
+            if line != span.start.line {
+                text.push('\n');
+            }
+            text.extend(
+                source
+                    .chars()
+                    .skip(from - 1)
+                    .take(to.saturating_sub(from - 1)),
+            );
+        }
+        let mut chars = text.chars();
+        chars.next();
+        chars.next_back();
+        chars.as_str().to_string()
+    }
+
     fn push(
         &mut self,
         kind: NodeKind,
         span: ParserSpan,
-        tag: Option<(String, Position)>,
+        tag: Option<Position>,
     ) -> Result<NodeId, YamlError> {
         if self.nodes.len() >= self.limits.nodes {
             return Err(refuse(
@@ -402,10 +435,16 @@ impl Builder<'_> {
             ));
         }
         let id = NodeId(self.nodes.len() as u32);
+        // A tagged node starts at its tag, as the toolchain places it.
+        let mut span = Span::from_parser(span);
+        if let Some(tag) = tag {
+            span.start = tag;
+        }
         self.nodes.push(Node {
             kind,
-            span: Span::from_parser(span),
+            span,
             tag,
+            spelling: None,
         });
         Ok(id)
     }
@@ -429,8 +468,7 @@ impl Builder<'_> {
     /// holding it starts: at the `-` of a sequence item, or at the key of a mapping entry.
     fn place_empty(&mut self, id: NodeId) {
         let node = &self.nodes[id.0 as usize];
-        let empty = node.tag.is_none()
-            && matches!(&node.kind, NodeKind::Scalar { value, style: Style::Plain } if value.is_empty());
+        let empty = matches!(&node.kind, NodeKind::Scalar { value, style: Style::Plain } if value.is_empty());
         if !empty {
             return;
         }
@@ -537,6 +575,20 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_scalar_keeps_its_spelling_between_its_quotes() {
+        let text = "\"q\\\"\\u00e9\": 'it''s'\nplain: !t \"a\n  b\"\n";
+        let document = parse(text).unwrap().document;
+        let NodeKind::Mapping(entries) = &document.node(document.root().unwrap()).kind else {
+            panic!("root is a mapping");
+        };
+        let spellings: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|&(key, value)| (document.spelling(key), document.spelling(value)))
+            .collect();
+        assert_eq!(spellings, [(r#"q\"\u00e9"#, "it''s"), ("plain", "a\n  b")]);
+    }
+
+    #[test]
     fn a_module_file_becomes_a_spanned_tree() {
         let parsed = parse("product: jvm/app\nmodules:\n  - ./libs/*\n  - \"true\"\n").unwrap();
         assert_eq!(parsed.problems, []);
@@ -609,25 +661,31 @@ mod tests {
     }
 
     #[test]
-    fn a_local_tag_is_kept_for_the_schema_to_judge() {
+    fn where_a_local_tag_is_written_is_kept() {
         let parsed =
             parse("product: !foo jvm/lib\naction: !com.example.Generate\n  dir: x\n").unwrap();
         assert_eq!(parsed.problems, []);
-        let tagged: Vec<(NodeId, Position)> = parsed.document.tagged().collect();
-        assert_eq!(tagged.len(), 2);
-        assert_eq!(parsed.document.tag(tagged[0].0), Some("!foo"));
+        let document = &parsed.document;
+        let Some(NodeKind::Mapping(entries)) = document.root().map(|top| &document.node(top).kind)
+        else {
+            panic!("a mapping");
+        };
+        let tags: Vec<Option<Position>> = entries
+            .iter()
+            .flat_map(|&(key, value)| [document.tag(key), document.tag(value)])
+            .collect();
         assert_eq!(
-            tagged[0].1,
-            Position {
-                line: 1,
-                column: 10
-            }
+            tags,
+            [
+                None,
+                Some(Position {
+                    line: 1,
+                    column: 10
+                }),
+                None,
+                Some(Position { line: 2, column: 9 }),
+            ]
         );
-        assert_eq!(
-            parsed.document.tag(tagged[1].0),
-            Some("!com.example.Generate")
-        );
-        assert_eq!(tagged[1].1, Position { line: 2, column: 9 });
     }
 
     #[test]

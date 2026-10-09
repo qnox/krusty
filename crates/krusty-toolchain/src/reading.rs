@@ -1,26 +1,21 @@
 //! Reading typed values out of a [`Document`] the way the toolchain's schema reader does, with its
 //! type-mismatch messages: `Expected `<type>`, but got `<value kind>``, `Expected a value: `<type>``
 //! for an empty value, and `Unknown property `<name>`` for a key the schema does not have.
+//!
+//! The order is the toolchain's too: a value's custom `!tag` is refused where the value is met, and
+//! unknown properties are reported after everything else the file's mapping holds.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::{Diagnostic, Diagnostics};
+use crate::inventory;
 use crate::yaml::{Document, Limits, NodeId, NodeKind, Position, Style};
 
-/// Read a file of at most `limit` bytes as UTF-8, or report why not.
+/// Read a file of at most `limit` bytes as UTF-8, never through a symbolic link, or report why
+/// not.
 pub fn read_bounded(path: &Path, limit: usize) -> Result<String, String> {
-    use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let mut bytes = Vec::new();
-    file.take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    if bytes.len() > limit {
-        return Err(format!(
-            "{}: krusty-toolchain reads build files of at most {limit} bytes",
-            path.display()
-        ));
-    }
+    let bytes = inventory::read_file(path, limit).map_err(|error| error.to_string())?;
     String::from_utf8(bytes).map_err(|_| format!("{}: the file is not UTF-8", path.display()))
 }
 
@@ -56,12 +51,18 @@ pub struct FileReader<'a> {
     pub file: PathBuf,
     pub document: &'a Document,
     pub diagnostics: &'a mut Diagnostics,
+    /// Nodes whose tag has been refused, so a value looked at twice is reported once.
+    tags_reported: HashSet<NodeId>,
+    /// Keys the schema does not have, reported by [`FileReader::finish`].
+    unknown: Vec<NodeId>,
 }
 
 /// What a node holds, for type checks.
 pub enum Value<'d> {
     /// A plain empty value (`key:` or `-` with nothing after it).
     Missing,
+    /// An empty value with a tag: not even `null`.
+    Absent,
     /// A plain `null`.
     Null,
     Scalar(&'d str),
@@ -75,6 +76,43 @@ impl<'a> FileReader<'a> {
             file: file.to_path_buf(),
             document,
             diagnostics,
+            tags_reported: HashSet::new(),
+            unknown: Vec::new(),
+        }
+    }
+
+    /// Refuse a custom tag on `node`. The top node's tag is accepted, as the toolchain accepts it.
+    pub fn meet(&mut self, node: NodeId) {
+        let Some(position) = self.document.tag(node) else {
+            return;
+        };
+        if self.document.root() == Some(node) || !self.tags_reported.insert(node) {
+            return;
+        }
+        self.diagnostics.push(Diagnostic::error(
+            &self.file,
+            Some(position),
+            "Unexpected custom YAML type tag",
+        ));
+    }
+
+    /// Meet every node of a value that is not read further, in document order.
+    pub fn skip(&mut self, node: NodeId) {
+        self.meet(node);
+        let document: &'a Document = self.document;
+        match &document.node(node).kind {
+            NodeKind::Scalar { .. } => {}
+            NodeKind::Sequence(items) => {
+                for &item in items {
+                    self.skip(item);
+                }
+            }
+            NodeKind::Mapping(entries) => {
+                for &(key, value) in entries {
+                    self.skip(key);
+                    self.skip(value);
+                }
+            }
         }
     }
 
@@ -82,11 +120,23 @@ impl<'a> FileReader<'a> {
         self.document.node(node).span.start
     }
 
-    pub fn value(&self, node: NodeId) -> Value<'a> {
+    /// What `node` holds, met by the reader: a custom tag on it is refused.
+    pub fn value(&mut self, node: NodeId) -> Value<'a> {
+        self.meet(node);
+        self.shape(node)
+    }
+
+    /// What `node` holds, looked at without meeting it: for inferring what a value is before it
+    /// is read.
+    pub fn shape(&self, node: NodeId) -> Value<'a> {
         let document: &'a Document = self.document;
         match &document.node(node).kind {
             NodeKind::Scalar { value, style } if *style == Style::Plain && value.is_empty() => {
-                Value::Missing
+                if document.tag(node).is_some() {
+                    Value::Absent
+                } else {
+                    Value::Missing
+                }
             }
             NodeKind::Scalar { value, style } if *style == Style::Plain && value == "null" => {
                 Value::Null
@@ -97,13 +147,11 @@ impl<'a> FileReader<'a> {
         }
     }
 
-    /// The text of a scalar key.
+    /// The text of a scalar key as written, which is what the toolchain matches and prints: a
+    /// quoted key loses its quotes but keeps its escapes.
     pub fn key(&self, key: NodeId) -> &'a str {
         let document: &'a Document = self.document;
-        match &document.node(key).kind {
-            NodeKind::Scalar { value, .. } => value,
-            _ => unreachable!("yaml.rs refuses non-scalar keys"),
-        }
+        document.spelling(key)
     }
 
     pub fn error(&mut self, node: NodeId, message: impl Into<String>) {
@@ -116,7 +164,7 @@ impl<'a> FileReader<'a> {
     /// schema type).
     pub fn mismatch(&mut self, node: NodeId, expected: &str) {
         let message = match self.value(node) {
-            Value::Missing => format!("Expected a value: `{expected}`"),
+            Value::Missing | Value::Absent => format!("Expected a value: `{expected}`"),
             Value::Null => "`null` value is unexpected here. Use quotes to treat it as a regular string literal".to_string(),
             Value::Scalar(_) => format!("Expected `{expected}`, but got `scalar`"),
             Value::Sequence(_) => format!("Expected `{expected}`, but got `sequence []`"),
@@ -125,9 +173,20 @@ impl<'a> FileReader<'a> {
         self.error(node, message);
     }
 
-    pub fn unknown_property(&mut self, key: NodeId) {
-        let name = self.key(key).to_string();
-        self.error(key, format!("Unknown property `{name}`"));
+    /// A key the schema does not have: its value's tags are refused now, the key itself by
+    /// [`FileReader::finish`].
+    pub fn unknown_property(&mut self, key: NodeId, value: NodeId) {
+        self.skip(key);
+        self.skip(value);
+        self.unknown.push(key);
+    }
+
+    /// Report the unknown properties, after the rest of the file's mapping.
+    pub fn finish(&mut self) {
+        for key in std::mem::take(&mut self.unknown) {
+            let name = self.key(key).to_string();
+            self.error(key, format!("Unknown property `{name}`"));
+        }
     }
 
     /// A string, or a reported mismatch.

@@ -1,7 +1,0 @@
-A module without a product.
---- project.yaml
-modules: [a]
---- a/module.yaml
-description: hi
---- expected
-a/module.yaml:1:1: ERROR: Product type definition is missing. Define a product using a `product:` declaration.

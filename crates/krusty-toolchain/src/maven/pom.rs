@@ -5,6 +5,8 @@ use std::collections::HashSet;
 
 use roxmltree::{Document, Node, ParsingOptions};
 
+use super::ParseError;
+
 /// `<properties>`, in declaration order; a property declared empty has no value.
 #[derive(Clone, Debug, Default)]
 pub struct Properties(pub Vec<(String, Option<String>)>);
@@ -129,19 +131,32 @@ fn sanitized(text: &str, group: &str, artifact: &str) -> String {
 }
 
 /// Read the POM of `group:artifact`.
-pub fn parse(text: &str, group: &str, artifact: &str) -> Result<Pom, String> {
+pub fn parse(text: &str, group: &str, artifact: &str) -> Result<Pom, ParseError> {
     let text = sanitized(text, group, artifact);
     let options = ParsingOptions {
         allow_dtd: true,
         ..ParsingOptions::default()
     };
-    let document = Document::parse_with_options(&text, options)
-        .map_err(|error| format!("the POM is not well-formed XML: {error}"))?;
+    let document = Document::parse_with_options(&text, options).map_err(|error| {
+        let position = error.pos();
+        ParseError::at(
+            position.row as usize,
+            position.col as usize,
+            &format!("the POM is not well-formed XML: {error}"),
+            &format!(" at {position}"),
+        )
+    })?;
     let project = document.root_element();
     if project.tag_name().name() != "project" {
-        return Err(format!(
-            "the POM's root element is `{}`, not `project`",
-            project.tag_name().name()
+        let position = document.text_pos_at(project.range().start);
+        return Err(ParseError::at(
+            position.row as usize,
+            position.col as usize,
+            &format!(
+                "the POM's root element is `{}`, not `project`",
+                project.tag_name().name()
+            ),
+            "",
         ));
     }
     let dependency_management = child(project, "dependencyManagement")

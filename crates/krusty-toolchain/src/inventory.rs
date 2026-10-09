@@ -1,11 +1,15 @@
 //! The one way this crate looks at a project's files: bounded, sorted, and never through a
 //! symbolic link.
 //!
-//! Every reader in the toolchain (module discovery, source and resource collection, input hashing)
-//! goes through [`walk`] and [`resolve_inside`], so containment cannot be lost between one walk and
-//! the next. A symbolic link is never followed: met inside a walked region it is refused with its
+//! Every reader in the toolchain (project and module discovery, build files, source and resource
+//! collection, input hashing) goes through [`kind`], [`read_file`], [`walk`] and
+//! [`resolve_inside`], so containment cannot be lost between one look and the next. A symbolic link
+//! is never followed: met where a project's file or directory should be, it is refused with its
 //! path, because following it could read files outside the project and ignoring it could silently
-//! build something other than what the toolchain builds.
+//! build something other than what the toolchain builds. A file is opened without following a
+//! link in its last component and read from that handle, so it cannot be swapped for a link
+//! between being looked at and being read. Directories above the project root are not the
+//! project's and may be links.
 
 use std::fmt;
 use std::io;
@@ -45,6 +49,8 @@ pub struct Entry {
 #[derive(Debug)]
 pub enum InventoryError {
     SymbolicLink(PathBuf),
+    TooLarge { path: PathBuf, limit: usize },
+    NotAFile(PathBuf),
     TooDeep { path: PathBuf, limit: usize },
     TooMany { root: PathBuf, limit: usize },
     NotUnicode(PathBuf),
@@ -59,6 +65,12 @@ impl fmt::Display for InventoryError {
                 "krusty-toolchain does not follow symbolic links: {}",
                 path.display()
             ),
+            Self::TooLarge { path, limit } => write!(
+                f,
+                "{}: krusty-toolchain reads build files of at most {limit} bytes",
+                path.display()
+            ),
+            Self::NotAFile(path) => write!(f, "{}: not a file", path.display()),
             Self::TooDeep { path, limit } => write!(
                 f,
                 "{} is nested more than {limit} directories deep; krusty-toolchain stops there",
@@ -86,6 +98,87 @@ fn io_error(path: &Path) -> impl FnOnce(io::Error) -> InventoryError + '_ {
     }
 }
 
+/// What is at `path`, looked at without following a symbolic link: `None` when nothing is.
+pub fn kind(path: &Path) -> Result<Option<Kind>, InventoryError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(InventoryError::SymbolicLink(path.to_path_buf()))
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(Some(Kind::Directory)),
+        Ok(_) => Ok(Some(Kind::File)),
+        // Below a file nothing exists either.
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(InventoryError::Io {
+            path: path.to_path_buf(),
+            error,
+        }),
+    }
+}
+
+/// The bytes of the file at `path`, at most `limit` of them. The file is opened without following
+/// a symbolic link and read from the handle opened.
+pub fn read_file(path: &Path, limit: usize) -> Result<Vec<u8>, InventoryError> {
+    use std::io::Read;
+    let file = open_without_following(path)?;
+    let metadata = file.metadata().map_err(io_error(path))?;
+    if metadata.file_type().is_symlink() {
+        return Err(InventoryError::SymbolicLink(path.to_path_buf()));
+    }
+    if !metadata.is_file() {
+        return Err(InventoryError::NotAFile(path.to_path_buf()));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error(path))?;
+    if bytes.len() > limit {
+        return Err(InventoryError::TooLarge {
+            path: path.to_path_buf(),
+            limit,
+        });
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn open_without_following(path: &Path) -> Result<std::fs::File, InventoryError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| {
+            // `O_NOFOLLOW` fails with `ELOOP` on a link.
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                InventoryError::SymbolicLink(path.to_path_buf())
+            } else {
+                InventoryError::Io {
+                    path: path.to_path_buf(),
+                    error,
+                }
+            }
+        })
+}
+
+#[cfg(windows)]
+fn open_without_following(path: &Path) -> Result<std::fs::File, InventoryError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// Opens a link itself rather than its target; the caller refuses it by its metadata.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(io_error(path))
+}
+
 /// Every file and directory below `root`, at most `limits.depth` levels down, sorted by relative
 /// path. `root` itself must be a real directory. Entries below the depth limit are not listed;
 /// a directory at the limit with children is an error only when `refuse_deeper` is set, so a walk
@@ -99,18 +192,46 @@ pub fn walk(
     if metadata.file_type().is_symlink() {
         return Err(InventoryError::SymbolicLink(root.to_path_buf()));
     }
-    let mut found = Vec::new();
-    // (directory, its relative path, its level)
-    let mut pending: Vec<(PathBuf, String, usize)> = vec![(root.to_path_buf(), String::new(), 0)];
-    while let Some((directory, relative, level)) = pending.pop() {
-        for item in std::fs::read_dir(&directory).map_err(io_error(&directory))? {
-            let item = item.map_err(io_error(&directory))?;
+    let mut walk = Walk {
+        root,
+        limits,
+        refuse_deeper,
+        found: Vec::new(),
+    };
+    walk.directory(root, "", 0)?;
+    let mut found = walk.found;
+    found.sort();
+    Ok(found)
+}
+
+/// One walk in progress. Each directory's entries are taken in name order, so which entry an error
+/// names does not depend on the order the file system lists them in.
+struct Walk<'a> {
+    root: &'a Path,
+    limits: WalkLimits,
+    refuse_deeper: bool,
+    found: Vec<Entry>,
+}
+
+impl Walk<'_> {
+    fn directory(
+        &mut self,
+        directory: &Path,
+        relative: &str,
+        level: usize,
+    ) -> Result<(), InventoryError> {
+        let mut items = std::fs::read_dir(directory)
+            .map_err(io_error(directory))?
+            .map(|item| item.map_err(io_error(directory)))
+            .collect::<Result<Vec<_>, _>>()?;
+        items.sort_by_key(|item| item.file_name());
+        for item in items {
             let path = item.path();
-            if level >= limits.depth {
-                if refuse_deeper {
+            if level >= self.limits.depth {
+                if self.refuse_deeper {
                     return Err(InventoryError::TooDeep {
                         path,
-                        limit: limits.depth,
+                        limit: self.limits.depth,
                     });
                 }
                 break;
@@ -128,28 +249,27 @@ pub fn walk(
             if file_type.is_symlink() {
                 return Err(InventoryError::SymbolicLink(path));
             }
-            if found.len() >= limits.entries {
+            if self.found.len() >= self.limits.entries {
                 return Err(InventoryError::TooMany {
-                    root: root.to_path_buf(),
-                    limit: limits.entries,
+                    root: self.root.to_path_buf(),
+                    limit: self.limits.entries,
                 });
             }
             if file_type.is_dir() {
-                found.push(Entry {
+                self.found.push(Entry {
                     relative: child.clone(),
                     kind: Kind::Directory,
                 });
-                pending.push((path, child, level + 1));
+                self.directory(&path, &child, level + 1)?;
             } else {
-                found.push(Entry {
+                self.found.push(Entry {
                     relative: child,
                     kind: Kind::File,
                 });
             }
         }
+        Ok(())
     }
-    found.sort();
-    Ok(found)
 }
 
 /// Where `relative` leads from `root`, walked component by component as the file system would walk
@@ -168,7 +288,7 @@ pub fn resolve_inside(root: &Path, relative: &Path) -> Result<Option<PathBuf>, I
                 if depth == 0 {
                     return Ok(None);
                 }
-                if !path.is_dir() {
+                if kind(&path)? != Some(Kind::Directory) {
                     return Ok(Some(path.join("..").join(components.as_path())));
                 }
                 path.pop();
@@ -278,6 +398,96 @@ mod tests {
             format!(
                 "krusty-toolchain does not follow symbolic links: {}",
                 temp.0.join("src/escape").display()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_is_read_only_when_it_is_not_a_symbolic_link() {
+        let temp = TempDir::new("read");
+        write(&temp.0, "real.yaml");
+        std::fs::write(temp.0.join("real.yaml"), "abc").unwrap();
+        assert_eq!(read_file(&temp.0.join("real.yaml"), 3).unwrap(), b"abc");
+        assert_eq!(
+            read_file(&temp.0.join("real.yaml"), 2)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "{}: krusty-toolchain reads build files of at most 2 bytes",
+                temp.0.join("real.yaml").display()
+            )
+        );
+        std::os::unix::fs::symlink(temp.0.join("real.yaml"), temp.0.join("linked.yaml")).unwrap();
+        assert_eq!(
+            read_file(&temp.0.join("linked.yaml"), 3)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "krusty-toolchain does not follow symbolic links: {}",
+                temp.0.join("linked.yaml").display()
+            )
+        );
+        assert_eq!(
+            kind(&temp.0.join("linked.yaml")).unwrap_err().to_string(),
+            format!(
+                "krusty-toolchain does not follow symbolic links: {}",
+                temp.0.join("linked.yaml").display()
+            )
+        );
+        assert_eq!(
+            read_file(&temp.0, 3).unwrap_err().to_string(),
+            format!("{}: not a file", temp.0.display())
+        );
+    }
+
+    /// Several entries of one directory would each stop the walk; the first in name order is the
+    /// one reported, whatever order the file system lists them in.
+    #[cfg(unix)]
+    #[test]
+    fn of_competing_failures_the_first_entry_by_name_is_reported() {
+        use std::os::unix::ffi::OsStrExt;
+        let temp = TempDir::new("competing");
+        let outside = TempDir::new("competing-target");
+        for name in ["d", "b", "f"] {
+            std::os::unix::fs::symlink(&outside.0, temp.0.join(name)).unwrap();
+        }
+        let not_unicode = temp.0.join(std::ffi::OsStr::from_bytes(b"c\xff"));
+        std::fs::write(&not_unicode, "").unwrap();
+        write(&temp.0, "a/x.kt");
+        write(&temp.0, "e.kt");
+        let error = walk(&temp.0, WalkLimits::SOURCES, true).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "krusty-toolchain does not follow symbolic links: {}",
+                temp.0.join("b").display()
+            )
+        );
+        std::fs::remove_file(temp.0.join("b")).unwrap();
+        let error = walk(&temp.0, WalkLimits::SOURCES, true).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "krusty-toolchain reads only file names that are valid Unicode: {}",
+                not_unicode.display()
+            )
+        );
+        // Of several directories too deep, the first by name is reported.
+        std::fs::remove_file(&not_unicode).unwrap();
+        for name in ["d", "f"] {
+            std::fs::remove_file(temp.0.join(name)).unwrap();
+        }
+        write(&temp.0, "g/y.kt");
+        let shallow = WalkLimits {
+            depth: 1,
+            entries: 100,
+        };
+        assert_eq!(
+            walk(&temp.0, shallow, true).unwrap_err().to_string(),
+            format!(
+                "{} is nested more than 1 directories deep; krusty-toolchain stops there",
+                temp.0.join("a/x.kt").display()
             )
         );
     }

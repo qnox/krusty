@@ -19,7 +19,6 @@ use crate::yaml::{Document, NodeId, NodeKind, Position, Style};
 const WRONG_SCOPED: &str = "Wrong scoped dependency syntax. Possible syntax includes: \n1. `<external-notation>` - a string with the format `<groupId>:<artifactId>:<version>` \n2. `<local-notation>` - a path to another module (starting with the `//` for paths relative to the project root, e.g. `//foo`, or with the `.` for paths relative to the containing directory, e.g. `../foo`) \n3. `<catalog-notation>` - a special reference to the version catalog, starting with the `$` symbol, e.g. `$libs.foo` \n4. `bom: <catalog-notation> | <external-notation>` - BOM dependency \n Additional dependency attributes (not for BOM) can be customized after the `:`, making it a single key-value mapping, e.g., `<external-notation>: exported` or `<local-notation>: compile-only`, etc. A full form may also be used, e.g. `<notation>: '{' exported: true, scope: compile-only '}'`";
 const WRONG_UNSCOPED: &str = "Wrong dependency syntax. Possible syntax includes: \n1. `<external-notation>` - a string with the format `<groupId>:<artifactId>:<version>` \n2. `<local-notation>` - a path to another module (starting with the `//` for paths relative to the project root, e.g. `//foo`, or with the `.` for paths relative to the containing directory, e.g. `../foo`) \n3. `<catalog-notation>` - a special reference to the version catalog, starting with the `$` symbol, e.g. `$libs.foo` \n4. `bom: <external-notation> | <catalog-notation>` - BOM dependency \nDependency scope (`exported`, `compile-only`, etc.) is not applicable here.";
 const WRONG_UNSCOPED_EXTERNAL: &str = "Wrong dependency syntax. Possible syntax includes: \n1. `<external-notation>` - a string with the format `<groupId>:<artifactId>:<version>` \n2. `<catalog-notation>` - a special reference to the version catalog, starting with the `$` symbol, e.g. `$libs.foo` \nDependency scope (`exported`, `compile-only`, etc.) is not applicable here.";
-const UNEXPECTED_TAG: &str = "Unexpected custom YAML type tag";
 const REFERENCE: &str =
     "References are not yet supported in this file. The string is interpreted literally";
 const REFERENCE_KEY: &str =
@@ -134,11 +133,7 @@ impl Parser<'_, '_> {
 
     /// A tag the schema does not use (`!!` tags are refused when the file is parsed).
     fn refuse_tag(&mut self, node: NodeId) {
-        if let Some((tag, position)) = self.reader.document.tag_at(node) {
-            if !tag.starts_with("!!") {
-                self.report(position, Severity::Error, UNEXPECTED_TAG);
-            }
-        }
+        self.reader.meet(node);
     }
 
     fn is_plain(&self, node: NodeId) -> bool {
@@ -465,7 +460,7 @@ impl Parser<'_, '_> {
 
     /// `parseObject`.
     fn object(&mut self, node: NodeId, object: &'static ObjectType, contexts: Contexts) -> Node {
-        if let Some(from_key) = object.from_key() {
+        if let Some(from_key) = object.key_property() {
             return self.object_from_key(node, object, contexts, |parser, key, contexts| {
                 let value = parser.node(key, &from_key.ty, false, contexts);
                 Some(vec![Entry {
@@ -594,7 +589,7 @@ impl Parser<'_, '_> {
                     self.error_node(node, contexts)
                 }
             },
-            Yaml::Missing | Yaml::Null => {
+            Yaml::Missing | Yaml::Null | Yaml::Absent => {
                 self.unexpected(node, &render(&Type::Object(object), false, true, true));
                 self.error_node(node, contexts)
             }
@@ -805,7 +800,7 @@ impl Parser<'_, '_> {
 
     /// `inferDependencyType`.
     fn notation(&self, node: NodeId, scoped: bool) -> Notation {
-        match self.reader.value(node) {
+        match self.reader.shape(node) {
             Yaml::Mapping(pairs) => {
                 if let Some(notation) = self.notation_of_keys(pairs) {
                     return notation;
@@ -922,7 +917,7 @@ impl Parser<'_, '_> {
                     .collect();
                 Node::new(Value::List(children), self.trace(node), contexts)
             }
-            Yaml::Missing | Yaml::Null => {
+            Yaml::Missing | Yaml::Null | Yaml::Absent => {
                 self.unexpected(node, "<undefined-type>");
                 self.error_node(node, contexts)
             }

@@ -5,8 +5,8 @@ import java.nio.file.PathMatcher;
 import java.util.regex.PatternSyntaxException;
 
 /**
- * Records how the Kotlin Toolchain treats a `project.yaml` module glob, for
- * `crates/krusty-toolchain/tests/recorded/globs.tsv`.
+ * Judges how the Kotlin Toolchain treats a `project.yaml` module glob, for the cases in
+ * `crates/krusty-toolchain/tests/cases/globs.tsv` (run and cached by `tests/support/oracle.rs`).
  *
  * Input: one case per line, `pattern<TAB>path<TAB>path...`. Output: per case, the pattern, the
  * toolchain's normalized pattern, and either the matcher's verdict per path (`+path`/`-path`) or the

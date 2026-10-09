@@ -7,7 +7,7 @@ use std::path::Path;
 use super::metadata::Metadata;
 use super::pom::{merge_dependencies, Activation, Dependency, Pom, Profile, Properties};
 use super::system::{self, OsParameter};
-use super::{single_version, Coordinates};
+use super::{single_version, Coordinates, Problem};
 
 /// More ancestors than this are not read (`ProjectHasMoreThanTenAncestors`).
 const MAX_DEPTH: usize = 10;
@@ -17,7 +17,7 @@ const MAX_EXPANSIONS: usize = 64;
 /// An effective POM, and the problems reading its ancestors and imports.
 pub struct EffectivePom {
     pub pom: Pom,
-    pub problems: Vec<String>,
+    pub problems: Vec<Problem>,
     /// How many levels of ancestors and imports were read below it.
     pub height: usize,
 }
@@ -28,7 +28,7 @@ pub struct Reading<'a> {
     /// The module's JDK version, as profiles' `<jdk>` compare it (`1.8`, `11`, `25`).
     jdk_version: &'a str,
     /// Problems with the POMs read, reported against the artifact.
-    pub problems: Vec<String>,
+    pub problems: Vec<Problem>,
     /// The deepest level read so far.
     pub deepest: usize,
 }
@@ -71,8 +71,12 @@ impl<'a> Reading<'a> {
     pub fn effective(&mut self, pom: &Pom, depth: usize) -> Pom {
         self.deepest = self.deepest.max(depth);
         if depth > MAX_DEPTH {
-            self.problems
-                .push("The POM has more than ten ancestors; the rest are not read".to_string());
+            self.problems.push(Problem::general(format!(
+                "The POM of {}:{}:{} has more than ten ancestors; the rest are not read",
+                pom.group.as_deref().unwrap_or_default(),
+                pom.artifact.as_deref().unwrap_or_default(),
+                pom.version.as_deref().unwrap_or_default()
+            )));
             return pom.clone();
         }
         let parent = pom.parent.as_ref().and_then(|parent| {

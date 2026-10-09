@@ -864,6 +864,7 @@ dependencies = [
 name = "krusty-toolchain"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "roxmltree",
  "saphyr-parser",
  "serde_json",

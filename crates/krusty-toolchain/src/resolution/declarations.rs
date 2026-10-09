@@ -424,7 +424,7 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
             Some("because Spring Boot is enabled and springBoot.applyBom=true"),
         ));
     }
-    if product == ProductType::JvmAmperPlugin {
+    if product == ProductType::AmperPlugin {
         implicit.push(implicit_maven(
             "org.jetbrains.amper",
             "amper-extensibility-api",

@@ -1,0 +1,9 @@
+The root module listed explicitly.
+--- project.yaml
+modules:
+  - .
+  - libs/a
+--- module.yaml
+product: jvm/lib
+--- libs/a/module.yaml
+product: jvm/lib

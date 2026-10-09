@@ -1,9 +1,0 @@
-Properties without values.
---- project.yaml
-modules:
-plugins:
---- module.yaml
-product: jvm/lib
---- expected
-project.yaml:1:1: ERROR: Expected a value: `sequence [string]`
-project.yaml:2:1: ERROR: Expected a value: `sequence [UnscopedModuleDependency]`
