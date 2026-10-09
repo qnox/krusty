@@ -14,6 +14,8 @@
 //! What krusty CANNOT do here is stated as a failed work response rather than a silently wrong jar:
 //! it has no Java front end, so a target whose action carries `.java` sources or source jars is
 //! refused, and it produces no reduced ABI jar, so `--abi-out` receives a copy of the full jar.
+//! `--resources` groups (`strip_prefix:add_prefix:file`) are copied into the output jar after the
+//! classes, under the same entry names the module jar uses.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -40,6 +42,19 @@ pub struct WorkUnit {
     pub kotlinc_args: Vec<String>,
     /// Worker options that were understood but have no effect on krusty's output.
     pub inert: Vec<String>,
+    /// Resource groups from `--resources`, in request order. Each group is one
+    /// `strip_prefix:add_prefix:file` argument, the spelling `builder-args.bzl` emits.
+    pub resources: Vec<ResourceGroup>,
+}
+
+/// One `--resources` argument: files copied into the jar after their strip prefix is removed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceGroup {
+    /// Directory prefix removed from each file path. Empty keeps the path as the entry name.
+    pub strip_prefix: String,
+    /// Directory prepended to the stripped path. Empty leaves the stripped path unchanged.
+    pub add_prefix: String,
+    pub files: Vec<PathBuf>,
 }
 
 /// Why a work request cannot be served.
@@ -81,6 +96,7 @@ const LIST_FLAGS: &[&str] = &[
     "--x_warning_level",
     "--x_xlanguage",
     "--add-export",
+    "--resources",
 ];
 
 /// Boolean worker options with no value, and how each maps to kotlinc's own spelling. An entry with
@@ -247,6 +263,18 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                             .to_string(),
                     ));
                 }
+                // `strip_prefix:add_prefix:file` groups. Packaged after compilation.
+                "--resources" => {
+                    if values.is_empty() {
+                        return Err(Refusal::Malformed(
+                            "--resources requires at least one strip_prefix:add_prefix:file group"
+                                .to_string(),
+                        ));
+                    }
+                    for value in values {
+                        unit.resources.push(parse_resource_group(&value)?);
+                    }
+                }
                 // Understood, but they do not change the bytes krusty writes.
                 _ => unit.inert.push(flag.to_string()),
             }
@@ -409,15 +437,6 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                     "{flag}: krusty does not load compiler plugins supplied by the build"
                 )));
             }
-            // `--resources` is followed by colon-joined `strip_prefix:add_prefix:file…` groups.
-            // krusty's jar writer emits class files and the `kotlin_module` index, nothing else, so a
-            // target with resources would get a jar silently missing them.
-            "--resources" => {
-                return Err(Refusal::Unsupported(
-                    "--resources: krusty does not package resources into the output jar"
-                        .to_string(),
-                ));
-            }
             // `--reduced-classpath-mode true` (and the `--direct-dependencies` list that accompanies
             // it) narrow what the builder puts on the classpath. Ignoring the optimization is safe:
             // krusty still receives the full `--cp`.
@@ -516,6 +535,135 @@ pub fn expand_flagfiles(arguments: &[String]) -> std::io::Result<Vec<String>> {
         }
     }
     Ok(expanded)
+}
+
+fn parse_resource_group(value: &str) -> Result<ResourceGroup, Refusal> {
+    let mut parts = value.split(':');
+    let strip_prefix = parts.next().unwrap_or("");
+    let Some(add_prefix) = parts.next() else {
+        return Err(Refusal::Malformed(format!(
+            "--resources {value}: expected strip_prefix:add_prefix:file"
+        )));
+    };
+    let files: Vec<PathBuf> = parts.map(PathBuf::from).collect();
+    if files.is_empty() || files.iter().any(|file| file.as_os_str().is_empty()) {
+        return Err(Refusal::Malformed(format!(
+            "--resources {value}: expected strip_prefix:add_prefix:file"
+        )));
+    }
+    Ok(ResourceGroup {
+        strip_prefix: strip_prefix.to_string(),
+        add_prefix: add_prefix.to_string(),
+        files,
+    })
+}
+
+/// Jar entry for one resource file. `strip_prefix` is removed and `add_prefix` is prepended, which
+/// is how `jvm_library` names entries in the module jar.
+pub fn resource_entry_name(
+    strip_prefix: &str,
+    add_prefix: &str,
+    path: &std::path::Path,
+) -> Result<String, String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| "resource path is not UTF-8".to_string())?
+        .replace('\\', "/");
+    let relative = if strip_prefix.is_empty() {
+        path.strip_prefix("./").unwrap_or(&path).to_string()
+    } else {
+        let normalized_prefix = strip_prefix.replace('\\', "/");
+        let prefix = normalized_prefix.trim_end_matches('/');
+        let rest = path
+            .strip_prefix(prefix)
+            .ok_or_else(|| format!("resource {path} is outside strip prefix {prefix}"))?;
+        let rest = rest
+            .strip_prefix('/')
+            .filter(|rest| !rest.is_empty())
+            .ok_or_else(|| format!("resource {path} is outside strip prefix {prefix}"))?;
+        rest.to_string()
+    };
+    let add = add_prefix.replace('\\', "/");
+    let entry = if add.is_empty() {
+        relative
+    } else {
+        format!("{add}/{relative}")
+    };
+    let has_drive_prefix = entry
+        .as_bytes()
+        .get(..2)
+        .is_some_and(|prefix| prefix[0].is_ascii_alphabetic() && prefix[1] == b':');
+    if entry.is_empty()
+        || entry.starts_with('/')
+        || has_drive_prefix
+        || entry.chars().any(char::is_control)
+        || entry
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return Err(format!(
+            "resource entry {entry:?} is not a canonical relative jar path"
+        ));
+    }
+    Ok(entry)
+}
+
+/// Copy `--resources` into an existing jar. Entry names follow [`resource_entry_name`].
+pub fn package_resources(jar: &std::path::Path, groups: &[ResourceGroup]) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    let mut planned: Vec<(String, PathBuf)> = Vec::new();
+    for group in groups {
+        for listed in &group.files {
+            let name = resource_entry_name(&group.strip_prefix, &group.add_prefix, listed)?;
+            planned.push((name, listed.clone()));
+        }
+    }
+    if planned.is_empty() {
+        return Ok(());
+    }
+
+    let existing = {
+        let file = std::fs::File::open(jar)
+            .map_err(|error| format!("cannot open {}: {error}", jar.display()))?;
+        let archive = zip::ZipArchive::new(file)
+            .map_err(|error| format!("cannot read {}: {error}", jar.display()))?;
+        archive
+            .file_names()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+    };
+    let mut seen = existing;
+    for (name, _) in &planned {
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate jar entry {name}"));
+        }
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(jar)
+        .map_err(|error| format!("cannot open {}: {error}", jar.display()))?;
+    let mut writer = zip::ZipWriter::new_append(file)
+        .map_err(|error| format!("cannot append to {}: {error}", jar.display()))?;
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for (name, path) in planned {
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("cannot read resource {}: {error}", path.display()))?;
+        writer
+            .start_file(name, options)
+            .map_err(|error| format!("cannot add resource to {}: {error}", jar.display()))?;
+        writer
+            .write_all(&bytes)
+            .map_err(|error| format!("cannot add resource to {}: {error}", jar.display()))?;
+    }
+    writer
+        .finish()
+        .map_err(|error| format!("cannot finish {}: {error}", jar.display()))?;
+    Ok(())
 }
 
 /// One request of bazel's JSON worker protocol. Only the fields this worker reads are modelled;
@@ -933,20 +1081,147 @@ mod tests {
         assert!(matches!(malformed, Refusal::Malformed(_)), "{malformed:?}");
     }
 
-    /// Resources would be dropped from the jar, so the target is refused rather than shipped
-    /// incomplete.
+    /// intellij-community's module jar names a resource by stripping the resource root. The worker
+    /// argument is `strip_prefix:add_prefix:file`, and an empty add prefix is two adjacent colons
+    /// (`platform/icons-api/resources::…/intellij.platform.icons.api.xml`).
     #[test]
-    fn a_target_with_resources_is_refused() {
-        let refusal = translate(&args(&[
+    fn resources_keep_the_module_jar_entry_name() {
+        let unit = translate(&args(&[
             "--resources",
-            "res:prefix:a.txt",
+            "platform/icons-api/resources::platform/icons-api/resources/intellij.platform.icons.api.xml",
+            "res:com/example:res/a.txt:res/b.txt",
             "--srcs",
             "A.kt",
             "--out",
             "o.jar",
         ]))
+        .expect("resources must translate");
+        assert_eq!(
+            unit.resources,
+            vec![
+                ResourceGroup {
+                    strip_prefix: "platform/icons-api/resources".to_string(),
+                    add_prefix: String::new(),
+                    files: vec![PathBuf::from(
+                        "platform/icons-api/resources/intellij.platform.icons.api.xml"
+                    )],
+                },
+                ResourceGroup {
+                    strip_prefix: "res".to_string(),
+                    add_prefix: "com/example".to_string(),
+                    files: vec![PathBuf::from("res/a.txt"), PathBuf::from("res/b.txt")],
+                },
+            ]
+        );
+        assert_eq!(
+            resource_entry_name(
+                &unit.resources[0].strip_prefix,
+                &unit.resources[0].add_prefix,
+                &unit.resources[0].files[0],
+            )
+            .expect("entry"),
+            "intellij.platform.icons.api.xml"
+        );
+        assert_eq!(
+            resource_entry_name("res", "com/example", std::path::Path::new("res/a.txt"))
+                .expect("entry"),
+            "com/example/a.txt"
+        );
+
+        for value in ["res", "res:prefix", "res:prefix:"] {
+            let refusal = translate(&args(&["--resources", value, "--out", "o.jar"])).unwrap_err();
+            assert_eq!(
+                refusal,
+                Refusal::Malformed(format!(
+                    "--resources {value}: expected strip_prefix:add_prefix:file"
+                ))
+            );
+        }
+        let missing = translate(&args(&["--resources", "--out", "o.jar"])).unwrap_err();
+        assert_eq!(
+            missing,
+            Refusal::Malformed(
+                "--resources requires at least one strip_prefix:add_prefix:file group".to_string()
+            )
+        );
+        let outside =
+            resource_entry_name("res", "", std::path::Path::new("other/a.txt")).unwrap_err();
+        assert_eq!(outside, "resource other/a.txt is outside strip prefix res");
+
+        for (add, path, entry) in [
+            ("../outside", "res/a.txt", "../outside/a.txt"),
+            ("/absolute", "res/a.txt", "/absolute/a.txt"),
+            ("\\absolute", "res/a.txt", "/absolute/a.txt"),
+            ("C:", "res/a.txt", "C:/a.txt"),
+            ("com/./example", "res/a.txt", "com/./example/a.txt"),
+            ("com//example", "res/a.txt", "com//example/a.txt"),
+            ("bad\0name", "res/a.txt", "bad\0name/a.txt"),
+        ] {
+            assert_eq!(
+                resource_entry_name("res", add, std::path::Path::new(path)).unwrap_err(),
+                format!("resource entry {entry:?} is not a canonical relative jar path")
+            );
+        }
+        assert_eq!(
+            resource_entry_name("", "", std::path::Path::new("../a.txt")).unwrap_err(),
+            "resource entry \"../a.txt\" is not a canonical relative jar path"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let path = PathBuf::from(std::ffi::OsString::from_vec(vec![b'a', 0xff]));
+            assert_eq!(
+                resource_entry_name("", "", &path).unwrap_err(),
+                "resource path is not UTF-8"
+            );
+        }
+    }
+
+    #[test]
+    fn packaged_resources_land_in_the_jar() {
+        let dir = std::env::temp_dir().join(format!("krusty-resources-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("resources")).unwrap();
+        std::fs::write(dir.join("resources/mod.xml"), b"<module/>").unwrap();
+        let jar = dir.join("out.jar");
+        {
+            use zip::write::SimpleFileOptions;
+            let file = std::fs::File::create(&jar).expect("create jar");
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file("META-INF/MANIFEST.MF", SimpleFileOptions::default())
+                .expect("manifest entry");
+            std::io::Write::write_all(&mut writer, b"Manifest-Version: 1.0\r\n\r\n")
+                .expect("manifest bytes");
+            writer.finish().expect("finish jar");
+        }
+        package_resources(
+            &jar,
+            &[ResourceGroup {
+                strip_prefix: dir.join("resources").display().to_string(),
+                add_prefix: String::new(),
+                files: vec![dir.join("resources/mod.xml")],
+            }],
+        )
+        .expect("package");
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&jar).unwrap()).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("mod.xml").unwrap(), &mut xml).unwrap();
+        assert_eq!(xml, "<module/>");
+        assert!(archive.by_name("META-INF/MANIFEST.MF").is_ok());
+
+        let duplicate = package_resources(
+            &jar,
+            &[ResourceGroup {
+                strip_prefix: dir.join("resources").display().to_string(),
+                add_prefix: String::new(),
+                files: vec![dir.join("resources/mod.xml")],
+            }],
+        )
         .unwrap_err();
-        assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+        assert_eq!(duplicate, "duplicate jar entry mod.xml");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The rule forwards a target's `kotlinc_opts` as `--kotlinc-arg` each. Without a passthrough

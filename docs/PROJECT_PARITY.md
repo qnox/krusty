@@ -148,10 +148,9 @@ version of this probe did exactly that and reported roughly twice as many "unres
 blockers as really exist.
 
 **`built` is an upper bound.** The probe sends the compile-shaping options but not `--resources`,
-`--java-count`, or `--abi-out`, which the real rule derives from the target. At least one of the six,
-`intellij.platform.buildData`, declares `resources = glob(["resources/**/*"])` in its `BUILD.bazel`,
-and the worker refuses `--resources` outright rather than write a jar silently missing them. Under
-the real rule that target fails.
+`--java-count`, or `--abi-out`, which the real rule derives from the target. The worker now copies
+`--resources` into the jar, so a target such as `intellij.platform.buildData` is no longer refused
+for declaring `resources`. This scan predates that and did not send the flag.
 
 `-Xlambdas=class` is the largest single refusal (10 of the 11 `unsupported` rows; the eleventh is
 `-Xexplicit-api=strict`) and the refusal is correct: krusty emits `invokedynamic` lambdas only, so it
