@@ -621,10 +621,7 @@ fn foreign_architectures() -> &'static [ForeignArchitecture] {
 }
 
 fn foreign_flags(arch: &str) -> Vec<String> {
-    let mut flags = vec![
-        format!("--target={arch}-linux-gnu"),
-        "-fuse-ld=lld".to_string(),
-    ];
+    let mut flags = vec![format!("--target={arch}-linux-gnu")];
     flags.extend(compile_flags().iter().map(|flag| flag.to_string()));
     flags
 }
@@ -680,6 +677,8 @@ fn build_and_run_on(foreign: &ForeignArchitecture, driver: &str) -> Output {
         .join(format!("{driver}-{arch}"));
     let build = Command::new("clang")
         .args(foreign_flags(arch))
+        // The host's linker knows only the host's machine; lld links every target.
+        .arg("-fuse-ld=lld")
         .arg("-I")
         .arg(runtime_dir())
         .args(objects)
