@@ -564,6 +564,17 @@ backends by `TARGET_BACKEND`/`DONT_TARGET_EXACT_BACKEND`, or muted on JVM by the
 family, count in neither JVM badge's numerator nor denominator. Native applicability independently
 uses the corresponding Native target/mute directives.
 
+Both JVM compiles of a unit run under the same command line. `src/conformance/compiler_arguments.rs`
+(`unit_kotlinc_arguments`) maps the case's configuration directives (`LANGUAGE`, `API_VERSION`,
+`OPT_IN`, `EXPLICIT_API_MODE`, `ALLOW_KOTLIN_PACKAGE`, `RETURN_VALUE_CHECKER_MODE`, `JVM_TARGET`,
+`STRING_CONCAT`, `ASSERTIONS_MODE`, `WHEN_EXPRESSIONS`, and the unit's own `LAMBDAS`,
+`SAM_CONVERSIONS`, `JVM_DEFAULT_MODE`) to kotlinc arguments. The reference kotlinc receives them
+verbatim; krusty's gate parses them with `krusty_cli::cli::parse`, the executable's own command
+line, and compiles with the language settings and JVM backend that command line selects. A case
+whose arguments krusty's command line refuses (an argument krusty does not implement yet) is not
+applicable on JVM and is listed in the expected not-applicable inventory until krusty implements
+it.
+
 Both lanes scan the same version-pinned corpus directory. The Native lane never inherits a JVM
 mute: it excludes a case only for a Native/ANY target directive or a true target-runtime/source
 requirement such as JVM classes. A missing harness capability is an expected failure and remains in

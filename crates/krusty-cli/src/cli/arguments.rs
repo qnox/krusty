@@ -387,6 +387,29 @@ pub(super) fn apply(
                 ));
             }
         }
+        // `-Xassertions` selects how `assert(...)` is compiled. krusty emits the two unconditional
+        // modes; `jvm` and `legacy` name runtime-checked shapes it does not reproduce yet.
+        "-Xassertions" => match text {
+            "always-enable" | "always-disable" => opts.assertions = Some(text.to_string()),
+            "jvm" | "legacy" => opts.errors.push(format!(
+                "{name}={text} selects an output shape krusty does not emit"
+            )),
+            _ => opts.errors.push(format!(
+                "unknown assertions mode: {text}, supported modes: [always-enable, always-disable, jvm, legacy]"
+            )),
+        },
+        // `-Xstring-concat` selects how a string concatenation is built from JVM 9 on. `inline`
+        // (`StringBuilder`) is emitted at every target; krusty's `invokedynamic` shape is the
+        // target default, so naming either `indy` mode explicitly is not modeled yet.
+        "-Xstring-concat" => match text {
+            "inline" => opts.inline_string_concat = true,
+            "indy" | "indy-with-constants" => opts.errors.push(format!(
+                "{name}={text} selects an output shape krusty does not emit"
+            )),
+            _ => opts.errors.push(format!(
+                "unknown `-Xstring-concat` mode: {text}\nSupported modes: inline, indy-with-constants, indy"
+            )),
+        },
         "-opt-in" => opts
             .opt_in
             .extend(list.iter().filter(|marker| !marker.is_empty()).cloned()),
@@ -525,6 +548,9 @@ pub(super) fn finish_language_settings(
                 opts.language_settings
                     .features
                     .apply_explicit_api_mode(mode);
+            }
+            if let Some(mode) = &opts.assertions {
+                opts.language_settings.features.apply_assertions_mode(mode);
             }
             for marker in &opts.opt_in {
                 opts.language_settings.features.opt_in(marker);
