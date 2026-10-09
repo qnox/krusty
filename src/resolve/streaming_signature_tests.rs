@@ -1701,6 +1701,7 @@ val errorTest = object : ErrorTest {
 #[test]
 fn anonymous_classifier_header_expands_generic_statement_local_type_alias() {
     let source = r#"
+// LANGUAGE: +LocalTypeAliases
 open class Generic<K>
 fun make(): Any {
     typealias Alias<K> = Generic<K>

@@ -125,6 +125,7 @@ const MODELED_FEATURES: &[&str] = &[
     "FullValueClasses",
     "ImplicitSignedToUnsignedIntegerConversion",
     "JvmSupportRecursiveTypeOf",
+    "LocalTypeAliases",
     "MultiDollarInterpolation",
     "MultiPlatformProjects",
     "NameBasedDestructuring",
