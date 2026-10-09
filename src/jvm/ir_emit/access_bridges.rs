@@ -394,6 +394,7 @@ pub(super) fn cross_owner_member_calls(
     contexts: &[static_accessors::EmissionContext],
     private_interface_bodies_are_members: bool,
 ) -> MemberAccessBridges {
+    let exporting = static_accessors::inline_functions_exporting_private_access(ir);
     let mut private = std::collections::HashSet::new();
     let mut protected = std::collections::HashMap::new();
     let mut scan = |owner: &str,
@@ -762,7 +763,7 @@ pub(super) fn cross_owner_member_calls(
                 &owner,
                 context.class.map(|class| class as crate::ir::ClassId),
                 vec![root],
-                static_accessors::non_private_inline_body(ir, root),
+                static_accessors::body_exports_private_access(ir, &exporting, root),
             );
         }
     }

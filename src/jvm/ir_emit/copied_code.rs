@@ -16,4 +16,34 @@ impl Emitter<'_> {
         self.cw.set_copying(outer);
         result
     }
+
+    /// A same-module expansion re-emits the inline body in the caller. When that expression was
+    /// copied from an inline function whose private access is published, it calls the same
+    /// accessors the published method does. A lambda the caller substituted into the expansion is
+    /// not such a copy, so it keeps the caller's own access. Member references the copy interns
+    /// are recorded as copied code, the same way [`Self::emitting`] records them.
+    pub(super) fn with_copied_private_access(
+        &mut self,
+        expression: u32,
+        emit: impl FnOnce(&mut Self),
+    ) {
+        let previous = self.export_private_calls;
+        self.export_private_calls =
+            self.method_exports_private_access || self.copy_exports_private_access(expression);
+        self.emitting(expression, emit);
+        self.export_private_calls = previous;
+    }
+
+    fn copy_exports_private_access(&self, expression: u32) -> bool {
+        self.ir
+            .inline_copy_provenance(expression)
+            .is_some_and(|frames| {
+                frames.iter().any(|frame| {
+                    self.run
+                        .static_accessor_plan
+                        .borrow()
+                        .exports_private_access(frame.function)
+                })
+            })
+    }
 }

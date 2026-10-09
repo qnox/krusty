@@ -22,15 +22,23 @@ impl Emitter<'_> {
         let field_ty = jvm_value_ty(&field.ty);
         let owner = class_decl.fq_name();
         let is_lateinit = field.is_lateinit();
-        if let Some(method) = static_accessors::cross_class_backing_field_method(
-            self.cw,
-            self.ir,
-            &self.facade,
-            self.static_owner,
-            class,
-            index,
-            false,
-        ) {
+        let reader = (!self.export_private_calls)
+            .then_some(self.static_owner)
+            .flatten();
+        let method = {
+            let planned = self.run.static_accessor_plan.borrow();
+            static_accessors::cross_class_backing_field_method(
+                self.cw,
+                self.ir,
+                &self.facade,
+                &planned,
+                reader,
+                class,
+                index,
+                false,
+            )
+        };
+        if let Some(method) = method {
             self.emit_value(receiver, code);
             code.invokestatic(method, 1, slot_words(field_ty) as i32);
         } else if static_storage(self.ir, class_decl) {
