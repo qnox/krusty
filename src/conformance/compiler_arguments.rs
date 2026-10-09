@@ -30,7 +30,6 @@ pub fn unit_kotlinc_arguments<'a>(
 /// | `// OPT_IN: a.B, c.D` | `-opt-in=a.B`, `-opt-in=c.D` |
 /// | `// EXPLICIT_API_MODE: STRICT` | `-Xexplicit-api=strict` |
 /// | `// ALLOW_KOTLIN_PACKAGE`, or a `package kotlin…` declaration | `-Xallow-kotlin-package` |
-/// | `// RETURN_VALUE_CHECKER_MODE: FULL\|CHECKER\|DISABLED` | `-Xreturn-value-checker=full\|check\|disable` |
 /// | `// JVM_TARGET: X` | `-jvm-target X` |
 /// | `// STRING_CONCAT: X` | `-Xstring-concat=X` |
 /// | `// ASSERTIONS_MODE: X` | `-Xassertions=X` |
@@ -76,20 +75,6 @@ pub fn case_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
     if directive(src, "ALLOW_KOTLIN_PACKAGE") || declares_reserved_kotlin_package(src) {
         arguments.push("-Xallow-kotlin-package".to_string());
     }
-    if let Some(mode) = last_value(src, "RETURN_VALUE_CHECKER_MODE") {
-        // The directive spells kotlinc's `ReturnValueCheckerMode` enum constants.
-        let value = match mode {
-            "FULL" => "full",
-            "CHECKER" => "check",
-            "DISABLED" => "disable",
-            unknown => {
-                return Err(format!(
-                    "box directive `// RETURN_VALUE_CHECKER_MODE: {unknown}` names no mode"
-                ))
-            }
-        };
-        arguments.push(format!("-Xreturn-value-checker={value}"));
-    }
     if let Some(target) = last_value(src, "JVM_TARGET") {
         arguments.extend(["-jvm-target".to_string(), target.to_string()]);
     }
@@ -103,6 +88,33 @@ pub fn case_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
         arguments.push(format!("-Xwhen-expressions={}", mode.to_ascii_lowercase()));
     }
     Ok(arguments)
+}
+
+/// The kotlinc arguments only the reference compile of a case receives: `// RETURN_VALUE_CHECKER_MODE:
+/// FULL|CHECKER|DISABLED` selects `-Xreturn-value-checker=full|check|disable`, so kotlinc accepts the
+/// case's `@MustUseReturnValues`/`@IgnorableReturnValue` annotations.
+///
+/// krusty does not model the return-value checker and refuses the argument, yet the checker only
+/// reports unused results and never changes the case's runtime `box()`. Keeping the argument off
+/// krusty's command line keeps such a case applicable; it moves to [`case_kotlinc_arguments`] once
+/// krusty applies the argument. An unknown mode fails closed rather than reference-compiling under
+/// a guessed default.
+pub fn reference_only_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
+    let Some(mode) = last_value(src, "RETURN_VALUE_CHECKER_MODE") else {
+        return Ok(Vec::new());
+    };
+    // The directive spells kotlinc's `ReturnValueCheckerMode` enum constants.
+    let value = match mode {
+        "FULL" => "full",
+        "CHECKER" => "check",
+        "DISABLED" => "disable",
+        unknown => {
+            return Err(format!(
+                "box directive `// RETURN_VALUE_CHECKER_MODE: {unknown}` names no mode"
+            ))
+        }
+    };
+    Ok(vec![format!("-Xreturn-value-checker={value}")])
 }
 
 /// The trimmed payload of every `// <name>:` directive line, in source order.
@@ -182,13 +194,34 @@ mod tests {
                 "-opt-in=kotlin.contracts.ExperimentalContracts",
                 "-Xexplicit-api=strict",
                 "-Xallow-kotlin-package",
-                "-Xreturn-value-checker=check",
                 "-jvm-target",
                 "1.8",
                 "-Xstring-concat=inline",
                 "-Xassertions=always-enable",
                 "-Xwhen-expressions=indy",
             ]
+        );
+    }
+
+    #[test]
+    fn the_return_value_checker_mode_reaches_only_the_reference_compile() {
+        let src = "// RETURN_VALUE_CHECKER_MODE: CHECKER\nfun box() = \"OK\"\n";
+        assert_eq!(arguments(src), Vec::<String>::new());
+        for (mode, argument) in [
+            ("FULL", "-Xreturn-value-checker=full"),
+            ("CHECKER", "-Xreturn-value-checker=check"),
+            ("DISABLED", "-Xreturn-value-checker=disable"),
+        ] {
+            assert_eq!(
+                reference_only_kotlinc_arguments(&format!(
+                    "// RETURN_VALUE_CHECKER_MODE: {mode}\nfun box() = \"OK\"\n"
+                )),
+                Ok(vec![argument.to_string()])
+            );
+        }
+        assert_eq!(
+            reference_only_kotlinc_arguments("fun box() = \"OK\"\n"),
+            Ok(Vec::new())
         );
     }
 
@@ -227,7 +260,7 @@ mod tests {
     #[test]
     fn an_unknown_mode_fails_closed() {
         assert_eq!(
-            case_kotlinc_arguments("// RETURN_VALUE_CHECKER_MODE: SOMETIMES\n"),
+            reference_only_kotlinc_arguments("// RETURN_VALUE_CHECKER_MODE: SOMETIMES\n"),
             Err(
                 "box directive `// RETURN_VALUE_CHECKER_MODE: SOMETIMES` names no mode".to_string()
             )

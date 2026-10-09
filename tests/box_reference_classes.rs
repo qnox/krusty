@@ -21,8 +21,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use krusty::conformance::{
-    directive, inject_support_module, module_units, split_files, split_modules,
-    unit_kotlinc_arguments, BoxJdk, FragmentUnit,
+    directive, inject_support_module, module_units, reference_only_kotlinc_arguments, split_files,
+    split_modules, unit_kotlinc_arguments, BoxJdk, FragmentUnit,
 };
 
 use super::common::{self, byte_dump};
@@ -454,10 +454,17 @@ struct PlannedUnit {
 /// Split a case into the units krusty compiles it as: a `// MODULE:` build's folded units, else
 /// one `main` unit of its `// FILE:` blocks or of the whole source. `// WITH_COROUTINES` adds the
 /// generated helpers exactly where krusty does. Each unit's arguments come from
-/// [`unit_kotlinc_arguments`], the selection the gate's own compile of that unit parses.
+/// [`unit_kotlinc_arguments`], the selection the gate's own compile of that unit parses, followed by
+/// the case's [`reference_only_kotlinc_arguments`].
 fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<PlannedUnit>, String> {
+    let reference_only = reference_only_kotlinc_arguments(src)
+        .map_err(|error| format!("reference oracle: {error}"))?;
     let arguments = |kotlin: &[(String, String)]| {
         unit_kotlinc_arguments(src, kotlin.iter().map(|(_, source)| source.as_str()))
+            .map(|mut arguments| {
+                arguments.extend(reference_only.iter().cloned());
+                arguments
+            })
             .map_err(|error| format!("reference oracle: {error}"))
     };
     if src.contains("// MODULE:") {
