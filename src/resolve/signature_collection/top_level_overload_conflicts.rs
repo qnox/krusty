@@ -5,6 +5,9 @@
 
 use super::*;
 
+mod registration;
+pub(in crate::resolve) use registration::*;
+
 fn report_conflicting_top_level_overloads(
     groups: &TopLevelFunctionConflictGroups,
     pending: &HashMap<TopLevelFunctionConflictDecl, PendingTopLevelFunctionConflict>,
