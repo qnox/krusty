@@ -58,7 +58,6 @@ use spill_layout::{
     kind_positions, rematerialized_nulls, spill_field_ty, spill_order, suspension_points_in_order,
     SpillLayout,
 };
-mod snapshot_types;
 mod specialized_lambda_classes;
 pub(crate) use specialized_lambda_classes::SpecializedLambdaClasses;
 mod suspend_lambda;
@@ -107,16 +106,6 @@ struct JvmCoroutineRepresentation;
 impl CoroutineRepresentation for JvmCoroutineRepresentation {
     fn zero(&self, ty: &Ty) -> IrConst {
         IrConst::zero_for_value_type(super::physical_type::ir_ty_to_jvm(ty))
-    }
-
-    fn snapshot_type(
-        &self,
-        ir: &IrFile,
-        expression: ExprId,
-        orig_rets: &[Ty],
-        value_types: &std::collections::HashMap<u32, Ty>,
-    ) -> Option<Ty> {
-        snapshot_types::snapshot_type(ir, expression, orig_rets, value_types)
     }
 }
 

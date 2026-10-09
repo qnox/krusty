@@ -1371,14 +1371,34 @@ fn hoist_call_operands_in_order(
     }
 }
 
+/// The type of an already-evaluated operand that hoisting binds to a temporary, read from what was
+/// recorded for it: a value carries its type in the function's value namespace, and any other
+/// expression carries the type checked lowering recorded. Where a target made the node physical and
+/// recorded the representation it evaluates to (`IrFile::physical_types`), that is the value the
+/// temporary holds. `None` means nothing was recorded, and the operand list stays unhoisted.
+fn recorded_operand_type(
+    ir: &IrFile,
+    expression: ExprId,
+    value_types: &HashMap<u32, Ty>,
+) -> Option<Ty> {
+    match ir.exprs[expression as usize] {
+        IrExpr::GetValue(index) => value_types.get(&index).copied(),
+        _ => ir
+            .physical_types
+            .get(&expression)
+            .or_else(|| ir.logical_types.get(&expression))
+            .copied(),
+    }
+}
+
 /// Hoist suspensions inside an ordered operand list (a call's receiver + arguments, a template's
 /// parts) while preserving Kotlin's strict left-to-right evaluation order: any effectful operand
 /// that precedes a later suspending operand is bound to a prelude temp (kotlinc spills every
 /// operand of such a call), so `f(g(), susp())` runs `g()` before the suspension. `None` slots
 /// (default-argument holes) pass through untouched.
 ///
-/// Returns `None` — with `ir` and `prelude` unmodified — when the target cannot type a required
-/// snapshot; the caller leaves the whole expression unhoisted so the flattener declines the
+/// Returns `None` — with `ir` and `prelude` unmodified — when a required snapshot has no recorded
+/// type; the caller leaves the whole expression unhoisted so the flattener declines the
 /// shape (skip, never miscompile). The snapshot plan is decided and typed on the ORIGINAL operands
 /// before any rewrite: bailing mid-hoist would strand already-bound prelude temps next to a
 /// returned original expression, double-evaluating their effects. Typing the original is valid for
@@ -1408,11 +1428,7 @@ fn hoist_operands_in_order(
                 continue;
             }
             if suspends[i] || operand_needs_snapshot(ir, x, value_types) {
-                let Some(ty) =
-                    typing
-                        .representation
-                        .snapshot_type(ir, x, typing.orig_rets, value_types)
-                else {
+                let Some(ty) = recorded_operand_type(ir, x, value_types) else {
                     crate::trace_compiler!(
                         "suspend",
                         "hoist_operands_in_order BAIL: operand {i} untypeable: {:?} logical={:?}",
@@ -1488,18 +1504,6 @@ mod tests {
     impl CoroutineRepresentation for SemanticOnly {
         fn zero(&self, ty: &Ty) -> IrConst {
             IrConst::zero_for_value_type(*ty)
-        }
-        fn snapshot_type(
-            &self,
-            ir: &IrFile,
-            expression: ExprId,
-            _: &[Ty],
-            value_types: &HashMap<u32, Ty>,
-        ) -> Option<Ty> {
-            match ir.exprs[expression as usize] {
-                IrExpr::GetValue(index) => value_types.get(&index).copied(),
-                _ => ir.logical_types.get(&expression).copied(),
-            }
         }
     }
 

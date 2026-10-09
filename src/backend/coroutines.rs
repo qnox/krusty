@@ -12,9 +12,9 @@
 //! * [`hoisting`] lifts a suspension nested in an operand into a preceding temporary, in source
 //!   evaluation order.
 //!
-//! They preserve checked Kotlin meaning and choose no representation. Where a rewrite has to name
-//! one (the default a fresh temporary starts from, or the result type of a call a target pass has
-//! already made physical), it asks the target through [`CoroutineRepresentation`].
+//! They preserve checked Kotlin meaning and choose no representation. A temporary takes the type
+//! recorded for the value it holds, never one these passes derive; the constant a fresh temporary
+//! starts from is the target's, asked through [`CoroutineRepresentation`].
 
 mod block_splicing;
 mod bottom_completion;
@@ -28,7 +28,7 @@ mod value_when;
 
 pub(crate) use block_splicing::{diverging_control_core, splice_return_blocks};
 pub(crate) use bottom_completion::{
-    suspension_completion, unwrap_suspend_cast, SuspensionCompletion,
+    suspension_completion, unwrap_suspend_cast, SuspensionCompletion, UnwrappedSuspension,
 };
 pub(crate) use control_flow::{expr_contains_owned_loop_jump, expr_has_return, stmt_diverges};
 pub(crate) use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
@@ -45,26 +45,13 @@ pub(crate) use value_namespace::{
 pub(crate) use value_try::desugar_value_try;
 pub(crate) use value_when::desugar_value_when;
 
-use std::collections::HashMap;
-
-use crate::ir::{ExprId, IrConst, IrFile};
+use crate::ir::IrConst;
 use crate::types::Ty;
 
 /// The representation facts a target supplies to the shared suspend normalizations.
 pub(crate) trait CoroutineRepresentation {
     /// The constant a fresh temporary of type `ty` starts from before its first real assignment.
     fn zero(&self, ty: &Ty) -> IrConst;
-
-    /// The type of a temporary holding the already-evaluated operand `expression`, which hoisting
-    /// binds ahead of a later suspension. `None` leaves the operand list unhoisted, and the state
-    /// machine declines the residual suspension.
-    fn snapshot_type(
-        &self,
-        ir: &IrFile,
-        expression: ExprId,
-        orig_rets: &[Ty],
-        value_types: &HashMap<u32, Ty>,
-    ) -> Option<Ty>;
 }
 
 /// What hoisting needs to type the temporaries it introduces.
