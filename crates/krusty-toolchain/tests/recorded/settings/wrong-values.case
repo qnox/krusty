@@ -1,0 +1,13 @@
+A value of the wrong type is reported and its default shown.
+--- module.yaml
+product: jvm/lib
+settings:
+  jvm:
+    release: twenty
+    storeParameterNames: maybe
+  kotlin:
+    freeCompilerArgs: -Xone
+--- expected
+module.yaml:4:14: ERROR: Expected: integer | null
+module.yaml:5:26: ERROR: Expected: boolean ( "true" | "false" )
+module.yaml:7:23: ERROR: Expected `sequence [string] | null`, but got `scalar`

@@ -19,7 +19,12 @@ root with its line and column when the toolchain gives them, the severity, and t
 line breaks written as `\\n`) and `stdout` (the module table, present only when the command succeeds).
 The project is written to a directory named `project`, which names its root module.
 
-Usage: record_projects.py <kotlin wrapper> <case file>...
+With `--settings`, the recorder runs `./kotlin show settings --all-modules` instead and records the
+settings it prints, with trailing spaces dropped from each line, as `settings` (present only when
+the command succeeds). Problems are read from both streams, since warnings go to standard output;
+the settings follow them.
+
+Usage: record_projects.py [--settings] <kotlin wrapper> <case file>...
 The environment must be the one the toolchain runs in (JAVA_HOME, LC_ALL=C.UTF-8, no banner).
 """
 
@@ -30,7 +35,7 @@ import subprocess
 import sys
 import tempfile
 
-RECORDED = ("expected", "stdout")
+RECORDED = ("expected", "stdout", "settings")
 # Kept as written: what krusty-toolchain reports where it deliberately differs, and why.
 KRUSTY = "krusty"
 SEVERITY = "(ERROR|WARNING|WEAK WARNING)"
@@ -39,6 +44,8 @@ BOX_LINE = re.compile(r"^\s+│(?: (.*))?$")
 LOCATION = re.compile(r"^→ (.*?)(?::(\d+):(\d+))?$")
 PLAIN = re.compile(r"^" + SEVERITY + r": (.*)$")
 FILE = re.compile(r"^ ╰→ (.*)$")
+# A conflict is printed without a severity; it is an error.
+CONFLICT = "Conflicting values for property "
 ABORT = (
     "ERROR: Aborting because there were errors in the Kotlin project file, please see above.",
     "ERROR: failed to read Kotlin project model, refer to the errors above",
@@ -98,6 +105,18 @@ def parse(root, output):
                     index += 1
                     message.append(relative(root, lines[index]))
                 problems.append(f"{severity}: " + "\\n".join(message))
+        elif line.startswith(CONFLICT):
+            # Its values and their places run to the next line that does not continue them.
+            message = [relative(root, line)]
+            while index + 1 < len(lines) and (
+                lines[index + 1].startswith(" ")
+                or not lines[index + 1].strip()
+                and index + 2 < len(lines)
+                and lines[index + 2].startswith("  - ")
+            ):
+                index += 1
+                message.append(relative(root, lines[index]))
+            problems.append("ERROR: " + "\\n".join(message))
         elif line.startswith("╭─"):
             while True:
                 table.append(line)
@@ -109,7 +128,7 @@ def parse(root, output):
     return problems, table
 
 
-def record(wrapper, path):
+def record(wrapper, path, settings):
     sections = read_case(path)
     with tempfile.TemporaryDirectory(prefix="kotlin-project-case-") as directory:
         # A fixed directory name, since the root module is named after it.
@@ -123,24 +142,36 @@ def record(wrapper, path):
             with open(file, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(lines) + ("\n" if lines else ""))
         shutil.copy(wrapper, os.path.join(root, "kotlin"))
+        command = ["show", "settings", "--all-modules"] if settings else ["show", "modules"]
         run = subprocess.run(
-            ["./kotlin", "show", "modules"],
+            ["./kotlin", *command],
             cwd=root,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             timeout=600,
         )
-        output = "\n".join(
+        printed = [
             line for line in run.stdout.splitlines()
             if not line.startswith("Picked up JAVA_TOOL_OPTIONS")
-        )
+        ]
+        output = "\n".join(printed)
         problems, table = parse(root, output)
-        stdout = table if run.returncode == 0 else None
+        if run.returncode != 0:
+            stdout = None
+        elif settings:
+            lines = [line.rstrip() for line in printed]
+            first = next(
+                index for index, line in enumerate(lines)
+                if line.startswith(("Module: ", "settings@"))
+            )
+            stdout = lines[first:]
+        else:
+            stdout = table
     kept = [section for section in sections if section[0] not in RECORDED]
     kept.append(["expected", problems])
     if stdout is not None:
-        kept.append(["stdout", stdout])
+        kept.append(["settings" if settings else "stdout", stdout])
     with open(path, "w", encoding="utf-8") as handle:
         for name, lines in kept:
             if name is not None:
@@ -150,9 +181,13 @@ def record(wrapper, path):
 
 
 def main():
-    wrapper, cases = sys.argv[1], sys.argv[2:]
+    arguments = sys.argv[1:]
+    settings = arguments[:1] == ["--settings"]
+    if settings:
+        arguments = arguments[1:]
+    wrapper, cases = arguments[0], arguments[1:]
     for case in cases:
-        record(wrapper, case)
+        record(wrapper, case, settings)
         print(case, file=sys.stderr)
 
 

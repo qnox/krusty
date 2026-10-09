@@ -1,0 +1,15 @@
+`@jvm` settings beat unqualified ones; test settings are not the main fragment's.
+--- module.yaml
+product: jvm/app
+settings:
+  jvm:
+    release: 21
+settings@jvm:
+  jvm:
+    release: 22
+test-settings:
+  jvm:
+    release: 23
+--- expected
+module.yaml:7:5: ERROR: Setting `release` can only be used without any @platform qualifier.
+ERROR: Conflicting values for property `release` in context [test, jvm, module.yaml]:\n  - `22`, defined at:\n    ╰─ module.yaml:7:14\n  - `23`, defined at:\n    ╰─ module.yaml:10:14

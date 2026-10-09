@@ -6,12 +6,14 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use krusty_toolchain::configuration;
 use krusty_toolchain::diagnostic::Diagnostics;
-use krusty_toolchain::model::{self, Start};
+use krusty_toolchain::model::{self, Model, Start};
 use krusty_toolchain::show;
 
 const USAGE: &str =
-    "usage: krusty-toolchain [--project-dir=<path>] show modules [--format=plain|table]";
+    "usage: krusty-toolchain [--project-dir=<path>] show modules [--format=plain|table]
+       krusty-toolchain [--project-dir=<path>] show settings [-m <module>]... [--all-modules]";
 
 #[derive(Clone, Copy)]
 enum Format {
@@ -19,14 +21,25 @@ enum Format {
     Table,
 }
 
+enum Show {
+    Modules(Format),
+    /// The named modules', or every module's (`all`).
+    Settings {
+        names: Vec<String>,
+        all: bool,
+    },
+}
+
 struct Command {
     project_dir: Option<PathBuf>,
-    format: Format,
+    show: Show,
 }
 
 fn parse(arguments: &[String]) -> Result<Command, String> {
     let mut project_dir = None;
     let mut format = Format::Table;
+    let mut modules = Vec::new();
+    let mut all_modules = false;
     let mut words = Vec::new();
     let mut index = 0;
     while index < arguments.len() {
@@ -56,6 +69,8 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
                     }
                 }
             }
+            "-m" | "--module" => modules.push(value()?),
+            "-a" | "--all-modules" => all_modules = true,
             option if option.starts_with('-') => {
                 return Err(format!(
                     "krusty-toolchain does not implement the option `{option}`"
@@ -73,7 +88,14 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
     {
         ["show", "modules"] => Ok(Command {
             project_dir,
-            format,
+            show: Show::Modules(format),
+        }),
+        ["show", "settings"] => Ok(Command {
+            project_dir,
+            show: Show::Settings {
+                names: modules,
+                all: all_modules,
+            },
         }),
         [] => Err("no command given".to_string()),
         other => Err(format!(
@@ -101,14 +123,53 @@ fn run(command: Command) -> Result<bool, String> {
         }
         return Ok(false);
     };
-    match command.format {
-        Format::Table => print!("{}", show::modules_table(&model.modules)),
-        Format::Plain => {
+    match command.show {
+        Show::Modules(Format::Table) => print!("{}", show::modules_table(&model.modules)),
+        Show::Modules(Format::Plain) => {
             for name in show::module_names(&model.modules) {
                 println!("{name}");
             }
         }
+        Show::Settings { names, all } => return show_settings(&model, &names, all),
     }
+    Ok(true)
+}
+
+/// Print the settings of the modules `names` (every module when `all`, or when there is only one),
+/// in the project's order.
+fn show_settings(model: &Model, names: &[String], all: bool) -> Result<bool, String> {
+    if names.is_empty() && !all && model.modules.len() > 1 {
+        return Err("Please specify the module(s) to inspect with -m, or use --all-modules to inspect all modules".to_string());
+    }
+    let unknown: Vec<&String> = names
+        .iter()
+        .filter(|name| !model.modules.iter().any(|module| module.name == **name))
+        .collect();
+    if !unknown.is_empty() {
+        let available = show::module_names(&model.modules);
+        return Err(format!(
+            "Couldn't find module(s) named: {}\nAvailable modules: - {}",
+            unknown
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            available.join("\n- ")
+        ));
+    }
+    let mut diagnostics = Diagnostics::default();
+    let configured =
+        configuration::configure(&model.project.root, &model.modules, &mut diagnostics);
+    let output = show::modules_settings(&model.modules, &configured, |module| {
+        all || names.is_empty() || names.contains(&module.name)
+    });
+    for diagnostic in diagnostics.iter() {
+        eprintln!("{diagnostic}");
+    }
+    if diagnostics.has_errors() {
+        return Ok(false);
+    }
+    print!("{output}");
     Ok(true)
 }
 

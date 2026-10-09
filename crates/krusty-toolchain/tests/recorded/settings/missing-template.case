@@ -1,0 +1,7 @@
+A template that does not exist is reported where it is applied.
+--- module.yaml
+product: jvm/lib
+apply:
+  - missing.module-template.yaml
+--- expected
+module.yaml:3:5: ERROR: Cannot find template file `missing.module-template.yaml`

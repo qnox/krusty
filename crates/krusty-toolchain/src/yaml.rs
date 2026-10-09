@@ -152,6 +152,14 @@ impl Document {
         self.node(id).tag.as_ref().map(|(tag, _)| tag.as_str())
     }
 
+    /// The tag written on `id` and where it is written.
+    pub fn tag_at(&self, id: NodeId) -> Option<(&str, Position)> {
+        self.node(id)
+            .tag
+            .as_ref()
+            .map(|(tag, position)| (tag.as_str(), *position))
+    }
+
     /// Every tagged node with where its tag is written, so a caller whose schema has no tags can
     /// refuse them all.
     pub fn tagged(&self) -> impl Iterator<Item = (NodeId, Position)> + '_ {

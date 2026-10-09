@@ -1,0 +1,14 @@
+Two templates the module applies setting one value differently.
+--- module.yaml
+product: jvm/lib
+apply: [ a.module-template.yaml, b.module-template.yaml ]
+--- a.module-template.yaml
+settings:
+  jvm:
+    release: 21
+--- b.module-template.yaml
+settings:
+  jvm:
+    release: 22
+--- expected
+ERROR: Conflicting values for property `release` in context [module.yaml]:\n  - `21`, defined at:\n    ╰─ a.module-template.yaml:3:14\n  - `22`, defined at:\n    ╰─ b.module-template.yaml:3:14
