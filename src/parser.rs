@@ -34,6 +34,7 @@ mod return_labels;
 mod superclass_references;
 mod type_parameters;
 mod syntax_gates;
+mod type_aliases;
 mod value_parameters;
 use class_recovery::error_class_decl;
 use declaration_modifiers::{
@@ -674,10 +675,11 @@ struct Parser<'a> {
     /// Span of the `context` keyword introducing the buffered clause. Diagnostics about the clause
     /// itself are anchored here rather than on some later modifier, which is where kotlinc puts them.
     pending_context_span: Option<Span>,
-    /// Where the member declaration prefix most recently read by `parse_member_decl_prefix` began,
-    /// with the token index at which that prefix ended. A body property whose `val`/`var` sits at
-    /// exactly that index starts its declaration there, modifiers and annotations included; any
-    /// other declaration never reads a stale prefix, because its keyword is elsewhere.
+    /// Where the declaration prefix most recently read by `parse_member_decl_prefix` (or the
+    /// annotations of a statement) began, with the token index at which that prefix ended. A body
+    /// property or type alias whose keyword sits at exactly that index starts its declaration
+    /// there, modifiers and annotations included; any other declaration never reads a stale
+    /// prefix, because its keyword is elsewhere.
     member_declaration_prefix: Option<(u32, usize)>,
     /// Span of the identifier most recently read as a DECLARATION's name (every declaration head
     /// takes its name through `ident_or_error`). A declaration head reads this immediately after
@@ -1758,31 +1760,6 @@ impl<'a> Parser<'a> {
             Some(argument)
         } else {
             Some(self.parse_expr())
-        }
-    }
-
-    /// Parse the complete declaration-shaped part of a type alias. Semantic registration differs
-    /// between file, classifier, and local scopes, but no scope is allowed to skip its tokens.
-    fn parse_type_alias_syntax(&mut self) -> crate::ast::TypeAliasDecl {
-        let start = self.tok().span;
-        self.bump(); // `typealias`
-        let name = self.ident_or_error("typealias name");
-        let name_span = self.declaration_name_span;
-        let type_params = if self.at(TokenKind::Lt) {
-            self.parse_type_params(start.lo).0
-        } else {
-            Vec::new()
-        };
-        self.expect(TokenKind::Eq, "'='");
-        self.skip_plain_newlines();
-        let target = self.parse_type();
-        let end = self.t[self.i.saturating_sub(1)].span;
-        crate::ast::TypeAliasDecl {
-            name,
-            type_params,
-            target,
-            span: Span::new(start.lo, end.hi),
-            name_span,
         }
     }
 
@@ -4418,6 +4395,7 @@ impl<'a> Parser<'a> {
         // Statement annotations have no codegen representation, but `@Suppress` and opt-in
         // acceptance are scoped frontend policies. Retain what they read on the transient statement.
         if self.at(TokenKind::At) {
+            let prefix_start = self.tok().span.lo;
             let mut annotations = Vec::new();
             while self.at(TokenKind::At) {
                 let (annotation, arguments) = self.parse_annotation();
@@ -4429,6 +4407,7 @@ impl<'a> Parser<'a> {
                 }
                 self.skip_newlines();
             }
+            self.member_declaration_prefix = Some((prefix_start, self.i));
             let statement = self.parse_stmt();
             if !annotations.is_empty() {
                 self.file

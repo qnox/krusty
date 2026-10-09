@@ -4660,6 +4660,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `` `_` `` are not unnamed. `var _` is additionally `'var' properties require a name.` at the
   `var` keyword, whatever the feature. An untyped `when (val _ = e)` uses `e` itself as the subject.
   Tests: `tests/unnamed_local_variables_e2e.rs`.
+- **Local type aliases (`LocalTypeAliases`, `-Xlocal-type-aliases`).** Without the feature every
+  type alias declared in a body (a function, local function, member function, initializer block
+  or object expression, including the members of local classes) is `UNSUPPORTED_FEATURE` at the
+  declaration's start, its annotations included. Nested type aliases in a classifier are
+  `NestedTypeAliases`, not this feature. Tests: `tests/local_type_aliases_e2e.rs`.
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and
   `.idea/misc.xml`; no IDE, JVM, or build tool is launched. Detection order is `Explicit` > `BSP` >
