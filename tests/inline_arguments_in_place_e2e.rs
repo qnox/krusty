@@ -102,6 +102,48 @@ fn an_inline_only_println_of_a_local_loads_the_local_after_system_out() {
 }
 
 #[test]
+fn an_empty_inline_vararg_is_duplicated_on_the_stack_like_kotlinc() {
+    // `Path.outputStream()` is `@InlineOnly` and spreads its vararg:
+    // `aload receiver; aload options; aload options; arraylength; copyOf`. With no options the
+    // array is `iconst_0; anewarray`. kotlinc leaves the receiver on the stack and duplicates
+    // that array. Storing both parameters first is a different method. A vararg that contains an
+    // element still stores the array, and the receiver with it.
+    let src = "import java.nio.file.Path\n\
+        import java.nio.file.StandardOpenOption\n\
+        import kotlin.io.path.outputStream\n\
+        fun open(p: Path) = p.outputStream()\n\
+        fun openCreate(p: Path) = p.outputStream(StandardOpenOption.CREATE)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "EmptyVarargInPlace",
+        src,
+        "EmptyVarargInPlaceKt",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    for member in [
+        "java.io.OutputStream open(",
+        "java.io.OutputStream openCreate(",
+    ] {
+        let reference = method_instructions(&built.reference, member);
+        assert!(!reference.is_empty(), "{member} not found");
+        assert_eq!(
+            method_instructions(&built.krusty, member),
+            reference,
+            "{member}"
+        );
+        assert_eq!(
+            stack_map(&built.krusty, member),
+            stack_map(&built.reference, member),
+            "{member} frames"
+        );
+    }
+}
+
+#[test]
 fn inline_only_arguments_read_in_place_still_run() {
     common::expect_box_ok_with_stdlib(
         &format!(
