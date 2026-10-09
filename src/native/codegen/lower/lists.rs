@@ -24,6 +24,7 @@
 //! that implements one of these interfaces overrides a dependency method, and is declined whole.
 
 use super::*;
+use crate::types::CollectionKind;
 
 /// Whether a type is one of the list shapes the runtime builds.
 ///
@@ -159,68 +160,66 @@ pub(super) fn indexed_value_getter_ty(name: &str) -> Ty {
 /// realizations differ where it counts: the index one takes an `Int` and the element one takes the
 /// erased reference, whatever `E` was substituted to.
 fn list_symbol(
-    declaration: crate::types::CollectionKind,
+    declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
     physical: &[Ty],
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
-    if !matches!(
-        declaration,
-        crate::types::CollectionKind::Collection | crate::types::CollectionKind::List
-    ) {
-        return None;
-    }
     // The operand is the last physical parameter. This matters for mapped realizations because
     // the semantic parameter may have been substituted to the same Kotlin type in both overloads,
     // while the physical parameter still distinguishes the JVM-compatible representation.
     let operand = physical.last().map(|ty| ty.non_null());
     let by_index = matches!(operand, Some(Ty::Int));
+    let reads = declaration.reads(&[CollectionKind::Collection, CollectionKind::List]);
+    let mutates = declaration.mutates(&[CollectionKind::Collection, CollectionKind::List]);
     Some(match (signature.name, signature.params, signature.ret) {
         // `List.size` is a Kotlin property over a Java method, so the provider may present the
         // getter under either spelling; both name the same question.
-        ("getSize" | "size", [], Ty::Int) => ("kt_list_size", vec![any()], Ty::Int),
-        ("isEmpty", [], Ty::Boolean) => ("kt_list_is_empty", vec![any()], Ty::Boolean),
-        ("get", [Ty::Int], ret) if ret.is_reference() => {
+        ("getSize" | "size", [], Ty::Int) if reads => ("kt_list_size", vec![any()], Ty::Int),
+        ("isEmpty", [], Ty::Boolean) if reads => ("kt_list_is_empty", vec![any()], Ty::Boolean),
+        ("get", [Ty::Int], ret) if reads && ret.is_reference() => {
             ("kt_list_get", vec![any(), Ty::Int], any())
         }
-        ("indexOf", [element], Ty::Int) if element.is_reference() => {
+        ("indexOf", [element], Ty::Int) if reads && element.is_reference() => {
             ("kt_list_index_of", vec![any(), any()], Ty::Int)
         }
-        ("lastIndexOf", [element], Ty::Int) if element.is_reference() => {
+        ("lastIndexOf", [element], Ty::Int) if reads && element.is_reference() => {
             ("kt_list_last_index_of", vec![any(), any()], Ty::Int)
         }
-        ("contains", [element], Ty::Boolean) if element.is_reference() => {
+        ("contains", [element], Ty::Boolean) if reads && element.is_reference() => {
             ("kt_list_contains", vec![any(), any()], Ty::Boolean)
         }
-        ("containsAll", [elements], Ty::Boolean) if elements.is_reference() => (
+        ("containsAll", [elements], Ty::Boolean) if reads && elements.is_reference() => (
             "kt_collection_contains_all",
             vec![any(), any()],
             Ty::Boolean,
         ),
-        // The mutating half. A receiver that is not a growable list never reaches these: Kotlin
-        // declares them on `MutableList` only, so naming one is already the proof.
-        ("add", [element], Ty::Boolean) if element.is_reference() => {
+        // The mutating half, declared on the MUTABLE face (or by `ArrayList` itself). A read-only
+        // face never declares one, so a same-shaped member of anything else stays its own.
+        ("add", [element], Ty::Boolean) if mutates && element.is_reference() => {
             ("kt_mutable_list_add", vec![any(), any()], Ty::Boolean)
         }
-        ("add", [Ty::Int, element], Ty::Unit) if element.is_reference() => (
+        ("add", [Ty::Int, element], Ty::Unit) if mutates && element.is_reference() => (
             "kt_mutable_list_add_at",
             vec![any(), Ty::Int, any()],
             Ty::Unit,
         ),
-        ("set", [Ty::Int, element], ret) if element.is_reference() && ret.is_reference() => {
+        ("set", [Ty::Int, element], ret)
+            if mutates && element.is_reference() && ret.is_reference() =>
+        {
             ("kt_mutable_list_set", vec![any(), Ty::Int, any()], any())
         }
-        ("removeAt", [Ty::Int], ret) if ret.is_reference() => {
+        ("removeAt", [Ty::Int], ret) if mutates && ret.is_reference() => {
             ("kt_mutable_list_remove_at", vec![any(), Ty::Int], any())
         }
         // `removeAt`, under the name its realization gave it; see the note on this function.
-        ("remove", [Ty::Int], ret) if by_index && ret.is_reference() => {
+        ("remove", [Ty::Int], ret) if mutates && by_index && ret.is_reference() => {
             ("kt_mutable_list_remove_at", vec![any(), Ty::Int], any())
         }
-        ("remove", [element], Ty::Boolean) if element.is_reference() => {
+        ("remove", [element], Ty::Boolean) if mutates && element.is_reference() => {
             ("kt_mutable_list_remove", vec![any(), any()], Ty::Boolean)
         }
-        ("clear", [], Ty::Unit) => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
-        ("addAll", [elements], Ty::Boolean) if elements.is_reference() => (
+        ("clear", [], Ty::Unit) if mutates => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
+        ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
             "kt_mutable_collection_add_all",
             vec![any(), any()],
             Ty::Boolean,
@@ -233,38 +232,41 @@ fn list_symbol(
 /// typed by no narrower collection. Which collection stands behind it is the descriptor's to say,
 /// so each entry point asks it rather than reading one shape's header.
 fn collection_symbol(
-    declaration: crate::types::CollectionKind,
+    declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
-    if declaration != crate::types::CollectionKind::Collection {
-        return None;
-    }
+    let reads = declaration.reads(&[CollectionKind::Collection]);
+    let mutates = declaration.mutates(&[CollectionKind::Collection]);
     Some(match (signature.name, signature.params, signature.ret) {
-        ("getSize" | "size", [], Ty::Int) => ("kt_collection_size", vec![any()], Ty::Int),
-        ("isEmpty", [], Ty::Boolean) => ("kt_collection_is_empty", vec![any()], Ty::Boolean),
-        ("contains", [element], Ty::Boolean) if element.is_reference() => {
+        ("getSize" | "size", [], Ty::Int) if reads => ("kt_collection_size", vec![any()], Ty::Int),
+        ("isEmpty", [], Ty::Boolean) if reads => {
+            ("kt_collection_is_empty", vec![any()], Ty::Boolean)
+        }
+        ("contains", [element], Ty::Boolean) if reads && element.is_reference() => {
             ("kt_iterable_contains", vec![any(), any()], Ty::Boolean)
         }
-        ("containsAll", [elements], Ty::Boolean) if elements.is_reference() => (
+        ("containsAll", [elements], Ty::Boolean) if reads && elements.is_reference() => (
             "kt_collection_contains_all",
             vec![any(), any()],
             Ty::Boolean,
         ),
-        // The mutating half, declared on `MutableCollection`, which maps onto the same classifier.
-        ("add", [element], Ty::Boolean) if element.is_reference() => {
+        // The mutating half, declared on `MutableCollection`: the mutable face of the same mapping.
+        ("add", [element], Ty::Boolean) if mutates && element.is_reference() => {
             ("kt_mutable_collection_add", vec![any(), any()], Ty::Boolean)
         }
-        ("remove", [element], Ty::Boolean) if element.is_reference() => (
+        ("remove", [element], Ty::Boolean) if mutates && element.is_reference() => (
             "kt_mutable_collection_remove",
             vec![any(), any()],
             Ty::Boolean,
         ),
-        ("addAll", [elements], Ty::Boolean) if elements.is_reference() => (
+        ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
             "kt_mutable_collection_add_all",
             vec![any(), any()],
             Ty::Boolean,
         ),
-        ("clear", [], Ty::Unit) => ("kt_mutable_collection_clear", vec![any()], Ty::Unit),
+        ("clear", [], Ty::Unit) if mutates => {
+            ("kt_mutable_collection_clear", vec![any()], Ty::Unit)
+        }
         _ => return None,
     })
 }
@@ -739,17 +741,34 @@ impl BodyLowering<'_, '_, '_> {
         target: crate::fir::ExternalPropertyId,
         receiver: u32,
     ) -> Option<String> {
-        if !self
-            .type_of(receiver)
-            .is_some_and(|ty| is_list(self.file, ty) || is_collection(self.file, ty))
-        {
+        let ty = self.type_of(receiver)?;
+        if !(is_list(self.file, ty) || is_collection(self.file, ty)) {
             return None;
         }
         let property = self.file.callables.property(target)?;
-        if !matches!(property.name.as_ref(), "getSize" | "size") || property.result != Ty::Int {
+        // The selected GETTER is what decides, not the property's spelling: a dependency subtype
+        // that declares its own `size` is reached through its own declaration, never this table.
+        let getter = self.file.callables.callable(property.getter)?;
+        let Some(crate::types::SemanticCallableOwner::Classifier(owner)) = getter.declaration_owner
+        else {
             return None;
-        }
-        Some(property.name.to_string())
+        };
+        let declaration = classifier_shapes::collection_declaration(self.file.classifiers, owner)?;
+        let signature = super::super::super::intrinsics::FunctionSignature::new(
+            super::super::super::intrinsics::DeclarationOwner::callable(
+                getter.physical_owner,
+                getter.declaration_owner,
+            ),
+            &getter.name,
+            &getter.params,
+            getter.ret,
+        );
+        let (symbol, _, _) = if is_list(self.file, ty) {
+            list_symbol(declaration, signature, &getter.physical_params)?
+        } else {
+            collection_symbol(declaration, signature)?
+        };
+        matches!(symbol, "kt_list_size" | "kt_collection_size").then(|| property.name.to_string())
     }
 
     /// A checked dependency-property read over one of the runtime-owned representations in this
@@ -856,9 +875,10 @@ impl BodyLowering<'_, '_, '_> {
         if !(list || is_collection(self.file, ty)) || self.file.implements_collection_of(ty) {
             return None;
         }
-        let semantic_owner = signature.owner.semantic_classifier()?;
-        let declaration =
-            classifier_shapes::mapped_collection(self.file.classifiers, semantic_owner)?.kind;
+        let declaration = classifier_shapes::collection_declaration(
+            self.file.classifiers,
+            signature.owner.semantic_classifier()?,
+        )?;
         let (symbol, carried, answer) = if list {
             list_symbol(declaration, signature, physical)?
         } else {
@@ -1340,23 +1360,31 @@ mod tests {
         )
     }
 
+    use crate::types::MappedCollection;
+    use classifier_shapes::{CollectionDeclaration, StandardCollectionImplementation};
+
+    fn face(kind: CollectionKind, mutable: bool) -> CollectionDeclaration {
+        CollectionDeclaration::Interface(MappedCollection { kind, mutable })
+    }
+
     #[test]
     fn list_runtime_members_require_complete_signatures() {
         let element = Ty::ty_param("E", any());
+        let list = face(CollectionKind::List, false);
         assert!(list_symbol(
-            crate::types::CollectionKind::List,
+            list,
             signature("kotlin/collections/List", "get", &[Ty::Int], element),
             &[Ty::Int],
         )
         .is_some());
         assert!(list_symbol(
-            crate::types::CollectionKind::List,
+            list,
             signature("kotlin/collections/List", "get", &[Ty::String], element),
             &[Ty::String],
         )
         .is_none());
         assert!(list_symbol(
-            crate::types::CollectionKind::List,
+            list,
             signature(
                 "kotlin/collections/List",
                 "contains",
@@ -1367,11 +1395,49 @@ mod tests {
         )
         .is_none());
         assert!(list_symbol(
-            crate::types::CollectionKind::Set,
+            face(CollectionKind::Set, false),
             signature("kotlin/collections/List", "get", &[Ty::Int], element),
             &[Ty::Int],
         )
         .is_none());
+    }
+
+    /// A query is declared on the read-only face and a mutation on the mutable one; `ArrayList`
+    /// declares both itself. The face is part of the selected declaration, so a member of the
+    /// other face with the same shape is not this table's.
+    #[test]
+    fn list_and_collection_members_match_their_declaration_face() {
+        let element = Ty::ty_param("E", any());
+        let size = signature("kotlin/collections/List", "size", &[], Ty::Int);
+        let clear = signature("kotlin/collections/MutableList", "clear", &[], Ty::Unit);
+        let add_params = [element];
+        let add = signature(
+            "kotlin/collections/MutableList",
+            "add",
+            &add_params,
+            Ty::Boolean,
+        );
+        let array_list =
+            CollectionDeclaration::Implementation(StandardCollectionImplementation::List);
+
+        assert!(list_symbol(face(CollectionKind::List, false), size, &[]).is_some());
+        assert!(list_symbol(face(CollectionKind::List, true), size, &[]).is_none());
+        assert!(list_symbol(face(CollectionKind::List, true), clear, &[]).is_some());
+        assert!(list_symbol(face(CollectionKind::List, false), clear, &[]).is_none());
+        assert!(list_symbol(face(CollectionKind::List, false), add, &[any()]).is_none());
+        assert!(list_symbol(array_list, size, &[]).is_some());
+        assert!(list_symbol(array_list, clear, &[]).is_some());
+
+        let collection = face(CollectionKind::Collection, false);
+        let mutable_collection = face(CollectionKind::Collection, true);
+        assert!(collection_symbol(collection, size).is_some());
+        assert!(collection_symbol(mutable_collection, size).is_none());
+        assert!(collection_symbol(mutable_collection, clear).is_some());
+        assert!(collection_symbol(collection, clear).is_none());
+        assert!(collection_symbol(collection, add).is_none());
+        // `Collection` is the only declaration a `Collection`-typed receiver can select.
+        assert!(collection_symbol(face(CollectionKind::List, false), size).is_none());
+        assert!(collection_symbol(array_list, size).is_none());
     }
 
     #[test]

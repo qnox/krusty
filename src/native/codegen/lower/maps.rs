@@ -56,7 +56,7 @@ pub(super) fn runtime_symbol(
     } else if collection.kind == crate::types::CollectionKind::Map {
         map_symbol(declaration?, signature)
     } else if collection.kind == crate::types::CollectionKind::Set {
-        set_symbol(declaration?, signature)
+        set_symbol(set_declaration(file, signature)?, signature)
     } else {
         None
     }
@@ -145,40 +145,49 @@ fn is_map_set_extension(signature: super::super::super::intrinsics::FunctionSign
 /// A set's `size` and `isEmpty` are the map's: a set IS a map with no values, and both questions
 /// are about its keys.
 fn set_symbol(
-    declaration: crate::types::CollectionKind,
+    declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
-    if !matches!(
-        declaration,
-        crate::types::CollectionKind::Collection | crate::types::CollectionKind::Set
-    ) {
-        return None;
-    }
+    use crate::types::CollectionKind::{Collection, Set};
+    let reads = declaration.reads(&[Collection, Set]);
+    let mutates = declaration.mutates(&[Collection, Set]);
     Some(match (signature.name, signature.params, signature.ret) {
-        ("getSize" | "size", [], Ty::Int) => ("kt_map_size", vec![any()], Ty::Int),
-        ("isEmpty", [], Ty::Boolean) => ("kt_map_is_empty", vec![any()], Ty::Boolean),
-        ("contains", [element], Ty::Boolean) if element.is_reference() => {
+        ("getSize" | "size", [], Ty::Int) if reads => ("kt_map_size", vec![any()], Ty::Int),
+        ("isEmpty", [], Ty::Boolean) if reads => ("kt_map_is_empty", vec![any()], Ty::Boolean),
+        ("contains", [element], Ty::Boolean) if reads && element.is_reference() => {
             ("kt_set_contains", vec![any(), any()], Ty::Boolean)
         }
-        ("containsAll", [elements], Ty::Boolean) if elements.is_reference() => (
+        ("containsAll", [elements], Ty::Boolean) if reads && elements.is_reference() => (
             "kt_collection_contains_all",
             vec![any(), any()],
             Ty::Boolean,
         ),
-        ("addAll", [elements], Ty::Boolean) if elements.is_reference() => (
+        ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
             "kt_mutable_collection_add_all",
             vec![any(), any()],
             Ty::Boolean,
         ),
-        ("add", [element], Ty::Boolean) if element.is_reference() => {
+        ("add", [element], Ty::Boolean) if mutates && element.is_reference() => {
             ("kt_set_add", vec![any(), any()], Ty::Boolean)
         }
-        ("remove", [element], Ty::Boolean) if element.is_reference() => {
+        ("remove", [element], Ty::Boolean) if mutates && element.is_reference() => {
             ("kt_set_remove", vec![any(), any()], Ty::Boolean)
         }
-        ("clear", [], Ty::Unit) => ("kt_map_clear", vec![any()], Ty::Unit),
+        ("clear", [], Ty::Unit) if mutates => ("kt_map_clear", vec![any()], Ty::Unit),
         _ => return None,
     })
+}
+
+/// The exact declaration a set member was selected from; see
+/// [`classifier_shapes::collection_declaration`].
+fn set_declaration(
+    file: &FileLowering<'_>,
+    signature: super::super::super::intrinsics::FunctionSignature<'_>,
+) -> Option<classifier_shapes::CollectionDeclaration> {
+    classifier_shapes::collection_declaration(
+        file.classifiers,
+        signature.owner.semantic_classifier()?,
+    )
 }
 
 /// The runtime function answering one member of a map entry.
@@ -374,7 +383,7 @@ impl BodyLowering<'_, '_, '_> {
                 map_symbol(declaration?, signature)?
             }
         } else if is_set(self.file, ty) {
-            set_symbol(declaration?, signature)?
+            set_symbol(set_declaration(self.file, signature)?, signature)?
         } else if is_map_entry(self.file, ty) {
             map_entry_symbol(declaration, signature)?
         } else {
@@ -487,6 +496,30 @@ mod tests {
         assert!(map_symbol(
             crate::types::CollectionKind::Set,
             signature("kotlin/collections/Map", "get", &[key], value),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn set_members_match_their_declaration_face() {
+        use classifier_shapes::{CollectionDeclaration, StandardCollectionImplementation};
+        let face = |mutable| {
+            CollectionDeclaration::Interface(crate::types::MappedCollection {
+                kind: crate::types::CollectionKind::Set,
+                mutable,
+            })
+        };
+        let size = signature("kotlin/collections/Set", "size", &[], Ty::Int);
+        let clear = signature("kotlin/collections/MutableSet", "clear", &[], Ty::Unit);
+        let hash_set = CollectionDeclaration::Implementation(StandardCollectionImplementation::Set);
+        assert!(set_symbol(face(false), size).is_some());
+        assert!(set_symbol(face(true), size).is_none());
+        assert!(set_symbol(face(true), clear).is_some());
+        assert!(set_symbol(face(false), clear).is_none());
+        assert!(set_symbol(hash_set, clear).is_some());
+        assert!(set_symbol(
+            CollectionDeclaration::Implementation(StandardCollectionImplementation::List),
+            size
         )
         .is_none());
     }

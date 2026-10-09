@@ -9,7 +9,7 @@
 //!
 //! Every program also runs on the JVM, which is what the expected `OK` is checked against.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
 
 fn expect_ok(source: &str, stem: &str) {
     expect_box_ok_with_stdlib(source, stem);
@@ -131,5 +131,35 @@ fn add_all_answers_whether_the_receiver_changed() {
          \x20   return \"OK\"\n\
          }\n",
         "MutableCollectionAddAll",
+    );
+}
+
+/// A dependency subtype of `Collection` that declares its own `size` and mutators: the selected
+/// declarations are `ArrayDeque`'s, not the interface's, so none of them enters the runtime's
+/// collection entry points — the runtime does not make an `ArrayDeque` and would read a header
+/// that is not there. Each declines at its own declaration.
+#[test]
+fn a_dependency_subtypes_own_size_is_not_the_collections() {
+    expect_native_decline(
+        "fun count(values: ArrayDeque<String>): Int = values.size\n\
+         fun box(): String = \"OK\"\n",
+        "DependencySubtypeSize",
+        "kotlin/collections/ArrayDeque.size",
+    );
+}
+
+#[test]
+fn a_dependency_subtypes_own_mutators_are_not_the_collections() {
+    expect_native_decline(
+        "fun wipe(values: ArrayDeque<String>) = values.clear()\n\
+         fun box(): String = \"OK\"\n",
+        "DependencySubtypeClear",
+        "ArrayDeque.clear",
+    );
+    expect_native_decline(
+        "fun grow(values: ArrayDeque<String>) = values.add(\"x\")\n\
+         fun box(): String = \"OK\"\n",
+        "DependencySubtypeAdd",
+        "ArrayDeque.add",
     );
 }

@@ -224,6 +224,60 @@ pub(super) fn mapped_collection(
     selected
 }
 
+/// What declares a selected collection member, by the declaration owner's OWN identity: a face of
+/// a mapped collection interface its provider published a role on, or one of the standard
+/// implementations the runtime realizes.
+///
+/// Unlike [`mapped_collection`], no supertype is consulted. A dependency subtype's own `size` or
+/// `clear()` is ITS declaration, not the interface's, and the runtime's representation is not
+/// behind it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CollectionDeclaration {
+    Interface(MappedCollection),
+    Implementation(StandardCollectionImplementation),
+}
+
+impl CollectionDeclaration {
+    fn kind(self) -> CollectionKind {
+        match self {
+            Self::Interface(collection) => collection.kind,
+            Self::Implementation(StandardCollectionImplementation::List) => CollectionKind::List,
+            Self::Implementation(StandardCollectionImplementation::Set) => CollectionKind::Set,
+            Self::Implementation(StandardCollectionImplementation::Map) => CollectionKind::Map,
+        }
+    }
+
+    /// A query member of one of `kinds`: declared on its read-only face, or by an implementation.
+    pub(super) fn reads(self, kinds: &[CollectionKind]) -> bool {
+        kinds.contains(&self.kind())
+            && !matches!(
+                self,
+                Self::Interface(MappedCollection { mutable: true, .. })
+            )
+    }
+
+    /// A mutating member of one of `kinds`: declared on its mutable face, or by an implementation.
+    pub(super) fn mutates(self, kinds: &[CollectionKind]) -> bool {
+        kinds.contains(&self.kind())
+            && !matches!(
+                self,
+                Self::Interface(MappedCollection { mutable: false, .. })
+            )
+    }
+}
+
+pub(super) fn collection_declaration(
+    classifiers: &dyn BackendClassifierSource,
+    owner: TypeName,
+) -> Option<CollectionDeclaration> {
+    match classifiers.classifier(owner).and_then(|fact| fact.role) {
+        Some(ClassifierRole::MappedCollection(collection)) => {
+            Some(CollectionDeclaration::Interface(collection))
+        }
+        _ => standard_collection_implementation(owner).map(CollectionDeclaration::Implementation),
+    }
+}
+
 /// The runtime collection shape reached by this classifier's declared supertype graph.
 ///
 /// Looking through supertypes is necessary for concrete implementations, ranges, and primitive
