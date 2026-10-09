@@ -111,6 +111,10 @@ impl Emitter<'_> {
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
         self.release_reserved_inline_stack(reserved_inline_stack);
+        // A statement-position inline expansion ran under the callee. Forget the line in effect so
+        // the next mark is written even when it names that same line: a one-line `Unit` body marks
+        // its closing `return` again (`markLineNumberAfterInlineIfNeeded`).
+        self.mark_after_inlined_call(block, code);
     }
 
     /// Emit a block in value position: its statements run for effect and its trailing value is

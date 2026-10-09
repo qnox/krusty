@@ -1046,7 +1046,7 @@ impl BodyLowering<'_> {
     ) -> Option<ExprId> {
         // `FunctionN.invoke` returns erased `Object`, including when the function type is `Unit`.
         // A used result is reloaded on the normal path after `finally`. A `Unit` specialization
-        // stores the object and does not reload it.
+        // stores the object; the reload is discarded so temporary elimination keeps the store.
         let erased_invoke = matches!(
             self.ir.expr(body),
             IrExpr::InvokeFunction { ret, .. } if *ret != Ty::Nothing
@@ -1076,10 +1076,12 @@ impl BodyLowering<'_> {
             value: None,
         });
         let guarded = self.guarded_try(try_body, cleanup, cause, plan_value)?;
-        // A discarded `Unit` specialization never reloads the erased object. Every other result
-        // is read after `finally` and narrowed there, not inside the protected range.
+        // A discarded `Unit` specialization reloads the erased object and throws that reload
+        // away (`aload; pop`). Temporary elimination keeps the store: the one load has `finally`
+        // between it and the store. Pop-backward then deletes the reload, so the join stack stays
+        // empty. The inline-return carry would leave the object on that stack.
         let value = if erased_invoke && result_ty == Ty::Unit {
-            None
+            Some(self.ir.add_expr(IrExpr::GetValue(result_slot)))
         } else {
             let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
             Some(if erased_invoke {
