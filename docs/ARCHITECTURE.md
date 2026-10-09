@@ -93,9 +93,13 @@ settings add arguments the adapter does not model. Replacing such a task would d
 reject the build, so neither is replaced and neither joins `krustyCompile`.
 (`kotlin_dsl_build_src_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
 
-The adapter derives Kotlin semantics from `KotlinBasePlugin.pluginVersion`. It reads the experimental
-Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to reject an
-override which would make those semantics diverge; it does not use the experimental compiler path.
+The adapter derives Kotlin semantics from `KotlinBasePlugin.pluginVersion`. A pre-release suffix on a
+supported release (`2.4.20-dev-7885`, `2.4.20-RC3`, `2.4.20-Beta1`, `2.4.20-SNAPSHOT`) selects that
+release. It reads the experimental Build Tools API `compilerVersion` property behind the two exact
+KGP/BTA opt-ins only to reject an override which normalizes to a different supported release. A
+`compilerVersion` outside the supported releases is not a second compiler: the task still runs on the
+plugin's reference, and the task's `languageVersion` and `apiVersion` are forwarded unchanged. It
+does not use the experimental compiler path. `allWarningsAsErrors` is forwarded as `-Werror`.
 
 Gradle owns incremental invalidation. An unchanged replacement task is UP-TO-DATE and does not run
 krusty. Once any source, classpath, friend path, plugin, compiler option, or compiler binary changes,

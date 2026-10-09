@@ -12121,8 +12121,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's wording. The configured severity is applied before compilation: `error` fails the
   invocation, `warning` reports it, and `disabled` omits it. The Bazel worker normalizes
   `--x_warning_level` to the standard compiler option, and the Gradle plugin transports the option
-  unchanged; neither owns a duplicate diagnostic-name registry. `-Werror` and
-  `allWarningsAsErrors` remain rejected until the compiler models their global policy.
+  unchanged; neither owns a duplicate diagnostic-name registry. `-Werror`, and Gradle's
+  `compilerOptions.allWarningsAsErrors` which forwards that flag, fails the compilation when
+  any warning remains: a named warning the policy did not disable, a compiler warning
+  diagnostic, or a module warning. A disabled named warning stays omitted. The Gradle
+  plugin accepts a pre-release suffix on a supported Kotlin Gradle plugin release
+  (`2.4.20-dev-7885` selects reference `2.4.20`) and forwards the Kotlin repository's
+  JVM free arguments (`-Xallow-kotlin-package`, `-XXexplicit-return-types`,
+  `-Xreturn-value-checker`, and the stdlib compilation flags). `compilerVersion` must
+  normalize to that same reference; a version outside the supported releases is compiled
+  with the plugin's reference, and a different supported release is rejected.
   (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
   `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)

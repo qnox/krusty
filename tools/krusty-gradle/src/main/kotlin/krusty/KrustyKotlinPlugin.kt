@@ -283,10 +283,22 @@ abstract class KrustyCompileTask @Inject constructor(
             )
         }
         val pluginVersion = supportedKotlinPluginVersion(kotlinPluginVersion.get())
-        if (compilerVersion.get() != pluginVersion) {
-            throw GradleException(
-                "Kotlin compiler ${compilerVersion.get()} differs from Kotlin Gradle plugin $pluginVersion",
+        val rawCompilerVersion = compilerVersion.get()
+        // A pre-release of a supported release (the Kotlin repository bootstraps with
+        // `2.4.20-dev-<n>`) is that release. A different supported release is a real
+        // semantic override and stays rejected. A version krusty does not implement, such as
+        // the 2.2.21 compiler the repository uses for Gradle-embedded modules, is not a second
+        // compiler: the task's language and API versions are forwarded, and this reference is
+        // the one krusty can emit.
+        when (val compilerRelease = kotlinReferenceRelease(rawCompilerVersion)) {
+            null -> logger.warn(
+                "krusty: Kotlin compiler $rawCompilerVersion is not a supported reference; compiling with $pluginVersion",
             )
+            else -> if (compilerRelease != pluginVersion) {
+                throw GradleException(
+                    "Kotlin compiler $rawCompilerVersion differs from Kotlin Gradle plugin $pluginVersion",
+                )
+            }
         }
         if (!compilerPluginClasspath.isEmpty) {
             arguments.add(
@@ -353,10 +365,9 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
-    // `-Werror` is not yet modeled, so its structured equivalent stays rejected. Named
-    // `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is the
-    // authoritative place to validate names and apply severities.
-    reject(options.allWarningsAsErrors.getOrElse(false), "allWarningsAsErrors")
+    // Named `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is
+    // the authoritative place to validate names and apply severities. `-Werror` is the global
+    // form of that policy: the compiler fails the compilation when any warning is emitted.
     reject(options.verbose.getOrElse(false), "verbose")
     reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
     reject(task.useModuleDetection.getOrElse(false), "useModuleDetection")
@@ -376,6 +387,11 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
             )
         }
     }
+    if (options.allWarningsAsErrors.getOrElse(false) && "-Werror" in freeArguments) {
+        throw GradleException(
+            "compilerOptions.allWarningsAsErrors and freeCompilerArg '-Werror' are both set; configure exactly one",
+        )
+    }
     languageVersion?.let { arguments.addPair("-language-version", it) }
     apiVersion?.let { arguments.addPair("-api-version", it) }
     structuredOptIns.forEach { marker ->
@@ -388,10 +404,12 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     options.jvmDefault.orNull?.let { arguments.addPair("-jvm-default", it.compilerArgument) }
     if (options.javaParameters.getOrElse(false)) arguments.add("-java-parameters")
     if (options.noJdk.getOrElse(false)) arguments.add("-no-jdk")
+    if (options.allWarningsAsErrors.getOrElse(false)) arguments.add("-Werror")
     return arguments
 }
 
 private val ALLOWED_FREE_FLAGS = setOf(
+    "-Werror",
     "-Xno-param-assertions",
     "-Xno-call-assertions",
     "-Xcontext-parameters",
@@ -404,7 +422,21 @@ private val ALLOWED_FREE_FLAGS = setOf(
     "-Xdont-warn-on-error-suppression",
     "-Xrender-internal-diagnostic-names",
     "-Xskip-metadata-version-check",
+    // The Kotlin repository passes these on JVM modules. They select diagnostics or a
+    // compilation mode krusty does not restrict (the `kotlin` package is already accepted),
+    // and dropping them at this boundary would reject the build before the compiler runs.
+    "-Xallow-kotlin-package",
+    "-Xstdlib-compilation",
+    "-Xexpect-actual-classes",
+    "-Xannotation-target-all",
+    "-Xno-new-java-annotation-targets",
+    "-Xmultifile-parts-inherit",
+    "-Xuse-14-inline-classes-mangling-scheme",
+    "-Xoutput-builtins-metadata",
+    "-Xmulti-platform",
 )
+
+private val RETURN_VALUE_CHECKER_MODES = setOf("check", "full", "disable")
 
 private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "complete", "disable")
 
@@ -451,10 +483,6 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
             // Several -opt-in arguments are legal (the Kotlin build applies one per opt-in); only an
             // exact repeat is a duplicate, so the key is the argument itself.
             argument.startsWith("-opt-in=") && argument.substringAfter('=').isNotEmpty() -> argument
-            argument == "-Werror" ->
-                throw GradleException(
-                    "krusty does not support warning policy freeCompilerArg '$argument'",
-                )
             // The compiler owns the typed diagnostic registry and severity validation. Several
             // entries are legal (one per diagnostic), so only an exact repeated argument shares a
             // key at this transport boundary.
@@ -467,6 +495,12 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
             argument == "-Xname-based-destructuring" -> "-Xname-based-destructuring"
             argument.startsWith("-Xname-based-destructuring=") &&
                 argument.substringAfter('=') in NAME_DESTRUCTURING_MODES -> "-Xname-based-destructuring"
+            argument.startsWith("-XXexplicit-return-types=") &&
+                argument.substringAfter('=') in EXPLICIT_API_MODES -> "-XXexplicit-return-types"
+            argument.startsWith("-Xreturn-value-checker=") &&
+                argument.substringAfter('=') in RETURN_VALUE_CHECKER_MODES -> "-Xreturn-value-checker"
+            argument.startsWith("-Xcommon-sources=") &&
+                argument.substringAfter('=').isNotEmpty() -> "-Xcommon-sources"
             else -> throw GradleException(
                 "unsupported freeCompilerArg '$argument'; use a supported compilerOptions property",
             )
@@ -497,9 +531,20 @@ private fun reservedFreeArgument(argument: String): String? {
     }
 }
 
-private fun supportedKotlinPluginVersion(version: String): String = when (version) {
-    "2.4.0", "2.4.10", "2.4.20" -> version
-    else -> throw GradleException("unsupported Kotlin Gradle plugin $version; expected 2.4.0, 2.4.10, or 2.4.20")
+private fun supportedKotlinPluginVersion(version: String): String {
+    val release = version.substringBefore('-')
+    return when (release) {
+        "2.4.0", "2.4.10", "2.4.20" -> release
+        else -> throw GradleException(
+            "unsupported Kotlin Gradle plugin $version; expected 2.4.0, 2.4.10, or 2.4.20",
+        )
+    }
+}
+
+private fun kotlinReferenceRelease(version: String): String? = try {
+    supportedKotlinPluginVersion(version)
+} catch (_: GradleException) {
+    null
 }
 
 private fun MutableList<String>.addPair(name: String, value: String) {

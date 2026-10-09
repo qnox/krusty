@@ -117,6 +117,8 @@ pub struct Options {
     pub language_settings: LanguageSettings,
     /// Options accepted for compatibility but not acted on (reported once).
     pub ignored: Vec<String>,
+    /// `-Werror`: every emitted warning fails the compilation.
+    pub warnings_as_errors: bool,
     /// Flags kotlinc itself accepts but warns about ("flag is not supported by this version of the
     /// compiler") while compiling exactly as if the flag were absent. Unlike `ignored`, these are
     /// part of kotlinc's accepted surface: the driver prints kotlinc's warning and compilation is
@@ -190,6 +192,7 @@ impl Default for Options {
             module_name: "main".to_string(),
             language_settings: LanguageSettings::default(),
             ignored: Vec::new(),
+            warnings_as_errors: false,
             unsupported_flag_warnings: Vec::new(),
             warning_policy: WarningPolicy::default(),
             warnings: Vec::new(),
@@ -238,7 +241,6 @@ const IGNORED_FLAGS: &[&str] = &[
     "-include-runtime",
     "-nowarn",
     "-verbose",
-    "-Werror",
     "-progressive",
     "-script",
     "-Xuse-ir",
@@ -575,6 +577,9 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             // before compiling, never dropped: a plugin that changes the output must either run
             // natively or fail the compile.
             flag if opts.plugins.accept(flag, || it.next()) => {}
+            // kotlinc's global warning policy. Named `-Xwarning-level` still wins for one
+            // diagnostic; this promotes every warning that policy leaves in place.
+            "-Werror" => opts.warnings_as_errors = true,
             "-java-parameters" => opts.java_parameters = true,
             "-version" => opts.print_version = true,
             "-help" | "-h" | "-X" => opts.print_help = true,
@@ -1574,6 +1579,16 @@ mod tests {
               {disable, strict, warning}"
             ]
         );
+    }
+
+    /// `-Werror` is a real warning policy, not an ignored compatibility flag.
+    #[test]
+    fn werror_is_a_warning_policy() {
+        let parsed = parse_args(&["-Werror", "f.kt"]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert!(parsed.warnings_as_errors);
+        assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
     }
 
     /// `-opt-in` accepts markers in both spellings, repeated and comma-separated.

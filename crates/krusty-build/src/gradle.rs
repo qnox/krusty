@@ -822,12 +822,8 @@ mod tests {
                     "duplicate freeCompilerArg '-Xskip-prerelease-check'",
                 ),
                 (
-                    "all-warnings-as-errors",
-                    "krusty does not support compilerOptions.allWarningsAsErrors",
-                ),
-                (
-                    "free-werror",
-                    "krusty does not support warning policy freeCompilerArg '-Werror'",
+                    "werror-overlap",
+                    "compilerOptions.allWarningsAsErrors and freeCompilerArg '-Werror' are both set; configure exactly one",
                 ),
                 (
                     "empty-opt-in",
@@ -985,6 +981,74 @@ mod tests {
                     .all(|argument| !argument.starts_with("-Xmetadata-version")),
                 "{language_2_2_run:?}",
             );
+
+            // The Kotlin repository's bootstrap compiler version and its warning/argument
+            // surface must reach krusty. A pre-release of the selected plugin release is that
+            // release; an older compiler version the repository pins for Gradle embedding is
+            // not a second krusty target.
+            let reference = format!("-Xkotlin-reference-version={kgp}");
+            for case in ["all-warnings-as-errors", "free-werror"] {
+                let _ = std::fs::remove_file(&log);
+                build()
+                    .property("krusty.negative", case)
+                    .tasks([":compiler:util:compileKotlin"])
+                    .run()
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                let invocation = single_invocation(&log);
+                assert_eq!(
+                    invocation.iter().filter(|argument| argument.as_str() == "-Werror").count(),
+                    1,
+                    "{case}: {invocation:?}"
+                );
+            }
+            let _ = std::fs::remove_file(&log);
+            build()
+                .property("krusty.negative", "bootstrap-compiler-version")
+                .tasks([":compiler:util:compileKotlin"])
+                .run()
+                .unwrap_or_else(|error| panic!("bootstrap compiler version: {error}"));
+            let bootstrap = single_invocation(&log);
+            assert!(
+                bootstrap.iter().any(|argument| argument == &reference),
+                "{bootstrap:?}"
+            );
+            assert!(
+                bootstrap.iter().all(|argument| !argument.contains("-dev-")),
+                "{bootstrap:?}"
+            );
+            let _ = std::fs::remove_file(&log);
+            build()
+                .property("krusty.negative", "older-compiler-version")
+                .tasks([":compiler:util:compileKotlin"])
+                .run()
+                .unwrap_or_else(|error| panic!("older compiler version: {error}"));
+            let older = single_invocation(&log);
+            assert!(
+                older.iter().any(|argument| argument == &reference),
+                "{older:?}"
+            );
+            let _ = std::fs::remove_file(&log);
+            build()
+                .property("krusty.negative", "repo-arguments")
+                .tasks([":compiler:util:compileKotlin"])
+                .run()
+                .unwrap_or_else(|error| panic!("repository arguments: {error}"));
+            let repo_args = single_invocation(&log);
+            for argument in [
+                "-Xallow-kotlin-package",
+                "-XXexplicit-return-types=warning",
+                "-Xreturn-value-checker=full",
+                "-Xannotation-target-all",
+                "-Xstdlib-compilation",
+                "-Xexpect-actual-classes",
+                "-Xcommon-sources=/repo/common",
+            ] {
+                assert_eq!(
+                    repo_args.iter().filter(|actual| actual.as_str() == argument).count(),
+                    1,
+                    "{argument} missing from {repo_args:?}"
+                );
+            }
         }
 
         let _ = std::fs::remove_dir_all(&root);
@@ -2112,8 +2176,11 @@ val generateKotlin = tasks.register<GenerateKotlin>("generateKotlin") {
 }
 
 kotlin {
-    if (krustyNegative == "compiler-version") {
-        compilerVersion.set("2.4.0")
+    when (krustyNegative) {
+        "compiler-version" -> compilerVersion.set("2.4.0")
+        "bootstrap-compiler-version" -> compilerVersion.set("KGP_VERSION-dev-7885")
+        "older-compiler-version" -> compilerVersion.set("2.2.21")
+        else -> {}
     }
     sourceSets.named("main") {
         kotlin.srcDir("src")
@@ -2171,6 +2238,21 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=8")
             "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
             "free-werror" -> freeCompilerArgs.add("-Werror")
+            "werror-overlap" -> {
+                allWarningsAsErrors.set(true)
+                freeCompilerArgs.add("-Werror")
+            }
+            "repo-arguments" -> freeCompilerArgs.addAll(
+                listOf(
+                    "-Xallow-kotlin-package",
+                    "-XXexplicit-return-types=warning",
+                    "-Xreturn-value-checker=full",
+                    "-Xannotation-target-all",
+                    "-Xstdlib-compilation",
+                    "-Xexpect-actual-classes",
+                    "-Xcommon-sources=/repo/common",
+                ),
+            )
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
             "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
             "warning-level-missing-colon" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG")
