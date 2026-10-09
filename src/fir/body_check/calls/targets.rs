@@ -28,6 +28,8 @@ pub(super) struct ExternalCallTarget<'a> {
     pub(super) can_inline: bool,
     pub(super) inline_plan: Option<&'a crate::libraries::InlineBodyPlan>,
     pub(super) inline_receiver_parameter: Option<usize>,
+    /// Unsubstituted type-parameter receiver the inline plan stores as its erased bound.
+    pub(super) inline_declared_receiver: Option<Ty>,
     pub(super) reified_type_parameter_ordinals: &'a [u32],
 }
 

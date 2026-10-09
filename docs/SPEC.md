@@ -13838,6 +13838,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the specialized reference — its bound erases to `Object` — and a primitive specialization stays unboxed.
   (`tests/inline_erased_parameter_e2e.rs`.)
 
+- **An inlined `Closeable.use` stores the receiver as `Closeable` and narrows its result after
+  `finally`.** `T.use` keeps the extension receiver in a `Closeable` slot: a receiver that is not
+  already that class is `checkcast` once, at the store, and both `closeFinally` calls reload that
+  slot. The function argument, when it is already a local, is invoked from the caller's slot. The
+  `Function1.invoke` result is stored as erased `Object` with no preceding `null`. The normal path
+  reloads that object after `closeFinally` and jumps over the handlers; the call site's
+  `checkcast` or unbox is that landing, with the value already on the stack. A `Unit` use stores
+  the object and does not reload it. (`tests/closeable_use_receiver_e2e.rs`.)
+
 - **An inline expansion's parameters are locals OF THAT EXPANSION, named by their ROLE.** A spilled
   local's debug name is what a debugger shows while stepping through an inlined body, and krusty
   produced the wrong one in three distinct ways:

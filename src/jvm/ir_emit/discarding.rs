@@ -104,12 +104,23 @@ impl Emitter<'_> {
                     arg,
                     type_operand,
                 } if *type_operand == crate::types::Ty::Unit && !self.diverges(*arg) => {
+                    // A carried inline result is already on the stack at the landing. Reading it
+                    // consumes that resident value and does not change the tracked height, so the
+                    // pop is the landing itself: the load stayed before the jump.
+                    let carried = matches!(
+                        self.ir.expr(*arg),
+                        IrExpr::GetValue(index) if self.stack_resident_value == Some(*index)
+                    );
                     let before = code.stack_height();
                     self.emit_value(*arg, code);
-                    match code.stack_height() - before {
-                        1 => code.pop(),
-                        2 => code.pop2(),
-                        _ => {}
+                    if carried {
+                        code.pop();
+                    } else {
+                        match code.stack_height() - before {
+                            1 => code.pop(),
+                            2 => code.pop2(),
+                            _ => {}
+                        }
                     }
                     return;
                 }

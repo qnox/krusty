@@ -105,6 +105,7 @@ impl BodyLowering<'_> {
             recovery,
             plan_defaults,
             returned_value,
+            declared_receiver,
         ) = match plan {
             crate::fir::FirInlineBodyPlan::Iteration {
                 frame,
@@ -169,6 +170,7 @@ impl BodyLowering<'_> {
                 recovery,
                 defaults,
                 result: returned,
+                declared_receiver,
             } => (
                 frame,
                 *lambda_parameter,
@@ -179,6 +181,7 @@ impl BodyLowering<'_> {
                 recovery.as_deref(),
                 defaults,
                 *returned,
+                *declared_receiver,
             ),
         };
         let lambda_parameter = lambda_parameter as usize;
@@ -194,6 +197,8 @@ impl BodyLowering<'_> {
                 extension_receiver_parameter: None,
                 mode: SelectedOperandMode::Materialized,
             })?;
+        self.record_inlined_type_parameter_receiver(&statements, receiver, declared_receiver);
+        self.reuse_plain_function_argument(&mut statements, &mut args, lambda_parameter);
         for omitted in &defaults {
             let default = plan_defaults
                 .iter()
@@ -889,7 +894,93 @@ impl BodyLowering<'_> {
         })
     }
 
-    fn guard_inline_body(
+    /// The spilled extension receiver of an inlined type parameter keeps the declaration type.
+    /// Emission stores that parameter as its erased bound and casts back only where a use needs
+    /// the call-site class.
+    fn record_inlined_type_parameter_receiver(
+        &mut self,
+        statements: &[ExprId],
+        receiver: Option<ExprId>,
+        declared: Option<crate::fir::ResolvedTy>,
+    ) {
+        let Some(declared) = declared
+            .map(crate::fir::ResolvedTy::get)
+            .filter(|receiver| receiver.non_null().is_ty_param())
+        else {
+            return;
+        };
+        let Some(receiver) = receiver else {
+            return;
+        };
+        let IrExpr::GetValue(slot) = *self.ir.expr(receiver) else {
+            return;
+        };
+        let Some(&declaration) = statements.iter().find(|statement| {
+            matches!(
+                self.ir.expr(**statement),
+                IrExpr::Variable { index, .. } if *index == slot
+            )
+        }) else {
+            return;
+        };
+        self.ir.record_inline_declared_type(declaration, declared);
+    }
+
+    /// A function argument that is already a local is invoked from that local.
+    ///
+    /// The plan materializes every operand so a lambda literal can be found and spliced. A plain
+    /// local has no template: the copy would be a second slot the reference compiler does not
+    /// emit, and the invocation reads the caller's parameter directly.
+    fn reuse_plain_function_argument(
+        &mut self,
+        statements: &mut Vec<ExprId>,
+        args: &mut [ExprId],
+        lambda_parameter: usize,
+    ) {
+        let Some(&function) = args.get(lambda_parameter) else {
+            return;
+        };
+        let IrExpr::GetValue(slot) = *self.ir.expr(function) else {
+            return;
+        };
+        let Some(position) = statements.iter().position(|statement| {
+            matches!(
+                self.ir.expr(*statement),
+                IrExpr::Variable {
+                    index,
+                    init: Some(init),
+                    ..
+                } if *index == slot && matches!(self.ir.expr(*init), IrExpr::GetValue(_))
+            )
+        }) else {
+            return;
+        };
+        let reads = args
+            .iter()
+            .filter(
+                |&&operand| matches!(self.ir.expr(operand), IrExpr::GetValue(read) if *read == slot),
+            )
+            .count();
+        if reads != 1 {
+            return;
+        }
+        let IrExpr::Variable {
+            init: Some(init), ..
+        } = *self.ir.expr(statements[position])
+        else {
+            return;
+        };
+        args[lambda_parameter] = init;
+        statements.remove(position);
+    }
+
+    /// An erased `FunctionN.invoke`, including a `Unit` specialization.
+    ///
+    /// The invoke stores `Object` inside the `try`. `finally` runs, then the normal path reloads
+    /// that object and jumps over the handlers. A used result is narrowed at that landing. A
+    /// `Unit` specialization pops there: the load and the pop are not adjacent, so temporary
+    /// elimination keeps the store and pop-backward removes the reload.
+    fn guard_erased_invocation_result(
         &mut self,
         body: ExprId,
         cleanup: &[crate::fir::FirInlineCall],
@@ -898,13 +989,77 @@ impl BodyLowering<'_> {
         plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
     ) -> Option<ExprId> {
         let result_slot = self.allocate_temporary();
-        let initial = self
-            .ir
-            .add_expr(IrExpr::Const(IrConst::zero_for_value_type(result_ty)));
+        let label = format!("$inline_invoke${result_slot}");
+        let initial = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let declaration = self.ir.add_expr(IrExpr::Variable {
+            index: result_slot,
+            ty: Ty::obj("java/lang/Object"),
+            init: Some(initial),
+            named: false,
+        });
+        self.ir
+            .inline_return_frames
+            .insert(declaration, label.clone());
+        let store_result = self.ir.add_expr(IrExpr::SetValue {
+            var: result_slot,
+            value: body,
+        });
+        let exit = self.ir.add_expr(IrExpr::Break {
+            label: Some(label.clone()),
+        });
+        let try_body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![store_result, exit],
+            value: None,
+        });
+        let guarded = self.guarded_try(try_body, cleanup, cause, plan_value)?;
+        let loop_body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![guarded],
+            value: None,
+        });
+        let condition = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let carried = self.ir.add_expr(IrExpr::While {
+            cond: condition,
+            body: loop_body,
+            update: None,
+            post_test: false,
+            label: Some(label),
+        });
+        let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
+        let narrowed = self.ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg: read,
+            type_operand: result_ty,
+        });
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration, carried],
+            value: Some(narrowed),
+        }))
+    }
+
+    fn guard_inline_body(
+        &mut self,
+        body: ExprId,
+        cleanup: &[crate::fir::FirInlineCall],
+        cause: Option<(u32, Ty)>,
+        result_ty: Ty,
+        plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
+    ) -> Option<ExprId> {
+        // `FunctionN.invoke` returns erased `Object`, including when the function type is `Unit`.
+        // Both specializations reload after `finally` and jump over the handlers. A used result
+        // is narrowed at that landing; a `Unit` result is popped there.
+        let erased_invoke = matches!(
+            self.ir.expr(body),
+            IrExpr::InvokeFunction { ret, .. } if *ret != Ty::Nothing
+        );
+        if erased_invoke {
+            return self
+                .guard_erased_invocation_result(body, cleanup, cause, result_ty, plan_value);
+        }
+        let result_slot = self.allocate_temporary();
         let declaration = self.ir.add_expr(IrExpr::Variable {
             index: result_slot,
             ty: result_ty,
-            init: Some(initial),
+            init: None,
             named: false,
         });
         let store_result = self.ir.add_expr(IrExpr::SetValue {
@@ -915,6 +1070,21 @@ impl BodyLowering<'_> {
             stmts: vec![store_result],
             value: None,
         });
+        let guarded = self.guarded_try(try_body, cleanup, cause, plan_value)?;
+        let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration, guarded],
+            value: Some(read),
+        }))
+    }
+
+    fn guarded_try(
+        &mut self,
+        body: ExprId,
+        cleanup: &[crate::fir::FirInlineCall],
+        cause: Option<(u32, Ty)>,
+        plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
+    ) -> Option<ExprId> {
         let catches = match cause {
             None => Vec::new(),
             Some((cause_slot, cause_ty)) => {
@@ -945,16 +1115,11 @@ impl BodyLowering<'_> {
             stmts: cleanup_calls,
             value: None,
         });
-        let guarded = self.ir.add_expr(IrExpr::Try {
-            body: try_body,
+        Some(self.ir.add_expr(IrExpr::Try {
+            body,
             catches,
             finally: Some(finally),
             result: Ty::Unit,
-        });
-        let value = self.ir.add_expr(IrExpr::GetValue(result_slot));
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![declaration, guarded],
-            value: Some(value),
         }))
     }
 

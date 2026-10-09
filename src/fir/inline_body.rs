@@ -116,6 +116,10 @@ pub enum FirInlineBodyPlan {
         recovery: Option<Box<FirInlineRecovery>>,
         defaults: Box<[FirInlineDefault]>,
         result: Option<FirInlineValue>,
+        /// Declared extension receiver when it is a type parameter. The expansion stores that
+        /// parameter as its erased bound; an unconstrained parameter is absent because its bound
+        /// erases to `Object` and the specialized reference stays.
+        declared_receiver: Option<ResolvedTy>,
     },
     /// Declaration-scoped iterator expansion for the exact selected inline `forEach` declaration.
     /// All three convention calls were selected by the checker at the call site; lowering only

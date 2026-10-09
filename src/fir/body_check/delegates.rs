@@ -973,6 +973,12 @@ fn selected_delegate_call(
                     inline_plan: super::inline_body_plan::publish(
                         callable.inline_body_plan.as_deref(),
                         Some(0),
+                        super::inline_body_plan::type_parameter_receiver(
+                            callable
+                                .generic_sig
+                                .as_deref()
+                                .and_then(|signature| signature.receiver),
+                        ),
                     )
                     .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,
                     extension_receiver_parameter: None,
@@ -1067,6 +1073,7 @@ fn selected_delegate_call(
                         can_inline: inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
                             inline_body_plan.as_deref(),
+                            None,
                             None,
                         )
                         .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,

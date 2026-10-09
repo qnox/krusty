@@ -46,8 +46,9 @@ impl Emitter<'_> {
         }
     }
 
-    /// `String.get` (`charAt`) or `String.length` (`length`) on `receiver`. `charAt` is a real
-    /// dispatch, so a multi-line call's own line returns before it, as kotlinc marks it.
+    /// `String.get` (`charAt`) or `String.length` (`length`) on `receiver`. Both are real
+    /// dispatches, so the call's line returns at the `invokevirtual`, after the receiver. An
+    /// inlined receiver forgets the line in effect, and this mark is what puts it on `length`.
     fn emit_string_member(
         &mut self,
         expression: crate::ir::ExprId,
@@ -65,6 +66,7 @@ impl Emitter<'_> {
                 code.invokevirtual(method, 1, 1);
             }
             crate::ir::IrIntrinsic::StringLength => {
+                self.mark_dispatch_line(expression, code);
                 let method = self.cw.methodref("java/lang/String", "length", "()I");
                 code.invokevirtual(method, 0, 1);
             }
