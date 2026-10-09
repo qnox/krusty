@@ -834,14 +834,6 @@ impl LibraryMember {
     pub fn owner_name(&self) -> Option<String> {
         self.owner.map(TypeName::render)
     }
-
-    pub fn owner_name_or(&self, fallback: &str) -> String {
-        self.owner_name().unwrap_or_else(|| fallback.to_string())
-    }
-
-    pub fn owner_type_or(&self, fallback: TypeName) -> TypeName {
-        self.owner.unwrap_or(fallback)
-    }
 }
 
 /// Which source a resolved callable came from — set by the source that resolves it, read by the
@@ -2204,29 +2196,6 @@ pub struct PropertyInfo {
 #[derive(Clone, Default)]
 pub struct PropertySet {
     pub overloads: Vec<PropertyInfo>,
-}
-
-impl PropertyInfo {
-    pub fn owner_name(&self) -> String {
-        self.owner.render()
-    }
-
-    pub fn owner_name_or(&self, fallback: &str) -> String {
-        let rendered = self.owner.render();
-        if rendered.is_empty() {
-            fallback.to_string()
-        } else {
-            rendered
-        }
-    }
-
-    pub fn owner_type_or(&self, fallback: TypeName) -> TypeName {
-        if self.owner.matches("") {
-            fallback
-        } else {
-            self.owner
-        }
-    }
 }
 
 /// The callable half of a [`ResolvedSymbols`].
