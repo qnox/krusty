@@ -10,6 +10,7 @@ pub(super) fn realize(
     realizations: &mut PropertyRealizations,
 ) -> Result<(), PropertyId> {
     let accesses = crate::backend::local_properties::realize(ir)?;
+    let suspend_lambda_bodies = suspend_lambda_body_expressions(ir);
     for access in accesses {
         let Some(layout) = ir.local_property_layouts.get(&access.target).cloned() else {
             return Err(access.target);
@@ -26,11 +27,38 @@ pub(super) fn realize(
         }
         if access.direct_member {
             realizations.record_local(access.operation, access.target);
-            mark_private_cross_class_access(ir, &layout, access.operation, access.read);
+            let in_suspend_lambda = suspend_lambda_bodies.contains(&access.operation);
+            mark_private_cross_class_access(
+                ir,
+                &layout,
+                access.operation,
+                access.read,
+                in_suspend_lambda,
+            );
         }
         mark_private_member_extension(ir, &layout, access.operation, access.read);
     }
     Ok(())
+}
+
+/// Every expression of a suspend lambda's body. The JVM backend makes such a lambda a class of its
+/// own (`SuspendLambda`) after this realization runs, so its body reaches the enclosing class's
+/// private members from outside even though its expressions still belong to that class here. A
+/// lambda inlined into its caller instead keeps the caller's class, where the access stays direct.
+fn suspend_lambda_body_expressions(ir: &IrFile) -> std::collections::HashSet<ExprId> {
+    let mut expressions = std::collections::HashSet::new();
+    let mut pending: Vec<ExprId> = ir
+        .suspend_funs
+        .iter()
+        .filter(|function| ir.lambda_origins.contains_key(function))
+        .filter_map(|&function| ir.functions.get(function as usize)?.body)
+        .collect();
+    while let Some(expression) = pending.pop() {
+        if expressions.insert(expression) {
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        }
+    }
+    expressions
 }
 
 fn property_declaration_type(layout: &IrLocalPropertyLayout) -> Option<Ty> {
@@ -51,6 +79,7 @@ fn mark_private_cross_class_access(
     layout: &IrLocalPropertyLayout,
     operation: ExprId,
     read: bool,
+    in_suspend_lambda: bool,
 ) {
     let IrLocalPropertyLayout::Member {
         class,
@@ -62,7 +91,7 @@ fn mark_private_cross_class_access(
         return;
     };
     let declaring = ir.classes[*class as usize].fq_name;
-    if ir.expression_owners.get(&operation).copied() == Some(declaring) {
+    if !in_suspend_lambda && ir.expression_owners.get(&operation).copied() == Some(declaring) {
         return;
     }
     if let Some(declaration) = ir.classes[*class as usize]
