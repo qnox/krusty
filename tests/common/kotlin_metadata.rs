@@ -5,15 +5,27 @@ use std::collections::HashMap;
 /// The raw `@kotlin.Metadata` payload of a class file: the `d1` bytes and `d2` strings exactly as
 /// written. The normal class reader decodes metadata and does not retain this packed representation.
 pub(crate) fn raw_kotlin_metadata(bytes: &[u8]) -> Option<(Vec<u8>, Vec<String>)> {
-    let elements = kotlin_metadata_elements(bytes)?;
-    let strings = |name: &str| {
-        elements.iter().find_map(|(element, value)| match value {
-            MetadataElement::Strings(strings) if element == name => Some(strings.clone()),
-            _ => None,
-        })
-    };
-    let payload = strings("d1")?.concat().chars().map(|c| c as u8).collect();
-    Some((payload, strings("d2").unwrap_or_default()))
+    let payload = kotlin_metadata_d1_parts(bytes)?
+        .concat()
+        .chars()
+        .map(|c| c as u8)
+        .collect();
+    let d2 = element_strings(&kotlin_metadata_elements(bytes)?, "d2");
+    Some((payload, d2.unwrap_or_default()))
+}
+
+/// The `d1` strings of a class file's `@kotlin.Metadata` exactly as written, one entry per
+/// `CONSTANT_Utf8` part: the partition of the packed payload, not only its concatenation.
+pub(crate) fn kotlin_metadata_d1_parts(bytes: &[u8]) -> Option<Vec<String>> {
+    element_strings(&kotlin_metadata_elements(bytes)?, "d1")
+}
+
+/// The strings of the string-array element `name`, as written.
+fn element_strings(elements: &[(String, MetadataElement)], name: &str) -> Option<Vec<String>> {
+    elements.iter().find_map(|(element, value)| match value {
+        MetadataElement::Strings(strings) if element == name => Some(strings.clone()),
+        _ => None,
+    })
 }
 
 /// The integer elements of a class file's `@kotlin.Metadata` (`k`, `mv`, `xi`, ...) in the order
