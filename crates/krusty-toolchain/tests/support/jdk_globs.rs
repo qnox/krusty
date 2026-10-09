@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::oracle::{run_merged, scratch, script, Fingerprint, Output, Reference};
+use super::oracle::{run_captured, scratch, script, Fingerprint, Output, Reference};
 
 /// What `GlobOracle.java` prints for `cases` (one `pattern<TAB>path<TAB>path…` per line) on the JDK
 /// `JAVA_HOME` names: replayed from the cache, or run when allowed.
@@ -40,7 +40,7 @@ pub fn jdk_globs(case: &str, cases: &str) -> Output {
             .arg("GlobOracle")
             .arg("cases.tsv")
             .current_dir(&directory);
-        let output = run_merged(command, &directory);
+        let output = run_captured(command, &directory);
         let _ = std::fs::remove_dir_all(&directory);
         output
     })

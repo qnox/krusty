@@ -6,7 +6,8 @@
 //! `│ text`, the location `│ → file:line:column`, the quoted source, and `╰─`. A problem with a
 //! whole file is a `SEVERITY: message` line followed by ` ╰→ file`; one with the project as a whole
 //! is a `SEVERITY: message` line whose message runs to the next blank line. The closing line saying
-//! the command stopped is not a problem, and neither is the table a successful command prints.
+//! the command stopped is not a problem. The toolchain writes errors to stderr and warnings, before
+//! the command's result, to stdout.
 
 const SEVERITIES: [&str; 3] = ["WEAK WARNING", "WARNING", "ERROR"];
 const ABORT: [&str; 2] = [
@@ -35,68 +36,82 @@ fn location(root: &str, text: &str) -> Option<String> {
     Some(place.replace(&format!("{root}/"), ""))
 }
 
-/// The table a successful command printed, byte for byte: from a line starting `╭` to the line
-/// starting `╰` that closes it, its line break included. A problem's box is indented, so it is
-/// never taken for the table.
-pub fn table(output: &[u8]) -> Option<&[u8]> {
-    let mut start = None;
-    let mut offset = 0;
-    for line in output.split_inclusive(|&byte| byte == b'\n') {
-        if start.is_none() && line.starts_with("╭".as_bytes()) {
-            start = Some(offset);
-        }
-        offset += line.len();
-        if start.is_some() && line.starts_with("╰".as_bytes()) {
-            return Some(&output[start?..offset]);
-        }
-    }
-    None
+/// Whether `line` starts a problem's rendering or is the closing line.
+fn starts_problem(line: &str) -> bool {
+    ABORT.contains(&line)
+        || severity(line).is_some()
+        || line
+            .trim_start()
+            .strip_prefix("╭─ ")
+            .is_some_and(|rest| severity(rest).is_some())
 }
 
-/// The problems `output` reports, in order.
-pub fn problems(root: &str, output: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(output);
-    let lines: Vec<&str> = text.lines().collect();
+/// The problems rendered at the start of `output`, in order, and the bytes after them: what the
+/// command printed as its result. Every line up to that point belongs to a problem's rendering or
+/// is the closing line saying the command stopped, so nothing in between is skipped unread.
+pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<String>, &'o [u8]) {
+    let mut lines: Vec<(usize, &str)> = Vec::new();
+    let mut offset = 0;
+    for line in output.split_inclusive(|&byte| byte == b'\n') {
+        let text = std::str::from_utf8(line).expect("the toolchain prints UTF-8");
+        lines.push((offset, text.strip_suffix('\n').unwrap_or(text)));
+        offset += line.len();
+    }
+    let text = |index: usize| lines.get(index).map(|&(_, text)| text);
     let mut problems = Vec::new();
     let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index];
-        if let Some((severity, first)) = line.trim_start().strip_prefix("╭─ ").and_then(severity)
+    while let Some(line) = text(index) {
+        if ABORT.contains(&line) {
+            index += 1;
+        } else if line.is_empty() && text(index + 1).is_some_and(starts_problem) {
+            // A blank line separating problems, or before the closing line.
+            index += 1;
+        } else if let Some((severity, first)) =
+            line.trim_start().strip_prefix("╭─ ").and_then(severity)
         {
             let mut message = vec![first.to_string()];
             let mut place = String::new();
-            while let Some(text) = lines.get(index + 1).and_then(|line| box_text(line)) {
+            while let Some(content) = text(index + 1).and_then(box_text) {
                 index += 1;
-                if let Some(found) = location(root, text) {
+                if let Some(found) = location(root, content) {
                     place = format!("{found}: ");
                     break;
                 }
-                if !text.is_empty() || lines[index].trim_start() != "│" {
-                    message.push(text.to_string());
+                if !content.is_empty() || lines[index].1.trim_start() != "│" {
+                    message.push(content.to_string());
                 }
             }
-            while !lines[index].trim_start().starts_with("╰─") {
+            while !text(index)
+                .expect("a problem's box is closed")
+                .trim_start()
+                .starts_with("╰─")
+            {
                 index += 1;
             }
+            index += 1;
             problems.push(format!("{place}{severity}: {}", message.join("\\n")));
-        } else if let Some((severity, first)) = severity(line).filter(|_| !ABORT.contains(&line)) {
-            let file = lines
-                .get(index + 1)
-                .and_then(|next| next.strip_prefix(" ╰→ "));
-            if let Some(file) = file {
+        } else if let Some((severity, first)) = severity(line) {
+            index += 1;
+            if let Some(file) = text(index).and_then(|next| next.strip_prefix(" ╰→ ")) {
                 index += 1;
                 let file = file.replace(&format!("{root}/"), "");
                 problems.push(format!("{file}: {severity}: {first}"));
             } else {
+                // The message runs to the next blank line, which ends it.
                 let mut message = vec![first.to_string()];
-                while let Some(next) = lines.get(index + 1).filter(|next| !next.trim().is_empty()) {
+                while let Some(next) = text(index).filter(|next| !next.trim().is_empty()) {
                     index += 1;
                     message.push(next.replace(&format!("{root}/"), ""));
                 }
+                if text(index).is_some() {
+                    index += 1;
+                }
                 problems.push(format!("{severity}: {}", message.join("\\n")));
             }
+        } else {
+            break;
         }
-        index += 1;
     }
-    problems
+    let rest = lines.get(index).map_or(output.len(), |&(offset, _)| offset);
+    (problems, &output[rest..])
 }

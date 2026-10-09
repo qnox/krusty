@@ -523,8 +523,9 @@ mod tests {
     fn the_jdk_matcher_agrees_on_every_case() {
         let cases = include_str!("../tests/cases/globs.tsv");
         let jdk = crate::jdk_globs::jdk_globs("globs", cases);
-        assert_eq!(jdk.code, 0, "{}", String::from_utf8_lossy(&jdk.output));
-        let judged = String::from_utf8(jdk.output).expect("the oracle prints UTF-8");
+        assert_eq!(jdk.code, 0, "{}", String::from_utf8_lossy(&jdk.stderr));
+        assert_eq!(jdk.stderr, b"", "{}", String::from_utf8_lossy(&jdk.stderr));
+        let judged = String::from_utf8(jdk.stdout).expect("the oracle prints UTF-8");
         assert_eq!(judged.lines().count(), cases.lines().count(), "{judged}");
         let mut mismatches = Vec::new();
         for line in judged.lines() {

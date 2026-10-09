@@ -3,7 +3,7 @@
 
 use std::process::Command;
 
-use super::oracle::{run_merged, scratch, script, Fingerprint, Output, Reference};
+use super::oracle::{run_captured, scratch, script, Fingerprint, Output, Reference};
 
 /// One invocation of `kotlin` on a project.
 pub struct Invocation<'a> {
@@ -52,13 +52,16 @@ pub fn kotlin(invocation: &Invocation<'_>) -> Output {
         // The wrapper beside the project, as the toolchain expects it.
         std::fs::create_dir_all(&root).unwrap();
         std::fs::copy(script("kotlin"), root.join("kotlin")).unwrap();
-        let mut command = Command::new("./kotlin");
+        // Run by `sh` rather than executed: a copy just written may still be open in a process
+        // another thread is starting, and executing it would fail with ETXTBSY.
+        let mut command = Command::new("sh");
         command
+            .arg("./kotlin")
             .args(invocation.args)
             .current_dir(&root)
             .env("LC_ALL", "C.UTF-8")
             .env("KOTLIN_CLI_NO_WELCOME_BANNER", "1");
-        let output = run_merged(command, &root);
+        let output = run_captured(command, &root);
         let _ = std::fs::remove_dir_all(&directory);
         output
     })

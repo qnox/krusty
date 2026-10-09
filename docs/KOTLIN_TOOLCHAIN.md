@@ -62,12 +62,14 @@ deliberately differs; that must be a refusal in krusty-toolchain's name, or the 
 reject the case too). `tests/project_cases.rs` runs `kotlin show modules` on each case through the
 toolchain's own wrapper, `scripts/kotlin-toolchain/kotlin`, which pins the exact distribution, and
 requires krusty-toolchain to report the same problems (file, line, column, severity, message) in
-the same order and, on success, the same module table, byte for byte. Module globs are checked the
+the same order: the errors the toolchain writes to stderr, which must hold nothing else, and the
+warnings it writes to stdout. What stdout holds after the warnings is the command's result, and
+must equal krusty-toolchain's module table byte for byte (nothing, when the command fails). Module globs are checked the
 same way against the JDK matcher: `tests/cases/globs.tsv` lists patterns and paths, and
 `scripts/kotlin-toolchain/GlobOracle.java` judges them on the JDK `JAVA_HOME` names.
 
-`tests/support/oracle.rs` caches each reference's exit code and raw output (stdout and stderr in
-the order written; only a JVM's `Picked up JAVA_TOOL_OPTIONS` line is dropped) under
+`tests/support/oracle.rs` caches each reference's exit code and raw stdout and stderr (only a JVM's
+`Picked up JAVA_TOOL_OPTIONS` line is dropped from stderr) under
 `target/cache/kotlin-toolchain-oracle` (or `KRUSTY_TOOLCHAIN_ORACLE_DIR`), keyed by the reference's
 identity (the wrapper's bytes, or the JDK's `release` record and `GlobOracle.java`) and every
 input. A cached entry is replayed. A missing one fails locally; record it from the reference with

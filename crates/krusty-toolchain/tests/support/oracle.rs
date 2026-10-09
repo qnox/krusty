@@ -9,16 +9,14 @@
 //! version, or the JDK's) and a fingerprint of the reference's own bytes (the wrapper, or
 //! `GlobOracle.java` and the JDK's `release` record) and every input.
 //!
-//! The toolchain writes warnings and its result to stdout and errors to stderr, so both are read
-//! from one pipe, in the order they are written. Nothing is removed from that output but the line a
-//! JVM prints for `JAVA_TOOL_OPTIONS`, which is the environment's, not the reference's.
+//! stdout and stderr are kept as written. Nothing is removed from them but the line a JVM prints on
+//! stderr for `JAVA_TOOL_OPTIONS`, which is the environment's, not the reference's.
 //!
 //! A cached entry is replayed. A miss fails, naming the case, unless the reference may run:
 //! `KRUSTY_TOOLCHAIN_RUN_MISSING=1` (CI) runs it for a missing entry, and `KRUSTY_RECORD=1` runs it
 //! for every entry; either stores what it ran. CI restores the cache master saved, runs only what
 //! is missing, and master saves the result. Each live run prints one line to stderr.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,11 +26,13 @@ pub struct Output {
     /// The directory it ran in, as it appears in the output.
     pub root: String,
     pub code: i32,
-    /// stdout and stderr, as written.
-    pub output: Vec<u8>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
-const MAGIC: &[u8] = b"krusty-toolchain oracle 2\n";
+/// The entry format, part of every entry's directory, so an entry of another format is a miss.
+const FORMAT: &str = "3";
+const MAGIC: &[u8] = b"krusty-toolchain oracle 3\n";
 /// What a JVM prints on its own when `JAVA_TOOL_OPTIONS` is set.
 const JAVA_TOOL_OPTIONS_LINE: &[u8] = b"Picked up JAVA_TOOL_OPTIONS: ";
 
@@ -89,7 +89,7 @@ impl Reference<'_> {
             .map(PathBuf::from)
             .unwrap_or_else(|| workspace().join("target/cache/kotlin-toolchain-oracle"));
         let path = root
-            .join(&self.slot)
+            .join(format!("{}.v{FORMAT}", self.slot))
             .join(format!("{:032x}", self.fingerprint));
         let record = flag("KRUSTY_RECORD");
         if !record {
@@ -130,26 +130,17 @@ pub fn scratch() -> PathBuf {
     directory.canonicalize().unwrap()
 }
 
-/// `command`'s exit code and its stdout and stderr through one pipe, in the order written.
-pub fn run_merged(mut command: Command, directory: &Path) -> Output {
-    let (mut reader, writer) = std::io::pipe().expect("open a pipe");
-    let mut child = command
+/// `command`'s exit code, stdout and stderr.
+pub fn run_captured(mut command: Command, directory: &Path) -> Output {
+    let ran = command
         .stdin(Stdio::null())
-        .stdout(writer.try_clone().expect("share the pipe"))
-        .stderr(writer)
-        .spawn()
+        .output()
         .unwrap_or_else(|error| panic!("run {command:?}: {error}"));
-    // Only the child holds the pipe's writers now, so the read ends when it exits.
-    drop(command);
-    let mut output = Vec::new();
-    reader
-        .read_to_end(&mut output)
-        .expect("read the reference's output");
-    let status = child.wait().expect("wait for the reference");
     Output {
         root: directory.display().to_string(),
-        code: status.code().expect("the reference exits with a code"),
-        output: without_java_tool_options(&output),
+        code: ran.status.code().expect("the reference exits with a code"),
+        stdout: ran.stdout,
+        stderr: without_java_tool_options(&ran.stderr),
     }
 }
 
@@ -164,7 +155,7 @@ fn without_java_tool_options(output: &[u8]) -> Vec<u8> {
 
 fn store(path: &Path, output: &Output) {
     let mut bytes = MAGIC.to_vec();
-    for part in [output.root.as_bytes(), &output.output] {
+    for part in [output.root.as_bytes(), &output.stdout, &output.stderr] {
         bytes.extend_from_slice(format!("{}\n", part.len()).as_bytes());
         bytes.extend_from_slice(part);
     }
@@ -184,7 +175,7 @@ fn decode(bytes: &[u8]) -> Option<Output> {
         Some(value)
     };
     let mut parts = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..3 {
         let length = usize::try_from(number(&mut rest)?).ok()?;
         parts.push(rest.get(..length)?.to_vec());
         rest = &rest[length..];
@@ -193,7 +184,13 @@ fn decode(bytes: &[u8]) -> Option<Output> {
     if !rest.is_empty() {
         return None;
     }
-    let output = parts.pop()?;
+    let stderr = parts.pop()?;
+    let stdout = parts.pop()?;
     let root = String::from_utf8(parts.pop()?).ok()?;
-    Some(Output { root, code, output })
+    Some(Output {
+        root,
+        code,
+        stdout,
+        stderr,
+    })
 }
