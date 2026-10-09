@@ -1604,6 +1604,9 @@ pub struct File {
     /// at Kotlin's operator location without retaining source text or adding a span field to every AST
     /// node. Keyed by the value expression's `ExprId`; absent for expression bodies and synthetic values.
     pub value_operator_spans: std::collections::HashMap<u32, Span>,
+    /// Local properties named by the unescaped `_` token: they bind nothing. A local named
+    /// `` `_` `` is an ordinary binding with that name.
+    pub unnamed_locals: std::collections::HashSet<StmtId>,
     /// Assignment lvalue spans keyed by statement ID.
     pub assignment_target_spans: std::collections::HashMap<u32, Span>,
     /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
@@ -1950,6 +1953,7 @@ impl File {
         self.stmt_lines = Vec::new();
         self.assignment_target_lines = Default::default();
         self.value_operator_spans = Default::default();
+        self.unnamed_locals = Default::default();
         // Both return-label span tables are keyed by the arenas released here.
         self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();

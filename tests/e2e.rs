@@ -2091,6 +2091,8 @@ mod try_primitive_nullable_join_e2e;
 mod uncast_continuation_operand_e2e;
 #[path = "unmatched_null_check_temporaries_e2e.rs"]
 mod unmatched_null_check_temporaries_e2e;
+#[path = "unnamed_local_variables_e2e.rs"]
+mod unnamed_local_variables_e2e;
 #[path = "upcast_checkcast_e2e.rs"]
 mod upcast_checkcast_e2e;
 #[path = "when_subject_once_e2e.rs"]

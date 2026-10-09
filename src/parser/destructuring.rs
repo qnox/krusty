@@ -77,6 +77,7 @@ impl Parser<'_> {
     /// Parse a local `val`/`var`, including the leading-keyword destructuring form.
     pub(super) fn parse_local_binding(&mut self, start: Span) -> StmtId {
         let is_var = self.at(TokenKind::KwVar);
+        let keyword = self.tok().span;
         self.bump();
         let close = if self.at(TokenKind::LParen) {
             Some(TokenKind::RParen)
@@ -137,6 +138,8 @@ impl Parser<'_> {
             return statement;
         }
 
+        self.gate_unnamed_local(is_var.then_some(keyword));
+        let unnamed = self.at_unnamed_local_name();
         let name = self.ident_or_error("variable name");
         let ty = if self.eat(TokenKind::Colon) {
             self.skip_plain_newlines();
@@ -180,7 +183,7 @@ impl Parser<'_> {
         if let Some(operator) = init_operator {
             self.file.value_operator_spans.insert(init.0, operator);
         }
-        self.finish_stmt(
+        let statement = self.finish_stmt(
             Stmt::Local {
                 is_var: is_var || deferred,
                 name,
@@ -188,7 +191,11 @@ impl Parser<'_> {
                 init,
             },
             start,
-        )
+        );
+        if unnamed {
+            self.file.unnamed_locals.insert(statement);
+        }
+        statement
     }
 
     /// `= property` is an explicit rename. A parenthesized name-based entry without `=` names the

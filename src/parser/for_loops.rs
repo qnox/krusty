@@ -78,6 +78,7 @@ impl Parser<'_> {
         let name = match &destructure {
             Some(_) => format!("$dest${}", start.lo),
             None => {
+                self.gate_unnamed_local(None);
                 let n = self.ident_or_error("loop variable");
                 // An explicit loop-variable type — `for (i: Int in xs)`. The variable's type is the
                 // iterable's element type; the annotation only widens it (`for (c: Char? in str)`), so
