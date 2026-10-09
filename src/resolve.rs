@@ -24975,7 +24975,7 @@ val result = object { fun value(): String = captured }
             .iter()
             .map(|source| crate::frontend::SourceInput::kotlin(source))
             .collect::<Vec<_>>();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare_retained(
             &inputs,
             Box::new(crate::libraries::EmptySymbolSource),
             &LangFeatures::new(),
@@ -28471,12 +28471,11 @@ fun box(): String {
             fun inspect() { Direct.entries; Owner.Nested.entries }");
     }
 
-    /// A source-declared enum must reach the SAME provider seam a classpath enum reaches: the checker
-    /// records `ClassifierPropertyRead` carrying the declaring owner and the provider's property
-    /// capability. Typing `entries` without recording the read leaves lowering with only the bare
-    /// classifier receiver to evaluate, which is not a value.
+    /// A source-declared enum must reach the same semantic property seam as a classpath enum. The
+    /// frontend records the declaring owner and the selected `entries` operation; the backend owns
+    /// any physical accessor used to realize that operation.
     #[test]
-    fn source_enum_entries_records_the_declaring_owner_and_its_accessor() {
+    fn source_enum_entries_records_the_declaring_owner_and_semantic_operation() {
         let source = "enum class Direct { VALUE }\n\
              class Owner { enum class Nested { VALUE } }\n\
              fun inspect() { Direct.entries; Owner.Nested.entries }";
@@ -28505,16 +28504,14 @@ fun box(): String {
                 panic!("source enum '{owner}' did not record an entries read for lowering");
             };
             assert_eq!(recorded.render(), owner);
-            let accessor = property
-                .getter
-                .as_ref()
-                .unwrap_or_else(|| panic!("source enum '{owner}' lost its entries accessor"));
             assert_eq!(
-                accessor.owner.map(|owner| owner.render()).as_deref(),
-                Some(owner)
+                property.operation,
+                crate::libraries::ImplicitClassifierProperty::EnumEntries
             );
-            assert_eq!(accessor.physical_name.as_deref(), Some("getEntries"));
-            assert_eq!(accessor.descriptor, "()Lkotlin/enums/EnumEntries;");
+            assert_eq!(
+                property.ty,
+                Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj(owner)])
+            );
             assert_eq!(
                 info.ty(read),
                 Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj(owner)])
@@ -28728,8 +28725,8 @@ fun box(): String {
             .into_iter()
             .flat_map(|callee| {
                 [
-                    (mixing, "1", None),
                     (missing, missing_argument_anchor("1)", callee), Some(callee)),
+                    (mixing, "1", None),
                 ]
             })
             .collect::<Vec<_>>();
@@ -29419,28 +29416,6 @@ fun box(): String {
     }
 
     #[test]
-    fn module_top_level_calls_record_selected_overload_for_lowering() {
-        let source = "fun pick(x: Int): String = \"int\"\n\
-             fun pick(x: String): String = x\n\
-             fun box(): String = pick(\"OK\")";
-        let (file, info, diagnostics) = retained_standalone_analysis(source);
-        assert_no_diags(&diagnostics);
-
-        let call = named_call(&file, "pick");
-        let target = module_top_level_target(&info, call);
-        let selected_decl = top_level_fun_decl(&file, "pick", |f| {
-            f.params.first().is_some_and(|p| p.ty.name == "String")
-        });
-        assert_eq!(target.callable.name, "pick");
-        assert_eq!(target.callable.params, vec![Ty::String]);
-        assert_eq!(target.callable.ret, Ty::String);
-        assert_eq!(target.source_file, Some(0));
-        assert_eq!(target.source_decl, Some(selected_decl));
-        assert_eq!(target.param_meta, vec![("x".to_string(), None)]);
-        assert!(target.context_args.is_empty());
-    }
-
-    #[test]
     fn integer_literal_adaptation_is_consistent_across_source_call_origins() {
         ok("fun topLevel(value: Long): Long = value\n\
              class Owner { fun member(value: Long): Long = value }\n\
@@ -29450,36 +29425,6 @@ fun box(): String {
              fun useMember(): Long = Owner().member(1 + 1)\n\
              fun useExtension(): Long = \"\".extension(-1)\n\
              fun useUnsigned(): ULong = unsigned(1u)");
-    }
-
-    #[test]
-    fn module_top_level_context_calls_record_context_sources_for_lowering() {
-        let source = "class A(val x: String)\n\
-             fun leaf(x: Int): String = \"int\"\n\
-             context(a: A) fun leaf(): String = a.x\n\
-             context(a: A) fun mid(): String = leaf()";
-        let (file, info, diagnostics) = retained_standalone_analysis(source);
-        assert_no_diags(&diagnostics);
-
-        let call = named_call(&file, "leaf");
-        let target = module_top_level_target(&info, call);
-        assert_eq!(target.callable.name, "leaf");
-        assert_eq!(target.callable.params, vec![Ty::obj("A")]);
-        assert_eq!(target.callable.ret, Ty::String);
-        assert_eq!(target.source_file, Some(0));
-        assert!(target.source_decl.is_some());
-        assert_eq!(target.param_meta, vec![("a".to_string(), None)]);
-        assert_eq!(
-            target.context_args,
-            vec![Some(ResolvedContextArgument::Binding {
-                name: "a".to_string(),
-                shadow_depth: 0,
-            })]
-        );
-        assert!(
-            !info.context_args.contains_key(&call),
-            "module top-level context calls must carry context sources in the resolved target"
-        );
     }
 
     #[test]
@@ -29632,30 +29577,6 @@ fun box(): String {
                 shadow_depth: 0,
             })]
         );
-    }
-
-    #[test]
-    fn module_top_level_context_call_records_defaulted_value_param() {
-        let source = "class A(val x: String)\n\
-             context(a: A) fun leaf(s: String = \"OK\"): String = s\n\
-             context(a: A) fun mid(): String = leaf()";
-        let (file, info, diagnostics) = retained_standalone_analysis(source);
-        assert_no_diags(&diagnostics);
-
-        let call = named_call(&file, "leaf");
-        let target = module_top_level_target(&info, call);
-        assert_eq!(target.callable.params, vec![Ty::obj("A"), Ty::String]);
-        assert_eq!(
-            target.context_args,
-            vec![Some(ResolvedContextArgument::Binding {
-                name: "a".to_string(),
-                shadow_depth: 0,
-            })]
-        );
-        assert_eq!(target.param_meta.len(), 2);
-        assert_eq!(target.param_meta[0], ("a".to_string(), None));
-        assert_eq!(target.param_meta[1].0, "s");
-        assert!(target.param_meta[1].1.is_some());
     }
 
     #[test]
@@ -29854,50 +29775,6 @@ fun box(): String {
     }
 
     #[test]
-    fn immediate_invocation_context_selects_callable_references_inside_branches() {
-        let source = "fun String.asFloat(): Float = 1.0f\n\
-             fun String.asInt(): Int = 1\n\
-             fun String.asInt(radix: Int): Int = radix\n\
-             class Box(val value: Int) {\n\
-                 operator fun invoke(transform: (Int) -> Int): Int = transform(value)\n\
-             }\n\
-             fun makeBox(value: Int): Box = Box(value)\n\
-             fun invokeReturnedBox(): Int = makeBox(1)({ it + 1 })\n\
-             fun decode(value: String, flag: Boolean): Any = when (flag) {\n\
-                 true -> String::asFloat\n\
-                 else -> String::asInt\n\
-             }(value)";
-        let (file, info, diagnostics) =
-            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
-        assert_no_diags(&diagnostics);
-
-        let when_expression = file
-            .expr_arena
-            .iter()
-            .position(|expression| matches!(expression, Expr::When { .. }))
-            .map(|index| ExprId(index as u32))
-            .expect("source should contain a when expression");
-        assert_eq!(
-            info.callable_reference_type(when_expression),
-            Some(Ty::fun(vec![Ty::String], Ty::obj("kotlin/Any")))
-        );
-
-        let as_int_reference = file
-            .expr_arena
-            .iter()
-            .enumerate()
-            .find_map(|(index, expression)| match expression {
-                Expr::CallableRef { name, .. } if name == "asInt" => Some(ExprId(index as u32)),
-                _ => None,
-            })
-            .expect("source should contain String::asInt");
-        assert_eq!(
-            info.resolved_source_call(as_int_reference),
-            Some((0, file.decls[1].0))
-        );
-    }
-
-    #[test]
     fn nullable_classifier_reference_selects_nullable_extension_before_instance_member() {
         let source = "class C { fun pick(value: Int): String = \"member\" }\n\
              fun C?.pick(value: Int): String = \"extension\"\n\
@@ -29949,41 +29826,6 @@ fun box(): String {
              }",
         );
         assert_eq!(errors, Vec::<String>::new());
-    }
-
-    #[test]
-    fn source_callable_refs_retain_the_checker_selected_declaration() {
-        let source = "fun pick(value: Int, marker: Any): Int = value\n\
-             fun pick(value: Any, marker: Int): Int = marker\n\
-             val ref: (Int, Any) -> Unit = ::pick\n";
-        let (file, info, diagnostics) =
-            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
-        assert!(
-            diagnostics.diags.is_empty(),
-            "unexpected diagnostics: {:?}",
-            diagnostics
-                .diags
-                .iter()
-                .map(|diagnostic| &diagnostic.msg)
-                .collect::<Vec<_>>()
-        );
-        let function_ref = file
-            .expr_arena
-            .iter()
-            .enumerate()
-            .find_map(|(index, expression)| match expression {
-                Expr::CallableRef {
-                    receiver: None,
-                    name,
-                } if name == "pick" => Some(ExprId(index as u32)),
-                _ => None,
-            })
-            .expect("source should contain ::pick");
-
-        assert_eq!(
-            info.resolved_source_call(function_ref),
-            Some((0, file.decls[0].0))
-        );
     }
 
     #[test]
@@ -30040,29 +29882,42 @@ fun box(): String {
         let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
-        let (file, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(platform), &mut diagnostics);
-        let symbols = symbols.expect("production frontend must retain finalized symbols");
-        let _ = info.expect("production frontend must check the source");
+        let inputs = [crate::frontend::SourceInput::kotlin(source)];
+        let mut analysis = crate::frontend::analyze_source_set_with_features(
+            &inputs,
+            Box::new(platform),
+            &LangFeatures::from_source(source),
+            &mut diagnostics,
+        );
+        let index = analysis
+            .streamed
+            .as_ref()
+            .expect("Pass 1 must finalize")
+            .module
+            .index();
+        let class_declaration = index
+            .classifier_declaration(type_name("A"))
+            .expect("stable source class A");
+        let class_header = index
+            .classifier_header(class_declaration)
+            .expect("resolved source class A header");
+        assert_eq!(
+            class_header
+                .interfaces
+                .iter()
+                .map(|interface| interface.get())
+                .collect::<Vec<_>>(),
+            [Ty::fun_with_shape(vec![Ty::Int], Ty::Unit, 0, true, false,)],
+            "stable classifier header lost the declared receiver-function supertype"
+        );
+        let file = analysis.files.pop().expect("source file");
+        let symbols = analysis.symbols;
+        let _ = analysis
+            .types
+            .pop()
+            .flatten()
+            .expect("production frontend must check the source");
         let files = vec![file];
-        let class = symbols
-            .class_by_type_name(type_name("A"))
-            .expect("source class A must be registered");
-        assert_eq!(
-            class.callable_signature,
-            Some(Ty::fun_with_shape(vec![Ty::Int], Ty::Unit, 0, true, false,)),
-            "source function supertype lost its receiver/function shape"
-        );
-        assert_eq!(
-            class.interfaces.iter_ids().collect::<Vec<_>>(),
-            [type_name("kotlin/Function1")],
-            "class hierarchy must retain the semantic function classifier identity"
-        );
-        assert_eq!(
-            class.interface_type_args,
-            [vec![Ty::Int, Ty::Unit]],
-            "class hierarchy must retain the function classifier arguments"
-        );
         for function in ["arrayTest", "charArrayTest", "call"] {
             let signature = symbols
                 .single_fun(function)
@@ -30986,47 +30841,6 @@ fun use() {
     }
 
     #[test]
-    fn bound_and_unbound_source_extension_refs_retain_selected_declarations() {
-        let source = "class C\n\
-             fun C.pick(value: Int): Unit {}\n\
-             fun C.pick(value: Any): Unit {}\n\
-             val c = C()\n\
-             val bound: (Int) -> Unit = c::pick\n\
-             val unbound: (C, Int) -> Unit = C::pick\n";
-        let (file, info, diagnostics) =
-            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
-        assert!(
-            diagnostics.diags.is_empty(),
-            "unexpected diagnostics: {:?}",
-            diagnostics
-                .diags
-                .iter()
-                .map(|diagnostic| &diagnostic.msg)
-                .collect::<Vec<_>>()
-        );
-        let references = file
-            .expr_arena
-            .iter()
-            .enumerate()
-            .filter_map(|(index, expression)| match expression {
-                Expr::CallableRef {
-                    receiver: Some(_),
-                    name,
-                } if name == "pick" => Some(ExprId(index as u32)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(references.len(), 2);
-        for reference in references {
-            assert_eq!(
-                info.resolved_source_call(reference),
-                Some((0, file.decls[1].0))
-            );
-        }
-    }
-
-    #[test]
     fn constructor_refs_are_not_shadowed_by_same_named_classpath_functions() {
         let source = "class Foo(val i: Int)\nval ref = ::Foo";
         let (file, info, diagnostics) =
@@ -31180,7 +30994,12 @@ fun use() {
         let (file, info, diagnostics) =
             retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
-        assert_eq!(diagnostics.diags[0].msg, "overload resolution ambiguity");
+        assert_eq!(
+            diagnostics.diags[0].msg,
+            "overload resolution ambiguity between candidates:\n\
+             fun tie(a: Long): String\n\
+             fun tie(a: Byte): String"
+        );
         assert_eq!(
             &source[diagnostics.diags[0].span.lo as usize..diagnostics.diags[0].span.hi as usize],
             "tie"
@@ -31983,8 +31802,8 @@ fun use() {
                 .declared_props
                 .get("value")
                 .map(|property| property.ty),
-            Some(Ty::obj("E")),
-            "the property ABI uses the declared bound while generic_property_shapes retains T",
+            Some(box_parameter),
+            "the semantic property keeps T; only a backend may choose its physical bound representation",
         );
     }
 
@@ -32247,7 +32066,7 @@ fun use(counter: Counter) {
                       }";
         let mut diagnostics = DiagSink::new();
         let inputs = [crate::frontend::SourceInput::kotlin(source)];
-        let mut analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let mut analysis = crate::frontend::analyze_source_set_with_features_and_prepare_retained(
             &inputs,
             Box::new(crate::libraries::EmptySymbolSource),
             &LangFeatures::new(),

@@ -831,6 +831,35 @@ where
     )
 }
 
+#[cfg(test)]
+/// Run the production source-set pipeline while retaining its parser-coordinate inspection views
+/// for tests that need to seed source symbols before checking. Production emission deliberately
+/// uses the non-retaining entry point above.
+pub(crate) fn analyze_source_set_with_features_and_prepare_retained<F, P>(
+    sources: &[SourceInput<'_>],
+    platform: P,
+    project_features: &LangFeatures,
+    prepare_symbols: F,
+    diags: &mut DiagSink,
+) -> SourceSetAnalysis
+where
+    F: FnOnce(&[File], &mut FrontendSymbols),
+    P: Into<PlatformProvider>,
+{
+    analyze_source_set_impl(
+        sources,
+        sources.len(),
+        sources.len(),
+        platform.into(),
+        project_features,
+        DEFAULT_MODULE_NAME,
+        prepare_symbols,
+        diags,
+        false,
+        true,
+    )
+}
+
 /// Analyze a source set for the production two-pass pipeline without allowing a target to mutate
 /// frontend semantic state. Target layout is realized only after checked common IR exists; file
 /// containers, physical names, and descriptors therefore cannot influence Pass-1 signature
