@@ -1087,6 +1087,46 @@ impl BodyLowering<'_, '_, '_> {
         }
         Ok(Some(self.builder.ins().ireduce(clif, answer)))
     }
+
+    /// A counted loop's `step` rejected a value that is not positive.
+    ///
+    /// The header already decided the step is illegal and stored it; this throws
+    /// `IllegalArgumentException("Step must be positive, was: $step.")`, the same text the
+    /// stdlib's `step` and `kt_range_step` use. The step is rendered through its own `toString`,
+    /// so a `Long` step prints as a decimal without a type suffix.
+    pub(super) fn illegal_progression_step(
+        &mut self,
+        step: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let step = self.reference(step)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let prefix = self.string_literal(b"Step must be positive, was: ")?;
+        let Some(message) = self.runtime_call(
+            "kt_string_plus",
+            &[any(), any()],
+            Ty::String,
+            &[prefix, step],
+        )?
+        else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let suffix = self.string_literal(b".")?;
+        let Some(message) = self.runtime_call(
+            "kt_string_plus",
+            &[any(), any()],
+            Ty::String,
+            &[message, suffix],
+        )?
+        else {
+            return Ok(None);
+        };
+        self.raise("kt_type_illegal_argument_exception", message)
+    }
 }
 
 #[cfg(test)]

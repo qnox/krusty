@@ -1766,6 +1766,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 negated,
                 counter,
             }) => self.range_contains(operation, value, start, end, negated, counter),
+            IrExpr::Checked(IrCheckedOperation::IllegalProgressionStep { step }) => {
+                self.illegal_progression_step(step)
+            }
             IrExpr::LateinitCheck { operand, name } => self.lateinit_check(operand, &name),
             IrExpr::Throw { operand } => self.throw(operand),
             IrExpr::Try {
