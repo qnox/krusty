@@ -28,7 +28,7 @@ mod value_when;
 
 pub(crate) use block_splicing::{diverging_control_core, splice_return_blocks};
 pub(crate) use bottom_completion::{
-    suspension_completion, unwrap_suspend_cast, SuspensionCompletion, UnwrappedSuspension,
+    suspension_completion, unwrap_suspend_cast, SuspensionCompletion,
 };
 pub(crate) use control_flow::{expr_contains_owned_loop_jump, expr_has_return, stmt_diverges};
 pub(crate) use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
