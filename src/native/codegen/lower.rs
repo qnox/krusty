@@ -1704,7 +1704,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .expect("checked by the guard");
                 match self.list_property_member(&name, receiver, Ty::Int) {
                     Some(realized) => realized,
-                    None => Err(format!("`{name}` of a receiver that is not a list")),
+                    None => Err(format!("`{name}` of a receiver that is not a collection")),
                 }
             }
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -1712,13 +1712,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 receiver: Some(receiver),
                 ..
             }) if self.map_getter(target, receiver).is_some() => {
-                let name = self
+                let property = self
                     .map_getter(target, receiver)
                     .expect("checked by the guard");
-                let answer = maps::map_getter_ty(&name);
-                match self.map_property_member(&name, receiver, answer) {
+                match self.map_property_member(property, receiver, property.answer()) {
                     Some(realized) => realized,
-                    None => Err(format!("`{name}` of a receiver that is not a map")),
+                    None => Err(format!(
+                        "`{}` of a receiver that is not a map",
+                        property.name()
+                    )),
                 }
             }
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
@@ -2236,10 +2238,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         }
                         Some(receiver) if self.list_getter(*target, *receiver).is_some() => Ty::Int,
                         Some(receiver) if self.map_getter(*target, *receiver).is_some() => {
-                            let name = self
+                            let property = self
                                 .map_getter(*target, *receiver)
                                 .expect("checked by the guard");
-                            let answer = maps::map_getter_ty(&name);
+                            let answer = property.answer();
                             // The runtime's answer is only the carrier; the checked result names
                             // the collection the read IS (`m.keys` is a `Set`). A walk over the
                             // read itself, `for (k in m.keys)`, finds its collection shape there.
