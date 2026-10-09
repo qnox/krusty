@@ -24946,41 +24946,43 @@ val result = object { fun value(): String = captured }
         detected_features: bool,
     ) -> (Vec<String>, Option<TypeInfo>) {
         let mut diagnostics = DiagSink::new();
-        let kotlin_annotations = parse_file(
-            "package kotlin\n\
-             annotation class Suppress(vararg val names: String)",
-            &mut diagnostics,
-        );
-        let exact_annotation = parse_file(
-            "package kotlin.internal\nannotation class Exact",
-            &mut diagnostics,
-        );
-        let jvm_annotations = parse_file(
-            "package kotlin.jvm\nannotation class JvmInline",
-            &mut diagnostics,
-        );
-        let file = if detected_features {
-            parse_file_with_detected_features(src, &mut diagnostics)
+        let kotlin_annotations = "package kotlin\n\
+             annotation class Suppress(vararg val names: String)";
+        let exact_annotation = "package kotlin.internal\nannotation class Exact";
+        let jvm_annotations = "package kotlin.jvm\nannotation class JvmInline";
+        let source = if detected_features {
+            src.to_owned()
         } else {
-            parse_file(src, &mut diagnostics)
+            // The production frontend always detects source directives. Preserve the old helper's
+            // no-directive mode by removing only LANGUAGE directives from its synthetic fixture.
+            src.lines()
+                .filter(|line| !line.trim_start().starts_with("// LANGUAGE:"))
+                .collect::<Vec<_>>()
+                .join("\n")
         };
-        let files = vec![kotlin_annotations, exact_annotation, jvm_annotations, file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[3], &mut symbols, &mut diagnostics);
+        let sources = [
+            kotlin_annotations,
+            exact_annotation,
+            jvm_annotations,
+            source.as_str(),
+        ];
+        let mut analysis = crate::frontend::analyze_source_set(
+            &sources,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        let info = analysis.types.get_mut(3).and_then(Option::take);
         let errors = diagnostics
             .diags
             .iter()
             .map(|diagnostic| diagnostic.msg.clone())
             .collect();
-        (errors, Some(info))
+        (errors, info)
     }
 
     fn check_with_detected_features(src: &str) -> Vec<String> {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file_with_detected_features(src, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let _ = crate::frontend::analyze_source_standalone(src, &mut diagnostics);
         diagnostics
             .diags
             .iter()
@@ -24989,7 +24991,7 @@ val result = object { fun value(): String = captured }
     }
 
     #[test]
-    fn legacy_visibility_suppression_uses_the_lexical_annotation_identity() {
+    fn visibility_suppression_uses_the_lexical_annotation_identity() {
         let (file_errors, _) = check_with_annotation_fixtures(
             r#"
 @file:KotlinSuppress("INVISIBLE_REFERENCE")
