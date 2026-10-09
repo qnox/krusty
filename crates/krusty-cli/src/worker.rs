@@ -491,6 +491,9 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
     // ignoring an unknown target option can emit a different artifact. Everything intentionally
     // inert was removed above; every remaining option must be genuinely modeled by the CLI.
     let parsed = crate::cli::parse(unit.kotlinc_args.clone());
+    if !parsed.argument_errors.is_empty() {
+        return Err(Refusal::Unsupported(parsed.argument_errors.join("; ")));
+    }
     if !parsed.errors.is_empty() {
         return Err(Refusal::Unsupported(parsed.errors.join("; ")));
     }
@@ -501,12 +504,12 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
         )));
     }
     // A warn-and-ignore flag (`-Xwasm-kclass-fqn`) must be intercepted as an INERT value above so
-    // Bazel sees the no-effect note; reaching this parse means a cli.rs addition has no matching
-    // worker arm — refuse rather than accept it with neither kotlinc's warning nor an inert report.
-    if !parsed.unsupported_flag_warnings.is_empty() {
+    // Bazel sees the no-effect note; an argument kotlinc only warns about reaching this parse has
+    // no worker arm, and is refused rather than accepted with neither the warning nor a report.
+    if !parsed.argument_warnings.is_empty() {
         return Err(Refusal::Unsupported(format!(
             "warn-and-ignore option(s) missing a worker inert arm: {}",
-            parsed.unsupported_flag_warnings.join(", ")
+            parsed.argument_warnings.join("; ")
         )));
     }
     if !parsed.sources.is_empty() {

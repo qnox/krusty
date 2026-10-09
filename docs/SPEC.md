@@ -12136,6 +12136,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
   `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
+- **The command line is parsed by kotlinc's rules, from kotlinc's own argument table.** Each
+  supported release's JVM arguments (name, short and deprecated spellings, value type, delimiter,
+  deprecation/removal, `@Enables`/`@Disables` features) are read by reflection from that release's
+  `kotlin-compiler.jar` into `crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv`, and
+  `-Xkotlin-reference-version` selects the table. Argfiles quote with `'`/`"` and a missing one is a
+  warning; `--` makes every later token a source; `-name=value` and `-name value` both work, the
+  space form of an `-X` value warns that it is obsolete, and `-short=value` is invalid; a boolean
+  takes only `=true`/`=false`, and a feature switch takes no value; arrays accumulate and split on
+  the declared delimiter (`,` for `-Xfriend-paths`, the path separator for `-classpath`); a scalar
+  passed twice with different values warns and the last wins. An unknown `-X` flag warns that it is
+  not supported and compiles as if absent; any other unknown `-…` is `invalid argument`, exit 1.
+  Deprecated and removed arguments get kotlinc's `DEPRECATED_CLI_ARG`/`REMOVED_CLI_ARG` warnings.
+  Every argument of every supported release has a krusty disposition: applied, or accepted and
+  reported as ignored (`crates/krusty-cli/src/kotlinc_arguments/disposition.rs`).
+  (`tests/kotlinc_argument_conformance_e2e.rs` compares the table with the reference compiler and
+  the parser with kotlinc's `parseCommandLineArguments` over every argument and value form;
+  `crates/krusty-cli/src/kotlinc_arguments/tokenize.rs` unit tests.)
 - **A companion object's nested classifiers are in scope in the class that declares it.** Each
   lexical class rung contributes its own nested classifiers, then those of its companion object
   (kotlinc's companion static scope), before the next enclosing rung. A body call (`Edge(2)`), a

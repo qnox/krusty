@@ -8,7 +8,7 @@ use std::path::Path;
 use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty_cli::cli;
+use krusty_cli::{cli, kotlinc_arguments};
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -23,6 +23,14 @@ fn main() {
     }
     let opts = cli::parse(argv);
 
+    // kotlinc rejects a malformed command line before anything else, in these words.
+    if !opts.argument_errors.is_empty() {
+        for error in &opts.argument_errors {
+            eprintln!("error: {}", kotlinc_arguments::render(error));
+        }
+        eprintln!("info: use -help for more information");
+        std::process::exit(1);
+    }
     if opts.print_version {
         println!("{}", cli::version_line());
         return;
@@ -37,13 +45,11 @@ fn main() {
         }
         std::process::exit(2);
     }
+    for warning in &opts.argument_warnings {
+        eprintln!("warning: {}", kotlinc_arguments::render(warning));
+    }
     for ig in &opts.ignored {
         eprintln!("krusty: ignoring unsupported option '{ig}'");
-    }
-    // kotlinc's own wording, byte for byte (measured on kotlinc 2.4.10 JVM): the flag is accepted,
-    // this warning is printed, and compilation is unchanged.
-    for flag in &opts.unsupported_flag_warnings {
-        eprintln!("warning: flag is not supported by this version of the compiler: {flag}");
     }
     if opts.sources.is_empty() {
         eprintln!("krusty: no source files. Use -help for usage.");
@@ -108,6 +114,7 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
                 .join(":"),
         );
     }
+    // kotlinc splits `-Xfriend-paths` on `,`, not on the path separator.
     if !unit.friend_paths.is_empty() {
         argv.push(format!(
             "-Xfriend-paths={}",
@@ -115,7 +122,7 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
                 .iter()
                 .map(|entry| entry.display().to_string())
                 .collect::<Vec<_>>()
-                .join(":")
+                .join(",")
         ));
     }
     argv.extend(unit.kotlinc_args.iter().cloned());
@@ -133,8 +140,14 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
         })?;
     } else {
         let opts = cli::parse(argv);
-        if !opts.errors.is_empty() {
-            return Err(format!("krusty: {}\n", opts.errors.join("; ")));
+        let errors: Vec<&str> = opts
+            .argument_errors
+            .iter()
+            .chain(&opts.errors)
+            .map(String::as_str)
+            .collect();
+        if !errors.is_empty() {
+            return Err(format!("krusty: {}\n", errors.join("; ")));
         }
         compile(&opts)?;
     }

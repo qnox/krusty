@@ -810,6 +810,7 @@ dependencies = [
  "cranelift-object",
  "dhat",
  "flate2",
+ "krusty-cli",
  "libc",
  "object 0.40.0",
  "pprof",

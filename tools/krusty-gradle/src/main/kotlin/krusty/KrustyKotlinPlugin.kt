@@ -274,7 +274,8 @@ abstract class KrustyCompileTask @Inject constructor(
             arguments.add(libraries.files.joinToString(File.pathSeparator, transform = File::getAbsolutePath))
         }
         if (!friendPaths.isEmpty) {
-            arguments.add("-Xfriend-paths=" + friendPaths.files.joinToString(File.pathSeparator, transform = File::getAbsolutePath))
+            // kotlinc splits friend paths on `,`, not on the path separator.
+            arguments.add("-Xfriend-paths=" + friendPaths.files.joinToString(",", transform = File::getAbsolutePath))
         }
         arguments.addAll(compilerArguments.get())
         if (javaVersion.get() != kotlinJavaVersion.get()) {

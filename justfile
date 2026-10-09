@@ -232,6 +232,17 @@ kotlinc VERSION=`just max-version`:
     chmod +x "$bin"
     echo "$bin"
 
+# Regenerate krusty's copy of one kotlinc release's argument table from that release's compiler jar
+# (crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv). The conformance e2e test fails until
+# the vendored table equals what the provisioned compiler declares.
+kotlinc-arguments VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lib="$(dirname "$(dirname "$(just kotlinc "{{VERSION}}")")")/lib"
+    java -cp "$lib/kotlin-compiler.jar:$lib/kotlin-stdlib.jar" \
+        scripts/kotlinc-arguments/DumpKotlincArguments.java \
+        > "crates/krusty-cli/src/kotlinc_arguments/releases/{{VERSION}}.tsv"
+
 # Provision the Kotlin/Native distribution whose stdlib KLIB supplies the real metadata format.
 # The extracted root is versioned and cached beside the JVM compiler distribution.
 kotlin-native VERSION=`just max-version`:

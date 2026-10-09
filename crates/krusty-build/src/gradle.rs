@@ -407,11 +407,12 @@ mod tests {
             "$KOTLIN_STDLIB",
             "$ANNOTATIONS",
         ]);
-        let friend_paths = normalized_path_list(&[
+        let friend_paths = [
             "$ROOT/compiler/util/build/classes/java/main",
             "$ROOT/compiler/util/build/classes/kotlin/main",
             "$ROOT/compiler/util/build/libs/util.jar",
-        ]);
+        ]
+        .join(",");
         let friend_argument = format!("-Xfriend-paths={friend_paths}");
 
         assert_eq!(
@@ -1703,12 +1704,13 @@ fun main() {
                 index += 2;
                 continue;
             }
-            if argument.starts_with("-Xfriend-paths=") {
-                let paths = argument.trim_start_matches("-Xfriend-paths=");
-                normalized.push(format!(
-                    "-Xfriend-paths={}",
-                    normalize_paths(paths, root, kotlin_version)
-                ));
+            if let Some(paths) = argument.strip_prefix("-Xfriend-paths=") {
+                // kotlinc's delimiter for friend paths is `,`, not the path separator.
+                let paths = paths
+                    .split(',')
+                    .map(|path| normalize_path(Path::new(path), root, kotlin_version))
+                    .collect::<Vec<_>>();
+                normalized.push(format!("-Xfriend-paths={}", paths.join(",")));
                 index += 1;
                 continue;
             }
