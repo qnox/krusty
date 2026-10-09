@@ -25,10 +25,6 @@ product: wasm-js/app
 product: wasm-wasi/app
 --- p11/module.yaml
 product: js/app
---- expected
-p0/module.yaml:1:10: ERROR: Product type `lib` should have its platforms declared explicitly like that:\nproduct:\n  type: lib\n  platforms: [jvm, iosArm64]
-p3/module.yaml:1:10: ERROR: Product type `kmp/lib` should have its platforms declared explicitly like that:\nproduct:\n  type: kmp/lib\n  platforms: [jvm, iosArm64]
-p4/module.yaml:1:10: ERROR: Android applications require setting `android.namespace` set
 --- krusty
 p0/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `lib`
 p10/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `wasm-wasi/app`
@@ -40,3 +36,7 @@ p6/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm
 p7/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `linux/app`
 p8/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `windows/app`
 p9/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `wasm-js/app`
+--- expected
+p0/module.yaml:1:10: ERROR: Product type `lib` should have its platforms declared explicitly like that:\nproduct:\n  type: lib\n  platforms: [jvm, iosArm64]
+p3/module.yaml:1:10: ERROR: Product type `kmp/lib` should have its platforms declared explicitly like that:\nproduct:\n  type: kmp/lib\n  platforms: [jvm, iosArm64]
+p4/module.yaml:1:10: ERROR: Android applications require setting `android.namespace` set

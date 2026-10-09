@@ -1,0 +1,16 @@
+Unknown properties, the missing product, and an unknown property of the product, in the toolchain's order.
+--- project.yaml
+modules: [a, b]
+--- a/module.yaml
+foo: 1
+description: !x [b]
+--- b/module.yaml
+product:
+  bar: 1
+  type: !t jvm/lib
+baz: 2
+--- expected
+a/module.yaml:1:1: ERROR: Product type definition is missing. Define a product using a `product:` declaration.
+b/module.yaml:3:9: ERROR: Unexpected custom YAML type tag
+b/module.yaml:2:3: ERROR: Unknown property `bar`
+b/module.yaml:4:1: ERROR: Unknown property `baz`

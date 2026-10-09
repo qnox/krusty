@@ -1,0 +1,11 @@
+An unknown property of the project file is reported after the problems of its modules list.
+--- project.yaml
+foo: 1
+modules: [missing, !tag libs/a]
+--- libs/a/module.yaml
+product: jvm/lib
+--- expected
+project.yaml:2:20: ERROR: Unexpected custom YAML type tag
+project.yaml:1:1: ERROR: Unknown property `foo`
+project.yaml:2:11: ERROR: Unresolved module path `missing`
+project.yaml:2:10: WEAK WARNING: It is recommended to sort the `modules` list alphabetically. This reduces the chance of Git conflicts and makes it easier to visually locate a module in the list.

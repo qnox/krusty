@@ -18,19 +18,29 @@ The reference is Kotlin Toolchain 0.13.0.
 
 ## Reading rules
 
-- YAML is parsed by `saphyr-parser` (YAML 1.2). Anchors, aliases, `!!` tags and a second document
-  are reported with the toolchain's messages. A YAML syntax error is reported with the parser's
+- YAML is parsed by `saphyr-parser` (YAML 1.2). Anchors, aliases, `!!` tags, custom `!` tags
+  (except on a file's top mapping) and a second document are reported with the toolchain's
+  messages. A YAML syntax error is reported with the parser's
   message where the toolchain's PSI parser would recover.
 - Module globs follow `java.nio` `glob:` semantics (`sun.nio.fs.Globs`) after the toolchain's
   normalisation; `glob.rs` is checked against a corpus recorded from the JDK
   (`scripts/kotlin-toolchain/GlobOracle.java`, `tests/recorded/globs.tsv`). Matches are sorted.
-- Every file-system read goes through `inventory.rs`: bounded, sorted, and never through a symbolic
-  link. A link met on the way to a module, or inside a walked region, is an error naming it.
+- Every file-system look and read goes through `inventory.rs`: bounded, sorted, and never through a
+  symbolic link. A link met on the way to a module, inside a walked region, or as a build file
+  (`project.yaml`, `module.yaml`, `project.amper`, `module.amper`, `plugin.yaml`) is an error naming
+  it. A build file is opened without following a link (`O_NOFOLLOW`) and read from that handle, so
+  it cannot become a link between being found and being read. Each directory's entries are sorted
+  before limits apply, so the error a walk reports does not depend on the file system's order.
 - A `modules` path is walked component by component as the file system walks it, so `a/x/../b` is
   unresolved when `a/x` does not exist, as it is for the toolchain.
-- Diagnostics are `(severity, message, file, line, column)` in the toolchain's order and words.
+- Diagnostics are `(severity, message, file, line, column)` in the toolchain's order and words:
+  within a file, a value's problems where the value is met and unknown properties last; a module
+  file without `product` reports only that.
   Project-file errors stop before module files are read; module-file errors stop before module names
   are compared.
+
+The library's public surface is the command boundary: `model` (read a project), `diagnostic` and
+`show`. Discovery, the file-system inventory, YAML and the build-file readers are private.
 
 ## Deliberate refusals
 
@@ -56,6 +66,12 @@ Re-record after changing a case or moving to another toolchain version:
 
 ```text
 export JAVA_HOME=<JDK 25> LC_ALL=C.UTF-8 KOTLIN_CLI_NO_WELCOME_BANNER=1
-python3 scripts/kotlin-toolchain/record_projects.py <path to the kotlin wrapper> \
+python3 scripts/kotlin-toolchain/record_projects.py scripts/kotlin-toolchain/kotlin \
   crates/krusty-toolchain/tests/recorded/projects/*.case
 ```
+
+`scripts/kotlin-toolchain/kotlin` is the toolchain's own wrapper, pinning the version and checksum
+of the distribution it runs. The committed recordings keep these tests fast and offline; the
+`kotlin-toolchain` CI job (a gate of `ci-and-conformance`) keeps them true by running
+`scripts/kotlin-toolchain/verify_recordings.sh`, which re-records every project case through that
+wrapper and the glob corpus through `GlobOracle.java` on a JDK 25, and fails on any difference.

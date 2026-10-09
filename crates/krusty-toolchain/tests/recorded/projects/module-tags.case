@@ -1,0 +1,20 @@
+A custom tag on a module file's value is refused at the tag, wherever the value is.
+--- project.yaml
+modules: [libs/a, libs/b, libs/c]
+--- libs/a/module.yaml
+product: !foo jvm/lib
+description: !bar
+--- libs/b/module.yaml
+product:
+  type: !com.example.Type jvm/app
+--- libs/c/module.yaml
+product: !tagged
+  type: jvm/lib
+description: !text "x"
+--- expected
+libs/a/module.yaml:1:10: ERROR: Unexpected custom YAML type tag
+libs/a/module.yaml:2:14: ERROR: Unexpected custom YAML type tag
+libs/a/module.yaml:2:1: ERROR: Expected a value: `string | null`
+libs/b/module.yaml:2:9: ERROR: Unexpected custom YAML type tag
+libs/c/module.yaml:1:10: ERROR: Unexpected custom YAML type tag
+libs/c/module.yaml:3:14: ERROR: Unexpected custom YAML type tag

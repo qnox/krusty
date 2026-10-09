@@ -1,0 +1,17 @@
+A tag is reported where the reader meets its value, among the file's other problems; unknown properties are reported last.
+--- project.yaml
+modules: [libs/a]
+--- libs/a/module.yaml
+unknown: 1
+product: !foo jvm/lib
+other: !bar 2
+layout: !baz default
+description: !qux [a]
+--- expected
+libs/a/module.yaml:2:10: ERROR: Unexpected custom YAML type tag
+libs/a/module.yaml:3:8: ERROR: Unexpected custom YAML type tag
+libs/a/module.yaml:4:9: ERROR: Unexpected custom YAML type tag
+libs/a/module.yaml:5:14: ERROR: Unexpected custom YAML type tag
+libs/a/module.yaml:5:14: ERROR: Expected `string | null`, but got `sequence []`
+libs/a/module.yaml:1:1: ERROR: Unknown property `unknown`
+libs/a/module.yaml:3:1: ERROR: Unknown property `other`
