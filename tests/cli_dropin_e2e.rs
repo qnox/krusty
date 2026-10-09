@@ -572,53 +572,189 @@ fn cross_file_value_class_property_read_uses_mangled_getter() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// Global and named warning policy has kotlinc's exact status, diagnostic stream, and output state.
+fn output_file_ledger(root: &std::path::Path) -> std::collections::BTreeSet<String> {
+    fn visit(
+        root: &std::path::Path,
+        directory: &std::path::Path,
+        files: &mut std::collections::BTreeSet<String>,
+    ) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("read compiler output entry").path();
+            if path.is_dir() {
+                visit(root, &path, files);
+            } else {
+                files.insert(
+                    path.strip_prefix(root)
+                        .expect("output is under its requested root")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+
+    let mut files = std::collections::BTreeSet::new();
+    visit(root, root, &mut files);
+    files
+}
+
+/// Remove only kotlinc's source excerpt from a warning report. The remaining vector is the complete
+/// emitted diagnostic ledger: unlocated warnings, the Werror summary, and every located warning in
+/// order. Krusty's plain renderer does not print source excerpts.
+fn warning_diagnostic_ledger(stderr: &[u8]) -> Vec<String> {
+    std::str::from_utf8(stderr)
+        .expect("compiler diagnostics are UTF-8")
+        .lines()
+        .filter(|line| !matches!(*line, "fun f() = 1" | "^^^^^" | "    ^"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Global and named warning policy has kotlinc's exact status, ordered diagnostic ledger, stdout,
+/// and complete output-file set. This covers configuration, module, and located source warnings.
 #[test]
 fn warning_policy_precedence_matches_kotlinc() {
+    struct Case {
+        tag: &'static str,
+        source: &'static str,
+        arguments: &'static [&'static str],
+        code: i32,
+        diagnostics: Vec<String>,
+    }
+
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_warning_policy_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let source = dir.join("F.kt");
-    fs::write(&source, "fun f(): Int = 1\n").unwrap();
-
-    let warning =
-        "warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.\n";
-    let cases: &[(&str, &[&str], i32, String)] = &[
-        (
-            "named-warning-overrides-werror",
-            &["-Werror", "-Xwarning-level=REDUNDANT_CLI_ARG:warning"],
-            0,
-            warning.to_string(),
-        ),
-        (
-            "named-disabled-overrides-werror",
-            &["-Werror", "-Xwarning-level=REDUNDANT_CLI_ARG:disabled"],
-            0,
-            String::new(),
-        ),
-        (
-            "named-warning-overrides-nowarn",
-            &["-nowarn", "-Xwarning-level=REDUNDANT_CLI_ARG:warning"],
-            0,
-            warning.to_string(),
-        ),
-        (
-            "plain-werror",
-            &["-Werror"],
-            1,
-            format!("{warning}error: warnings found and -Werror specified\n"),
-        ),
+    let location = source.display();
+    let cli_warning = "warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string();
+    let visibility_warning =
+        format!("{location}:1:1: warning: visibility must be specified in explicit API mode.");
+    let return_warning =
+        format!("{location}:1:5: warning: return type must be specified in explicit API mode.");
+    let werror = "error: warnings found and -Werror specified".to_string();
+    let module_warning = "warning: opt-in requirement marker 'does.not.Exist' is unresolved. Make sure it's present in the module dependencies.".to_string();
+    let cases = vec![
+        Case {
+            tag: "named-warning-overrides-werror",
+            source: "fun f(): Int = 1\n",
+            arguments: &[
+                "-language-version",
+                "2.4",
+                "-Xcontext-parameters",
+                "-Werror",
+                "-Xwarning-level=REDUNDANT_CLI_ARG:warning",
+            ],
+            code: 0,
+            diagnostics: vec![cli_warning.clone()],
+        },
+        Case {
+            tag: "named-disabled-overrides-werror",
+            source: "fun f(): Int = 1\n",
+            arguments: &[
+                "-language-version",
+                "2.4",
+                "-Xcontext-parameters",
+                "-Werror",
+                "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
+            ],
+            code: 0,
+            diagnostics: Vec::new(),
+        },
+        Case {
+            tag: "named-warning-overrides-nowarn",
+            source: "fun f(): Int = 1\n",
+            arguments: &[
+                "-language-version",
+                "2.4",
+                "-Xcontext-parameters",
+                "-nowarn",
+                "-Xwarning-level=REDUNDANT_CLI_ARG:warning",
+            ],
+            code: 0,
+            diagnostics: vec![cli_warning.clone()],
+        },
+        Case {
+            tag: "plain-werror-promotes-cli-warning",
+            source: "fun f(): Int = 1\n",
+            arguments: &[
+                "-language-version",
+                "2.4",
+                "-Xcontext-parameters",
+                "-Werror",
+            ],
+            code: 1,
+            diagnostics: vec![cli_warning, werror.clone()],
+        },
+        Case {
+            tag: "werror-promotes-located-source-warnings",
+            source: "fun f() = 1\n",
+            arguments: &["-Xexplicit-api=warning", "-Werror"],
+            code: 1,
+            diagnostics: vec![
+                werror.clone(),
+                visibility_warning.clone(),
+                return_warning.clone(),
+            ],
+        },
+        Case {
+            tag: "nowarn-suppresses-located-source-warnings",
+            source: "fun f() = 1\n",
+            arguments: &["-Xexplicit-api=warning", "-nowarn"],
+            code: 0,
+            diagnostics: Vec::new(),
+        },
+        Case {
+            tag: "werror-wins-before-nowarn",
+            source: "fun f() = 1\n",
+            arguments: &["-Xexplicit-api=warning", "-Werror", "-nowarn"],
+            code: 1,
+            diagnostics: vec![
+                werror.clone(),
+                visibility_warning.clone(),
+                return_warning.clone(),
+            ],
+        },
+        Case {
+            tag: "werror-wins-after-nowarn",
+            source: "fun f() = 1\n",
+            arguments: &["-Xexplicit-api=warning", "-nowarn", "-Werror"],
+            code: 1,
+            diagnostics: vec![
+                werror.clone(),
+                visibility_warning.clone(),
+                return_warning.clone(),
+            ],
+        },
+        Case {
+            tag: "module-warning-precedes-werror-and-source-warnings",
+            source: "fun f() = 1\n",
+            arguments: &[
+                "-opt-in=does.not.Exist",
+                "-Xexplicit-api=warning",
+                "-Werror",
+            ],
+            code: 1,
+            diagnostics: vec![module_warning, werror, visibility_warning, return_warning],
+        },
     ];
+    let successful_outputs = std::collections::BTreeSet::from([
+        "FKt.class".to_string(),
+        "META-INF/main.kotlin_module".to_string(),
+    ]);
 
-    for (tag, policy, expected_code, expected_stderr) in cases {
-        let reference_out = dir.join(format!("{tag}-reference"));
-        let mut reference_args = vec![
-            "-language-version".to_string(),
-            "2.4".to_string(),
-            "-Xcontext-parameters".to_string(),
-        ];
-        reference_args.extend(policy.iter().map(|argument| (*argument).to_string()));
+    for case in cases {
+        fs::write(&source, case.source).expect("write warning-policy source");
+        let reference_out = dir.join(format!("{}-reference", case.tag));
+        let mut reference_args = case
+            .arguments
+            .iter()
+            .map(|argument| (*argument).to_string())
+            .collect::<Vec<_>>();
         reference_args.extend([
             "-no-reflect".to_string(),
             "-d".to_string(),
@@ -629,31 +765,51 @@ fn warning_policy_precedence_matches_kotlinc() {
             common::byte_dump::with_recorded_diagnostics(|| {
                 common::kotlinc_compile(&reference_args).expect("reference compiler unavailable")
             });
-        assert_eq!(reference_code, *expected_code, "{tag}: {reference_stderr}");
-        assert_eq!(reference_stderr, *expected_stderr, "{tag}");
+        assert_eq!(reference_code, case.code, "{}", case.tag);
+        assert_eq!(
+            warning_diagnostic_ledger(reference_stderr.as_bytes()),
+            case.diagnostics,
+            "{}: reference diagnostics",
+            case.tag
+        );
 
-        let krusty_out = dir.join(format!("{tag}-krusty"));
-        let mut command = Command::new(&krusty);
-        command.args(["-language-version", "2.4", "-Xcontext-parameters"]);
-        command.args(*policy);
-        let result = command
+        let krusty_out = dir.join(format!("{}-krusty", case.tag));
+        let result = Command::new(&krusty)
+            .args(case.arguments)
             .args(["-no-reflect", "-d"])
             .arg(&krusty_out)
             .arg(&source)
             .output()
             .expect("run krusty");
-        assert_eq!(result.status.code(), Some(*expected_code), "{tag}");
-        assert_eq!(result.stderr, expected_stderr.as_bytes(), "{tag}");
-        let expected_stdout = if *expected_code == 0 {
+        assert_eq!(result.status.code(), Some(case.code), "{}", case.tag);
+        assert_eq!(
+            warning_diagnostic_ledger(&result.stderr),
+            case.diagnostics,
+            "{}: krusty diagnostics",
+            case.tag
+        );
+        let expected_stdout = if case.code == 0 {
             format!("ok: emitted 1 class file(s) to {}\n", krusty_out.display())
         } else {
             String::new()
         };
-        assert_eq!(result.stdout, expected_stdout.as_bytes(), "{tag}");
+        assert_eq!(result.stdout, expected_stdout.as_bytes(), "{}", case.tag);
+        let expected_outputs = if case.code == 0 {
+            successful_outputs.clone()
+        } else {
+            std::collections::BTreeSet::new()
+        };
         assert_eq!(
-            krusty_out.join("FKt.class").is_file(),
-            *expected_code == 0,
-            "{tag}: output state"
+            output_file_ledger(&reference_out),
+            expected_outputs,
+            "{}: reference output files",
+            case.tag
+        );
+        assert_eq!(
+            output_file_ledger(&krusty_out),
+            expected_outputs,
+            "{}: krusty output files",
+            case.tag
         );
     }
     let _ = fs::remove_dir_all(&dir);
