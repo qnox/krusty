@@ -12206,6 +12206,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_package_value_class_property_is_stored_as_its_value`,
   `an_explicit_backing_field_is_read_at_the_public_type`,
   `a_source_written_package_accessor_runs_in_its_own_file`).
+- **Native: a member property declared in another file is reached through its declaring file.**
+  A member property of a class, object, or enum declared in another file of the module is read and
+  written through the same getter and setter entry points as a package property, keyed by the
+  checked property identity; they take the receiver first, typed as the declaring classifier. The
+  declaring file realizes the access as a use in that file does: a backing field (a `lateinit`
+  field throws `UninitializedPropertyAccessException` until assigned), a source-written or
+  delegated accessor, or the dispatch slot of an `open` member, so an override in a subclass is
+  selected. The value crosses at the declared type: a value-class-typed member is its underlying
+  value, and a generic member is its declared type parameter, which each use site adapts to its own
+  instantiation (`Box<Int>` reads an `Int`, `Box<String>` a `String`). The using file evaluates the
+  receiver first and, for an assignment, the new value next. The entry point does not run the
+  declaring file's top-level initializer: the instance's constructor has already run. An interface
+  or annotation member, a classifier constant, an extension or context property, and a property of
+  a local or anonymous class are not this access.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`a_member_val_is_read_from_the_file_that_declares_the_class`,
+  `a_member_var_is_updated_from_another_file`,
+  `an_initializer_in_another_file_reads_a_member`,
+  `a_member_assignment_evaluates_the_receiver_before_the_value`,
+  `a_lateinit_member_throws_until_assigned`,
+  `a_value_class_typed_member_is_carried_as_its_value`,
+  `a_generic_member_is_read_at_each_instantiation`,
+  `an_open_member_and_a_source_written_getter_run_in_the_declaring_file`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs
