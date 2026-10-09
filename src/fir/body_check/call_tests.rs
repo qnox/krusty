@@ -1,7 +1,7 @@
 use super::test_support::{
     checked_function_body, checked_function_body_with_features,
     checked_function_body_with_platform, checked_function_body_with_platform_and_features,
-    jvm_semantics, jvm_stdlib_semantics, root_expression,
+    checked_source_set_function_body, jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
 use crate::fir::{FirExpressionDebugLines, FirInlineBodyPlan};
@@ -166,6 +166,119 @@ fn source_overload_call_keeps_the_selected_stable_callable() {
         [Ty::String]
     );
     assert_eq!(signature.result.get(), Ty::String);
+}
+
+#[test]
+fn cross_file_call_keeps_the_selected_stable_source_declaration() {
+    let (body, index) = checked_source_set_function_body(
+        &[
+            "fun helper(value: String): String = value",
+            "fun box(): String = helper(\"OK\")",
+        ],
+        1,
+        "box",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("cross-file source call")
+        .kind
+    else {
+        panic!("cross-file source call must become checked call FIR")
+    };
+    let callable = index
+        .callable(call.target.module().expect("stable source target"))
+        .expect("selected source callable");
+    assert_eq!(index.callable_name(callable.id), Some("helper"));
+    assert_eq!(
+        index
+            .declaration_anchor(callable.declaration)
+            .expect("stable source declaration")
+            .source,
+        SourceFileId::from_raw(0),
+    );
+    let signature = index
+        .signature(callable.declaration)
+        .expect("selected source signature");
+    assert_eq!(
+        signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>(),
+        [Ty::String],
+    );
+}
+
+#[test]
+fn cross_file_overload_keeps_the_selected_stable_source_declaration() {
+    let (body, index) = checked_source_set_function_body(
+        &[
+            "fun helper(value: Int): String = \"int\"",
+            "fun helper(value: String): String = value",
+            "fun box(): String = helper(\"OK\")",
+        ],
+        2,
+        "box",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("cross-file overload call")
+        .kind
+    else {
+        panic!("selected cross-file overload must become checked call FIR")
+    };
+    let callable = index
+        .callable(call.target.module().expect("stable source target"))
+        .expect("selected source callable");
+    assert_eq!(
+        index
+            .declaration_anchor(callable.declaration)
+            .expect("stable source declaration")
+            .source,
+        SourceFileId::from_raw(1),
+    );
+    let signature = index
+        .signature(callable.declaration)
+        .expect("selected source signature");
+    assert_eq!(
+        signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>(),
+        [Ty::String],
+    );
+}
+
+#[test]
+fn package_scope_call_keeps_the_selected_stable_source_declaration() {
+    let (body, index) = checked_source_set_function_body(
+        &[
+            "package a\nfun helper(): String = \"a\"",
+            "package b\nfun helper(): String = \"OK\"",
+            "package b\nfun box(): String = helper()",
+        ],
+        2,
+        "box",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("package-scoped source call")
+        .kind
+    else {
+        panic!("package-scoped source call must become checked call FIR")
+    };
+    let callable = index
+        .callable(call.target.module().expect("stable source target"))
+        .expect("selected source callable");
+    assert_eq!(index.callable_name(callable.id), Some("helper"));
+    assert_eq!(
+        index
+            .declaration_anchor(callable.declaration)
+            .expect("stable source declaration")
+            .source,
+        SourceFileId::from_raw(1),
+    );
 }
 
 #[test]

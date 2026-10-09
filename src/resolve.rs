@@ -27214,18 +27214,6 @@ fun box(): String {
         target
     }
 
-    fn top_level_fun_decl(
-        file: &File,
-        name: &str,
-        matches_decl: impl Fn(&FunDecl) -> bool,
-    ) -> DeclId {
-        file.decls
-            .iter()
-            .copied()
-            .find(|&decl| matches!(file.decl(decl), Decl::Fun(f) if f.name == name && matches_decl(f)))
-            .unwrap_or_else(|| panic!("source should contain {name} declaration"))
-    }
-
     struct FakeMemberPlatform;
 
     impl FakeMemberPlatform {
@@ -29577,85 +29565,6 @@ fun box(): String {
                 shadow_depth: 0,
             })]
         );
-    }
-
-    #[test]
-    fn module_top_level_cross_file_calls_record_source_key_for_lowering() {
-        let sources = [
-            "fun helper(s: String): String = s",
-            "fun box(): String = helper(\"OK\")",
-        ];
-        let (files, types, diagnostics) =
-            retained_standalone_source_set_with_prepare(&sources, |files, symbols| {
-                let helper = top_level_fun_decl(&files[0], "helper", |_| true);
-                symbols
-                    .fn_facades_by_decl
-                    .insert((0, helper.0), crate::types::type_name("AKt"));
-                symbols
-                    .fn_facades
-                    .insert("helper".to_string(), crate::types::type_name("AKt"));
-            });
-        let helper_decl = top_level_fun_decl(&files[0], "helper", |_| true);
-        let info = &types[1];
-        assert_no_diags(&diagnostics);
-
-        let call = named_call(&files[1], "helper");
-        let target = module_top_level_target(&info, call);
-        assert_eq!(target.callable.name, "helper");
-        assert_eq!(target.source_file, Some(0));
-        assert_eq!(target.source_decl, Some(helper_decl));
-        assert!(target.param_meta.is_empty());
-    }
-
-    #[test]
-    fn module_top_level_cross_file_overload_uses_selected_source_key() {
-        let sources = [
-            "fun helper(x: Int): String = \"int\"",
-            "fun helper(s: String): String = s",
-            "fun box(): String = helper(\"OK\")",
-        ];
-        let (files, types, diagnostics) =
-            retained_standalone_source_set_with_prepare(&sources, |files, symbols| {
-                let int = top_level_fun_decl(&files[0], "helper", |_| true);
-                let string = top_level_fun_decl(&files[1], "helper", |_| true);
-                symbols
-                    .fn_facades_by_decl
-                    .insert((0, int.0), crate::types::type_name("AKt"));
-                symbols
-                    .fn_facades_by_decl
-                    .insert((1, string.0), crate::types::type_name("BKt"));
-                symbols
-                    .fn_facades
-                    .insert("helper".to_string(), crate::types::type_name("AKt"));
-            });
-        let string_decl = top_level_fun_decl(&files[1], "helper", |_| true);
-        let info = &types[2];
-        assert_no_diags(&diagnostics);
-
-        let call = named_call(&files[2], "helper");
-        let target = module_top_level_target(&info, call);
-        assert_eq!(target.callable.name, "helper");
-        assert_eq!(target.callable.params, vec![Ty::String]);
-        assert_eq!(target.source_file, Some(1));
-        assert_eq!(target.source_decl, Some(string_decl));
-    }
-
-    #[test]
-    fn module_top_level_selection_respects_package_scope() {
-        let sources = [
-            "package a\nfun helper(): String = \"a\"",
-            "package b\nfun helper(): String = \"OK\"",
-            "package b\nfun box(): String = helper()",
-        ];
-        let (files, types, diagnostics) = retained_standalone_source_set(&sources);
-        let info = &types[2];
-        assert_no_diags(&diagnostics);
-
-        let call = named_call(&files[2], "helper");
-        let target = module_top_level_target(&info, call);
-        let b_decl = top_level_fun_decl(&files[1], "helper", |_| true);
-        assert_eq!(target.source_file, Some(1));
-        assert_eq!(target.source_decl, Some(b_decl));
     }
 
     #[test]
