@@ -151,3 +151,112 @@ impl KlibWriter {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn writer() -> KlibWriter {
+        let mut writer = KlibWriter::new(
+            "lib",
+            crate::kotlin_version::KotlinVersion {
+                major: 2,
+                minor: 4,
+                patch: 10,
+            },
+            &KlibPlatform::Native {
+                targets: vec!["linux_x64".to_string()],
+            },
+            &["stdlib".to_string()],
+        );
+        writer.add_fragment("p.two", b"two-0".to_vec());
+        writer.add_fragment("p.one", b"one-0".to_vec());
+        writer.add_fragment("", b"root-0".to_vec());
+        writer.add_fragment("p.one", b"one-1".to_vec());
+        writer
+    }
+
+    #[test]
+    fn each_package_numbers_its_own_fragments_in_compilation_order() {
+        let entries = writer().entries();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|(name, bytes)| (name.as_str(), String::from_utf8_lossy(bytes).into_owned()))
+                .filter(|(name, _)| name.ends_with(".knm"))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "default/linkdata/package_p.one/0_one.knm",
+                    "one-0".to_string()
+                ),
+                (
+                    "default/linkdata/package_p.one/1_one.knm",
+                    "one-1".to_string()
+                ),
+                (
+                    "default/linkdata/package_p.two/0_two.knm",
+                    "two-0".to_string()
+                ),
+                ("default/linkdata/root_package/0_.knm", "root-0".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_manifest_is_sorted_with_no_header() {
+        let entries = writer().entries();
+        let manifest = &entries
+            .iter()
+            .find(|(name, _)| name == "default/manifest")
+            .expect("a manifest")
+            .1;
+        assert_eq!(
+            String::from_utf8_lossy(manifest),
+            "abi_version=2.4.0\n\
+             builtins_platform=NATIVE\n\
+             compiler_version=2.4.10\n\
+             depends=stdlib\n\
+             ir_signature_versions=1,2\n\
+             metadata_version=2.4.0\n\
+             native_targets=linux_x64\n\
+             unique_name=lib\n"
+        );
+    }
+
+    #[test]
+    fn the_module_header_names_the_module_and_its_sorted_packages() {
+        let mut expected = crate::metadata::protobuf::Pb::new();
+        expected.field_bytes(1, b"<lib>");
+        for package in ["", "p.one", "p.two"] {
+            expected.field_bytes(7, package.as_bytes());
+        }
+        assert_eq!(writer().module_header(), expected.into_bytes());
+    }
+
+    #[test]
+    fn the_klib_reader_opens_a_written_library() {
+        let root = std::env::temp_dir().join(format!("klib-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        writer().write_directory(&root).expect("write the library");
+        let archive = crate::klib::KlibArchive::open(&root).expect("open the written library");
+        let manifest = archive.manifest().expect("a parsable manifest");
+        assert_eq!(manifest.unique_name(), Some("lib"));
+        assert_eq!(manifest.depends(), ["stdlib"]);
+        assert_eq!(manifest.targets(), ["linux_x64"]);
+        assert_eq!(
+            archive
+                .package_fragments()
+                .iter()
+                .map(|fragment| (fragment.package_fqname.as_str(), fragment.entry.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("", "default/linkdata/root_package/0_.knm"),
+                ("p.one", "default/linkdata/package_p.one/0_one.knm"),
+                ("p.one", "default/linkdata/package_p.one/1_one.knm"),
+                ("p.two", "default/linkdata/package_p.two/0_two.knm"),
+            ]
+        );
+        std::fs::remove_dir_all(&root).expect("remove the library");
+    }
+}

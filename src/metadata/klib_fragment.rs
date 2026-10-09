@@ -96,3 +96,88 @@ pub fn package_fragment(
     fragment.field_bytes(173, package.join(".").as_bytes()); // fqName = 173
     fragment.canonical().into_bytes()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::semantic::{parse_package_fragment_checked, KotlinType};
+    use crate::types::Ty;
+
+    fn constant_property(name: &str) -> PropMeta {
+        PropMeta {
+            spellings: crate::spelling::DeclaredSpellings::default(),
+            visibility: crate::types::Visibility::Public,
+            name: name.into(),
+            ty: Ty::Int,
+            is_var: false,
+            type_params: Vec::new(),
+            semantic_type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            receiver: None,
+            context_params: Vec::new(),
+            getter: None,
+            setter: None,
+            setter_parameter_name: None,
+            is_const: true,
+            has_constant: true,
+            has_backing_field: true,
+            modifiers: crate::ir::IrPropertyModifiers::default(),
+            setter_visibility: crate::types::Visibility::Public,
+            companion: false,
+            accessor_annotations: Default::default(),
+            field_name: None,
+            field_desc: None,
+            decl_order: 1,
+        }
+    }
+
+    fn file_members() -> KlibFileMembers {
+        KlibFileMembers {
+            file_name: "lib.kt".to_string(),
+            functions: vec![FnMeta::plain(
+                "answer",
+                vec![("x".into(), Ty::Int)],
+                Ty::String,
+            )],
+            properties: vec![constant_property("LIMIT")],
+            constants: vec![Some(crate::ir::IrConst::Int(3))],
+            aliases: Vec::new(),
+        }
+    }
+
+    /// The fragment's trailing fields: `isEmpty` (172) is 0 and `fqName` (173) spells the package.
+    fn fragment_tail(package: &str) -> Vec<u8> {
+        let mut tail = Pb::new();
+        tail.field_varint(172, 0);
+        tail.field_bytes(173, package.as_bytes());
+        tail.into_bytes()
+    }
+
+    #[test]
+    fn a_fragment_names_its_package_and_reads_back_through_the_klib_reader() {
+        let fragment = package_fragment(&["p", "q"], &file_members(), true);
+        assert!(fragment.ends_with(&fragment_tail("p.q")));
+
+        let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");
+        assert_eq!(package.classes.len(), 0);
+        assert_eq!(package.functions.len(), 1);
+        let function = &package.functions[0];
+        assert_eq!(function.name, "answer");
+        assert_eq!(function.param_names, ["x"]);
+        assert_eq!(function.params, [KotlinType::class("kotlin/Int")]);
+        assert_eq!(function.ret, KotlinType::class("kotlin/String"));
+        assert_eq!(package.properties.len(), 1);
+        let property = &package.properties[0];
+        assert_eq!(property.name, "LIMIT");
+        assert_eq!(property.constant, Some(crate::libraries::LibConst::Int(3)));
+    }
+
+    #[test]
+    fn a_root_package_fragment_has_an_empty_name() {
+        let fragment = package_fragment(&[], &file_members(), true);
+        assert!(fragment.ends_with(&fragment_tail("")));
+        let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");
+        assert_eq!(package.functions.len(), 1);
+        assert_eq!(package.properties.len(), 1);
+    }
+}

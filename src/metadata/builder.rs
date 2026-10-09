@@ -108,7 +108,7 @@ impl FnMeta {
     /// carries. The byte fixtures below build on this with `..FnMeta::plain(..)` and name only the
     /// fields their case is about, so a field added to `FnMeta` no longer breaks a fixture that does
     /// not use it.
-    fn plain(name: &str, params: Vec<(String, Ty)>, ret: Ty) -> Self {
+    pub(super) fn plain(name: &str, params: Vec<(String, Ty)>, ret: Ty) -> Self {
         Self {
             name: name.into(),
             params,

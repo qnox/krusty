@@ -5236,18 +5236,22 @@ non-inline callers, still reads the field directly. Test:
 
 A non-JVM dependency is distributed as a KLIB, and a dependent compilation reads its declarations
 (and, on Native, its bodies) from it. For krusty to build a multi-module Native program it has to
-write the dependency libraries itself; kotlinc only supplies the expected output.
+write the dependency libraries itself; kotlinc only supplies the expected program output.
 
-- **Package metadata (done).** `klib::backend::KlibBackend` is a `Backend` that writes one
+- **Metadata container (this slice).** `klib::backend::KlibBackend` is a `Backend` that writes one
   `PackageFragment` per checked file and lays them out with `klib::write::KlibWriter` (manifest,
   `linkdata/module`, `package_<fq>/<n>_<seg>.knm`, `root_package/`). The records come from the same
   builders as JVM `@Metadata` (`metadata::builder`), fed by target-free declaration records
   (`metadata::declaration_records`); `metadata::klib_fragment` owns only the carrier: the fragment's
   `StringTable` and `QualifiedNameTable`, per-container type tables, the file and constant-value
-  extensions, and the package name. Top-level functions, properties and typealiases are byte-equal
-  to `kotlinc-native -p library` for Kotlin 2.4.0, 2.4.10 and 2.4.20 (`tests/klib_writer_e2e.rs`).
-- **Class metadata (next).** A file declaring a class is declined by name until the class record
-  is written for the KLIB carrier.
+  extensions, and the package name. Top-level functions, properties and typealiases are written;
+  a class is declined by name. Unit tests beside `klib::write` and `metadata::klib_fragment` check
+  the layout and read fragments back through the ordinary KLIB reader. The library has no
+  serialized IR, so a dependent Native program cannot link a body from it yet: this is not module
+  support.
+- **Class metadata (next).** The class record written for the KLIB carrier.
 - **Serialized IR (next).** Bodies are written as the IR the `metadata::klib_ir` decoder reads back.
-- **Box tests (next).** The Native lane's `// MODULE:` cases compile each dependency to a KLIB with
-  this backend, then the main module against it.
+- **Native `// MODULE:` box cases (later).** The shared Native box harness writes each dependency
+  module's KLIB with this backend, the dependent compilation reads it through the KLIB library
+  provider, and Native links and runs `box()`; the expected-failure ratchet records each case until
+  it runs.
