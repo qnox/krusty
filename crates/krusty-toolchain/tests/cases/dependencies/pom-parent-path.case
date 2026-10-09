@@ -14,5 +14,5 @@ dependencies:
   <version>1.0</version>
 </project>
 --- m2/org/example/lib/1.0/lib-1.0.jar
---- krusty
-ERROR: org.example:parent:.. names no file in a Maven repository: its version `..` is not a file name
+--- krusty-refusal
+error	ERROR: org.example:parent:.. names no file in a Maven repository: its version `..` is not a file name

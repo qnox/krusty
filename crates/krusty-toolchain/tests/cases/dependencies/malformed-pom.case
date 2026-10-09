@@ -10,5 +10,5 @@ dependencies:
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.example
 </project>
---- krusty
-<directory>/home/.m2/repository/org/example/broken/1.0/broken-1.0.pom:4:1: ERROR: Unable to parse the POM of org.example:broken:1.0: the POM is not well-formed XML: expected 'groupId' tag, not 'project'
+--- krusty-refusal
+error	<directory>/home/.m2/repository/org/example/broken/1.0/broken-1.0.pom:4:1: ERROR: Unable to parse the POM of org.example:broken:1.0: the POM is not well-formed XML: expected 'groupId' tag, not 'project'

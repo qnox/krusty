@@ -31,6 +31,6 @@ dependencies:
     }
   ]
 }
---- krusty
-<directory>/home/.m2/repository/org/example/native-only/1.0/native-only-1.0.module: ERROR: No variant of org.example:native-only:1.0 matches the JVM compile classpath
-<directory>/home/.m2/repository/org/example/native-only/1.0/native-only-1.0.module: ERROR: No variant of org.example:native-only:1.0 matches the JVM runtime classpath
+--- krusty-refusal
+error	<directory>/home/.m2/repository/org/example/native-only/1.0/native-only-1.0.module: ERROR: No variant of org.example:native-only:1.0 matches the JVM compile classpath
+error	<directory>/home/.m2/repository/org/example/native-only/1.0/native-only-1.0.module: ERROR: No variant of org.example:native-only:1.0 matches the JVM runtime classpath

@@ -10,76 +10,32 @@
 //! the command's result, to stdout. A conflict between two values is printed as its message alone,
 //! values and places on the indented lines after it; it is an error.
 
-use krusty_toolchain::diagnostic::Severity;
+use super::{ExpectedDiagnostic, ExpectedSeverity};
 
 /// A conflict between values is printed without a severity; it is an error.
 const CONFLICT: &str = "Conflicting values for property ";
-const SEVERITIES: [(&str, Severity); 3] = [
-    ("WEAK WARNING", Severity::WeakWarning),
-    ("WARNING", Severity::Warning),
-    ("ERROR", Severity::Error),
-];
+const SEVERITIES: [&str; 3] = ["WEAK WARNING", "WARNING", "ERROR"];
 const ABORT: [&str; 2] = [
     "ERROR: Aborting because there were errors in the Kotlin project file, please see above.",
     "ERROR: failed to read Kotlin project model, refer to the errors above",
 ];
 
-/// A problem as it was reported: its severity, and its rendering in the form above.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Reported {
-    pub severity: Severity,
-    pub text: String,
-}
-
-impl Reported {
-    fn new(severity: Severity, place: &str, label: &str, message: &str) -> Self {
-        Self {
-            severity,
-            text: format!("{place}{label}: {message}"),
-        }
-    }
-}
-
-/// Reported problems split by severity, each in the order it was reported: the errors, and the
-/// warnings and weak warnings.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Ledgers {
-    pub errors: Vec<Reported>,
-    pub warnings: Vec<Reported>,
-}
-
-impl Ledgers {
-    pub fn of(problems: impl IntoIterator<Item = Reported>) -> Self {
-        let (errors, warnings) = problems
-            .into_iter()
-            .partition(|problem| problem.severity == Severity::Error);
-        Self { errors, warnings }
-    }
-
-    /// The toolchain's problems from its two streams, each of which must hold one kind only.
-    pub fn of_streams(stderr: Vec<Reported>, stdout: Vec<Reported>) -> Result<Self, String> {
-        let errors = Self::of(stderr);
-        let warnings = Self::of(stdout);
-        if !errors.warnings.is_empty() || !warnings.errors.is_empty() {
-            return Err(format!(
-                "the toolchain wrote warnings to stderr {:#?} or errors to stdout {:#?}",
-                errors.warnings, warnings.errors
-            ));
-        }
-        Ok(Self {
-            errors: errors.errors,
-            warnings: warnings.warnings,
-        })
-    }
-}
-
-/// `SEVERITY: message` at the start of `text`, with the severity's label.
-fn severity(text: &str) -> Option<(Severity, &'static str, &str)> {
-    SEVERITIES.iter().find_map(|&(label, severity)| {
-        text.strip_prefix(label)
+/// `SEVERITY: message` at the start of `text`.
+fn severity(text: &str) -> Option<(&'static str, &str)> {
+    SEVERITIES.iter().find_map(|&severity| {
+        text.strip_prefix(severity)
             .and_then(|rest| rest.strip_prefix(": "))
-            .map(|message| (severity, label, message))
+            .map(|message| (severity, message))
     })
+}
+
+fn expected_severity(label: &str) -> ExpectedSeverity {
+    match label {
+        "ERROR" => ExpectedSeverity::Error,
+        "WARNING" => ExpectedSeverity::Warning,
+        "WEAK WARNING" => ExpectedSeverity::WeakWarning,
+        _ => unreachable!("severity() returns only a known label"),
+    }
 }
 
 /// A box line's text: `│` and one space dropped, `Some("")` for a bare `│`.
@@ -108,7 +64,7 @@ fn starts_problem(line: &str) -> bool {
 /// The problems rendered at the start of `output`, in order, and the bytes after them: what the
 /// command printed as its result. Every line up to that point belongs to a problem's rendering or
 /// is the closing line saying the command stopped, so nothing in between is skipped unread.
-pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<Reported>, &'o [u8]) {
+pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<ExpectedDiagnostic>, &'o [u8]) {
     let mut lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0;
     for line in output.split_inclusive(|&byte| byte == b'\n') {
@@ -125,7 +81,7 @@ pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<Reported>, &'o [u8]) {
         } else if line.is_empty() && text(index + 1).is_some_and(starts_problem) {
             // A blank line separating problems, or before the closing line.
             index += 1;
-        } else if let Some((severity, label, first)) =
+        } else if let Some((severity, first)) =
             line.trim_start().strip_prefix("╭─ ").and_then(severity)
         {
             let mut message = vec![first.to_string()];
@@ -148,13 +104,19 @@ pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<Reported>, &'o [u8]) {
                 index += 1;
             }
             index += 1;
-            problems.push(Reported::new(severity, &place, label, &message.join("\\n")));
-        } else if let Some((severity, label, first)) = severity(line) {
+            problems.push(ExpectedDiagnostic {
+                severity: expected_severity(severity),
+                rendered: format!("{place}{severity}: {}", message.join("\\n")),
+            });
+        } else if let Some((severity, first)) = severity(line) {
             index += 1;
             if let Some(file) = text(index).and_then(|next| next.strip_prefix(" ╰→ ")) {
                 index += 1;
                 let file = file.replace(&format!("{root}/"), "");
-                problems.push(Reported::new(severity, &format!("{file}: "), label, first));
+                problems.push(ExpectedDiagnostic {
+                    severity: expected_severity(severity),
+                    rendered: format!("{file}: {severity}: {first}"),
+                });
             } else {
                 // The message runs to the next blank line, which ends it.
                 let mut message = vec![first.to_string()];
@@ -165,7 +127,10 @@ pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<Reported>, &'o [u8]) {
                 if text(index).is_some() {
                     index += 1;
                 }
-                problems.push(Reported::new(severity, "", label, &message.join("\\n")));
+                problems.push(ExpectedDiagnostic {
+                    severity: expected_severity(severity),
+                    rendered: format!("{severity}: {}", message.join("\\n")),
+                });
             }
         } else if line.starts_with(CONFLICT) {
             // Its values and their places run on indented lines, a blank line separating values.
@@ -179,12 +144,10 @@ pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<Reported>, &'o [u8]) {
                 index += 1;
                 message.push(next.replace(&format!("{root}/"), ""));
             }
-            problems.push(Reported::new(
-                Severity::Error,
-                "",
-                "ERROR",
-                &message.join("\\n"),
-            ));
+            problems.push(ExpectedDiagnostic {
+                severity: ExpectedSeverity::Error,
+                rendered: format!("ERROR: {}", message.join("\\n")),
+            });
         } else {
             break;
         }

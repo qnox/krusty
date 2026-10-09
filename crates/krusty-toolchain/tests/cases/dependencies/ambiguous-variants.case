@@ -52,5 +52,5 @@ dependencies:
     }
   ]
 }
---- krusty
-<directory>/home/.m2/repository/org/example/twice/1.0/twice-1.0.module: ERROR: More than one variant of org.example:twice:1.0 matches the JVM compile classpath: firstApiElements, secondApiElements
+--- krusty-refusal
+error	<directory>/home/.m2/repository/org/example/twice/1.0/twice-1.0.module: ERROR: More than one variant of org.example:twice:1.0 matches the JVM compile classpath: firstApiElements, secondApiElements

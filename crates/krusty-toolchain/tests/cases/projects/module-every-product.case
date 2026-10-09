@@ -25,14 +25,14 @@ product: wasm-js/app
 product: wasm-wasi/app
 --- p11/module.yaml
 product: js/app
---- krusty
-p0/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `lib`
-p10/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `wasm-wasi/app`
-p11/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `js/app`
-p3/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `kmp/lib`
-p4/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `android/app`
-p5/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `ios/app`
-p6/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `macos/app`
-p7/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `linux/app`
-p8/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `windows/app`
-p9/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `wasm-js/app`
+--- krusty-refusal
+error	p0/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `lib`
+error	p10/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `wasm-wasi/app`
+error	p11/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `js/app`
+error	p3/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `kmp/lib`
+error	p4/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `android/app`
+error	p5/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `ios/app`
+error	p6/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `macos/app`
+error	p7/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `linux/app`
+error	p8/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `windows/app`
+error	p9/module.yaml:1:10: ERROR: krusty-toolchain reads `jvm/app`, `jvm/lib` and `jvm/amper-plugin` modules only, not `wasm-js/app`

@@ -158,7 +158,9 @@ krusty-toolchain, `-Duser.home` for the toolchain's JVM), with a fresh `KOTLIN_S
 and an unreachable proxy, so every artifact a case resolves is in that repository.
 `tests/dependency_cases.rs` runs `krusty-toolchain` in the same layout and requires the same exit
 status, stdout and stderr, byte for byte, once each run's own directory is replaced by the same
-placeholder.
+placeholder. Where krusty-toolchain refuses an artifact it cannot read completely, the case's
+`--- krusty-refusal` section holds its errors, `error` and a tab before each rendered line: they
+must be its complete stderr, with exit status 1 and nothing on stdout.
 
 `tests/support/oracle.rs` caches each reference's exit code and raw stdout and stderr (only a JVM's
 `Picked up JAVA_TOOL_OPTIONS` line is dropped from stderr) under

@@ -8,19 +8,18 @@
 //! Where an artifact cannot be read completely (it is in no repository, its metadata is not
 //! well-formed, no variant or more than one matches, its coordinates name no file), the toolchain
 //! downloads, or logs and prints the graph anyway; krusty-toolchain refuses. Such a case's
-//! `krusty` section holds the complete stderr krusty-toolchain prints, which must be all it
-//! prints, with exit status 1, and must not be what the toolchain prints.
+//! `krusty-refusal` section holds the errors krusty-toolchain reports, which must be all it prints:
+//! its complete stderr, with exit status 1, and not what the toolchain does.
 
-#[path = "support/rendering.rs"]
-mod rendering;
 mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rendering::{problems, Ledgers, Reported};
 use support::kotlin::{self, Invocation, Resolving};
 use support::oracle::Output;
+use support::rendering::problems;
+use support::{ExpectedDiagnostic, ExpectedSeverity, KrustyExpected};
 
 const ARGS: &[&str] = &["show", "dependencies", "--all-modules", "--include-tests"];
 /// A case's sections below this directory are files of its local Maven repository.
@@ -134,27 +133,32 @@ fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
             continue;
         }
         let (warnings, result) = problems(&project_root, &toolchain.stdout);
-        let ledgers = match Ledgers::of_streams(errors, warnings) {
-            Ok(ledgers) => ledgers,
-            Err(error) => {
-                failures.push(format!("{name}: {error}"));
-                continue;
-            }
-        };
-        let lines = |problems: &[Reported]| -> String {
+        // Each stream holds one kind of problem.
+        let mixed: Vec<&ExpectedDiagnostic> = errors
+            .iter()
+            .filter(|problem| problem.severity != ExpectedSeverity::Error)
+            .chain(
+                warnings
+                    .iter()
+                    .filter(|problem| problem.severity == ExpectedSeverity::Error),
+            )
+            .collect();
+        if !mixed.is_empty() {
+            failures.push(format!(
+                "{name}: the toolchain wrote warnings to stderr or errors to stdout: {mixed:#?}"
+            ));
+            continue;
+        }
+        let lines = |problems: &[ExpectedDiagnostic]| -> String {
             problems
                 .iter()
-                .map(|problem| format!("{}\n", problem.text))
+                .map(|problem| format!("{}\n", problem.rendered))
                 .collect()
         };
         let expected = (
             toolchain.code,
-            format!(
-                "{}{}",
-                lines(&ledgers.warnings),
-                placed(&toolchain.root, result)
-            ),
-            lines(&ledgers.errors),
+            format!("{}{}", lines(&warnings), placed(&toolchain.root, result)),
+            lines(&errors),
         );
         // krusty-toolchain's, with paths relative to the project as the toolchain's are read back.
         let relative = |bytes: &[u8]| {
@@ -171,25 +175,38 @@ fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
             relative(&actual.stdout),
             relative(&actual.stderr),
         );
-        if let Some(krusty) = &case.krusty {
-            let refusal = (1, String::new(), format!("{}\n", krusty.join("\n")));
-            if printed != refusal {
+        match &case.krusty {
+            Some(KrustyExpected::Refusal(refused)) => {
+                let refusal = (1, String::new(), lines(refused));
+                if printed != refusal {
+                    failures.push(format!(
+                        "{name}: krusty-toolchain exited {} with stdout\n{}\nstderr\n{}\nthe `krusty-refusal` section expects exit 1, no stdout and stderr\n{}",
+                        printed.0, printed.1, printed.2, refusal.2
+                    ));
+                }
+                let not_errors: Vec<&ExpectedDiagnostic> = refused
+                    .iter()
+                    .filter(|problem| problem.severity != ExpectedSeverity::Error)
+                    .collect();
+                if refused.is_empty() || !not_errors.is_empty() {
+                    failures.push(format!(
+                        "{name}: the `krusty-refusal` section must be errors only: {refused:#?}"
+                    ));
+                }
+                if expected == refusal {
+                    failures.push(format!(
+                        "{name}: the `krusty-refusal` section is what the toolchain does"
+                    ));
+                }
+                continue;
+            }
+            Some(KrustyExpected::Difference(_)) => {
                 failures.push(format!(
-                    "{name}: krusty-toolchain exited {} with stdout\n{}\nstderr\n{}\nthe `krusty` section expects exit 1, no stdout and stderr\n{}",
-                    printed.0, printed.1, printed.2, refusal.2
+                    "{name}: krusty-toolchain differs from the toolchain only by refusing"
                 ));
+                continue;
             }
-            // krusty-toolchain writes only errors to stderr, so a section is a refusal unless it
-            // is empty.
-            if krusty.is_empty() {
-                failures.push(format!("{name}: the `krusty` section refuses nothing"));
-            }
-            if expected == refusal {
-                failures.push(format!(
-                    "{name}: the `krusty` section is what the toolchain does"
-                ));
-            }
-            continue;
+            None => {}
         }
         if printed != expected {
             failures.push(format!(

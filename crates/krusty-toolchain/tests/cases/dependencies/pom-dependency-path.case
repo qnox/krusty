@@ -17,5 +17,5 @@ dependencies:
   </dependencies>
 </project>
 --- m2/org/example/lib/1.0/lib-1.0.jar
---- krusty
-ERROR: org.example:../../../escaped:1.0 names no file in a Maven repository: its artifact `../../../escaped` is not a file name
+--- krusty-refusal
+error	ERROR: org.example:../../../escaped:1.0 names no file in a Maven repository: its artifact `../../../escaped` is not a file name

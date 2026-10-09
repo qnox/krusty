@@ -17,6 +17,6 @@ dependencies:
       <dependency><groupId>org.example</groupId><artifactId>gone</artifactId><version>2.0</version></dependency>
   </dependencies>
 </project>
---- krusty
-ERROR: The POM or module metadata of org.example:absent:1.0 is in no local repository, and krusty-toolchain does not download artifacts
-ERROR: The POM or module metadata of org.example:gone:2.0 is in no local repository, and krusty-toolchain does not download artifacts
+--- krusty-refusal
+error	ERROR: The POM or module metadata of org.example:absent:1.0 is in no local repository, and krusty-toolchain does not download artifacts
+error	ERROR: The POM or module metadata of org.example:gone:2.0 is in no local repository, and krusty-toolchain does not download artifacts

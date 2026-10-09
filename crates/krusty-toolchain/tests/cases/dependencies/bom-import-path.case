@@ -19,5 +19,5 @@ dependencies:
   </dependencyManagement>
 </project>
 --- m2/org/example/lib/1.0/lib-1.0.jar
---- krusty
-ERROR: ..:bom:1.0 names no file in a Maven repository: its group `..` is not a file name
+--- krusty-refusal
+error	ERROR: ..:bom:1.0 names no file in a Maven repository: its group `..` is not a file name

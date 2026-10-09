@@ -4,4 +4,4 @@ modules: [a]
 --- a/module.yaml
 product: [jvm/lib
 --- krusty
-a/module.yaml:2:1: ERROR: while parsing a flow sequence, expected ',' or ']'
+error	a/module.yaml:2:1: ERROR: while parsing a flow sequence, expected ',' or ']'
