@@ -93,7 +93,10 @@ fn trusted() -> MemFlagsData {
     MemFlagsData::trusted()
 }
 
-fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIsa, Unsupported> {
+fn isa_for(
+    target: NativeTarget,
+    verify: bool,
+) -> Result<cranelift_codegen::isa::OwnedTargetIsa, Unsupported> {
     let triple: target_lexicon::Triple = target
         .triple()
         .parse()
@@ -102,7 +105,7 @@ fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIs
     for (name, value) in [
         ("is_pic", "false"),
         ("opt_level", "none"),
-        ("enable_verifier", "true"),
+        ("enable_verifier", if verify { "true" } else { "false" }),
         ("use_colocated_libcalls", "false"),
     ] {
         flags
@@ -146,6 +149,7 @@ pub fn lower_file(
     target: NativeTarget,
     stem: &str,
     entry: Entry,
+    verify: bool,
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
         ir,
@@ -159,7 +163,7 @@ pub fn lower_file(
     } = input;
     let class_model = model::build(ir, value_classes)?;
 
-    let isa = isa_for(target)?;
+    let isa = isa_for(target, verify)?;
     let builder = ObjectBuilder::new(
         isa,
         format!("{stem}.o"),
@@ -2590,5 +2594,12 @@ mod tests {
             machine_carrier(Ty::Boolean).abi_param().unwrap().extension == ArgumentExtension::Uext
         );
         assert!(machine_carrier(Ty::Int).abi_param().unwrap().extension == ArgumentExtension::None);
+    }
+
+    #[test]
+    fn only_a_verified_build_runs_the_cranelift_verifier() {
+        let target = NativeTarget::host().expect("a supported host");
+        assert!(!isa_for(target, false).unwrap().flags().enable_verifier());
+        assert!(isa_for(target, true).unwrap().flags().enable_verifier());
     }
 }

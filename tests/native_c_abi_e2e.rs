@@ -81,7 +81,9 @@ fn compile(sources: &[(&str, &str)], module: &str) -> (Vec<Artifact>, Vec<String
     } else {
         krusty::native::Entry::Main
     };
-    let backend = CraneliftBackend::new(host().expect("checked by the caller")).with_entry(entry);
+    let backend = CraneliftBackend::new(host().expect("checked by the caller"))
+        .with_entry(entry)
+        .verified();
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, module, &mut diags);
     (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
 }
