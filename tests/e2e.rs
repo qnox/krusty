@@ -1587,6 +1587,8 @@ mod suspend_argument_operands_e2e;
 mod suspend_coroutine_inline_e2e;
 #[path = "suspend_function_boxing_e2e.rs"]
 mod suspend_function_boxing_e2e;
+#[path = "suspend_lambda_private_property_e2e.rs"]
+mod suspend_lambda_private_property_e2e;
 #[path = "suspend_lambda_shared_capture_e2e.rs"]
 mod suspend_lambda_shared_capture_e2e;
 #[path = "suspend_result_nullability_e2e.rs"]
