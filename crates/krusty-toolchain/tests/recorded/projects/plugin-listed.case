@@ -1,0 +1,21 @@
+A local plugin the project lists.
+--- project.yaml
+modules:
+  - libs/a
+  - plugins/p
+plugins:
+  - ./plugins/p
+--- libs/a/module.yaml
+product: jvm/lib
+--- plugins/p/module.yaml
+product: jvm/amper-plugin
+--- expected
+plugins/p/module.yaml:1:10: WARNING: `plugin.yaml` file is missing in the plugins module directory, so it will have no effect when enabled
+--- stdout
+╭──────┬──────────────────┬───────────────────╮
+│ Name │ Type             │ Short description │
+├──────┼──────────────────┼───────────────────┤
+│ a    │ jvm/lib          │                   │
+├──────┼──────────────────┼───────────────────┤
+│ p    │ jvm/amper-plugin │                   │
+╰──────┴──────────────────┴───────────────────╯

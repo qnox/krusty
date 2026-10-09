@@ -1,0 +1,33 @@
+The table is sorted by module name.
+--- project.yaml
+modules: [libs/B, libs/a, z, "y/*"]
+--- libs/B/module.yaml
+product: jvm/lib
+--- libs/a/module.yaml
+product: jvm/lib
+--- z/module.yaml
+product: jvm/lib
+--- y/_x/module.yaml
+product: jvm/lib
+--- y/Ab/module.yaml
+product: jvm/lib
+--- module.yaml
+product: jvm/app
+--- expected
+project.yaml:1:10: WEAK WARNING: It is recommended to sort the `modules` list alphabetically. This reduces the chance of Git conflicts and makes it easier to visually locate a module in the list.
+--- stdout
+╭─────────┬─────────┬───────────────────╮
+│ Name    │ Type    │ Short description │
+├─────────┼─────────┼───────────────────┤
+│ Ab      │ jvm/lib │                   │
+├─────────┼─────────┼───────────────────┤
+│ B       │ jvm/lib │                   │
+├─────────┼─────────┼───────────────────┤
+│ _x      │ jvm/lib │                   │
+├─────────┼─────────┼───────────────────┤
+│ a       │ jvm/lib │                   │
+├─────────┼─────────┼───────────────────┤
+│ project │ jvm/app │                   │
+├─────────┼─────────┼───────────────────┤
+│ z       │ jvm/lib │                   │
+╰─────────┴─────────┴───────────────────╯

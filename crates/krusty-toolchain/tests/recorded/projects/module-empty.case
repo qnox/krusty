@@ -1,0 +1,6 @@
+An empty module file.
+--- project.yaml
+modules: [a]
+--- a/module.yaml
+--- expected
+a/module.yaml: ERROR: Product type definition is missing. Define a product using a `product:` declaration.

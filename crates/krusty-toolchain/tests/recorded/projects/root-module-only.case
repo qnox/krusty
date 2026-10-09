@@ -1,0 +1,11 @@
+A root module and an empty project file.
+--- project.yaml
+--- module.yaml
+product: jvm/lib
+--- expected
+--- stdout
+╭─────────┬─────────┬───────────────────╮
+│ Name    │ Type    │ Short description │
+├─────────┼─────────┼───────────────────┤
+│ project │ jvm/lib │                   │
+╰─────────┴─────────┴───────────────────╯

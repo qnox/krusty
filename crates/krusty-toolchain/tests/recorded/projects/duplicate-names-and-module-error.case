@@ -1,0 +1,11 @@
+A name clash and a module file error.
+--- project.yaml
+modules: [a/x, b/x, c]
+--- a/x/module.yaml
+product: jvm/lib
+--- b/x/module.yaml
+product: jvm/lib
+--- c/module.yaml
+product: jvm/foo
+--- expected
+c/module.yaml:1:10: ERROR: Unknown value `jvm/foo`. Expected one of: [`lib`, `jvm/app`, `jvm/lib`, `kmp/lib`, `jvm/amper-plugin`, `android/app`, `ios/app`, `macos/app`, `linux/app`, `windows/app`, `wasm-js/app`, `wasm-wasi/app`, `js/app`]

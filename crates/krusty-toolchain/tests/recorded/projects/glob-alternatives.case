@@ -1,0 +1,27 @@
+Groups and classes.
+--- project.yaml
+modules: ["libs/{a,b}", "libs/[c-d]"]
+--- libs/a/module.yaml
+product: jvm/lib
+--- libs/b/module.yaml
+product: jvm/lib
+--- libs/c/module.yaml
+product: jvm/lib
+--- libs/d/module.yaml
+product: jvm/lib
+--- libs/e/module.yaml
+product: jvm/lib
+--- expected
+project.yaml:1:10: WEAK WARNING: It is recommended to sort the `modules` list alphabetically. This reduces the chance of Git conflicts and makes it easier to visually locate a module in the list.
+--- stdout
+╭──────┬─────────┬───────────────────╮
+│ Name │ Type    │ Short description │
+├──────┼─────────┼───────────────────┤
+│ a    │ jvm/lib │                   │
+├──────┼─────────┼───────────────────┤
+│ b    │ jvm/lib │                   │
+├──────┼─────────┼───────────────────┤
+│ c    │ jvm/lib │                   │
+├──────┼─────────┼───────────────────┤
+│ d    │ jvm/lib │                   │
+╰──────┴─────────┴───────────────────╯

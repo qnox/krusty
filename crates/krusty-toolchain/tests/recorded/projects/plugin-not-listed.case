@@ -1,0 +1,10 @@
+A plugin module the project does not list.
+--- project.yaml
+modules: [libs/a]
+plugins: [./plugins/p]
+--- libs/a/module.yaml
+product: jvm/lib
+--- plugins/p/module.yaml
+product: jvm/amper-plugin
+--- expected
+project.yaml:2:11: ERROR: Plugin module `plugins/p` is not included in the project `modules` list

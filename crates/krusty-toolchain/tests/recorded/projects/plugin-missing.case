@@ -1,0 +1,8 @@
+A plugin path with no module.
+--- project.yaml
+modules: [libs/a]
+plugins: [./plugins/p]
+--- libs/a/module.yaml
+product: jvm/lib
+--- expected
+project.yaml:2:11: ERROR: Plugin module `plugins/p` is not found

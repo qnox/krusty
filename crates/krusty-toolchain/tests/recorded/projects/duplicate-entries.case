@@ -1,0 +1,14 @@
+The same module listed twice in different spellings.
+--- project.yaml
+modules:
+  - ./libs/a
+  - libs/a
+--- libs/a/module.yaml
+product: jvm/lib
+--- expected
+--- stdout
+╭──────┬─────────┬───────────────────╮
+│ Name │ Type    │ Short description │
+├──────┼─────────┼───────────────────┤
+│ a    │ jvm/lib │                   │
+╰──────┴─────────┴───────────────────╯

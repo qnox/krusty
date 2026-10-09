@@ -1,0 +1,7 @@
+Anchors are refused.
+--- project.yaml
+modules: &list [libs/a]
+--- libs/a/module.yaml
+product: jvm/lib
+--- expected
+project.yaml:1:10: ERROR: YAML anchors/aliases are not supported in Kotlin project files

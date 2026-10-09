@@ -1,0 +1,9 @@
+A JVM product with another platform.
+--- project.yaml
+modules: [a]
+--- a/module.yaml
+product:
+  type: jvm/lib
+  platforms: [jvm, android]
+--- expected
+a/module.yaml:3:20: ERROR: Product type `jvm/lib` does not support platform `android`.\nSupported platforms are: [`jvm`].

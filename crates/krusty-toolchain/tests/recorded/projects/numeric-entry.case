@@ -1,0 +1,12 @@
+A path that YAML would read as a number.
+--- project.yaml
+modules: [1]
+--- 1/module.yaml
+product: jvm/lib
+--- expected
+--- stdout
+╭──────┬─────────┬───────────────────╮
+│ Name │ Type    │ Short description │
+├──────┼─────────┼───────────────────┤
+│ 1    │ jvm/lib │                   │
+╰──────┴─────────┴───────────────────╯

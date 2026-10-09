@@ -1,0 +1,25 @@
+Descriptions: the table shows the first line.
+--- project.yaml
+modules: [a, b, c]
+--- a/module.yaml
+product: jvm/lib
+description: |
+  First line
+  second line
+--- b/module.yaml
+product: jvm/app
+description: A longer description of b
+--- c/module.yaml
+product: jvm/lib
+description: ''
+--- expected
+--- stdout
+╭──────┬─────────┬───────────────────────────╮
+│ Name │ Type    │ Short description         │
+├──────┼─────────┼───────────────────────────┤
+│ a    │ jvm/lib │ First line                │
+├──────┼─────────┼───────────────────────────┤
+│ b    │ jvm/app │ A longer description of b │
+├──────┼─────────┼───────────────────────────┤
+│ c    │ jvm/lib │                           │
+╰──────┴─────────┴───────────────────────────╯

@@ -1,0 +1,403 @@
+libs/*	libs/*	-/a/./	-/-b/-/	-b/	-a-b/^/-/b-	--//b/^/^	--.a/^-^	-a	-b	-a/b	+libs/a	+libs/b	-x/a/y
+./libs/*	libs/*	-b/a-	-^aa/ba/-b	-b////b//.	-.	--../b-	-a-/a-./b-	-a	-b	-a/b	+libs/a	+libs/b	-x/a/y
+libs//a/	libs/a	--./.^/.	-a.//^a.//b	-a-/^--/.a	-a.b/^b^	-a/.-./^/	--b./.	-a	-b	-a/b	+libs/a	-libs/b	-x/a/y
+libs/./a/.	libs/a	-b/^	-^//a	-b//b-	-^^	-b/bba/^^	-/	-a	-b	-a/b	+libs/a	-libs/b	-x/a/y
+libs/x/../a	libs/a	-././-.	-./////a/.	-/	--a/./^^-	-a	-^/./a/.aa	-a	-b	-a/b	+libs/a	-libs/b	-x/a/y
+../a	../a	-b./-//-^	-//-a	-^//	-//b--/.b	-^/-^	-..a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a/../../b	../b	-^a^/b	-^//a-^	-.b/b./-b	--/aaa/-^	-aa/a^/^-	-a/b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+x/..		-^^/a	-aa-/-/^/	-^/b	--b/a/b	-./-a/-.	-^./	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+./		-./-	-^a./^a.	-^/.--	-./^/b^b	-b	-^.////-.a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+/	/	-.^./--b/^	-/./.^	-aa-	-^	-//b/.	--.b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a/./././b	a/b	-a^	-b/-/.^	-^-^	--./a	-^-^/-b./^b	-./aa/-^b	-a	-b	+a/b	-libs/a	-libs/b	-x/a/y
+./.a	.a	-a/-/-	-./b-/b^	-.b^/.	-^ba/-^	--b///	--//^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.../..		-aa/b/b/	--/^	-/aa/bb-	-//^/-	-/b-	-/b-/^/a^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*/..		-/a//-/-	-a^/	-b//	-^b^//.^	-b/^//b	-^--	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+libs/[bc]*	libs/[bc]*	-ab//	-./a	-^a//-	-bb^	-^a./b-/-/a	-b-//^.a	-a	-b	-a/b	-libs/a	+libs/b	-x/a/y
+libs/{a,b}/*	libs/{a,b}/*	-.a	-a/a/.	-ba^/a	--a^/-.^	-^/a/a^/	-a/-/b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+libs/{a	libs/{a	!Missing '} near index 6\nlibs/{a\n      ^
+libs/[a	libs/[a	!Missing '] near index 6\nlibs/[a\n      ^
+libs/[z-a]	libs/[z-a]	!Invalid range near index 6\nlibs/[z-a]\n      ^
+a\	a\	!No character to escape near index 1\na\\\n ^
+{a,{b}}	{a,{b}}	!Cannot nest groups near index 3\n{a,{b}}\n   ^
+[a/b]	[a/b]	!Explicit 'name separator' in class near index 2\n[a/b]\n  ^
+libs/[a-]	libs/[a-]	-a///-b	-bb	-b./././	-a	-^b/	--a//ba^	-a	-b	-a/b	+libs/a	-libs/b	-x/a/y
+libs/[-a]	libs/[-a]	-a^/	--	-b/a	-./^.^	-.-	-b-^	-a	-b	-a/b	+libs/a	-libs/b	-x/a/y
+libs/[^a]	libs/[^a]	-.-//.	--/^/-^.	-.	-b/b	--ab/.-a	--.-/.	-a	-b	-a/b	+libs/a	-libs/b	-x/a/y
+libs/[!a]	libs/[!a]	-a	-a/a	-bb/-a	-ba/^//	-..^//b./^a	-b.//bb//-a	-a	-b	-a/b	-libs/a	+libs/b	-x/a/y
+libs/[a-c]x	libs/[a-c]x	--//b	-.b//-//b/	-a.///-/	-^/a	-/^/b	-/./.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a\*	a\*	-a	-.///.^	-./aa/-^	-.a/-./^	-a.^/aa	-/b/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{a,b}	{a,b}	-/^///.	-b^a	-^/^	-/	-^^/b	-^	+a	+b	-a/b	-libs/a	-libs/b	-x/a/y
+a}	a}	-^--	-b/a/.	-b-/ba/^/	-a.//b/b/	-//	--.b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a,b	a,b	--a//a/a^b	-a//a	-ba//-a	-^/a/.	-a	-a-///a-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*	*	--/^	+^b	+b-^	+-a-	+^	-.b/^/-^	+a	+b	-a/b	-libs/a	-libs/b	-x/a/y
+**	**	+.//b-/.	+--/.-/^a	+/-/	+./^a-/^	+a	+a/-ab/-	+a	+b	+a/b	+libs/a	+libs/b	+x/a/y
+x/*/y	x/*/y	-./b.//	--///.^/a^	-.ba	-./a/-.	-/a/a.b/^	-a//./a	-a	-b	-a/b	-libs/a	-libs/b	+x/a/y
+?	?	-./.	--//b--/aa	--b./^./^/b	-a/./ba^	-^../-./.b.	-a/a-/.^^	+a	+b	-a/b	-libs/a	-libs/b	-x/a/y
+[\]	[\]	-.ab/aa^	-///-^//	-.-/--	-/-^/^/	-b.	-aa^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[&&a]	[&&a]	-^^b/.a^/-a	-.b./-//	-.	-.-//a	-a/-/b.^	-^.b/^aa/b	+a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[[]	[[]	-b	-/b/a-/b-	-./.	-ba.	-b/./b//	-b/b/b/-.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.*	.*	-a	-.ba//b./a	--b/b-/.ab	-^a/b	-^//-b./b	-b/-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a+b	a+b	-.^^/-	-a/^ab	--/.//	-^/ab///-	-a/./---	--/^^//^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a(b)|c	a(b)|c	-a^	-b^-/b	-^/^/-b	-b//a^/-	-^^	-//./b^-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+$^	$^	-a/a//.-a	-b	--//.a/^-^	-/./^.	-a/	-/--//^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{,a}	{,a}	-//aa/^^b	-b/a^a	---//-	--b	-/^/^	-/	+a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{a,}	{a,}	-a..	--/^/-^	+a	-b/-b.	-/-a/../bab	-//a/a^//ab	+a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{}	{}	-a//a^/.-^	-^/b	-^-/-^///	--//-	--..	-^-/.//-/.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a/{b,c/d}	a/{b,c/d}	-^./ab	-//^/b/ab	-^//	-a/-^/aa/	-b/.-//^./	-^a././^/	-a	-b	+a/b	-libs/a	-libs/b	-x/a/y
+[!-]	[!-]	-a^^/^^	--/a..	--/bb^	-^a/b	-b/a	-^b/-.a	+a	+b	-a/b	-libs/a	-libs/b	-x/a/y
+[a-b-c]	[a-b-c]	!Invalid range near index 4\n[a-b-c]\n    ^
+[--a]	[--a]	!Invalid range near index 2\n[--a]\n  ^
+[a--]	[a--]	!Invalid range near index 1\n[a--]\n ^
+\]/?	\]/?	-.	-b-b///ab	-a/.a//..	-^-/^aa/^	-b-.	--b^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.{	.{	!Missing '} near index 1\n.{\n ^
+\\,.b]^{	\\,.b]^{	!Missing '} near index 7\n\\\\,.b]^{\n       ^
+*?*^!	*?*^!	-.bb////.a	-/-b/.a/bb	-/-/	-a/./-	-///a	--ab	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[]\{^a\	[]\{^a\	!No character to escape near index 6\n[]\\{^a\\\n      ^
+[.][.-!\	[.][.-!\	!Invalid range near index 4\n[.][.-!\\\n    ^
+\{}?\	\{}?\	!No character to escape near index 4\n\\{}?\\\n    ^
+??.][\b}	??.][\b}	!Missing '] near index 7\n??.][\\b}\n       ^
+^]!-	^]!-	--	-a/^-/a^b	-b./a/b-b	-a-	--	-a^/a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[![{b,	[![{b,	!Missing '] near index 5\n[![{b,\n     ^
+bb[-a[[	bb[-a[[	!Missing '] near index 6\nbb[-a[[\n      ^
+a!?{	a!?{	!Missing '} near index 3\na!?{\n   ^
+b*}{\/	b*}{\	!Missing '} near index 5\nb*}{\\/\n     ^
+!,aa[,	!,aa[,	!Missing '] near index 5\n!,aa[,\n     ^
+!{b.^*	!{b.^*	!Missing '} near index 5\n!{b.^*\n     ^
+b{	b{	!Missing '} near index 1\nb{\n ^
+,-[	,-[	!Missing '] near index 2\n,-[\n  ^
+?ab,	?ab,	-/^-/../a/	-../	-b/a/	-.b./a	-.--	-/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^}**.\?	^}**.\?	--/b/--.	-^--	-^ab//^.//	-/.	-b./b/-/.	---/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.?[{	.?[{	!Missing '] near index 3\n.?[{\n   ^
+][}b	][}b	!Missing '] near index 3\n][}b\n   ^
+a}?	a}?	-b/a/a^a/ab/	--b	-//aa/a^b	-^.b	--	-^//^b//b-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+/\\}?{!}	/\\}?{!}	---	-^b-/-	-b	-/-/^	-//.b//^^	-/ab/-/^^a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+?-]	?-]	-^	-/^a	--/	-///aa/-.b	-ba-	-b/a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.!-!*!ba	.!-!*!ba	--/	-^b/b-^//	-^b/	-/a./^^	-/^/.^/^/	-b/a/a/^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^*	^*	-b^/.b	-^//-a/a	-.	-b/^-//^	--/^^-/a	-/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}.]	}.]	--//	-a-^	-/ab/b/	-/a	-a/^.-/a^	--.^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+]-]a[a^	]-]a[a^	!Missing '] near index 6\n]-]a[a^\n      ^
+}}].!ab]	}}].!ab]	-^/-	-^-	-^.a/ba/a	-^./^-/	--a/.a./...	-ab/.b^/-a^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^^-,!b]\	^^-,!b]\	!No character to escape near index 7\n^^-,!b]\\\n       ^
+.?!\-	.?!\-	-a/a	-.-/---	-./-/b-//-	-b	-.^/	-^/a.//^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}/.	}	-a^	--/^^//.	-/	--b/-b	-b/^-^	-.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+!]*,^?{	!]*,^?{	!Missing '} near index 6\n!]*,^?{\n      ^
+-ba	-ba	-a//^/	-b/^/a-	-/-//	-aab/-.//^/	--/-/-/^-/	-a--/-/b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+??-	??-	-./^	-/	-a//b/ab	-b/	-/a/./^^a	-^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[^/a}\	[^/a}\	!Explicit 'name separator' in class near index 2\n[^/a}\\\n  ^
+/,}-!}[!	/,}-!}[!	!Missing '] near index 7\n/,}-!}[!\n       ^
+**.a.a.	**.a.a.	-.a.	-aa	-bba/^/.	-/b.	--b/a.	-^a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\	\	!No character to escape near index 0\n\\\n^
+]{	]{	!Missing '} near index 1\n]{\n ^
+\,	\,	-bb-	-ba	-^/^	-^./--b	-a-//b-	--.//-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}{,.	}{,.	!Missing '} near index 3\n}{,.\n   ^
+?/	?	+a//	-.b	-ba	+a/	-./ba-/.a/	-aa/	+a	+b	-a/b	-libs/a	-libs/b	-x/a/y
+]*\![	]*\![	!Missing '] near index 4\n]*\\![\n    ^
+?b	?b	--a	-a^-//	-b	-/b//..^	-b^	--//bb	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+,!/.	,!	-aa/	-^^-/--	-ba^	--a	-^-./a.//^.	-.//	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-[./\	-[./\	!Explicit 'name separator' in class near index 3\n-[./\\\n   ^
+b-...-,b	b-...-,b	--a./--^/.^	-a/b-/a	-a/././	-a/a^/-.	-b	-^a//-/.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{**]!/	{**]!	!Missing '} near index 5\n{**]!/\n     ^
+-b]}a[/?	-b]}a[/?	!Explicit 'name separator' in class near index 6\n-b]}a[/?\n      ^
+^,*.-,-	^,*.-,-	-a-	-bb	-b^	-a///	-./b	-//a..	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\*]	\*]	-/a	-^ba//.-/^-	--a/.^	-^-/./.	-.//////	--.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+,	,	-.-b/^ba	-.a-	-a/^	-.b	--a/^ab/b	--/b-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+--{.-^a*	--{.-^a*	!Missing '} near index 7\n--{.-^a*\n       ^
+^!?^-/	^!?^-	-.a/.bb//	-b//^/.	--//b/	--//b	-.../^/^^^	-a.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+]^b.[	]^b.[	!Missing '] near index 4\n]^b.[\n    ^
+b\,*.!	b\,*.!	--/a-b/^	-a.b//-^/^^	---/a/b-	--./^	--/b	-a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-	-	-//--/.	-a//b.	--//./^b.	-a	-ab//b/./b	-b//a///b.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^/{	^/{	!Missing '} near index 2\n^/{\n  ^
+-*]}\*	-*]}\*	-^	--/-^	--a^/-/-/.	-^/a	-aaa/^//	-//^b^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{a\{b!	{a\{b!	!Missing '} near index 5\n{a\\{b!\n     ^
+*,}a]!^	*,}a]!^	-.-////	-.-a/^.	-^	-//-/-/a./	-./^/b/	-a///^/..b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-!./*-	-!./*-	-^^	-b	-/b//.-//-/	-/-a	-b/b	-//-/-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\a[[--![	\a[[--![	!Invalid range near index 3\n\\a[[--![\n   ^
+?a!/[.}	?a!/[.}	!Missing '] near index 6\n?a!/[.}\n      ^
+,*^a	,*^a	-^/.^	-/	-bb/^	-a-	--	-^///^-/b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+?!	?!	-^/..	-^/^a	-a/-//abb	-.b./^a/a-	--.^/-	-^/^-/.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{a!aa}	{a!aa}	-.a.	-/^b/-b/bb	-/.a/.^//^-a	-.-	-b^/	-^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+?,	?,	-bb./b//ab	-////b/-b	-^/	-^-a	--/.^	-^^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*-}*,\	*-}*,\	!No character to escape near index 5\n*-}*,\\\n     ^
+{	{	!Missing '} near index 0\n{\n^
+,,-[\b	,,-[\b	!Missing '] near index 5\n,,-[\\b\n     ^
+]]\{\}[	]]\{\}[	!Missing '] near index 6\n]]\\{\\}[\n      ^
+..	..	-b^//.//-	-^/^^	-a	-.ba/b	-./b^/-^^	--/-/bb	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+?a.-aba	?a.-aba	-../^	-^/b	---a	--a-/-b.	-.-/b^a	-b/^/a/-a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*b{	*b{	!Missing '} near index 2\n*b{\n  ^
+*.--]/	*.--]	-b^//ab	--/^.	--^^/a^/^	-/	-//^ba/-aa	-.^//./.b-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}]\?!?!	}]\?!?!	-a^////^.	-^--/a	--^-//	-/.^	--a	--	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\\-}	\\-}	-/a./b/--	-/	--^b	-./	--a	-^-^/.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\^b}{.	\^b}{.	!Missing '} near index 5\n\\^b}{.\n     ^
+,}	,}	-b/ab//bb	-a^/b///b/	--ba//	-^/./^-a/^.^	-.b//a/-^	-^/b/b--	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^.a*/,{	^.a*/,{	!Missing '} near index 6\n^.a*/,{\n      ^
+b?-	b?-	-^ab	-.a	-//-^	-^.	-b/-/.^	-aa	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^^	^^	-//b.^	-./a-^	-a/	-aa^	--b/-/.	-b/.^///-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*!	*!	-^ab/bb	-bb^/-^	-//a^	-^-//.bb/.a	-^/^	--/a^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[b	[b	!Missing '] near index 1\n[b\n ^
+,[]	,[]	!Unclosed character class near index 12\n^,[[^/]&&[]]$\n            ^
+\b-	\b-	-b./-^a	-^	-ba/b-	-^	--/b-/a	-///b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-aa?}a	-aa?}a	-./b/.a	-b/b.-	-/-a/bb	-b/^/-/	-a//--/	-^^/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}^	}^	--/aa/^.b	----/^/.aa	--b^	-/.//a/a-^	-^a/.-b	---./^a/ba	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+b-{?	b-{?	!Missing '} near index 3\nb-{?\n   ^
+[[,],\	[[,],\	!No character to escape near index 5\n[[,],\\\n     ^
+*.	*.	-/.^/.--/^a/	-b^.//a^/.^	-^/^	-.	-b/b/b-b	-^b^/^^^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[/.?b}^[	[/.?b}^[	!Explicit 'name separator' in class near index 1\n[/.?b}^[\n ^
+,[*	,[*	!Missing '] near index 2\n,[*\n  ^
+*^a.^	*^a.^	-b	-^-./a	-a/.-	-b	-ba	-a-//	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[/?{-^{	[/?{-^{	!Explicit 'name separator' in class near index 1\n[/?{-^{\n ^
+-*,}!!	-*,}!!	-b/-/-/	-ba//-.	-ba.	-ba/-/b^.	-/bb/-	-./..^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+./-{{	-{{	!Cannot nest groups near index 4\n./-{{\n    ^
+}.!?*![b	}.!?*![b	!Missing '] near index 7\n}.!?*![b\n       ^
+\}.[}]	\}.[}]	-a/-/.ab	-/-b/-^^/a^a	-ba	--.b/a-/a.-	--b	-a^///^-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+/\}*	/\}*	--/ba/	-b/-a-/.bb	-.^^	-b	--/.ab//a	-b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+b,^\	b,^\	!No character to escape near index 3\nb,^\\\n   ^
+,]\}./?{	,]\}./?{	!Missing '} near index 7\n,]\\}./?{\n       ^
+!*^{],[*	!*^{],[*	!Missing '] near index 7\n!*^{],[*\n       ^
+[[\-	[[\-	!Missing '] near index 4\n[[\\-
+/[^	/[^	!Missing '] near index 2\n/[^\n  ^
+^/!a!	^/!a!	-/	-/	-ab-/.^	-b/^/.^/ab	-.	-a^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{b\{[[	{b\{[[	!Missing '] near index 5\n{b\\{[[\n     ^
+}{b\	}{b\	!No character to escape near index 3\n}{b\\\n   ^
+b[!b,	b[!b,	!Missing '] near index 4\nb[!b,\n    ^
+!}	!}	-//	-.-a	-a/-/^b/b	-^//	--a	-//a//.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[}^]]	[}^]]	--.	-/a	-^//-	-b	--.a	-./a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\?	\?	-^b/^./^--	-^/-b-	-/	--/..a/b	-b^	-a/^a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a	a	-././b	-b//ba/-b	-b.	-a^-/./^	-//.-b/a^	-/^////^b	+a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+b./.^\*?	b./.^\*?	-a/-	-.^b/b-	-.-/-/.	-a	-/^a	-/^/--.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+,ba!--{	,ba!--{	!Missing '} near index 6\n,ba!--{\n      ^
+,*./}^	,*./}^	-b^/a.b	-^b/-^a	-ab/b	-b^/.b	-/-//^a	-/^/-/-a^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^	^	-^^/b/b	-^-.	-bb/a/^//	-aa//^/^^/	-/a//	-^aa	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a*{	a*{	!Missing '} near index 2\na*{\n  ^
+?!a*??	?!a*??	-/b/a/	-a////^a	-//.	-./^-/-^.	-^/./	-/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.		-/.a/a/b.	+.	--^a	-a/a/^-.	-//..	-./b/^^b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a/	a	--	--//a^	-^-^	-/	-b-/a	-a^//-//	+a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*a}/	*a}	-.b.//.-	--b.	-.	-.b/^/aa-	-./-^^	-/./a^/^^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[b^,{,\	[b^,{,\	!Missing '] near index 6\n[b^,{,\\\n      ^
+]}!*!\]	]}!*!\]	-/	-/.^///-	--/aba//-	-/^	-./--/^b.	-./b-/--	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+!-!]*b}?	!-!]*b}?	-a../a/b--	-a/a-/b.	-/b/b-//b.^	-b/^./-	--.	--^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+/!	/!	-a/-a-//	-b^-/---	-^a/a^/.ab	-a^/a-	-b/.-/.^a	-a/b^a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[	[	!Missing '] near index 0\n[\n^
+*}{b	*}{b	!Missing '} near index 3\n*}{b\n   ^
+{!ab/,	{!ab/,	!Missing '} near index 5\n{!ab/,\n     ^
+\}!\-[{	\}!\-[{	!Missing '] near index 6\n\\}!\\-[{\n      ^
+.\	.\	!No character to escape near index 1\n.\\\n ^
+/a	/a	-^/-/a^-/b	-.	--.//-/^.	--a/^/^	-b/^/a/a^^	-.-/b//^.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}--	}--	-//-	-b	-../aa./b.^	--.//^-	-^a/a^/-	---	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*/	*	-//.b	-aa//a-	-b/^/.-^	+aa/.	+^	-b-//b/b^b	+a	+b	-a/b	-libs/a	-libs/b	-x/a/y
+!a]/^\\	!a]/^\\	-^//a	-/	-//-.	-./.a	-^bb/^b././a	---a//ab	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+?a-b?!	?a-b?!	--/^a-	--/-/^bb	-a/	-^^^	-b	-^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+},,*]b	},,*]b	-.^/b	-b/^/a	--/.	-.^//--^//	-a^	-^/a///.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[/}]	[/}]	!Explicit 'name separator' in class near index 1\n[/}]\n ^
+*-}]	*-}]	-a/a-	---/.ab/bb	-^a/./a	-///^.a	--//^b/.	--.//a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\a,a	\a,a	-b.a/b	-^//.^.	---/.ba	-a^^/^^./-.-	--/^	-/-/b^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-}/ab?	-}/ab?	-b/b/-a	-.	--/-/.-/-a-	-.^/-/-//a	-.	-/bb//-a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-{a*	-{a*	!Missing '} near index 3\n-{a*\n   ^
+^a{*	^a{*	!Missing '} near index 3\n^a{*\n   ^
+a.,,^	a.,,^	-^/b-	-b///ab	-^	-a	-b./^b/.	-b/b/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+!?}	!?}	-b/baa/b-b	-b.//aa	-^/b/	--a^/..b	-^a/^	-^b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+]b[!!*?]	]b[!!*?]	-ab	-b/^/./-	-/	-^//	--.-/aa.	-a^/^-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.\b,{[-	.\b,{[-	!Missing '] near index 6\n.\\b,{[-\n      ^
+/\\}-	/\\}-	-b^/^./b-b	-aab//	--^/b^b	-^a/ab	--^^/b/a--	-^a///.//b.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+/[},-	/[},-	!Missing '] near index 5\n/[},-
+\\/{	\\/{	!Missing '} near index 3\n\\\\/{\n   ^
+!b?!!*?-	!b?!!*?-	-b/-.	-a	--/b/b/.a-	-/	-^//a/	-b-////-/b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*,b	*,b	-^/-	-./.b	-b-	--/./^^-	-.	---/.-/-/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+]	]	-^--/a/.//^	-b./.^-/^	-//b	-^a/^b	-/^a/-	-aa/.a//b.b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+b/-	b/-	-a	--/	-a	-//^^	-.//..-/^bb	-^//-b/a-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}/]?b	}/]?b	-a	-.-/bb//	-/-//./.^	-^ab	-.a//.-/ba/	-/^-/.^-/^.b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-!?[\^	-!?[\^	!Missing '] near index 5\n-!?[\\^\n     ^
+b!	b!	-^ba/.ab	-b/^b^/b.	-//.b/^b	-b^	-b	-./b/.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+]/\/[*,a	]/\/[*,a	!Missing '] near index 7\n]/\\/[*,a\n       ^
+\}}\.,,	\}}\.,,	-a.	-a-b	-a^	-/.//-/-/a-	-^bb/-^a/.	-a-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+/\[-b{	/\[-b{	!Missing '} near index 5\n/\\[-b{\n     ^
+b?*a*-*	b?*a*-*	-^.-/^/	-////b	-^/--b	---a/b.^	-^/b/.	-ba./bb./ab.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^-?.]?	^-?.]?	-./	-/	-b.a/a^	-^././-//^	-/^/b/	-//^//aa	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a]\{/-	a]\{/-	--^	-^-	--/b-b	-^/^^	-b.//^.//b.	-^/b-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+--{b}	--{b}	-^-b/-^//-	-^//.//	-./ba-//a	-^^-	-b	-.aa/.//	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+?^	?^	-../	-.a/b-.	-a-	--	-./ab/	--b/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\a]]a-,	\a]]a-,	-aa/.//	-a	-a.b/^	--a//b/-a	--	--^b//^b/a^b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{/!ab-?}	{/!ab-?}	-//^.^/-/	-/	--//.	-//b//b-/.	-^	-./-.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+/^abb[-	/^abb[-	!Missing '] near index 6\n/^abb[-\n      ^
+\.a[	\.a[	!Missing '] near index 3\n\\.a[\n   ^
+-/.	-	-//.^	+-/	-^b.	-b^//-	-^/-/-^/	-a/b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*.^\**-,	*.^\**-,	-/-b/.a//-.	--a^/-bb	--a//ba/-^	-../-/.b	-b.b/b///b	-b/.-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\!a!b	\!a!b	-ab	-^^/^.a//	-.b-	--//-a.	-^/a	-.-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+!^],,]\!	!^],,]\!	-a-/ba	-b	-/	-a.-/./	-.//b//bb	-^//	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+]-\}bb.	]-\}bb.	--	--/a/.b^	-//.	-a/	-ab	-ab/bba	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+ab,[-b{b	ab,[-b{b	!Missing '] near index 7\nab,[-b{b\n       ^
+b[a},{.a	b[a},{.a	!Missing '] near index 7\nb[a},{.a\n       ^
+b-a[]*	b-a[]*	!Unclosed character class near index 19\n^b-a[[^/]&&[]][^/]*$\n                   ^
+{{[\b^./	{{[\b^.	!Cannot nest groups near index 1\n{{[\\b^./\n ^
+.}/}/\*[	.}/}/\*[	!Missing '] near index 7\n.}/}/\\*[\n       ^
+{?*/	{?*	!Missing '} near index 3\n{?*/\n   ^
+-[^-]?[}	-[^-]?[}	!Invalid range near index 3\n-[^-]?[}\n   ^
+]/	]	-a//b	-.aa/^^b/ab	--.	-/.	--	-a/b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{]]	{]]	!Missing '} near index 2\n{]]\n  ^
+.-?.^-	.-?.^-	-^.b/^//bb	--	-.^/b-a/-.^	-^	-a	-b-/^.b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^!**a]a-	^!**a]a-	--	-a/..	-//-	--//b.	-.//-^	--b/^/^-.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+!*	!*	-ab/^	-a	-/-b////	-b///	-a/b	--	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+?{!]\b,.	?{!]\b,.	!Missing '} near index 7\n?{!]\\b,.\n       ^
+*.!	*.!	-^/../b/	-b.	-//-.//a^	-a	-b/b/a/^-	-/-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+b^^!?b/	b^^!?b	-.	-^//	-^/^	-a.^/^	-/-/^/-/^^	-^^//	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.*/	.*	-a../^	--///.	-a--/b.//^	-^a-	-a//-^	-//	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a^!b[	a^!b[	!Missing '] near index 4\na^!b[\n    ^
+,*}*/,	,*}*/,	-.^/^//-^-	---.//-	--a/b////	-b/./^-	-^^////	--a/.^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+},ba,]	},ba,]	--/^	--/a^/	-.//^b	-a	-.../.^-	-/a^/ab	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*b-[\	*b-[\	!Missing '] near index 4\n*b-[\\\n    ^
+?/.^}]\\	?/.^}]\\	--/^^/	-.^/-///	-b-	-b	-^./^b^/-a	-^a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}.	}.	-..^	-//b.	-/	-a/^///.^b	-a.a	-//^/a^^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}.![!!	}.![!!	!Missing '] near index 5\n}.![!!\n     ^
+\[	\[	-./	-/b./.a/.a	---	-./^/a	---^	-^/a/./a^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a[{b/	a[{b	!Explicit 'name separator' in class near index 4\na[{b/\n    ^
+b/a	b/a	-//-	-/-	-///a-	-b	-^./b./	-a/bb./b/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+?*{!{[	?*{!{[	!Cannot nest groups near index 4\n?*{!{[\n    ^
+?}\?,]	?}\?,]	-a/	-//.//b	-a//^a/ba	-^/	--bb	-a/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*/\-!b	*/\-!b	--.^/./	-a	-b..	-./--	-//a////a/	-^.^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-],}a	-],}a	-.^./a	-.ba/.b./^	--/b-/.^b	-//.	-.-	-.a^/b-/^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-,.?	-,.?	-^/^	-/./^a/b.	--/^	--a/b	-^/	-./-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+b?}}/{/	b?}}/{	!Missing '} near index 6\nb?}}/{/\n      ^
+^\/^-]?[	^\/^-]?[	!Missing '] near index 7\n^\\/^-]?[\n       ^
+[^]	[^]	-b	-^^//-.//^^	-/-	-b/^/	-b-b///	+^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+,\?bb*?	,\?bb*?	-^b^//a^	-aa/-/a^	-^-.//a-//a	-b.	-.^b/ba-	-/.^/.a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{{.!	{{.!	!Cannot nest groups near index 1\n{{.!\n ^
+?]/],.	?]/],.	-...	-//..b	-/^^//..	-//a./b	--^b/bb/^	-b///a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+!^	!^	--/b	--b/	-^/a/a-/-	-^..	--///b/-	-/.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a}*]\?]-	a}*]\?]-	-b^^	-.a	--.a/-	-b-/.a.	-a/./^.	-../-^-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+/\![\/	/\![\	!Explicit 'name separator' in class near index 5\n/\\![\\/\n     ^
+]?	]?	-/b	-.	--.^/bb	-^-/-///	-b-	--/-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\a-?/,^{	\a-?/,^{	!Missing '} near index 7\n\\a-?/,^{\n       ^
+./!?	!?	-/b.	--/ba/	-/././^//b-	-/	-a//-	-^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.a/a\	.a/a\	!No character to escape near index 4\n.a/a\\\n    ^
+//	/	-///-//-b	-b/	-a-^	-b/aa	-a^-/a	-//b/b^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^/-**-]	^/-**-]	-a.	-b/aaa	-b./^	-.-a///b	-bb-	-^.b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+/?*-b	/?*-b	-/.-/a-/a.-	--.-/-	-ba/--/^a	-/	-a	-.b/-//^a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+,]b[}?	,]b[}?	!Missing '] near index 5\n,]b[}?\n     ^
+^a^].a}?	^a^].a}?	-/.^	-//a/^	-^/b/b	-.	-b^^/--/a	-/^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.^]^[].b	.^]^[].b	!Unclosed character class near index 22\n^\\.\\^\\]\\^[[^/]&&[]]\\.b$\n                      ^
+],a!b	],a!b	-a^././/.b	-/^/b/.	-//.-./a	--/./^	-.a//--a/.-b	-^ba//b-/.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+],b{.	],b{.	!Missing '} near index 4\n],b{.\n    ^
+.]^-	.]^-	-.///-	-//.b/b	-aa.	-/-/^b.	-/^.	-b/-.//b^.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+!b!-	!b!-	-^-/-	-bb-/bab/.ab	--/-b^	--b	--/a/b^	-b^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^.}[	^.}[	!Missing '] near index 3\n^.}[\n   ^
+/]	/]	-^	-^^	-^b./^bb/^^/	-^/.a	--.	-.//b-/b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}!	}!	-bb^	-^/^^b	-^a/b-	-b/.	-b-/b/aa^	-//	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}!b	}!b	-./a/a.	-b	-b^-/aa	--.b	-b.	-^a/-/b/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+,\a[--*{	,\a[--*{	!Invalid range near index 5\n,\\a[--*{\n     ^
+!]]!^\	!]]!^\	!No character to escape near index 5\n!]]!^\\\n     ^
+a,][	a,][	!Missing '] near index 3\na,][\n   ^
+^/[/]	^/[/]	!Explicit 'name separator' in class near index 3\n^/[/]\n   ^
+??]{a?,	??]{a?,	!Missing '} near index 6\n??]{a?,\n      ^
+?/b-,/	?/b-,	-a/.//^	-.b/^b	-^./^-	-a./^/b^	-a./.a/^./	-/ab	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-[,	-[,	!Missing '] near index 2\n-[,\n  ^
+/[\^	/[\^	!Missing '] near index 3\n/[\\^\n   ^
+?[.*[[	?[.*[[	!Missing '] near index 5\n?[.*[[\n     ^
+[,?^?bab	[,?^?bab	!Missing '] near index 7\n[,?^?bab\n       ^
+/*a	/*a	+/./a	-//b//	-^a^	--a/a////	--/a	-a-./-ba	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\!,\aa/.	\!,\aa	-/a-	-a^	--/^/a	-^/^^^	-//..b	-/a-/^a-/b.b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+,?^?{^}	,?^?{^}	-b^	-^a/b/-	-.//.b^	-/	-b./^b/	-ba	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-]	-]	--.-/-	-.b^/-	-ab/b//	-/.b/^/	-//-a/	-^/.-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.,,{?[,[	.,,{?[,[	!Missing '] near index 7\n.,,{?[,[\n       ^
+?,ba-*	?,ba-*	-b./	-/-//--//	-././b//.	-a.-/-	-////b/--	-a./a../^..	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{}//[*[	{}/[*[	!Missing '] near index 6\n{}//[*[\n      ^
+.{{*	.{{*	!Cannot nest groups near index 2\n.{{*\n  ^
+\*}	\*}	-^-b	-.//a-	-a./b	-b.	-../aba/a-/	-^/./^/^^^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+,a\]}	,a\]}	-^	-aa/a/-..	-b^//^	-b	-.b/a	-b/.^/aa	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-b}]b	-b}]b	-/	-a	-a/a/.	-/	-^/..-	-.a^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^*.b/	^*.b	--	-^-//b/..	-/b//a^b/b-	-/^/^/a^	-a//^//^bb	-^/^/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{\*\a][-	{\*\a][-	!Missing '] near index 7\n{\\*\\a][-\n       ^
+b}/^{	b}/^{	!Missing '} near index 4\nb}/^{\n    ^
+,bb\,	,bb\,	--	-^/b/b-	-.-	-.a/^b	-.-	-.//a^b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+\b]??]	\b]??]	-b.	-a^a	-a/b	-b	-aba/b./.b	-//b../baa	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[*a^,^![	[*a^,^![	!Missing '] near index 7\n[*a^,^![\n       ^
+]b{?]	]b{?]	!Missing '} near index 4\n]b{?]\n    ^
+]!/b*	]!/b*	----	-^/a	-a/^a	-^-./^/-/b^a	--//.^/^a	--	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.a]-a	.a]-a	-.-a/a^	-.//^//	-b	-aa	-b	-.../^//a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-}[{[,[	-}[{[,[	!Missing '] near index 6\n-}[{[,[\n      ^
+a][}/?-}	a][}/?-}	!Explicit 'name separator' in class near index 4\na][}/?-}\n    ^
+{[[/	{[[	!Explicit 'name separator' in class near index 3\n{[[/\n   ^
+a-bb!	a-bb!	--/-/^/-	---./b^^	-.a//-	-aab	-b/-	--	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+].*--	].*--	-aba	-./.^b	-a/^/^	-^/	-./.	-.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{,-,/]]	{,-,/]]	!Missing '} near index 6\n{,-,/]]\n      ^
+!{^-	!{^-	!Missing '} near index 3\n!{^-\n   ^
+^!!!a[/?	^!!!a[/?	!Explicit 'name separator' in class near index 6\n^!!!a[/?\n      ^
+^?]a	^?]a	-./.	---/b-	-.-/-/b	-/^//.	-.^b/^	-.^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^!b^	^!b^	-b.//b/-^-	-^/a	-b/ba-	-^-/	-a/a	-a//-a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+/.		--	--b./bb/b	-./^	+-./..	-a-^/.b.	-^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{],]]*.	{],]]*.	!Missing '} near index 6\n{],]]*.\n      ^
+?[-	?[-	!Missing '] near index 2\n?[-\n  ^
+?\}	?\}	-^/b./	-/	--a^/-/	-^^a/b	-b	-a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}]	}]	-a/^/^b	-a///.b	-aa	-./^b-	-b/.b	-a.b/-.-/b-.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.^a,	.^a,	-../.	-./^.a/--a	-b-/^^/	--/ab	-^/-bb	--/./b/-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^}^[	^}^[	!Missing '] near index 3\n^}^[\n   ^
+-a	-a	-aab/^	-b-//a-.//	-/a-/b/.	--/^//.^	-ba/b^a	-b-b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}[,{	}[,{	!Missing '] near index 3\n}[,{\n   ^
+\b,{b[	\b,{b[	!Missing '] near index 5\n\\b,{b[\n     ^
+{b,{b^	{b,{b^	!Cannot nest groups near index 3\n{b,{b^\n   ^
+^,-?	^,-?	--a/	-^./.^	-.^b//.	-.a./^-/b	-b/a-^	-a-//-//-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}\a	}\a	-b	--/b-a/bb/	-^/-/..	-///a/-.	-a-/--/-.	-^b//..	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+,}[/}a^-	,}[/}a^-	!Explicit 'name separator' in class near index 3\n,}[/}a^-\n   ^
+-!-*-	-!-*-	-/b	-.	--/./-	-b-./b	-^b/a/b	-^/.b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{[\	{[\	!Missing '] near index 2\n{[\\\n  ^
+a{}*	a{}*	-^/.	-^/^a	-./b	-a/^^/-.-	-a/-/b/^^/	--b/aab//	+a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+a/}!.,	a/}!.,	-^-a	-^/./-./b	-/a/.^-	-^a/-a	-bab	-^.b/b.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{b]/.	{b]	!Missing '} near index 4\n{b]/.\n    ^
+]!,\!/}	]!,\!/}	-^	-a	-a/./-	-/b/	-/a/^-a/^	-aa/^.^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+?}{	?}{	!Missing '} near index 2\n?}{\n  ^
+b	b	-^/aa/.aa	-b/a/	-a//aa-//bb	-ab	-/a	-ba/.b^	-a	+b	-a/b	-libs/a	-libs/b	-x/a/y
+?b*-?[{	?b*-?[{	!Missing '] near index 6\n?b*-?[{\n      ^
+???b,?[	???b,?[	!Missing '] near index 6\n???b,?[\n      ^
+b}\\-{a	b}\\-{a	!Missing '} near index 6\nb}\\\\-{a\n      ^
+a?	a?	-b/^^^/.-	-///./ab	-a//.a-	-a.a/.-	--//b^/.b/	-b.a/-^-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+]{b!	]{b!	!Missing '} near index 3\n]{b!\n   ^
+b\b	b\b	-a/-	-/.///	-a-.	--^-/a	-^/-/^	-b/-b-/^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[^	[^	!Missing '] near index 1\n[^\n ^
+\a!^?^--	\a!^?^--	-a^-/a/./a	-//a-/	-a/^.	---//a/a.a	--//./-/.	-.//^/.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^/a	^/a	-/	--b/.ba/b.	-b/ba//	--	-^-a	-^-a/b^^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}a/-,,*{	}a/-,,*{	!Missing '} near index 7\n}a/-,,*{\n       ^
+[-!//b^	[-!/b^	!Explicit 'name separator' in class near index 3\n[-!//b^\n   ^
+\[\b{a^	\[\b{a^	!Missing '} near index 6\n\\[\\b{a^\n      ^
+bb	bb	-a^	-^a/b/a-.	-//	-a/.a/	-^b/^/^	-^a/.b^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+!^-,?	!^-,?	-../bb^/b	-a//^/.	-/.a/-/	-./bb^	-/	-..	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-,\{!	-,\{!	-^-	-bb/^a	-.a/^a^/-a	-.-/a/	-^^a	-.a//a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+b[.?}?	b[.?}?	!Missing '] near index 5\nb[.?}?\n     ^
+].,{	].,{	!Missing '} near index 3\n].,{\n   ^
+}/!??	}/!??	--	-/	-..^/-^	-bb///a/	-/^a/../^/	--	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}^{*!.]	}^{*!.]	!Missing '} near index 6\n}^{*!.]\n      ^
+},,-!/]a	},,-!/]a	-^//-^	-//^a/b/	--bb/ab^/^^	-/	-^.-/./ba	-..//b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[^?{*	[^?{*	!Missing '] near index 4\n[^?{*\n    ^
+]*	]*	-a	-.	-b	-b//..//a	-/-///^///	-abb/-./b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*.,a^	*.,a^	-b	-.b/./	-.^/	-.a/	-.	-/b//b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+{*b/,.	{*b/,.	!Missing '} near index 5\n{*b/,.\n     ^
+{[b//*	{[b/*	!Explicit 'name separator' in class near index 3\n{[b//*\n   ^
+b-^,{!	b-^,{!	!Missing '} near index 5\nb-^,{!\n     ^
+\[.{^.	\[.{^.	!Missing '} near index 5\n\\[.{^.\n     ^
+^]*?}?	^]*?}?	-b-	--//-	-a-b/../b	-^^.	-b..	-^-./a^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+].,[^	].,[^	!Missing '] near index 4\n].,[^\n    ^
+*]	*]	---/b/.--	-bb//--/./	-b././^/	-a//	-b^/-/	-^/bba/b/a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+!!\,-	!!\,-	-^/-.	-.	-.^./^^	--//a^/^a	-a/.a	-./^/^.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+-{?b!{,\	-{?b!{,\	!Cannot nest groups near index 5\n-{?b!{,\\\n     ^
+b,,}?]b{	b,,}?]b{	!Missing '} near index 7\nb,,}?]b{\n       ^
+*}^a-	*}^a-	-^/-/a/^^	-b	-b-/b	-/a^	--	-.^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+*/.!{?	*/.!{?	!Missing '} near index 5\n*/.!{?\n     ^
+},^,.\	},^,.\	!No character to escape near index 5\n},^,.\\\n     ^
+,]^.{	,]^.{	!Missing '} near index 4\n,]^.{\n    ^
+{?,{^-	{?,{^-	!Cannot nest groups near index 3\n{?,{^-\n   ^
+{-{]a	{-{]a	!Cannot nest groups near index 2\n{-{]a\n  ^
+a.	a.	-^./	-^^b	-^^./a	--/-.	-a^a	-^//b^./^/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}^,!}b	}^,!}b	-//..//^	--//-/bb-	-a^//^	-b/^	-/././/.	-.a	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+/^a	/^a	-./--a	-.///-/	-^^-	-ab^/b-.	-///b^/-	--aa/bab/ba	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+b!*.a*	b!*.a*	-/./a--/./-	-^/^	-/a	--./.b^/.	-b/bb///	-./-/b^^	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+.[/*/!	.[/*/!	!Explicit 'name separator' in class near index 2\n.[/*/!\n  ^
+,b*^}	,b*^}	-b--/-./	-b./	-b//a	-.^//-	-/	-b/.a///.	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+?,-*[[b^	?,-*[[b^	!Missing '] near index 7\n?,-*[[b^\n       ^
+-/-/{{/,	-/-/{{/,	!Cannot nest groups near index 5\n-/-/{{/,\n     ^
+*}*}\b{^	*}*}\b{^	!Missing '} near index 7\n*}*}\\b{^\n       ^
+b}^[b{/,	b}^[b{/,	!Explicit 'name separator' in class near index 6\nb}^[b{/,\n      ^
+.,]	.,]	-.a	-ab-/^	-a/^/./.	-//b	-b/a/^-^	-^/-//b-/	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}!].	}!].	-^/.^/a^-	-b-/b	-//.	-ba//	-^/^	-aa	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+[/^	[/^	!Explicit 'name separator' in class near index 1\n[/^\n ^
+-a/!\}	-a/!\}	-b/^b/^	-b^b/ba/b-b	-aa/ba	-//-	-b/-/ba/	-b//b	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+^}}a?	^}}a?	-a/..a/b	-^/^a./b	-..^/./.	-ab-/^b^/^	--/--	-^^/.b//	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+}}?]a\	}}?]a\	!No character to escape near index 5\n}}?]a\\\n     ^
+\^	\^	-/^b/-b//^.a	--//a/b	--	-b-	-/-/^^//	-/./a^-	-a	-b	-a/b	-libs/a	-libs/b	-x/a/y
+]-\^[.^[	]-\^[.^[	!Missing '] near index 7\n]-\\^[.^[\n       ^

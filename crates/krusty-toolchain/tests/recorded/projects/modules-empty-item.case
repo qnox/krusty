@@ -1,0 +1,9 @@
+An empty list item.
+--- project.yaml
+modules:
+  -
+  - libs/a
+--- libs/a/module.yaml
+product: jvm/lib
+--- expected
+project.yaml:2:3: ERROR: Expected a value: `string`

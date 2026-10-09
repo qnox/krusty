@@ -1,0 +1,8 @@
+A module file holding a list.
+--- project.yaml
+modules: [a]
+--- a/module.yaml
+- product
+--- expected
+a/module.yaml:1:1: ERROR: Expected `MinimalModule {..}`, but got `sequence []`
+a/module.yaml: ERROR: Product type definition is missing. Define a product using a `product:` declaration.

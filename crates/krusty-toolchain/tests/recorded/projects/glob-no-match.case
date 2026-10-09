@@ -1,0 +1,12 @@
+A glob that matches nothing.
+--- project.yaml
+modules: ["libs/*"]
+--- libs/readme.txt
+x
+--- expected
+project.yaml:1:11: WEAK WARNING: Glob pattern `libs/*` doesn't match any Kotlin module directory under the project root
+project.yaml:1:1: WARNING: Project has no modules: no root module file and no modules listed in the project file
+--- stdout
+╭──────┬──────┬───────────────────╮
+│ Name │ Type │ Short description │
+╰──────┴──────┴───────────────────╯

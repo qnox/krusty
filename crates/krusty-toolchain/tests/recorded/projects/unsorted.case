@@ -1,0 +1,19 @@
+An unsorted list.
+--- project.yaml
+modules:
+  - libs/b
+  - ./libs/a
+--- libs/a/module.yaml
+product: jvm/lib
+--- libs/b/module.yaml
+product: jvm/lib
+--- expected
+project.yaml:2:3: WEAK WARNING: It is recommended to sort the `modules` list alphabetically. This reduces the chance of Git conflicts and makes it easier to visually locate a module in the list.
+--- stdout
+╭──────┬─────────┬───────────────────╮
+│ Name │ Type    │ Short description │
+├──────┼─────────┼───────────────────┤
+│ a    │ jvm/lib │                   │
+├──────┼─────────┼───────────────────┤
+│ b    │ jvm/lib │                   │
+╰──────┴─────────┴───────────────────╯

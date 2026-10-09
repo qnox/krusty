@@ -1,0 +1,19 @@
+The product written as a mapping.
+--- project.yaml
+modules: [a, b]
+--- a/module.yaml
+product:
+  type: jvm/app
+--- b/module.yaml
+product:
+  type: jvm/lib
+  platforms: [jvm]
+--- expected
+--- stdout
+╭──────┬─────────┬───────────────────╮
+│ Name │ Type    │ Short description │
+├──────┼─────────┼───────────────────┤
+│ a    │ jvm/app │                   │
+├──────┼─────────┼───────────────────┤
+│ b    │ jvm/lib │                   │
+╰──────┴─────────┴───────────────────╯

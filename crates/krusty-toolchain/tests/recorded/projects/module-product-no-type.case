@@ -1,0 +1,8 @@
+A product mapping without a type.
+--- project.yaml
+modules: [a]
+--- a/module.yaml
+product:
+  platforms: [jvm]
+--- expected
+a/module.yaml:2:3: ERROR: No value for required property `type`.

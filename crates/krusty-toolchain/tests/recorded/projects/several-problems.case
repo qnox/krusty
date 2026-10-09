@@ -1,0 +1,16 @@
+Two problems in one list, each reported.
+--- project.yaml
+modules:
+  - zz
+  - libs/a
+  - "libs/*/x"
+  - libs/f
+--- libs/a/module.yaml
+product: jvm/lib
+--- libs/f
+x
+--- expected
+project.yaml:2:5: ERROR: Unresolved module path `zz`
+project.yaml:4:5: WEAK WARNING: Glob pattern `libs/*/x` doesn't match any Kotlin module directory under the project root
+project.yaml:5:5: ERROR: `libs/f` is not a directory
+project.yaml:2:3: WEAK WARNING: It is recommended to sort the `modules` list alphabetically. This reduces the chance of Git conflicts and makes it easier to visually locate a module in the list.
