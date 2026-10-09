@@ -121,13 +121,21 @@ impl<'c> Tokenized<'c> {
                 "Advanced option value is passed in an obsolete form. Please use the '=' character to specify the value: {argument}=..."
             ));
         }
-        for (deprecated, name) in &problems.deprecated {
-            warnings.push(format!(
-                "Argument {deprecated} is deprecated. Please use {name} instead"
-            ));
-        }
+        warnings.extend(self.deprecations());
         warnings.extend(self.argfile_problems.iter().cloned());
         warnings
+    }
+
+    /// The warnings that name a deprecated spelling. The argument still takes effect under its
+    /// current name, unlike the other warnings, whose argument is ignored.
+    pub fn deprecations(&self) -> Vec<String> {
+        self.problems
+            .deprecated
+            .iter()
+            .map(|(deprecated, name)| {
+                format!("Argument {deprecated} is deprecated. Please use {name} instead")
+            })
+            .collect()
     }
 }
 
