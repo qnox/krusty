@@ -14,7 +14,6 @@ pub mod rendering;
 use std::path::{Path, PathBuf};
 
 use krusty_toolchain::diagnostic::{Diagnostics, Severity};
-
 /// Sections that hold krusty-toolchain's deliberate difference rather than a file.
 const KRUSTY: &str = "krusty";
 const KRUSTY_REFUSAL: &str = "krusty-refusal";
