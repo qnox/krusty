@@ -147,25 +147,28 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
 /// instead of terminating: a worker that exits on a broken source takes the whole build's worker
 /// process down with it.
 pub fn compile(opts: &cli::Options) -> Result<usize, String> {
-    let mut promoted = String::new();
+    let mut configured_errors = String::new();
+    let mut unconfigured_warning_under_werror = false;
     for warning in &opts.warnings {
-        match opts.warning_policy.level(warning.name) {
-            cli::WarningLevel::Warning if opts.warnings_as_errors => {
-                promoted.push_str("error: ");
-                promoted.push_str(&warning.message);
-                promoted.push('\n');
+        match opts.warning_policy.command_line_disposition(warning.name) {
+            cli::WarningDisposition::Warning => eprintln!("warning: {}", warning.message),
+            cli::WarningDisposition::Error => {
+                configured_errors.push_str("error: ");
+                configured_errors.push_str(&warning.message);
+                configured_errors.push('\n');
             }
-            cli::WarningLevel::Warning => eprintln!("warning: {}", warning.message),
-            cli::WarningLevel::Error => {
-                promoted.push_str("error: ");
-                promoted.push_str(&warning.message);
-                promoted.push('\n');
+            cli::WarningDisposition::Disabled => {}
+            cli::WarningDisposition::WarningAndFail => {
+                eprintln!("warning: {}", warning.message);
+                unconfigured_warning_under_werror = true;
             }
-            cli::WarningLevel::Disabled => {}
         }
     }
-    if !promoted.is_empty() {
-        return Err(promoted);
+    if !configured_errors.is_empty() {
+        return Err(configured_errors);
+    }
+    if unconfigured_warning_under_werror {
+        return Err("error: warnings found and -Werror specified\n".to_string());
     }
     let version = match opts.kotlin_reference_version {
         Some(version) => version,
@@ -275,18 +278,28 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
             diags.diags.len()
         ));
     }
-    // Warnings alone do not fail the compilation, but they are still reported. `-Werror`
-    // promotes every one of them, including module warnings that have no source span.
+    // The same typed policy owns ordinary compiler and module warnings. Unlike command-line
+    // configuration warnings, these are suppressed by `-nowarn`; `-Werror` reports them and fails
+    // before any output is written.
     let warning_diagnostics = diags
         .diags
         .iter()
         .any(|diagnostic| diagnostic.severity == krusty::diag::Severity::Warning)
         || !diags.module_warnings.is_empty();
-    if opts.warnings_as_errors && warning_diagnostics {
-        return Err(format!(
-            "{}krusty: warnings found and -Werror is specified\n",
-            diags.render_all(&rendered)
-        ));
+    match opts.warning_policy.compiler_disposition() {
+        cli::WarningDisposition::WarningAndFail if warning_diagnostics => {
+            return Err(format!(
+                "error: warnings found and -Werror specified\n{}",
+                diags.render_all(&rendered)
+            ));
+        }
+        cli::WarningDisposition::Disabled => {
+            diags.diags.clear();
+            diags.module_warnings.clear();
+        }
+        cli::WarningDisposition::WarningAndFail
+        | cli::WarningDisposition::Warning
+        | cli::WarningDisposition::Error => {}
     }
     eprint!("{}", diags.render_all(&rendered));
 

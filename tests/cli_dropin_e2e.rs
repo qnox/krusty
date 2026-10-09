@@ -572,69 +572,89 @@ fn cross_file_value_class_property_read_uses_mangled_getter() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// `-Werror` fails a compilation that emits a warning and leaves a warning-clean compilation alone.
+/// Global and named warning policy has kotlinc's exact status, diagnostic stream, and output state.
 #[test]
-fn werror_fails_only_when_a_warning_is_emitted() {
+fn warning_policy_precedence_matches_kotlinc() {
     let krusty = common::krusty_binary();
-    let dir = std::env::temp_dir().join(format!("krusty_werror_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("krusty_warning_policy_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    let source = dir.join("Clean.kt");
+    let source = dir.join("F.kt");
     fs::write(&source, "fun f(): Int = 1\n").unwrap();
-    let out_dir = dir.join("out");
 
-    // The Gradle plugin always disables the implicit reflect jar. This environment has a
-    // stdlib jar and no reflect jar, so the warning policy is what the invocations test.
-    let clean = Command::new(&krusty)
-        .args(["-Werror", "-no-reflect"])
-        .arg("-d")
-        .arg(&out_dir)
-        .arg(&source)
-        .output()
-        .expect("run krusty");
-    assert!(
-        clean.status.success(),
-        "a warning-clean file must compile under -Werror: {}",
-        String::from_utf8_lossy(&clean.stderr)
-    );
-    assert!(out_dir.join("CleanKt.class").is_file());
+    let warning =
+        "warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.\n";
+    let cases: &[(&str, &[&str], i32, String)] = &[
+        (
+            "named-warning-overrides-werror",
+            &["-Werror", "-Xwarning-level=REDUNDANT_CLI_ARG:warning"],
+            0,
+            warning.to_string(),
+        ),
+        (
+            "named-disabled-overrides-werror",
+            &["-Werror", "-Xwarning-level=REDUNDANT_CLI_ARG:disabled"],
+            0,
+            String::new(),
+        ),
+        (
+            "named-warning-overrides-nowarn",
+            &["-nowarn", "-Xwarning-level=REDUNDANT_CLI_ARG:warning"],
+            0,
+            warning.to_string(),
+        ),
+        (
+            "plain-werror",
+            &["-Werror"],
+            1,
+            format!("{warning}error: warnings found and -Werror specified\n"),
+        ),
+    ];
 
-    let redundant = Command::new(&krusty)
-        .args([
-            "-language-version",
-            "2.4",
-            "-Xcontext-parameters",
-            "-Werror",
-            "-no-reflect",
-        ])
-        .arg("-d")
-        .arg(dir.join("redundant"))
-        .arg(&source)
-        .output()
-        .expect("run krusty");
-    assert!(
-        !redundant.status.success(),
-        "a redundant language flag is a warning, and -Werror must fail the compilation"
-    );
-    let redundant_stderr = String::from_utf8_lossy(&redundant.stderr);
-    assert!(
-        redundant_stderr.contains("-Werror") || redundant_stderr.contains("redundant"),
-        "{redundant_stderr}"
-    );
-    assert!(!dir.join("redundant/CleanKt.class").exists());
+    for (tag, policy, expected_code, expected_stderr) in cases {
+        let reference_out = dir.join(format!("{tag}-reference"));
+        let mut reference_args = vec![
+            "-language-version".to_string(),
+            "2.4".to_string(),
+            "-Xcontext-parameters".to_string(),
+        ];
+        reference_args.extend(policy.iter().map(|argument| (*argument).to_string()));
+        reference_args.extend([
+            "-no-reflect".to_string(),
+            "-d".to_string(),
+            reference_out.display().to_string(),
+            source.display().to_string(),
+        ]);
+        let (reference_code, reference_stderr) =
+            common::byte_dump::with_recorded_diagnostics(|| {
+                common::kotlinc_compile(&reference_args).expect("reference compiler unavailable")
+            });
+        assert_eq!(reference_code, *expected_code, "{tag}: {reference_stderr}");
+        assert_eq!(reference_stderr, *expected_stderr, "{tag}");
 
-    let explicit = Command::new(&krusty)
-        .args(["-Xexplicit-api=warning", "-Werror", "-no-reflect"])
-        .arg("-d")
-        .arg(dir.join("explicit"))
-        .arg(&source)
-        .output()
-        .expect("run krusty");
-    assert!(
-        !explicit.status.success(),
-        "an explicit-API warning must fail the compilation under -Werror: {}",
-        String::from_utf8_lossy(&explicit.stderr)
-    );
-    assert!(!dir.join("explicit/CleanKt.class").exists());
+        let krusty_out = dir.join(format!("{tag}-krusty"));
+        let mut command = Command::new(&krusty);
+        command.args(["-language-version", "2.4", "-Xcontext-parameters"]);
+        command.args(*policy);
+        let result = command
+            .args(["-no-reflect", "-d"])
+            .arg(&krusty_out)
+            .arg(&source)
+            .output()
+            .expect("run krusty");
+        assert_eq!(result.status.code(), Some(*expected_code), "{tag}");
+        assert_eq!(result.stderr, expected_stderr.as_bytes(), "{tag}");
+        let expected_stdout = if *expected_code == 0 {
+            format!("ok: emitted 1 class file(s) to {}\n", krusty_out.display())
+        } else {
+            String::new()
+        };
+        assert_eq!(result.stdout, expected_stdout.as_bytes(), "{tag}");
+        assert_eq!(
+            krusty_out.join("FKt.class").is_file(),
+            *expected_code == 0,
+            "{tag}: output state"
+        );
+    }
     let _ = fs::remove_dir_all(&dir);
 }
