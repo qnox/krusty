@@ -25,8 +25,8 @@ pub(crate) use crate::symbol_resolver::SupertypeProjectionCache;
 use crate::symbol_source::{CachedCompositeSource, SymbolQueryCache, SymbolSource};
 use crate::type_engine::{DeclKey, DeclineReason, Resolution, TypeEngine};
 use crate::types::{
-    existing_type_name, ty_mentions_param, type_name, type_name_nested_child, Ty, TypeName,
-    Visibility,
+    existing_type_name, semantic_value_parameter_ty, ty_mentions_param, type_name,
+    type_name_nested_child, Ty, TypeName, Visibility,
 };
 use scope::ScopeKind;
 use scope::{ContextReceiver, ContextReceiverKind, ContextValue, FlowExclusion, NarrowPath, Ns};
@@ -171,9 +171,14 @@ mod safe_index;
 mod sam_constructors;
 mod sam_conversion_recording;
 mod source_fragment;
+mod source_generic_signatures;
 mod source_signature_display;
 mod type_use_annotation_publication;
 use source_fragment::SourceFragmentMode;
+use source_generic_signatures::{
+    inferred_return_type_parameter, inferred_return_type_parameter_from_header,
+    source_generic_signature_from_header, source_generic_signature_from_tparams,
+};
 use source_signature_display::{
     function_type_ref_shape, source_function_conflict_display, source_function_display,
     streamed_function_conflict_display, write_function_type_shape_with,
@@ -8489,183 +8494,6 @@ fn definitely_non_null_binding(binding: Ty) -> Ty {
         Ty::obj("kotlin/Any")
     } else {
         binding.non_null()
-    }
-}
-
-/// The semantic type of one declared value-parameter slot. The AST always retains the type written
-/// after `:`; for `vararg element: T`, the binding and callable signature expose `Array<T>` (or the
-/// corresponding primitive array). Applying this once while collecting a signature keeps parser,
-/// checker, and lowering from carrying different representations of the same declaration.
-fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
-    crate::types::semantic_value_parameter_ty(declared, is_vararg)
-}
-
-/// The function's own type parameter that an INFERRED return type resolves to, read off the
-/// declaration rather than the erased inference. This covers both a returned value parameter
-/// (`fun <T> id(x: T) = x`) and invoking a function parameter whose declared return is the type
-/// parameter (`fun <T> use(f: () -> T) = f()`). In both cases the declaration says `T`; publishing
-/// the body's erased `Any?` would discard the constraint needed by callers.
-fn inferred_return_type_parameter(file: &File, function: &FunDecl) -> Option<String> {
-    let header = legacy_callable_header(function);
-    inferred_return_type_parameter_from_header(file, function, &header)
-}
-
-fn inferred_return_type_parameter_from_header(
-    file: &File,
-    function: &FunDecl,
-    header: &StreamedCallableHeader,
-) -> Option<String> {
-    if header.result != StreamedResultKind::Inferred || header.type_parameters.is_empty() {
-        return None;
-    }
-    let FunBody::Expr(body) = &function.body else {
-        return None;
-    };
-    // Production may have released this ordinary expression arena after compact signature
-    // extraction. In that path the signature graph is the sole owner of inferred return identity;
-    // this legacy refinement must not reopen (or index) the discarded body.
-    let body = file.expr_arena.get(body.0 as usize)?;
-    let returned_type = match body {
-        Expr::Name(name) if name == "this" => header.receiver.as_ref()?,
-        Expr::Name(name) => {
-            let parameter = function
-                .params
-                .iter()
-                .position(|parameter| &parameter.name == name)?;
-            &header.parameters.get(parameter)?.ty
-        }
-        Expr::Call { callee, .. } => {
-            let Expr::Name(name) = file.expr_arena.get(callee.0 as usize)? else {
-                return None;
-            };
-            let parameter = function
-                .params
-                .iter()
-                .position(|parameter| &parameter.name == name)?;
-            let parameter = &header.parameters.get(parameter)?.ty;
-            if parameter.name != "<fun>" && parameter.fun_params.is_empty() {
-                return None;
-            }
-            parameter.arg.as_deref()?
-        }
-        _ => return None,
-    };
-    header
-        .type_parameters
-        .iter()
-        .find(|type_parameter| {
-            *type_parameter == &returned_type.name && returned_type.targs.is_empty()
-        })
-        .cloned()
-}
-
-fn source_generic_signature_from_tparams(
-    function: &FunDecl,
-    type_params: &TParams,
-    receiver: Option<Ty>,
-    params: Vec<Ty>,
-    resolved_ret: Ty,
-    inferred_ret_tparam: Option<String>,
-    formal_bounds: Vec<Vec<Ty>>,
-) -> GenericSig {
-    let header = legacy_callable_header(function);
-    let bindings = header
-        .type_parameters
-        .iter()
-        .map(|source| (source.clone(), type_params.bound(source)))
-        .collect::<HashMap<_, _>>();
-    let ret = if header.explicit_result.is_some() {
-        resolved_ret
-    } else {
-        crate::symbol_resolver::ty_subst_keep_unbound(resolved_ret, &bindings)
-    };
-    let ret = match (header.result, inferred_ret_tparam) {
-        (StreamedResultKind::Inferred, Some(name)) => type_params.bound(&name),
-        _ => ret,
-    };
-    GenericSig {
-        formals: header
-            .type_parameters
-            .iter()
-            .filter_map(|source| type_params.bound(source).ty_param_name())
-            .map(str::to_string)
-            .collect(),
-        formal_bounds,
-        receiver,
-        params,
-        ret,
-        return_policy: Default::default(),
-    }
-}
-
-fn source_generic_signature_from_header(
-    header: &StreamedCallableHeader,
-    classes: &ClassNames,
-    type_params: &TParams,
-    resolved_ret: Ty,
-    inferred_ret_tparam: Option<String>,
-    diags: &mut DiagSink,
-) -> GenericSig {
-    let resolve = |reference: &TypeRef, diags: &mut DiagSink| {
-        ty_of_ref(reference, classes, type_params, diags)
-    };
-    let receiver = header
-        .receiver
-        .as_ref()
-        .map(|reference| resolve(reference, diags));
-    let params = header
-        .parameters
-        .iter()
-        .map(|parameter| {
-            let ty = resolve(&parameter.ty, diags);
-            semantic_value_parameter_ty(ty, parameter.is_vararg)
-        })
-        .collect();
-    let ret = header
-        .explicit_result
-        .as_ref()
-        .map(|reference| resolve(reference, diags))
-        .unwrap_or_else(|| {
-            let bindings = header
-                .type_parameters
-                .iter()
-                .map(|source| (source.clone(), type_params.bound(source)))
-                .collect::<HashMap<_, _>>();
-            crate::symbol_resolver::ty_subst_keep_unbound(resolved_ret, &bindings)
-        });
-    // An INFERRED return that is one of the declared type parameters. `resolved_ret` is the ERASED
-    // inference (`fun <T> foo(x: T) = x` infers `Any`), and recording that erasure in `@Metadata` says
-    // the function returns `Any` — which is not the declaration, and leaves kotlin-reflect unable to
-    // resolve the function against its bytecode method. Recover the parameter from the body when it is
-    // exactly one of the function's own value parameters, whose declared type says it directly.
-    let ret = match (header.result, inferred_ret_tparam) {
-        (StreamedResultKind::Inferred, Some(name)) => type_params.bound(&name),
-        _ => ret,
-    };
-    let formal_bounds = header
-        .type_parameters
-        .iter()
-        .map(|parameter| {
-            header
-                .bounds
-                .iter()
-                .filter(|(owner, _)| owner == parameter)
-                .map(|(_, bound)| resolve(bound, diags))
-                .collect()
-        })
-        .collect();
-    GenericSig {
-        formals: header
-            .type_parameters
-            .iter()
-            .filter_map(|source| type_params.bound(source).ty_param_name())
-            .map(str::to_string)
-            .collect(),
-        formal_bounds,
-        receiver,
-        params,
-        ret,
-        return_policy: Default::default(),
     }
 }
 
