@@ -34,7 +34,7 @@ pub(in crate::resolve) use declaration_facts::*;
 pub(in crate::resolve) use declaration_validation::*;
 pub(in crate::resolve) use declared_classifier_inventory::*;
 pub(in crate::resolve) use member_signatures::*;
-pub(super) use referenced_type_names::*;
+use referenced_type_names::*;
 pub(in crate::resolve) use source_alias_publication::*;
 pub(in crate::resolve) use source_declaration_spellings::*;
 pub(in crate::resolve) use supertype_cycles::*;
