@@ -12181,14 +12181,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Native: a file's top-level initializers run once, including from another file.** Each source
   file exports one initializer. The entry calls its own before `main` or `box`. A call to a
   top-level function defined in another file of the module calls that file's initializer first, so
-  a property declared there has its value even when that file is not the entry. The initializer
+  a property declared there has its value even when that file is not the entry. A read or write of a
+  package-level property declared in another file calls that property's getter or setter entry
+  point, which the declaring file defines from the checked property identity: the entry point runs
+  the initializer, then reads or writes the property the way a use in its own file does (its slot,
+  or its source-written or delegated accessor), converting between that storage and the declared
+  type. The value crosses at the declared type, so a value-class property is its underlying value
+  and a property with an explicit backing field is read at its public type. An inline function
+  spliced into the caller still updates the property in the file that declared it. An assignment
+  evaluates its right-hand side before the setter runs the initializer, so the initializer cannot
+  observe the assigned value and cannot overwrite it. The initializer
   runs at most once: a second call, from the entry or from another file, is a return. The
   once-only flag is set before the initializers run, so an initializer that reaches back into its
   own file sees the property defaults and does not recurse. A property initializer that increments
-  a `var` and is then read through two calls still reports the one increment.
+  a `var` and is then read through two calls still reports the one increment. A `lateinit` read
+  from another file throws `UninitializedPropertyAccessException` until the property is assigned.
   Tests: `tests/native_cross_file_e2e.rs`
   (`a_top_level_property_in_another_file_is_initialized_before_the_call`,
-  `a_file_initializer_runs_once_however_many_calls_arrive`).
+  `a_file_initializer_runs_once_however_many_calls_arrive`,
+  `a_package_property_is_read_from_the_file_that_stores_it`,
+  `an_inline_function_updates_a_package_property_in_its_own_file`,
+  `an_assignment_evaluates_its_value_before_the_defining_file_initializes`,
+  `a_lateinit_package_property_throws_until_assigned`,
+  `a_package_value_class_property_is_stored_as_its_value`,
+  `an_explicit_backing_field_is_read_at_the_public_type`,
+  `a_source_written_package_accessor_runs_in_its_own_file`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs
