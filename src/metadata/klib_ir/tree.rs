@@ -35,6 +35,7 @@ arena_id!(KlibIrTypeId);
 arena_id!(KlibIrFunctionId);
 arena_id!(KlibIrClassId);
 arena_id!(KlibIrVariableId);
+arena_id!(KlibIrTypeAbbreviationId);
 
 /// Every node of one top-level declaration's bodies.
 #[derive(Debug, Default)]
@@ -44,6 +45,7 @@ pub struct KlibIrArena {
     pub(super) functions: Vec<KlibIrFunction>,
     pub(super) classes: Vec<KlibIrClass>,
     pub(super) variables: Vec<KlibIrVariable>,
+    pub(super) abbreviations: Vec<KlibIrTypeAbbreviation>,
 }
 
 impl KlibIrArena {
@@ -65,6 +67,10 @@ impl KlibIrArena {
 
     pub fn variable(&self, id: KlibIrVariableId) -> &KlibIrVariable {
         &self.variables[id.index()]
+    }
+
+    pub fn abbreviation(&self, id: KlibIrTypeAbbreviationId) -> &KlibIrTypeAbbreviation {
+        &self.abbreviations[id.index()]
     }
 
     pub fn expr_count(&self) -> usize {
@@ -91,7 +97,7 @@ pub enum KlibIrType {
         /// Constructors of the type's annotations (`@ExtensionFunctionType`, ...).
         annotations: Vec<KlibIrAnnotation>,
         /// The type alias this type was written as, recorded by KLIBs older than Kotlin 2.4.
-        abbreviation: Option<KlibIrTypeAbbreviation>,
+        abbreviation: Option<KlibIrTypeAbbreviationId>,
     },
     DefinitelyNotNull(KlibIrTypeId),
     Dynamic {

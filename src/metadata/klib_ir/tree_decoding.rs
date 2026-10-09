@@ -22,9 +22,9 @@ use super::tree::{
     KlibIrExprKind, KlibIrField, KlibIrFileEntry, KlibIrFunction, KlibIrFunctionId,
     KlibIrLocalDelegatedProperty, KlibIrLoop, KlibIrMember, KlibIrMemberAccess, KlibIrNullability,
     KlibIrParameter, KlibIrProperty, KlibIrStatement, KlibIrSyntheticBody, KlibIrType,
-    KlibIrTypeAbbreviation, KlibIrTypeAlias, KlibIrTypeArgument, KlibIrTypeId, KlibIrTypeOperator,
-    KlibIrTypeParameter, KlibIrValueClassRepresentation, KlibIrVarargElement, KlibIrVariable,
-    KlibIrVariableId, KlibIrVariance,
+    KlibIrTypeAbbreviation, KlibIrTypeAbbreviationId, KlibIrTypeAlias, KlibIrTypeArgument,
+    KlibIrTypeId, KlibIrTypeOperator, KlibIrTypeParameter, KlibIrValueClassRepresentation,
+    KlibIrVarargElement, KlibIrVariable, KlibIrVariableId, KlibIrVariance,
 };
 use super::wire::{
     declaration_index, entries, message, packed_field, packed_values, read_per_file_table,
@@ -479,13 +479,18 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
     fn type_abbreviation(
         &mut self,
         msg: &Msg<'_>,
-    ) -> Result<KlibIrTypeAbbreviation, KlibIrDecodeError> {
-        Ok(KlibIrTypeAbbreviation {
+    ) -> Result<KlibIrTypeAbbreviationId, KlibIrDecodeError> {
+        let abbreviation = KlibIrTypeAbbreviation {
             type_alias: self.required_symbol(msg, 2, "abbreviated type alias")?,
             marked_nullable: msg.required_varint(3, "abbreviation has_question_mark")? != 0,
             arguments: self.type_arguments(msg, 4)?,
             annotations: self.annotations(msg, 1)?,
-        })
+        };
+        let id = KlibIrTypeAbbreviationId(
+            u32::try_from(self.arena.abbreviations.len()).expect("arena fits u32"),
+        );
+        self.arena.abbreviations.push(abbreviation);
+        Ok(id)
     }
 
     fn optional_type(
