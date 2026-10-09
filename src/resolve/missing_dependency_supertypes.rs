@@ -95,11 +95,6 @@ impl Checker<'_> {
         label: &str,
         severity: Severity,
     ) -> bool {
-        // Without the platform's own classes every platform supertype is absent by configuration,
-        // not a missing dependency.
-        if !self.libraries.has_platform_classes() {
-            return false;
-        }
         let (parents, binary) = self.direct_supertype_names(classifier);
         let missing = missing_inherited_supertypes(&self.fed_source(), parents, binary);
         let warning =

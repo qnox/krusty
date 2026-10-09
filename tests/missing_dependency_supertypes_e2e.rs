@@ -192,3 +192,12 @@ fun ops(x: B3) = x[0] + x() + x.memberFun()
         &[],
     );
 }
+
+#[test]
+fn no_jdk_reports_missing_platform_supertypes() {
+    assert_like_kotlinc(
+        "package n\nfun length(value: String) = value.length\n",
+        true,
+        &["-no-jdk"],
+    );
+}

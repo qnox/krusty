@@ -462,12 +462,6 @@ pub(crate) fn type_alias_target_classifier(expansion: Ty) -> Option<TypeName> {
 }
 
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
-    /// Whether the platform's own classes (a JVM compilation's JDK) are part of this compilation.
-    /// Without them, every platform supertype of a library classifier is absent by configuration.
-    fn has_platform_classes(&self) -> bool {
-        true
-    }
-
     /// Confirm that every selected dependency was ingested completely before declaration lookup.
     fn validate_initialization(&self) -> Result<(), PlatformInitializationError> {
         Ok(())

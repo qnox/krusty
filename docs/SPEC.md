@@ -12238,9 +12238,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is reported ahead of the unresolved reference. A constructor call, or an access whose dispatch
   receiver already reported, is kotlinc's eager check: the warning `… This may be forbidden soon.
   Check the module classpath for missing or conflicting dependencies.`, an error under
-  `AllowEagerSupertypeAccessibilityChecks`. A compilation with no JDK on its classpath skips the
-  check: every JDK supertype of a library classifier is absent there by configuration. (kotlinc
-  `-no-jdk` reports those too, `kotlin.String`'s included.)
+  `AllowEagerSupertypeAccessibilityChecks`. This includes `-no-jdk`: platform supertypes absent
+  from that deliberately restricted classpath are reported exactly as kotlinc reports them.
   (`tests/missing_dependency_supertypes_e2e.rs` builds the library chain with krusty and compares
   exit code, every diagnostic's file, line, column, message and order, and the output tree with
   kotlinc, with and without the feature.)

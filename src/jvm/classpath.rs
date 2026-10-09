@@ -1658,13 +1658,6 @@ impl Classpath {
         self.owning_entry(physical) == Some(expected)
     }
 
-    /// Whether a JDK supplies the platform classes: its `lib/modules` image or a `ct.sym` release.
-    pub fn has_platform_classes(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|entry| matches!(entry, Entry::Jimage(_) | Entry::CtSym { .. }))
-    }
-
     pub fn new(paths: Vec<PathBuf>) -> Classpath {
         Self::new_with_friend_paths(paths, Vec::new())
     }
