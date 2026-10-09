@@ -570,12 +570,14 @@ Both JVM compiles of a unit run under the same command line. `src/conformance/co
 `ASSERTIONS_MODE`, `WHEN_EXPRESSIONS`, and the unit's own `LAMBDAS`, `SAM_CONVERSIONS`,
 `JVM_DEFAULT_MODE`) to kotlinc arguments. The reference kotlinc receives them
 verbatim; krusty's gate parses them with `krusty_cli::cli::parse`, the executable's own command
-line, and compiles with the language settings and JVM backend that command line selects. A case
-whose arguments krusty's command line refuses (an argument krusty does not implement yet) is not
-applicable on JVM and is listed in the expected not-applicable inventory until krusty implements
-it. The one exception is `RETURN_VALUE_CHECKER_MODE`: its `-Xreturn-value-checker` argument reaches
-only the reference compile (`reference_only_kotlinc_arguments`), because the checker never changes
-a case's runtime `box()` and krusty does not model it yet.
+line, and compiles with the language settings and JVM backend that command line selects. Backend
+applicability depends only on the corpus target and source universe. A targeted case whose selected
+configuration krusty cannot compile remains applicable and fails with the refusal; it never moves
+to the not-applicable inventory. `RETURN_VALUE_CHECKER_MODE` is a reference-oracle setup detail:
+its `-Xreturn-value-checker` argument reaches only the reference compile
+(`reference_only_kotlinc_arguments`) because the checker does not change runtime `box()` behavior.
+Historical API levels which kotlinc's public command line cannot express fail closed until the
+differential harness can install that typed configuration on both compilers.
 
 Both lanes scan the same version-pinned corpus directory. The Native lane never inherits a JVM
 mute: it excludes a case only for a Native/ANY target directive or a true target-runtime/source

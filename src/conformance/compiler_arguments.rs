@@ -39,10 +39,10 @@ pub fn unit_kotlinc_arguments<'a>(
 /// to [`unit_kotlinc_arguments`]; a value of one that names no mode fails closed here, so no unit
 /// compiles under a guessed default.
 ///
-/// An `// API_VERSION:` below 2.0 adds no argument. kotlinc 2.4 removed those versions from its
-/// command line ("API version 1.9 is no longer supported"); Kotlin's test runner sets them on the
-/// compiler configuration directly, which no command line can express, so such a case compiles at
-/// the default API version on both sides.
+/// An `// API_VERSION:` below 2.0 cannot be represented by kotlinc 2.4's public command line:
+/// Kotlin's own test runner installs it directly in the compiler configuration. Refuse that case
+/// here until the differential harness has the same typed configuration channel; silently omitting
+/// it would compile a different program at the default API level.
 ///
 /// A case declaring a type in the reserved `kotlin` package needs `-Xallow-kotlin-package` whether
 /// or not it says so: several corpus cases declare one without the directive, and kotlinc rejects
@@ -59,9 +59,12 @@ pub fn case_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
         .map(|token| format!("-XXLanguage:{token}"))
         .collect();
     if let Some(version) = last_value(src, "API_VERSION") {
-        if !predates_kotlin_2(version) {
-            arguments.extend(["-api-version".to_string(), version.to_string()]);
+        if predates_kotlin_2(version) {
+            return Err(format!(
+                "box directive `// API_VERSION: {version}` requires the typed compiler-configuration channel"
+            ));
         }
+        arguments.extend(["-api-version".to_string(), version.to_string()]);
     }
     arguments.extend(
         values(src, "OPT_IN")
@@ -226,14 +229,20 @@ mod tests {
     }
 
     #[test]
-    fn a_kotlin_1_api_version_adds_no_argument() {
+    fn a_kotlin_1_api_version_fails_closed_instead_of_selecting_the_default_api() {
         assert_eq!(
-            arguments("// API_VERSION: 1.9\nfun box() = \"OK\"\n"),
-            Vec::<String>::new()
+            case_kotlinc_arguments("// API_VERSION: 1.9\nfun box() = \"OK\"\n"),
+            Err(
+                "box directive `// API_VERSION: 1.9` requires the typed compiler-configuration channel"
+                    .to_string()
+            )
         );
         assert_eq!(
-            arguments("// API_VERSION: 1.3\nfun box() = \"OK\"\n"),
-            Vec::<String>::new()
+            case_kotlinc_arguments("// API_VERSION: 1.3\nfun box() = \"OK\"\n"),
+            Err(
+                "box directive `// API_VERSION: 1.3` requires the typed compiler-configuration channel"
+                    .to_string()
+            )
         );
     }
 

@@ -296,17 +296,28 @@ fn unit_options<'a>(
     }
 }
 
-/// Whether the gate compiles the case: the corpus targets krusty's backend and krusty's command
-/// line accepts every case-wide argument the directives select. A case that needs an argument
-/// krusty refuses cannot compile as kotlinc does, so it is not applicable, and the expected
-/// not-applicable inventory lists it like any other exclusion until krusty implements the argument.
+/// Whether the corpus case targets this gate. Compiler coverage is deliberately absent: a targeted
+/// case whose selected configuration krusty cannot compile is an applicable failure, never an
+/// applicability exclusion.
 fn gate_applicable(src: &str, no_run: bool) -> bool {
-    let targeted = if no_run {
+    if no_run {
         frontend_applicable(src, krusty::conformance::BACKENDS)
     } else {
         backend_applicable(src, krusty::conformance::BACKENDS)
-    };
-    targeted && unit_options(src, []).is_ok()
+    }
+}
+
+#[test]
+fn a_missing_configuration_channel_does_not_remove_a_targeted_case() {
+    let source = "// API_VERSION: 1.9\nfun box() = \"OK\"\n";
+    assert!(gate_applicable(source, false));
+    match unit_options(source, []) {
+        Ok(_) => panic!("the unrepresentable API level must fail closed"),
+        Err(error) => assert_eq!(
+            error,
+            "box directive `// API_VERSION: 1.9` requires the typed compiler-configuration channel"
+        ),
+    }
 }
 
 /// The JVM library provider a unit analyzes against, at the API version its command line selects.
