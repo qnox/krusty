@@ -29575,18 +29575,15 @@ fun box(): String {
     #[test]
     fn member_context_property_getter_sees_its_parameter() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class Scope\n\
+        let source = "class Scope\n\
              class Owner {\n\
                  context(scope: Scope)\n\
                  val current get() = scope\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+             }";
+        let (_, symbols, info) =
+            crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        assert!(info.is_some(), "production frontend must check the source");
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -29602,16 +29599,10 @@ fun box(): String {
     #[test]
     fn anonymous_context_property_parameters_may_repeat() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class Scope\n\
+        let source = "class Scope\n\
              context(_: Scope, _: Scope)\n\
-             val current: Int get() = 1",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+             val current: Int get() = 1";
+        let _ = crate::frontend::analyze_source_standalone(source, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
     }
@@ -29680,21 +29671,15 @@ fun box(): String {
 
     #[test]
     fn module_top_level_context_overload_skips_unsatisfied_candidate() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class A(val x: String)\n\
+        let source = "class A(val x: String)\n\
              class B(val x: String)\n\
              context(a: A) fun leaf(): String = a.x\n\
              context(b: B) fun leaf(): String = b.x\n\
-             context(b: B) fun mid(): String = leaf()",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+             context(b: B) fun mid(): String = leaf()";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
+        assert_no_diags(&diagnostics);
 
-        let call = named_call(&files[0], "leaf");
+        let call = named_call(&file, "leaf");
         let target = module_top_level_target(&info, call);
         assert_eq!(target.callable.params, vec![Ty::obj("B")]);
         assert_eq!(
@@ -29708,19 +29693,13 @@ fun box(): String {
 
     #[test]
     fn module_top_level_context_call_records_defaulted_value_param() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class A(val x: String)\n\
+        let source = "class A(val x: String)\n\
              context(a: A) fun leaf(s: String = \"OK\"): String = s\n\
-             context(a: A) fun mid(): String = leaf()",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+             context(a: A) fun mid(): String = leaf()";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
+        assert_no_diags(&diagnostics);
 
-        let call = named_call(&files[0], "leaf");
+        let call = named_call(&file, "leaf");
         let target = module_top_level_target(&info, call);
         assert_eq!(target.callable.params, vec![Ty::obj("A"), Ty::String]);
         assert_eq!(
@@ -29812,23 +29791,25 @@ fun box(): String {
 
     #[test]
     fn classpath_top_level_named_calls_record_arg_slots_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file("fun direct(): String = knownTop(b = 2, a = \"x\")", &mut d);
-        let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let source = "fun direct(): String = knownTop(b = 2, a = \"x\")";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
 
-        let call = files[0]
+        let call = file
             .expr_arena
             .iter()
             .enumerate()
             .find_map(|(idx, expr)| match expr {
-                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                Expr::Call { callee, .. } => match file.expr(*callee) {
                     Expr::Name(name) if name == "knownTop" => Some(ExprId(idx as u32)),
                     _ => None,
                 },
@@ -29849,7 +29830,7 @@ fun box(): String {
         let values: Vec<_> = slots
             .iter()
             .map(|slot| {
-                slot.map(|arg| match files[0].expr(arg) {
+                slot.map(|arg| match file.expr(arg) {
                     Expr::StringLit(v) => v.to_lossy(),
                     Expr::IntLit(v) => v.to_string(),
                     other => panic!("unexpected argument expression in slot: {other:?}"),
@@ -29889,18 +29870,20 @@ fun box(): String {
 
     #[test]
     fn classpath_top_level_function_refs_record_callable_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file("val ref = ::knownTop", &mut d);
-        let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let source = "val ref = ::knownTop";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
 
-        let function_ref = files[0]
+        let function_ref = file
             .expr_arena
             .iter()
             .enumerate()
@@ -29924,9 +29907,7 @@ fun box(): String {
 
     #[test]
     fn immediate_invocation_context_selects_callable_references_inside_branches() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "fun String.asFloat(): Float = 1.0f\n\
+        let source = "fun String.asFloat(): Float = 1.0f\n\
              fun String.asInt(): Int = 1\n\
              fun String.asInt(radix: Int): Int = radix\n\
              class Box(val value: Int) {\n\
@@ -29937,16 +29918,12 @@ fun box(): String {
              fun decode(value: String, flag: Boolean): Any = when (flag) {\n\
                  true -> String::asFloat\n\
                  else -> String::asInt\n\
-             }(value)",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+             }(value)";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert_no_diags(&diagnostics);
 
-        let when_expression = files[0]
+        let when_expression = file
             .expr_arena
             .iter()
             .position(|expression| matches!(expression, Expr::When { .. }))
@@ -29957,7 +29934,7 @@ fun box(): String {
             Some(Ty::fun(vec![Ty::String], Ty::obj("kotlin/Any")))
         );
 
-        let as_int_reference = files[0]
+        let as_int_reference = file
             .expr_arena
             .iter()
             .enumerate()
@@ -29968,26 +29945,20 @@ fun box(): String {
             .expect("source should contain String::asInt");
         assert_eq!(
             info.resolved_source_call(as_int_reference),
-            Some((0, files[0].decls[1].0))
+            Some((0, file.decls[1].0))
         );
     }
 
     #[test]
     fn nullable_classifier_reference_selects_nullable_extension_before_instance_member() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class C { fun pick(value: Int): String = \"member\" }\n\
+        let source = "class C { fun pick(value: Int): String = \"member\" }\n\
              fun C?.pick(value: Int): String = \"extension\"\n\
-             fun use(value: C?): String = (C?::pick)(value, 1)",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+             fun use(value: C?): String = (C?::pick)(value, 1)";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert_no_diags(&diagnostics);
 
-        let reference = files[0]
+        let reference = file
             .expr_arena
             .iter()
             .enumerate()
@@ -29995,7 +29966,7 @@ fun box(): String {
                 let id = ExprId(index as u32);
                 matches!(expression, Expr::CallableRef { name, .. } if name == "pick")
                     .then_some(id)
-                    .filter(|id| files[0].nullable_callable_ref_receivers.contains(&id.0))
+                    .filter(|id| file.nullable_callable_ref_receivers.contains(&id.0))
             })
             .expect("source should contain C?::pick");
         assert!(matches!(
@@ -30010,24 +29981,19 @@ fun box(): String {
     #[test]
     fn widening_cast_in_earlier_condition_does_not_widen_stable_property_read() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "val PREFIX = \"prefix\"\n\
+        let source = "val PREFIX = \"prefix\"\n\
              fun consume(value: String): String = value\n\
              fun use(): String {\n\
                  if ((PREFIX as String?) == \"ignored\") return \"early\"\n\
                  return consume(PREFIX)\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+             }";
+        let _ =
+            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
         assert_no_diags(&diagnostics);
     }
 
     #[test]
-    fn legacy_checker_consumes_normalized_member_property_stability() {
+    fn production_checker_consumes_normalized_member_property_stability() {
         let (errors, _) = check(
             "fun consume(value: String) {}\n\
              class Box(val value: Any?) {\n\
@@ -30039,17 +30005,11 @@ fun box(): String {
 
     #[test]
     fn source_callable_refs_retain_the_checker_selected_declaration() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "fun pick(value: Int, marker: Any): Int = value\n\
+        let source = "fun pick(value: Int, marker: Any): Int = value\n\
              fun pick(value: Any, marker: Int): Int = marker\n\
-             val ref: (Int, Any) -> Unit = ::pick\n",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+             val ref: (Int, Any) -> Unit = ::pick\n";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert!(
             diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -30059,7 +30019,7 @@ fun box(): String {
                 .map(|diagnostic| &diagnostic.msg)
                 .collect::<Vec<_>>()
         );
-        let function_ref = files[0]
+        let function_ref = file
             .expr_arena
             .iter()
             .enumerate()
@@ -30074,7 +30034,7 @@ fun box(): String {
 
         assert_eq!(
             info.resolved_source_call(function_ref),
-            Some((0, files[0].decls[0].0))
+            Some((0, file.decls[0].0))
         );
     }
 
