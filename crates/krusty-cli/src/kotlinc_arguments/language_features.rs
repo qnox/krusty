@@ -2,14 +2,17 @@
 //!
 //! Each `releases/<version>.features.tsv` is the output of
 //! `scripts/kotlinc-arguments/DumpLanguageFeatures.java` run against that release's
-//! `kotlin-compiler.jar`, in declaration order. Regenerate it with `just kotlinc-arguments <version>`.
+//! `kotlin-compiler.jar`, in declaration order. A table is named after the first release that
+//! declares it; a later release with the same features reuses that file. Regenerate it with
+//! `just kotlinc-arguments <version>`.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use krusty::kotlin_version::KotlinVersion;
 
-/// The feature tables, by reference version. `every_supported_release_has_a_feature_table` keeps
+/// The feature tables, by reference version. A release whose table is identical to an earlier
+/// one's shares that file instead of a copy. `every_supported_release_has_a_feature_table` keeps
 /// this list equal to the `kotlin-versions` manifest.
 const RELEASES: &[(KotlinVersion, &str)] = &[
     (
@@ -18,13 +21,20 @@ const RELEASES: &[(KotlinVersion, &str)] = &[
     ),
     (
         KotlinVersion::V2_4_10,
-        include_str!("releases/2.4.10.features.tsv"),
+        include_str!("releases/2.4.0.features.tsv"),
     ),
     (
         KotlinVersion::V2_4_20,
         include_str!("releases/2.4.20.features.tsv"),
     ),
 ];
+
+/// The vendored table text of one release, for comparison with a fresh dump.
+pub fn vendored_table(version: KotlinVersion) -> Option<&'static str> {
+    RELEASES
+        .iter()
+        .find_map(|&(release, table)| (release == version).then_some(table))
+}
 
 /// One `LanguageFeature` entry. Versions are kotlinc's `versionString`s.
 #[derive(Clone, Debug, Eq, PartialEq)]

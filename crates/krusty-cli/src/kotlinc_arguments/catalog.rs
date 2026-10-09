@@ -4,18 +4,20 @@
 //! run against that release's `kotlin-compiler.jar`: it reflects over the compiler's own
 //! `@Argument`, `@Enables`/`@Disables` and `@Deprecated` annotations. The parser reads these facts
 //! instead of re-spelling them, so a name, alias, value type, delimiter or lifecycle is never copied
-//! by hand. Regenerate a table with `just kotlinc-arguments <version>`.
+//! by hand. A table is named after the first release that declares it; a later release with the
+//! same surface reuses that file. Regenerate a table with `just kotlinc-arguments <version>`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
 use krusty::kotlin_version::KotlinVersion;
 
-/// The release tables, by reference version. `every_supported_release_has_a_table` keeps this list
+/// The release tables, by reference version. A release whose table is identical to an earlier
+/// one's shares that file instead of a copy. `every_supported_release_has_a_table` keeps this list
 /// equal to the `kotlin-versions` manifest.
 const RELEASES: &[(KotlinVersion, &str)] = &[
     (KotlinVersion::V2_4_0, include_str!("releases/2.4.0.tsv")),
-    (KotlinVersion::V2_4_10, include_str!("releases/2.4.10.tsv")),
+    (KotlinVersion::V2_4_10, include_str!("releases/2.4.0.tsv")),
     (KotlinVersion::V2_4_20, include_str!("releases/2.4.20.tsv")),
 ];
 
@@ -269,6 +271,13 @@ impl Catalog {
     pub fn by_name(&self, name: &str) -> Option<&ArgumentSpec> {
         self.lookup(name).filter(|argument| argument.name == name)
     }
+}
+
+/// The vendored table text of one release, for comparison with a fresh dump.
+pub fn vendored_table(version: KotlinVersion) -> Option<&'static str> {
+    RELEASES
+        .iter()
+        .find_map(|&(release, table)| (release == version).then_some(table))
 }
 
 /// The reference releases that have a table.

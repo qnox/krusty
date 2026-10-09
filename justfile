@@ -235,16 +235,31 @@ kotlinc VERSION=`just max-version`:
 # Regenerate krusty's copy of one kotlinc release's argument table from that release's compiler jar
 # (crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv). The conformance e2e test fails until
 # the vendored table equals what the provisioned compiler declares.
+# A dump identical to an earlier release's table is not stored twice: the recipe names the file to
+# reuse, and the release's entry in `catalog.rs`/`language_features.rs` points at it.
 kotlinc-arguments VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
     lib="$(dirname "$(dirname "$(just kotlinc "{{VERSION}}")")")/lib"
-    java -cp "$lib/kotlin-compiler.jar:$lib/kotlin-stdlib.jar" \
-        scripts/kotlinc-arguments/DumpKotlincArguments.java \
-        > "crates/krusty-cli/src/kotlinc_arguments/releases/{{VERSION}}.tsv"
-    java -cp "$lib/kotlin-compiler.jar:$lib/kotlin-stdlib.jar" \
-        scripts/kotlinc-arguments/DumpLanguageFeatures.java \
-        > "crates/krusty-cli/src/kotlinc_arguments/releases/{{VERSION}}.features.tsv"
+    releases=crates/krusty-cli/src/kotlinc_arguments/releases
+    dump() {
+        local main="$1" suffix="$2" fresh
+        fresh="$(mktemp)"
+        java -cp "$lib/kotlin-compiler.jar:$lib/kotlin-stdlib.jar" \
+            "scripts/kotlinc-arguments/$main.java" > "$fresh"
+        for existing in "$releases"/*"$suffix"; do
+            [ "$existing" = "$releases/{{VERSION}}$suffix" ] && continue
+            case "$suffix" in .tsv) [[ "$existing" == *.features.tsv ]] && continue ;; esac
+            if cmp -s "$fresh" "$existing"; then
+                rm -f "$fresh" "$releases/{{VERSION}}$suffix"
+                echo "{{VERSION}}$suffix is identical to $(basename "$existing"); reuse that file"
+                return
+            fi
+        done
+        mv "$fresh" "$releases/{{VERSION}}$suffix"
+    }
+    dump DumpKotlincArguments .tsv
+    dump DumpLanguageFeatures .features.tsv
 
 # Provision the Kotlin/Native distribution whose stdlib KLIB supplies the real metadata format.
 # The extracted root is versioned and cached beside the JVM compiler distribution.

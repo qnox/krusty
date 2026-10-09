@@ -13,7 +13,9 @@
 use std::fmt::Write as _;
 
 use krusty::kotlin_version::KotlinVersion;
-use krusty_cli::kotlinc_arguments::{tokenize, Catalog, Recorded, ValueKind};
+use krusty_cli::kotlinc_arguments::{
+    catalog, language_features, tokenize, Catalog, Recorded, ValueKind,
+};
 
 use super::common;
 
@@ -175,12 +177,8 @@ fn corpus(catalog: &Catalog) -> Vec<Vec<String>> {
 fn the_argument_table_is_what_the_reference_compiler_declares() {
     let (version, _) = kotlinc_report(&[]);
     let dumped = run_java("dump", "DumpKotlincArguments", DUMPER);
-    let vendored_path = format!(
-        "{}/crates/krusty-cli/src/kotlinc_arguments/releases/{version}.tsv",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let vendored = std::fs::read_to_string(&vendored_path)
-        .unwrap_or_else(|error| panic!("{vendored_path}: {error}"));
+    let vendored = catalog::vendored_table(version)
+        .unwrap_or_else(|| panic!("kotlinc {version} has no vendored argument table"));
     assert_eq!(
         dumped, vendored,
         "kotlinc {version} declares a different argument table; regenerate it with \
@@ -192,12 +190,8 @@ fn the_argument_table_is_what_the_reference_compiler_declares() {
 fn the_language_feature_table_is_what_the_reference_compiler_declares() {
     let (version, _) = kotlinc_report(&[]);
     let dumped = run_java("features", "DumpLanguageFeatures", FEATURE_DUMPER);
-    let vendored_path = format!(
-        "{}/crates/krusty-cli/src/kotlinc_arguments/releases/{version}.features.tsv",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let vendored = std::fs::read_to_string(&vendored_path)
-        .unwrap_or_else(|error| panic!("{vendored_path}: {error}"));
+    let vendored = language_features::vendored_table(version)
+        .unwrap_or_else(|| panic!("kotlinc {version} has no vendored language feature table"));
     assert_eq!(
         dumped, vendored,
         "kotlinc {version} declares a different language feature table; regenerate it with \
