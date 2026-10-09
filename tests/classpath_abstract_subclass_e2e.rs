@@ -153,6 +153,18 @@ fn assert_diagnostics(
     krusty: common::CompilerError,
     reference: common::CompilerError,
 ) {
+    let expected_block = |diagnostic: common::CompilerError| {
+        let mut message = diagnostic.message.lines();
+        let mut block = vec![format!(
+            "{}:{}:{}: {}",
+            diagnostic.file,
+            diagnostic.line,
+            diagnostic.column,
+            message.next().unwrap_or_default()
+        )];
+        block.extend(message.map(|line| format!("| {line}")));
+        block
+    };
     let result = common::compiler_diagnostics(&[(name, source)], classpath);
     assert_eq!(result.krusty_code, 1, "{name}: {}", result.krusty_stderr);
     assert_eq!(
@@ -161,10 +173,15 @@ fn assert_diagnostics(
         result.reference_stderr
     );
     assert_eq!(result.krusty_stdout, "", "{name}");
-    assert_eq!(common::compiler_errors(&result.krusty_stderr), [krusty]);
     assert_eq!(
-        common::compiler_errors(&result.reference_stderr),
-        [reference]
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        expected_block(krusty),
+        "{name}"
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.reference_stderr, true),
+        expected_block(reference),
+        "{name}"
     );
     assert_eq!(
         common::compiler_warnings(&result.krusty_stderr),
