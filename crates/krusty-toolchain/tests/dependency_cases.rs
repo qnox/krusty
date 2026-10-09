@@ -79,6 +79,75 @@ fn placed(directory: &str, bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace(directory, PLACEHOLDER)
 }
 
+/// krusty-toolchain refusals are repository-owned behavior and remain runnable without the cached
+/// external oracle. Their complete status and streams still have to match the typed case ledger.
+#[test]
+fn every_dependency_refusal_is_exact() {
+    let cases = support::cases("dependencies");
+    let mut shared = Vec::new();
+    files_below(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/dependencies/repository"),
+        "",
+        &mut shared,
+    );
+    let mut failures = Vec::new();
+    for case in &cases {
+        let Some(KrustyExpected::Refusal(refused)) = &case.krusty else {
+            continue;
+        };
+        let mut repository = shared.clone();
+        let mut project = Vec::new();
+        for (file, text) in &case.files {
+            match file.strip_prefix(REPOSITORY_SECTION) {
+                Some(file) => repository.push((file.to_string(), text.clone())),
+                None => project.push((file.clone(), text.clone())),
+            }
+        }
+        let actual = krusty_toolchain(
+            &case.name,
+            &Inputs {
+                project,
+                repository,
+            },
+        );
+        let project = format!("/{}/", Resolving::PROJECT);
+        let relative = |bytes: &[u8]| {
+            placed(
+                &actual.root,
+                String::from_utf8_lossy(bytes)
+                    .replace(&project, "/")
+                    .as_bytes(),
+            )
+        };
+        let expected_stderr: String = refused
+            .iter()
+            .map(|problem| format!("{}\n", problem.rendered))
+            .collect();
+        let expected = (1, String::new(), expected_stderr);
+        let printed = (
+            actual.code,
+            relative(&actual.stdout),
+            relative(&actual.stderr),
+        );
+        if printed != expected {
+            failures.push(format!(
+                "{}: got status {} with stdout\n{}stderr\n{}expected status 1 with no stdout and stderr\n{}",
+                case.name, printed.0, printed.1, printed.2, expected.2
+            ));
+        }
+        let severities: Vec<ExpectedSeverity> =
+            refused.iter().map(|problem| problem.severity).collect();
+        let errors = vec![ExpectedSeverity::Error; refused.len()];
+        if refused.is_empty() || severities != errors {
+            failures.push(format!(
+                "{}: the `krusty-refusal` section must be errors only: {refused:#?}",
+                case.name
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
     let cases = support::cases("dependencies");

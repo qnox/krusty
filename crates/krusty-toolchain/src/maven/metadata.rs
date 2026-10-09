@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use super::effective_pom::{EffectivePom, Reading};
@@ -15,7 +16,7 @@ pub struct Metadata<'s> {
     store: &'s Store,
     /// Files by coordinates and extension: absent, read, or why they cannot be read.
     files: Cache<(Coordinates, &'static str), FileRead>,
-    poms: Cache<Coordinates, Result<Rc<Pom>, Problem>>,
+    poms: Cache<Coordinates, Result<Rc<SourcedPom>, Problem>>,
     modules: Cache<Coordinates, Result<Rc<[Variant]>, Problem>>,
     /// Effective POMs by their coordinates and the JDK version their profiles were judged for.
     effective: Cache<EffectiveKey, Result<Rc<EffectivePom>, Vec<Problem>>>,
@@ -24,6 +25,11 @@ pub struct Metadata<'s> {
 }
 
 type Cache<K, V> = RefCell<HashMap<K, V>>;
+
+pub(super) struct SourcedPom {
+    pub pom: Pom,
+    pub path: PathBuf,
+}
 
 /// A metadata file in the store: `Ok(None)` when no repository holds it.
 pub type FileRead = Result<Option<Rc<StoredFile>>, Problem>;
@@ -57,14 +63,19 @@ impl<'s> Metadata<'s> {
     }
 
     /// The raw POM published under `coordinates`, or why it cannot be read.
-    pub fn pom(&self, coordinates: &Coordinates) -> Result<Rc<Pom>, Problem> {
+    pub(super) fn pom(&self, coordinates: &Coordinates) -> Result<Rc<SourcedPom>, Problem> {
         if let Some(pom) = self.poms.borrow().get(coordinates) {
             return pom.clone();
         }
         let pom = self.file(coordinates, "pom").and_then(|file| {
             let file = file.ok_or_else(|| missing(coordinates, "POM"))?;
             pom::parse(&file.text, &coordinates.group, &coordinates.artifact)
-                .map(Rc::new)
+                .map(|pom| {
+                    Rc::new(SourcedPom {
+                        pom,
+                        path: file.path.clone(),
+                    })
+                })
                 .map_err(|error| {
                     Problem::in_file(
                         &file.path,
@@ -149,7 +160,7 @@ impl<'s> Metadata<'s> {
             .map_err(|problem| vec![problem])
             .map(|raw| {
                 let mut reading = Reading::new(self, jdk_version);
-                let pom = reading.effective(&raw, 0);
+                let pom = reading.effective(&raw.pom, &raw.path, 0);
                 Rc::new(EffectivePom {
                     pom,
                     problems: reading.problems,

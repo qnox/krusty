@@ -128,37 +128,14 @@ fn is_absent(error: &std::io::Error) -> bool {
 /// `group/as/directories/artifact/version/artifact-version[-classifier].extension`.
 fn relative_path(coordinates: &Coordinates, extension: &str) -> Result<PathBuf, Problem> {
     let version = coordinates.version.as_deref().unwrap_or("unspecified");
-    // The group is a directory per `.`-separated segment.
-    let group_is_safe = coordinates.group.split('.').all(is_safe);
-    let mut parts = vec![
-        ("group", coordinates.group.as_str(), group_is_safe),
-        (
-            "artifact",
-            &coordinates.artifact,
-            is_safe(&coordinates.artifact),
-        ),
-        ("version", version, is_safe(version)),
-    ];
-    if let Some(classifier) = &coordinates.classifier {
-        parts.push(("classifier", classifier, is_safe(classifier)));
-    }
-    parts.push(("extension", extension, is_safe(extension)));
-    if let Some((part, value, _)) = parts.iter().find(|(_, _, safe)| !safe) {
-        return Err(Problem::general(format!(
-            "{} names no file in a Maven repository: its {part} `{value}` is not a file name",
-            coordinates.pretty(None)
-        )));
+    if let Some(message) = coordinates.repository_path_problem(extension) {
+        return Err(Problem::general(message));
     }
     let mut path: PathBuf = coordinates.group.split('.').collect();
     path.push(&coordinates.artifact);
     path.push(version);
     path.push(format!("{}.{extension}", coordinates.file_stem()));
     Ok(path)
-}
-
-/// Whether `part` of coordinates can be one name in a path, and only that.
-fn is_safe(part: &str) -> bool {
-    !part.is_empty() && part != "." && part != ".." && !part.contains(['/', '\\', ':', '\0'])
 }
 
 /// The local Maven repository for the home directory `home` and Maven installation `m2_home`:

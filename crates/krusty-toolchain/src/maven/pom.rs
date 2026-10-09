@@ -5,6 +5,8 @@ use std::collections::HashSet;
 
 use roxmltree::{Document, Node, ParsingOptions};
 
+use crate::yaml::Position;
+
 use super::ParseError;
 
 /// `<properties>`, in declaration order; a property declared empty has no value.
@@ -38,6 +40,8 @@ pub struct Parent {
     pub group: String,
     pub artifact: String,
     pub version: String,
+    /// The `<parent>` declaration in the POM.
+    pub position: Position,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +53,8 @@ pub struct Dependency {
     pub packaging: Option<String>,
     pub classifier: Option<String>,
     pub scope: Option<String>,
+    /// The `<dependency>` declaration in the POM.
+    pub position: Position,
 }
 
 impl Dependency {
@@ -168,6 +174,7 @@ pub fn parse(text: &str, group: &str, artifact: &str) -> Result<Pom, ParseError>
                 group: text_of(parent, "groupId")?,
                 artifact: text_of(parent, "artifactId")?,
                 version: text_of(parent, "version")?,
+                position: position(parent),
             })
         }),
         group: text_of(project, "groupId"),
@@ -212,6 +219,14 @@ fn text_of(node: Node<'_, '_>, name: &str) -> Option<String> {
     child(node, name).map(text)
 }
 
+fn position(node: Node<'_, '_>) -> Position {
+    let position = node.document().text_pos_at(node.range().start);
+    Position {
+        line: position.row as usize,
+        column: position.col as usize,
+    }
+}
+
 fn boolean_of(node: Node<'_, '_>, name: &str) -> Option<bool> {
     text_of(node, name).map(|value| value == "true")
 }
@@ -231,6 +246,7 @@ fn dependency_list(node: Node<'_, '_>) -> Vec<Dependency> {
                 packaging: text_of(dependency, "type"),
                 classifier: text_of(dependency, "classifier"),
                 scope: text_of(dependency, "scope"),
+                position: position(dependency),
             })
         })
         .collect()

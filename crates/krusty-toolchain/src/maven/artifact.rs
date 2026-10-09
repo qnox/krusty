@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::path::Path;
 use std::rc::Rc;
 
 use super::gradle_module::{self, Variant};
@@ -361,6 +362,7 @@ impl<'a> ArtifactResolver<'a> {
             artifact,
             scope,
             has_pom,
+            source: &file.path,
         };
         let mut declared = Read::default();
         let special = coordinates.group == "org.jetbrains.kotlin"
@@ -431,14 +433,18 @@ impl<'a> ArtifactResolver<'a> {
                 ));
                 if let Some(available) = &variant.available_at {
                     if !self.blocked(&available.group, &available.module) {
-                        declared.children.push(Artifact {
-                            coordinates: Coordinates::new(
-                                &available.group,
-                                &available.module,
-                                Some(&available.version),
-                            ),
-                            is_bom: false,
-                        });
+                        let coordinates = Coordinates::new(
+                            &available.group,
+                            &available.module,
+                            Some(&available.version),
+                        );
+                        match coordinates.repository_path_problem("jar") {
+                            Some(message) => declared.problems.push(in_file(message)),
+                            None => declared.children.push(Artifact {
+                                coordinates,
+                                is_bom: false,
+                            }),
+                        }
                     }
                 }
                 declared.constraints.extend(constraints(variant));
@@ -475,7 +481,7 @@ impl<'a> ArtifactResolver<'a> {
                         .map(|constraint| constraint.version.clone())
                 }),
             };
-            artifacts.push(self.dependency_artifact(
+            artifacts.extend(self.dependency_artifact(
                 dependency,
                 version.as_ref(),
                 context,
@@ -514,6 +520,11 @@ impl<'a> ArtifactResolver<'a> {
                 ),
                 is_bom: true,
             };
+            let extension = dependency.extension.as_deref().unwrap_or("jar");
+            if let Some(message) = bom.coordinates.repository_path_problem(extension) {
+                problems.push(Problem::in_file(context.source, None, message));
+                continue;
+            }
             let bom = self.intern(&bom);
             let declared = self.declared(bom, context.scope);
             found.extend(
@@ -545,26 +556,36 @@ impl<'a> ArtifactResolver<'a> {
         version: Option<&RichVersion>,
         context: &VariantContext<'_>,
         problems: &mut Vec<Problem>,
-    ) -> Artifact {
+    ) -> Option<Artifact> {
         let resolved = version.and_then(RichVersion::resolve);
         if version.is_some() && resolved.is_none() {
-            problems.push(Problem::general(format!(
-                "Unable to determine the version of {}:{} required by {}: no version attribute is defined",
-                dependency.group,
-                dependency.module,
-                context.artifact.coordinates.pretty(None)
-            )));
+            problems.push(Problem::in_file(
+                context.source,
+                None,
+                format!(
+                    "Unable to determine the version of {}:{} required by {}: no version attribute is defined",
+                    dependency.group,
+                    dependency.module,
+                    context.artifact.coordinates.pretty(None)
+                ),
+            ));
         }
-        Artifact {
-            coordinates: Coordinates::with_selector(
-                &dependency.group,
-                &dependency.module,
-                resolved.as_deref(),
-                dependency.classifier.as_deref(),
-                dependency.extension.as_deref(),
-            ),
+        let coordinates = Coordinates::with_selector(
+            &dependency.group,
+            &dependency.module,
+            resolved.as_deref(),
+            dependency.classifier.as_deref(),
+            dependency.extension.as_deref(),
+        );
+        let extension = dependency.extension.as_deref().unwrap_or("jar");
+        if let Some(message) = coordinates.repository_path_problem(extension) {
+            problems.push(Problem::in_file(context.source, None, message));
+            return None;
+        }
+        Some(Artifact {
+            coordinates,
             is_bom: dependency.is_bom(),
-        }
+        })
     }
 }
 
@@ -574,6 +595,7 @@ struct VariantContext<'c> {
     scope: Scope,
     /// Whether the artifact also publishes a POM, whose managed versions complete its variants'.
     has_pom: bool,
+    source: &'c Path,
 }
 
 /// The version the variant's own constraints give `dependency`.

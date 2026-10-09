@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use super::coordinates::artifact_extension;
 use super::metadata::Metadata;
 use super::pom::{merge_dependencies, Activation, Dependency, Pom, Profile, Properties};
 use super::system::{self, OsParameter};
@@ -64,24 +65,33 @@ impl<'a> Reading<'a> {
                 return Some(shared.pom.clone());
             }
         }
-        Some(self.effective(&raw, depth))
+        Some(self.effective(&raw.pom, &raw.path, depth))
     }
 
     /// The effective POM of `pom` (`Project.resolve`).
-    pub fn effective(&mut self, pom: &Pom, depth: usize) -> Pom {
+    pub fn effective(&mut self, pom: &Pom, source: &Path, depth: usize) -> Pom {
         self.deepest = self.deepest.max(depth);
         if depth > MAX_DEPTH {
-            self.problems.push(Problem::general(format!(
-                "The POM of {}:{}:{} has more than ten ancestors; the rest are not read",
-                pom.group.as_deref().unwrap_or_default(),
-                pom.artifact.as_deref().unwrap_or_default(),
-                pom.version.as_deref().unwrap_or_default()
-            )));
+            self.problems.push(Problem::in_file(
+                source,
+                None,
+                format!(
+                    "The POM of {}:{}:{} has more than ten ancestors; the rest are not read",
+                    pom.group.as_deref().unwrap_or_default(),
+                    pom.artifact.as_deref().unwrap_or_default(),
+                    pom.version.as_deref().unwrap_or_default()
+                ),
+            ));
             return pom.clone();
         }
         let parent = pom.parent.as_ref().and_then(|parent| {
             let coordinates =
                 Coordinates::new(&parent.group, &parent.artifact, Some(&parent.version));
+            if let Some(message) = coordinates.repository_path_problem("pom") {
+                self.problems
+                    .push(Problem::in_file(source, Some(parent.position), message));
+                return None;
+            }
             self.effective_of(&coordinates, depth + 1)
         });
         let without_profiles = match &parent {
@@ -168,9 +178,32 @@ impl<'a> Reading<'a> {
             .version
             .as_deref()
             .map(|value| expand(value, &project));
-        project.dependencies = dependencies;
-        project.dependency_management = management;
+        project.dependencies = self.safe_dependencies(dependencies, source);
+        project.dependency_management = self.safe_dependencies(management, source);
         project
+    }
+
+    /// Keep only dependencies whose coordinates can be used at the repository boundary, reporting
+    /// an invalid declaration at the POM that owns it rather than later as a project-level error.
+    fn safe_dependencies(
+        &mut self,
+        dependencies: Vec<Dependency>,
+        source: &Path,
+    ) -> Vec<Dependency> {
+        dependencies
+            .into_iter()
+            .filter_map(|dependency| match dependency_path_problem(&dependency) {
+                Some(message) => {
+                    self.problems.push(Problem::in_file(
+                        source,
+                        Some(dependency.position),
+                        message,
+                    ));
+                    None
+                }
+                None => Some(dependency),
+            })
+            .collect()
     }
 
     /// The dependency management of the BOMs `project` imports (`scope` `import`), the first
@@ -188,6 +221,11 @@ impl<'a> Reading<'a> {
         for import in imports {
             let coordinates =
                 Coordinates::new(&import.group, &import.artifact, import.version.as_deref());
+            // The completed effective POM reports this declaration with its source. Do not attempt
+            // a repository read first: that would lose the source and create a second problem.
+            if dependency_path_problem(&import).is_some() {
+                continue;
+            }
             if let Some(effective) = self.effective_of(&coordinates, depth + 1) {
                 managements.push(effective.dependency_management);
             }
@@ -261,6 +299,32 @@ impl<'a> Reading<'a> {
     }
 }
 
+/// Why a dependency declaration cannot name the repository file it will read. Imports read a POM
+/// by group, artifact and version; regular dependencies use their selector's artifact extension.
+fn dependency_path_problem(dependency: &Dependency) -> Option<String> {
+    if dependency.scope.as_deref() == Some("import") && dependency.version.is_some() {
+        return Coordinates::new(
+            &dependency.group,
+            &dependency.artifact,
+            dependency.version.as_deref(),
+        )
+        .repository_path_problem("pom");
+    }
+    let coordinates = Coordinates::with_selector(
+        &dependency.group,
+        &dependency.artifact,
+        dependency.version.as_deref(),
+        dependency.classifier.as_deref(),
+        dependency.packaging.as_deref(),
+    );
+    let extension = dependency
+        .packaging
+        .as_deref()
+        .map(artifact_extension)
+        .unwrap_or("jar");
+    coordinates.repository_path_problem(extension)
+}
+
 /// `first + second` for properties: `None` only when both are.
 fn merge_properties(first: Option<&Properties>, second: Option<&Properties>) -> Option<Properties> {
     match (first, second) {
@@ -322,6 +386,7 @@ fn expand_dependency(dependency: &Dependency, project: &Pom) -> Dependency {
         packaging: optional(&dependency.packaging),
         classifier: optional(&dependency.classifier),
         scope: optional(&dependency.scope),
+        position: dependency.position,
     }
 }
 

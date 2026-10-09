@@ -44,4 +44,4 @@ dependencies:
   ]
 }
 --- krusty-refusal
-error	ERROR: org.example:a/../../b:1.0 names no file in a Maven repository: its artifact `a/../../b` is not a file name
+error	<directory>/home/.m2/repository/org/example/lib/1.0/lib-1.0.module: ERROR: org.example:a/../../b:1.0 names no file in a Maven repository: its artifact `a/../../b` is not a file name

@@ -45,4 +45,4 @@ dependencies:
   ]
 }
 --- krusty-refusal
-error	ERROR: org.example:lib-jvm:../.. names no file in a Maven repository: its version `../..` is not a file name
+error	<directory>/home/.m2/repository/org/example/lib/1.0/lib-1.0.module: ERROR: org.example:lib-jvm:../.. names no file in a Maven repository: its version `../..` is not a file name

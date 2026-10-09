@@ -108,6 +108,41 @@ impl Coordinates {
         }
         stem
     }
+
+    /// Why these coordinates cannot name a file with `extension` in a Maven repository.
+    ///
+    /// Metadata readers use this before turning an external declaration into an artifact, so they
+    /// can report the declaration's source. The store repeats the check at its filesystem boundary
+    /// for callers that do not have a metadata source.
+    pub(crate) fn repository_path_problem(&self, extension: &str) -> Option<String> {
+        let version = self.version.as_deref().unwrap_or("unspecified");
+        let group_is_safe = self.group.split('.').all(is_safe_file_name);
+        let parts = [
+            ("group", self.group.as_str(), group_is_safe),
+            (
+                "artifact",
+                self.artifact.as_str(),
+                is_safe_file_name(&self.artifact),
+            ),
+            ("version", version, is_safe_file_name(version)),
+            (
+                "classifier",
+                self.classifier.as_deref().unwrap_or("safe"),
+                self.classifier.as_deref().is_none_or(is_safe_file_name),
+            ),
+            ("extension", extension, is_safe_file_name(extension)),
+        ];
+        let (part, value, _) = parts.iter().find(|(_, _, safe)| !safe)?;
+        Some(format!(
+            "{} names no file in a Maven repository: its {part} `{value}` is not a file name",
+            self.pretty(None)
+        ))
+    }
+}
+
+/// Whether `part` of coordinates can be one name in a path, and only that.
+fn is_safe_file_name(part: &str) -> bool {
+    !part.is_empty() && part != "." && part != ".." && !part.contains(['/', '\\', ':', '\0'])
 }
 
 /// The extension of the artifact a packaging type produces (`resolveArtifactExtension`).
