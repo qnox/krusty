@@ -332,6 +332,11 @@ pub(super) fn emit_packed_array(
             .class_ref(&crate::jvm::names::anewarray_element_class(element_type));
         code.anewarray(class);
     }
+    // No element is stored, so the fresh array stays on the stack. An `@InlineOnly` spread then
+    // duplicates it (`aload; aload; arraylength`) instead of parking an empty array in a local.
+    if elements.is_empty() {
+        return;
+    }
 
     let array_type = ir_ty_to_jvm(array_type);
     let array = emitter.frame.enter_temp(TempRole::VarargArray, array_type);
