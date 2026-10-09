@@ -1173,9 +1173,10 @@ impl BodyLowering<'_> {
         Some(expression)
     }
 
-    /// Replace one already-evaluated lambda operand with its checked inline-body template. Capture
-    /// evaluation stays at the lambda's source position, and every external inline shape shares this
-    /// single local-slot rebasing path.
+    /// Replace one already-evaluated source lambda literal or checker-selected callable reference
+    /// with its checked inline-body template. Capture and bound-receiver evaluation stays at the
+    /// argument's source position, and every external inline shape shares this single local-slot
+    /// rebasing path. Other checked function expressions are invoked through their function value.
     ///
     /// The expansion reproduces the reference compiler's frame for the call: each invocation
     /// operand becomes a local of the frame (the inlined callee's receiver parameter initializes
@@ -1218,16 +1219,40 @@ impl BodyLowering<'_> {
             } => lambda,
             _ => return invoke_function(self),
         };
-        let (implementation, captures, inline_body, arity) =
-            match inline_argument_template(self.ir, lambda) {
-                Some(template) => template,
-                None => return invoke_function(self),
-            };
+        let callable_reference = matches!(self.ir.expr(lambda), IrExpr::CallableReference(_));
+        let source_lambda = matches!(
+            self.ir.expr(lambda),
+            IrExpr::Lambda {
+                inline_body: Some(_),
+                ..
+            }
+        );
+        if !callable_reference && !source_lambda {
+            return invoke_function(self);
+        }
+        let Some((mut implementation, mut captures, mut template, arity)) =
+            inline_argument_template(self.ir, lambda)
+        else {
+            return invoke_function(self);
+        };
         if invocation_operands.len() != arity {
             return None;
         }
 
+        let mut reference_declarations = Vec::new();
+        if callable_reference {
+            self.stage_spliced_reference_operands(lambda, &mut reference_declarations)?;
+            self.ir.inline_callable_reference_arguments.insert(lambda);
+            // Staging rewrites the reference's captures and bound receiver to their stored reads.
+            // Project the checked adapter template again so those exact values feed its formals.
+            (implementation, captures, template, _) = inline_argument_template(self.ir, lambda)?;
+        }
+
         statements.remove(declaration_position);
+        statements.splice(
+            declaration_position..declaration_position,
+            reference_declarations,
+        );
         let mut capture_declarations = Vec::with_capacity(captures.len());
         let mut formal_slots = Vec::with_capacity(captures.len() + arity);
         for (capture_ordinal, capture) in captures.into_iter().enumerate() {
@@ -1313,13 +1338,18 @@ impl BodyLowering<'_> {
                 formal_slots.push(slot);
                 continue;
             }
-            let source_name = parameter_identities
-                .as_ref()
-                .and_then(|identities| identities.get(parameter as usize))
-                .and_then(|identity| identity.source_name.clone());
-            match (self.ir.expr(value), source_name) {
-                (IrExpr::GetValue(slot), None) => formal_slots.push(*slot),
-                (_, name) => {
+            let reference_parameter = callable_reference.then_some(operand);
+            let source_name = if reference_parameter.is_some() {
+                None
+            } else {
+                parameter_identities
+                    .as_ref()
+                    .and_then(|identities| identities.get(parameter as usize))
+                    .and_then(|identity| identity.source_name.clone())
+            };
+            match (self.ir.expr(value), source_name, reference_parameter) {
+                (IrExpr::GetValue(slot), None, None) => formal_slots.push(*slot),
+                (_, name, reference_parameter) => {
                     let slot = self.allocate_temporary();
                     let declaration = self.ir.add_expr(IrExpr::Variable {
                         index: slot,
@@ -1333,6 +1363,14 @@ impl BodyLowering<'_> {
                         self.ir.set_debug_local_provenance(
                             declaration,
                             crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { depth: 0 },
+                        );
+                    }
+                    if let Some(ordinal) = reference_parameter {
+                        self.ir.set_debug_local_provenance(
+                            declaration,
+                            crate::ir::IrDebugLocalProvenance::InlineCallableReferenceParameter {
+                                ordinal: u32::try_from(ordinal).ok()?,
+                            },
                         );
                     }
                     preamble.push(declaration);
@@ -1355,12 +1393,26 @@ impl BodyLowering<'_> {
         }
         preamble.push(marker);
 
+        let inline_body = if callable_reference {
+            let (body, _) = crate::ir::clone_expression_dag(self.ir, template);
+            if let Some(line) = self.ir.expr_source_lines.get(&lambda).copied() {
+                self.ir.expr_source_lines.insert(body, line);
+            }
+            body
+        } else {
+            template
+        };
         let local_base = self.next_temporary;
         let local_count =
             rehome_inline_body_values(self.ir, inline_body, &formal_slots, local_base)?;
         self.next_temporary = local_base.checked_add(local_count)?;
-        self.ir.functions[implementation as usize].body = None;
-        self.ir.inline_only_fns.insert(implementation);
+        // A callable-reference adapter can still have a carrier use elsewhere. The consumed
+        // reference is marked above; target realization removes the adapter only when no carrier
+        // remains. A source lambda's implementation is owned entirely by this splice.
+        if !callable_reference {
+            self.ir.functions[implementation as usize].body = None;
+            self.ir.inline_only_fns.insert(implementation);
+        }
         // A `finally` protects the lambda parameters and its inline-frame marker, so they open the
         // spliced body. A call without one keeps them as statements ahead of the body; that is
         // where an inlined `return this` closes the frame before the read.

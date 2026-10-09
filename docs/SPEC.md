@@ -16211,3 +16211,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the call's line after the locals end; the load and its `pop` are removed together. A computed
   value still ends the locals first and returns to the inline body's line with a `nop` after the
   value (`jvm/ir_emit/block_scope.rs`). Test: `tests/also_apply_result_line_e2e.rs`.
+
+- **A checked function value passed to a provider-planned inline call is invoked.** A stdlib scope
+  function such as `let` takes its provider plan for every expression already checked against its
+  function parameter: locals, captures, properties, calls, conditionals, and callable references
+  all evaluate once. A literal body is spliced. A non-suspend callable reference is spliced through
+  its checked adapter template, including its bound receiver and captures, so kotlinc's direct call
+  and `pN` inline locals are retained without rediscovering the reference target. The other
+  expressions use the common function-value invocation path. FIR storage representation therefore
+  cannot make `object : R { override fun run(t: Throwable?) { t?.let(x) } }` reach a backend as an
+  external `StandardKt.let` call. Tests:
+  `fir_lower::tests::inline_plan_tests::dependency_scope_plans_invoke_function_values_captured_by_local_classes`,
+  `tests/scope_function_value_arg_e2e.rs`,
+  `tests/native_codegen_e2e.rs` (`a_scope_function_whose_block_is_a_captured_function_value_runs`).

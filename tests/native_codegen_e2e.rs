@@ -1398,6 +1398,37 @@ fn a_scope_function_whose_block_is_a_function_value_runs() {
 }
 
 #[test]
+fn a_scope_function_whose_block_is_a_captured_function_value_runs() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The function value reaches the scope function through an object's capture field, not a
+    // local or parameter of the calling body. It is still one stored value: evaluated once and
+    // invoked, whether the capture is a plain field or the shared cell of a captured `var`.
+    assert_eq!(
+        run("interface Sink { fun accept(value: Int?): Int }\n\
+             fun captured(block: (Int) -> Int): Sink = object : Sink {\n\
+             \x20   override fun accept(value: Int?): Int = value?.let(block) ?: -1\n\
+             }\n\
+             fun shared(start: (Int) -> Int): Sink {\n\
+             \x20   var block = start\n\
+             \x20   val sink = object : Sink {\n\
+             \x20       override fun accept(value: Int?): Int = value!!.let(block)\n\
+             \x20   }\n\
+             \x20   block = { it * 3 }\n\
+             \x20   return sink\n\
+             }\n\
+             fun main() {\n\
+             \x20   println(captured { it + 1 }.accept(41))\n\
+             \x20   println(captured { it + 1 }.accept(null))\n\
+             \x20   println(shared { it + 1 }.accept(5))\n\
+             }\n"),
+        "42\n-1\n15\n"
+    );
+}
+
+#[test]
 fn an_extension_property_is_read_and_written_through_its_accessors() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
