@@ -3,7 +3,8 @@ name: ci
 # Build the conformance test binary once. Every supported Kotlin version gets independent JVM and
 # Native matrix rows: JVM runs its box corpus plus the non-box suites; Native runs its box corpus.
 # Publish only after all rows pass and every version matches its committed platform expectations.
-# `ci-and-conformance` is the one required check over `ci` and that whole matrix.
+# `ci-and-conformance` is the one required check over core CI, KLIB semantics, conformance, and
+# Gradle release/compatibility validation.
 # `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
 # match the lists on their own base and still disagree with them once both are on master.
 on:
@@ -363,25 +364,36 @@ jobs:
           path: jvm-byte-equality.txt
           if-no-files-found: error
 
-  # The one check a ruleset requires: its context does not change with the Kotlin version matrix.
-  # A required check that is skipped counts as passing, so this job is always scheduled and fails
-  # itself unless `ci` and the whole matrix (one result over every lane) succeeded. A failed
-  # `build-shared-bins` or `versions` skips the matrix, which fails it here too.
+  # The one check a ruleset requires: its context does not change with either matrix. A required
+  # check that is skipped counts as passing, so this job is always scheduled and fails itself unless
+  # core CI, KLIB semantics, the complete conformance matrix, the plugin build, and the complete
+  # Gradle matrix succeeded. A failed shared build or version inventory skips a consumer, which
+  # fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, conformance]
+    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: require ci and every conformance lane to succeed
+      - name: require every merge gate to succeed
         env:
           CI_RESULT: ${{ needs.ci.result }}
+          KLIB_RESULT: ${{ needs.klib-semantics.result }}
           CONFORMANCE_RESULT: ${{ needs.conformance.result }}
+          GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
+          GRADLE_RESULT: ${{ needs.gradle.result }}
         run: |
           echo "ci: $CI_RESULT"
+          echo "klib-semantics: $KLIB_RESULT"
           echo "conformance: $CONFORMANCE_RESULT"
-          if [ "$CI_RESULT" != success ] || [ "$CONFORMANCE_RESULT" != success ]; then
-            echo "ci and every conformance lane must succeed" >&2
+          echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
+          echo "gradle: $GRADLE_RESULT"
+          if [ "$CI_RESULT" != success ] \
+            || [ "$KLIB_RESULT" != success ] \
+            || [ "$CONFORMANCE_RESULT" != success ] \
+            || [ "$GRADLE_PLUGIN_RESULT" != success ] \
+            || [ "$GRADLE_RESULT" != success ]; then
+            echo "core CI, KLIB semantics, conformance, and every Gradle gate must succeed" >&2
             exit 1
           fi
 
@@ -446,7 +458,16 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: ${{ matrix.gradle }}
-          cache-provider: basic
+          # The integration harness deliberately uses an isolated user home below. Do not restore
+          # an unused ~/.gradle cache; the next step owns the exact home the nested builds consume.
+          cache-provider: external
+      - name: cache Gradle integration dependencies
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/krusty-gradle-user-home/caches
+          # Each matrix lane has a different Gradle/KGP/KSP dependency graph. The generated fixture
+          # build scripts live in gradle.rs, while the tested plugin build lives under tools/.
+          key: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-${{ hashFiles('Cargo.lock', 'crates/krusty-build/src/gradle.rs', 'tools/krusty-gradle/**') }}
       - uses: actions/download-artifact@v8
         with:
           name: shared-bins

@@ -289,19 +289,18 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs `ci` and the whole `conformance` matrix, where every supported Kotlin version has distinct
-JVM and Native rows; the JVM row also owns the non-box suite. The job is scheduled with
-`if: always()`, because a required
-check that is skipped counts as passing, and it fails unless both results are `success`. A failed,
-skipped, or cancelled dependency therefore fails it, including a failed `build-shared-bins` or
-`versions` job that skips the whole matrix. Its name stays the same when the version manifest
-changes. It runs on pull requests, merge groups, and master pushes. The master `release` job keeps
-its own, broader `needs` list (KLIB semantics, the Gradle matrix, and release builds), which this
-check does not cover.
+It needs core `ci`, `klib-semantics`, the whole `conformance` matrix, `build-gradle-plugin`, and the
+whole `gradle` compatibility matrix. Every supported Kotlin version has distinct JVM and Native
+conformance rows; the JVM row also owns the non-box suite. The job is scheduled with `if: always()`,
+because a required check that is skipped counts as passing, and it fails unless every dependency
+result is `success`. A failed, skipped, cancelled, or absent dependency therefore fails it,
+including a failed shared build or version inventory that skips a downstream matrix. Its name stays
+the same when either matrix changes. It runs on pull requests, merge groups, and master pushes. The
+master `release` job additionally requires the release build and version inventory before it
+publishes artifacts.
 
-The `master` ruleset (id `19534763`) requires `ci` until the maintainer switches it. Switch only
-after the job has landed on master and reported success there, so the required context is one
-GitHub has actually reported:
+The `master` ruleset (id `19534763`) requires this aggregate from the GitHub Actions app (id
+`15368`). Audit the live protection without changing the ruleset:
 
 1. Find the latest master push run and confirm its head is the merged commit:
 
@@ -318,30 +317,15 @@ GitHub has actually reported:
      --jq '.check_runs[] | select(.name == "ci-and-conformance") | {name, conclusion, app: .app.id}'
    ```
 
-3. Read the current required checks. Before the switch this prints
-   `[{"context":"ci","integration_id":15368}]`:
+3. Read the current required checks:
 
    ```sh
    gh api repos/qnox/krusty/rulesets/19534763 \
      --jq '.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks'
    ```
 
-4. Replace `ci` with `ci-and-conformance`, either in Settings → Rules → Rulesets → `master` →
-   "Require status checks to pass" (pick the GitHub Actions source), or through the API, which
-   keeps every other rule as it is:
-
-   ```sh
-   gh api repos/qnox/krusty/rulesets/19534763 \
-     | jq '{name, target, enforcement, conditions, bypass_actors: (.bypass_actors // []),
-            rules: (.rules | map(if .type == "required_status_checks"
-              then .parameters.required_status_checks =
-                [{"context": "ci-and-conformance", "integration_id": 15368}]
-              else . end))}' \
-     | gh api -X PUT repos/qnox/krusty/rulesets/19534763 --input -
-   ```
-
-5. Repeat step 3. It must print `[{"context":"ci-and-conformance","integration_id":15368}]`, and an
-   open pull request then lists `ci-and-conformance` as required.
+   It must print `[{"context":"ci-and-conformance","integration_id":15368}]`. An open pull request
+   must also list `ci-and-conformance` as required.
 
 The JVM conformance, JVM byte-equality, and Native conformance badges change only when a master
 `release` job publishes. To verify a publication, confirm that run's `release` job succeeded,
