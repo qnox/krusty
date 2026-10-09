@@ -21,6 +21,8 @@ impl super::Emitter<'_> {
             (Some(classifier), None) => match primitive_wrapper(classifier) {
                 Some(wrapper) if !type_argument => self.primitive_class(wrapper, code),
                 _ => {
+                    // `Unit::class` is the `kotlin.Unit` object's class, never the `void` return.
+                    let classifier = crate::types::stored_value_ty(classifier);
                     let descriptor = super::boxed_descriptor(classifier);
                     let internal = descriptor
                         .strip_prefix('L')
