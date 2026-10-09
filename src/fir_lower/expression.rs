@@ -75,9 +75,22 @@ impl BodyLowering<'_> {
                 let parts = runs
                     .iter()
                     .map(|run| match run {
-                        super::constant_evaluation::TemplateRun::Constant(text) => {
-                            let text = lower_constant(text, Ty::String, origin)?;
-                            Ok((self.ir.add_expr(IrExpr::Const(text)), None))
+                        super::constant_evaluation::TemplateRun::Constant { value, source } => {
+                            let text = lower_constant(value, Ty::String, origin)?;
+                            let lowered = self.ir.add_expr(IrExpr::Const(text));
+                            // The folded literal is marked where its first constant was written.
+                            // A later constant absorbed into the same run does not open a line.
+                            let debug = self.body.expression_debug_lines(*source);
+                            if debug.positionless {
+                                self.ir.mark_positionless(lowered);
+                            }
+                            if debug.source != 0 {
+                                self.ir.expr_source_lines.insert(lowered, debug.source);
+                            }
+                            if debug.end != 0 {
+                                self.ir.expr_end_lines.insert(lowered, debug.end);
+                            }
+                            Ok((lowered, None))
                         }
                         super::constant_evaluation::TemplateRun::Part(part) => Ok((
                             self.expression_with_conversion(part.value, part.conversion)?,
