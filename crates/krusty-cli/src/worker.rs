@@ -103,7 +103,7 @@ const LIST_FLAGS: &[&str] = &[
 /// `None` is understood but changes nothing krusty emits.
 fn boolean_option(flag: &str) -> Option<Option<&'static str>> {
     Some(match flag {
-        "--progressive" => None,
+        "--progressive" => Some("-progressive"),
         "--x_allow_kotlin_package" => Some("-Xallow-kotlin-package"),
         "--x_allow_result_return_type" => Some("-Xallow-result-return-type"),
         "--x_allow_unstable_dependencies" => Some("-Xallow-unstable-dependencies"),
@@ -392,9 +392,8 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                     translate_language_features(&mut unit, features, flag)?;
                 } else {
                     match value.as_str() {
-                        // Diagnostics/current-language policy only; the compiler already implements
-                        // its current semantics and records these no-ops for Bazel to print.
-                        "-progressive" | "-nowarn" => unit.inert.push(value),
+                        // Diagnostic policy only; record these no-ops for Bazel to print.
+                        "-nowarn" => unit.inert.push(value),
                         "-Xexplicit-api=disable" => unit.inert.push(value),
                         // kotlinc 2.4.10 (JVM) accepts `-Xwasm-kclass-fqn` with only a "flag is
                         // not supported by this version of the compiler" warning and emits
@@ -825,7 +824,13 @@ mod tests {
 
     #[test]
     fn the_real_argument_surface_translates() {
-        let unit = translate(&intellij_request()).expect("must translate");
+        // `--progressive` is part of the real request but deliberately refused below until its
+        // semantics are implemented. Keep exercising every other field of that request here.
+        let request = intellij_request()
+            .into_iter()
+            .filter(|argument| argument != "--progressive")
+            .collect::<Vec<_>>();
+        let unit = translate(&request).expect("must translate");
         assert_eq!(unit.output_jar, PathBuf::from("out/util.jar"));
         assert_eq!(unit.abi_jar, Some(PathBuf::from("out/util.abi.jar")));
         assert_eq!(
@@ -863,11 +868,32 @@ mod tests {
             );
         }
         for inert in [
-            "--progressive",
             "--warn off",
             "--x_xlanguage +AllowEagerSupertypeAccessibilityChecks",
         ] {
             assert!(unit.inert.iter().any(|value| value == inert), "{inert}");
+        }
+    }
+
+    /// The worker and batch surfaces must not disagree about a semantic option. Until progressive
+    /// language features are implemented, neither the rule-owned spelling nor a forwarded
+    /// kotlinc spelling may compile while silently using ordinary language semantics.
+    #[test]
+    fn progressive_is_refused_through_every_worker_surface() {
+        for progressive in [
+            vec!["--progressive"],
+            vec!["--kotlinc-arg", "-progressive"],
+            vec!["--kotlinc-arg", "-Xprogressive"],
+        ] {
+            let mut request = progressive;
+            request.extend(["--srcs", "A.kt", "--out", "o.jar"]);
+            let refusal = translate(&args(&request)).unwrap_err();
+            assert_eq!(
+                refusal,
+                Refusal::Unsupported(
+                    "krusty does not implement the kotlinc argument '-progressive'".to_string()
+                )
+            );
         }
     }
 
@@ -1236,8 +1262,6 @@ mod tests {
         let unit = translate(&args(&[
             "--kotlinc-arg",
             "-Xjvm-default=all",
-            "--kotlinc-arg",
-            "-progressive",
             "--srcs",
             "A.kt",
             "--out",
@@ -1245,7 +1269,7 @@ mod tests {
         ]))
         .expect("must translate");
         assert_eq!(unit.kotlinc_args, vec!["-Xjvm-default=all".to_string()]);
-        assert_eq!(unit.inert, vec!["-progressive".to_string()]);
+        assert!(unit.inert.is_empty(), "{:?}", unit.inert);
     }
 
     /// intellij-community's fleet.multiplatform.shims and fleet.util.codepoints targets forward
