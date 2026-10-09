@@ -12,14 +12,15 @@ mod mangling;
 mod metadata_declarations;
 
 pub use mangling::{
-    accessor_signature, callable_signature, class_signature, property_signature, Accessor,
-    CallableShape, ClassScope, DeclarationContainer, ManglingError, PropertyShape, SignatureType,
-    TypeParameterShape, TypeView,
+    accessor_signature, callable_signature, class_signature, enum_entry_signature,
+    property_signature, Accessor, CallableShape, ClassScope, DeclarationContainer, ManglingError,
+    PropertyShape, SignatureType, TypeParameterShape, TypeView,
 };
 pub use metadata_declarations::{
-    constructor_signature, member_property_accessor_signature, member_signature,
-    metadata_class_signature, package_function_signature, package_property_accessor_signature,
-    package_property_signature, MetadataAccessor, MetadataContainer,
+    constructor_signature, enum_class_member_signatures, member_property_accessor_signature,
+    member_signature, metadata_class_signature, metadata_enum_entry_signature,
+    package_function_signature, package_property_accessor_signature, package_property_signature,
+    MetadataAccessor, MetadataClass, MetadataContainer,
 };
 
 /// One exact qualified path in a public KLIB signature.

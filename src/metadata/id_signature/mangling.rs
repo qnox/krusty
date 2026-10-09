@@ -15,29 +15,47 @@
 //! fully qualified classifier with `<arguments>` and `?`, a type parameter is
 //! `container:index` (container 0 is the declaration itself, 1 its class, and so on outward), a
 //! type parameter declaration is `index§<bound&bound>`, and a vararg parameter carries `...`. A
-//! property is `(context types)`? `@receiver`? `{type parameters}` `name`. A result type is never
+//! property is `(context types)`? `@receiver`? `{type parameters}` `name`. A class member without a
+//! dispatch receiver carries `#static`, after a function's name or before a property's other parts. A result type is never
 //! written for the declarations a KLIB links by public signature.
+//!
+//! A signature's mask carries Kotlin's `IdSignature.Flags`. The two a public KLIB declaration can
+//! have are recursive: `IS_EXPECT` when the declaration or a class around it is `expect`, and
+//! `IS_NATIVE_INTEROP_LIBRARY` for every declaration of a C-interop library. The declaration model
+//! supplies both facts; the mangler never assumes them.
 
 use std::borrow::Cow;
 
 use super::{city_hash, KlibAccessorIdSignature, KlibNamePath, KlibPublicIdSignature};
 
+/// `IdSignature.Flags.IS_EXPECT`.
+const IS_EXPECT: u64 = 1 << 0;
+/// `IdSignature.Flags.IS_NATIVE_INTEROP_LIBRARY`.
+const IS_NATIVE_INTEROP_LIBRARY: u64 = 1 << 2;
+
+/// `MangleConstant.STATIC_MEMBER_MARK`.
+const STATIC_MEMBER: &str = "#static";
+
 /// A type as the signature mangler sees it.
 pub trait SignatureType: Sized {
+    /// The identity of a type parameter's declaration. Mangling locates a referenced parameter
+    /// by this identity, never by its spelling.
+    type ParameterId: Copy + Eq + std::fmt::Debug;
+
     fn view(&self) -> Result<TypeView<'_, Self>, ManglingError>;
 }
 
 /// One level of a type.
-pub enum TypeView<'a, T> {
+pub enum TypeView<'a, T: SignatureType> {
     Class {
         /// Package and class names joined with `.` (`kotlin.collections.Map.Entry`).
         fq_name: Cow<'a, str>,
         arguments: Vec<&'a T>,
         nullable: bool,
     },
-    /// A reference to a type parameter in scope, by its declared name.
+    /// A reference to a type parameter in scope.
     Parameter {
-        name: &'a str,
+        id: T::ParameterId,
         nullable: bool,
     },
     In(&'a T),
@@ -46,34 +64,46 @@ pub enum TypeView<'a, T> {
 }
 
 /// A declared type parameter.
-pub struct TypeParameterShape<'a, T> {
-    pub name: &'a str,
+pub struct TypeParameterShape<'a, T: SignatureType> {
+    pub id: T::ParameterId,
     /// Declared upper bounds; empty means the default `Any?`.
     pub bounds: Vec<&'a T>,
 }
 
-/// A class around a declaration.
-pub struct ClassScope<'a, T> {
+impl<T: SignatureType> Clone for TypeParameterShape<'_, T> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            bounds: self.bounds.clone(),
+        }
+    }
+}
+
+/// A class: the declaration a class signature names, and a scope around nested declarations.
+pub struct ClassScope<'a, T: SignatureType> {
     pub name: &'a str,
     pub type_parameters: Vec<TypeParameterShape<'a, T>>,
+    pub expect: bool,
 }
 
 /// Where a declaration sits: its package and the classes around it, outermost first.
-pub struct DeclarationContainer<'a, T> {
+pub struct DeclarationContainer<'a, T: SignatureType> {
     pub package: &'a [String],
     pub classes: &'a [ClassScope<'a, T>],
+    /// The declaration belongs to a C-interop library.
+    pub native_interop_library: bool,
 }
 
-impl<T> Clone for DeclarationContainer<'_, T> {
+impl<T: SignatureType> Clone for DeclarationContainer<'_, T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T> Copy for DeclarationContainer<'_, T> {}
+impl<T: SignatureType> Copy for DeclarationContainer<'_, T> {}
 
-impl<'a, T> DeclarationContainer<'a, T> {
-    fn signature(&self, name: &str, mangled: Option<&str>) -> KlibPublicIdSignature {
+impl<'a, T: SignatureType> DeclarationContainer<'a, T> {
+    fn signature(&self, name: &str, mangled: Option<&str>, expect: bool) -> KlibPublicIdSignature {
         KlibPublicIdSignature {
             package: KlibNamePath {
                 segments: self.package.to_vec().into_boxed_slice(),
@@ -87,8 +117,20 @@ impl<'a, T> DeclarationContainer<'a, T> {
                     .collect(),
             },
             member_id: mangled.map(|mangled| city_hash::city_hash64(mangled.as_bytes())),
-            mask: 0,
+            mask: self.mask(expect),
         }
+    }
+
+    /// The recursive flags: a declaration inside an `expect` class is itself expected.
+    fn mask(&self, expect: bool) -> u64 {
+        let mut mask = 0;
+        if expect || self.classes.iter().any(|class| class.expect) {
+            mask |= IS_EXPECT;
+        }
+        if self.native_interop_library {
+            mask |= IS_NATIVE_INTEROP_LIBRARY;
+        }
+        mask
     }
 
     /// The type-parameter scopes a declaration's types see, innermost (the declaration) first.
@@ -108,7 +150,7 @@ impl<'a, T> DeclarationContainer<'a, T> {
 }
 
 /// A function or constructor.
-pub struct CallableShape<'a, T> {
+pub struct CallableShape<'a, T: SignatureType> {
     /// `<init>` for a constructor.
     pub name: &'a str,
     pub contexts: Vec<&'a T>,
@@ -117,14 +159,20 @@ pub struct CallableShape<'a, T> {
     /// The index in `params` of the vararg parameter, whose type is its array type.
     pub vararg: Option<usize>,
     pub type_parameters: Vec<TypeParameterShape<'a, T>>,
+    pub expect: bool,
+    /// A class member without a dispatch receiver: an enum class's `values` or `valueOf`.
+    pub static_member: bool,
 }
 
 /// A property.
-pub struct PropertyShape<'a, T> {
+pub struct PropertyShape<'a, T: SignatureType> {
     pub name: &'a str,
     pub contexts: Vec<&'a T>,
     pub receiver: Option<&'a T>,
     pub type_parameters: Vec<TypeParameterShape<'a, T>>,
+    pub expect: bool,
+    /// A class member without a dispatch receiver: an enum class's `entries`.
+    pub static_member: bool,
 }
 
 /// Which accessor of a property.
@@ -159,11 +207,20 @@ impl std::fmt::Display for ManglingError {
 impl std::error::Error for ManglingError {}
 
 /// The identity of a class, interface, object, enum or annotation class: a path, no member id.
-pub fn class_signature<T>(
+pub fn class_signature<T: SignatureType>(
+    container: DeclarationContainer<'_, T>,
+    class: &ClassScope<'_, T>,
+) -> KlibPublicIdSignature {
+    container.signature(class.name, None, class.expect)
+}
+
+/// The identity of an enum entry; `container` ends with its enum class. An entry carries no
+/// flags of its own, only those of the classes around it.
+pub fn enum_entry_signature<T: SignatureType>(
     container: DeclarationContainer<'_, T>,
     name: &str,
 ) -> KlibPublicIdSignature {
-    container.signature(name, None)
+    container.signature(name, None, false)
 }
 
 /// The identity of a function or constructor.
@@ -172,7 +229,7 @@ pub fn callable_signature<T: SignatureType>(
     callable: &CallableShape<'_, T>,
 ) -> Result<KlibPublicIdSignature, ManglingError> {
     let mangled = mangle_callable(&container.scopes(&callable.type_parameters), callable)?;
-    Ok(container.signature(callable.name, Some(&mangled)))
+    Ok(container.signature(callable.name, Some(&mangled), callable.expect))
 }
 
 /// The identity of a property.
@@ -181,11 +238,12 @@ pub fn property_signature<T: SignatureType>(
     property: &PropertyShape<'_, T>,
 ) -> Result<KlibPublicIdSignature, ManglingError> {
     let mangled = mangle_property(&container.scopes(&property.type_parameters), property)?;
-    Ok(container.signature(property.name, Some(&mangled)))
+    Ok(container.signature(property.name, Some(&mangled), property.expect))
 }
 
 /// The identity of a property's getter or setter. An accessor is mangled as a function named
-/// `<get-name>` or `<set-name>` with the property's contexts, receiver and type parameters.
+/// `<get-name>` or `<set-name>` with the property's contexts, receiver and type parameters, and
+/// shares the property's flags.
 pub fn accessor_signature<T: SignatureType>(
     container: DeclarationContainer<'_, T>,
     property: &PropertyShape<'_, T>,
@@ -195,29 +253,24 @@ pub fn accessor_signature<T: SignatureType>(
         Accessor::Getter => (format!("<get-{}>", property.name), Vec::new()),
         Accessor::Setter { value } => (format!("<set-{}>", property.name), vec![value]),
     };
-    let type_parameters = property
-        .type_parameters
-        .iter()
-        .map(|parameter| TypeParameterShape {
-            name: parameter.name,
-            bounds: parameter.bounds.clone(),
-        })
-        .collect();
     let function = CallableShape {
         name: &name,
         contexts: property.contexts.clone(),
         receiver: property.receiver,
         params,
         vararg: None,
-        type_parameters,
+        type_parameters: property.type_parameters.clone(),
+        expect: property.expect,
+        static_member: property.static_member,
     };
-    let scopes = container.scopes(&function.type_parameters);
-    let mangled = mangle_callable(&scopes, &function)?;
+    let mangled = mangle_callable(&container.scopes(&function.type_parameters), &function)?;
+    let property_signature = property_signature(container, property)?;
+    let mask = property_signature.mask;
     Ok(KlibAccessorIdSignature::new(
-        property_signature(container, property)?,
+        property_signature,
         name,
         city_hash::city_hash64(mangled.as_bytes()),
-        0,
+        mask,
     ))
 }
 
@@ -227,7 +280,19 @@ fn mangle_callable<T: SignatureType>(
     scopes: &Scopes<'_, '_, T>,
     callable: &CallableShape<'_, T>,
 ) -> Result<String, ManglingError> {
+    if let Some(vararg) = callable.vararg {
+        if vararg >= callable.params.len() {
+            return Err(ManglingError::new(format!(
+                "{} marks parameter {vararg} as vararg but has {} value parameters",
+                callable.name,
+                callable.params.len()
+            )));
+        }
+    }
     let mut out = String::from(callable.name);
+    if callable.static_member {
+        out.push_str(STATIC_MEMBER);
+    }
     contexts(&callable.contexts, scopes, &mut out)?;
     if let Some(receiver) = callable.receiver {
         out.push('@');
@@ -253,6 +318,9 @@ fn mangle_property<T: SignatureType>(
     property: &PropertyShape<'_, T>,
 ) -> Result<String, ManglingError> {
     let mut out = String::new();
+    if property.static_member {
+        out.push_str(STATIC_MEMBER);
+    }
     contexts(&property.contexts, scopes, &mut out)?;
     if let Some(receiver) = property.receiver {
         out.push('@');
@@ -337,19 +405,18 @@ fn ty<T: SignatureType>(
                 out.push('?');
             }
         }
-        TypeView::Parameter { name, nullable } => {
-            // Source cannot name a shadowed type parameter, so the innermost one wins.
+        TypeView::Parameter { id, nullable } => {
             let (container, index) = scopes
                 .iter()
                 .enumerate()
                 .find_map(|(container, scope)| {
                     scope
                         .iter()
-                        .position(|parameter| parameter.name == name)
+                        .position(|parameter| parameter.id == id)
                         .map(|index| (container, index))
                 })
                 .ok_or_else(|| {
-                    ManglingError::new(format!("type parameter {name} is not in scope"))
+                    ManglingError::new(format!("type parameter {id:?} is not in scope"))
                 })?;
             out.push_str(&format!("{container}:{index}"));
             if nullable {
@@ -370,60 +437,4 @@ fn ty<T: SignatureType>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A declaration model of its own, unrelated to decoded metadata.
-    enum Model {
-        Class(&'static str, Vec<Model>),
-        Parameter(&'static str),
-    }
-
-    impl SignatureType for Model {
-        fn view(&self) -> Result<TypeView<'_, Self>, ManglingError> {
-            Ok(match self {
-                Model::Class(fq_name, arguments) => TypeView::Class {
-                    fq_name: Cow::Borrowed(fq_name),
-                    arguments: arguments.iter().collect(),
-                    nullable: false,
-                },
-                Model::Parameter(name) => TypeView::Parameter {
-                    name,
-                    nullable: false,
-                },
-            })
-        }
-    }
-
-    #[test]
-    fn any_declaration_model_mangles_through_its_type_view() {
-        // `kotlin.comparisons.maxOf<T : Comparable<T>>(T, T)` in the 2.4.20 stdlib KLIB.
-        let bound = Model::Class("kotlin.Comparable", vec![Model::Parameter("T")]);
-        let t = Model::Parameter("T");
-        let package = ["kotlin".to_owned(), "comparisons".to_owned()];
-        let max_of = CallableShape {
-            name: "maxOf",
-            contexts: Vec::new(),
-            receiver: None,
-            params: vec![&t, &t],
-            vararg: None,
-            type_parameters: vec![TypeParameterShape {
-                name: "T",
-                bounds: vec![&bound],
-            }],
-        };
-        let signature = callable_signature(
-            DeclarationContainer {
-                package: &package,
-                classes: &[],
-            },
-            &max_of,
-        )
-        .unwrap();
-        assert_eq!(signature.member_id(), Some(0xba31_5fe0_bd1b_9796));
-        assert_eq!(
-            signature.member_id().map(|id| id as i64),
-            Some(-5_030_133_889_946_118_250)
-        );
-    }
-}
+mod tests;

@@ -2541,6 +2541,7 @@ pub enum BuiltinTy {
     },
     Param {
         name: String,
+        id: crate::metadata::semantic::KotlinTypeParameterId,
         nullable: bool,
     },
     InProjection(Box<BuiltinTy>),
@@ -2583,7 +2584,7 @@ impl BuiltinTy {
                 nullable,
                 ..
             } => (internal.clone(), args.as_slice(), *nullable),
-            BuiltinTy::Param { name, nullable } => (name.clone(), &[][..], *nullable),
+            BuiltinTy::Param { name, nullable, .. } => (name.clone(), &[][..], *nullable),
             BuiltinTy::InProjection(inner) => return format!("in {}", inner.render()),
             BuiltinTy::OutProjection(inner) => return format!("out {}", inner.render()),
         };

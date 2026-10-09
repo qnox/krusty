@@ -4571,11 +4571,15 @@ code is the one the code generator already names: provider-owned bodies through 
 - **Signatures (done).** `metadata::id_signature` computes a declaration's public `IdSignature`
   from its shape, as Kotlin's `IrMangleComputer` (signature mode) and CityHash64 do. The mangler is
   target-free: a declaration model implements `SignatureType`, so the KLIB reader (over decoded
-  metadata) and a KLIB writer (over krusty's own declarations) agree on one identity. Over the
-  Kotlin/Native 2.4.20 stdlib it reproduces every public function, property, accessor, constructor
-  and class signature that IR serializes; the misses are `@OptionalExpectation` annotation classes,
-  which IR omits, and non-public nested classes. The four library KLIBs above match completely.
-  Enum entries are still open.
+  metadata) and a KLIB writer (over krusty's own declarations) agree on one identity. A type
+  parameter is located by its declaration identity (metadata's `TypeParameter.id`), never by its
+  spelling. The mask is an explicit input: `IS_EXPECT` from the declaration's and its classes'
+  metadata flags, `IS_NATIVE_INTEROP_LIBRARY` from the library. Enum classes get their implicit
+  `values`, `valueOf` and `entries` (static members, `#static`). The unit tests pin a kotlinc-native
+  fixture KLIB (`tests/fixtures/klib_signatures`) whose metadata must sign every declaration and
+  accessor exactly as its IR declares them. Over the Kotlin/Native 2.4.20 stdlib it also reproduces
+  every public function, property, accessor, constructor and class signature; the misses are
+  `@OptionalExpectation` annotation classes, which IR omits, and non-public nested classes.
 - **Joining (next).** A selected dependency callable is joined to its decoded body through its
   exact public signature, never through a name or parameter tuple.
 - **Lowering (next).** The decoded body is lowered into checked common IR so the native generator

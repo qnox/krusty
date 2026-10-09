@@ -441,7 +441,7 @@ impl SemanticTables<'_> {
     fn validate_type_edges(
         &self,
         body: &[u8],
-        type_parameters: &std::collections::HashMap<u64, String>,
+        type_parameters: &TypeParameterScope,
         depth: u32,
         context: &str,
     ) -> Result<Option<metadata::KotlinType>, PackageFragmentDecodeError> {
@@ -530,7 +530,7 @@ impl SemanticTables<'_> {
     fn ty(
         &self,
         body: &[u8],
-        type_parameters: &std::collections::HashMap<u64, String>,
+        type_parameters: &TypeParameterScope,
         depth: u32,
         context: &str,
     ) -> Result<metadata::KotlinType, PackageFragmentDecodeError> {
@@ -580,18 +580,30 @@ impl SemanticTables<'_> {
                 shape,
             });
         }
-        let name = if let Some(id) = node.type_parameter_id {
-            type_parameters.get(&id).cloned().ok_or_else(|| {
+        let (id, name) = if let Some(id) = node.type_parameter_id {
+            let name = type_parameters.by_id.get(&id).cloned().ok_or_else(|| {
                 semantic_error(format!("{context} references absent type parameter {id}"))
-            })?
-        } else if let Some(id) = node.type_parameter_name_id {
-            semantic_string(self.strings, id, context)?
+            })?;
+            (id, name)
+        } else if let Some(name_id) = node.type_parameter_name_id {
+            // The name form addresses a type parameter of the immediate owner only.
+            let name = semantic_string(self.strings, name_id, context)?;
+            let id = type_parameters.own.get(&name).copied().ok_or_else(|| {
+                semantic_error(format!(
+                    "{context} names type parameter {name}, which its owner does not declare"
+                ))
+            })?;
+            (id, name)
         } else {
             return Err(semantic_error(format!(
                 "{context} type has no classifier or type parameter"
             )));
         };
-        Ok(metadata::KotlinType::Param { name, nullable })
+        Ok(metadata::KotlinType::Param {
+            name,
+            id: metadata::KotlinTypeParameterId(id),
+            nullable,
+        })
     }
 
     fn function_type_shape(
@@ -637,7 +649,7 @@ impl SemanticTables<'_> {
     fn ty_by_id(
         &self,
         id: u64,
-        type_parameters: &std::collections::HashMap<u64, String>,
+        type_parameters: &TypeParameterScope,
         depth: u32,
         context: &str,
     ) -> Result<metadata::KotlinType, PackageFragmentDecodeError> {
@@ -667,8 +679,9 @@ impl SemanticTables<'_> {
                     nullable: true,
                     shape,
                 },
-                metadata::KotlinType::Param { name, .. } => metadata::KotlinType::Param {
+                metadata::KotlinType::Param { name, id, .. } => metadata::KotlinType::Param {
                     name,
+                    id,
                     nullable: true,
                 },
                 metadata::KotlinType::InProjection(inner) => {
@@ -688,7 +701,7 @@ impl SemanticTables<'_> {
         &self,
         inline: Option<&[u8]>,
         table_id: Option<u64>,
-        type_parameters: &std::collections::HashMap<u64, String>,
+        type_parameters: &TypeParameterScope,
         context: &str,
     ) -> Result<metadata::KotlinType, PackageFragmentDecodeError> {
         match (inline, table_id) {
@@ -704,16 +717,14 @@ impl SemanticTables<'_> {
     fn type_parameters(
         &self,
         bodies: &[&[u8]],
-        inherited: &std::collections::HashMap<u64, String>,
+        inherited: &TypeParameterScope,
         context: &str,
-    ) -> Result<
-        (
-            Vec<metadata::KotlinTypeParameter>,
-            std::collections::HashMap<u64, String>,
-        ),
-        PackageFragmentDecodeError,
-    > {
-        let mut names = inherited.clone();
+    ) -> Result<(Vec<metadata::KotlinTypeParameter>, TypeParameterScope), PackageFragmentDecodeError>
+    {
+        let mut names = TypeParameterScope {
+            by_id: inherited.by_id.clone(),
+            own: std::collections::HashMap::new(),
+        };
         let mut parsed = Vec::with_capacity(bodies.len());
         for body in bodies {
             let mut cursor = Cursor::new(body, 0);
@@ -754,10 +765,15 @@ impl SemanticTables<'_> {
                 ))
             })?;
             let name = semantic_string(self.strings, parameter.name_id, context)?;
-            if names.insert(parameter.id, name).is_some() {
+            if names.by_id.insert(parameter.id, name.clone()).is_some() {
                 return Err(semantic_error(format!(
                     "duplicate type-parameter id {} in {context}",
                     parameter.id
+                )));
+            }
+            if names.own.insert(name, parameter.id).is_some() {
+                return Err(semantic_error(format!(
+                    "duplicate type-parameter name in {context}"
                 )));
             }
             parsed.push(parameter);
@@ -765,6 +781,7 @@ impl SemanticTables<'_> {
         let mut parameters = Vec::with_capacity(parsed.len());
         for parameter in parsed {
             let name = names
+                .by_id
                 .get(&parameter.id)
                 .cloned()
                 .ok_or_else(|| semantic_error("lost decoded type-parameter identity"))?;
@@ -800,6 +817,7 @@ impl SemanticTables<'_> {
                 )? == "kotlin/internal/OnlyInputTypes";
             }
             parameters.push(metadata::KotlinTypeParameter {
+                id: metadata::KotlinTypeParameterId(parameter.id),
                 name,
                 bounds,
                 variance: match parameter.variance {
@@ -815,6 +833,14 @@ impl SemanticTables<'_> {
     }
 }
 
+/// The type parameters a declaration's types can reference: every one in scope by its metadata
+/// id, and the declaration's own by name for the immediate-owner `type_parameter_name` form.
+#[derive(Clone, Default)]
+struct TypeParameterScope {
+    by_id: std::collections::HashMap<u64, String>,
+    own: std::collections::HashMap<String, u64>,
+}
+
 struct SemanticValueParameter {
     ty: metadata::KotlinType,
     name: String,
@@ -825,7 +851,7 @@ struct SemanticValueParameter {
 fn validate_contract_expression(
     body: &[u8],
     tables: &SemanticTables<'_>,
-    type_parameters: &std::collections::HashMap<u64, String>,
+    type_parameters: &TypeParameterScope,
 ) -> Result<(), PackageFragmentDecodeError> {
     let mut cursor = Cursor::new(body, 0);
     let mut inline_types = Vec::new();
@@ -859,7 +885,7 @@ fn validate_contract_expression(
 fn validate_contract(
     body: &[u8],
     tables: &SemanticTables<'_>,
-    type_parameters: &std::collections::HashMap<u64, String>,
+    type_parameters: &TypeParameterScope,
 ) -> Result<(), PackageFragmentDecodeError> {
     for effect in message_bodies(body, 1, "contract")? {
         for argument in message_bodies(effect, 2, "contract effect")? {
@@ -875,7 +901,7 @@ fn validate_contract(
 fn semantic_value_parameter(
     body: &[u8],
     tables: &SemanticTables<'_>,
-    type_parameters: &std::collections::HashMap<u64, String>,
+    type_parameters: &TypeParameterScope,
     context: &str,
 ) -> Result<SemanticValueParameter, PackageFragmentDecodeError> {
     validate_annotation_fields(body, &[7, 170], tables.strings, tables.qnames, context)?;
@@ -931,6 +957,7 @@ struct SemanticFunctionShape {
     visibility: crate::types::Visibility,
     is_inline: bool,
     is_suspend: bool,
+    is_expect: bool,
     is_abstract: bool,
     is_operator: bool,
     is_infix: bool,
@@ -1035,6 +1062,7 @@ fn semantic_function_shape(
         visibility: crate::types::Visibility::from_metadata((flags >> 1) & 0x7),
         is_inline: flags & (1 << 10) != 0,
         is_suspend: flags & (1 << 13) != 0,
+        is_expect: flags & crate::metadata::function_flags::IS_EXPECT != 0,
         is_abstract: (flags >> 4) & 0x3 == 2,
         is_operator: flags & (1 << 8) != 0,
         is_infix: flags & (1 << 9) != 0,
@@ -1049,7 +1077,7 @@ fn semantic_function_shape(
 fn semantic_function(
     body: &[u8],
     tables: &SemanticTables<'_>,
-    inherited: &std::collections::HashMap<u64, String>,
+    inherited: &TypeParameterScope,
     top_level: bool,
 ) -> Result<(metadata::KotlinMember, Option<metadata::KotlinFunction>), PackageFragmentDecodeError>
 {
@@ -1223,6 +1251,7 @@ fn semantic_function(
         ret: ret.clone(),
         is_property: false,
         is_var: false,
+        is_expect: function.is_expect,
         is_operator: function.is_operator,
         is_infix: function.is_infix,
         is_abstract: function.is_abstract,
@@ -1253,6 +1282,7 @@ fn semantic_function(
         is_suspend: function.is_suspend,
         is_operator: function.is_operator,
         is_infix: function.is_infix,
+        is_expect: function.is_expect,
         context_count: context_types.len(),
         annotations,
     });
@@ -1262,7 +1292,7 @@ fn semantic_function(
 fn semantic_property(
     body: &[u8],
     tables: &SemanticTables<'_>,
-    inherited: &std::collections::HashMap<u64, String>,
+    inherited: &TypeParameterScope,
     top_level: bool,
 ) -> Result<(metadata::KotlinMember, Option<metadata::KotlinProperty>), PackageFragmentDecodeError>
 {
@@ -1422,6 +1452,7 @@ fn semantic_property(
         ret: ret.clone(),
         is_property: true,
         is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
+        is_expect: flags & crate::metadata::property_flags::IS_EXPECT != 0,
         is_operator: false,
         is_infix: false,
         is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
@@ -1446,6 +1477,7 @@ fn semantic_property(
         formals,
         visibility,
         is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
+        is_expect: flags & crate::metadata::property_flags::IS_EXPECT != 0,
         context_count: context_params.len(),
         context_params,
         constant,
@@ -1456,7 +1488,7 @@ fn semantic_property(
 fn validate_type_alias(
     body: &[u8],
     tables: &SemanticTables<'_>,
-    inherited: &std::collections::HashMap<u64, String>,
+    inherited: &TypeParameterScope,
 ) -> Result<(), PackageFragmentDecodeError> {
     validate_annotation_fields(
         body,
@@ -1538,7 +1570,7 @@ fn semantic_enum_entry(
 fn semantic_constructor(
     body: &[u8],
     tables: &SemanticTables<'_>,
-    type_parameters: &std::collections::HashMap<u64, String>,
+    type_parameters: &TypeParameterScope,
 ) -> Result<metadata::KotlinConstructor, PackageFragmentDecodeError> {
     validate_annotation_fields(
         body,
@@ -1613,16 +1645,9 @@ fn semantic_class(
     strings: &[String],
     qnames: &[QName],
     header: SemanticClassHeader,
-    inherited_type_parameters: &std::collections::HashMap<u64, String>,
+    inherited_type_parameters: &TypeParameterScope,
     annotation_protocol: ClassAnnotationProtocol,
-) -> Result<
-    (
-        String,
-        metadata::KotlinClass,
-        std::collections::HashMap<u64, String>,
-    ),
-    PackageFragmentDecodeError,
-> {
+) -> Result<(String, metadata::KotlinClass, TypeParameterScope), PackageFragmentDecodeError> {
     // kotlinc reads `Class.annotation` (25) and falls back to the protocol's class-annotation
     // extension only when the class carries none there.
     let mut annotations =
@@ -1834,20 +1859,20 @@ pub(super) fn parse(
         };
         for body in message_bodies(package, 3, "package declaration")? {
             let (_, function) =
-                semantic_function(body, &tables, &std::collections::HashMap::new(), true)?;
+                semantic_function(body, &tables, &TypeParameterScope::default(), true)?;
             result.functions.push(
                 function.ok_or_else(|| semantic_error("top-level function lost its identity"))?,
             );
         }
         for body in message_bodies(package, 4, "package declaration")? {
             let (_, property) =
-                semantic_property(body, &tables, &std::collections::HashMap::new(), true)?;
+                semantic_property(body, &tables, &TypeParameterScope::default(), true)?;
             result.properties.push(
                 property.ok_or_else(|| semantic_error("top-level property lost its identity"))?,
             );
         }
         for body in message_bodies(package, 5, "package declaration")? {
-            validate_type_alias(body, &tables, &std::collections::HashMap::new())?;
+            validate_type_alias(body, &tables, &TypeParameterScope::default())?;
         }
     }
     let class_headers = classes
@@ -1863,13 +1888,9 @@ pub(super) fn parse(
             )));
         }
     }
-    let mut decoded = (0..classes.len()).map(|_| None).collect::<Vec<
-        Option<(
-            String,
-            metadata::KotlinClass,
-            std::collections::HashMap<u64, String>,
-        )>,
-    >>();
+    let mut decoded = (0..classes.len())
+        .map(|_| None)
+        .collect::<Vec<Option<(String, metadata::KotlinClass, TypeParameterScope)>>>();
     let mut remaining = classes.len();
     while remaining != 0 {
         let mut progressed = false;
@@ -1900,7 +1921,7 @@ pub(super) fn parse(
                 };
                 parent_scope.clone()
             } else {
-                std::collections::HashMap::new()
+                TypeParameterScope::default()
             };
             decoded[index] = Some(semantic_class(
                 classes[index],

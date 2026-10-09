@@ -30,6 +30,7 @@ pub(crate) mod function_flags {
     pub const VISIBILITY_PRIVATE: u64 = 1 << 1;
     pub const IS_INLINE: u64 = 1 << 10;
     pub const IS_SUSPEND: u64 = 1 << 13;
+    pub const IS_EXPECT: u64 = 1 << 14;
     /// Low bit of the 2-bit `ReturnValueStatus` field (bits 16-17), which follows
     /// `hasNonStableParameterNames` (bit 15).
     pub const RETURN_VALUE_STATUS_SHIFT: u32 = 16;
@@ -56,6 +57,7 @@ pub(crate) mod property_flags {
     pub const MEMBER_KIND_DELEGATION: u64 = 2 << 6;
     pub const IS_LATEINIT: u64 = 1 << 12;
     pub const IS_DELEGATED: u64 = 1 << 15;
+    pub const IS_EXPECT: u64 = 1 << 16;
     /// Accessor flag word bit 6: the accessor is not the compiler default.
     pub const ACCESSOR_IS_NOT_DEFAULT: u64 = 1 << 6;
     /// Both modality bits (4-5). Shared by the property word and the accessor word, which is how an

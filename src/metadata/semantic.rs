@@ -60,8 +60,11 @@ pub enum KotlinType {
         nullable: bool,
         shape: KotlinFunctionTypeShape,
     },
+    /// A reference to a type parameter in scope. `id` is its declaration's identity; `name` is
+    /// its spelling, kept for rendering and for consumers that scope parameters by name.
     Param {
         name: String,
+        id: KotlinTypeParameterId,
         nullable: bool,
     },
     InProjection(Box<KotlinType>),
@@ -105,7 +108,7 @@ impl KotlinType {
                 nullable,
                 ..
             } => (internal.clone(), args.as_slice(), *nullable),
-            Self::Param { name, nullable } => (name.clone(), &[][..], *nullable),
+            Self::Param { name, nullable, .. } => (name.clone(), &[][..], *nullable),
             Self::InProjection(inner) => return format!("in {}", inner.render()),
             Self::OutProjection(inner) => return format!("out {}", inner.render()),
             Self::Star => return "*".to_string(),
@@ -148,6 +151,7 @@ pub struct KotlinMember {
     pub is_property: bool,
     /// A `var` property; never set on a function.
     pub is_var: bool,
+    pub is_expect: bool,
     pub is_operator: bool,
     pub is_infix: bool,
     pub is_abstract: bool,
@@ -177,6 +181,7 @@ pub struct KotlinFunction {
     pub is_suspend: bool,
     pub is_operator: bool,
     pub is_infix: bool,
+    pub is_expect: bool,
     pub context_count: usize,
     /// Qualified identities of annotations declared on this function.
     pub annotations: Vec<crate::types::TypeName>,
@@ -200,6 +205,7 @@ pub struct KotlinProperty {
     pub formals: Vec<KotlinTypeParameter>,
     pub visibility: Visibility,
     pub is_var: bool,
+    pub is_expect: bool,
     pub context_count: usize,
     pub constant: Option<crate::libraries::LibConst>,
 }
@@ -212,8 +218,14 @@ pub struct KotlinConstructor {
     pub visibility: Visibility,
 }
 
+/// A type parameter's declaration identity: metadata's `TypeParameter.id`, unique along the chain
+/// of declarations whose type parameters are in scope.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct KotlinTypeParameterId(pub u64);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KotlinTypeParameter {
+    pub id: KotlinTypeParameterId,
     pub name: String,
     pub bounds: Vec<KotlinType>,
     pub variance: crate::types::TypeVariance,

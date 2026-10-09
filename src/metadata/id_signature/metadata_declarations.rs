@@ -2,22 +2,25 @@
 //!
 //! Metadata and serialized IR are two views of one KLIB. Each metadata declaration is mangled
 //! exactly as the IR serializer mangled the same declaration, so a provider joins the two by
-//! identity alone.
+//! identity alone. Type parameters are located by their metadata declaration id, and `expect` comes
+//! from the declaration's metadata flags.
 
 use std::borrow::Cow;
 
 use super::mangling::{
-    accessor_signature, callable_signature, class_signature, property_signature, Accessor,
-    CallableShape, ClassScope, DeclarationContainer, ManglingError, PropertyShape, SignatureType,
-    TypeParameterShape, TypeView,
+    accessor_signature, callable_signature, class_signature, enum_entry_signature,
+    property_signature, Accessor, CallableShape, ClassScope, DeclarationContainer, ManglingError,
+    PropertyShape, SignatureType, TypeParameterShape, TypeView,
 };
 use super::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::semantic::{
-    KotlinConstructor, KotlinFunction, KotlinMember, KotlinProperty, KotlinType,
-    KotlinTypeParameter,
+    KotlinClass, KotlinConstructor, KotlinFunction, KotlinMember, KotlinProperty, KotlinType,
+    KotlinTypeParameter, KotlinTypeParameterId,
 };
 
 impl SignatureType for KotlinType {
+    type ParameterId = KotlinTypeParameterId;
+
     fn view(&self) -> Result<TypeView<'_, Self>, ManglingError> {
         Ok(match self {
             KotlinType::Class {
@@ -65,8 +68,8 @@ impl SignatureType for KotlinType {
                 arguments: args.iter().collect(),
                 nullable: *nullable,
             },
-            KotlinType::Param { name, nullable } => TypeView::Parameter {
-                name,
+            KotlinType::Param { id, nullable, .. } => TypeView::Parameter {
+                id: *id,
                 nullable: *nullable,
             },
             KotlinType::InProjection(inner) => TypeView::In(inner),
@@ -76,31 +79,47 @@ impl SignatureType for KotlinType {
     }
 }
 
-/// Where a metadata declaration sits: its package and the classes around it, outermost first,
-/// each with its declared type parameters.
+/// A class around a metadata declaration, or the class a class signature names.
+#[derive(Clone, Copy)]
+pub struct MetadataClass<'a> {
+    /// The simple name.
+    pub name: &'a str,
+    pub type_params: &'a [KotlinTypeParameter],
+    pub expect: bool,
+}
+
+impl<'a> MetadataClass<'a> {
+    pub fn of(name: &'a str, class: &'a KotlinClass) -> Self {
+        Self {
+            name,
+            type_params: &class.type_params,
+            expect: class.is_expect,
+        }
+    }
+
+    fn scope(&self) -> ClassScope<'a, KotlinType> {
+        ClassScope {
+            name: self.name,
+            type_parameters: type_parameters(self.type_params),
+            expect: self.expect,
+        }
+    }
+}
+
+/// Where a metadata declaration sits: its package and the classes around it, outermost first.
 #[derive(Clone, Copy)]
 pub struct MetadataContainer<'a> {
     pub package: &'a [String],
-    pub classes: &'a [(&'a str, &'a [KotlinTypeParameter])],
-}
-
-impl MetadataContainer<'_> {
-    fn scopes(&self) -> Vec<ClassScope<'_, KotlinType>> {
-        self.classes
-            .iter()
-            .map(|(name, parameters)| ClassScope {
-                name,
-                type_parameters: type_parameters(parameters),
-            })
-            .collect()
-    }
+    pub classes: &'a [MetadataClass<'a>],
+    /// The declaration's KLIB is a C-interop library (its manifest's `interop=true`).
+    pub native_interop_library: bool,
 }
 
 fn type_parameters(parameters: &[KotlinTypeParameter]) -> Vec<TypeParameterShape<'_, KotlinType>> {
     parameters
         .iter()
         .map(|parameter| TypeParameterShape {
-            name: &parameter.name,
+            id: parameter.id,
             bounds: parameter.bounds.iter().collect(),
         })
         .collect()
@@ -110,19 +129,29 @@ fn with_container<R>(
     container: MetadataContainer<'_>,
     build: impl FnOnce(DeclarationContainer<'_, KotlinType>) -> R,
 ) -> R {
-    let classes = container.scopes();
+    let classes: Vec<_> = container.classes.iter().map(MetadataClass::scope).collect();
     build(DeclarationContainer {
         package: container.package,
         classes: &classes,
+        native_interop_library: container.native_interop_library,
     })
 }
 
 /// The identity of a class; `container` holds the classes around it, not the class itself.
 pub fn metadata_class_signature(
     container: MetadataContainer<'_>,
+    class: MetadataClass<'_>,
+) -> KlibPublicIdSignature {
+    let class = class.scope();
+    with_container(container, |container| class_signature(container, &class))
+}
+
+/// The identity of an enum entry; `container` ends with its enum class.
+pub fn metadata_enum_entry_signature(
+    container: MetadataContainer<'_>,
     name: &str,
 ) -> KlibPublicIdSignature {
-    with_container(container, |container| class_signature(container, name))
+    with_container(container, |container| enum_entry_signature(container, name))
 }
 
 /// A top-level function's identity.
@@ -130,9 +159,9 @@ pub fn package_function_signature(
     container: MetadataContainer<'_>,
     function: &KotlinFunction,
 ) -> Result<KlibPublicIdSignature, ManglingError> {
-    let contexts = function
+    let (contexts, params) = function
         .params
-        .get(..function.context_count)
+        .split_at_checked(function.context_count)
         .ok_or_else(|| {
             ManglingError::new(format!(
                 "function {} has {} context parameters but {} parameters",
@@ -141,15 +170,39 @@ pub fn package_function_signature(
                 function.params.len()
             ))
         })?;
+    let vararg = function
+        .vararg
+        .map(|index| {
+            index.checked_sub(function.context_count).ok_or_else(|| {
+                ManglingError::new(format!(
+                    "function {} marks context parameter {index} as vararg",
+                    function.name
+                ))
+            })
+        })
+        .transpose()?;
     let shape = CallableShape {
         name: &function.name,
         contexts: contexts.iter().collect(),
         receiver: function.receiver.as_ref(),
-        params: function.params[function.context_count..].iter().collect(),
-        vararg: function.vararg.map(|index| index - function.context_count),
+        params: params.iter().collect(),
+        vararg,
         type_parameters: type_parameters(&function.formals),
+        expect: function.is_expect,
+        static_member: false,
     };
     with_container(container, |container| callable_signature(container, &shape))
+}
+
+fn package_property_shape(property: &KotlinProperty) -> PropertyShape<'_, KotlinType> {
+    PropertyShape {
+        name: &property.name,
+        contexts: property.context_params.iter().collect(),
+        receiver: property.receiver.as_ref(),
+        type_parameters: type_parameters(&property.formals),
+        expect: property.is_expect,
+        static_member: false,
+    }
 }
 
 /// A top-level property's identity.
@@ -157,12 +210,7 @@ pub fn package_property_signature(
     container: MetadataContainer<'_>,
     property: &KotlinProperty,
 ) -> Result<KlibPublicIdSignature, ManglingError> {
-    let shape = PropertyShape {
-        name: &property.name,
-        contexts: property.context_params.iter().collect(),
-        receiver: property.receiver.as_ref(),
-        type_parameters: type_parameters(&property.formals),
-    };
+    let shape = package_property_shape(property);
     with_container(container, |container| property_signature(container, &shape))
 }
 
@@ -195,14 +243,28 @@ pub fn package_property_accessor_signature(
     accessor: MetadataAccessor,
 ) -> Result<KlibAccessorIdSignature, ManglingError> {
     let accessor = metadata_accessor(accessor, &property.name, property.is_var, &property.ty)?;
-    let shape = PropertyShape {
-        name: &property.name,
-        contexts: property.context_params.iter().collect(),
-        receiver: property.receiver.as_ref(),
-        type_parameters: type_parameters(&property.formals),
-    };
+    let shape = package_property_shape(property);
     with_container(container, |container| {
         accessor_signature(container, &shape, accessor)
+    })
+}
+
+fn member_property_shape(
+    member: &KotlinMember,
+) -> Result<PropertyShape<'_, KotlinType>, ManglingError> {
+    if !member.is_property {
+        return Err(ManglingError::new(format!(
+            "member {} is a function and has no accessors",
+            member.name
+        )));
+    }
+    Ok(PropertyShape {
+        name: &member.name,
+        contexts: member.context_params.iter().collect(),
+        receiver: member.receiver.as_ref(),
+        type_parameters: type_parameters(&member.formals),
+        expect: member.is_expect,
+        static_member: false,
     })
 }
 
@@ -212,19 +274,8 @@ pub fn member_property_accessor_signature(
     member: &KotlinMember,
     accessor: MetadataAccessor,
 ) -> Result<KlibAccessorIdSignature, ManglingError> {
-    if !member.is_property {
-        return Err(ManglingError::new(format!(
-            "member {} is a function and has no accessors",
-            member.name
-        )));
-    }
+    let shape = member_property_shape(member)?;
     let accessor = metadata_accessor(accessor, &member.name, member.is_var, &member.ret)?;
-    let shape = PropertyShape {
-        name: &member.name,
-        contexts: member.context_params.iter().collect(),
-        receiver: member.receiver.as_ref(),
-        type_parameters: type_parameters(&member.formals),
-    };
     with_container(container, |container| {
         accessor_signature(container, &shape, accessor)
     })
@@ -235,34 +286,26 @@ pub fn member_signature(
     container: MetadataContainer<'_>,
     member: &KotlinMember,
 ) -> Result<KlibPublicIdSignature, ManglingError> {
-    with_container(container, |container| {
-        if member.is_property {
-            property_signature(
-                container,
-                &PropertyShape {
-                    name: &member.name,
-                    contexts: member.context_params.iter().collect(),
-                    receiver: member.receiver.as_ref(),
-                    type_parameters: type_parameters(&member.formals),
-                },
-            )
-        } else {
-            callable_signature(
-                container,
-                &CallableShape {
-                    name: &member.name,
-                    contexts: member.context_params.iter().collect(),
-                    receiver: member.receiver.as_ref(),
-                    params: member.params.iter().collect(),
-                    vararg: member.vararg,
-                    type_parameters: type_parameters(&member.formals),
-                },
-            )
-        }
-    })
+    if member.is_property {
+        let shape = member_property_shape(member)?;
+        return with_container(container, |container| property_signature(container, &shape));
+    }
+    let shape = CallableShape {
+        name: &member.name,
+        contexts: member.context_params.iter().collect(),
+        receiver: member.receiver.as_ref(),
+        params: member.params.iter().collect(),
+        vararg: member.vararg,
+        type_parameters: type_parameters(&member.formals),
+        expect: member.is_expect,
+        static_member: false,
+    };
+    with_container(container, |container| callable_signature(container, &shape))
 }
 
-/// A constructor's identity; `container` ends with the constructed class.
+/// A constructor's identity; `container` ends with the constructed class. Metadata records no
+/// `expect` on a constructor: it is expected exactly when its class is, which the container
+/// carries.
 pub fn constructor_signature(
     container: MetadataContainer<'_>,
     constructor: &KotlinConstructor,
@@ -274,382 +317,60 @@ pub fn constructor_signature(
         params: constructor.params.iter().collect(),
         vararg: constructor.vararg,
         type_parameters: Vec::new(),
+        expect: false,
+        static_member: false,
     };
     with_container(container, |container| callable_signature(container, &shape))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::metadata::semantic::KotlinFunctionTypeShape;
-    use crate::types::{ReturnValueStatus, TypeVariance, Visibility};
-
-    // Every expected member id below is the one the Kotlin/Native 2.4.20 stdlib KLIB serializes for
-    // the named declaration.
-
-    fn class(internal: &str, args: Vec<KotlinType>) -> KotlinType {
-        KotlinType::Class {
-            internal: internal.to_owned(),
-            args,
-            nullable: false,
-            shape: KotlinFunctionTypeShape::default(),
-        }
-    }
-
-    fn nullable(ty: KotlinType) -> KotlinType {
-        match ty {
-            KotlinType::Class {
-                internal,
-                args,
-                shape,
-                ..
-            } => KotlinType::Class {
-                internal,
-                args,
-                nullable: true,
-                shape,
-            },
-            KotlinType::Param { name, .. } => KotlinType::Param {
-                name,
-                nullable: true,
-            },
-            other => other,
-        }
-    }
-
-    fn param(name: &str) -> KotlinType {
-        KotlinType::Param {
-            name: name.to_owned(),
-            nullable: false,
-        }
-    }
-
-    fn type_parameter(name: &str, bounds: Vec<KotlinType>) -> KotlinTypeParameter {
-        KotlinTypeParameter {
-            name: name.to_owned(),
-            bounds,
-            variance: TypeVariance::Invariant,
-            only_input: false,
-            reified: false,
-        }
-    }
-
-    fn function(
-        name: &str,
-        receiver: Option<KotlinType>,
-        params: Vec<KotlinType>,
-        formals: Vec<KotlinTypeParameter>,
-    ) -> KotlinFunction {
-        KotlinFunction {
-            name: name.to_owned(),
-            receiver,
-            param_names: vec![String::new(); params.len()],
-            param_defaults: vec![false; params.len()],
-            params,
-            ret: class("kotlin/Unit", Vec::new()),
-            formals,
-            vararg: None,
-            visibility: Visibility::Public,
-            is_inline: false,
-            has_reified_type_params: false,
-            is_suspend: false,
-            is_operator: false,
-            is_infix: false,
-            context_count: 0,
-            annotations: Vec::new(),
-        }
-    }
-
-    fn member(name: &str, params: Vec<KotlinType>, is_property: bool) -> KotlinMember {
-        KotlinMember {
-            name: name.to_owned(),
-            receiver: None,
-            context_params: Vec::new(),
-            visibility: Visibility::Public,
-            param_names: vec![String::new(); params.len()],
-            param_defaults: vec![false; params.len()],
-            params,
-            ret: class("kotlin/Unit", Vec::new()),
-            is_property,
-            is_var: false,
-            is_operator: false,
-            is_infix: false,
-            is_abstract: false,
-            return_value_status: ReturnValueStatus::default(),
-            formals: Vec::new(),
-            ret_nullable: false,
-            constant: None,
-            vararg: None,
-            annotations: Vec::new(),
-        }
-    }
-
-    fn package(segments: &[&str]) -> Vec<String> {
-        segments
-            .iter()
-            .map(|segment| (*segment).to_owned())
-            .collect()
-    }
-
-    fn top_level(package: &[String]) -> MetadataContainer<'_> {
-        MetadataContainer {
-            package,
-            classes: &[],
-        }
-    }
-
-    fn member_id(signature: &KlibPublicIdSignature) -> i64 {
-        signature.member_id().expect("a callable has a member id") as i64
-    }
-
-    #[test]
-    fn a_function_without_a_result_or_type_parameters() {
-        let kotlin_io = package(&["kotlin", "io"]);
-        let println = function(
-            "println",
-            None,
-            vec![nullable(class("kotlin/Any", Vec::new()))],
-            Vec::new(),
-        );
-        let signature = package_function_signature(top_level(&kotlin_io), &println).unwrap();
-        assert_eq!(signature.package().segments(), ["kotlin", "io"]);
-        assert_eq!(signature.declaration().segments(), ["println"]);
-        assert_eq!(member_id(&signature), -3_363_048_611_743_956_379);
-    }
-
-    #[test]
-    fn an_extension_function() {
-        let kotlin_ranges = package(&["kotlin", "ranges"]);
-        let int = class("kotlin/Int", Vec::new());
-        let coerce = function("coerceAtLeast", Some(int.clone()), vec![int], Vec::new());
-        let signature = package_function_signature(top_level(&kotlin_ranges), &coerce).unwrap();
-        assert_eq!(member_id(&signature), 3_998_717_805_095_061_419);
-    }
-
-    #[test]
-    fn type_parameters_are_referenced_by_container_and_index() {
-        let kotlin_comparisons = package(&["kotlin", "comparisons"]);
-        let max_of = function(
-            "maxOf",
-            None,
-            vec![param("T"), param("T")],
-            vec![type_parameter(
-                "T",
-                vec![class("kotlin/Comparable", vec![param("T")])],
-            )],
-        );
-        let signature =
-            package_function_signature(top_level(&kotlin_comparisons), &max_of).unwrap();
-        assert_eq!(member_id(&signature), -5_030_133_889_946_118_250);
-    }
-
-    #[test]
-    fn a_star_projection_and_an_unbounded_type_parameter() {
-        let kotlin_sequences = package(&["kotlin", "sequences"]);
-        let filter = function(
-            "filterIsInstance",
-            Some(class("kotlin/sequences/Sequence", vec![KotlinType::Star])),
-            Vec::new(),
-            vec![type_parameter("R", Vec::new())],
-        );
-        let signature = package_function_signature(top_level(&kotlin_sequences), &filter).unwrap();
-        assert_eq!(member_id(&signature), 298_316_304_477_115_805);
-    }
-
-    #[test]
-    fn a_suspend_function_type_is_its_suspend_function_class() {
-        let kotlin_coroutines = package(&["kotlin", "coroutines"]);
-        let continuation = class("kotlin/coroutines/Continuation", vec![param("T")]);
-        let block = KotlinType::Class {
-            internal: "kotlin/Function1".to_owned(),
-            args: vec![
-                continuation.clone(),
-                nullable(class("kotlin/Any", Vec::new())),
-            ],
-            nullable: false,
-            shape: KotlinFunctionTypeShape {
-                suspend: true,
-                ..KotlinFunctionTypeShape::default()
-            },
-        };
-        let create = function(
-            "createCoroutine",
-            Some(block),
-            vec![continuation],
-            vec![type_parameter("T", Vec::new())],
-        );
-        let signature = package_function_signature(top_level(&kotlin_coroutines), &create).unwrap();
-        assert_eq!(member_id(&signature), -5_059_621_468_224_635_510);
-    }
-
-    #[test]
-    fn context_parameters_come_first() {
-        let kotlin = package(&["kotlin"]);
-        let mut context_of = function(
-            "contextOf",
-            None,
-            vec![param("A")],
-            vec![type_parameter("A", Vec::new())],
-        );
-        context_of.context_count = 1;
-        let signature = package_function_signature(top_level(&kotlin), &context_of).unwrap();
-        assert_eq!(member_id(&signature), -12_594_581_380_294_987);
-    }
-
-    #[test]
-    fn an_extension_property_with_a_type_parameter() {
-        let kotlin_collections = package(&["kotlin", "collections"]);
-        let last_index = KotlinProperty {
-            name: "lastIndex".to_owned(),
-            receiver: Some(class("kotlin/collections/List", vec![param("T")])),
-            context_params: Vec::new(),
-            ty: class("kotlin/Int", Vec::new()),
-            formals: vec![type_parameter("T", Vec::new())],
-            visibility: Visibility::Public,
-            is_var: false,
-            context_count: 0,
-            constant: None,
-        };
-        let signature =
-            package_property_signature(top_level(&kotlin_collections), &last_index).unwrap();
-        assert_eq!(member_id(&signature), -7_238_914_123_027_933_299);
-    }
-
-    #[test]
-    fn class_members_see_the_class_type_parameters_as_the_next_container() {
-        let kotlin = package(&["kotlin"]);
-        let parameters = [
-            type_parameter("A", Vec::new()),
-            type_parameter("B", Vec::new()),
-        ];
-        let classes = [("Pair", &parameters[..])];
-        let pair = MetadataContainer {
-            package: &kotlin,
-            classes: &classes,
-        };
-        let class_identity = metadata_class_signature(top_level(&kotlin), "Pair");
-        assert_eq!(class_identity.declaration().segments(), ["Pair"]);
-        assert_eq!(class_identity.member_id(), None);
-
-        let constructor = constructor_signature(
-            pair,
-            &KotlinConstructor {
-                params: vec![param("A"), param("B")],
-                param_names: vec![String::new(); 2],
-                param_defaults: vec![false; 2],
-                vararg: None,
-                visibility: Visibility::Public,
-            },
-        )
-        .unwrap();
-        assert_eq!(constructor.declaration().segments(), ["Pair", "<init>"]);
-        assert_eq!(member_id(&constructor), 3_086_114_026_882_374_588);
-
-        let first = member_signature(pair, &member("first", Vec::new(), true)).unwrap();
-        assert_eq!(first.declaration().segments(), ["Pair", "first"]);
-        assert_eq!(member_id(&first), 1_497_393_077_339_299_626);
-    }
-
-    #[test]
-    fn a_member_function_references_its_class_type_parameter() {
-        let kotlin_collections = package(&["kotlin", "collections"]);
-        let parameters = [type_parameter("E", Vec::new())];
-        let classes = [("ArrayList", &parameters[..])];
-        let array_list = MetadataContainer {
-            package: &kotlin_collections,
-            classes: &classes,
-        };
-        let add = member_signature(array_list, &member("add", vec![param("E")], false)).unwrap();
-        assert_eq!(add.declaration().segments(), ["ArrayList", "add"]);
-        assert_eq!(member_id(&add), 4_996_012_557_724_047_373);
-    }
-
-    #[test]
-    fn an_extension_property_without_type_parameters() {
-        let kotlin_text = package(&["kotlin", "text"]);
-        let last_index = KotlinProperty {
-            name: "lastIndex".to_owned(),
-            receiver: Some(class("kotlin/CharSequence", Vec::new())),
-            context_params: Vec::new(),
-            ty: class("kotlin/Int", Vec::new()),
-            formals: Vec::new(),
-            visibility: Visibility::Public,
-            is_var: false,
-            context_count: 0,
-            constant: None,
-        };
-        let signature = package_property_signature(top_level(&kotlin_text), &last_index).unwrap();
-        assert_eq!(member_id(&signature), 1_266_685_057_648_611_082);
-    }
-
-    #[test]
-    fn a_getter_is_a_function_with_the_property_receiver_and_type_parameters() {
-        let kotlin_collections = package(&["kotlin", "collections"]);
-        let last_index = KotlinProperty {
-            name: "lastIndex".to_owned(),
-            receiver: Some(class("kotlin/collections/List", vec![param("T")])),
-            context_params: Vec::new(),
-            ty: class("kotlin/Int", Vec::new()),
-            formals: vec![type_parameter("T", Vec::new())],
-            visibility: Visibility::Public,
-            is_var: false,
-            context_count: 0,
-            constant: None,
-        };
-        let getter = package_property_accessor_signature(
-            top_level(&kotlin_collections),
-            &last_index,
-            MetadataAccessor::Getter,
-        )
-        .unwrap();
-        assert_eq!(getter.property().declaration().segments(), ["lastIndex"]);
-        assert_eq!(member_id(getter.property()), -7_238_914_123_027_933_299);
-        assert_eq!(getter.name(), "<get-lastIndex>");
-        assert_eq!(getter.member_id() as i64, 1_631_619_787_052_076_373);
-        assert_eq!(
-            package_property_accessor_signature(
-                top_level(&kotlin_collections),
-                &last_index,
-                MetadataAccessor::Setter,
-            )
-            .unwrap_err()
-            .to_string(),
-            "property lastIndex is a val and has no setter"
-        );
-    }
-
-    #[test]
-    fn a_setter_takes_the_property_type() {
-        let kotlin_concurrent = package(&["kotlin", "concurrent"]);
-        let parameters: [KotlinTypeParameter; 0] = [];
-        let classes = [("AtomicInt", &parameters[..])];
-        let atomic_int = MetadataContainer {
-            package: &kotlin_concurrent,
-            classes: &classes,
-        };
-        let mut value = member("value", Vec::new(), true);
-        value.ret = class("kotlin/Int", Vec::new());
-        value.is_var = true;
-        let setter =
-            member_property_accessor_signature(atomic_int, &value, MetadataAccessor::Setter)
-                .unwrap();
-        assert_eq!(
-            setter.property().declaration().segments(),
-            ["AtomicInt", "value"]
-        );
-        assert_eq!(setter.name(), "<set-value>");
-        assert_eq!(setter.member_id() as i64, -195_057_410_739_577_239);
-    }
-
-    #[test]
-    fn an_unknown_type_parameter_is_an_error() {
-        let kotlin = package(&["kotlin"]);
-        let broken = function("f", None, vec![param("T")], Vec::new());
-        assert_eq!(
-            package_function_signature(top_level(&kotlin), &broken)
-                .unwrap_err()
-                .to_string(),
-            "type parameter T is not in scope"
-        );
-    }
+/// The members the compiler gives every enum class, which its metadata leaves implicit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumClassMemberSignatures {
+    /// `values(): Array<E>`.
+    pub values: KlibPublicIdSignature,
+    /// `valueOf(value: String): E`.
+    pub value_of: KlibPublicIdSignature,
+    /// `entries: EnumEntries<E>`, present when the enum was compiled for Kotlin 1.9 or later.
+    pub entries: KlibPublicIdSignature,
+    pub entries_getter: KlibAccessorIdSignature,
 }
+
+/// The implicit members of an enum class; `container` ends with the enum class. They carry the
+/// enum class's flags.
+pub fn enum_class_member_signatures(
+    container: MetadataContainer<'_>,
+) -> Result<EnumClassMemberSignatures, ManglingError> {
+    let string = KotlinType::class("kotlin/String");
+    let function = |name, params| CallableShape {
+        name,
+        contexts: Vec::new(),
+        receiver: None,
+        params,
+        vararg: None,
+        type_parameters: Vec::new(),
+        expect: false,
+        static_member: true,
+    };
+    let entries = PropertyShape {
+        name: "entries",
+        contexts: Vec::new(),
+        receiver: None,
+        type_parameters: Vec::new(),
+        expect: false,
+        static_member: true,
+    };
+    with_container(container, |container| {
+        Ok(EnumClassMemberSignatures {
+            values: callable_signature(container, &function("values", Vec::new()))?,
+            value_of: callable_signature(container, &function("valueOf", vec![&string]))?,
+            entries: property_signature(container, &entries)?,
+            entries_getter: accessor_signature(container, &entries, Accessor::Getter)?,
+        })
+    })
+}
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod fixture_tests;

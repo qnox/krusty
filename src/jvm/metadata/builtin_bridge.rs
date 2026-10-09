@@ -31,7 +31,9 @@ pub(super) fn ty_from_common(ty: common::KotlinType) -> super::BuiltinTy {
             nullable,
             shape,
         },
-        common::KotlinType::Param { name, nullable } => super::BuiltinTy::Param { name, nullable },
+        common::KotlinType::Param { name, id, nullable } => {
+            super::BuiltinTy::Param { name, id, nullable }
+        }
         common::KotlinType::InProjection(inner) => {
             super::BuiltinTy::InProjection(Box::new(ty_from_common(*inner)))
         }
@@ -63,8 +65,9 @@ pub(crate) fn ty_to_common(ty: &super::BuiltinTy) -> common::KotlinType {
             nullable: *nullable,
             shape: *shape,
         },
-        super::BuiltinTy::Param { name, nullable } => common::KotlinType::Param {
+        super::BuiltinTy::Param { name, id, nullable } => common::KotlinType::Param {
             name: name.clone(),
+            id: *id,
             nullable: *nullable,
         },
         super::BuiltinTy::InProjection(inner) => {
