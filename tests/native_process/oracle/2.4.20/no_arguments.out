@@ -1,7 +1,5 @@
 status 0
-stdout 4
-x
-y
+stdout 2
+0
 
 stderr 0
-

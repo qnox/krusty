@@ -1,8 +1,5 @@
 status 0
-stdout 6
-2
-p
-q
+stdout 7
+with 1
 
 stderr 0
-

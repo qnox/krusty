@@ -6,7 +6,8 @@
 //! EXACTLY with the references':
 //!
 //! * Kotlin/Native, the target's own reference. Its answers are recorded under
-//!   `tests/native_process/oracle/` and required: a case it is a reference for fails without one.
+//!   `tests/native_process/oracle/<version>/` and required: a case it is a reference for fails
+//!   without one. The version is the newest reference in `kotlin-versions`.
 //!   Re-record them by running this module with `KRUSTY_RECORD_NATIVE_PROCESS_ORACLE` naming a
 //!   Kotlin/Native distribution (`scripts/kotlin-native.sh` provisions one); each program is
 //!   compiled with its `kotlinc-native` and run on the same bytes.
@@ -48,6 +49,24 @@ fn programs_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/native_process")
 }
 
+fn oracle_version() -> &'static str {
+    include_str!("../kotlin-versions")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_whitespace().next())
+        .max_by(|left, right| {
+            left.split('.')
+                .map(|part| part.parse::<u32>().expect("numeric Kotlin version"))
+                .cmp(
+                    right
+                        .split('.')
+                        .map(|part| part.parse::<u32>().expect("numeric Kotlin version")),
+                )
+        })
+        .expect("kotlin-versions names a reference")
+}
+
 /// One run: a program, the arguments and standard input it is started with, and which references
 /// hold for it.
 struct Case {
@@ -70,8 +89,18 @@ fn transcript(output: &Output) -> Vec<u8> {
     transcript.extend_from_slice(&output.stdout);
     transcript.extend_from_slice(format!("\nstderr {}\n", output.stderr.len()).as_bytes());
     transcript.extend_from_slice(&output.stderr);
-    transcript.push(b'\n');
     transcript
+}
+
+fn assert_same_transcript(case: &str, reference: &str, native: &[u8], expected: &[u8]) {
+    assert!(
+        native == expected,
+        "{case}: krusty's native program and {reference} differ\nkrusty ({} bytes):\n{}\n{reference} ({} bytes):\n{}",
+        native.len(),
+        String::from_utf8_lossy(native),
+        expected.len(),
+        String::from_utf8_lossy(expected)
+    );
 }
 
 fn run(case: &Case) {
@@ -85,6 +114,7 @@ fn run(case: &Case) {
     if case.kotlin_native {
         let oracle_path = programs_dir()
             .join("oracle")
+            .join(oracle_version())
             .join(format!("{}.out", case.name));
         if let Some(distribution) = std::env::var_os(RECORD_ORACLE) {
             let recorded = transcript(&run_kotlin_native(Path::new(&distribution), case));
@@ -99,23 +129,14 @@ fn run(case: &Case) {
                 oracle_path.display()
             )
         });
-        assert_eq!(
-            String::from_utf8_lossy(&native),
-            String::from_utf8_lossy(&oracle),
-            "{}: krusty's native program and Kotlin/Native's differ",
-            case.name
-        );
+        assert_same_transcript(case.name, "Kotlin/Native", &native, &oracle);
     }
     if case.jvm {
         let Some(jvm) = run_jvm(case) else {
             return;
         };
-        assert_eq!(
-            String::from_utf8_lossy(&native),
-            String::from_utf8_lossy(&transcript(&jvm)),
-            "{}: krusty's native program and the JVM's differ",
-            case.name
-        );
+        let jvm = transcript(&jvm);
+        assert_same_transcript(case.name, "the JVM", &native, &jvm);
     }
 }
 
@@ -150,21 +171,40 @@ fn run_kotlin_native(distribution: &Path, case: &Case) -> Output {
         .expect("scratch directory")
         .join("kotlin-native-process");
     fs::create_dir_all(&scratch).expect("create the Kotlin/Native scratch directory");
-    let executable = scratch.join(format!("{}.kexe", case.program));
-    if !executable.is_file() {
-        let output = std::process::Command::new(distribution.join("bin/kotlinc-native"))
-            .arg(programs_dir().join(format!("{}.kt", case.program)))
-            .arg("-o")
-            .arg(scratch.join(case.program))
-            .output()
-            .expect("run kotlinc-native");
-        assert!(
-            output.status.success(),
-            "{}: kotlinc-native failed:\n{}",
-            case.program,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let compiler = distribution.join("bin/kotlinc-native");
+    let version = std::process::Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("read the Kotlin/Native compiler version");
+    let mut version_output = version.stdout;
+    version_output.extend_from_slice(&version.stderr);
+    let version_text = String::from_utf8_lossy(&version_output);
+    assert!(
+        version.status.success()
+            && version_text
+                .split_whitespace()
+                .any(|word| word == oracle_version()),
+        "the process oracle requires Kotlin/Native {}, got: {version_text}",
+        oracle_version()
+    );
+
+    // Recording is rare and must never bless a stale executable. Use a case-specific output so
+    // parallel cases sharing one source do not race, and rebuild it from this source/version.
+    let output_name = format!("{}-{}", oracle_version(), case.name);
+    let executable = scratch.join(format!("{output_name}.kexe"));
+    let _ = fs::remove_file(&executable);
+    let output = std::process::Command::new(&compiler)
+        .arg(programs_dir().join(format!("{}.kt", case.program)))
+        .arg("-o")
+        .arg(scratch.join(output_name))
+        .output()
+        .expect("run kotlinc-native");
+    assert!(
+        output.status.success(),
+        "{}: kotlinc-native failed:\n{}",
+        case.program,
+        String::from_utf8_lossy(&output.stderr)
+    );
     run_native_image(
         &fs::read(&executable).expect("read the Kotlin/Native executable"),
         case.name,
