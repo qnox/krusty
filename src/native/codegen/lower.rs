@@ -1218,10 +1218,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(());
                 }
                 match self.checked_property(&target) {
-                    Ok((class, index)) => {
+                    Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_write(class, index, dispatch_receiver, value)?
                     }
-                    Err(reason) if reason.construct() == objects::TOP_LEVEL => {
+                    Ok(objects::CheckedProperty::TopLevel) => {
                         self.top_level_write(&target, value)?;
                     }
                     Err(reason) => return Err(reason),
@@ -1818,10 +1818,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     );
                 }
                 match self.checked_property(&target) {
-                    Ok((class, index)) => self.property_read(class, index, dispatch_receiver),
-                    Err(reason) if reason.construct() == objects::TOP_LEVEL => {
-                        self.top_level_read(&target)
+                    Ok(objects::CheckedProperty::Member(class, index)) => {
+                        self.property_read(class, index, dispatch_receiver)
                     }
+                    Ok(objects::CheckedProperty::TopLevel) => self.top_level_read(&target),
                     Err(reason) => Err(reason),
                 }
             }

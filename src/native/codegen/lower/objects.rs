@@ -2392,7 +2392,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.dispatch(object, slot, &params, ret, &arguments)
     }
 
-    /// The property a checked operation names, as (class, property index).
+    /// The member or top-level realization a checked property operation names.
     /// Follow one enclosing-instance edge: `this@Outer` from inside an `inner` class.
     ///
     /// An `inner` class carries its outer instance in a field, written before the superclass
@@ -2433,15 +2433,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     pub(super) fn checked_property(
         &self,
         target: &crate::fir::PropertyId,
-    ) -> Result<(ClassId, usize), Unsupported> {
+    ) -> Result<CheckedProperty, Unsupported> {
         match self.file.ir.local_property_layouts.get(target) {
             Some(crate::ir::IrLocalPropertyLayout::Member {
                 class, property, ..
-            }) => Ok((*class, *property as usize)),
+            }) => Ok(CheckedProperty::Member(*class, *property as usize)),
             Some(
                 crate::ir::IrLocalPropertyLayout::TopLevelStorage { .. }
                 | crate::ir::IrLocalPropertyLayout::TopLevelAccessor { .. },
-            ) => Err(TOP_LEVEL.into()),
+            ) => Ok(CheckedProperty::TopLevel),
             Some(crate::ir::IrLocalPropertyLayout::MemberExtension { .. }) => {
                 Err("a member-extension property reached ordinary member storage".into())
             }
@@ -2737,7 +2737,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         receiver: u32,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
-        let (property_class, index) = self.checked_property(&target)?;
+        let CheckedProperty::Member(property_class, index) = self.checked_property(&target)? else {
+            return Err("a `super` access to a top-level property".into());
+        };
         if property_class != class {
             return Err("a `super` property target owned by another class".into());
         }
@@ -2901,6 +2903,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 }
 
-/// Marks a checked property that turned out to be top-level, so the caller routes it to
-/// `super::statics` instead of looking for a class member. Never reaches a diagnostic.
-pub(super) const TOP_LEVEL: &str = "\u{0}top-level";
+/// The realization selected for an ordinary checked property operation.
+pub(super) enum CheckedProperty {
+    Member(ClassId, usize),
+    TopLevel,
+}
