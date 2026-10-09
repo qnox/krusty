@@ -140,6 +140,14 @@ pub(super) fn type_parameter_receiver(
     receiver.filter(|receiver| receiver.non_null().is_ty_param())
 }
 
+/// The unsubstituted receiver an inline plan stores, when the declaration receiver is a type
+/// parameter. Specialization replaces the call-site slot; this signature node does not.
+pub(super) fn signature_type_parameter_receiver(
+    signature: Option<&crate::libraries::GenericSig>,
+) -> Option<crate::types::Ty> {
+    type_parameter_receiver(signature.and_then(|signature| signature.receiver))
+}
+
 pub(super) fn publish(
     plan: Option<&crate::libraries::InlineBodyPlan>,
     receiver_parameter: Option<usize>,
