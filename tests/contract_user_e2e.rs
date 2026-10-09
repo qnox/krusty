@@ -58,6 +58,32 @@ fun box(): String {\n\
 }
 
 #[test]
+fn implicit_extension_receiver_not_null_contract_narrows_the_conjunction() {
+    // `ready()` writes no receiver. Its `returns(true) implies (this != null)` still names the
+    // enclosing extension receiver, so the right side of `&&` may use `this` as non-null,
+    // including a labeled return from the lambda that consumes the smart-cast value.
+    const SRC: &str = "import kotlin.contracts.ExperimentalContracts\n\
+import kotlin.contracts.contract\n\
+@OptIn(ExperimentalContracts::class)\n\
+fun String?.ready(): Boolean {\n\
+    contract { returns(true) implies (this@ready != null) }\n\
+    return this != null && length > 0\n\
+}\n\
+@OptIn(ExperimentalContracts::class)\n\
+fun String?.use(): Boolean {\n\
+    return ready() && this.iterator().let { i ->\n\
+        if (!i.hasNext()) return@let false\n\
+        i.next() == 'a'\n\
+    }\n\
+}\n\
+fun box(): String = if (\"ab\".use() && !(null as String?).use()) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("implicit receiver contract smartcast compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
 fn returns_false_implies_param_not_null_smart_casts_in_else_branch() {
     const SRC: &str = "import kotlin.contracts.ExperimentalContracts\n\
 import kotlin.contracts.contract\n\
