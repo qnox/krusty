@@ -367,7 +367,9 @@ extern const KType kt_type_list_iterator;
 KRef kt_list_of(KRef elements);
 KRef kt_list_empty(void);
 /* `E.entries`: the read-only list over a fresh array of the constants, as a
-   `kotlin.enums.EnumEntriesList`. The generator builds one per enum and keeps it. */
+   `kotlin.enums.EnumEntriesList`. Each enum's initializer builds one and keeps it. An `is` against
+   `kotlin.enums.EnumEntries` names the interface descriptor. */
+extern const KType kt_type_enum_entries_interface;
 KRef kt_enum_entries_of(KRef values);
 /* `xs.toList()` and `xs.reversed()` on an ARRAY: a snapshot of its elements as a list, each boxed
    on the way in. A snapshot rather than a view, which is Kotlin's own answer and is observable —

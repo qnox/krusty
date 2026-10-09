@@ -89,9 +89,25 @@ const KType kt_type_list = {KT_ANONYMOUS("kotlin.collections.List"),
                             .interfaces = kt_list_interfaces,
                             .interface_count = sizeof(kt_list_interfaces) / sizeof(KType *)};
 
+/* `kotlin.enums.EnumEntries`, the interface `E.entries` is typed as. Like the collection
+   interfaces it has no instances of its own, and lists its bases flattened. */
+static const KType *const kt_enum_entries_bases[] = {
+    &kt_type_list_interface, &kt_type_collection_interface, &kt_type_iterable_interface};
+const KType kt_type_enum_entries_interface = {
+    KT_NAMED("kotlin.enums.", "EnumEntries"),
+    .instance_size = sizeof(KObjectHeader),
+    .super = &kt_type_any,
+    .vtable = kt_any_vtable,
+    .vtable_length = 3,
+    .interfaces = kt_enum_entries_bases,
+    .interface_count = sizeof(kt_enum_entries_bases) / sizeof(KType *)};
+
 /* `E.entries`: the same read-only list over an array of the constants, under the class
-   Kotlin/Native's `enumEntries(values)` answers. Only its NAME differs from `listOf`'s list, which
-   is what `entries::class` and an iterator's class read. */
+   Kotlin/Native's `enumEntries(values)` answers, and an `EnumEntries` besides every interface
+   `listOf`'s list is. */
+static const KType *const kt_enum_entries_interfaces[] = {
+    &kt_type_enum_entries_interface, &kt_type_list_interface, &kt_type_collection_interface,
+    &kt_type_iterable_interface, &kt_type_random_access_interface};
 static const KType kt_type_enum_entries = {
     KT_NAMED("kotlin.enums.", "EnumEntriesList"),
     .instance_size = sizeof(KList),
@@ -100,8 +116,8 @@ static const KType kt_type_enum_entries = {
     .super = &kt_type_any,
     .vtable = kt_list_vtable,
     .vtable_length = 3,
-    .interfaces = kt_list_interfaces,
-    .interface_count = sizeof(kt_list_interfaces) / sizeof(KType *)};
+    .interfaces = kt_enum_entries_interfaces,
+    .interface_count = sizeof(kt_enum_entries_interfaces) / sizeof(KType *)};
 
 /* Either class of the immutable list; both are a `KList` over an array that is every element. */
 static kt_boolean kt_is_read_only_list(KRef value) {
