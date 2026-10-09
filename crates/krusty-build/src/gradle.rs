@@ -858,9 +858,11 @@ mod tests {
             };
             for (case, argument, expected) in [
                 (
-                    "jvm-default-bad-mode",
-                    "-jvm-default=sideways",
-                    "krusty: error: invalid value 'sideways' for -jvm-default".to_owned(),
+                    "explicit-api-bad-mode",
+                    "-Xexplicit-api=sideways",
+                    "krusty: error: unknown value for parameter -Xexplicit-api: 'sideways'. \
+                     Value should be one of {disable, strict, warning}"
+                        .to_owned(),
                 ),
                 (
                     "jspecify-free-argument",
@@ -2186,7 +2188,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "reserved-free-argument" -> freeCompilerArgs.add("-d=forbidden")
             "plugin-free-argument" -> freeCompilerArgs.add("-Xplugin=forbidden.jar")
             "jvm-default-conflict" -> freeCompilerArgs.add("-jvm-default=disable")
-            "jvm-default-bad-mode" -> freeCompilerArgs.add("-jvm-default=sideways")
+            "explicit-api-bad-mode" -> freeCompilerArgs.add("-Xexplicit-api=sideways")
             "old-language-version" -> languageVersion.set(KotlinVersion.fromVersion("1.9"))
             "old-api-version" -> apiVersion.set(KotlinVersion.fromVersion("1.9"))
             "progressive-free-argument" -> freeCompilerArgs.add("-progressive")
