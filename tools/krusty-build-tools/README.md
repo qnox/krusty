@@ -21,6 +21,11 @@ with krusty when this jar takes the place of `org.jetbrains.kotlin:kotlin-build-
 ./gradlew test -Pkrusty.binary=/path/to/krusty   # drives a real krusty binary
 ```
 
+CI runs `scripts/package-build-tools.sh` once per supported Kotlin version (`kotlin-versions`),
+against the krusty binary built for that commit. It tests, builds the jar twice from clean to
+check that the bytes are reproducible, and uploads the jar, the cache installer and their
+`SHA256SUMS` as a CI artifact. A release publishes those artifacts as they are.
+
 ## Kotlin Toolchain
 
 The Kotlin Toolchain resolves the implementation by Maven coordinates and has no setting that
