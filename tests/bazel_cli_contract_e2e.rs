@@ -262,17 +262,17 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     let abi = dir.join("demo.abi.jar");
     let cri = dir.join("demo.kotlinCriStorage");
 
-    // Request 1: the options intellij-community actually builds with, less `--progressive`, which
-    // krusty refuses until it implements progressive semantics (see
-    // `the_projects_progressive_flag_is_refused`). Request 2 supplies the same
-    // codegen decisions through the rule's `kotlinc_opts` passthrough ONLY: worker defaults must not
-    // overwrite them. Request 3 carries Java and must be refused WITHOUT ending the worker, so a
-    // fourth request still gets served.
+    // Request 1 is the options intellij-community actually builds with, including `--progressive`:
+    // it must be refused while those semantics are unimplemented. Request 2 supplies codegen
+    // decisions through the rule's `kotlinc_opts` passthrough ONLY: worker defaults must not
+    // overwrite them. Request 3 carries Java and must also be refused. Requests 4 and 5 prove both
+    // failures leave the worker alive; request 5 is request 1's supported subset and writes every
+    // declared output.
     let requests = format!(
         concat!(
             r#"{{"arguments":["--target_label","//demo:demo","--kotlin_module_name","intellij.demo","#,
             r#""--jvm_default","no-compatibility","--x_lambdas","indy","--x_sam_conversions","indy","#,
-            r#""--x_no_param_assertions","--x_no_call_assertions","--warn","off","#,
+            r#""--x_no_param_assertions","--x_no_call_assertions","--progressive","--warn","off","#,
             r#""--srcs","{src}","--out","{jar}","--abi-out","{abi}","--kotlin-cri-out","{cri}","#,
             r#""--java-count","0"],"requestId":1}}"#,
             "\n",
@@ -281,6 +281,12 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
             r#"{{"arguments":["--srcs","{src}","--out","{jar}","--java-count","4"],"requestId":3}}"#,
             "\n",
             r#"{{"arguments":["--srcs","{src}","--out","{disable_jar}","--jvm_default","disable"],"requestId":4}}"#,
+            "\n",
+            r#"{{"arguments":["--target_label","//demo:demo","--kotlin_module_name","intellij.demo","#,
+            r#""--jvm_default","no-compatibility","--x_lambdas","indy","--x_sam_conversions","indy","#,
+            r#""--x_no_param_assertions","--x_no_call_assertions","--warn","off","#,
+            r#""--srcs","{src}","--out","{jar}","--abi-out","{abi}","--kotlin-cri-out","{cri}","#,
+            r#""--java-count","0"],"requestId":5}}"#,
             "\n"
         ),
         src = source.display(),
@@ -307,28 +313,16 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     let output = child.wait_with_output().expect("worker exit");
     let text = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
-    assert_eq!(lines.len(), 4, "one response per request: {text}");
-
-    assert!(
-        lines[0].contains("\"exitCode\":0") && lines[0].contains("\"requestId\":1"),
-        "the real argument surface must compile: {}",
-        lines[0]
-    );
-    assert!(
-        lines[1].contains("\"exitCode\":0") && lines[1].contains("\"requestId\":2"),
-        "forwarded codegen flags must compile: {}",
-        lines[1]
-    );
-    assert!(
-        lines[2].contains("\"exitCode\":1") && lines[2].contains("Java front end"),
-        "a Java-carrying target is refused: {}",
-        lines[2]
-    );
-    assert!(
-        lines[3].contains("\"exitCode\":0") && lines[3].contains("\"requestId\":4"),
-        "every -jvm-default strategy is emitted, `disable` included, and the worker was still \
-         alive to answer a fourth request: {}",
-        lines[3]
+    assert_eq!(
+        lines,
+        [
+            r#"{"exitCode":1,"output":"krusty: unsupported by krusty: krusty does not implement the kotlinc argument '-progressive'","requestId":1}"#,
+            r#"{"exitCode":0,"output":"","requestId":2}"#,
+            r#"{"exitCode":1,"output":"krusty: krusty has no Java front end, so this target cannot be built by it: --java-count 4","requestId":3}"#,
+            r#"{"exitCode":0,"output":"","requestId":4}"#,
+            r#"{"exitCode":0,"output":"krusty: no effect on output: --warn off\n","requestId":5}"#,
+        ],
+        "one exact response per request: {text}"
     );
 
     // Every DECLARED output exists, or bazel fails the action.
