@@ -127,6 +127,7 @@ const MODELED_FEATURES: &[&str] = &[
     "ExplicitBackingFields",
     "ExplicitContextArguments",
     "FullValueClasses",
+    "FunctionalTypeWithExtensionAsSupertype",
     "ImplicitSignedToUnsignedIntegerConversion",
     "JvmSupportRecursiveTypeOf",
     "LocalTypeAliases",

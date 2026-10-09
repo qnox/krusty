@@ -1720,6 +1720,8 @@ mod collection_literals_gate_e2e;
 mod companion_blocks_gate_e2e;
 #[path = "for_loop_iterable_slot_e2e.rs"]
 mod for_loop_iterable_slot_e2e;
+#[path = "function_type_supertypes_e2e.rs"]
+mod function_type_supertypes_e2e;
 #[path = "inline_arguments_in_place_e2e.rs"]
 mod inline_arguments_in_place_e2e;
 mod inline_format_arguments_e2e;

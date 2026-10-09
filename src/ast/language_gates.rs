@@ -24,6 +24,9 @@ pub struct LanguageGates {
     pub companion_blocks_and_extensions: FeatureGate,
     /// `CollectionLiterals`, for the meaning of a `[…]` expression outside an annotation.
     pub collection_literals: FeatureGate,
+    /// `FunctionalTypeWithExtensionAsSupertype`, for supertypes that expand to an extension or
+    /// contextual function type.
+    pub functional_type_with_extension_as_supertype: FeatureGate,
 }
 
 impl LanguageGates {
