@@ -784,7 +784,7 @@ mod tests {
             let invocation = single_invocation(&log);
             assert!(has_pair(
                 &invocation,
-                "-Xintellij-plugin-root",
+                "-Xescaping-functions",
                 "-d=forbidden"
             ));
         } else {
@@ -2273,7 +2273,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "reference-version-free-argument" -> freeCompilerArgs.add("-Xkotlin-reference-version=2.4.0")
             "dependency-policy-free-argument" -> freeCompilerArgs.add("-no-stdlib=false")
             "release-specific-argument-boundary" -> freeCompilerArgs.addAll(
-                "-Xintellij-plugin-root",
+                "-Xescaping-functions",
                 "-d=forbidden",
             )
             "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
