@@ -627,7 +627,7 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, versions, build-release]",
+            "needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]",
         )
         .expect(
             "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
