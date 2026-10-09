@@ -1,4 +1,4 @@
-//! Emitting one already-selected realization of a property READ.
+//! Emitting one already-selected realization of a property read, and the field store that mirrors it.
 //!
 //! WHICH realization a property read takes is decided elsewhere, from the owner's own class file or
 //! from the convention kotlinc follows for a class this compilation is still emitting. What is left
@@ -123,12 +123,19 @@ impl Emitter<'_> {
             } => {
                 let slot = crate::jvm::physical_type::field_slot(&descriptor);
                 let lateinit = self.is_lateinit_field(owner, &name);
+                let exported = (!is_static)
+                    .then(|| self.exporting_instance_field_method(operation.expression, false))
+                    .flatten();
                 let owner = owner.render();
-                let fref = self.cw.fieldref(&owner, &name, &descriptor);
-                if is_static {
-                    code.getstatic(fref, slot.words());
+                if let Some(method) = exported {
+                    code.invokestatic(method, 1, slot.words());
                 } else {
-                    code.getfield(fref, slot.words());
+                    let fref = self.cw.fieldref(&owner, &name, &descriptor);
+                    if is_static {
+                        code.getstatic(fref, slot.words());
+                    } else {
+                        code.getfield(fref, slot.words());
+                    }
                 }
                 // A `lateinit var` read throws while the field is still null, wherever it is read from.
                 if lateinit {
@@ -365,6 +372,74 @@ impl Emitter<'_> {
                 })
             }
             access => Ok(access),
+        }
+    }
+
+    /// `access$get<X>$p` / `access$set<X>$p` for the exact local property this inline template
+    /// must not name. The checked operation identity reaches its declaration layout directly;
+    /// emitted owner and field spellings remain classfile output facts, never lookup keys.
+    pub(super) fn exporting_instance_field_method(
+        &mut self,
+        operation: crate::ir::ExprId,
+        write: bool,
+    ) -> Option<u16> {
+        if !self.export_private_calls {
+            return None;
+        }
+        let crate::jvm::property_realizations::PropertyRealization::Local(property) =
+            self.property_realizations.get(operation)?
+        else {
+            return None;
+        };
+        let crate::ir::IrLocalPropertyLayout::Member {
+            class,
+            backing_field: Some(field),
+            ..
+        } = self.ir.local_property_layouts.get(property)?
+        else {
+            return None;
+        };
+        let planned = self.run.static_accessor_plan.borrow();
+        static_accessors::cross_class_backing_field_method(
+            self.cw,
+            self.ir,
+            &self.facade,
+            &planned,
+            None,
+            *class,
+            *field,
+            write,
+        )
+    }
+
+    /// Store into an already-selected field. An exported inline template calls `access$set<X>$p`
+    /// instead of naming its own private instance field.
+    pub(super) fn emit_realized_field_store(
+        &mut self,
+        expression: u32,
+        owner: TypeName,
+        name: &str,
+        descriptor: &str,
+        is_static: bool,
+        code: &mut CodeBuilder,
+    ) {
+        let words = crate::jvm::physical_type::field_slot(descriptor).words();
+        let exported = (!is_static)
+            .then(|| self.exporting_instance_field_method(expression, true))
+            .flatten();
+        // kotlinc's `visitSetField` marks the assignment's line at the store, so the line
+        // returns after a value that ran on another line or under an inlined body.
+        self.mark_dispatch_line(expression, code);
+        if let Some(method) = exported {
+            code.invokestatic(method, words + 1, 0);
+        } else {
+            let owner = owner.render();
+            let fref = self.cw.fieldref(&owner, name, descriptor);
+            if is_static {
+                code.putstatic(fref, words);
+            } else {
+                code.putfield(fref, words);
+            }
         }
     }
 }

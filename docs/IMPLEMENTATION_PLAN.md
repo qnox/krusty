@@ -5185,3 +5185,18 @@ therefore pops `StringCompanionObject.INSTANCE` and stores `""` straight into th
 parameter the body reads, including a used extension receiver, is still stored or read from its
 caller local. Tests: `tests/inline_format_arguments_e2e.rs`,
 `tests/delegated_properties_array_e2e.rs`.
+
+## A private property in an exported inline template uses an accessor  ✅
+
+A non-private `inline` function, and a private `inline` function it expands, calls
+`access$get<X>$p` / `access$set<X>$p` for a private property and `access$<name>` for a private
+function. The private inline function's own method uses those accessors, because the bytecode
+splicer copies that method into every caller, and that method opens with `$i$f$<name>`
+(an instance method included). A private `inline` function that declares a default does too:
+its `$default` stub is not private, so the stub's default expressions and the body it
+re-emits use the same accessors. A same-module non-inline caller re-emits the copied body
+and uses the same accessors; a lambda the caller substituted into that body keeps the
+caller's own access. A nested copy marks the outer frame's line on a `nop` before
+the caller continues. A private inline function with no default, expanded only from
+non-inline callers, still reads the field directly. Test:
+`tests/private_inline_property_access_e2e.rs`.

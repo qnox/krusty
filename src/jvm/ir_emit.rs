@@ -4680,10 +4680,12 @@ fn emit_method_inner_with_holder(
     let param_tys = jvm_function_params(ir, fid);
     let ret = jvm_declared_ty(&env.override_results.physical_result(ir, fid));
     let mut e = Emitter::new(ir, cw, env, static_owner, owner, facade, ret, [body]);
-    // The bytecode splicer copies this method. A non-private inline function therefore calls
-    // public accessors for its private callees, so every copy is legal in another class.
-    e.export_private_calls =
-        ir.inline_fns.contains(&fid) && !ir.method_visibility(fid).is_private();
+    e.method_exports_private_access = static_accessors::method_exports_private_calls(
+        ir,
+        &env.run.static_accessor_plan.borrow(),
+        fid,
+    );
+    e.export_private_calls = e.method_exports_private_access;
     e.finally_markers = ir.inline_fns.contains(&fid);
     // kotlinc's transformer keeps a suspend body's own local names: they name the spills.
     let transformed = env.emit_time_machines.transformed(fid);
@@ -4922,16 +4924,17 @@ fn emit_method_inner_with_holder(
     // istore_<n>` into a synthetic `$i$f$<name>` int local covering the body — its inliner tracks
     // splice depth through these. Emitted after the parameter guards; the body's LineNumberTable
     // then naturally starts at the post-store pc.
-    let inline_marker: Option<(u16, u16)> =
-        (!instance && ir.top_level_inline_functions.contains(&fid)).then(|| {
-            let slot = e
-                .frame
-                .enter_temp(TempRole::InlineDepthMarker, Ty::Int)
-                .slot();
-            code.push_int(0, e.cw);
-            store(Ty::Int, slot, &mut code);
-            (slot, code.bytes.len() as u16)
-        });
+    let inline_marker: Option<(u16, u16)> = (ir.top_level_inline_functions.contains(&fid)
+        || (instance && ir.inline_fns.contains(&fid)))
+    .then(|| {
+        let slot = e
+            .frame
+            .enter_temp(TempRole::InlineDepthMarker, Ty::Int)
+            .slot();
+        code.push_int(0, e.cw);
+        store(Ty::Int, slot, &mut code);
+        (slot, code.bytes.len() as u16)
+    });
     // The marker and the parameter guards carry no line. The method's first entry is the first
     // statement, or the expression body — kotlinc does not also record the signature line there.
     // Building the machine: everything the discovery pass learned is in hand, so the entry,
@@ -5505,9 +5508,8 @@ struct Emitter<'a> {
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
-    /// This method is a non-private `inline` function. Private calls in it name `access$`
-    /// accessors, because the splicer copies these instructions into other classes.
     export_private_calls: bool,
+    method_exports_private_access: bool,
     /// This method is `inline`, so each copy of a `finally` is bracketed by
     /// `InlineMarker.finallyStart`/`finallyEnd`.
     finally_markers: bool,
@@ -5687,6 +5689,7 @@ impl<'a> Emitter<'a> {
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
             export_private_calls: false,
+            method_exports_private_access: false,
             finally_markers: false,
             finally_marker_depth: 0,
             classifiers: env.signature_symbols,
@@ -6040,7 +6043,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit(&mut self, e: u32, code: &mut CodeBuilder) {
-        self.emitting(e, |emitter| emitter.emit_node(e, code));
+        self.with_copied_private_access(e, |emitter| emitter.emit_node(e, code));
     }
 
     fn emit_node(&mut self, e: u32, code: &mut CodeBuilder) {
@@ -6120,7 +6123,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
-        self.emitting(e, |emitter| emitter.emit_value_expression(e, code));
+        self.with_copied_private_access(e, |emitter| emitter.emit_value_expression(e, code));
     }
 
     fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
@@ -6384,19 +6387,14 @@ impl<'a> Emitter<'a> {
                 name,
                 descriptor,
                 is_static,
-            } => {
-                let owner = owner.render();
-                let words = crate::jvm::physical_type::field_slot(&descriptor).words();
-                let fref = self.cw.fieldref(&owner, &name, &descriptor);
-                // kotlinc's `visitSetField` marks the assignment's line at the store, so the line
-                // returns after a value that ran on another line or under an inlined body.
-                self.mark_dispatch_line(operation.expression, code);
-                if is_static {
-                    code.putstatic(fref, words);
-                } else {
-                    code.putfield(fref, words);
-                }
-            }
+            } => self.emit_realized_field_store(
+                operation.expression,
+                owner,
+                &name,
+                &descriptor,
+                is_static,
+                code,
+            ),
             PropertyAccess::Accessor {
                 owner,
                 name,

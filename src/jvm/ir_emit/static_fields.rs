@@ -825,7 +825,7 @@ impl Emitter<'_> {
         // re-enter it: the read is inside that getter.
         if let Some(storage) = crate::jvm::private_static_access::bridged_getter(self.ir, i)
             .or_else(|| crate::jvm::private_static_access::declared_backing_getter(self.ir, i))
-            .filter(|storage| self.static_owner != Some(storage.owner))
+            .filter(|storage| self.static_owner != Some(storage.owner) || self.export_private_calls)
         {
             let m = static_accessors::static_methodref(
                 self.cw,
@@ -927,7 +927,7 @@ impl Emitter<'_> {
         // from another class, goes through its owner's accessor.
         if let Some(storage) = crate::jvm::private_static_access::bridged_setter(self.ir, index)
             .or_else(|| crate::jvm::private_static_access::declared_backing_setter(self.ir, index))
-            .filter(|storage| self.static_owner != Some(storage.owner))
+            .filter(|storage| self.static_owner != Some(storage.owner) || self.export_private_calls)
         {
             let m = static_accessors::static_methodref(
                 self.cw,

@@ -91,15 +91,22 @@ impl Emitter<'_> {
             self.emit_static_storage_field(receiver, value, &owner, &name, field_ty, code);
             return;
         }
-        let cross_class_method = super::static_accessors::cross_class_backing_field_method(
-            self.cw,
-            self.ir,
-            &self.facade,
-            self.static_owner,
-            class,
-            index,
-            true,
-        );
+        let reader = (!self.export_private_calls)
+            .then_some(self.static_owner)
+            .flatten();
+        let cross_class_method = {
+            let planned = self.run.static_accessor_plan.borrow();
+            super::static_accessors::cross_class_backing_field_method(
+                self.cw,
+                self.ir,
+                &self.facade,
+                &planned,
+                reader,
+                class,
+                index,
+                true,
+            )
+        };
         if cross_class_method.is_none()
             && self.emit_int_self_sub(receiver, class, index, value, code)
         {
