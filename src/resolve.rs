@@ -26484,20 +26484,14 @@ enum class EntryChoice {
 
     #[test]
     fn elvis_uses_the_non_null_left_operand_type() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class StoredItem\n\
+        let source = "class StoredItem\n\
              fun pick(value: Any) {\n\
                  val item = value as? StoredItem ?: StoredItem()\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+             }";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert_no_diags(&diagnostics);
 
-        let elvis = files[0]
+        let elvis = file
             .expr_arena
             .iter()
             .enumerate()
@@ -26510,19 +26504,13 @@ enum class EntryChoice {
 
     #[test]
     fn elvis_joins_non_null_and_nullable_string_to_nullable_string() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "fun pick(name: String, fallback: String?) {\n\
+        let source = "fun pick(name: String, fallback: String?) {\n\
                  val chosen = name ?: fallback\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+             }";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert_no_diags(&diagnostics);
 
-        let elvis = files[0]
+        let elvis = file
             .expr_arena
             .iter()
             .enumerate()
@@ -26580,9 +26568,7 @@ enum class EntryChoice {
 
     #[test]
     fn super_calls_record_the_exact_source_overload() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 open class Base {
     open fun pick(value: Int): Int = value
     open fun pick(value: String): Int = value.length
@@ -26591,12 +26577,8 @@ class Child : Base() {
     fun pickInt(): Int = super.pick(1)
     fun pickString(): Int = super.pick("x")
 }
-"#,
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+"#;
+        let (_, info, diagnostics) = retained_standalone_analysis(source);
         assert!(
             diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -26624,9 +26606,7 @@ class Child : Base() {
 
     #[test]
     fn super_properties_record_exact_non_virtual_accessors() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 open class Base {
     open var value: Int = 0
 }
@@ -26636,12 +26616,8 @@ class Child : Base() {
         return super.value
     }
 }
-"#,
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+"#;
+        let (_, info, diagnostics) = retained_standalone_analysis(source);
         assert!(
             diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -26670,46 +26646,40 @@ class Child : Base() {
 
     #[test]
     fn implicit_source_extensions_preserve_lambda_literal_unit_coercion() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class Scope {\n\
+        let source = "class Scope {\n\
                  fun choose(): String {\n\
                      val stored: () -> String = { \"value\" }\n\
                      return pick { \"value\" } + pick(stored)\n\
                  }\n\
              }\n\
              fun Scope.pick(block: () -> Unit): String = \"unit\"\n\
-             fun Scope.pick(value: Any): String = \"any\"",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+             fun Scope.pick(value: Any): String = \"any\"";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert_no_diags(&diagnostics);
 
-        let declarations = files[0]
+        let declarations = file
             .decls
             .iter()
             .copied()
             .filter(|declaration| {
-                matches!(files[0].decl(*declaration), Decl::Fun(function) if function.name == "pick")
+                matches!(file.decl(*declaration), Decl::Fun(function) if function.name == "pick")
             })
             .collect::<Vec<_>>();
         assert_eq!(declarations.len(), 2);
 
         let mut literal_call = None;
         let mut stored_call = None;
-        for (index, expression) in files[0].expr_arena.iter().enumerate() {
+        for (index, expression) in file.expr_arena.iter().enumerate() {
             let Expr::Call { callee, args } = expression else {
                 continue;
             };
-            if !matches!(files[0].expr(*callee), Expr::Name(name) if name == "pick") {
+            if !matches!(file.expr(*callee), Expr::Name(name) if name == "pick") {
                 continue;
             }
             let call = ExprId(index as u32);
             if args
                 .first()
-                .is_some_and(|argument| matches!(files[0].expr(*argument), Expr::Lambda { .. }))
+                .is_some_and(|argument| matches!(file.expr(*argument), Expr::Lambda { .. }))
             {
                 literal_call = Some(call);
             } else {
@@ -26729,40 +26699,34 @@ class Child : Base() {
 
     #[test]
     fn indexed_source_extensions_preserve_lambda_literal_unit_coercion() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class Scope\n\
+        let source = "class Scope\n\
              operator fun Scope.get(block: () -> Unit): String = \"unit\"\n\
              operator fun Scope.get(value: Any): String = \"any\"\n\
              fun literal(scope: Scope): String = scope[{ \"value\" }]\n\
-             fun stored(scope: Scope, block: () -> String): String = scope[block]",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+             fun stored(scope: Scope, block: () -> String): String = scope[block]";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert_no_diags(&diagnostics);
 
-        let declarations = files[0]
+        let declarations = file
             .decls
             .iter()
             .copied()
             .filter(|declaration| {
-                matches!(files[0].decl(*declaration), Decl::Fun(function) if function.name == "get")
+                matches!(file.decl(*declaration), Decl::Fun(function) if function.name == "get")
             })
             .collect::<Vec<_>>();
         assert_eq!(declarations.len(), 2);
 
         let mut literal_index = None;
         let mut stored_index = None;
-        for (index, expression) in files[0].expr_arena.iter().enumerate() {
+        for (index, expression) in file.expr_arena.iter().enumerate() {
             let Expr::Index { indices, .. } = expression else {
                 continue;
             };
             let indexed = ExprId(index as u32);
             if indices
                 .first()
-                .is_some_and(|argument| matches!(files[0].expr(*argument), Expr::Lambda { .. }))
+                .is_some_and(|argument| matches!(file.expr(*argument), Expr::Lambda { .. }))
             {
                 literal_index = Some(indexed);
             } else {
@@ -26782,33 +26746,27 @@ class Child : Base() {
 
     #[test]
     fn safe_call_source_extensions_preserve_lambda_literal_unit_coercion() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class Scope\n\
+        let source = "class Scope\n\
              fun Scope.pick(block: () -> Unit): String = \"unit\"\n\
              fun Scope.pick(value: Any): String = \"any\"\n\
              fun literal(scope: Scope?): String? = scope?.pick { \"value\" }\n\
-             fun stored(scope: Scope?, block: () -> String): String? = scope?.pick(block)",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+             fun stored(scope: Scope?, block: () -> String): String? = scope?.pick(block)";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert_no_diags(&diagnostics);
 
-        let declarations = files[0]
+        let declarations = file
             .decls
             .iter()
             .copied()
             .filter(|declaration| {
-                matches!(files[0].decl(*declaration), Decl::Fun(function) if function.name == "pick")
+                matches!(file.decl(*declaration), Decl::Fun(function) if function.name == "pick")
             })
             .collect::<Vec<_>>();
         assert_eq!(declarations.len(), 2);
 
         let mut literal_call = None;
         let mut stored_call = None;
-        for (index, expression) in files[0].expr_arena.iter().enumerate() {
+        for (index, expression) in file.expr_arena.iter().enumerate() {
             let Expr::SafeCall {
                 name,
                 args: Some(args),
@@ -26823,7 +26781,7 @@ class Child : Base() {
             let call = ExprId(index as u32);
             if args
                 .first()
-                .is_some_and(|argument| matches!(files[0].expr(*argument), Expr::Lambda { .. }))
+                .is_some_and(|argument| matches!(file.expr(*argument), Expr::Lambda { .. }))
             {
                 literal_call = Some(call);
             } else {
@@ -26843,23 +26801,17 @@ class Child : Base() {
 
     #[test]
     fn binary_source_extensions_preserve_lambda_literal_unit_coercion() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class Scope\n\
+        let source = "class Scope\n\
              operator fun Scope.plus(block: () -> Unit): String = \"unit\"\n\
              operator fun Scope.plus(value: Any): String = \"any\"\n\
              fun literal(scope: Scope): String = scope + ({ \"value\" })\n\
-             fun stored(scope: Scope, block: () -> String): String = scope + block",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+             fun stored(scope: Scope, block: () -> String): String = scope + block";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert_no_diags(&diagnostics);
 
         let mut literal_binary = None;
         let mut stored_binary = None;
-        for (index, expression) in files[0].expr_arena.iter().enumerate() {
+        for (index, expression) in file.expr_arena.iter().enumerate() {
             let Expr::Binary {
                 op: BinOp::Add,
                 rhs,
@@ -26869,7 +26821,7 @@ class Child : Base() {
                 continue;
             };
             let binary = ExprId(index as u32);
-            if matches!(files[0].expr(*rhs), Expr::Lambda { .. }) {
+            if matches!(file.expr(*rhs), Expr::Lambda { .. }) {
                 literal_binary = Some(binary);
             } else {
                 stored_binary = Some(binary);
@@ -26897,22 +26849,16 @@ class Child : Base() {
 
     #[test]
     fn nullable_compare_to_extensions_preserve_lambda_literal_unit_coercion() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "operator fun Long?.compareTo(block: () -> Unit): Int = -1\n\
+        let source = "operator fun Long?.compareTo(block: () -> Unit): Int = -1\n\
              operator fun Long?.compareTo(value: Any): Int = 1\n\
              fun literal(value: Long?): Boolean = value < ({ \"value\" })\n\
-             fun stored(value: Long?, block: () -> String): Boolean = value < block",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+             fun stored(value: Long?, block: () -> String): Boolean = value < block";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert_no_diags(&diagnostics);
 
         let mut literal_binary = None;
         let mut stored_binary = None;
-        for (index, expression) in files[0].expr_arena.iter().enumerate() {
+        for (index, expression) in file.expr_arena.iter().enumerate() {
             let Expr::Binary {
                 op: BinOp::Lt, rhs, ..
             } = expression
@@ -26920,7 +26866,7 @@ class Child : Base() {
                 continue;
             };
             let binary = ExprId(index as u32);
-            if matches!(files[0].expr(*rhs), Expr::Lambda { .. }) {
+            if matches!(file.expr(*rhs), Expr::Lambda { .. }) {
                 literal_binary = Some(binary);
             } else {
                 stored_binary = Some(binary);
@@ -26948,9 +26894,7 @@ class Child : Base() {
 
     #[test]
     fn super_call_finds_an_inherited_overload_behind_unrelated_overloads() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 open class Base {
     open fun pick(value: Int): Int = value
 }
@@ -26961,12 +26905,8 @@ open class Middle : Base() {
 class Child : Middle() {
     fun parent(): Int = super.pick(1)
 }
-"#,
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+"#;
+        let (_, info, diagnostics) = retained_standalone_analysis(source);
         assert!(
             diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -26988,9 +26928,7 @@ class Child : Middle() {
 
     #[test]
     fn super_call_selects_an_inherited_overload_over_a_nearer_namesake() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 open class Grand {
     open fun pick(value: Int): Int = value
 }
@@ -27000,12 +26938,8 @@ open class Base : Grand() {
 class Child : Base() {
     fun parent(): Int = super.pick(1)
 }
-"#,
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+"#;
+        let (_, info, diagnostics) = retained_standalone_analysis(source);
         assert!(
             diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -27027,39 +26961,37 @@ class Child : Base() {
 
     #[test]
     fn local_function_calls_record_resolved_target_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 fun box(): String {
     val base = 40
     fun f(x: Int = 2) = base + x
     return f().toString()
 }
-"#,
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+"#;
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
 
-        let call = files[0]
+        let call = file
             .expr_arena
             .iter()
             .enumerate()
             .find_map(|(idx, expr)| match expr {
-                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                Expr::Call { callee, .. } => match file.expr(*callee) {
                     Expr::Name(name) if name == "f" => Some(ExprId(idx as u32)),
                     _ => None,
                 },
                 _ => None,
             })
             .expect("source should contain f() local function call");
-        let target_stmt = files[0]
+        let target_stmt = file
             .stmt_arena
             .iter()
             .enumerate()
@@ -27088,9 +27020,7 @@ fun box(): String {
 
     #[test]
     fn local_function_calls_record_shadowed_declaration_target() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 fun box(): String {
     fun f(x: Int = 1) = x
     fun g(): Int {
@@ -27099,19 +27029,19 @@ fun box(): String {
     }
     return g().toString()
 }
-"#,
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+"#;
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
 
-        let inner_f_stmt = files[0]
+        let inner_f_stmt = file
             .stmt_arena
             .iter()
             .enumerate()
@@ -27121,12 +27051,12 @@ fun box(): String {
             })
             .next_back()
             .expect("source should contain inner f local function declaration");
-        let f_call = files[0]
+        let f_call = file
             .expr_arena
             .iter()
             .enumerate()
             .find_map(|(idx, expr)| match expr {
-                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                Expr::Call { callee, .. } => match file.expr(*callee) {
                     Expr::Name(name) if name == "f" => Some(ExprId(idx as u32)),
                     _ => None,
                 },
