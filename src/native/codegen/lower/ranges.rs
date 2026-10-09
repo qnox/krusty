@@ -164,7 +164,8 @@ fn comparable_range_element(ty: Ty) -> Option<Ty> {
         return None;
     }
     let argument = arguments.first()?.non_null();
-    (matches!(argument, Ty::Obj(..)) && carrier(argument) == Carrier::Ref).then_some(argument)
+    (matches!(argument, Ty::Obj(..)) && machine_carrier(argument) == Carrier::Ref)
+        .then_some(argument)
 }
 
 /// The runtime function answering one member of a comparable range, and what it answers with.
@@ -581,7 +582,7 @@ impl BodyLowering<'_, '_, '_> {
             && !declared.is_abstract
             && !declared.is_interface
             && !declared.is_sealed
-            && !declared.is_value
+            && !self.file.values.is_value_class(declared.fq_name)
             && !declared.is_enum
             && !declared.is_enum_entry;
         let own = declared.methods.iter().copied().find(|&function| {
@@ -805,7 +806,7 @@ impl BodyLowering<'_, '_, '_> {
         counter: Ty,
     ) -> Result<Option<Value>, Unsupported> {
         let counter = counter.non_null();
-        if carrier(counter).clif().is_none() {
+        if self.carrier(counter).clif().is_none() {
             return Err(format!("a range membership test over `{counter:?}`"));
         }
         // Any of the three may TRANSFER CONTROL rather than answer — `x in 1u..break`, and the
@@ -1078,7 +1079,7 @@ impl BodyLowering<'_, '_, '_> {
         // `IntRange.first`, `CharRange.first`, and `UIntRange.first` are narrower than the
         // runtime's answer. `ULong` is semantically distinct from `Long` but already has the same
         // machine width, so compare machine types before asking Cranelift to narrow.
-        let Some(clif) = carrier(ret).clif() else {
+        let Some(clif) = self.carrier(ret).clif() else {
             return Ok(Some(answer));
         };
         if self.builder.func.dfg.value_type(answer) == clif {

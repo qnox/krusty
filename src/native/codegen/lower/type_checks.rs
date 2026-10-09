@@ -228,24 +228,47 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let ty = self.type_of(operand);
         let (value, primitive) = match self.asserted_declaration_number(operand) {
             Some((produced, primitive)) => (self.reference(produced)?, Some(primitive)),
-            None => (self.reference(operand)?, None),
+            None => match ty {
+                // Preserve the expression's representation across `!!`. In particular, a value
+                // class over a reference carrier is already a nullable pointer, but coercing it
+                // to `Any` here would allocate its value-class box and hand that box to a
+                // consumer which still expects the underlying carrier.
+                Some(_) => {
+                    let Some(value) = self.expression(operand)? else {
+                        return Ok(None);
+                    };
+                    (value, None)
+                }
+                None => (self.reference(operand)?, None),
+            },
         };
         if self.terminated {
             return Ok(None);
         }
-        let checked = self
-            .runtime_call("kt_not_null", &[any()], any(), &[value])?
-            .expect("`kt_not_null` returns its argument");
+        // The erased generic-number boundary above is always a reference. Every other reference
+        // carrier can be null and is checked in place; a scalar cannot represent null, so `!!`
+        // is only the identity operation for it.
+        let checked = if primitive.is_some() || ty.is_none_or(|ty| self.carrier(ty) == Carrier::Ref)
+        {
+            self.runtime_call("kt_not_null", &[any()], any(), &[value])?
+                .expect("`kt_not_null` returns its argument")
+        } else {
+            value
+        };
         if self.terminated {
             return Ok(None);
         }
         if let Some(primitive) = primitive {
             return self.number_result(checked, primitive);
         }
-        // `x!!` on a nullable primitive is the unboxing Kotlin means by it.
-        match ty.map(Ty::non_null) {
-            Some(ty) if carrier(ty) != Carrier::Ref => self.convert(checked, Some(any()), ty),
-            _ => Ok(Some(checked)),
+        // `!!` changes the semantic occurrence from nullable to non-null even when both happen to
+        // use a reference carrier. That distinction matters for value classes: `Outer?` may be a
+        // box because its underlying value already admits null, while `Outer` is the underlying
+        // reference itself. Convert between the two semantic types rather than comparing only
+        // their machine carriers.
+        match ty {
+            Some(source) => self.convert(checked, Some(source), source.non_null()),
+            None => Ok(Some(checked)),
         }
     }
 
@@ -274,7 +297,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         {
             return Ok(Some(self.file.classes[class as usize].descriptor));
         }
-        if carrier(target) != Carrier::Ref {
+        if self.carrier(target) != Carrier::Ref {
             return Ok(None);
         }
         self.file.type_descriptor(target)
@@ -329,6 +352,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             answer = self.builder.ins().bxor(answer, one);
         }
         Ok(Some(answer))
+    }
+
+    /// The object a runtime cast let through, as the site's `target` carries it.
+    fn checked_object(
+        &mut self,
+        checked: Option<Value>,
+        target: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        match checked {
+            Some(object) if !self.terminated => {
+                self.convert(object, Some(Ty::nullable(any())), target)
+            }
+            other => Ok(other),
+        }
     }
 
     /// `is`, `as`, `as?` and the coercions the frontend inserts.
@@ -436,9 +473,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 //
                 // Unboxing first and converting would answer `1` to a program Kotlin refuses with
                 // a ClassCastException, so the descriptor is asked before anything is read out.
-                let source_carrier = self.type_of(arg).map(carrier);
-                if carrier(target) != Carrier::Ref
-                    && source_carrier.is_none_or(|source| source != carrier(target))
+                let source_carrier = self.type_of(arg).map(|ty| self.carrier(ty));
+                if self.carrier(target) != Carrier::Ref
+                    && source_carrier.is_none_or(|source| source != self.carrier(target))
                 {
                     let Some(descriptor) = self.file.type_descriptor(target)? else {
                         return self.coerce(arg, type_operand);
@@ -486,7 +523,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     };
                     if op != IrTypeOp::CastNonNull
                         || type_operand.is_nullable()
-                        || carrier(type_operand) != Carrier::Ref
+                        || self.carrier(type_operand) != Carrier::Ref
                     {
                         return Ok(Some(value));
                     }
@@ -501,7 +538,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(None);
                 };
                 let descriptor = self.data_address(descriptor);
-                self.runtime_call(helper, &[any(), any()], any(), &[object, descriptor])
+                let checked =
+                    self.runtime_call(helper, &[any(), any()], any(), &[object, descriptor])?;
+                // What passed the check is an OBJECT; where the target is a value class carried
+                // as its value, the value is read out of it.
+                self.checked_object(checked, type_operand)
             }
             IrTypeOp::SafeCast => {
                 let Some(descriptor) = self.checked_cast_target(type_operand)? else {
@@ -511,12 +552,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(None);
                 };
                 let descriptor = self.data_address(descriptor);
-                self.runtime_call(
+                let checked = self.runtime_call(
                     "kt_safe_cast",
                     &[any(), any()],
                     any(),
                     &[object, descriptor],
-                )
+                )?;
+                self.checked_object(checked, Ty::nullable(type_operand))
             }
             IrTypeOp::ImplicitCoercion => {
                 let arg = self
@@ -668,10 +710,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         };
         let primitive = target.nullable_primitive()?;
         (*type_operand == primitive
-            && carrier(primitive) != Carrier::Ref
+            && self.carrier(primitive) != Carrier::Ref
             && self
                 .type_of(*inner)
-                .is_some_and(|ty| carrier(ty) == Carrier::Ref))
+                .is_some_and(|ty| self.carrier(ty) == Carrier::Ref))
         .then_some(*inner)
     }
 

@@ -216,7 +216,7 @@ impl<'a> FileLowering<'a> {
                 .chain(constructor_parameters(self.ir, class))
                 .collect();
             for argument in &params[1..] {
-                if carrier(*argument) == Carrier::Void {
+                if self.carrier(*argument) == Carrier::Void {
                     return Err(format!(
                         "a `Unit` constructor parameter of `{}`",
                         self.ir.classes[class as usize].fq_name()
@@ -274,6 +274,8 @@ impl<'a> FileLowering<'a> {
                     Slot::FieldGetter { .. }
                         | Slot::FieldSetter { .. }
                         | Slot::AnnotationMember { .. }
+                        | Slot::ValueMember { .. }
+                        | Slot::ValueBridge { .. }
                         | Slot::Bridge { .. }
                         | Slot::FunctionBridge { .. }
                         | Slot::AccessorBridge { .. }
@@ -344,7 +346,31 @@ impl<'a> FileLowering<'a> {
                 self.accessors.insert(slot, id);
                 continue;
             }
-            if let Slot::AnnotationMember { class, member } = &slot {
+            if let Slot::ValueBridge { class, function } = &slot {
+                // The member's own signature with the BOX where `this` goes: that is what a caller
+                // reading the slot off an object passes.
+                let base = self.class_base(*class).to_string();
+                let mut params = vec![any()];
+                params.extend(super::super::super::captures::carried_parameters(
+                    self.ir, *function,
+                ));
+                let ret = self.ir.functions[*function as usize].ret;
+                let id = self.declare_local_function(
+                    &format!("kt_{base}__boxed_{function}"),
+                    &params,
+                    ret,
+                )?;
+                self.accessors.insert(slot, id);
+                continue;
+            }
+            if let Slot::ValueMember { class, member } | Slot::AnnotationMember { class, member } =
+                &slot
+            {
+                let prefix = if matches!(slot, Slot::ValueMember { .. }) {
+                    "box"
+                } else {
+                    "value"
+                };
                 let base = self.class_base(*class).to_string();
                 let (suffix, params, ret) = match member {
                     AnyMember::Equals => ("equals", vec![any(), any()], Ty::Boolean),
@@ -352,7 +378,7 @@ impl<'a> FileLowering<'a> {
                     AnyMember::ToString => ("to_string", vec![any()], any()),
                 };
                 let id = self.declare_local_function(
-                    &format!("kt_{base}__value_{suffix}"),
+                    &format!("kt_{base}__{prefix}_{suffix}"),
                     &params,
                     ret,
                 )?;
@@ -418,7 +444,7 @@ impl<'a> FileLowering<'a> {
     /// one — `box$MyLocalObject` is the name Kotlin/Native gives a class local to `box`, and
     /// flattening it to `box.MyLocalObject` reads as a package that does not exist. That name is
     /// already this target's: `lower_ir_file` realized every local classifier from its provenance.
-    fn kotlin_name(&self, class: ClassId) -> String {
+    pub(super) fn kotlin_name(&self, class: ClassId) -> String {
         self.ir.classes[class as usize].fq_name().replace('/', ".")
     }
 
@@ -622,6 +648,8 @@ impl<'a> FileLowering<'a> {
                 Slot::FieldGetter { .. }
                 | Slot::FieldSetter { .. }
                 | Slot::AnnotationMember { .. }
+                | Slot::ValueMember { .. }
+                | Slot::ValueBridge { .. }
                 | Slot::Bridge { .. }
                 | Slot::FunctionBridge { .. }
                 | Slot::AccessorBridge { .. } => self.accessors[slot],
@@ -1059,7 +1087,7 @@ impl<'a> FileLowering<'a> {
                 declaration.fq_name()
             ));
         }
-        let mut slots = vec![Ty::Obj(declaration.fq_name_id(), &[])];
+        let mut slots = vec![self.object_type(class)];
         slots.extend(secondary.prefix_params.iter().copied());
         slots.extend(secondary.params.iter().copied());
         let signature = self.signature_of(&slots, Ty::Unit)?;
@@ -1405,6 +1433,12 @@ impl<'a> FileLowering<'a> {
         if let Slot::AnnotationMember { class, member } = slot {
             return self.define_annotation_member(*class, *member, id);
         }
+        if let Slot::ValueMember { class, member } = slot {
+            return self.define_value_member(*class, *member, id);
+        }
+        if let Slot::ValueBridge { class, function } = slot {
+            return self.define_value_bridge(*class, *function, id);
+        }
         let (Slot::FieldGetter { class, field } | Slot::FieldSetter { class, field }) = slot else {
             unreachable!("only field accessors are synthesized");
         };
@@ -1448,199 +1482,6 @@ impl<'a> FileLowering<'a> {
         }
     }
 
-    /// A bridge: the base's signature in, the override's out, and a dispatch between them.
-    ///
-    /// `A<T : Number>.foo(): T` erases its result to a reference and `Z : A<Int>` returns an
-    /// unboxed integer, so the base's slot cannot hold `Z`'s body — a caller reading the slot
-    /// through `A` would read an integer as a pointer. This stands there instead: it takes what the
-    /// BASE declares, converts each operand to what the override's slot expects, and converts the
-    /// answer back.
-    ///
-    /// It forwards by DISPATCH and not by calling the override, which is what keeps it right under
-    /// a further subclass: `Y : Z` replaces the target slot with its own body, and this reaches
-    /// whatever the receiver actually is rather than the override that happened to need the bridge.
-    /// The FUNCTION SLOT's stand-in: `kotlin.Function{N}.invoke`'s signature, converted onto the
-    /// override's own and dispatched through its slot; see [`Slot::FunctionBridge`].
-    ///
-    /// Apart from [`Self::define_bridge`] only in where the signature it WEARS comes from. That
-    /// one reads a base declaration of this file; there is none here, because `kotlin.Function{N}`
-    /// is declared in no file this target compiles — so the signature is written out, which is the
-    /// one every function value shares: references throughout.
-    fn define_function_bridge(
-        &mut self,
-        arity: usize,
-        target_slot: u32,
-        target: crate::ir::FunId,
-        id: FuncId,
-    ) -> Result<(), Unsupported> {
-        let params = vec![any(); arity + 1];
-        let signature = self.signature_of(&params, any())?;
-        let forwarded = super::super::super::captures::carried_parameters(self.ir, target);
-        let forwarded_ret = self.ir.functions[target as usize].ret;
-        if forwarded.len() != arity {
-            return Err(format!(
-                "a function-slot bridge to `{}`, which takes {} of {arity} operands",
-                self.ir.functions[target as usize].name,
-                forwarded.len()
-            ));
-        }
-        let name = format!(
-            "function bridge to `{}`",
-            self.ir.functions[target as usize].name
-        );
-        self.emit_function(id, signature, any(), &name, &mut |body, values| {
-            let mut arguments = Vec::with_capacity(forwarded.len());
-            for (index, &want) in forwarded.iter().enumerate() {
-                // From the REFERENCE the caller passed: a function type's operands are boxed, and
-                // this is the same unboxing the uniform lambda entry point makes.
-                let Some(value) = body.convert(values[index + 1], Some(any()), want)? else {
-                    return Err("a `Unit` operand crossing the function slot".to_string());
-                };
-                arguments.push(value);
-            }
-            let answer = body.dispatch(
-                values[0],
-                target_slot,
-                &forwarded,
-                forwarded_ret,
-                &arguments,
-            )?;
-            let answer = match answer {
-                Some(answer) => body.convert(answer, Some(forwarded_ret), any())?,
-                None => None,
-            };
-            let answer = match answer {
-                Some(answer) => answer,
-                // A `Unit` body answering a caller that reads a reference: the runtime owns that
-                // singleton, and it is the Kotlin value such a call gets back.
-                None => body
-                    .runtime_call("kt_unit", &[], any(), &[])?
-                    .expect("`kt_unit` returns the singleton"),
-            };
-            body.builder.ins().return_(&[answer]);
-            body.terminate();
-            Ok(())
-        })
-    }
-
-    fn define_bridge(
-        &mut self,
-        declared: crate::ir::FunId,
-        target_slot: Option<u32>,
-        target: crate::ir::FunId,
-        id: FuncId,
-    ) -> Result<(), Unsupported> {
-        let base = self.ir.functions[declared as usize].clone();
-        let carried = super::super::super::captures::carried_parameters(self.ir, declared);
-        let mut params = vec![any()];
-        params.extend(carried.iter().copied());
-        let result = base.ret;
-        let signature = self.signature_of(&params, result)?;
-        let forwarded = super::super::super::captures::carried_parameters(self.ir, target);
-        let forwarded_ret = self.ir.functions[target as usize].ret;
-        let name = format!("bridge to `{}`", base.name);
-        self.emit_function(id, signature, result, &name, &mut |body, values| {
-            let mut arguments = Vec::with_capacity(forwarded.len());
-            for (index, &want) in forwarded.iter().enumerate() {
-                let have = carried.get(index).copied();
-                let Some(value) = body.convert(values[index + 1], have, want)? else {
-                    return Err("a `Unit` operand crossing a bridge".to_string());
-                };
-                arguments.push(value);
-            }
-            // Through the slot where there is one, so a further subclass's override is reached
-            // through the same base. An INTERFACE's own bridge has none — see `Slot::Bridge` —
-            // and calls the default body outright, which is where it is the only implementation.
-            let answer = match target_slot {
-                Some(slot) => {
-                    body.dispatch(values[0], slot, &forwarded, forwarded_ret, &arguments)?
-                }
-                None => {
-                    let Some(target) = body.file.functions[target as usize] else {
-                        return Err("a bridge to a method with no body".to_string());
-                    };
-                    let func_ref = body.func_ref(target);
-                    let mut operands = vec![values[0]];
-                    operands.extend_from_slice(&arguments);
-                    let call = body.emit_call(func_ref, &operands)?;
-                    body.builder.inst_results(call).first().copied()
-                }
-            };
-            match (answer, carrier(result)) {
-                (Some(answer), Carrier::Void) => {
-                    let _ = answer;
-                    body.builder.ins().return_(&[]);
-                }
-                (Some(answer), _) => {
-                    let Some(answer) = body.convert(answer, Some(forwarded_ret), result)? else {
-                        return Err("an answer that does not cross a bridge".to_string());
-                    };
-                    body.builder.ins().return_(&[answer]);
-                }
-                // `open fun foo(): Any` overridden by `fun foo(): Unit`. The override produces
-                // no machine value, and `Unit` is still the Kotlin value a caller reading the
-                // base's slot gets back — the runtime owns that singleton, so hand it over.
-                (None, Carrier::Ref) => {
-                    let unit = body
-                        .runtime_call("kt_unit", &[], any(), &[])?
-                        .expect("`kt_unit` returns the singleton");
-                    body.builder.ins().return_(&[unit]);
-                }
-                (None, Carrier::Void) => {
-                    body.builder.ins().return_(&[]);
-                }
-                (None, Carrier::Scalar(_, _)) => {
-                    return Err("a `Unit` answer where the base declares a primitive".to_string());
-                }
-            }
-            body.terminate();
-            Ok(())
-        })
-    }
-
-    /// A property accessor's bridge: the interface's carrier in, the implementation's out.
-    ///
-    /// The same shape as [`Self::define_bridge`] and for the same reason, except that neither end
-    /// is named by a declaration — a synthesized field access has none — so the two property TYPES
-    /// stand in for the two signatures.
-    fn define_accessor_bridge(
-        &mut self,
-        declared: Ty,
-        implemented: Ty,
-        setter: bool,
-        target_slot: u32,
-        id: FuncId,
-    ) -> Result<(), Unsupported> {
-        let (params, result) = if setter {
-            (vec![any(), declared], Ty::Unit)
-        } else {
-            (vec![any()], declared)
-        };
-        let signature = self.signature_of(&params, result)?;
-        let name = format!("accessor bridge to slot {target_slot}");
-        self.emit_function(id, signature, result, &name, &mut |body, values| {
-            if setter {
-                let Some(value) = body.convert(values[1], Some(declared), implemented)? else {
-                    return Err("a `Unit` value crossing an accessor bridge".to_string());
-                };
-                body.dispatch(values[0], target_slot, &[implemented], Ty::Unit, &[value])?;
-                body.builder.ins().return_(&[]);
-                body.terminate();
-                return Ok(());
-            }
-            let answer = body.dispatch(values[0], target_slot, &[], implemented, &[])?;
-            let Some(answer) = answer else {
-                return Err("a `Unit` answer crossing an accessor bridge".to_string());
-            };
-            let Some(answer) = body.convert(answer, Some(implemented), declared)? else {
-                return Err("a `Unit` answer crossing an accessor bridge".to_string());
-            };
-            body.builder.ins().return_(&[answer]);
-            body.terminate();
-            Ok(())
-        })
-    }
-
     /// An ANNOTATION instance's `equals`, `hashCode` and `toString`: the same answers Kotlin gives,
     /// which are the MEMBERS' and not the object's identity.
     ///
@@ -1677,7 +1518,7 @@ impl<'a> FileLowering<'a> {
             })
             .collect();
         for (_, ty, _) in &members {
-            if carrier(*ty).clif().is_none() {
+            if self.carrier(*ty).clif().is_none() {
                 return Err(format!(
                     "an annotation member of `{ty:?}` (`{}`)",
                     declaration.fq_name()
@@ -1706,7 +1547,7 @@ impl<'a> FileLowering<'a> {
                     body.continue_in(compare);
                     body.builder.seal_block(compare);
                     for (_, ty, offset) in &members {
-                        let clif = carrier(*ty).clif().expect("checked above");
+                        let clif = body.carrier(*ty).clif().expect("checked above");
                         let mine = body.builder.ins().load(clif, trusted(), left, *offset);
                         let theirs = body.builder.ins().load(clif, trusted(), right, *offset);
                         let equal = if ty.non_null().is_array() {
@@ -1741,7 +1582,7 @@ impl<'a> FileLowering<'a> {
                 self.emit_function(id, signature, Ty::Int, &name, &mut |body, params| {
                     let mut sum = body.builder.ins().iconst(types::I32, 0);
                     for (member_name, ty, offset) in &members {
-                        let clif = carrier(*ty).clif().expect("checked above");
+                        let clif = body.carrier(*ty).clif().expect("checked above");
                         let value = body.builder.ins().load(clif, trusted(), params[0], *offset);
                         let hash = if ty.non_null().is_array() {
                             body.runtime_call(
@@ -1779,7 +1620,7 @@ impl<'a> FileLowering<'a> {
                         };
                         let head = body.string_literal(separator.as_bytes())?;
                         text = body.join(text, head)?;
-                        let clif = carrier(*ty).clif().expect("checked above");
+                        let clif = body.carrier(*ty).clif().expect("checked above");
                         let value = body.builder.ins().load(clif, trusted(), params[0], *offset);
                         let rendered = if ty.non_null().is_array() {
                             body.runtime_call(
@@ -1817,7 +1658,7 @@ impl<'a> FileLowering<'a> {
         let id = self.classes[class as usize]
             .constructor
             .expect("a primary constructor is defined only where one was declared");
-        let mut slots = vec![Ty::Obj(declaration.fq_name_id(), &[])];
+        let mut slots = vec![self.object_type(class)];
         slots.extend(constructor_parameters(self.ir, class));
         let signature = self.signature_of(&slots, Ty::Unit)?;
         let parent = match layout.superclass {
@@ -2015,12 +1856,8 @@ impl<'a> FileLowering<'a> {
                     }
                     let field = argument.field_index.unwrap_or(next_field);
                     next_field = field + 1;
-                    let field_type = captures::physical_ty(
-                        body.file.ir,
-                        class,
-                        field,
-                        declaration.fields[field as usize].ty,
-                    );
+                    let field_type =
+                        model::field_storage_ty(body.file.values, body.file.ir, class, field)?;
                     let argument_type =
                         captures::physical_ty(body.file.ir, class, index as u32, argument.ty);
                     let Some(value) =
@@ -2195,6 +2032,26 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         class: ClassId,
         index: u32,
     ) -> Result<Option<Value>, Unsupported> {
+        // A value class's own property, read off an occurrence carried as the value, IS that
+        // value: there is no object to load it from, and none is needed.
+        let classifier = self.file.ir.classes[class as usize].fq_name;
+        if self.unboxed_value_receiver(receiver, classifier)
+            && model::value_field(self.file.ir, class)? == index
+        {
+            let Some(value) = self.coerce(receiver, Ty::Obj(classifier, &[]))? else {
+                return Ok(None);
+            };
+            // The value is held at the declared underlying type; the node reads the field at the
+            // type the IR gives it, which a generic value class spells as its type parameter.
+            let stored = model::field_storage_ty(self.file.values, self.file.ir, class, index)?;
+            let field = captures::physical_ty(
+                self.file.ir,
+                class,
+                index,
+                self.file.ir.classes[class as usize].fields[index as usize].ty,
+            );
+            return self.convert(value, Some(stored), field);
+        }
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
         };
@@ -2205,6 +2062,30 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             self.file.ir.classes[class as usize].fields[index as usize].ty,
         );
         self.load_field(object, class, index, ty).map(Some)
+    }
+
+    /// Whether `receiver` is the unboxed occurrence of the selected value class.
+    ///
+    /// Common IR keeps both facts needed here: the node shape gives the physical carrier and the
+    /// checked logical type says whose carrier it is. A constructor is the deliberate exception:
+    /// its `this` is a box being filled and `object_type` records that slot as physical `Any`, so
+    /// it must continue through object storage even when the checked expression names the class.
+    fn unboxed_value_receiver(&self, receiver: u32, classifier: TypeName) -> bool {
+        if !self.file.values.is_value_class(classifier) {
+            return false;
+        }
+        let physical = self.type_of(receiver);
+        if physical == Some(any()) {
+            return false;
+        }
+        self.file
+            .ir
+            .logical_types
+            .get(&receiver)
+            .copied()
+            .or(physical)
+            .and_then(|ty| self.file.values.unboxed(ty))
+            == Some(classifier)
     }
 
     /// Load a field, with the throw-if-null a `lateinit` one carries.
@@ -2222,14 +2103,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         ty: Ty,
     ) -> Result<Value, Unsupported> {
         let offset = self.file.model.layout(class).fields[index as usize].offset as i32;
-        let clif = carrier(ty).clif().expect("fields are never `Unit`");
+        let stored = model::field_storage_ty(self.file.values, self.file.ir, class, index)?;
+        let clif = self
+            .carrier(stored)
+            .clif()
+            .expect("fields are never `Unit`");
         let value = self.builder.ins().load(clif, trusted(), object, offset);
         let field = &self.file.ir.classes[class as usize].fields[index as usize];
         if field.is_lateinit() {
             let name = field.name.clone();
             self.lateinit_guard(value, &name)?;
         }
-        Ok(value)
+        if stored == ty {
+            return Ok(value);
+        }
+        Ok(self
+            .convert(value, Some(stored), ty)?
+            .expect("a field is never `Unit`"))
     }
 
     /// The RAW value of a `lateinit` field, behind `::prop.isInitialized`.
@@ -2259,7 +2149,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             index,
             self.file.ir.classes[class as usize].fields[index as usize].ty,
         );
-        let clif = carrier(ty).clif().expect("fields are never `Unit`");
+        let clif = self.carrier(ty).clif().expect("fields are never `Unit`");
         // The RAW load, not `load_field`: that one carries the guard this is asking about.
         Ok(Some(self.builder.ins().load(
             clif,
@@ -2327,12 +2217,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(object) = self.receiver(receiver)? else {
             return Ok(());
         };
-        let ty = captures::physical_ty(
-            self.file.ir,
-            class,
-            index,
-            self.file.ir.classes[class as usize].fields[index as usize].ty,
-        );
+        let ty = model::field_storage_ty(self.file.values, self.file.ir, class, index)?;
         let offset = self.file.model.layout(class).fields[index as usize].offset as i32;
         let value = self.coerce(value, ty)?;
         if self.terminated {
@@ -2460,7 +2345,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         arguments.insert(0, object);
         let func_ref = self.func_ref(constructor);
         self.emit_call(func_ref, &arguments)?;
-        Ok(Some(object))
+        self.constructed(object, class)
     }
 
     pub(super) fn method_call(
@@ -2574,10 +2459,56 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             let name = &self.file.ir.classes[class as usize].properties[index].name;
             return Err(format!("a receiver-less read of `{name}`"));
         };
+        // A member of a value class receives the VALUE as `this`. Reading one of that class's
+        // properties therefore must not turn the value into an object merely because ordinary
+        // property dispatch starts from an object receiver.
+        let classifier = self.file.ir.classes[class as usize].fq_name;
+        if self.unboxed_value_receiver(receiver, classifier) {
+            let Some(value) = self.coerce(receiver, Ty::Obj(classifier, &[]))? else {
+                return Ok(None);
+            };
+            return self.value_property_read_of(class, index, value);
+        }
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
         };
         self.property_read_of(class, index, object)
+    }
+
+    /// Read a value-class property when its receiver is already the unboxed value.
+    ///
+    /// A declared getter is an ordinary member whose Native signature takes that value directly.
+    /// The primary property without a getter is the value itself, converted from the declaration's
+    /// storage type to the property's checked result type. Virtual/interface reads do not arrive
+    /// here: their selected property belongs to the interface rather than to this value class and
+    /// continue through the boxed dispatch path.
+    fn value_property_read_of(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        value: Value,
+    ) -> Result<Option<Value>, Unsupported> {
+        let property = self.file.ir.classes[class as usize].properties[index].clone();
+        if let Some(getter) = property.getter {
+            let id = self.file.functions[getter as usize].expect("a getter has a body");
+            let func_ref = self.func_ref(id);
+            let call = self.emit_call(func_ref, &[value])?;
+            return Ok(self.builder.inst_results(call).first().copied());
+        }
+        let Some(field) = property.backing_field else {
+            return Err(format!(
+                "a value-class property with neither storage nor a getter (`{}`)",
+                property.name
+            ));
+        };
+        if model::value_field(self.file.ir, class)? != field {
+            return Err(format!(
+                "a value-class property backed by a non-value field (`{}`)",
+                property.name
+            ));
+        }
+        let stored = model::field_storage_ty(self.file.values, self.file.ir, class, field)?;
+        self.convert(value, Some(stored), property.ty)
     }
 
     /// [`Self::property_read`] with the receiver already evaluated — what a synthesized body has.
@@ -2590,7 +2521,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let property = self.file.ir.classes[class as usize].properties[index].clone();
         if property
             .storage_ty
-            .is_some_and(|storage| carrier(storage) != carrier(property.ty))
+            .is_some_and(|storage| self.carrier(storage) != self.carrier(property.ty))
         {
             return Err(format!(
                 "a property whose storage differs from its type (`{}`)",
@@ -2603,9 +2534,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return self.dispatch(object, slot, &[], property.ty, &[]);
         }
         if let Some(getter) = property.getter {
+            // A value class's getter is its own member and takes the VALUE as `this`; what is in
+            // hand here is the object, so the value is read out of it first.
+            let classifier = self.file.ir.classes[class as usize].fq_name;
+            let this = if self.file.values.is_value_class(classifier) {
+                self.unbox_value(object, classifier)?
+            } else {
+                object
+            };
             let id = self.file.functions[getter as usize].expect("a getter has a body");
             let func_ref = self.func_ref(id);
-            let call = self.emit_call(func_ref, &[object])?;
+            let call = self.emit_call(func_ref, &[this])?;
             return Ok(self.builder.inst_results(call).first().copied());
         }
         match property.backing_field {

@@ -1001,23 +1001,6 @@ KRef kt_throwable_message(KRef self);
 /* `Throwable.cause`, or NULL where the constructor was given none. */
 KRef kt_throwable_cause(KRef self);
 
-/* ---- kotlin.Result ------------------------------------------------------------------------- */
-
-/* A value class over `Any?` whose representation is Kotlin's: a success IS the value, and a
-   failure is a marker holding the exception. Every entry below takes that representation. */
-KRef kt_result_success(KRef value);
-KRef kt_result_failure(KRef exception);
-kt_boolean kt_result_is_failure(KRef value);
-kt_boolean kt_result_is_success(KRef value);
-KRef kt_result_get_or_null(KRef value);
-KRef kt_result_exception_or_null(KRef value);
-/* `getOrThrow()`: a success's value, or, for a failure, its exception thrown and NULL answered at
-   once — never the failure marker, which is no value of the program's type. */
-KRef kt_result_get_or_throw(KRef value);
-/* `Success(value)` or `Failure(exception)`; NULL, with the exception pending, when rendering the
-   value or the exception through its `toString` throws. */
-KRef kt_result_to_string(KRef value);
-
 /* `Throwable.toString()`: the qualified name, and `: message` after it when there is one. A class
    the SOURCE declares as a subclass of one of these inherits it through its own vtable, which is
    why it is published rather than private to this file. */
