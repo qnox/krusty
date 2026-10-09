@@ -31,12 +31,23 @@ pub(super) fn ty_from_common(ty: common::KotlinType) -> super::BuiltinTy {
             nullable,
             shape,
         },
-        common::KotlinType::Param { name, nullable } => super::BuiltinTy::Param { name, nullable },
+        common::KotlinType::Param { name, id, nullable } => {
+            super::BuiltinTy::Param { name, id, nullable }
+        }
         common::KotlinType::InProjection(inner) => {
             super::BuiltinTy::InProjection(Box::new(ty_from_common(*inner)))
         }
         common::KotlinType::OutProjection(inner) => {
             super::BuiltinTy::OutProjection(Box::new(ty_from_common(*inner)))
+        }
+        // The JVM builtins records spell a star projection as `out Any?`.
+        common::KotlinType::Star => {
+            super::BuiltinTy::OutProjection(Box::new(super::BuiltinTy::Class {
+                internal: "kotlin/Any".to_string(),
+                args: Vec::new(),
+                nullable: true,
+                shape: common::KotlinFunctionTypeShape::default(),
+            }))
         }
     }
 }
@@ -54,8 +65,9 @@ pub(crate) fn ty_to_common(ty: &super::BuiltinTy) -> common::KotlinType {
             nullable: *nullable,
             shape: *shape,
         },
-        super::BuiltinTy::Param { name, nullable } => common::KotlinType::Param {
+        super::BuiltinTy::Param { name, id, nullable } => common::KotlinType::Param {
             name: name.clone(),
+            id: *id,
             nullable: *nullable,
         },
         super::BuiltinTy::InProjection(inner) => {
@@ -69,6 +81,7 @@ pub(crate) fn ty_to_common(ty: &super::BuiltinTy) -> common::KotlinType {
 
 fn type_param_from_common(parameter: common::KotlinTypeParameter) -> super::BuiltinTypeParam {
     super::BuiltinTypeParam {
+        id: parameter.id,
         name: parameter.name,
         bounds: parameter.bounds.into_iter().map(ty_from_common).collect(),
         variance: parameter.variance,

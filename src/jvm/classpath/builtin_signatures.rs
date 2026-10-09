@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use crate::jvm::names::type_descriptor;
 use crate::libraries::GenericSig;
+use crate::metadata::semantic::KotlinTypeParameterId;
 use crate::types::Ty;
 
 /// A builtin member's declared non-null result: its type parameter, or its classifier. A nullable
@@ -51,19 +52,22 @@ pub(super) fn builtin_descriptor(sig: &GenericSig) -> String {
 /// A decoded `.kotlin_builtins` type as a semantic [`Ty`]. `bounds` supplies each in-scope type
 /// parameter's declared upper bound; an unlisted one is `Any?`, matching the `@Metadata`
 /// generic-signature decoder. JVM erasure is derived separately by [`builtin_erased`].
-pub(super) fn builtin_ty(t: &crate::jvm::metadata::BuiltinTy, bounds: &HashMap<String, Ty>) -> Ty {
+pub(super) fn builtin_ty(
+    t: &crate::jvm::metadata::BuiltinTy,
+    bounds: &HashMap<KotlinTypeParameterId, Ty>,
+) -> Ty {
     crate::metadata::semantic::semantic_ty(
         &crate::jvm::metadata::builtin_bridge::ty_to_common(t),
         bounds,
     )
 }
 
-/// The declared upper bound of each type parameter, keyed by name. Bounds are decoded with an EMPTY
-/// bound map so a recursive bound (`E : Comparable<E>`) terminates.
+/// The declared upper bound of each type parameter, keyed by its declaration identity. Bounds are
+/// decoded with an EMPTY bound map so a recursive bound (`E : Comparable<E>`) terminates.
 pub(super) fn builtin_bounds(
     params: &[crate::jvm::metadata::BuiltinTypeParam],
-    inherited: &HashMap<String, Ty>,
-) -> HashMap<String, Ty> {
+    inherited: &HashMap<KotlinTypeParameterId, Ty>,
+) -> HashMap<KotlinTypeParameterId, Ty> {
     let mut out = inherited.clone();
     for p in params {
         let bound = p
@@ -71,7 +75,7 @@ pub(super) fn builtin_bounds(
             .first()
             .map(|b| builtin_ty(b, &HashMap::new()))
             .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-        out.insert(p.name.clone(), bound);
+        out.insert(p.id, bound);
     }
     out
 }

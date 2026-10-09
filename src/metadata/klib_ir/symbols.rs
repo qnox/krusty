@@ -9,7 +9,9 @@
 
 use super::wire::{message, unique_bytes, unique_varint};
 use super::KlibIrDecodeError;
-use crate::metadata::id_signature::{decode_public_id_signature, KlibPublicIdSignature};
+use crate::metadata::id_signature::{
+    decode_public_id_signature, KlibAccessorIdSignature, KlibPublicIdSignature,
+};
 
 const ENTRY: &str = "signatures.knt";
 
@@ -60,14 +62,8 @@ impl KlibIrSymbolKind {
 pub enum KlibIrSignature {
     /// A public declaration, exactly as every module that links against it names it.
     Public(KlibPublicIdSignature),
-    /// A getter or setter of a public property: the property's identity and the accessor's name
-    /// (`<get-size>`), plus the serialized accessor hash and mask.
-    Accessor {
-        property: KlibPublicIdSignature,
-        name: String,
-        hash: u64,
-        mask: u64,
-    },
+    /// A getter or setter of a public property.
+    Accessor(KlibAccessorIdSignature),
     /// A declaration whose identity is private to one serialized file: file index within the
     /// KLIB and slot in that file's signature table.
     FileLocal { file: u32, slot: u32 },
@@ -161,12 +157,9 @@ impl<'a> SignatureTable<'a> {
             let property_slot = self.slot(property, "accessor property")?;
             if let KlibIrSignature::Public(property) = self.signature(property_slot)? {
                 let name = string(self.strings, name, "accessor name")?;
-                return Ok(KlibIrSignature::Accessor {
-                    property,
-                    name,
-                    hash,
-                    mask,
-                });
+                return Ok(KlibIrSignature::Accessor(KlibAccessorIdSignature::new(
+                    property, name, hash, mask,
+                )));
             }
         }
         Ok(KlibIrSignature::FileLocal {
