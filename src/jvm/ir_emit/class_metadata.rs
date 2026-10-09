@@ -1372,8 +1372,9 @@ pub(super) fn build_class_metadata_with_facts(
             annotations_in_metadata: opts.annotations_in_metadata,
         },
     );
-    // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).
-    let d1 = vec![d1_bytes.iter().map(|&b| b as char).collect()];
+    // d1 is the protobuf payload as one `char` per byte, in parts that each fit one `CONSTANT_Utf8`
+    // entry (the constant pool writes them as modified UTF-8).
+    let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     Some(KotlinMetadata {
         k: 1,
         mv: opts.metadata_version().to_vec(),

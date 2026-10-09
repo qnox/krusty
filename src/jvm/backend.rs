@@ -1644,7 +1644,7 @@ fn build_facade_metadata(
             k: 2,
             mv: metadata_version.to_vec(),
             xi: 48,
-            d1: vec![d1_bytes.iter().map(|&byte| byte as char).collect()],
+            d1: crate::metadata::encoding::bytes_to_strings(&d1_bytes),
             d2,
         }
     })

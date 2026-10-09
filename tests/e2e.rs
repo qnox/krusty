@@ -1347,6 +1347,8 @@ mod lambda_result_type_variable_e2e;
 mod lambda_vs_block_fun_type_e2e;
 #[path = "language_level_features_e2e.rs"]
 mod language_level_features_e2e;
+#[path = "large_metadata_parts_e2e.rs"]
+mod large_metadata_parts_e2e;
 #[path = "lateinit_companion_read_e2e.rs"]
 mod lateinit_companion_read_e2e;
 #[path = "lateinit_field_nullability_e2e.rs"]
@@ -1577,6 +1579,8 @@ mod result_generic_override_argument_e2e;
 mod same_module_inline_frame_markers_e2e;
 #[path = "setter_return_line_e2e.rs"]
 mod setter_return_line_e2e;
+#[path = "source_map_annotation_parts_e2e.rs"]
+mod source_map_annotation_parts_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
 #[path = "super_delegation_line_e2e.rs"]
