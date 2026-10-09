@@ -13,7 +13,33 @@
 //! Operand order is the contract. Operands are hoisted left to right so each temp is declared in
 //! the order the source evaluates it, and each operand is hoisted exactly once.
 
-use super::*;
+use std::collections::{HashMap, HashSet};
+
+use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrFile};
+use crate::types::Ty;
+
+use super::block_splicing::{
+    diverging_value_consumer_statements, preserve_replacement_logical_type,
+};
+use super::control_flow::expr_contains_owned_loop_jump;
+use super::statement_normalization::{
+    demote_block_value_to_statement, normalize_statement_try_results,
+};
+use super::suspension_points::{
+    expr_calls_suspend, is_suspension_point, recorded_suspension_result, suspend_call_fid,
+    value_class_suspension_result, when_cond_suspends, when_has_non_direct_suspending_branch,
+};
+use super::value_namespace::{is_rematerialized_null, max_value_index, spliced_body_value_types};
+use super::value_try::{bind_value_try_to_fresh_local, desugar_value_try, suspending_value_try};
+use super::value_when::{bind_value_when_to_fresh_local, normalize_value_when, value_when};
+use super::SuspensionTyping;
+
+/// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
+type Branches = Vec<(Option<ExprId>, ExprId)>;
+
+fn object_ty() -> Ty {
+    Ty::nullable(Ty::obj("kotlin/Any"))
+}
 
 /// Turn a value `when` with a suspending condition into a result local plus a statement decision tree.
 /// A Kotlin `when` does *not* evaluate all conditions eagerly: condition `n + 1` is reached only after
@@ -25,7 +51,7 @@ fn hoist_when_cond_suspensions(
     expression: ExprId,
     expected_ty: Option<Ty>,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     value_types: &mut HashMap<u32, Ty>,
     out: &mut Vec<ExprId>,
 ) -> Option<ExprId> {
@@ -40,7 +66,7 @@ fn hoist_when_cond_suspensions(
         })
         .or_else(|| ir.logical_types.get(&when_expr).copied())?;
     let (declaration, conditional, value) =
-        bind_value_when_to_fresh_local(ir, expression, &ty, suspend_set)?;
+        bind_value_when_to_fresh_local(ir, typing.representation, expression, &ty, suspend_set)?;
     value_types.insert(
         match ir.exprs[declaration as usize] {
             IrExpr::Variable { index, .. } => index,
@@ -56,7 +82,7 @@ fn hoist_when_cond_suspensions(
         ir,
         branches,
         suspend_set,
-        orig_rets,
+        typing,
         value_types,
     ));
     Some(value)
@@ -69,22 +95,22 @@ fn hoist_when_statement_branches(
     ir: &mut IrFile,
     branches: Branches,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     value_types: &mut HashMap<u32, Ty>,
 ) -> Vec<ExprId> {
     let Some(((condition, body), rest)) = branches.split_first() else {
         return Vec::new();
     };
-    let body = normalize_when_statement_body(ir, *body, suspend_set, orig_rets, value_types);
+    let body = normalize_when_statement_body(ir, *body, suspend_set, typing, value_types);
     let Some(condition) = *condition else {
         debug_assert!(rest.is_empty(), "checked when else branch must be last");
         return vec![body];
     };
 
     let mut out = Vec::new();
-    let condition = hoist_expr(ir, condition, suspend_set, orig_rets, value_types, &mut out);
+    let condition = hoist_expr(ir, condition, suspend_set, typing, value_types, &mut out);
     let remaining =
-        hoist_when_statement_branches(ir, rest.to_vec(), suspend_set, orig_rets, value_types);
+        hoist_when_statement_branches(ir, rest.to_vec(), suspend_set, typing, value_types);
     let else_body = ir.add_expr(IrExpr::Block {
         stmts: remaining,
         value: None,
@@ -99,23 +125,16 @@ fn normalize_when_statement_body(
     ir: &mut IrFile,
     body: ExprId,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     value_types: &mut HashMap<u32, Ty>,
 ) -> ExprId {
     if matches!(ir.exprs[body as usize], IrExpr::Block { .. }) {
         demote_block_value_to_statement(ir, body);
-        hoist_suspensions(ir, body, suspend_set, orig_rets, value_types);
+        hoist_suspensions(ir, body, suspend_set, typing, value_types);
         return body;
     }
     let mut statements = Vec::new();
-    hoist_stmt(
-        ir,
-        body,
-        suspend_set,
-        orig_rets,
-        value_types,
-        &mut statements,
-    );
+    hoist_stmt(ir, body, suspend_set, typing, value_types, &mut statements);
     if let [only] = statements.as_slice() {
         *only
     } else {
@@ -148,22 +167,22 @@ fn normalize_when_statement_body(
 /// `ret` is the ENCLOSING function's return type: the only statement in a spliced body it types is
 /// a non-local `return`, which leaves that function. The body's own value is typed by the value
 /// itself (see [`desugar_spliced_value_try`]).
-pub(super) fn hoist_spliced_inline_bodies(
+pub(crate) fn hoist_spliced_inline_bodies(
     ir: &mut IrFile,
     body: ExprId,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     ret: &Ty,
 ) {
     let mut seen = HashSet::new();
-    hoist_spliced_walk(ir, body, suspend_set, orig_rets, ret, &mut seen);
+    hoist_spliced_walk(ir, body, suspend_set, typing, ret, &mut seen);
 }
 
 fn hoist_spliced_walk(
     ir: &mut IrFile,
     expression: ExprId,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     ret: &Ty,
     seen: &mut HashSet<ExprId>,
 ) {
@@ -178,10 +197,9 @@ fn hoist_spliced_walk(
     } = ir.exprs[expression as usize].clone()
     {
         // A nested spliced body runs in this frame too, so normalize the innermost first.
-        hoist_spliced_walk(ir, inner, suspend_set, orig_rets, ret, seen);
+        hoist_spliced_walk(ir, inner, suspend_set, typing, ret, seen);
         let mut value_types = spliced_body_value_types(ir, impl_fn, inner);
-        let rewritten =
-            hoist_spliced_body(ir, inner, suspend_set, orig_rets, ret, &mut value_types);
+        let rewritten = hoist_spliced_body(ir, inner, suspend_set, typing, ret, &mut value_types);
         if rewritten != inner {
             if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[expression as usize] {
                 *inline_body = Some(rewritten);
@@ -193,14 +211,14 @@ fn hoist_spliced_walk(
             }
         }
         for capture in captures {
-            hoist_spliced_walk(ir, capture, suspend_set, orig_rets, ret, seen);
+            hoist_spliced_walk(ir, capture, suspend_set, typing, ret, seen);
         }
         return;
     }
     let mut children = Vec::new();
     crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
     for child in children {
-        hoist_spliced_walk(ir, child, suspend_set, orig_rets, ret, seen);
+        hoist_spliced_walk(ir, child, suspend_set, typing, ret, seen);
     }
 }
 
@@ -222,6 +240,7 @@ fn hoist_spliced_walk(
 /// Returns the body to use: a bare `try` becomes a block binding it.
 fn desugar_spliced_value_try(
     ir: &mut IrFile,
+    typing: &SuspensionTyping<'_>,
     body: ExprId,
     suspend_set: &HashSet<u32>,
     ret: &Ty,
@@ -233,7 +252,7 @@ fn desugar_spliced_value_try(
     };
     let bound = value.and_then(|value| {
         let ty = spliced_value_try_type(ir, value)?;
-        bind_value_try_to_fresh_local(ir, value, &ty, suspend_set)
+        bind_value_try_to_fresh_local(ir, typing.representation, value, &ty, suspend_set)
     });
     let block = match (bound, ir.exprs[body as usize].clone()) {
         (None, IrExpr::Block { .. }) => body,
@@ -256,7 +275,7 @@ fn desugar_spliced_value_try(
     };
     // The statement forms (`val v = try { … }`, `x = try { … }`, `return try { … }`), and every
     // block the body owns short of a nested lambda.
-    desugar_value_try(ir, block, suspend_set, ret);
+    desugar_value_try(ir, typing.representation, block, suspend_set, ret);
     // A `try` used as a statement of the body may still carry its checked type; only the value the
     // body yields is a consumer here.
     normalize_statement_try_results(ir, block, false);
@@ -327,20 +346,20 @@ fn hoist_spliced_body(
     ir: &mut IrFile,
     body: ExprId,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     ret: &Ty,
     value_types: &mut HashMap<u32, Ty>,
 ) -> ExprId {
-    let body = desugar_spliced_value_try(ir, body, suspend_set, ret);
+    let body = desugar_spliced_value_try(ir, typing, body, suspend_set, ret);
     match ir.exprs[body as usize].clone() {
         IrExpr::Block { stmts, value } => {
             let mut out = Vec::with_capacity(stmts.len());
             for stmt in stmts {
-                hoist_stmt(ir, stmt, suspend_set, orig_rets, value_types, &mut out);
+                hoist_stmt(ir, stmt, suspend_set, typing, value_types, &mut out);
             }
             let value = value.map(|v| {
                 let mut prelude = Vec::new();
-                let hoisted = hoist_expr(ir, v, suspend_set, orig_rets, value_types, &mut prelude);
+                let hoisted = hoist_expr(ir, v, suspend_set, typing, value_types, &mut prelude);
                 out.extend(prelude);
                 hoisted
             });
@@ -349,7 +368,7 @@ fn hoist_spliced_body(
         }
         _ => {
             let mut prelude = Vec::new();
-            let hoisted = hoist_expr(ir, body, suspend_set, orig_rets, value_types, &mut prelude);
+            let hoisted = hoist_expr(ir, body, suspend_set, typing, value_types, &mut prelude);
             if prelude.is_empty() {
                 body
             } else {
@@ -362,11 +381,11 @@ fn hoist_spliced_body(
     }
 }
 
-pub(super) fn hoist_suspensions(
+pub(crate) fn hoist_suspensions(
     ir: &mut IrFile,
     b: ExprId,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     value_types: &mut HashMap<u32, Ty>,
 ) {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
@@ -374,14 +393,14 @@ pub(super) fn hoist_suspensions(
     };
     let mut out: Vec<ExprId> = Vec::with_capacity(stmts.len());
     for s in stmts {
-        hoist_stmt(ir, s, suspend_set, orig_rets, value_types, &mut out);
+        hoist_stmt(ir, s, suspend_set, typing, value_types, &mut out);
     }
     // A block's TAIL VALUE that is an `if`/`when` EXPRESSION (a lambda's tail expression, `runBlocking { …;
     // if (susp()) a else b }`) — hoist a suspension in its CONDITIONS to a preceding temp, exactly as a
     // `return if (susp()) …` statement above, so the flattener never meets a condition-suspending When it
     // can't model.
     let new_value = value.map(|v| {
-        hoist_when_cond_suspensions(ir, v, None, suspend_set, orig_rets, value_types, &mut out)
+        hoist_when_cond_suspensions(ir, v, None, suspend_set, typing, value_types, &mut out)
             .unwrap_or(v)
     });
     ir.exprs[b as usize] = IrExpr::Block {
@@ -395,13 +414,13 @@ fn hoist_stmt(
     ir: &mut IrFile,
     stmt: ExprId,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     value_types: &mut HashMap<u32, Ty>,
     out: &mut Vec<ExprId>,
 ) {
     if let Some(statements) = diverging_value_consumer_statements(ir, &ir.exprs[stmt as usize]) {
         for statement in statements {
-            hoist_stmt(ir, statement, suspend_set, orig_rets, value_types, out);
+            hoist_stmt(ir, statement, suspend_set, typing, value_types, out);
         }
         return;
     }
@@ -422,7 +441,7 @@ fn hoist_stmt(
                     || expr_contains_owned_loop_jump(ir, init))
             {
                 for statement in stmts {
-                    hoist_stmt(ir, statement, suspend_set, orig_rets, value_types, out);
+                    hoist_stmt(ir, statement, suspend_set, typing, value_types, out);
                 }
                 let rebound = ir.add_expr(IrExpr::Variable {
                     index,
@@ -430,7 +449,7 @@ fn hoist_stmt(
                     init: Some(value),
                     named,
                 });
-                hoist_stmt(ir, rebound, suspend_set, orig_rets, value_types, out);
+                hoist_stmt(ir, rebound, suspend_set, typing, value_types, out);
                 return;
             }
         }
@@ -441,7 +460,7 @@ fn hoist_stmt(
     // before `emit_suspension` can bind it. Callable points take the same path, so operand hoisting
     // remains uniform and selected-call agnostic.
     if is_suspension_point(ir, stmt, suspend_set) {
-        hoist_call_operands_in_order(ir, stmt, suspend_set, orig_rets, value_types, out);
+        hoist_call_operands_in_order(ir, stmt, suspend_set, typing, value_types, out);
         out.push(stmt);
         return;
     }
@@ -481,7 +500,7 @@ fn hoist_stmt(
                                 ir,
                                 body,
                                 suspend_set,
-                                orig_rets,
+                                typing,
                                 value_types,
                             ),
                         )
@@ -495,7 +514,7 @@ fn hoist_stmt(
                 ir,
                 branches,
                 suspend_set,
-                orig_rets,
+                typing,
                 value_types,
             ));
             return;
@@ -507,7 +526,7 @@ fn hoist_stmt(
         // is hoisted; a branch VALUE that suspends stays for the flattener / a later skip.)
         IrExpr::Return(Some(v)) if when_cond_suspends(ir, *v, suspend_set) => {
             let nw =
-                hoist_when_cond_suspensions(ir, *v, None, suspend_set, orig_rets, value_types, out)
+                hoist_when_cond_suspensions(ir, *v, None, suspend_set, typing, value_types, out)
                     .expect("guard ensured a condition suspends");
             let nr = ir.add_expr(IrExpr::Return(Some(nw)));
             out.push(nr);
@@ -533,7 +552,7 @@ fn hoist_stmt(
                 // suspension in the inline body's last assignment remains hidden until `Flat`
                 // appends the block value to the state and has no bound suspension to resume into.
                 demote_block_value_to_statement(ir, body);
-                hoist_suspensions(ir, body, suspend_set, orig_rets, value_types);
+                hoist_suspensions(ir, body, suspend_set, typing, value_types);
             }
             // A loop condition is conditional with respect to entering the loop, but every time the
             // HEADER is reached its operands evaluate unconditionally. Keep its hoisted suspension
@@ -542,7 +561,7 @@ fn hoist_stmt(
             // turns that block into the header's state sequence below.
             let cond = if expr_calls_suspend(ir, cond, suspend_set) {
                 let mut prelude = Vec::new();
-                let value = hoist_expr(ir, cond, suspend_set, orig_rets, value_types, &mut prelude);
+                let value = hoist_expr(ir, cond, suspend_set, typing, value_types, &mut prelude);
                 ir.add_expr(IrExpr::Block {
                     stmts: prelude,
                     value: Some(value),
@@ -564,7 +583,7 @@ fn hoist_stmt(
         // scope block, etc. Recurse so a suspension buried in a call argument inside it (or its nested
         // loops) is hoisted to a preceding bound temp before the flattener sees it.
         IrExpr::Block { value: None, .. } => {
-            hoist_suspensions(ir, stmt, suspend_set, orig_rets, value_types);
+            hoist_suspensions(ir, stmt, suspend_set, typing, value_types);
             out.push(stmt);
             return;
         }
@@ -581,7 +600,7 @@ fn hoist_stmt(
                 stmts: ns,
                 value: None,
             };
-            hoist_suspensions(ir, stmt, suspend_set, orig_rets, value_types);
+            hoist_suspensions(ir, stmt, suspend_set, typing, value_types);
             out.push(stmt);
             return;
         }
@@ -603,7 +622,7 @@ fn hoist_stmt(
                     region,
                     produces_value,
                     suspend_set,
-                    orig_rets,
+                    typing,
                     value_types,
                 );
             }
@@ -616,7 +635,7 @@ fn hoist_stmt(
         // snapshot the operands stay in place and the emit declines the residual nested suspension.
         IrExpr::Variable { init: Some(i), .. } if is_suspension_point(ir, *i, suspend_set) => {
             let i = *i;
-            hoist_call_operands_in_order(ir, i, suspend_set, orig_rets, value_types, out);
+            hoist_call_operands_in_order(ir, i, suspend_set, typing, value_types, out);
             out.push(stmt);
             return;
         }
@@ -632,21 +651,14 @@ fn hoist_stmt(
             // re-bind `a` to the When with the hoisted condition. A branch VALUE that suspends stays for
             // the flattener's `stmt_cond_suspension` (`val a = when { … -> susp() }`), which this arm still
             // routes to (`hoist_when_cond_suspensions` returns `None`) when the condition doesn't suspend.
-            let i = hoist_when_cond_suspensions(
-                ir,
-                i,
-                Some(ty),
-                suspend_set,
-                orig_rets,
-                value_types,
-                out,
-            )
-            .unwrap_or(i);
+            let i =
+                hoist_when_cond_suspensions(ir, i, Some(ty), suspend_set, typing, value_types, out)
+                    .unwrap_or(i);
             if when_has_non_direct_suspending_branch(ir, i, suspend_set)
                 || expr_contains_owned_loop_jump(ir, i)
             {
                 let (declaration, conditional, value) =
-                    bind_value_when_to_fresh_local(ir, i, &ty, suspend_set)
+                    bind_value_when_to_fresh_local(ir, typing.representation, i, &ty, suspend_set)
                         .expect("non-direct suspending branch must bind as a value conditional");
                 out.push(declaration);
                 out.push(conditional);
@@ -687,14 +699,14 @@ fn hoist_stmt(
                 value,
                 Some(elem),
                 suspend_set,
-                orig_rets,
+                typing,
                 value_types,
                 out,
             ) {
                 value = conditional;
             }
             if let Some((declaration, conditional, value)) =
-                bind_value_when_to_fresh_local(ir, value, &elem, suspend_set)
+                bind_value_when_to_fresh_local(ir, typing.representation, value, &elem, suspend_set)
             {
                 out.push(declaration);
                 out.push(conditional);
@@ -715,7 +727,7 @@ fn hoist_stmt(
         _ => {}
     }
     // Hoist suspensions in the statement's unconditional sub-expressions.
-    let new_stmt = hoist_expr(ir, stmt, suspend_set, orig_rets, value_types, out);
+    let new_stmt = hoist_expr(ir, stmt, suspend_set, typing, value_types, out);
     out.push(new_stmt);
 }
 
@@ -724,41 +736,27 @@ fn hoist_protected_region(
     region: ExprId,
     produces_value: bool,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     value_types: &mut HashMap<u32, Ty>,
 ) {
     if matches!(ir.exprs[region as usize], IrExpr::Block { .. }) {
         if !produces_value {
             demote_block_value_to_statement(ir, region);
         }
-        hoist_suspensions(ir, region, suspend_set, orig_rets, value_types);
+        hoist_suspensions(ir, region, suspend_set, typing, value_types);
         return;
     }
     let original = ir.add_expr(ir.exprs[region as usize].clone());
     if produces_value {
         let mut stmts = Vec::new();
-        let value = hoist_expr(
-            ir,
-            original,
-            suspend_set,
-            orig_rets,
-            value_types,
-            &mut stmts,
-        );
+        let value = hoist_expr(ir, original, suspend_set, typing, value_types, &mut stmts);
         ir.exprs[region as usize] = IrExpr::Block {
             stmts,
             value: Some(value),
         };
     } else {
         let mut stmts = Vec::new();
-        hoist_stmt(
-            ir,
-            original,
-            suspend_set,
-            orig_rets,
-            value_types,
-            &mut stmts,
-        );
+        hoist_stmt(ir, original, suspend_set, typing, value_types, &mut stmts);
         ir.exprs[region as usize] = IrExpr::Block { stmts, value: None };
     }
 }
@@ -770,7 +768,7 @@ fn hoist_expr(
     ir: &mut IrFile,
     e: ExprId,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     value_types: &mut HashMap<u32, Ty>,
     prelude: &mut Vec<ExprId>,
 ) -> ExprId {
@@ -778,17 +776,17 @@ fn hoist_expr(
         // Hoist nested suspensions in the receiver/arguments first (they evaluate before the call),
         // preserving left-to-right operand order. On an untypeable snapshot, leave the whole call
         // unhoisted — the flattener declines the residual nested suspension (skip, not miscompile).
-        if !hoist_call_operands_in_order(ir, e, suspend_set, orig_rets, value_types, prelude) {
+        if !hoist_call_operands_in_order(ir, e, suspend_set, typing, value_types, prelude) {
             return e;
         }
         // Logical return type of the suspension: from common lowering for a cross-unit call or intrinsic
-        // point, else the callee's `orig_rets` entry (a same-file callee), else `Object`.
+        // point, else the callee's `typing` entry (a same-file callee), else `Object`.
         let ty = value_class_suspension_result(ir, e, suspend_set)
             .map(crate::ir::IrValueClassSuspendResult::boundary_ty)
             .or_else(|| recorded_suspension_result(ir, e))
             .or_else(|| {
                 suspend_call_fid(ir, e, suspend_set)
-                    .and_then(|fid| orig_rets.get(fid as usize).cloned())
+                    .and_then(|fid| typing.orig_rets.get(fid as usize).cloned())
             })
             .unwrap_or_else(object_ty);
         let tmp = max_value_index(ir) + 1;
@@ -816,15 +814,9 @@ fn hoist_expr(
     if let Some(when_expr) = value_when(ir, e) {
         if expr_calls_suspend(ir, e, suspend_set) && when_cond_suspends(ir, when_expr, suspend_set)
         {
-            if let Some(value) = hoist_when_cond_suspensions(
-                ir,
-                e,
-                None,
-                suspend_set,
-                orig_rets,
-                value_types,
-                prelude,
-            ) {
+            if let Some(value) =
+                hoist_when_cond_suspensions(ir, e, None, suspend_set, typing, value_types, prelude)
+            {
                 return value;
             }
         }
@@ -837,7 +829,7 @@ fn hoist_expr(
         };
         if let Some(ty) = semantic_ty {
             if let Some((declaration, conditional, value)) =
-                bind_value_when_to_fresh_local(ir, e, &ty, suspend_set)
+                bind_value_when_to_fresh_local(ir, typing.representation, e, &ty, suspend_set)
             {
                 if let IrExpr::Variable { index, .. } = ir.exprs[declaration as usize] {
                     value_types.insert(index, ty);
@@ -849,7 +841,7 @@ fn hoist_expr(
                 if let IrExpr::When { branches } = ir.exprs[conditional as usize].clone() {
                     for (_, branch) in branches {
                         if matches!(ir.exprs[branch as usize], IrExpr::Block { .. }) {
-                            hoist_suspensions(ir, branch, suspend_set, orig_rets, value_types);
+                            hoist_suspensions(ir, branch, suspend_set, typing, value_types);
                         }
                     }
                 }
@@ -867,14 +859,9 @@ fn hoist_expr(
             // number of direct suspension points (`await() + await()`) and snapshots an effectful
             // left subtree only when a later suspension would otherwise move ahead of it.
             let operands = [Some(lhs), Some(rhs)];
-            let Some(new_operands) = hoist_operands_in_order(
-                ir,
-                &operands,
-                suspend_set,
-                orig_rets,
-                value_types,
-                prelude,
-            ) else {
+            let Some(new_operands) =
+                hoist_operands_in_order(ir, &operands, suspend_set, typing, value_types, prelude)
+            else {
                 return e;
             };
             let nl = new_operands[0].expect("binary operands have no default-argument holes");
@@ -888,14 +875,9 @@ fn hoist_expr(
         }
         IrExpr::Equality { op, mode, lhs, rhs } => {
             let operands = [Some(lhs), Some(rhs)];
-            let Some(new_operands) = hoist_operands_in_order(
-                ir,
-                &operands,
-                suspend_set,
-                orig_rets,
-                value_types,
-                prelude,
-            ) else {
+            let Some(new_operands) =
+                hoist_operands_in_order(ir, &operands, suspend_set, typing, value_types, prelude)
+            else {
                 return e;
             };
             let nl = new_operands[0].expect("equality operands have no default-argument holes");
@@ -915,7 +897,7 @@ fn hoist_expr(
             name,
             erased,
         } => {
-            let arg = hoist_expr(ir, arg, suspend_set, orig_rets, value_types, prelude);
+            let arg = hoist_expr(ir, arg, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::ReifiedTypeOp {
                 cast,
                 negated,
@@ -929,7 +911,7 @@ fn hoist_expr(
             producer,
             completion,
         } => {
-            let producer = hoist_expr(ir, producer, suspend_set, orig_rets, value_types, prelude);
+            let producer = hoist_expr(ir, producer, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::BottomValue {
                 producer,
                 completion,
@@ -942,7 +924,7 @@ fn hoist_expr(
         // stayed buried in the operand, where the state-machine flattener cannot split it, and the
         // whole function was declined.
         IrExpr::Throw { operand } => {
-            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
+            let operand = hoist_expr(ir, operand, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::Throw { operand };
             e
         }
@@ -953,7 +935,7 @@ fn hoist_expr(
             arg,
             declaration,
         } => {
-            let arg = hoist_expr(ir, arg, suspend_set, orig_rets, value_types, prelude);
+            let arg = hoist_expr(ir, arg, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::EnumValueOf {
                 classifier,
                 arg,
@@ -968,19 +950,19 @@ fn hoist_expr(
         // here — that is a `RefSet`, which already has its own arm.
         IrExpr::RefNew { elem, init } => {
             let init =
-                init.map(|init| hoist_expr(ir, init, suspend_set, orig_rets, value_types, prelude));
+                init.map(|init| hoist_expr(ir, init, suspend_set, typing, value_types, prelude));
             ir.exprs[e as usize] = IrExpr::RefNew { elem, init };
             e
         }
         IrExpr::RefGet { holder, elem } => {
-            let holder = hoist_expr(ir, holder, suspend_set, orig_rets, value_types, prelude);
+            let holder = hoist_expr(ir, holder, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::RefGet { holder, elem };
             e
         }
         // `arrayOfNulls<String>(count())` — the size evaluates before the array exists, so a
         // suspension in it hoists like any other single operand.
         IrExpr::NewArray { array_type, size } => {
-            let size = hoist_expr(ir, size, suspend_set, orig_rets, value_types, prelude);
+            let size = hoist_expr(ir, size, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::NewArray { array_type, size };
             e
         }
@@ -992,7 +974,7 @@ fn hoist_expr(
             value: Some(value),
             type_argument,
         } => {
-            let value = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
+            let value = hoist_expr(ir, value, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::KClassLiteral {
                 classifier,
                 value: Some(value),
@@ -1001,17 +983,17 @@ fn hoist_expr(
             e
         }
         IrExpr::NotNullAssert { operand, check } => {
-            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
+            let operand = hoist_expr(ir, operand, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::NotNullAssert { operand, check };
             e
         }
         IrExpr::LateinitCheck { operand, name } => {
-            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
+            let operand = hoist_expr(ir, operand, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::LateinitCheck { operand, name };
             e
         }
         IrExpr::PrimitiveNeg { operand, ty } => {
-            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
+            let operand = hoist_expr(ir, operand, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::PrimitiveNeg { operand, ty };
             e
         }
@@ -1020,14 +1002,9 @@ fn hoist_expr(
         // and every effectful part BEFORE it snapshots first to keep the source order.
         IrExpr::StringConcat(parts) => {
             let operands: Vec<Option<ExprId>> = parts.iter().map(|&p| Some(p)).collect();
-            let Some(no) = hoist_operands_in_order(
-                ir,
-                &operands,
-                suspend_set,
-                orig_rets,
-                value_types,
-                prelude,
-            ) else {
+            let Some(no) =
+                hoist_operands_in_order(ir, &operands, suspend_set, typing, value_types, prelude)
+            else {
                 return e;
             };
             let np: Vec<ExprId> = no.into_iter().map(|p| p.unwrap()).collect();
@@ -1039,7 +1016,7 @@ fn hoist_expr(
             arg,
             type_operand,
         } => {
-            let na = hoist_expr(ir, arg, suspend_set, orig_rets, value_types, prelude);
+            let na = hoist_expr(ir, arg, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::TypeOp {
                 op,
                 arg: na,
@@ -1054,7 +1031,7 @@ fn hoist_expr(
             named,
         } => {
             if let Some(i) = init {
-                let ni = hoist_expr(ir, i, suspend_set, orig_rets, value_types, prelude);
+                let ni = hoist_expr(ir, i, suspend_set, typing, value_types, prelude);
                 ir.exprs[e as usize] = IrExpr::Variable {
                     index,
                     ty,
@@ -1065,7 +1042,7 @@ fn hoist_expr(
             e
         }
         IrExpr::SetValue { var, value } => {
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::SetValue { var, value: nv };
             e
         }
@@ -1073,7 +1050,7 @@ fn hoist_expr(
         // write. Hoist a suspend function-value invocation before the store so the state machine binds
         // and resumes the call, then performs the write exactly once with the resumed value.
         IrExpr::SetStatic { index, value } => {
-            let value = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
+            let value = hoist_expr(ir, value, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::SetStatic { index, value };
             e
         }
@@ -1086,8 +1063,8 @@ fn hoist_expr(
             index,
             value,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
+            let nr = hoist_expr(ir, receiver, suspend_set, typing, value_types, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::SetField {
                 receiver: nr,
                 class,
@@ -1097,7 +1074,7 @@ fn hoist_expr(
             e
         }
         IrExpr::Return(Some(v)) => {
-            let nv = hoist_expr(ir, v, suspend_set, orig_rets, value_types, prelude);
+            let nv = hoist_expr(ir, v, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::Return(Some(nv));
             e
         }
@@ -1114,8 +1091,8 @@ fn hoist_expr(
                 "hoist captured write expression={e} holder={holder} value={value} suspends={}",
                 expr_calls_suspend(ir, value, suspend_set)
             );
-            let nh = hoist_expr(ir, holder, suspend_set, orig_rets, value_types, prelude);
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
+            let nh = hoist_expr(ir, holder, suspend_set, typing, value_types, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::RefSet {
                 holder: nh,
                 elem,
@@ -1132,11 +1109,11 @@ fn hoist_expr(
             // Use the same ordered-call reconstruction as the suspension-point path. Keeping one
             // implementation matters here: both direct suspension calls and ordinary calls that
             // merely CONTAIN one obey the identical receiver-then-arguments evaluation contract.
-            hoist_call_operands_in_order(ir, e, suspend_set, orig_rets, value_types, prelude);
+            hoist_call_operands_in_order(ir, e, suspend_set, typing, value_types, prelude);
             e
         }
         IrExpr::MethodCall { .. } => {
-            hoist_call_operands_in_order(ir, e, suspend_set, orig_rets, value_types, prelude);
+            hoist_call_operands_in_order(ir, e, suspend_set, typing, value_types, prelude);
             e
         }
         // Function-value invocation has the same receiver-first evaluation order as a member call:
@@ -1151,14 +1128,9 @@ fn hoist_expr(
         } => {
             let mut operands: Vec<Option<ExprId>> = vec![Some(func)];
             operands.extend(args.iter().map(|&arg| Some(arg)));
-            let Some(mut operands) = hoist_operands_in_order(
-                ir,
-                &operands,
-                suspend_set,
-                orig_rets,
-                value_types,
-                prelude,
-            ) else {
+            let Some(mut operands) =
+                hoist_operands_in_order(ir, &operands, suspend_set, typing, value_types, prelude)
+            else {
                 return e;
             };
             let func = operands
@@ -1183,14 +1155,9 @@ fn hoist_expr(
         // planner and reject shapes it already handles generically.
         IrExpr::New { args, .. } => {
             let operands: Vec<Option<ExprId>> = args.iter().map(|&arg| Some(arg)).collect();
-            let Some(new_operands) = hoist_operands_in_order(
-                ir,
-                &operands,
-                suspend_set,
-                orig_rets,
-                value_types,
-                prelude,
-            ) else {
+            let Some(new_operands) =
+                hoist_operands_in_order(ir, &operands, suspend_set, typing, value_types, prelude)
+            else {
                 return e;
             };
             let new_args = new_operands
@@ -1214,14 +1181,9 @@ fn hoist_expr(
         } => {
             let operands: Vec<Option<ExprId>> =
                 elements.iter().map(|&element| Some(element)).collect();
-            let Some(new_operands) = hoist_operands_in_order(
-                ir,
-                &operands,
-                suspend_set,
-                orig_rets,
-                value_types,
-                prelude,
-            ) else {
+            let Some(new_operands) =
+                hoist_operands_in_order(ir, &operands, suspend_set, typing, value_types, prelude)
+            else {
                 return e;
             };
             let new_elements = new_operands
@@ -1240,7 +1202,7 @@ fn hoist_expr(
             class,
             index,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
+            let nr = hoist_expr(ir, receiver, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::GetField {
                 receiver: nr,
                 class,
@@ -1253,7 +1215,7 @@ fn hoist_expr(
             inner,
             outer,
         } => {
-            let receiver = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
+            let receiver = hoist_expr(ir, receiver, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::EnclosingInstance {
                 receiver,
                 inner,
@@ -1266,7 +1228,7 @@ fn hoist_expr(
             class,
             index,
         } => {
-            let receiver = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
+            let receiver = hoist_expr(ir, receiver, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::LateinitInitialized {
                 receiver,
                 class,
@@ -1283,7 +1245,7 @@ fn hoist_expr(
             operation,
         } => {
             let nr = receiver.map(|receiver| {
-                hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude)
+                hoist_expr(ir, receiver, suspend_set, typing, value_types, prelude)
             });
             ir.exprs[e as usize] = IrExpr::PropertyRead {
                 receiver: nr,
@@ -1305,9 +1267,9 @@ fn hoist_expr(
             operation,
         } => {
             let nr = receiver.map(|receiver| {
-                hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude)
+                hoist_expr(ir, receiver, suspend_set, typing, value_types, prelude)
             });
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, typing, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::PropertyWrite {
                 receiver: nr,
                 owner,
@@ -1330,10 +1292,10 @@ fn hoist_expr(
             value: Some(v),
         } => {
             for statement in stmts {
-                hoist_stmt(ir, statement, suspend_set, orig_rets, value_types, prelude);
+                hoist_stmt(ir, statement, suspend_set, typing, value_types, prelude);
             }
             preserve_replacement_logical_type(ir, e, v);
-            hoist_expr(ir, v, suspend_set, orig_rets, value_types, prelude)
+            hoist_expr(ir, v, suspend_set, typing, value_types, prelude)
         }
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
         // flattener, which restructures it or skips the file).
@@ -1351,7 +1313,7 @@ fn hoist_call_operands_in_order(
     ir: &mut IrFile,
     e: ExprId,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     value_types: &mut HashMap<u32, Ty>,
     prelude: &mut Vec<ExprId>,
 ) -> bool {
@@ -1363,14 +1325,9 @@ fn hoist_call_operands_in_order(
         } => {
             let mut operands: Vec<Option<ExprId>> = vec![dispatch_receiver];
             operands.extend(args.iter().map(|&a| Some(a)));
-            let Some(mut no) = hoist_operands_in_order(
-                ir,
-                &operands,
-                suspend_set,
-                orig_rets,
-                value_types,
-                prelude,
-            ) else {
+            let Some(mut no) =
+                hoist_operands_in_order(ir, &operands, suspend_set, typing, value_types, prelude)
+            else {
                 return false;
             };
             let nr = no.remove(0);
@@ -1393,14 +1350,9 @@ fn hoist_call_operands_in_order(
         IrExpr::MethodCall { receiver, args, .. } => {
             let mut operands: Vec<Option<ExprId>> = vec![Some(receiver)];
             operands.extend(args.iter().copied());
-            let Some(mut no) = hoist_operands_in_order(
-                ir,
-                &operands,
-                suspend_set,
-                orig_rets,
-                value_types,
-                prelude,
-            ) else {
+            let Some(mut no) =
+                hoist_operands_in_order(ir, &operands, suspend_set, typing, value_types, prelude)
+            else {
                 return false;
             };
             let nr = no.remove(0).unwrap();
@@ -1437,7 +1389,7 @@ fn hoist_operands_in_order(
     ir: &mut IrFile,
     operands: &[Option<ExprId>],
     suspend_set: &HashSet<u32>,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     value_types: &mut HashMap<u32, Ty>,
     prelude: &mut Vec<ExprId>,
 ) -> Option<Vec<Option<ExprId>>> {
@@ -1456,7 +1408,7 @@ fn hoist_operands_in_order(
                 continue;
             }
             if suspends[i] || operand_needs_snapshot(ir, x, value_types) {
-                let Some(ty) = hoisted_value_ty(ir, x, orig_rets, value_types) else {
+                let Some(ty) = hoisted_value_ty(ir, x, typing, value_types) else {
                     crate::trace_compiler!(
                         "suspend",
                         "hoist_operands_in_order BAIL: operand {i} untypeable: {:?} logical={:?}",
@@ -1482,7 +1434,7 @@ fn hoist_operands_in_order(
             out.push(None);
             continue;
         };
-        let mut nx = hoist_expr(ir, x, suspend_set, orig_rets, value_types, prelude);
+        let mut nx = hoist_expr(ir, x, suspend_set, typing, value_types, prelude);
         if let Some(ty) = snapshot_ty[i] {
             let tmp = max_value_index(ir) + 1;
             let bound = ir.add_expr(IrExpr::Variable {
@@ -1526,7 +1478,7 @@ fn operand_needs_snapshot(ir: &IrFile, expression: ExprId, value_types: &HashMap
 fn hoisted_value_ty(
     ir: &IrFile,
     expression: ExprId,
-    orig_rets: &[Ty],
+    typing: &SuspensionTyping<'_>,
     value_types: &HashMap<u32, Ty>,
 ) -> Option<Ty> {
     match &ir.exprs[expression as usize] {
@@ -1548,30 +1500,27 @@ fn hoisted_value_ty(
         }),
         // A class literal is emitted as an `ldc Class`, which is still a runtime resolution action and
         // therefore must stay before a later suspension (including any linkage failure it can raise).
-        IrExpr::ClassConst { .. } => Some(Ty::obj("java/lang/Class")),
+        IrExpr::ClassConst { .. } => Some(typing.representation.class_constant_type()),
         // Value indices are local to one function. Looking through the complete arena can find a
         // declaration with the same numeric index in an unrelated method and poison the verifier type
         // of the new temp. The caller supplies the current function's parameter/local environment.
         IrExpr::GetValue(index) => value_types.get(index).copied(),
         IrExpr::Call { callee, .. } => {
             if let Some(function) = callee.source_function() {
-                orig_rets.get(function as usize).copied()
+                typing.orig_rets.get(function as usize).copied()
             } else {
                 match callee {
                     Callee::CrossFile { ret, .. }
                     | Callee::Module { ret, .. }
                     | Callee::Super { ret, .. }
                     | Callee::External { ret, .. } => Some(*ret),
-                    Callee::Static { descriptor, .. } | Callee::Special { descriptor, .. } => {
-                        crate::jvm::ir_emit::parse_physical_method_desc(descriptor)
-                            .map(|(_, ret)| ret)
+                    Callee::Static { .. } | Callee::Special { .. } => {
+                        typing.representation.physical_call_result(callee)
                     }
-                    Callee::Virtual {
-                        descriptor, params, ..
-                    } => params.as_ref().map(|(_, ret)| *ret).or_else(|| {
-                        crate::jvm::ir_emit::parse_physical_method_desc(descriptor)
-                            .map(|(_, ret)| ret)
-                    }),
+                    Callee::Virtual { params, .. } => params
+                        .as_ref()
+                        .map(|(_, ret)| *ret)
+                        .or_else(|| typing.representation.physical_call_result(callee)),
                     Callee::Intrinsic { ret, .. } => Some(*ret),
                     _ => unreachable!("source-function callees were handled above"),
                 }
@@ -1581,7 +1530,7 @@ fn hoisted_value_ty(
             .classes
             .get(*class as usize)
             .and_then(|class| class.methods.get(*index as usize))
-            .and_then(|function| orig_rets.get(*function as usize))
+            .and_then(|function| typing.orig_rets.get(*function as usize))
             .copied(),
         IrExpr::InvokeFunction { ret, .. } => Some(*ret),
         IrExpr::Equality { .. } => Some(Ty::Boolean),
@@ -1596,7 +1545,7 @@ fn hoisted_value_ty(
             | IrBinOp::RefNe
             | IrBinOp::And
             | IrBinOp::Or => Ty::Boolean,
-            _ => hoisted_value_ty(ir, *lhs, orig_rets, value_types)?,
+            _ => hoisted_value_ty(ir, *lhs, typing, value_types)?,
         }),
         IrExpr::PrimitiveNeg { ty, .. }
         | IrExpr::TypeOp {
@@ -1609,14 +1558,14 @@ fn hoisted_value_ty(
         // `value_ty`'s treatment in the emitter.
         IrExpr::BottomValue { .. } => Some(Ty::Nothing),
         IrExpr::NotNullAssert { operand, .. } => {
-            hoisted_value_ty(ir, *operand, orig_rets, value_types)
+            hoisted_value_ty(ir, *operand, typing, value_types)
         }
         // A value block is an evaluation wrapper, not a distinct value representation. Hoisting its
         // statements collapses the wrapper to the final expression, so a snapshot uses that final
         // expression's exact type. An empty/statement-only block has no value to materialize.
         IrExpr::Block {
             value: Some(value), ..
-        } => hoisted_value_ty(ir, *value, orig_rets, value_types),
+        } => hoisted_value_ty(ir, *value, typing, value_types),
         // Declared storage types, read straight off the IR declaration the node indexes — the same
         // sources the emitter's `value_ty` consults. `PropertyRead` carries its type inline; a
         // `Unit`-typed property realizes through a `()V` accessor (nothing to bind) and a bare
@@ -1632,8 +1581,7 @@ fn hoisted_value_ty(
             .map(|class| Ty::obj_name(class.fq_name)),
         IrExpr::ExternalStaticInstance { ty, .. } => Some(Ty::obj_name(*ty)),
         IrExpr::ExternalStaticField { descriptor, .. } => {
-            let ty = crate::jvm::ir_emit::ty_from_field_descriptor(descriptor);
-            (!matches!(ty, Ty::Unit | Ty::Error)).then_some(ty)
+            typing.representation.static_field_type(descriptor)
         }
         IrExpr::EnumEntry { classifier, .. } => Some(Ty::obj_name(*classifier)),
         IrExpr::EnumValueOf { classifier, .. } => Some(Ty::obj_name(*classifier)),
@@ -1665,7 +1613,34 @@ fn hoisted_value_ty(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::coroutines::CoroutineRepresentation;
     use crate::ir::IrIntrinsicSuspensionPoint;
+    use crate::types::type_name;
+
+    /// A representation that declines every physical fact: these tests exercise only semantic IR.
+    struct SemanticOnly;
+
+    impl CoroutineRepresentation for SemanticOnly {
+        fn zero(&self, ty: &Ty) -> IrConst {
+            IrConst::zero_for_value_type(*ty)
+        }
+        fn physical_call_result(&self, _: &Callee) -> Option<Ty> {
+            None
+        }
+        fn static_field_type(&self, _: &str) -> Option<Ty> {
+            None
+        }
+        fn class_constant_type(&self) -> Ty {
+            Ty::obj("kotlin/reflect/KClass")
+        }
+    }
+
+    fn typing() -> SuspensionTyping<'static> {
+        SuspensionTyping {
+            orig_rets: &[],
+            representation: &SemanticOnly,
+        }
+    }
 
     #[test]
     fn a_shared_operand_is_hoisted_independently_at_each_use() {
@@ -1688,7 +1663,13 @@ mod tests {
         });
 
         crate::ir::make_expression_children_unique(&mut ir, body);
-        hoist_suspensions(&mut ir, body, &HashSet::new(), &[], &mut HashMap::new());
+        hoist_suspensions(
+            &mut ir,
+            body,
+            &HashSet::new(),
+            &typing(),
+            &mut HashMap::new(),
+        );
 
         let IrExpr::Block { stmts, .. } = &ir.exprs[body as usize] else {
             panic!("hoisting must retain the function body block")
@@ -1747,7 +1728,7 @@ mod tests {
             inline_body: Some(body),
         });
 
-        hoist_spliced_inline_bodies(&mut ir, lambda, &HashSet::new(), &[], &Ty::Unit);
+        hoist_spliced_inline_bodies(&mut ir, lambda, &HashSet::new(), &typing(), &Ty::Unit);
 
         let IrExpr::Lambda {
             inline_body: Some(rewritten),
@@ -1773,8 +1754,8 @@ mod tests {
             ty: 0,
             field: "INSTANCE",
         });
-        let ty =
-            hoisted_value_ty(&ir, instance, &[], &HashMap::new()).expect("static instance type");
+        let ty = hoisted_value_ty(&ir, instance, &typing(), &HashMap::new())
+            .expect("static instance type");
         assert_eq!(ty, Ty::obj_name(type_name("example/Outer$Widget")));
     }
 
@@ -1812,7 +1793,13 @@ mod tests {
             });
 
             crate::ir::make_expression_children_unique(&mut ir, body);
-            hoist_suspensions(&mut ir, body, &HashSet::new(), &[], &mut HashMap::new());
+            hoist_suspensions(
+                &mut ir,
+                body,
+                &HashSet::new(),
+                &typing(),
+                &mut HashMap::new(),
+            );
 
             let IrExpr::Block { stmts, .. } = &ir.exprs[body as usize] else {
                 panic!("hoisting must retain the function body block")

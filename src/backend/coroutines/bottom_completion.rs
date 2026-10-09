@@ -1,23 +1,23 @@
 //! Checked bottom-value completion at JVM suspension points.
 
-use super::is_suspension_point;
+use super::suspension_points::is_suspension_point;
 use crate::ir::{ExprId, IrBottomValueCompletion, IrExpr, IrFile, IrTypeOp};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy)]
-pub(super) struct UnwrappedSuspension {
-    pub(super) point: ExprId,
-    pub(super) completion: Option<IrBottomValueCompletion>,
+pub(crate) struct UnwrappedSuspension {
+    pub(crate) point: ExprId,
+    pub(crate) completion: Option<IrBottomValueCompletion>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct SuspensionCompletion {
+pub(crate) struct SuspensionCompletion {
     /// The raw call's checked result is semantic bottom, so its pre-CPS logical marker must not be
     /// interpreted as the physical `Object` result of the rewritten call.
-    pub(super) semantic_bottom: bool,
+    pub(crate) semantic_bottom: bool,
     /// The resumed path terminates in this exact use context. A substituted generic bottom value
     /// used as a statement is semantic bottom but deliberately falls through after being discarded.
-    pub(super) resume_diverges: bool,
+    pub(crate) resume_diverges: bool,
 }
 
 /// Peel checked result wrappers off `e` when their producer is a suspend call, returning the
@@ -31,7 +31,7 @@ pub(super) struct SuspensionCompletion {
 /// `ImplicitCoercion` that boxes a primitive result must be kept. Dropping it would `areturn` an
 /// unboxed value where a reference is required. The flattener path re-applies the coercion via
 /// `bind_from_r`, so it peels both.
-pub(super) fn unwrap_suspend_cast(
+pub(crate) fn unwrap_suspend_cast(
     ir: &IrFile,
     e: ExprId,
     suspend_set: &HashSet<u32>,
@@ -77,7 +77,7 @@ pub(super) fn unwrap_suspend_cast(
     }
 }
 
-pub(super) fn suspension_completion(
+pub(crate) fn suspension_completion(
     suspension: UnwrappedSuspension,
     discarded: bool,
 ) -> SuspensionCompletion {

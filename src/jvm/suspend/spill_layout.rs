@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{is_suspension_point, object_ty};
+pub(super) use crate::backend::coroutines::value_namespace::is_rematerialized_null;
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::types::Ty;
 
@@ -38,13 +39,6 @@ fn spill_kind(ty: &Ty) -> char {
             _ => 'I',
         }
     }
-}
-
-/// A local of the bottom type (`var x = null` — `Ty::Null`) has exactly one possible value, so
-/// kotlinc gives it no continuation field and rematerializes it in every resume arm. Keeping it out
-/// of the spill layout also preserves its verifier `null` type instead of widening it to `Object`.
-pub(super) fn is_rematerialized_null(ty: &Ty) -> bool {
-    matches!(ty.non_null(), Ty::Null)
 }
 
 /// The entries of a suspension's scope list that a resume arm rematerializes rather than reloads.
