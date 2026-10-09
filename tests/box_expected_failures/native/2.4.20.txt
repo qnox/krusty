@@ -178,10 +178,6 @@ classLiteral/primitiveClassEquality.kt
 classes/kt1538.kt
 classes/kt2566_2.kt
 classes/kt3001.kt
-classes/overloadBinaryOperator.kt
-classes/overloadPlusAssign.kt
-classes/overloadPlusAssignReturn.kt
-classes/overloadPlusToPlusAssign.kt
 classes/overloadUnaryOperator.kt
 classes/typedDelegation.kt
 closures/captureInSuperConstructorCall/outerCapturedInSecondaryConstructorDefaultParameter.kt
@@ -871,7 +867,6 @@ destructuringDeclInLambdaParam/stdlibUsages.kt
 diagnostics/functions/tailRecursion/recursiveCallInInlineLambda.kt
 diagnostics/functions/tailRecursion/shortCircuit.kt
 elvis/genericElvisWithMoreSpecificLHS.kt
-elvis/genericElvisWithNullLHS.kt
 elvis/ofNonNullableResultType.kt
 enum/defaultCtor/noPrimaryConstructor.kt
 enum/enumEntriesInCompanion.kt
@@ -1030,7 +1025,6 @@ inline/genericFunctionReference.kt
 inline/identityEquals.kt
 inline/incrementProperty.kt
 inline/inline13.kt
-inline/inline16.kt
 inline/inline2.kt
 inline/inline21.kt
 inline/inline24.kt
