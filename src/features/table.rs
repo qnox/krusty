@@ -2,9 +2,8 @@
 //!
 //! Each `releases/<version>.features.tsv` is the output of
 //! `scripts/kotlinc-arguments/DumpLanguageFeatures.java` run against that release's
-//! `kotlin-compiler.jar`, in declaration order. A table is named after the first release that
-//! declares it; a later release with the same features reuses that file. Regenerate it with
-//! `just kotlinc-arguments <version>`.
+//! `kotlin-compiler.jar`, in declaration order. Every release has its own file, even when it equals
+//! another release's. Regenerate it with `just kotlinc-arguments <version>`.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -13,23 +12,26 @@ use super::LanguageVersionPolicy;
 use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
 
-/// The feature tables, by reference version. A release whose table is identical to an earlier
-/// one's shares that file instead of a copy. `every_supported_release_has_a_feature_table` keeps
-/// this list equal to the `kotlin-versions` manifest.
-const RELEASES: &[(KotlinVersion, &str)] = &[
-    (
-        KotlinVersion::V2_4_0,
-        include_str!("releases/2.4.0.features.tsv"),
-    ),
-    (
-        KotlinVersion::V2_4_10,
-        include_str!("releases/2.4.0.features.tsv"),
-    ),
-    (
-        KotlinVersion::V2_4_20,
-        include_str!("releases/2.4.20.features.tsv"),
-    ),
-];
+/// The feature tables, by reference version.
+/// `every_supported_release_has_a_feature_table` keeps this list equal to the
+/// `kotlin-versions` manifest, and `every_release_reads_its_own_file` keeps each entry on the file
+/// named after its release.
+macro_rules! releases {
+    ($($version:ident => $file:literal),+ $(,)?) => {
+        const RELEASES: &[(KotlinVersion, &str)] = &[$((
+            KotlinVersion::$version,
+            include_str!(concat!("releases/", $file, ".features.tsv")),
+        )),+];
+        #[cfg(test)]
+        const RELEASE_FILES: &[(KotlinVersion, &str)] = &[$((KotlinVersion::$version, $file)),+];
+    };
+}
+
+releases! {
+    V2_4_0 => "2.4.0",
+    V2_4_10 => "2.4.10",
+    V2_4_20 => "2.4.20",
+}
 
 /// The vendored table text of one release, for comparison with a fresh dump.
 pub fn vendored_table(version: KotlinVersion) -> Option<&'static str> {
@@ -210,6 +212,15 @@ mod tests {
         for version in KotlinVersion::supported() {
             let table = FeatureTable::for_version(version).expect("a table");
             assert!(table.get("TypeAliases").is_some());
+        }
+    }
+
+    /// A release never reads another release's file, even one with the same bytes: a later refresh
+    /// of one release must not silently change another's policy.
+    #[test]
+    fn every_release_reads_its_own_file() {
+        for &(version, file) in RELEASE_FILES {
+            assert_eq!(file, version.to_string());
         }
     }
 
