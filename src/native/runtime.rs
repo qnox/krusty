@@ -40,8 +40,9 @@
 //! * `krusty_gc.c` is the heap: allocator and a mark-sweep collector with conservative roots and a
 //!   precisely traced heap. It knows nothing about any particular type; every object tells it,
 //!   through its `KType` descriptor, which of its fields are references.
-//! * `krusty_threads.c` is the mutator lock and the registry of threads that run Kotlin. The
-//!   runtime starts no thread; one that foreign code started attaches when it calls into Kotlin.
+//! * `krusty_threads.c` is the mutator lock, the registry of threads that run Kotlin, and the
+//!   threads the runtime starts itself with `clone`; one that foreign code started attaches when
+//!   it calls into Kotlin.
 //!   A thread holds the lock while it runs Kotlin and releases it in foreign code, recording its
 //!   registers and stack pointer, which is what the collector scans it by.
 //! * `krusty_start.c` is `_start`, which with no C library the runtime must supply itself.

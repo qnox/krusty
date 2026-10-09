@@ -11,6 +11,8 @@
 #define KT_SYS_MMAP 9
 #define KT_SYS_MUNMAP 11
 #define KT_SYS_EXIT 231 /* exit_group */
+#define KT_SYS_EXIT_THREAD 60
+#define KT_SYS_CLONE 56
 #define KT_SYS_GETTID 186
 #define KT_SYS_FUTEX 202
 #elif defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
@@ -18,6 +20,8 @@
 #define KT_SYS_MMAP 222
 #define KT_SYS_MUNMAP 215
 #define KT_SYS_EXIT 94 /* exit_group */
+#define KT_SYS_EXIT_THREAD 93
+#define KT_SYS_CLONE 220
 #define KT_SYS_GETTID 178
 #define KT_SYS_FUTEX 98
 #else
@@ -68,6 +72,13 @@ static inline long kt_syscall(long number, long a0, long a1, long a2, long a3, l
 __attribute__((noreturn)) static inline void kt_sys_exit(long status) {
     kt_syscall(KT_SYS_EXIT, status, 0, 0, 0, 0, 0);
     __builtin_unreachable();
+}
+
+/* End the calling thread alone; `kt_sys_exit` ends the process. */
+__attribute__((noreturn)) static inline void kt_sys_exit_thread(void) {
+    for (;;) {
+        kt_syscall(KT_SYS_EXIT_THREAD, 0, 0, 0, 0, 0, 0);
+    }
 }
 
 #define KT_EINTR 4
@@ -131,6 +142,12 @@ static inline long kt_sys_gettid(void) { return kt_syscall(KT_SYS_GETTID, 0, 0, 
 
 static inline void kt_sys_futex_wait(uint32_t *word, uint32_t expected) {
     kt_syscall(KT_SYS_FUTEX, (long)word, KT_FUTEX_WAIT_PRIVATE, (long)expected, 0, 0, 0);
+}
+
+/* A wait woken by a SHARED wake, which is the one the kernel makes when a thread it was told to
+   clear the id word of ends. */
+static inline void kt_sys_futex_wait_shared(uint32_t *word, uint32_t expected) {
+    kt_syscall(KT_SYS_FUTEX, (long)word, 0 /* FUTEX_WAIT */, (long)expected, 0, 0, 0);
 }
 
 static inline void kt_sys_futex_wake(uint32_t *word, int count) {

@@ -1245,7 +1245,8 @@ void kt_exit(kt_int status);
    holds the lock while it runs Kotlin or the runtime and releases it while it runs foreign code. So
    a call from Kotlin into C that may block is bracketed by `kt_native_enter`/`kt_native_leave`, and
    a call from C into Kotlin (a callback, or the start routine of a thread C created) by
-   `kt_callback_enter`/`kt_callback_leave`. The runtime itself starts no thread. */
+   `kt_callback_enter`/`kt_callback_leave`. A static program's threads are the runtime's own
+   (`kt_thread_start`). */
 
 /* How many callee-saved registers a released thread records: the most any supported architecture
    has (RISC-V's s0-s11). */
@@ -1279,5 +1280,16 @@ void kt_callback_enter(KThreadEntry *entry, void *stack_bottom);
 /* Leave Kotlin for the foreign code that called in, releasing the lock. Answers the exception the
    callback left in flight, or NULL; it is the caller's, and no longer pending anywhere. */
 KRef kt_callback_leave(KThreadEntry *entry);
+
+/* A thread the runtime started, until it is joined. */
+typedef struct KThreadHandle KThreadHandle;
+
+/* Start a thread that runs `routine(argument)` as Kotlin, holding the lock as every attached thread
+   does, and ends when it returns. An exception it leaves in flight ends the process, reported as
+   Kotlin reports one nothing caught, on a thread named `Thread-<n>`. The caller holds the lock. */
+KThreadHandle *kt_thread_start(void (*routine)(KRef), KRef argument);
+
+/* Wait, with the lock released, for the thread to end, and free what it ran on. */
+void kt_thread_join(KThreadHandle *handle);
 
 #endif /* KRUSTY_RT_H */

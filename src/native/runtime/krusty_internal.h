@@ -63,11 +63,21 @@ struct KThread {
     long tid;
     bool released;
     KThread *next;
+    /* A thread the runtime started, until it first runs: what it runs, and its argument, which is
+       a root until the thread takes it. */
+    void (*start_routine)(KRef);
+    KRef start_argument;
+    /* Its start order, which names it in an uncaught report. */
+    uint32_t number;
 };
 
 /* The roots a collection finds outside its own stack, which `krusty_threads.c` knows and
    `krusty_gc.c` marks: the bottom of the holder's stack (0 before `kt_runtime_init`), and every
    released thread's recorded registers, exception and stack, handed to the two scanners below. */
+/* `kt_check_uncaught` for a thread of another name: report what is in flight, if anything, as
+   Kotlin reports an exception nothing caught on `thread`, and end the process with 134. */
+void kt_report_uncaught(const char *thread, size_t thread_length);
+
 uintptr_t kt_threads_running_bottom(void);
 void kt_threads_scan_released(void);
 void kt_gc_scan_word(uintptr_t word);

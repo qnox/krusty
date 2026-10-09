@@ -1,13 +1,12 @@
 //! What the native target promises about concurrency today, pinned so it cannot drift quietly.
 //!
-//! **The runtime starts no threads; it runs the ones foreign code starts.** Its kernel interface
-//! creates nothing that runs concurrently. A thread that C interop creates (`pthread_create` with a
-//! Kotlin callback) attaches when it calls into Kotlin, and every attached thread shares one heap
-//! under one mutator lock: a thread holds it while it runs Kotlin and releases it while it is in
-//! foreign code, so at most one thread runs Kotlin at a time and every lock hand-off orders memory.
-//! `docs/SPEC.md` records that decision and what it leaves for later (safepoints, so that a thread
-//! looping in Kotlin cannot keep the others waiting). `tests/native_runtime_e2e.rs` drives the lock
-//! with real threads.
+//! **Threads share one heap under one mutator lock.** A thread runs Kotlin because the runtime
+//! started it (`kt_thread_start`: the kernel's `clone` on a stack the runtime maps, Go's way, with
+//! no C library) or because foreign code did and called into Kotlin. Every such thread holds the
+//! lock while it runs Kotlin and releases it while it is in foreign code, so at most one thread
+//! runs Kotlin at a time and every hand-off of the lock orders memory. `docs/SPEC.md` records that
+//! decision and what it leaves for later (safepoints, so that a thread looping in Kotlin cannot
+//! keep the others waiting). `tests/native_runtime_e2e.rs` drives the lock with real threads.
 //!
 //! So these tests pin the contract as it stands: a construct whose meaning is exhausted by
 //! one-thread-at-a-time execution compiles and runs, and a construct that needs real concurrency is
@@ -187,25 +186,23 @@ fn a_real_suspension_is_declined_rather_than_dropped() {
 }
 
 #[test]
-fn the_runtime_starts_no_threads() {
-    // The whole of the runtime's kernel interface: it waits on and wakes the mutator lock, and asks
-    // which thread it is on, but it never creates a thread. A program that links this runtime has
-    // the threads foreign code gives it and no others. This reads the syscall header rather than
-    // trusting a comment, so adding `clone` without revisiting the memory model fails here first.
+fn the_runtime_talks_to_the_kernel_directly() {
+    // The runtime's whole kernel interface, read from the syscall header rather than trusted to a
+    // comment: it starts threads with `clone`, waits and wakes on the mutator lock with `futex`,
+    // and never goes through a C library to do either. A `pthread` here would make every static
+    // program need a target libc, which is the toolchain the freestanding runtime exists to avoid.
     let syscalls = common::native_sys_header();
-    for forbidden in ["SYS_CLONE", "clone", "pthread"] {
-        assert!(
-            !syscalls.contains(forbidden),
-            "the runtime names `{forbidden}`: if it starts threads of its own, the memory model \
-             docs/SPEC.md records for attached threads needs revisiting, and these tests need \
-             rewriting"
-        );
-    }
+    assert!(
+        !syscalls.contains("pthread"),
+        "the runtime names `pthread`: a static program must not need a C library"
+    );
     for expected in [
         "KT_SYS_WRITE",
         "KT_SYS_MMAP",
         "KT_SYS_MUNMAP",
         "KT_SYS_EXIT",
+        "KT_SYS_EXIT_THREAD",
+        "KT_SYS_CLONE",
         "KT_SYS_GETTID",
         "KT_SYS_FUTEX",
     ] {

@@ -617,6 +617,19 @@ fn each_thread_keeps_its_own_exception_in_flight() {
 }
 
 #[test]
+fn threads_the_runtime_starts_keep_their_argument_until_they_run() {
+    run_driver("threads_started_by_the_runtime");
+}
+
+#[test]
+fn an_exception_a_started_thread_leaves_uncaught_ends_the_process_on_its_name() {
+    run_driver_expecting_failure(
+        "thread_uncaught_exception",
+        "Exception in thread \"Thread-1\" kotlin.IllegalStateException: boom\n",
+    );
+}
+
+#[test]
 fn a_double_or_float_renders_as_the_jvm_renders_it() {
     run_driver("fp_render_known_answers");
 }

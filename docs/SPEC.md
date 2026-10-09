@@ -9724,8 +9724,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_null_cast_to_an_erased_type_parameter_names_it_by_its_owner`),
   `tests/unboxing_coercion_e2e.rs`
   (`failed_null_casts_name_primitive_and_qualified_type_parameter_targets`).
-- **Native: threads share one heap under one mutator lock.** The runtime starts no thread. A thread
-  that foreign code starts (`pthread_create` through C interop) attaches when it calls into Kotlin
+- **Native: threads share one heap under one mutator lock.** A static program's threads are the
+  runtime's own: `kt_thread_start` registers the new thread (released, its argument a root) before
+  `clone` creates it on a stack the runtime maps, as Go does with no C library; `kt_thread_join`
+  waits with the lock released and frees the stack. An exception a started thread leaves uncaught
+  ends the process, reported on `Thread-<n>` as the JVM names an unnamed thread. Creating the kernel
+  thread is the one replaceable step, so a program that links a C library starts them with
+  `pthread_create` instead. A thread that foreign code starts attaches when it calls into Kotlin
   (`kt_callback_enter`) and detaches when that outermost call returns; a callback on a thread that
   is already attached re-enters as that thread, found by its kernel thread id. Every attached thread
   shares the heap, as Kotlin/Native's memory model has them share it. One lock keeps it consistent:
@@ -9747,7 +9752,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and `GetCurrentThreadId`) and keeps the lock, the registry and the scan unchanged; the runtime is
   cross-compiled per target by clang as before. Tests: `tests/native_runtime_e2e.rs`
   (`threads_started_by_foreign_code_share_the_heap_through_collections`,
-  `each_thread_keeps_its_own_exception_in_flight`), `tests/native_concurrency_e2e.rs`.
+  `each_thread_keeps_its_own_exception_in_flight`,
+  `threads_the_runtime_starts_keep_their_argument_until_they_run`,
+  `an_exception_a_started_thread_leaves_uncaught_ends_the_process_on_its_name`),
+  `tests/native_concurrency_e2e.rs`.
 - **Native runtime: exceptions and integer arithmetic.** `src/native/runtime/krusty_rt.c` raises
   what Kotlin raises and does not stop there: `kt_throw` RECORDS the exception in the one pending
   slot and returns, and the caller's check of that slot is the propagation. So every runtime entry

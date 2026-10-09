@@ -1,8 +1,9 @@
 /* krusty native runtime: the threads that run Kotlin, and the mutator lock they share. Hand-written
    freestanding C; build.rs compiles it into the runtime for every target.
 
-   The runtime starts no thread. A program gets its threads from outside, through C interop
-   (`pthread_create` with a Kotlin callback), and every thread that runs Kotlin code shares one heap
+   A thread runs Kotlin either because the runtime started it (`kt_thread_start`, Go's way: the
+   kernel's `clone`, no C library) or because foreign code did and called into Kotlin (a
+   `pthread_create` start routine, when a program links a C library). Either way it shares one heap
    with every other. What keeps that heap and the rest of the runtime's state consistent is one
    lock: a thread HOLDS it while it runs Kotlin code or the runtime, and RELEASES it while it is in
    foreign code, which is where a thread blocks (a read, an accept, a wait on a mutex). So at most
@@ -260,6 +261,179 @@ KRef kt_callback_leave(KThreadEntry *entry) {
     return raised;
 }
 
+/* ---- threads the runtime starts ----------------------------------------------------------------
+
+   The one platform-specific step is creating the kernel thread: here `clone(2)` on a stack the
+   runtime maps, as Go does. A target that must start threads through a C library replaces
+   `kt_spawn` with `pthread_create`; everything around it is the same. */
+
+#define KT_THREAD_STACK_BYTES ((size_t)8 * 1024 * 1024)
+
+/* CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM |
+   CLONE_CHILD_CLEARTID: a thread of this process, whose id word the kernel clears and wakes when it
+   ends. */
+#define KT_CLONE_FLAGS 0x00250f00ul
+
+struct KThreadHandle {
+    uint32_t exited;
+    void *stack;
+};
+
+/* Start `routine(argument)` on a new thread whose stack ends at `stack_top`; the kernel clears
+   `*exited` and wakes it when the thread ends. Answers the thread's id or a negated errno. The
+   routine and argument ride on the new stack, where only the child reads them. */
+long kt_clone(unsigned long flags, void *stack_top, uint32_t *exited, void (*routine)(void *),
+              void *argument);
+
+#if defined(__x86_64__)
+/* clone(flags, stack, parent_tid, child_tid, tls): rdi, rsi, rdx, r10, r8. */
+__asm__(".text\n"
+        ".globl kt_clone\n"
+        ".type kt_clone, @function\n"
+        "kt_clone:\n"
+        "  subq $16, %rsi\n"
+        "  movq %rcx, 0(%rsi)\n"
+        "  movq %r8, 8(%rsi)\n"
+        "  movq %rdx, %r10\n"
+        "  xorl %edx, %edx\n"
+        "  xorl %r8d, %r8d\n"
+        "  movl $56, %eax\n"
+        "  syscall\n"
+        "  testq %rax, %rax\n"
+        "  jnz 1f\n"
+        "  xorl %ebp, %ebp\n"
+        "  popq %rax\n"
+        "  popq %rdi\n"
+        "  call *%rax\n"
+        "  ud2\n"
+        "1:\n"
+        "  ret\n"
+        ".size kt_clone, .-kt_clone\n");
+#elif defined(__aarch64__)
+/* clone(flags, stack, parent_tid, tls, child_tid): x0..x4. */
+__asm__(".text\n"
+        ".globl kt_clone\n"
+        ".type kt_clone, %function\n"
+        "kt_clone:\n"
+        "  stp x3, x4, [x1, #-16]!\n"
+        "  mov x4, x2\n"
+        "  mov x2, #0\n"
+        "  mov x3, #0\n"
+        "  mov x8, #220\n"
+        "  svc #0\n"
+        "  cbnz x0, 1f\n"
+        "  mov x29, #0\n"
+        "  mov x30, #0\n"
+        "  ldp x9, x0, [sp], #16\n"
+        "  blr x9\n"
+        "  brk #0\n"
+        "1:\n"
+        "  ret\n"
+        ".size kt_clone, .-kt_clone\n");
+#elif defined(__riscv) && __riscv_xlen == 64
+/* clone(flags, stack, parent_tid, tls, child_tid): a0..a4. */
+__asm__(".text\n"
+        ".globl kt_clone\n"
+        ".type kt_clone, @function\n"
+        "kt_clone:\n"
+        "  addi a1, a1, -16\n"
+        "  sd a3, 0(a1)\n"
+        "  sd a4, 8(a1)\n"
+        "  mv a4, a2\n"
+        "  li a2, 0\n"
+        "  li a3, 0\n"
+        "  li a7, 220\n"
+        "  ecall\n"
+        "  bnez a0, 1f\n"
+        "  li s0, 0\n"
+        "  li ra, 0\n"
+        "  ld t0, 0(sp)\n"
+        "  ld a0, 8(sp)\n"
+        "  addi sp, sp, 16\n"
+        "  jalr t0\n"
+        "  unimp\n"
+        "1:\n"
+        "  ret\n"
+        ".size kt_clone, .-kt_clone\n");
+#else
+#error "krusty native: unsupported architecture"
+#endif
+
+/* Threads the runtime has started, for their names. */
+static uint32_t kt_started_threads;
+
+/* What a started thread runs first: become the holder as itself, run the routine, and leave. It
+   never returns: the thread ends here, after leaving the registry, so nothing scans its stack once
+   the joiner may free it. */
+__attribute__((noreturn)) static void kt_thread_main(void *start) {
+    KThread *thread = (KThread *)start;
+    uintptr_t bottom = 0;
+    kt_lock();
+    kt_running = thread;
+    thread->tid = kt_sys_gettid();
+    thread->stack_bottom = (uintptr_t)&bottom;
+    thread->released = false;
+    kt_pending = NULL;
+    void (*routine)(KRef) = thread->start_routine;
+    KRef argument = thread->start_argument;
+    thread->start_argument = NULL;
+    routine(argument);
+    if (kt_pending != NULL) {
+        /* `Thread-<n>`, numbered from 0 in start order, as the JVM names an unnamed thread. */
+        char name[20] = "Thread-";
+        size_t length = 7;
+        char digits[10];
+        size_t count = 0;
+        uint32_t number = thread->number;
+        do {
+            digits[count++] = (char)('0' + number % 10);
+            number /= 10;
+        } while (number != 0);
+        while (count > 0) {
+            name[length++] = digits[--count];
+        }
+        kt_report_uncaught(name, length);
+    }
+    kt_thread_remove(thread);
+    kt_running = NULL;
+    kt_unlock();
+    kt_sys_exit_thread();
+}
+
+static long kt_spawn(KThreadHandle *handle, KThread *thread) {
+    handle->stack = kt_map(KT_THREAD_STACK_BYTES);
+    __atomic_store_n(&handle->exited, 1, __ATOMIC_RELEASE);
+    return kt_clone(KT_CLONE_FLAGS, (char *)handle->stack + KT_THREAD_STACK_BYTES, &handle->exited,
+                    kt_thread_main, thread);
+}
+
+KThreadHandle *kt_thread_start(void (*routine)(KRef), KRef argument) {
+    /* The new thread is registered before it exists, released and with nothing on its stack yet,
+       so a collection before it first runs keeps its argument; it waits for the lock this thread
+       holds. */
+    KThread *thread = kt_thread_new(0, 0);
+    thread->released = true;
+    thread->start_routine = routine;
+    thread->start_argument = argument;
+    thread->number = kt_started_threads++;
+    KThreadHandle *handle = (KThreadHandle *)kt_map(sizeof(KThreadHandle));
+    if (kt_spawn(handle, thread) <= 0) {
+        KT_FAIL("krusty: could not start a thread\n");
+    }
+    return handle;
+}
+
+void kt_thread_join(KThreadHandle *handle) {
+    KThread *self = kt_native_enter();
+    while (__atomic_load_n(&handle->exited, __ATOMIC_ACQUIRE) != 0) {
+        /* The kernel's wake when a thread ends is a shared futex wake. */
+        kt_sys_futex_wait_shared(&handle->exited, 1);
+    }
+    kt_native_leave(self);
+    kt_unmap(handle->stack, KT_THREAD_STACK_BYTES);
+    kt_unmap(handle, sizeof(KThreadHandle));
+}
+
 /* ---- roots -------------------------------------------------------------------------------------- */
 
 uintptr_t kt_threads_running_bottom(void) {
@@ -278,6 +452,7 @@ void kt_threads_scan_released(void) {
             kt_gc_scan_word(thread->registers[i]);
         }
         kt_gc_scan_word((uintptr_t)thread->pending);
+        kt_gc_scan_word((uintptr_t)thread->start_argument);
         kt_gc_scan_range(thread->saved_sp, thread->stack_bottom);
     }
 }
