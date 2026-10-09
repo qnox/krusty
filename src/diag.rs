@@ -32,6 +32,9 @@ pub enum DiagnosticKind {
     /// frontend has reported, so these follow every frontend diagnostic in its ledger, in the order
     /// actualization produced them rather than in source order.
     Actualization,
+    /// Reported by one of kotlinc's expression checkers, which run once the body is resolved: at a
+    /// position shared with a resolution diagnostic (a type mismatch), it follows that one.
+    ExpressionChecker,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -275,7 +278,13 @@ impl DiagSink {
     /// for diagnostics that start at the same offset.
     pub(crate) fn sort_source_order_from(&mut self, start: usize) {
         let start = start.min(self.diags.len());
-        self.diags[start..].sort_by_key(|diagnostic| (diagnostic.file, diagnostic.span.lo));
+        self.diags[start..].sort_by_key(|diagnostic| {
+            (
+                diagnostic.file,
+                diagnostic.span.lo,
+                diagnostic.kind == DiagnosticKind::ExpressionChecker,
+            )
+        });
     }
 
     /// Restore deterministic source order after diagnostics from multiple semantic phases have
@@ -284,8 +293,14 @@ impl DiagSink {
     /// compiler reports them from a later phase.
     pub(crate) fn sort_source_order(&mut self) {
         self.diags.sort_by_key(|diagnostic| match diagnostic.kind {
-            DiagnosticKind::Actualization => (1, 0, 0, 0),
-            _ => (0, diagnostic.file, diagnostic.span.lo, diagnostic.span.hi),
+            DiagnosticKind::Actualization => (1, 0, 0, 0, 0),
+            _ => (
+                0,
+                diagnostic.file,
+                diagnostic.span.lo,
+                diagnostic.span.hi,
+                u32::from(diagnostic.kind == DiagnosticKind::ExpressionChecker),
+            ),
         });
     }
 

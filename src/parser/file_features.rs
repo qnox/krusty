@@ -36,4 +36,5 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
     let gates = &mut file.language_gates;
     gates.companion_blocks_and_extensions = features.gate("CompanionBlocksAndExtensions");
+    gates.collection_literals = features.gate("CollectionLiterals");
 }

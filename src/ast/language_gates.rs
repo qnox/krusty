@@ -22,6 +22,8 @@ pub struct LanguageGates {
     /// `CompanionBlocksAndExtensions`, for references to companion-block members and companion
     /// extensions.
     pub companion_blocks_and_extensions: FeatureGate,
+    /// `CollectionLiterals`, for the meaning of a `[…]` expression outside an annotation.
+    pub collection_literals: FeatureGate,
 }
 
 impl LanguageGates {
