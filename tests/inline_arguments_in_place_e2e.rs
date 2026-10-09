@@ -113,34 +113,11 @@ fn an_empty_inline_vararg_is_duplicated_on_the_stack_like_kotlinc() {
         import kotlin.io.path.outputStream\n\
         fun open(p: Path) = p.outputStream()\n\
         fun openCreate(p: Path) = p.outputStream(StandardOpenOption.CREATE)\n";
-    let Some(built) = compare_with_kotlinc_plugin(
+    common::assert_classes_identical_to_kotlinc_jdk(
         "EmptyVarargInPlace",
         src,
-        "EmptyVarargInPlaceKt",
-        &[common::stdlib_jar()],
-        "25",
-        &[],
-    ) else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
-    for member in [
-        "java.io.OutputStream open(",
-        "java.io.OutputStream openCreate(",
-    ] {
-        let reference = method_instructions(&built.reference, member);
-        assert!(!reference.is_empty(), "{member} not found");
-        assert_eq!(
-            method_instructions(&built.krusty, member),
-            reference,
-            "{member}"
-        );
-        assert_eq!(
-            stack_map(&built.krusty, member),
-            stack_map(&built.reference, member),
-            "{member} frames"
-        );
-    }
+        &["EmptyVarargInPlaceKt"],
+    );
 }
 
 #[test]
