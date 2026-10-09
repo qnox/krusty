@@ -4625,6 +4625,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class or qualified by it, callable reference) is `UNSUPPORTED_FEATURE` at the name. A written
   companion extension is not a candidate, so a reference to it is `unresolved reference`. Tests:
   `tests/companion_blocks_gate_e2e.rs`.
+- **Extension function supertypes (`FunctionalTypeWithExtensionAsSupertype`).** Without the feature
+  an extension or context function type as a supertype of a class, interface or object expression
+  is `extension or contextual function type is not allowed as a supertype.` at the supertype
+  reference. A plain function type is unaffected. Tests: `tests/function_type_supertypes_e2e.rs`.
+
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and
   `.idea/misc.xml`; no IDE, JVM, or build tool is launched. Detection order is `Explicit` > `BSP` >

@@ -64,7 +64,8 @@ fn extension_receiver_function_supertype() {
     // `Recv.() -> R` folds the receiver into the first `FunctionN` parameter (`Function1<Recv, R>`),
     // so the class implements `Function1` with an `invoke(Recv)` (calling it via receiver syntax
     // `5.h()` is a separate function-value-invoke path — here the interface method is called directly).
-    const SRC: &str = "class Ext : Int.() -> Int {\n\
+    const SRC: &str = "// LANGUAGE: +FunctionalTypeWithExtensionAsSupertype\n\
+        class Ext : Int.() -> Int {\n\
         \x20 override fun invoke(x: Int): Int = x + 1\n\
         }\n\
         fun box(): String {\n\

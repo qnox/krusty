@@ -91,6 +91,7 @@ mod context_sensitive_resolution;
 mod control_flow_join;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
+mod function_supertypes;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
@@ -50513,6 +50514,7 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        self.check_function_supertypes(scope, cl, &class_tparams);
         if let Some((owner, superclass, separate_emission)) = current_owner.and_then(|owner| {
             cl.base_class.as_ref()?;
             self.resolved_body_local_supertypes
