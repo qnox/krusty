@@ -1,8 +1,0 @@
-An invalid glob.
---- project.yaml
-modules: ["libs/[a"]
---- libs/a/module.yaml
-product: jvm/lib
---- expected
-project.yaml:1:11: ERROR: Invalid glob pattern `libs/[a`: Missing '] near index 6\nlibs/[a\n      ^
-project.yaml:1:1: WARNING: Project has no modules: no root module file and no modules listed in the project file

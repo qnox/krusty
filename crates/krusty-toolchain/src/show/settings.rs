@@ -141,7 +141,7 @@ impl Printer<'_> {
                     .filter(|entry| {
                         entry.property.is_some_and(|property| {
                             !property.hidden
-                                && (!property.jvm_app_only || self.product == ProductType::JvmApp)
+                                && (!property.jvm_app_only || self.product == ProductType::App)
                                 && property.platforms.includes_jvm()
                         })
                     })

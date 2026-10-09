@@ -11,7 +11,7 @@ mod refine;
 
 pub use complete::complete;
 pub use contexts::{Contexts, FileOrder};
-pub use node::{Entry, FileId, Files, Node, Trace, Value};
+pub use node::{FileId, Files, Node, Trace, Value};
 pub use parse::{read, Paths};
 pub use references::resolve;
 pub use refine::{Conflict, Refiner};

@@ -8,10 +8,8 @@ mod settings;
 mod types;
 
 pub use module_file::{FRAGMENT, MODULE, TEMPLATE};
-pub use settings::SETTINGS;
 pub use types::{
-    render, Default, DependencyKind, Deprecation, Derivation, EnumType, ObjectType, Platforms,
-    Property, Type,
+    render, Default, DependencyKind, Derivation, EnumType, ObjectType, Property, Type,
 };
 
 /// The object types a dependency is read as, for the reader's variant choice.

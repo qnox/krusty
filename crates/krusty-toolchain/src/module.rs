@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::{Diagnostic, Diagnostics, Severity};
+use crate::inventory::{self, Kind};
 use crate::reading::{read_document, FileReader, Value};
 use crate::yaml::NodeId;
 
@@ -44,19 +45,20 @@ const OTHER_PROPERTIES: [&str; 10] = [
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A JVM product type.
 pub enum ProductType {
-    JvmApp,
-    JvmLib,
+    App,
+    Lib,
     /// A toolchain plugin. Listed, but not built: krusty-toolchain does not run plugins.
-    JvmAmperPlugin,
+    AmperPlugin,
 }
 
 impl ProductType {
     pub fn name(self) -> &'static str {
         match self {
-            Self::JvmApp => "jvm/app",
-            Self::JvmLib => "jvm/lib",
-            Self::JvmAmperPlugin => "jvm/amper-plugin",
+            Self::App => "jvm/app",
+            Self::Lib => "jvm/lib",
+            Self::AmperPlugin => "jvm/amper-plugin",
         }
     }
 }
@@ -95,6 +97,9 @@ pub fn read_header(file: &Path, diagnostics: &mut Diagnostics) -> Option<ModuleH
     match top.map(|top| (top, reader.value(top))) {
         None => {}
         Some((_, Value::Missing | Value::Null)) => {}
+        // The toolchain reads a module's product first, and nothing else of a module without one.
+        Some((_, Value::Mapping(pairs)))
+            if !pairs.iter().any(|&(key, _)| reader.key(key) == "product") => {}
         Some((_, Value::Mapping(pairs))) => {
             for &(key, value) in pairs {
                 match reader.key(key) {
@@ -103,13 +108,14 @@ pub fn read_header(file: &Path, diagnostics: &mut Diagnostics) -> Option<ModuleH
                         product = read_product(&mut reader, value);
                     }
                     "description" => description = read_description(&mut reader, value),
-                    _ if other_property(&mut reader, key) => {}
-                    _ => reader.unknown_property(key),
+                    _ if other_property(&mut reader, key) => reader.skip(value),
+                    _ => reader.unknown_property(key, value),
                 }
             }
         }
         Some((top, _)) => reader.mismatch(top, "MinimalModule {..}"),
     }
+    reader.finish();
     if !product_seen {
         let message =
             "Product type definition is missing. Define a product using a `product:` declaration.";
@@ -187,7 +193,7 @@ fn read_product(reader: &mut FileReader<'_>, node: NodeId) -> Option<ProductType
                         product = product_type(reader, value);
                     }
                     "platforms" => platforms = Some(value),
-                    _ => reader.unknown_property(key),
+                    _ => reader.unknown_property(key, value),
                 }
             }
             if !typed {
@@ -214,11 +220,14 @@ fn product_type(reader: &mut FileReader<'_>, node: NodeId) -> Option<ProductType
         return None;
     };
     match name {
-        "jvm/app" => Some(ProductType::JvmApp),
-        "jvm/lib" => Some(ProductType::JvmLib),
+        "jvm/app" => Some(ProductType::App),
+        "jvm/lib" => Some(ProductType::Lib),
         "jvm/amper-plugin" => {
             let directory = reader.file.parent().expect("a module file has a directory");
-            if !directory.join("plugin.yaml").is_file() {
+            let plugin_file = inventory::kind(&directory.join("plugin.yaml"));
+            if let Err(error) = &plugin_file {
+                reader.error(node, error.to_string());
+            } else if plugin_file.ok().flatten() != Some(Kind::File) {
                 let position = reader.position(node);
                 reader.diagnostics.push(Diagnostic::warning(
                     Severity::Warning,
@@ -227,7 +236,7 @@ fn product_type(reader: &mut FileReader<'_>, node: NodeId) -> Option<ProductType
                     "`plugin.yaml` file is missing in the plugins module directory, so it will have no effect when enabled",
                 ));
             }
-            Some(ProductType::JvmAmperPlugin)
+            Some(ProductType::AmperPlugin)
         }
         known if PRODUCT_TYPES.contains(&known) => {
             reader.error(
@@ -289,4 +298,52 @@ pub fn read_headers(
         .map(|file| read_header(file, diagnostics))
         .collect();
     headers.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "krusty-toolchain-module-{name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path.canonicalize().unwrap())
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plugin_file_that_is_a_symbolic_link_is_refused() {
+        let temp = TempDir::new("linked-plugin");
+        let outside = TempDir::new("linked-plugin-target");
+        std::fs::write(outside.0.join("plugin.yaml"), "").unwrap();
+        let file = temp.0.join("module.yaml");
+        std::fs::write(&file, "product: jvm/amper-plugin\n").unwrap();
+        std::os::unix::fs::symlink(outside.0.join("plugin.yaml"), temp.0.join("plugin.yaml"))
+            .unwrap();
+        let mut diagnostics = Diagnostics::default();
+        assert_eq!(read_header(&file, &mut diagnostics), None);
+        let reported: Vec<String> = diagnostics.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            reported,
+            [format!(
+                "{}:1:10: ERROR: krusty-toolchain does not follow symbolic links: {}",
+                file.display(),
+                temp.0.join("plugin.yaml").display()
+            )]
+        );
+    }
 }

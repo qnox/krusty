@@ -123,7 +123,7 @@ impl ObjectType {
 
     /// The property read from a single mapping key, with the rest nested under it
     /// (`@FromKeyAndTheRestIsNested`).
-    pub fn from_key(&self) -> Option<&'static Property> {
+    pub fn key_property(&self) -> Option<&'static Property> {
         self.properties.iter().find(|property| property.from_key)
     }
 }
@@ -283,7 +283,7 @@ impl Property {
         self
     }
 
-    pub const fn from_key(mut self) -> Self {
+    pub const fn read_from_key(mut self) -> Self {
         self.from_key = true;
         self
     }
@@ -347,7 +347,7 @@ pub fn render(ty: &Type, nullable: bool, syntax: bool, only_nested: bool) -> Str
 }
 
 fn render_object(out: &mut String, object: &ObjectType, syntax: bool, only_nested: bool) {
-    let from_key = object.from_key();
+    let from_key = object.key_property();
     let nested_only = (from_key.is_some() || object.maven_notation) && only_nested;
     if !nested_only {
         out.push_str(object.name);

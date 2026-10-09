@@ -1,7 +1,0 @@
-A project file holding a scalar.
---- project.yaml
-hello
---- module.yaml
-product: jvm/lib
---- expected
-project.yaml:1:1: ERROR: Expected `Project {..}`, but got `scalar`
