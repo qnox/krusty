@@ -974,12 +974,12 @@ impl BodyLowering<'_> {
         statements.remove(position);
     }
 
-    /// An erased `FunctionN.invoke` whose result the caller uses.
+    /// An erased `FunctionN.invoke`, including a `Unit` specialization.
     ///
     /// The invoke stores `Object` inside the `try`. `finally` runs, then the normal path reloads
-    /// that object and jumps over the handlers; the call site's `checkcast` or unbox is the
-    /// landing, with the value already on the stack. A `Unit` specialization stores the object
-    /// and never reloads it, so it stays an ordinary `try` statement.
+    /// that object and jumps over the handlers. A used result is narrowed at that landing. A
+    /// `Unit` specialization pops there: the load and the pop are not adjacent, so temporary
+    /// elimination keeps the store and pop-backward removes the reload.
     fn guard_erased_invocation_result(
         &mut self,
         body: ExprId,
@@ -1045,25 +1045,20 @@ impl BodyLowering<'_> {
         plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
     ) -> Option<ExprId> {
         // `FunctionN.invoke` returns erased `Object`, including when the function type is `Unit`.
-        // A used result is reloaded on the normal path after `finally`. A `Unit` specialization
-        // stores the object; the reload is discarded so temporary elimination keeps the store.
+        // Both specializations reload after `finally` and jump over the handlers. A used result
+        // is narrowed at that landing; a `Unit` result is popped there.
         let erased_invoke = matches!(
             self.ir.expr(body),
             IrExpr::InvokeFunction { ret, .. } if *ret != Ty::Nothing
         );
-        if erased_invoke && result_ty != Ty::Unit {
+        if erased_invoke {
             return self
                 .guard_erased_invocation_result(body, cleanup, cause, result_ty, plan_value);
         }
-        let slot_ty = if erased_invoke {
-            Ty::obj("java/lang/Object")
-        } else {
-            result_ty
-        };
         let result_slot = self.allocate_temporary();
         let declaration = self.ir.add_expr(IrExpr::Variable {
             index: result_slot,
-            ty: slot_ty,
+            ty: result_ty,
             init: None,
             named: false,
         });
@@ -1076,27 +1071,10 @@ impl BodyLowering<'_> {
             value: None,
         });
         let guarded = self.guarded_try(try_body, cleanup, cause, plan_value)?;
-        // A discarded `Unit` specialization reloads the erased object and throws that reload
-        // away (`aload; pop`). Temporary elimination keeps the store: the one load has `finally`
-        // between it and the store. Pop-backward then deletes the reload, so the join stack stays
-        // empty. The inline-return carry would leave the object on that stack.
-        let value = if erased_invoke && result_ty == Ty::Unit {
-            Some(self.ir.add_expr(IrExpr::GetValue(result_slot)))
-        } else {
-            let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
-            Some(if erased_invoke {
-                self.ir.add_expr(IrExpr::TypeOp {
-                    op: crate::ir::IrTypeOp::ImplicitCoercion,
-                    arg: read,
-                    type_operand: result_ty,
-                })
-            } else {
-                read
-            })
-        };
+        let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
         Some(self.ir.add_expr(IrExpr::Block {
             stmts: vec![declaration, guarded],
-            value,
+            value: Some(read),
         }))
     }
 
