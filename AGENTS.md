@@ -83,6 +83,11 @@ upstream release notes, which can name an assistant that contributed upstream. T
 - The AST/IR stays **index-based** (`u32` ids into parallel `Vec`s — no `Box`/`Rc` graphs).
 - Correctness is defined by the **differential harness** vs the real `kotlinc`: don't claim a
   feature works without an ABI-signature diff and/or a round-trip test.
+- **Toolchain versions are exact identities.** Never strip `-RC`, `-Beta`, `-dev`, `-SNAPSHOT`, or
+  another suffix; never alias a configured Kotlin compiler/KGP version to a stable release; and
+  never retry with a different supported version. Add and validate that exact version, reject it
+  explicitly, or correct a checkout-specific misconfiguration in that checkout rather than in
+  krusty production code.
 - Record every Kotlin-semantics decision in `docs/SPEC.md` with a test.
 - Keep `docs/SPEC.md`, `docs/IMPLEMENTATION_PLAN.md`, and `docs/METADATA_NOTES.md` current.
 

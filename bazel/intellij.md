@@ -7,15 +7,15 @@ which rule it loads — not by rewriting its options.
 Everything below was derived from that repository at `3f14adc599ef`, and the option table was
 checked against the worker in this repository.
 
-The Starlark rule has no automated coverage — `tests/bazel_cli_contract_e2e.rs` drives the worker
-protocol directly, because a Bazel action cannot run from the test suite. What it has instead is
-`bazel/smoke/`, a workspace small enough to read that compiles a Kotlin target with
-`krusty_jvm_library`; running it produces `bazel-bin/greet.jar` holding `smoke/Greeter.class`,
-`META-INF/smoke.kotlin_module` and a manifest, with `1 worker` in the build's process summary (the
-`KrustyCompile` mnemonic itself shows only under `--subcommands`, `bazel aquery`, or on failure).
-Verified against Bazel 9 and 8.4.2. It is not wired into CI, and it needs two machine paths filled
-in before it runs, so it is a recipe you follow — not a gate, and not proof that a target as large
-as an intellij module builds.
+CI downloads the three affected files from the pinned revision, checks that the patch applies, and
+asserts the eligibility guards and both action mnemonics after applying it. The worker protocol is
+covered separately by `tests/bazel_cli_contract_e2e.rs`. `bazel/smoke/` remains the executable
+integration recipe: it compiles a Kotlin target with `krusty_jvm_library` and produces
+`bazel-bin/greet.jar` holding `smoke/Greeter.class`, `META-INF/smoke.kotlin_module`, and a manifest,
+with `1 worker` in the build's process summary (the `KrustyCompile` mnemonic itself shows only under
+`--subcommands`, `bazel aquery`, or on failure). Verified against Bazel 9 and 8.4.2. The smoke build
+needs two machine paths filled in and is not a CI gate or proof that a target as large as an IntelliJ
+module builds.
 
 ## What the project's options become
 
@@ -218,11 +218,30 @@ ln -s /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include /tmp/macos
 ln -s /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib /tmp/macos_sdk_override/sysroot/usr/lib
 ```
 
-With the override in place, the icons-api target builds with:
+With the override in place, a Kotlin-only target builds with the patch below:
 
 ```bash
-JAVA_HOME=/path/to/jdk21 \
-bazel build //platform/icons-api:icons-api_krusty \
-  --override_repository=llvm++osx+macos_sdk=/tmp/macos_sdk_override \
-  --@krusty//bazel:krusty_binary=//tools/krusty:krusty
+KRUSTY_BINARY=/path/to/krusty/target/gate/krusty \
+  scripts/intellij-krusty.sh //platform/icons-api:icons-api \
+  --override_repository=llvm++osx+macos_sdk=/tmp/macos_sdk_override
+```
+
+## Compiling the project's own `jvm_library` targets
+
+Rewriting every `BUILD.bazel` to load `krusty_jvm_library` does not scale. `bazel/intellij/*.patch`
+is applied to an intellij-community checkout and leaves `jvm_library` in place. With
+`KRUSTY_BINARY` unset the patch is a stub and the JPS builder is unchanged. With it set to a built
+`krusty` executable, a target is compiled by krusty when it has no Java sources, no source jars,
+and no build-supplied compiler plugin in either the stubs or compile phase. Anything else stays on
+the JPS builder, so a mixed module still builds.
+
+The action sets `JAVA_HOME` from the build's tool Java runtime and passes `-no-stdlib`. The
+module classpath already contains `kotlin-stdlib`; the copied binary cannot walk up to a Kotlin
+distribution of its own. Further checkout fixes (a module dependency the compiler cannot see, a
+repository that fails to fetch) are additional patches in the same directory, applied in name
+order by `scripts/intellij-krusty.sh`.
+
+```bash
+cargo build --profile gate -p krusty-cli --bin krusty
+scripts/intellij-krusty.sh //platform/icons-api:icons-api
 ```

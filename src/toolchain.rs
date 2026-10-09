@@ -178,17 +178,37 @@ pub fn dist_jar(name: &str) -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-/// The Kotlin version to pin Maven fallbacks to — from the dist `build.txt` (e.g. `1.9.24-release-822`
-/// → `1.9.24`) or a located versioned stdlib jar, defaulting to the process-wide reference
-/// target. Dependency provisioning must not silently switch to the newest release when the caller
-/// explicitly selected an older supported compiler contract.
+/// Translate a distribution build identifier into its Maven artifact version. JetBrains appends
+/// `-release-N` to the artifact version in `build.txt`; remove only that structured build marker.
+/// Pre-release identity before it (`-RC`, `-Beta`, `-dev`, or `-SNAPSHOT`) is part of the artifact
+/// version and must remain exact.
+fn maven_version_from_build_number(build: &str) -> Option<&str> {
+    let build = build.trim();
+    if build.is_empty() {
+        return None;
+    }
+    let Some((version, sequence)) = build.rsplit_once("-release-") else {
+        return Some(build);
+    };
+    if !version.is_empty()
+        && !sequence.is_empty()
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        Some(version)
+    } else {
+        Some(build)
+    }
+}
+
+/// The Kotlin version to pin Maven fallbacks to — from the dist `build.txt` (e.g.
+/// `1.9.24-release-822` → `1.9.24`, but `2.4.20-RC2-release-17` → `2.4.20-RC2`) or a located
+/// versioned stdlib jar, defaulting to the process-wide reference target. Dependency provisioning
+/// must not alias one configured compiler release to another.
 pub fn kotlin_version() -> String {
     if let Some(lib) = kotlinc_lib_dir() {
         if let Ok(s) = std::fs::read_to_string(lib.parent().unwrap().join("build.txt")) {
-            if let Some(v) = s.trim().split('-').next() {
-                if !v.is_empty() {
-                    return v.to_string();
-                }
+            if let Some(version) = maven_version_from_build_number(&s) {
+                return version.to_string();
             }
         }
     }
@@ -517,6 +537,35 @@ fn find_exact_jar(dir: &std::path::Path, expected: &str, depth: usize) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distribution_build_number_preserves_the_exact_prerelease_version() {
+        assert_eq!(
+            maven_version_from_build_number("1.9.24-release-822\n"),
+            Some("1.9.24")
+        );
+        assert_eq!(
+            maven_version_from_build_number("2.4.20-RC2-release-17"),
+            Some("2.4.20-RC2")
+        );
+        assert_eq!(
+            maven_version_from_build_number("2.4.20-Beta1"),
+            Some("2.4.20-Beta1")
+        );
+        assert_eq!(
+            maven_version_from_build_number("2.4.20-dev-7885"),
+            Some("2.4.20-dev-7885")
+        );
+        assert_eq!(
+            maven_version_from_build_number("2.4.20-SNAPSHOT"),
+            Some("2.4.20-SNAPSHOT")
+        );
+        assert_eq!(
+            maven_version_from_build_number("2.4.20-RC2-release-local"),
+            Some("2.4.20-RC2-release-local")
+        );
+        assert_eq!(maven_version_from_build_number("  \n"), None);
+    }
 
     #[test]
     fn exact_dependency_lookup_does_not_substitute_an_installed_version() {
