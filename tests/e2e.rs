@@ -2446,6 +2446,8 @@ mod shared_cell_declaration_e2e;
 mod short_circuit_condition_e2e;
 #[path = "short_circuit_e2e.rs"]
 mod short_circuit_e2e;
+#[path = "short_destructuring_meaning_e2e.rs"]
+mod short_destructuring_meaning_e2e;
 #[path = "sibling_generic_custom_serializer_e2e.rs"]
 mod sibling_generic_custom_serializer_e2e;
 #[path = "sibling_value_class_data_class_e2e.rs"]

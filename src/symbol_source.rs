@@ -535,6 +535,7 @@ mod tests {
                     is_nested: false,
                     outer_instance: None,
                     kind: crate::libraries::TypeKind::Class,
+                    is_data: false,
                     inheritance: crate::libraries::ClassifierInheritance {
                         is_extensible: self.owner == "library",
                         ..Default::default()

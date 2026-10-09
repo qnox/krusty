@@ -2333,6 +2333,9 @@ pub struct LibraryType {
     /// booleans — read it through the `is_*` accessors, which encode the JVM reality that an annotation
     /// is also an interface.
     pub kind: TypeKind,
+    /// The declaration is a `data class`: a Kotlin declaration fact (the source modifier or the
+    /// metadata `IS_DATA` class flag). Java classifiers never carry it.
+    pub is_data: bool,
     /// Modality and construction facts of this declaration.
     pub inheritance: ClassifierInheritance,
     /// Internal names of the superclass + implemented interfaces (for the inherited-member walk).
@@ -2505,6 +2508,7 @@ impl LibraryType {
             is_nested: false,
             outer_instance: None,
             kind: TypeKind::Class,
+            is_data: false,
             inheritance: Default::default(),
             supertypes: TypeNameList::new(),
             supertype_templates: Vec::new(),
@@ -2796,6 +2800,7 @@ mod tests {
             is_nested: false,
             outer_instance: None,
             kind: super::TypeKind::Class,
+            is_data: false,
             inheritance: Default::default(),
             supertypes: crate::types::TypeNameList::new(),
             supertype_templates: Vec::new(),

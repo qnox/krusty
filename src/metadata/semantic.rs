@@ -299,6 +299,8 @@ pub struct KotlinClass {
     pub type_params: Vec<KotlinTypeParameter>,
     pub kind: TypeKind,
     pub is_fun_interface: bool,
+    /// `Flags.IS_DATA` (bit 10): the class is declared `data class`.
+    pub is_data: bool,
     pub visibility: Visibility,
     pub is_expect: bool,
     pub enum_entries: Vec<String>,

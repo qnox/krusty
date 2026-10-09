@@ -184,6 +184,7 @@ pub(crate) fn classifier_shape(
         is_nested: class.is_nested,
         outer_instance,
         kind,
+        is_data: class.is_data,
         inheritance: ClassifierInheritance {
             is_abstract: is_interface || class.modality.is_abstract(),
             is_extensible: !is_interface && class.modality != KotlinModality::Final,

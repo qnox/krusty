@@ -502,7 +502,7 @@ pub enum LambdaParameterRole {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DestructureEntry {
     pub name: String,
-    /// Span of the written name, including a bare `_`.
+    /// Span of the written name, backticks included, and of a bare `_`.
     pub name_span: Span,
     pub mutable: bool,
     pub ignored: bool,

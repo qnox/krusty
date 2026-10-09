@@ -846,6 +846,7 @@ fn in_memory_class(constructor_params: usize) -> KotlinClass {
         type_params: Vec::new(),
         kind: TypeKind::Class,
         is_fun_interface: false,
+        is_data: false,
         visibility: Visibility::Public,
         is_expect: false,
         enum_entries: Vec::new(),
