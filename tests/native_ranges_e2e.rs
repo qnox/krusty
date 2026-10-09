@@ -749,3 +749,56 @@ fn a_stepped_loop_evaluates_bounds_before_the_step() {
         "OK",
     );
 }
+
+#[test]
+fn a_stepped_until_loop_counts_to_its_last_reached_element() {
+    // Native counts `start until end step k` from `start` through the last element the
+    // progression reaches, without building it. The bound is exclusive, the step lands short of
+    // it, the start may be a local, and `until Int.MIN_VALUE` is still the empty range.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var s = \"\"\n\
+         \x20   for (i in 0 until 10 step 3) s += \"$i,\"\n\
+         \x20   if (s != \"0,3,6,9,\") return \"fail until: $s\"\n\
+         \x20   s = \"\"\n\
+         \x20   for (i in 0 until 9 step 3) s += \"$i,\"\n\
+         \x20   if (s != \"0,3,6,\") return \"fail exclusive: $s\"\n\
+         \x20   s = \"\"\n\
+         \x20   for (i in 1..<8 step 2) s += \"$i,\"\n\
+         \x20   if (s != \"1,3,5,7,\") return \"fail open end: $s\"\n\
+         \x20   val start = 4\n\
+         \x20   s = \"\"\n\
+         \x20   for (i in start until 12 step 4) s += \"$i,\"\n\
+         \x20   if (s != \"4,8,\") return \"fail local start: $s\"\n\
+         \x20   s = \"\"\n\
+         \x20   for (i in 5 until 5 step 2) s += \"$i,\"\n\
+         \x20   if (s != \"\") return \"fail empty: $s\"\n\
+         \x20   for (i in 0 until Int.MIN_VALUE step 2) return \"fail min: $i\"\n\
+         \x20   var total = 0L\n\
+         \x20   for (i in 0L until 10L step 4L) total += i\n\
+         \x20   if (total != 12L) return \"fail long: $total\"\n\
+         \x20   s = \"\"\n\
+         \x20   for (c in 'a' until 'g' step 2) s += c\n\
+         \x20   if (s != \"ace\") return \"fail char: $s\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "SteppedUntil",
+        "OK",
+    );
+}
+
+#[test]
+fn a_stepped_until_loop_rejects_a_step_that_is_not_positive() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   try {\n\
+         \x20       for (i in 0 until 10 step 0) return \"fail: iterated $i\"\n\
+         \x20   } catch (e: IllegalArgumentException) {\n\
+         \x20       return \"OK\"\n\
+         \x20   }\n\
+         \x20   return \"fail: no exception\"\n\
+         }\n",
+        "SteppedUntilZeroStep",
+        "OK",
+    );
+}

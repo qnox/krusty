@@ -46,6 +46,7 @@ pub(crate) const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy
     crate::backend::counted_loops::CountedLoopPolicy {
         style: crate::backend::counted_loops::CounterLoopStyle::PreTested,
         inlining: crate::backend::counted_loops::HeaderInlining::None,
+        until_steps: crate::backend::counted_loops::UntilSteps::Built,
     };
 
 #[cfg(test)]
