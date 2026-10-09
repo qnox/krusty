@@ -2,6 +2,7 @@
 //! which pins the exact version and checksum of the distribution it runs.
 
 use std::process::Command;
+use std::sync::Once;
 
 use super::oracle::{run_captured, scratch, script, Fingerprint, Output, Reference};
 
@@ -42,6 +43,7 @@ pub fn kotlin(invocation: &Invocation<'_>) -> Output {
         case: invocation.case,
     };
     reference.output(|| {
+        provision();
         let directory = scratch();
         let root = directory.join("project");
         for (file, text) in invocation.files {
@@ -65,6 +67,30 @@ pub fn kotlin(invocation: &Invocation<'_>) -> Output {
         let _ = std::fs::remove_dir_all(&directory);
         output
     })
+}
+
+/// Downloads the distribution the wrapper pins, once per process, before any live run. A run that
+/// downloads it prints its progress to stdout, and runs that start while another downloads print
+/// that they wait for it; neither belongs in a recorded output.
+fn provision() {
+    static PROVISIONED: Once = Once::new();
+    PROVISIONED.call_once(|| {
+        let directory = scratch();
+        std::fs::copy(script("kotlin"), directory.join("kotlin")).unwrap();
+        let output = Command::new("sh")
+            .args(["./kotlin", "--version"])
+            .current_dir(&directory)
+            .env("KOTLIN_CLI_NO_WELCOME_BANNER", "1")
+            .output()
+            .expect("run the Kotlin Toolchain wrapper");
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            output.status.success(),
+            "the Kotlin Toolchain wrapper could not provision its distribution:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    });
 }
 
 /// [`kotlin`] for every invocation, a few at a time: a live run spends most of its time starting a
