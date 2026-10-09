@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use krusty_toolchain::diagnostic::Diagnostics;
+use krusty_toolchain::diagnostic::{Diagnostics, Severity};
 use krusty_toolchain::model::{self, Start};
 use krusty_toolchain::show;
 
@@ -93,7 +93,10 @@ fn run(command: Command) -> Result<bool, String> {
     let mut diagnostics = Diagnostics::default();
     let model = model::read(start, &mut diagnostics);
     for diagnostic in diagnostics.iter() {
-        eprintln!("{diagnostic}");
+        match diagnostic.severity {
+            Severity::Error => eprintln!("{diagnostic}"),
+            Severity::Warning | Severity::WeakWarning => println!("{diagnostic}"),
+        }
     }
     let Some(model) = model? else {
         if !diagnostics.has_errors() {
