@@ -138,8 +138,10 @@ pub struct Options {
     /// kotlinc's command-line syntax warnings (an unknown `-X` flag, a deprecated spelling, an
     /// unreadable argfile), in its words; compilation is unchanged.
     pub argument_warnings: Vec<String>,
-    /// The `argument_warnings` that name a deprecated spelling. Their argument still applies.
-    pub argument_deprecations: Vec<String>,
+    /// Advanced options absent from the selected kotlinc release. The normal CLI follows kotlinc
+    /// and only warns; the persistent worker refuses them because its build action cannot safely
+    /// assume an unknown option is output-neutral.
+    pub(crate) unknown_extra_flags: Vec<String>,
     /// Named CLI warnings and their configured severity. These are evaluated before compilation;
     /// an `error` level fails the invocation and `disabled` removes the diagnostic entirely.
     pub warning_policy: WarningPolicy,
@@ -210,7 +212,7 @@ impl Default for Options {
             ignored: Vec::new(),
             argument_errors: Vec::new(),
             argument_warnings: Vec::new(),
-            argument_deprecations: Vec::new(),
+            unknown_extra_flags: Vec::new(),
             warning_policy: WarningPolicy::default(),
             warnings: Vec::new(),
             errors: Vec::new(),
@@ -267,7 +269,7 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
     let tokenized = kotlinc_arguments::tokenize(catalog, arguments, argfile_problems);
     opts.argument_errors = tokenized.errors();
     opts.argument_warnings = tokenized.warnings();
-    opts.argument_deprecations = tokenized.deprecations();
+    opts.unknown_extra_flags = tokenized.unknown_extra_flags().to_vec();
 
     let mut parsed = ParsedSettings::default();
     for occurrence in &tokenized.occurrences {
