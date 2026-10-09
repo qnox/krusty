@@ -673,6 +673,7 @@ impl BodyFirChecker<'_> {
                     can_inline: member.inline.can_inline(),
                     inline_plan: member.inline_body_plan.as_deref(),
                     inline_receiver_parameter: None,
+                    inline_declared_receiver: None,
                     reified_type_parameter_ordinals: &member
                         .call_sig
                         .reified_type_parameter_ordinals,
@@ -950,6 +951,10 @@ impl BodyFirChecker<'_> {
                         can_inline: extension.callable.inline.can_inline(),
                         inline_plan,
                         inline_receiver_parameter: None,
+                        inline_declared_receiver:
+                            super::inline_body_plan::signature_type_parameter_receiver(
+                                extension.callable.generic_sig.as_deref(),
+                            ),
                         reified_type_parameter_ordinals: &extension
                             .callable
                             .reified_type_parameter_ordinals,
@@ -1153,6 +1158,13 @@ impl BodyFirChecker<'_> {
                         inline_plan: publish_inline_body_plan(
                             selected.member.inline_body_plan.as_deref(),
                             None,
+                            super::inline_body_plan::type_parameter_receiver(
+                                selected
+                                    .member
+                                    .generic_sig
+                                    .as_ref()
+                                    .and_then(|signature| signature.receiver),
+                            ),
                         )
                         .map_err(|_| {
                             self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
@@ -1237,6 +1249,13 @@ impl BodyFirChecker<'_> {
                         inline_plan: publish_inline_body_plan(
                             selected.callable.inline_body_plan.as_deref(),
                             Some(context_count),
+                            super::inline_body_plan::type_parameter_receiver(
+                                selected
+                                    .callable
+                                    .generic_sig
+                                    .as_deref()
+                                    .and_then(|signature| signature.receiver),
+                            ),
                         )
                         .map_err(|_| {
                             self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
@@ -1328,10 +1347,14 @@ impl BodyFirChecker<'_> {
                         semantic_role: None,
                         suspend: *suspend,
                         can_inline: inline.can_inline(),
-                        inline_plan: publish_inline_body_plan(inline_body_plan.as_deref(), None)
-                            .map_err(|_| {
-                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
-                            })?,
+                        inline_plan: publish_inline_body_plan(
+                            inline_body_plan.as_deref(),
+                            None,
+                            None,
+                        )
+                        .map_err(|_| {
+                            self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                        })?,
                         extension_receiver_parameter: Some(extension_parameter),
                     }
                 };
@@ -1473,6 +1496,10 @@ impl BodyFirChecker<'_> {
                 can_inline: callable.inline.can_inline(),
                 inline_plan,
                 inline_receiver_parameter,
+                inline_declared_receiver:
+                    super::inline_body_plan::signature_type_parameter_receiver(
+                        callable.generic_sig.as_deref(),
+                    ),
                 reified_type_parameter_ordinals: &callable.reified_type_parameter_ordinals,
             },
         )?;
@@ -1601,6 +1628,7 @@ impl BodyFirChecker<'_> {
                 can_inline: inline.can_inline(),
                 inline_plan: inline_body_plan.as_deref(),
                 inline_receiver_parameter: None,
+                inline_declared_receiver: None,
                 reified_type_parameter_ordinals,
             },
         )?;
@@ -1674,6 +1702,7 @@ impl BodyFirChecker<'_> {
             can_inline,
             inline_plan,
             inline_receiver_parameter,
+            inline_declared_receiver,
             reified_type_parameter_ordinals,
         } = call;
         let resolved = |ty| {
@@ -1751,13 +1780,17 @@ impl BodyFirChecker<'_> {
                 semantic_role,
                 suspend,
                 can_inline,
-                inline_plan: publish_inline_body_plan(inline_plan, inline_receiver_parameter)
-                    .map_err(|_| {
-                        self.failure(
-                            self.file.expr_span(expression),
-                            BodyCheckFailureKind::UnsupportedCallShape,
-                        )
-                    })?,
+                inline_plan: publish_inline_body_plan(
+                    inline_plan,
+                    inline_receiver_parameter,
+                    inline_declared_receiver,
+                )
+                .map_err(|_| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnsupportedCallShape,
+                    )
+                })?,
                 extension_receiver_parameter: None,
             },
             substitutions.into_boxed_slice(),
@@ -2415,6 +2448,7 @@ impl BodyFirChecker<'_> {
                 can_inline: selected.member.inline.can_inline(),
                 inline_plan: selected.member.inline_body_plan.as_deref(),
                 inline_receiver_parameter: None,
+                inline_declared_receiver: None,
                 reified_type_parameter_ordinals: &selected
                     .member
                     .call_sig

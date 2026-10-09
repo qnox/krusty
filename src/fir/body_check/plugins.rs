@@ -225,6 +225,13 @@ impl BodyFirChecker<'_> {
                 inline_plan: super::inline_body_plan::publish(
                     selected.member.inline_body_plan.as_deref(),
                     None,
+                    super::inline_body_plan::type_parameter_receiver(
+                        selected
+                            .member
+                            .generic_sig
+                            .as_ref()
+                            .and_then(|signature| signature.receiver),
+                    ),
                 )
                 .map_err(|_| {
                     self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)

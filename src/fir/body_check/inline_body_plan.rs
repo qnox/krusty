@@ -131,9 +131,27 @@ fn map_recovery(
     }))
 }
 
+/// Keep an extension receiver only when it is a type parameter. Its bound is what the expansion
+/// stores; an ordinary classifier receiver is already the slot type. A nullable occurrence
+/// (`T?` where `T : Closeable?`) is still that parameter.
+pub(super) fn type_parameter_receiver(
+    receiver: Option<crate::types::Ty>,
+) -> Option<crate::types::Ty> {
+    receiver.filter(|receiver| receiver.non_null().is_ty_param())
+}
+
+/// The unsubstituted receiver an inline plan stores, when the declaration receiver is a type
+/// parameter. Specialization replaces the call-site slot; this signature node does not.
+pub(super) fn signature_type_parameter_receiver(
+    signature: Option<&crate::libraries::GenericSig>,
+) -> Option<crate::types::Ty> {
+    type_parameter_receiver(signature.and_then(|signature| signature.receiver))
+}
+
 pub(super) fn publish(
     plan: Option<&crate::libraries::InlineBodyPlan>,
     receiver_parameter: Option<usize>,
+    declared_receiver: Option<crate::types::Ty>,
 ) -> Result<Option<Box<crate::fir::FirInlineBodyPlan>>, MappingFailure> {
     let Some(plan) = plan else {
         return Ok(None);
@@ -204,6 +222,11 @@ pub(super) fn publish(
                 result: result
                     .map(|value| map_value(value, receiver_parameter))
                     .transpose()?,
+                declared_receiver: declared_receiver
+                    .filter(|receiver| receiver.non_null().is_ty_param())
+                    .map(crate::fir::ResolvedTy::new)
+                    .transpose()
+                    .map_err(|_| MappingFailure::UnsupportedPlan)?,
             }
         }
         crate::libraries::InlineBodyPlan::Iteration { .. } => {
@@ -670,6 +693,7 @@ mod tests {
             recovery,
             defaults,
             result,
+            ..
         } = plan.as_ref()
         else {
             panic!("stdlib let must retain its provider-owned invocation plan")
@@ -978,11 +1002,22 @@ mod tests {
             recovery: None,
             defaults,
             result,
+            declared_receiver,
             ..
         }) = plan
         else {
             panic!("Closeable.use must publish its complete plan in checked FIR")
         };
+        let declared = declared_receiver
+            .expect("Closeable.use stores its type-parameter receiver")
+            .get()
+            .non_null();
+        assert!(declared.is_ty_param(), "{declared:?}");
+        assert_eq!(
+            declared.ty_param_bound().map(Ty::non_null),
+            Some(Ty::obj("java/io/Closeable")),
+            "{declared:?}"
+        );
         assert_eq!(*lambda_parameter, 0);
         assert_eq!(arguments.as_ref(), [crate::fir::FirInlineValue::Receiver]);
         assert!(prologue.is_empty());
@@ -1044,9 +1079,9 @@ mod tests {
             result: None,
         };
 
-        assert_eq!(publish(None, None), Ok(None));
+        assert_eq!(publish(None, None, None), Ok(None));
         assert_eq!(
-            publish(Some(&plan), None),
+            publish(Some(&plan), None, None),
             Err(MappingFailure::UnsupportedPlan),
             "a present plan without stable member identities is a publication error",
         );
@@ -1085,7 +1120,7 @@ mod tests {
             defaults: Vec::new(),
             result: None,
         };
-        let Some(plan) = publish(Some(&plan), Some(0)).expect("valid checked plan") else {
+        let Some(plan) = publish(Some(&plan), Some(0), None).expect("valid checked plan") else {
             panic!("present provider plan must remain present")
         };
         let FirInlineBodyPlan::InvokeLambda { cause, cleanup, .. } = plan.as_ref() else {

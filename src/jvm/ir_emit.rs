@@ -6082,12 +6082,30 @@ impl<'a> Emitter<'a> {
                                 debug_lines::mark_statement_retained(self.ir, e, code);
                             }
                         }
+                        // An erased `FunctionN.invoke` stored into an `Object` slot stays `Object`.
+                        // The consumer after the store narrows it; casting at the store would put
+                        // the checkcast inside the protected range.
+                        // `FunctionN.invoke` returns `Object` even when the function type says
+                        // `Unit`. A `Unit` consumer pops that object; an `Object` slot stores it.
+                        let keep_erased_invoke = jvm_is_erased_top(jt)
+                            && matches!(
+                                self.ir.expr(value),
+                                IrExpr::InvokeFunction { ret, .. } if *ret != Ty::Nothing
+                            );
+                        if keep_erased_invoke {
+                            self.erased_invocations.insert(value);
+                        }
                         self.emit_value(value, code);
+                        if keep_erased_invoke {
+                            self.erased_invocations.remove(&value);
+                        }
                         self.unsigned_assignment_line = saved_assignment;
                         // Coerced to the slot's type as the initializer is: a value of another
                         // class is cast to the declared one, which is what a join of the two
-                        // stores reads back.
-                        self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
+                        // stores reads back. The erased invoke already left `Object`.
+                        if !keep_erased_invoke {
+                            self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
+                        }
                         // An inlined `return` stores on the return's line, after the value.
                         self.mark_expression_start(e, code);
                         let slot = self.activate_inline_return_frame_result(var, jt);
