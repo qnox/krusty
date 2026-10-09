@@ -635,19 +635,47 @@ mod tests {
     }
 
     #[test]
-    fn name_based_destructuring_complete_is_modeled_not_ignored() {
-        let parsed = parse_args(&["-Xname-based-destructuring=complete", "x.kt"]);
+    fn name_based_destructuring_only_syntax_is_modeled_not_ignored() {
+        let parsed = parse_args(&["-Xname-based-destructuring=only-syntax", "x.kt"]);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         assert!(parsed
             .language_settings
             .features
             .has("NameBasedDestructuring"));
-        assert!(parsed
+        assert!(!parsed
             .language_settings
             .features
             .has("EnableNameBasedDestructuringShortForm"));
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
+    }
+
+    #[test]
+    fn feature_argument_values_cannot_enable_unmodeled_semantics() {
+        for mode in ["name-mismatch", "complete"] {
+            let flag = format!("-Xname-based-destructuring={mode}");
+            let parsed = parse_args(&[&flag, "x.kt"]);
+            assert_eq!(
+                parsed.errors,
+                ["krusty does not implement the language feature \
+                  'DeprecateNameMismatchInShortDestructuringWithParentheses' selected by \
+                  '-Xname-based-destructuring'"
+                    .to_string()],
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_false_boolean_feature_flag_does_not_enable_the_feature() {
+        let parsed = parse_args(&[
+            "-language-version",
+            "2.2",
+            "-Xcontext-parameters=false",
+            "x.kt",
+        ]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(!parsed.language_settings.features.has("ContextParameters"));
     }
 
     /// `indy` is what krusty emits, so asking for it is honored silently. Any other value asks for a

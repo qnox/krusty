@@ -244,6 +244,31 @@ pub(super) fn apply(opts: &mut Options, parsed: &mut ParsedSettings, occurrence:
                     }
                 }
             }
+        } else {
+            let toggle_applies = |toggle: &&crate::kotlinc_arguments::catalog::FeatureToggle| {
+                match &occurrence.value {
+                    Value::Bool(flag) => *flag && toggle.if_value_is.is_none(),
+                    Value::String(value) => toggle.if_value_is.as_deref() == Some(value.as_str()),
+                    Value::List(_) => false,
+                }
+            };
+            if let Some(toggle) = spec
+                .enables
+                .iter()
+                .filter(toggle_applies)
+                .find(|toggle| !krusty::features::LangFeatures::models(&toggle.feature))
+            {
+                opts.errors.push(format!(
+                    "krusty does not implement the language feature '{}' selected by '{}'",
+                    toggle.feature, name
+                ));
+                return;
+            }
+            // A false Boolean feature flag applies none of its `@Enables`/`@Disables` entries.
+            // Reconstructing the bare spelling would incorrectly turn it back on.
+            if matches!(&occurrence.value, Value::Bool(false)) {
+                return;
+            }
         }
         let spellings: Vec<String> = match &occurrence.value {
             Value::Bool(_) => vec![name.to_string()],

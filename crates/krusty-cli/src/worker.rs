@@ -1454,10 +1454,10 @@ mod tests {
     }
 
     #[test]
-    fn name_based_destructuring_complete_is_accepted() {
+    fn modeled_name_based_destructuring_mode_is_accepted() {
         let unit = translate(&args(&[
             "--kotlinc-arg",
-            "-Xname-based-destructuring=complete",
+            "-Xname-based-destructuring=only-syntax",
             "--srcs",
             "A.kt",
             "--out",
@@ -1470,7 +1470,7 @@ mod tests {
             .language_settings
             .features
             .has("NameBasedDestructuring"));
-        assert!(parsed
+        assert!(!parsed
             .language_settings
             .features
             .has("EnableNameBasedDestructuringShortForm"));
