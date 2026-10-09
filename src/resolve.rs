@@ -24962,6 +24962,21 @@ val result = object { fun value(): String = captured }
         (file, info, diagnostics)
     }
 
+    fn retained_standalone_source_set(sources: &[&str]) -> (Vec<File>, Vec<TypeInfo>, DiagSink) {
+        let mut diagnostics = DiagSink::new();
+        let analysis = crate::frontend::analyze_source_set(
+            sources,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        let types = analysis
+            .types
+            .into_iter()
+            .map(|info| info.expect("production frontend must check every source file"))
+            .collect();
+        (analysis.files, types, diagnostics)
+    }
+
     fn check_with_annotation_fixtures(
         src: &str,
         detected_features: bool,
@@ -28664,12 +28679,10 @@ fun box(): String {
 
     #[test]
     fn lambda_literal_extension_defers_an_inapplicable_member_family() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "import test.literalChoice\n\
-             fun choose(): String = \"\".literalChoice(a = { \"value\" })",
-            &mut diagnostics,
-        );
+        let source = "import test.literalChoice\n\
+             fun choose(): String = \"\".literalChoice(a = { \"value\" })";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         let call = file
             .expr_arena
             .iter()
@@ -28684,10 +28697,6 @@ fun box(): String {
                 _ => None,
             })
             .expect("source should contain literalChoice call");
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
         let selected = info.resolved_extension(call).unwrap_or_else(|| {
             panic!(
@@ -28910,21 +28919,20 @@ fun box(): String {
 
     #[test]
     fn classpath_compare_operator_records_resolved_member_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "fun less(a: BoxedComparable, b: BoxedComparable): Boolean = a < b",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let source = "fun less(a: BoxedComparable, b: BoxedComparable): Boolean = a < b";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
 
-        let comparison = files[0]
+        let comparison = file
             .expr_arena
             .iter()
             .enumerate()
@@ -28945,18 +28953,20 @@ fun box(): String {
 
     #[test]
     fn classpath_index_operator_records_resolved_member_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file("fun first(xs: BoxedIndex): String = xs[0]", &mut d);
-        let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let source = "fun first(xs: BoxedIndex): String = xs[0]";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
 
-        let index = files[0]
+        let index = file
             .expr_arena
             .iter()
             .enumerate()
@@ -28974,18 +28984,20 @@ fun box(): String {
 
     #[test]
     fn classpath_string_index_operator_records_resolved_member_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file("fun first(s: String): Char = s[0]", &mut d);
-        let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let source = "fun first(s: String): Char = s[0]";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
 
-        let index = files[0]
+        let index = file
             .expr_arena
             .iter()
             .enumerate()
@@ -29003,22 +29015,20 @@ fun box(): String {
 
     #[test]
     fn module_index_operator_records_member_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class Box { operator fun get(i: Int): String = \"x\" }\n\
-             fun first(b: Box): String = b[0]",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let source = "class Box { operator fun get(i: Int): String = \"x\" }\n\
+             fun first(b: Box): String = b[0]";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
 
-        let index = files[0]
+        let index = file
             .expr_arena
             .iter()
             .enumerate()
@@ -29043,20 +29053,20 @@ fun box(): String {
 
     #[test]
     fn cross_file_inherited_member_records_declaring_owner() {
-        let mut d = DiagSink::new();
-        let files = vec![
-            parse_file("open class Base { fun ok(): String = \"O\" }", &mut d),
-            parse_file(
-                "class Child : Base()\nfun box(): String = Child().ok()",
-                &mut d,
-            ),
+        let sources = [
+            "open class Base { fun ok(): String = \"O\" }",
+            "class Child : Base()\nfun box(): String = Child().ok()",
         ];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[1], &mut syms, &mut d);
+        let (files, mut types, diagnostics) = retained_standalone_source_set(&sources);
+        let info = types.pop().expect("second source analysis");
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
 
         let call = files[1]
@@ -29123,23 +29133,21 @@ fun box(): String {
 
     #[test]
     fn module_index_operator_records_extension_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class Box\n\
+        let source = "class Box\n\
              operator fun Box.get(i: Int): String = \"x\"\n\
-             fun first(b: Box): String = b[0]",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+             fun first(b: Box): String = b[0]";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
 
-        let index = files[0]
+        let index = file
             .expr_arena
             .iter()
             .enumerate()
@@ -29206,18 +29214,12 @@ fun box(): String {
 
     #[test]
     fn index_assignment_records_member_set_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class Box { operator fun set(i: Int, v: String) {} }\n\
-             fun write(b: Box) { b[0] = \"x\" }",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+        let source = "class Box { operator fun set(i: Int, v: String) {} }\n\
+             fun write(b: Box) { b[0] = \"x\" }";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
+        assert_no_diags(&diagnostics);
 
-        let assign = files[0]
+        let assign = file
             .stmt_arena
             .iter()
             .enumerate()
@@ -29243,19 +29245,13 @@ fun box(): String {
 
     #[test]
     fn index_assignment_records_extension_set_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class Box\n\
+        let source = "class Box\n\
              operator fun Box.set(i: Int, v: String) {}\n\
-             fun write(b: Box) { b[0] = \"x\" }",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+             fun write(b: Box) { b[0] = \"x\" }";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
+        assert_no_diags(&diagnostics);
 
-        let assign = files[0]
+        let assign = file
             .stmt_arena
             .iter()
             .enumerate()
@@ -29280,14 +29276,12 @@ fun box(): String {
 
     #[test]
     fn index_assignment_records_get_return_for_lowering_guard() {
-        let mut d = DiagSink::new();
-        let file = parse_file("fun write(b: BoxedIndex) { b[0] = \"x\" }", &mut d);
-        let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+        let source = "fun write(b: BoxedIndex) { b[0] = \"x\" }";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
+        assert_no_diags(&diagnostics);
 
-        let assign = files[0]
+        let assign = file
             .stmt_arena
             .iter()
             .enumerate()
@@ -29306,17 +29300,12 @@ fun box(): String {
 
     #[test]
     fn foreach_records_iterator_protocol_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "fun loop(xs: BoxedIterable) { for (x in xs) { val y = x } }",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+        let source = "fun loop(xs: BoxedIterable) { for (x in xs) { val y = x } }";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
+        assert_no_diags(&diagnostics);
 
-        let iterable = files[0]
+        let iterable = file
             .stmt_arena
             .iter()
             .find_map(|stmt| match stmt {
@@ -29354,18 +29343,12 @@ fun box(): String {
 
     #[test]
     fn destructuring_records_member_component_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class Box(val s: String) { operator fun component1(): String = s }\n\
-             fun read(b: Box): String { val (x) = b; return x }",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+        let source = "class Box(val s: String) { operator fun component1(): String = s }\n\
+             fun read(b: Box): String { val (x) = b; return x }";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
+        assert_no_diags(&diagnostics);
 
-        let stmt = files[0]
+        let stmt = file
             .stmt_arena
             .iter()
             .enumerate()
@@ -29395,19 +29378,13 @@ fun box(): String {
 
     #[test]
     fn destructuring_records_extension_component_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class Box(val s: String)\n\
+        let source = "class Box(val s: String)\n\
              operator fun Box.component1(): String = s\n\
-             fun read(b: Box): String { val (x) = b; return x }",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+             fun read(b: Box): String { val (x) = b; return x }";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
+        assert_no_diags(&diagnostics);
 
-        let stmt = files[0]
+        let stmt = file
             .stmt_arena
             .iter()
             .enumerate()
@@ -29451,19 +29428,14 @@ fun box(): String {
 
     #[test]
     fn name_based_destructuring_records_property_getter_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file_with_detected_features(
+        let source =
             "// LANGUAGE: +NameBasedDestructuring, +EnableNameBasedDestructuringShortForm\n\
              data class P(val first: Int, val second: String)\n\
-             fun read(p: P): String { val (text = second) = p; return text }",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+             fun read(p: P): String { val (text = second) = p; return text }";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
+        assert_no_diags(&diagnostics);
 
-        let stmt = files[0]
+        let stmt = file
             .stmt_arena
             .iter()
             .enumerate()
@@ -29505,21 +29477,15 @@ fun box(): String {
 
     #[test]
     fn module_top_level_calls_record_selected_overload_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "fun pick(x: Int): String = \"int\"\n\
+        let source = "fun pick(x: Int): String = \"int\"\n\
              fun pick(x: String): String = x\n\
-             fun box(): String = pick(\"OK\")",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+             fun box(): String = pick(\"OK\")";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
+        assert_no_diags(&diagnostics);
 
-        let call = named_call(&files[0], "pick");
+        let call = named_call(&file, "pick");
         let target = module_top_level_target(&info, call);
-        let selected_decl = top_level_fun_decl(&files[0], "pick", |f| {
+        let selected_decl = top_level_fun_decl(&file, "pick", |f| {
             f.params.first().is_some_and(|p| p.ty.name == "String")
         });
         assert_eq!(target.callable.name, "pick");
@@ -29545,20 +29511,14 @@ fun box(): String {
 
     #[test]
     fn module_top_level_context_calls_record_context_sources_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class A(val x: String)\n\
+        let source = "class A(val x: String)\n\
              fun leaf(x: Int): String = \"int\"\n\
              context(a: A) fun leaf(): String = a.x\n\
-             context(a: A) fun mid(): String = leaf()",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert_no_diags(&d);
+             context(a: A) fun mid(): String = leaf()";
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
+        assert_no_diags(&diagnostics);
 
-        let call = named_call(&files[0], "leaf");
+        let call = named_call(&file, "leaf");
         let target = module_top_level_target(&info, call);
         assert_eq!(target.callable.name, "leaf");
         assert_eq!(target.callable.params, vec![Ty::obj("A")]);
@@ -29582,16 +29542,10 @@ fun box(): String {
     #[test]
     fn context_property_getter_sees_its_named_parameter() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class Scope\n\
+        let source = "class Scope\n\
              context(scope: Scope)\n\
-             val current: Scope get() = scope",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+             val current: Scope get() = scope";
+        let _ = crate::frontend::analyze_source_standalone(source, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
     }
@@ -29599,16 +29553,13 @@ fun box(): String {
     #[test]
     fn context_property_getter_infers_from_its_parameter() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class Scope\n\
+        let source = "class Scope\n\
              context(scope: Scope)\n\
-             val current get() = scope",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+             val current get() = scope";
+        let (_, symbols, info) =
+            crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        assert!(info.is_some(), "production frontend must check the source");
 
         assert_no_diags(&diagnostics);
         assert_eq!(
