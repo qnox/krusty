@@ -660,9 +660,31 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         workflow.contains("kotlin-native-conformance-${{ matrix.version }}-"),
         "a Native row must not race to publish the JVM row's broader immutable cache"
     );
+    for key in [
+        "key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}",
+        "key: klib-semantics-box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}",
+        "key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}",
+    ] {
+        assert!(
+            workflow.contains(key),
+            "every box corpus cache must use the key versioned for its mock JDK and CLI corpus inputs ({key})"
+        );
+    }
     assert!(
-        workflow.contains("box-corpus-cli-${{ matrix.version }}-"),
-        "the box corpus cache must not reuse an immutable key from before its mock JDK and CLI corpus inputs"
+        !workflow.contains("box-corpus-mock-jdk-"),
+        "no box corpus cache may restore an immutable entry from before the CLI corpus input"
+    );
+    assert_eq!(
+        workflow.matches("path: target/cache/box-corpus").count(),
+        3,
+        "run-tests.sh provisions the box corpus, so the coverage, KLIB and conformance lanes each cache it"
+    );
+    assert_eq!(
+        workflow
+            .matches("if: steps.box-corpus.outputs.cache-hit == 'true'\n        run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> \"$GITHUB_ENV\"")
+            .count(),
+        3,
+        "a restored box corpus must be complete, so every lane forbids fetching after a hit"
     );
     assert!(
         workflow.contains("recorded-kotlinc-bytes-conformance-${{ matrix.version }}-"),

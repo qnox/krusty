@@ -328,10 +328,22 @@ box-corpus VERSION=`just max-version`:
     if [ -d "$root/.git" ] && [ -d "$box" ]; then
         mock_dir="$(mock_dir_at_tag)"
     fi
-    if [ -n "$mock_dir" ] && [ -f "$root/$mock_dir/rt.jar" ] && [ -d "$root/compiler/testData/cli/jvm" ] && [ -d "$root/third-party/jsr305" ]; then
+    complete=0
+    if [ -n "$mock_dir" ] && [ -f "$root/$mock_dir/rt.jar" ]; then
+        complete=1
+        for dir in $cli_dirs; do [ -d "$root/$dir" ] || complete=0; done
+    fi
+    if [ "$complete" = 1 ]; then
         echo "$box"
         exit 0
-    elif [ -n "$mock_dir" ]; then
+    fi
+    # CI sets this after restoring an immutable cache entry: a hit must already hold every input,
+    # so fetching here would mean the cache key no longer names what the checkout contains.
+    if [ "${KRUSTY_BOX_CORPUS_OFFLINE:-}" = 1 ]; then
+        echo "the restored v${ver} corpus checkout is incomplete and KRUSTY_BOX_CORPUS_OFFLINE=1 forbids fetching; version its cache key" >&2
+        exit 1
+    fi
+    if [ -n "$mock_dir" ]; then
         # A cache provisioned before the mock JDK or the CLI corpus was needed: extend it rather
         # than accept it.
         echo "adding the mock JDK and the CLI corpus to the Kotlin codegen/box corpus (v${ver})…" >&2

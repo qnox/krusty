@@ -75,12 +75,17 @@ jobs:
             target/cache/ksp-corpus
           key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
       - name: cache box corpus
+        id: box-corpus
         uses: actions/cache@v6
         with:
           path: target/cache/box-corpus
-          # The box corpus checkout also carries the mock JDK its tests compile against. A key hit
-          # is never re-saved, so an entry from before that requirement must not be reused.
-          key: box-corpus-mock-jdk-${{ hashFiles('kotlin-versions') }}
+          # The checkout carries the box corpus, the mock JDK its tests compile against, and the CLI
+          # corpus. A key hit is never re-saved, so the salt changes whenever those inputs do.
+          key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}
+      # A hit must already hold every corpus input: provisioning then refuses to fetch.
+      - name: forbid corpus fetches after a cache hit
+        if: steps.box-corpus.outputs.cache-hit == 'true'
+        run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> "$GITHUB_ENV"
       - name: select recorded-byte cache version
         id: recorded-version
         run: echo "version=$(just max-version)" >> "$GITHUB_OUTPUT"
@@ -157,11 +162,17 @@ jobs:
         with:
           path: target/cache/kotlinc
           key: klib-semantics-kotlinc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
+      # klib-semantics runs through run-tests.sh, which provisions the box corpus before any test.
       - name: cache box corpus
+        id: box-corpus
         uses: actions/cache@v6
         with:
           path: target/cache/box-corpus
-          key: klib-semantics-box-corpus-mock-jdk-${{ hashFiles('kotlin-versions') }}
+          key: klib-semantics-box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}
+      # A hit must already hold every corpus input: provisioning then refuses to fetch.
+      - name: forbid corpus fetches after a cache hit
+        if: steps.box-corpus.outputs.cache-hit == 'true'
+        run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> "$GITHUB_ENV"
       - name: decode the Kotlin/Native stdlib through common metadata
         run: just klib-semantics
 
@@ -268,12 +279,17 @@ jobs:
           # serialization/KSP inputs exist. Both keys still identify one exact compiler version.
           key: kotlin-native-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       - name: cache box corpus (${{ matrix.version }})
+        id: box-corpus
         uses: actions/cache@v6
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
-          # The checkout also carries the mock JDK the box tests compile against and the CLI corpus.
-          # A key hit is never re-saved, so an entry from before those requirements must not be reused.
-          key: box-corpus-cli-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          # The checkout carries the box corpus, the mock JDK its tests compile against, and the CLI
+          # corpus. A key hit is never re-saved, so the salt changes whenever those inputs do.
+          key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      # A hit must already hold every corpus input: provisioning then refuses to fetch.
+      - name: forbid corpus fetches after a cache hit (${{ matrix.version }})
+        if: steps.box-corpus.outputs.cache-hit == 'true'
+        run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> "$GITHUB_ENV"
       # One archive per Kotlin version. A restored entry is replayed; a missing test compiles with
       # that lane's kotlinc. Master saves newly observed recordings under the exact version/commit.
       - name: restore recorded kotlinc bytes (${{ matrix.version }})

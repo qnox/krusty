@@ -267,7 +267,10 @@ class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n
 
 `kotlin_cli_jvm_conformance` (in the `conformance` binary) runs Kotlin's own command-line test
 corpus, `compiler/testData/cli/jvm` at the reference tag, through the krusty binary. `just box-corpus`
-provisions it in the same checkout as the box corpus. Each case is an `.args` file and the `.out`
+provisions it in the same checkout as the box corpus. CI caches that checkout under a key versioned
+for every input it carries (`box-and-cli-corpus-v1-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
+and `just box-corpus` then fails rather than fetch into an incomplete restored checkout, so adding a
+corpus input means bumping the salt. Each case is an `.args` file and the `.out`
 file kotlinc's `AbstractCliTest` compares against: the normalized stderr followed by the exit code's
 name, so the corpus covers argument parsing, help text, configuration errors, source discovery and
 reported diagnostics.
