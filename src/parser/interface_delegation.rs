@@ -16,6 +16,8 @@ impl Parser<'_> {
             return None;
         }
         self.bump();
+        // The delegate expression may start on the next line (`I by\n Impl()`).
+        self.skip_newlines();
         // A following `{` opens the CLASS BODY, not a lambda on the delegate call.
         let saved = self.no_trailing_lambda;
         self.no_trailing_lambda = true;
