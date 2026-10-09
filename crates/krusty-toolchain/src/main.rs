@@ -8,12 +8,16 @@ use std::process::ExitCode;
 
 use krusty_toolchain::configuration;
 use krusty_toolchain::diagnostic::Diagnostics;
+use krusty_toolchain::maven::{Metadata, Store};
 use krusty_toolchain::model::{self, Model, Start};
+use krusty_toolchain::module::ModuleHeader;
+use krusty_toolchain::resolution;
 use krusty_toolchain::show;
 
 const USAGE: &str =
     "usage: krusty-toolchain [--project-dir=<path>] show modules [--format=plain|table]
-       krusty-toolchain [--project-dir=<path>] show settings [-m <module>]... [--all-modules]";
+       krusty-toolchain [--project-dir=<path>] show settings [-m <module>]... [--all-modules]
+       krusty-toolchain [--project-dir=<path>] show dependencies [-m <module>]... [--all-modules] [--include-tests]";
 
 #[derive(Clone, Copy)]
 enum Format {
@@ -21,12 +25,18 @@ enum Format {
     Table,
 }
 
+/// The modules a command is about: those named, or every module (`all`).
+struct Selection {
+    names: Vec<String>,
+    all: bool,
+}
+
 enum Show {
     Modules(Format),
-    /// The named modules', or every module's (`all`).
-    Settings {
-        names: Vec<String>,
-        all: bool,
+    Settings(Selection),
+    Dependencies {
+        modules: Selection,
+        include_tests: bool,
     },
 }
 
@@ -40,6 +50,7 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
     let mut format = Format::Table;
     let mut modules = Vec::new();
     let mut all_modules = false;
+    let mut include_tests = false;
     let mut words = Vec::new();
     let mut index = 0;
     while index < arguments.len() {
@@ -71,6 +82,8 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
             }
             "-m" | "--module" => modules.push(value()?),
             "-a" | "--all-modules" => all_modules = true,
+            "--include-tests" => include_tests = true,
+            "--exclude-tests" => include_tests = false,
             option if option.starts_with('-') => {
                 return Err(format!(
                     "krusty-toolchain does not implement the option `{option}`"
@@ -92,9 +105,19 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
         }),
         ["show", "settings"] => Ok(Command {
             project_dir,
-            show: Show::Settings {
+            show: Show::Settings(Selection {
                 names: modules,
                 all: all_modules,
+            }),
+        }),
+        ["show", "dependencies"] => Ok(Command {
+            project_dir,
+            show: Show::Dependencies {
+                modules: Selection {
+                    names: modules,
+                    all: all_modules,
+                },
+                include_tests,
             },
         }),
         [] => Err("no command given".to_string()),
@@ -130,14 +153,19 @@ fn run(command: Command) -> Result<bool, String> {
                 println!("{name}");
             }
         }
-        Show::Settings { names, all } => return show_settings(&model, &names, all),
+        Show::Settings(selection) => return show_settings(&model, &selection),
+        Show::Dependencies {
+            modules,
+            include_tests,
+        } => return show_dependencies(&model, &modules, include_tests),
     }
     Ok(true)
 }
 
-/// Print the settings of the modules `names` (every module when `all`, or when there is only one),
-/// in the project's order.
-fn show_settings(model: &Model, names: &[String], all: bool) -> Result<bool, String> {
+/// The modules `selection` names (every module when `all`, or when there is only one), in the
+/// project's order.
+fn selected<'m>(model: &'m Model, selection: &Selection) -> Result<Vec<&'m ModuleHeader>, String> {
+    let Selection { names, all } = selection;
     if names.is_empty() && !all && model.modules.len() > 1 {
         return Err("Please specify the module(s) to inspect with -m, or use --all-modules to inspect all modules".to_string());
     }
@@ -157,11 +185,21 @@ fn show_settings(model: &Model, names: &[String], all: bool) -> Result<bool, Str
             available.join("\n- ")
         ));
     }
+    Ok(model
+        .modules
+        .iter()
+        .filter(|module| *all || names.is_empty() || names.contains(&module.name))
+        .collect())
+}
+
+/// Print the settings of the selected modules.
+fn show_settings(model: &Model, selection: &Selection) -> Result<bool, String> {
+    let shown = selected(model, selection)?;
     let mut diagnostics = Diagnostics::default();
     let configured =
         configuration::configure(&model.project.root, &model.modules, &mut diagnostics);
     let output = show::modules_settings(&model.modules, &configured, |module| {
-        all || names.is_empty() || names.contains(&module.name)
+        shown.iter().any(|selected| std::ptr::eq(*selected, module))
     });
     for diagnostic in diagnostics.iter() {
         eprintln!("{diagnostic}");
@@ -170,6 +208,51 @@ fn show_settings(model: &Model, names: &[String], all: bool) -> Result<bool, Str
         return Ok(false);
     }
     print!("{output}");
+    Ok(true)
+}
+
+/// Print the resolved dependency graphs of the selected modules: main, then with `include_tests`
+/// test, each for the compile and the runtime classpath.
+fn show_dependencies(
+    model: &Model,
+    selection: &Selection,
+    include_tests: bool,
+) -> Result<bool, String> {
+    let shown = selected(model, selection)?;
+    let mut diagnostics = Diagnostics::default();
+    let configured =
+        configuration::configure(&model.project.root, &model.modules, &mut diagnostics);
+    for diagnostic in diagnostics.iter() {
+        eprintln!("{diagnostic}");
+    }
+    if diagnostics.has_errors() {
+        return Ok(false);
+    }
+    let declarations = resolution::read_declarations(&model.modules, &configured)?;
+    let root = Store::default_root()
+        .ok_or("cannot locate the user cache directory: set KOTLIN_SHARED_CACHE_DIR")?;
+    // The local Maven repository is read, before the cache, when any module lists it.
+    let local = declarations
+        .iter()
+        .any(|module| module.maven_local)
+        .then(Store::local_repository)
+        .flatten();
+    let store = match local {
+        Some(local) => Store::with_local(&local, &root),
+        None => Store::new(&root),
+    };
+    let metadata = Metadata::new(&store);
+    let mut resolvers = resolution::Resolvers::new(&metadata);
+    for (index, module) in model.modules.iter().enumerate() {
+        if !shown.iter().any(|selected| std::ptr::eq(*selected, module)) {
+            continue;
+        }
+        let (mut graphs, resolver) = resolvers.resolve_module(&declarations, index, include_tests);
+        print!(
+            "{}",
+            show::module_dependencies(&module.name, &mut graphs, resolver)
+        );
+    }
     Ok(true)
 }
 

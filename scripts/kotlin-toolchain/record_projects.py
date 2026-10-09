@@ -24,7 +24,14 @@ settings it prints, with trailing spaces dropped from each line, as `settings` (
 the command succeeds). Problems are read from both streams, since warnings go to standard output;
 the settings follow them.
 
-Usage: record_projects.py [--settings] <kotlin wrapper> <case file>...
+With `--dependencies <repository>`, the recorder runs
+`./kotlin show dependencies --all-modules --include-tests` and records the graphs it prints, with
+trailing spaces dropped from each line, as `dependencies`. The artifacts are read from a local
+Maven repository (`repositories: [mavenLocal]`): `<repository>` with the case's `m2/<path>`
+sections added. The toolchain gets a fresh cache and no network, so every artifact a case
+resolves must be in that repository.
+
+Usage: record_projects.py [--settings | --dependencies <repository>] <kotlin wrapper> <case file>...
 The environment must be the one the toolchain runs in (JAVA_HOME, LC_ALL=C.UTF-8, no banner).
 """
 
@@ -35,7 +42,9 @@ import subprocess
 import sys
 import tempfile
 
-RECORDED = ("expected", "stdout", "settings")
+RECORDED = ("expected", "stdout", "settings", "dependencies")
+# Sections below this directory are artifacts of the case's local Maven repository.
+REPOSITORY_SECTION = "m2/"
 # Kept as written: what krusty-toolchain reports where it deliberately differs, and why.
 KRUSTY = "krusty"
 SEVERITY = "(ERROR|WARNING|WEAK WARNING)"
@@ -128,24 +137,65 @@ def parse(root, output):
     return problems, table
 
 
-def record(wrapper, path, settings):
+def without_download_warnings(lines):
+    """`lines` without the warnings, and their stack traces, about artifacts the toolchain could not
+    download: a case's repository holds metadata only, and the network is unreachable."""
+    kept, warning = [], False
+    for line in lines:
+        if line.startswith("WARN  "):
+            warning = True
+        elif warning and (line.startswith(("Caused by: ", "\t")) or line.lstrip().startswith(("at ", "... "))):
+            pass
+        else:
+            warning = False
+            kept.append(line)
+    return kept
+
+
+def write(directory, name, lines):
+    file = os.path.join(directory, name)
+    os.makedirs(os.path.dirname(file), exist_ok=True)
+    with open(file, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + ("\n" if lines else ""))
+
+
+def record(wrapper, path, mode, repository):
+    settings = mode == "settings"
     sections = read_case(path)
     with tempfile.TemporaryDirectory(prefix="kotlin-project-case-") as directory:
+        directory = os.path.realpath(directory)
         # A fixed directory name, since the root module is named after it.
-        root = os.path.join(os.path.realpath(directory), "project")
+        root = os.path.join(directory, "project")
         os.makedirs(root)
+        local = os.path.join(directory, "m2")
+        if repository is not None:
+            shutil.copytree(repository, local)
         for name, lines in sections:
             if name is None or name in RECORDED or name == KRUSTY:
                 continue
-            file = os.path.join(root, name)
-            os.makedirs(os.path.dirname(file), exist_ok=True)
-            with open(file, "w", encoding="utf-8") as handle:
-                handle.write("\n".join(lines) + ("\n" if lines else ""))
+            if name.startswith(REPOSITORY_SECTION):
+                write(local, name[len(REPOSITORY_SECTION):], lines)
+            else:
+                write(root, name, lines)
         shutil.copy(wrapper, os.path.join(root, "kotlin"))
-        command = ["show", "settings", "--all-modules"] if settings else ["show", "modules"]
+        environment = dict(os.environ)
+        if mode == "dependencies":
+            command = ["show", "dependencies", "--all-modules", "--include-tests"]
+            # The case's repository, a fresh cache, and an unreachable proxy for everything else.
+            environment["JAVA_TOOL_OPTIONS"] = " ".join([
+                environment.get("JAVA_TOOL_OPTIONS", ""),
+                f"-Dmaven.repo.local={local}",
+                "-Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=9",
+            ])
+            environment["KOTLIN_SHARED_CACHE_DIR"] = os.path.join(directory, "cache")
+        elif settings:
+            command = ["show", "settings", "--all-modules"]
+        else:
+            command = ["show", "modules"]
         run = subprocess.run(
             ["./kotlin", *command],
             cwd=root,
+            env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -159,6 +209,15 @@ def record(wrapper, path, settings):
         problems, table = parse(root, output)
         if run.returncode != 0:
             stdout = None
+        elif mode == "dependencies":
+            lines = [line.rstrip() for line in without_download_warnings(printed)]
+            first = next(
+                index for index, line in enumerate(lines)
+                if line.startswith("Dependencies of module ")
+            )
+            stdout = lines[first:]
+            while stdout and not stdout[-1]:
+                stdout.pop()
         elif settings:
             lines = [line.rstrip() for line in printed]
             first = next(
@@ -171,7 +230,7 @@ def record(wrapper, path, settings):
     kept = [section for section in sections if section[0] not in RECORDED]
     kept.append(["expected", problems])
     if stdout is not None:
-        kept.append(["settings" if settings else "stdout", stdout])
+        kept.append(["stdout" if mode == "modules" else mode, stdout])
     with open(path, "w", encoding="utf-8") as handle:
         for name, lines in kept:
             if name is not None:
@@ -182,12 +241,14 @@ def record(wrapper, path, settings):
 
 def main():
     arguments = sys.argv[1:]
-    settings = arguments[:1] == ["--settings"]
-    if settings:
-        arguments = arguments[1:]
+    mode, repository = "modules", None
+    if arguments[:1] == ["--settings"]:
+        mode, arguments = "settings", arguments[1:]
+    elif arguments[:1] == ["--dependencies"]:
+        mode, repository, arguments = "dependencies", os.path.realpath(arguments[1]), arguments[2:]
     wrapper, cases = arguments[0], arguments[1:]
     for case in cases:
-        record(wrapper, case, settings)
+        record(wrapper, case, mode, repository)
         print(case, file=sys.stderr)
 
 

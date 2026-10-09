@@ -81,8 +81,12 @@ impl Drop for TempDir {
     }
 }
 
+/// Sections below this directory are artifacts of the case's local Maven repository.
+pub const REPOSITORY_SECTION: &str = "m2/";
+
 /// Write the case's files below a fresh directory named `project`, as the recorder does (the root
-/// module is named after it); the directory is removed when the [`TempDir`] is dropped.
+/// module is named after it); the directory is removed when the [`TempDir`] is dropped. The case's
+/// repository artifacts are not part of the project.
 pub fn materialize(kind: &str, case: &Case) -> (TempDir, PathBuf) {
     let temp = std::env::temp_dir().join(format!(
         "krusty-toolchain-{kind}-case-{}-{}",
@@ -92,6 +96,9 @@ pub fn materialize(kind: &str, case: &Case) -> (TempDir, PathBuf) {
     let _ = std::fs::remove_dir_all(&temp);
     let root = temp.join("project");
     for (file, text) in &case.files {
+        if file.starts_with(REPOSITORY_SECTION) {
+            continue;
+        }
         let path = root.join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();

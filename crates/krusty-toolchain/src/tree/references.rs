@@ -3,7 +3,7 @@
 //! written.
 
 use super::node::{Node, Trace, Value};
-use crate::maven_version::ComparableVersion;
+use crate::maven::ComparableVersion;
 use crate::schema::Derivation;
 
 /// Resolve every reference in `node`, each against the object that holds it.

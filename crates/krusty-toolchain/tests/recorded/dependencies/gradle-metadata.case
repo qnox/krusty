@@ -1,0 +1,431 @@
+A library that publishes Gradle module metadata is read from its JVM variants: the variant for
+each classpath, a platform it depends on, the module its root points at, and its constraints.
+--- module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:multi:1.0
+--- m2/org/example/multi/1.0/multi-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>multi</artifactId>
+  <version>1.0</version>
+  <!-- do_not_remove: published-with-gradle-metadata -->
+</project>
+--- m2/org/example/multi/1.0/multi-1.0.module
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "org.example",
+    "module": "multi",
+    "version": "1.0"
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.10"
+    }
+  },
+  "variants": [
+    {
+      "name": "jvmApiElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-api",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "available-at": {
+        "url": "../../multi-jvm/1.0/multi-jvm-1.0.module",
+        "group": "org.example",
+        "module": "multi-jvm",
+        "version": "1.0"
+      }
+    },
+    {
+      "name": "jvmRuntimeElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-runtime",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "available-at": {
+        "url": "../../multi-jvm/1.0/multi-jvm-1.0.module",
+        "group": "org.example",
+        "module": "multi-jvm",
+        "version": "1.0"
+      }
+    },
+    {
+      "name": "metadataApiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "kotlin-metadata",
+        "org.jetbrains.kotlin.platform.type": "common"
+      },
+      "dependencies": [
+        {
+          "group": "org.example",
+          "module": "common-only",
+          "version": {
+            "requires": "1.0"
+          }
+        }
+      ]
+    }
+  ]
+}
+--- m2/org/example/multi-jvm/1.0/multi-jvm-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>multi-jvm</artifactId>
+  <version>1.0</version>
+  <!-- do_not_remove: published-with-gradle-metadata -->
+</project>
+--- m2/org/example/multi-jvm/1.0/multi-jvm-1.0.module
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "org.example",
+    "module": "multi-jvm",
+    "version": "1.0",
+    "url": "../../multi/1.0/multi-1.0.module"
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.10"
+    }
+  },
+  "variants": [
+    {
+      "name": "jvmApiElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-api",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        {
+          "group": "org.example",
+          "module": "gplatform",
+          "version": {
+            "requires": "1.0"
+          },
+          "attributes": {
+            "org.gradle.category": "platform"
+          }
+        },
+        {
+          "group": "org.example",
+          "module": "api-dep",
+          "version": {
+            "requires": "1.0"
+          }
+        },
+        {
+          "group": "org.example",
+          "module": "managed"
+        }
+      ],
+      "dependencyConstraints": [
+        {
+          "group": "org.example",
+          "module": "leaf",
+          "version": {
+            "requires": "2.0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "jvmRuntimeElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-runtime",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        {
+          "group": "org.example",
+          "module": "gplatform",
+          "version": {
+            "requires": "1.0"
+          },
+          "attributes": {
+            "org.gradle.category": "platform"
+          }
+        },
+        {
+          "group": "org.example",
+          "module": "api-dep",
+          "version": {
+            "requires": "1.0"
+          }
+        },
+        {
+          "group": "org.example",
+          "module": "managed"
+        },
+        {
+          "group": "org.example",
+          "module": "rt-dep",
+          "version": {
+            "requires": "1.0"
+          }
+        }
+      ],
+      "dependencyConstraints": [
+        {
+          "group": "org.example",
+          "module": "leaf",
+          "version": {
+            "requires": "2.0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "jvmSourcesElements-published",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      }
+    }
+  ]
+}
+--- m2/org/example/gplatform/1.0/gplatform-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>gplatform</artifactId>
+  <version>1.0</version><packaging>pom</packaging>
+  <!-- do_not_remove: published-with-gradle-metadata -->
+</project>
+--- m2/org/example/gplatform/1.0/gplatform-1.0.module
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "org.example",
+    "module": "gplatform",
+    "version": "1.0"
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.10"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "platform",
+        "org.gradle.usage": "java-api"
+      },
+      "dependencyConstraints": [
+        {
+          "group": "org.example",
+          "module": "managed",
+          "version": {
+            "requires": "4.0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "platform",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencyConstraints": [
+        {
+          "group": "org.example",
+          "module": "managed",
+          "version": {
+            "requires": "4.0"
+          }
+        },
+        {
+          "group": "org.example",
+          "module": "rt-dep",
+          "version": {
+            "requires": "1.1"
+          }
+        }
+      ]
+    }
+  ]
+}
+--- m2/org/example/api-dep/1.0/api-dep-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>api-dep</artifactId>
+  <version>1.0</version>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>leaf</artifactId><version>1.0</version></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/managed/4.0/managed-4.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>managed</artifactId>
+  <version>4.0</version>
+</project>
+--- m2/org/example/rt-dep/1.0/rt-dep-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>rt-dep</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/rt-dep/1.1/rt-dep-1.1.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>rt-dep</artifactId>
+  <version>1.1</version>
+</project>
+--- m2/org/example/leaf/1.0/leaf-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>leaf</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/leaf/2.0/leaf-2.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>leaf</artifactId>
+  <version>2.0</version>
+</project>
+--- m2/org/example/common-only/1.0/common-only-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>common-only</artifactId>
+  <version>1.0</version>
+</project>
+--- expected
+--- dependencies
+Dependencies of module project:
+
+Module project
+│ - main
+│ - scope = COMPILE
+│ - platforms = [jvm]
+├─── project:main:org.example:multi:1.0
+│    ╰─── org.example:multi:1.0
+│         ╰─── org.example:multi-jvm:1.0
+│              ├─── org.example:gplatform:1.0
+│              ├─── org.example:api-dep:1.0
+│              │    ╰─── org.example:leaf:1.0 -> 2.0
+│              ├─── org.example:managed:4.0
+│              ╰─── org.example:leaf:2.0 (c)
+╰─── project:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+     ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+          ╰─── org.jetbrains:annotations:13.0
+
+Module project
+│ - main
+│ - scope = RUNTIME
+│ - platforms = [jvm]
+├─── project:main:org.example:multi:1.0
+│    ╰─── org.example:multi:1.0
+│         ╰─── org.example:multi-jvm:1.0
+│              ├─── org.example:gplatform:1.0
+│              │    ╰─── org.example:rt-dep:1.1 (c)
+│              ├─── org.example:api-dep:1.0
+│              │    ╰─── org.example:leaf:1.0 -> 2.0
+│              ├─── org.example:managed:4.0
+│              ├─── org.example:rt-dep:1.0 -> 1.1
+│              ╰─── org.example:leaf:2.0 (c)
+╰─── project:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+     ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+          ╰─── org.jetbrains:annotations:13.0
+
+Module project
+│ - test
+│ - scope = COMPILE
+│ - platforms = [jvm]
+├─── project:test:org.example:multi:1.0
+│    ╰─── org.example:multi:1.0
+│         ╰─── org.example:multi-jvm:1.0
+│              ├─── org.example:gplatform:1.0
+│              ├─── org.example:api-dep:1.0
+│              │    ╰─── org.example:leaf:1.0 -> 2.0
+│              ├─── org.example:managed:4.0
+│              ╰─── org.example:leaf:2.0 (c)
+├─── project:test:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+│         ╰─── org.jetbrains:annotations:13.0
+╰─── project:test:org.jetbrains.kotlin:kotlin-test-junit5:2.4.20, implicit (because the test engine is junit-5)
+     ╰─── org.jetbrains.kotlin:kotlin-test-junit5:2.4.20
+          ├─── org.jetbrains.kotlin:kotlin-test:2.4.20
+          │    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+          ╰─── org.junit.jupiter:junit-jupiter-api:5.10.1
+               ├─── org.junit:junit-bom:5.10.1
+               ├─── org.opentest4j:opentest4j:1.3.0
+               ├─── org.junit.platform:junit-platform-commons:1.10.1
+               │    ├─── org.junit:junit-bom:5.10.1
+               │    ╰─── org.apiguardian:apiguardian-api:1.1.2
+               ╰─── org.apiguardian:apiguardian-api:1.1.2
+
+Module project
+│ - test
+│ - scope = RUNTIME
+│ - platforms = [jvm]
+├─── project:test:org.example:multi:1.0
+│    ╰─── org.example:multi:1.0
+│         ╰─── org.example:multi-jvm:1.0
+│              ├─── org.example:gplatform:1.0
+│              │    ╰─── org.example:rt-dep:1.1 (c)
+│              ├─── org.example:api-dep:1.0
+│              │    ╰─── org.example:leaf:1.0 -> 2.0
+│              ├─── org.example:managed:4.0
+│              ├─── org.example:rt-dep:1.0 -> 1.1
+│              ╰─── org.example:leaf:2.0 (c)
+├─── project:test:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+│         ╰─── org.jetbrains:annotations:13.0
+╰─── project:test:org.jetbrains.kotlin:kotlin-test-junit5:2.4.20, implicit (because the test engine is junit-5)
+     ╰─── org.jetbrains.kotlin:kotlin-test-junit5:2.4.20
+          ├─── org.jetbrains.kotlin:kotlin-test:2.4.20
+          │    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+          ├─── org.junit.jupiter:junit-jupiter-engine:5.10.1
+          │    ├─── org.junit:junit-bom:5.10.1
+          │    ├─── org.junit.platform:junit-platform-engine:1.10.1
+          │    │    ├─── org.junit:junit-bom:5.10.1
+          │    │    ├─── org.opentest4j:opentest4j:1.3.0
+          │    │    ╰─── org.junit.platform:junit-platform-commons:1.10.1
+          │    │         ╰─── org.junit:junit-bom:5.10.1
+          │    ╰─── org.junit.jupiter:junit-jupiter-api:5.10.1
+          │         ├─── org.junit:junit-bom:5.10.1
+          │         ├─── org.opentest4j:opentest4j:1.3.0
+          │         ╰─── org.junit.platform:junit-platform-commons:1.10.1 (*)
+          ╰─── org.junit.platform:junit-platform-launcher:1.10.1
+               ├─── org.junit:junit-bom:5.10.1
+               ╰─── org.junit.platform:junit-platform-engine:1.10.1 (*)

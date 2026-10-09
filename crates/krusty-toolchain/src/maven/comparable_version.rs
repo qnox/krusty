@@ -86,7 +86,12 @@ fn compare_to_none(item: &Item) -> Ordering {
             }
         }
         Item::String(value) => qualifier(value).as_str().cmp(RELEASE),
-        Item::List(items) => items.first().map_or(Ordering::Equal, compare_to_none),
+        // The whole list, not only its first item (MNG-6964): `0.8.0-0.6` is above `0.8.0`.
+        Item::List(items) => items
+            .iter()
+            .map(compare_to_none)
+            .find(|result| *result != Ordering::Equal)
+            .unwrap_or(Ordering::Equal),
     }
 }
 
@@ -238,6 +243,11 @@ mod tests {
             "2.4.20",
             "10",
         ]);
+    }
+
+    #[test]
+    fn a_qualifier_list_is_compared_past_its_leading_zero() {
+        assert_order(&["0.8.0", "0.8.0-0.6.x-compat", "0.8.1"]);
     }
 
     #[test]

@@ -12,13 +12,18 @@ The reference is Kotlin Toolchain 0.13.0.
 - `krusty-toolchain [--project-dir=<path>] show settings [-m <module>]... [--all-modules]` prints
   exactly what `kotlin show settings` prints for a JVM module's main fragment: every setting with
   where its value comes from (a file, the default, or a default derived from another setting).
+- `krusty-toolchain [--project-dir=<path>] show dependencies [-m <module>]... [--all-modules]
+  [--include-tests]` prints exactly what `kotlin show dependencies` prints: each module's resolved
+  dependency graph for the compile and runtime classpaths of its main (and test) fragment. See
+  [Dependency resolution](#dependency-resolution).
 - Project discovery: the nearest directory at or above the current one with a `project.yaml`. A
   module file passed on the way that the project does not list makes its directory a single-module
   project.
 - `project.yaml`: `modules` (plain paths and globs) and `plugins`.
 - `module.yaml` and the templates it applies (`apply`, transitively): `product`, `description`,
   `dependencies` and `settings`, with `test-` and `@jvm` variants, read against the toolchain's
-  schema (`src/schema`). `repositories`, `layout` and `tasks` are read but not yet used;
+  schema (`src/schema`). Of `repositories`, only `mavenLocal` is used; `layout` and `tasks` are
+  read but not yet used;
   `plugins`, `mavenPlugins`, `aliases` and `pluginInfo` are accepted without being read.
 
 ## Settings
@@ -58,6 +63,34 @@ Versions compare as Maven compares them (`maven_version.rs`), as the toolchain d
   Project-file errors stop before module files are read; module-file errors stop before module names
   are compared.
 
+## Dependency resolution
+
+`src/maven` reads artifacts and `src/resolution` resolves graphs, ported from the toolchain's
+`dependency-resolution` and `frontend/dr`:
+
+- Artifacts are read from the toolchain's shared cache, `<cache root>/.m2.cache` (the cache root is
+  `KOTLIN_SHARED_CACHE_DIR`, else the platform's user cache directory followed by
+  `JetBrains/Kotlin`), and, when a module lists `mavenLocal` in its `repositories`, first from the
+  local Maven repository (`<localRepository>` of `~/.m2/settings.xml` or
+  `$M2_HOME/conf/settings.xml`, else `~/.m2/repository`). krusty-toolchain does not download yet:
+  an artifact missing from both declares nothing. `mavenLocal` applies to the whole project.
+- An artifact's dependencies come from its Gradle module metadata when its POM carries the
+  `published-with-gradle-metadata` marker or it has no POM (the JVM variant for the classpath,
+  with platform dependencies, `available-at` and constraints), else from its effective POM
+  (parents, profiles for the module's JDK version, properties, imported BOMs, dependency
+  management, and the POM scopes of each classpath).
+- A graph is resolved in waves: within a wave, nodes requesting different versions of one
+  `group:module` are a conflict and are not expanded; between waves, every such node aligns on the
+  highest version (Maven's `ComparableVersion`), dependencies declared without a version take the
+  version their module's BOMs manage, and the nodes that changed are resolved again.
+- Each module is resolved on its own: its main and test fragments, each as one graph holding the
+  compile and the runtime classpath, with the modules it depends on, what they export to its
+  compile classpath and all they need at runtime, and the implicit dependencies the toolchain adds
+  (the standard library, the test framework, and the runtime libraries of enabled features).
+- What an artifact declares is read once per run for every module that reads it alike (the same
+  JDK version and `excludeDependencies`), and parsed POMs, effective POMs and module metadata
+  once per run.
+
 ## Deliberate refusals
 
 krusty-toolchain refuses, with an error naming itself:
@@ -83,6 +116,13 @@ reported; `tests/settings_cases.rs` requires the same problems and the same sett
 line (trailing spaces aside: the line naming a module is padded to 1,500 columns, which a unit test
 checks).
 
+`tests/recorded/dependencies/*.case` hold what `kotlin show dependencies --all-modules
+--include-tests` printed for a project that resolves from a local Maven repository (`mavenLocal`):
+`tests/recorded/dependencies/repository` (the standard library and the test framework) with the
+case's `m2/<path>` sections added. The recorder gives the toolchain a fresh cache and no network,
+so every artifact a case resolves is in that repository; `tests/dependency_cases.rs` resolves from
+the same repository and requires the same graphs, line for line.
+
 Re-record after changing a case or moving to another toolchain version:
 
 ```text
@@ -91,4 +131,7 @@ python3 scripts/kotlin-toolchain/record_projects.py <path to the kotlin wrapper>
   crates/krusty-toolchain/tests/recorded/projects/*.case
 python3 scripts/kotlin-toolchain/record_projects.py --settings <path to the kotlin wrapper> \
   crates/krusty-toolchain/tests/recorded/settings/*.case
+python3 scripts/kotlin-toolchain/record_projects.py \
+  --dependencies crates/krusty-toolchain/tests/recorded/dependencies/repository \
+  <path to the kotlin wrapper> crates/krusty-toolchain/tests/recorded/dependencies/*.case
 ```

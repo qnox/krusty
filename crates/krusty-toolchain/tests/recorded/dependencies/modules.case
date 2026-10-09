@@ -1,0 +1,353 @@
+A module's graph holds the modules it depends on, with what they export to its compile classpath
+and everything they need at runtime; its test graph adds its test dependencies.
+--- project.yaml
+modules:
+  - app
+  - lib
+  - util
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - ../lib
+  - org.example:app-only:1.0: compile-only
+test-dependencies:
+  - org.example:test-lib:1.0
+--- lib/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - ../util: exported
+  - org.example:api-dep:1.0: exported
+  - org.example:impl-dep:1.0
+  - org.example:rt-only:1.0: runtime-only
+--- util/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:util-dep:1.0
+--- m2/org/example/app-only/1.0/app-only-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>app-only</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/test-lib/1.0/test-lib-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>test-lib</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/api-dep/1.0/api-dep-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>api-dep</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/impl-dep/1.0/impl-dep-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>impl-dep</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/rt-only/1.0/rt-only-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>rt-only</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/util-dep/1.0/util-dep-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>util-dep</artifactId>
+  <version>1.0</version>
+</project>
+--- expected
+--- dependencies
+Dependencies of module app:
+
+Module app
+│ - main
+│ - scope = COMPILE
+│ - platforms = [jvm]
+├─── Module lib
+│    ├─── Module util
+│    ╰─── lib:main:org.example:api-dep:1.0
+│         ╰─── org.example:api-dep:1.0
+├─── app:main:org.example:app-only:1.0
+│    ╰─── org.example:app-only:1.0
+╰─── app:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+     ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+          ╰─── org.jetbrains:annotations:13.0
+
+Module app
+│ - main
+│ - scope = RUNTIME
+│ - platforms = [jvm]
+├─── Module lib
+│    ├─── Module util
+│    │    ├─── util:main:org.example:util-dep:1.0
+│    │    │    ╰─── org.example:util-dep:1.0
+│    │    ╰─── util:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│    │         ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+│    │              ╰─── org.jetbrains:annotations:13.0
+│    ├─── lib:main:org.example:api-dep:1.0
+│    │    ╰─── org.example:api-dep:1.0
+│    ├─── lib:main:org.example:impl-dep:1.0
+│    │    ╰─── org.example:impl-dep:1.0
+│    ├─── lib:main:org.example:rt-only:1.0
+│    │    ╰─── org.example:rt-only:1.0
+│    ╰─── lib:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│         ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+╰─── app:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+     ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+
+Module app
+│ - test
+│ - scope = COMPILE
+│ - platforms = [jvm]
+├─── Module lib
+│    ├─── Module util
+│    ╰─── lib:main:org.example:api-dep:1.0
+│         ╰─── org.example:api-dep:1.0
+├─── app:test:org.example:app-only:1.0
+│    ╰─── org.example:app-only:1.0
+├─── app:test:org.example:test-lib:1.0
+│    ╰─── org.example:test-lib:1.0
+├─── app:test:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+│         ╰─── org.jetbrains:annotations:13.0
+╰─── app:test:org.jetbrains.kotlin:kotlin-test-junit5:2.4.20, implicit (because the test engine is junit-5)
+     ╰─── org.jetbrains.kotlin:kotlin-test-junit5:2.4.20
+          ├─── org.jetbrains.kotlin:kotlin-test:2.4.20
+          │    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+          ╰─── org.junit.jupiter:junit-jupiter-api:5.10.1
+               ├─── org.junit:junit-bom:5.10.1
+               ├─── org.opentest4j:opentest4j:1.3.0
+               ├─── org.junit.platform:junit-platform-commons:1.10.1
+               │    ├─── org.junit:junit-bom:5.10.1
+               │    ╰─── org.apiguardian:apiguardian-api:1.1.2
+               ╰─── org.apiguardian:apiguardian-api:1.1.2
+
+Module app
+│ - test
+│ - scope = RUNTIME
+│ - platforms = [jvm]
+├─── Module lib
+│    ├─── Module util
+│    │    ├─── util:main:org.example:util-dep:1.0
+│    │    │    ╰─── org.example:util-dep:1.0
+│    │    ╰─── util:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│    │         ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+│    │              ╰─── org.jetbrains:annotations:13.0
+│    ├─── lib:main:org.example:api-dep:1.0
+│    │    ╰─── org.example:api-dep:1.0
+│    ├─── lib:main:org.example:impl-dep:1.0
+│    │    ╰─── org.example:impl-dep:1.0
+│    ├─── lib:main:org.example:rt-only:1.0
+│    │    ╰─── org.example:rt-only:1.0
+│    ╰─── lib:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│         ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+├─── app:test:org.example:test-lib:1.0
+│    ╰─── org.example:test-lib:1.0
+├─── app:test:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+╰─── app:test:org.jetbrains.kotlin:kotlin-test-junit5:2.4.20, implicit (because the test engine is junit-5)
+     ╰─── org.jetbrains.kotlin:kotlin-test-junit5:2.4.20
+          ├─── org.jetbrains.kotlin:kotlin-test:2.4.20
+          │    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+          ├─── org.junit.jupiter:junit-jupiter-engine:5.10.1
+          │    ├─── org.junit:junit-bom:5.10.1
+          │    ├─── org.junit.platform:junit-platform-engine:1.10.1
+          │    │    ├─── org.junit:junit-bom:5.10.1
+          │    │    ├─── org.opentest4j:opentest4j:1.3.0
+          │    │    ╰─── org.junit.platform:junit-platform-commons:1.10.1
+          │    │         ╰─── org.junit:junit-bom:5.10.1
+          │    ╰─── org.junit.jupiter:junit-jupiter-api:5.10.1
+          │         ├─── org.junit:junit-bom:5.10.1
+          │         ├─── org.opentest4j:opentest4j:1.3.0
+          │         ╰─── org.junit.platform:junit-platform-commons:1.10.1 (*)
+          ╰─── org.junit.platform:junit-platform-launcher:1.10.1
+               ├─── org.junit:junit-bom:5.10.1
+               ╰─── org.junit.platform:junit-platform-engine:1.10.1 (*)
+
+Dependencies of module lib:
+
+Module lib
+│ - main
+│ - scope = COMPILE
+│ - platforms = [jvm]
+├─── Module util
+├─── lib:main:org.example:api-dep:1.0
+│    ╰─── org.example:api-dep:1.0
+├─── lib:main:org.example:impl-dep:1.0
+│    ╰─── org.example:impl-dep:1.0
+╰─── lib:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+     ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+          ╰─── org.jetbrains:annotations:13.0
+
+Module lib
+│ - main
+│ - scope = RUNTIME
+│ - platforms = [jvm]
+├─── Module util
+│    ├─── util:main:org.example:util-dep:1.0
+│    │    ╰─── org.example:util-dep:1.0
+│    ╰─── util:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│         ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+│              ╰─── org.jetbrains:annotations:13.0
+├─── lib:main:org.example:api-dep:1.0
+│    ╰─── org.example:api-dep:1.0
+├─── lib:main:org.example:impl-dep:1.0
+│    ╰─── org.example:impl-dep:1.0
+├─── lib:main:org.example:rt-only:1.0
+│    ╰─── org.example:rt-only:1.0
+╰─── lib:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+     ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+
+Module lib
+│ - test
+│ - scope = COMPILE
+│ - platforms = [jvm]
+├─── Module util
+├─── lib:test:org.example:api-dep:1.0
+│    ╰─── org.example:api-dep:1.0
+├─── lib:test:org.example:impl-dep:1.0
+│    ╰─── org.example:impl-dep:1.0
+├─── lib:test:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+│         ╰─── org.jetbrains:annotations:13.0
+╰─── lib:test:org.jetbrains.kotlin:kotlin-test-junit5:2.4.20, implicit (because the test engine is junit-5)
+     ╰─── org.jetbrains.kotlin:kotlin-test-junit5:2.4.20
+          ├─── org.jetbrains.kotlin:kotlin-test:2.4.20
+          │    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+          ╰─── org.junit.jupiter:junit-jupiter-api:5.10.1
+               ├─── org.junit:junit-bom:5.10.1
+               ├─── org.opentest4j:opentest4j:1.3.0
+               ├─── org.junit.platform:junit-platform-commons:1.10.1
+               │    ├─── org.junit:junit-bom:5.10.1
+               │    ╰─── org.apiguardian:apiguardian-api:1.1.2
+               ╰─── org.apiguardian:apiguardian-api:1.1.2
+
+Module lib
+│ - test
+│ - scope = RUNTIME
+│ - platforms = [jvm]
+├─── Module util
+│    ├─── util:main:org.example:util-dep:1.0
+│    │    ╰─── org.example:util-dep:1.0
+│    ╰─── util:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│         ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+│              ╰─── org.jetbrains:annotations:13.0
+├─── lib:test:org.example:api-dep:1.0
+│    ╰─── org.example:api-dep:1.0
+├─── lib:test:org.example:impl-dep:1.0
+│    ╰─── org.example:impl-dep:1.0
+├─── lib:test:org.example:rt-only:1.0
+│    ╰─── org.example:rt-only:1.0
+├─── lib:test:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+╰─── lib:test:org.jetbrains.kotlin:kotlin-test-junit5:2.4.20, implicit (because the test engine is junit-5)
+     ╰─── org.jetbrains.kotlin:kotlin-test-junit5:2.4.20
+          ├─── org.jetbrains.kotlin:kotlin-test:2.4.20
+          │    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+          ├─── org.junit.jupiter:junit-jupiter-engine:5.10.1
+          │    ├─── org.junit:junit-bom:5.10.1
+          │    ├─── org.junit.platform:junit-platform-engine:1.10.1
+          │    │    ├─── org.junit:junit-bom:5.10.1
+          │    │    ├─── org.opentest4j:opentest4j:1.3.0
+          │    │    ╰─── org.junit.platform:junit-platform-commons:1.10.1
+          │    │         ╰─── org.junit:junit-bom:5.10.1
+          │    ╰─── org.junit.jupiter:junit-jupiter-api:5.10.1
+          │         ├─── org.junit:junit-bom:5.10.1
+          │         ├─── org.opentest4j:opentest4j:1.3.0
+          │         ╰─── org.junit.platform:junit-platform-commons:1.10.1 (*)
+          ╰─── org.junit.platform:junit-platform-launcher:1.10.1
+               ├─── org.junit:junit-bom:5.10.1
+               ╰─── org.junit.platform:junit-platform-engine:1.10.1 (*)
+
+Dependencies of module util:
+
+Module util
+│ - main
+│ - scope = COMPILE
+│ - platforms = [jvm]
+├─── util:main:org.example:util-dep:1.0
+│    ╰─── org.example:util-dep:1.0
+╰─── util:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+     ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+          ╰─── org.jetbrains:annotations:13.0
+
+Module util
+│ - main
+│ - scope = RUNTIME
+│ - platforms = [jvm]
+├─── util:main:org.example:util-dep:1.0
+│    ╰─── org.example:util-dep:1.0
+╰─── util:main:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+     ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+          ╰─── org.jetbrains:annotations:13.0
+
+Module util
+│ - test
+│ - scope = COMPILE
+│ - platforms = [jvm]
+├─── util:test:org.example:util-dep:1.0
+│    ╰─── org.example:util-dep:1.0
+├─── util:test:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+│         ╰─── org.jetbrains:annotations:13.0
+╰─── util:test:org.jetbrains.kotlin:kotlin-test-junit5:2.4.20, implicit (because the test engine is junit-5)
+     ╰─── org.jetbrains.kotlin:kotlin-test-junit5:2.4.20
+          ├─── org.jetbrains.kotlin:kotlin-test:2.4.20
+          │    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+          ╰─── org.junit.jupiter:junit-jupiter-api:5.10.1
+               ├─── org.junit:junit-bom:5.10.1
+               ├─── org.opentest4j:opentest4j:1.3.0
+               ├─── org.junit.platform:junit-platform-commons:1.10.1
+               │    ├─── org.junit:junit-bom:5.10.1
+               │    ╰─── org.apiguardian:apiguardian-api:1.1.2
+               ╰─── org.apiguardian:apiguardian-api:1.1.2
+
+Module util
+│ - test
+│ - scope = RUNTIME
+│ - platforms = [jvm]
+├─── util:test:org.example:util-dep:1.0
+│    ╰─── org.example:util-dep:1.0
+├─── util:test:org.jetbrains.kotlin:kotlin-stdlib:2.4.20, implicit
+│    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20
+│         ╰─── org.jetbrains:annotations:13.0
+╰─── util:test:org.jetbrains.kotlin:kotlin-test-junit5:2.4.20, implicit (because the test engine is junit-5)
+     ╰─── org.jetbrains.kotlin:kotlin-test-junit5:2.4.20
+          ├─── org.jetbrains.kotlin:kotlin-test:2.4.20
+          │    ╰─── org.jetbrains.kotlin:kotlin-stdlib:2.4.20 (*)
+          ├─── org.junit.jupiter:junit-jupiter-engine:5.10.1
+          │    ├─── org.junit:junit-bom:5.10.1
+          │    ├─── org.junit.platform:junit-platform-engine:1.10.1
+          │    │    ├─── org.junit:junit-bom:5.10.1
+          │    │    ├─── org.opentest4j:opentest4j:1.3.0
+          │    │    ╰─── org.junit.platform:junit-platform-commons:1.10.1
+          │    │         ╰─── org.junit:junit-bom:5.10.1
+          │    ╰─── org.junit.jupiter:junit-jupiter-api:5.10.1
+          │         ├─── org.junit:junit-bom:5.10.1
+          │         ├─── org.opentest4j:opentest4j:1.3.0
+          │         ╰─── org.junit.platform:junit-platform-commons:1.10.1 (*)
+          ╰─── org.junit.platform:junit-platform-launcher:1.10.1
+               ├─── org.junit:junit-bom:5.10.1
+               ╰─── org.junit.platform:junit-platform-engine:1.10.1 (*)
