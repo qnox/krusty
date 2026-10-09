@@ -4568,12 +4568,20 @@ code is the one the code generator already names: provider-owned bodies through 
   serialized declaration and expression fact (origins, raw flags, declaration and type annotations,
   value-class representations, type-alias expansions, inlined-block file entries) except source
   coordinates; `IrFile`-level facts are outside the trees.
+- **Signatures (done).** `metadata::id_signature` computes a declaration's public `IdSignature`
+  from its shape, as Kotlin's `IrMangleComputer` (signature mode) and CityHash64 do. The mangler is
+  target-free: a declaration model implements `SignatureType`, so the KLIB reader (over decoded
+  metadata) and a KLIB writer (over krusty's own declarations) agree on one identity. Over the
+  Kotlin/Native 2.4.20 stdlib it reproduces every public function, property, constructor and class
+  signature that IR serializes; the misses are `@OptionalExpectation` annotation classes, which IR
+  omits, and non-public nested classes. The four library KLIBs above match completely. Accessor
+  signatures and enum entries are still open.
 - **Joining (next).** A selected dependency callable is joined to its decoded body through its
   exact public signature, never through a name or parameter tuple.
 - **Lowering (next).** The decoded body is lowered into checked common IR so the native generator
   compiles it as it compiles a module function; a body using an operation the lowering does not
   model declines by name.
-- Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`. End-to-end coverage comes through
+- Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs` and `metadata/id_signature/`. End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
   topology, where krusty compiles each dependency module to a KLIB itself (metadata and serialized
   IR) and then compiles the main module against it; kotlinc only supplies the expected output.

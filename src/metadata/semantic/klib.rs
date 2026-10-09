@@ -554,14 +554,7 @@ impl SemanticTables<'_> {
                     let ty = self.ty_by_id(id, type_parameters, depth + 1, context)?;
                     metadata::project_kotlin_type(projection, ty)
                 }
-                ParsedTypeArgument::Star => {
-                    metadata::KotlinType::OutProjection(Box::new(metadata::KotlinType::Class {
-                        internal: "kotlin/Any".to_string(),
-                        args: Vec::new(),
-                        nullable: true,
-                        shape: metadata::KotlinFunctionTypeShape::default(),
-                    }))
-                }
+                ParsedTypeArgument::Star => metadata::KotlinType::Star,
             };
             arguments.push(argument);
         }
@@ -684,6 +677,7 @@ impl SemanticTables<'_> {
                 metadata::KotlinType::OutProjection(inner) => {
                     metadata::KotlinType::OutProjection(inner)
                 }
+                metadata::KotlinType::Star => metadata::KotlinType::Star,
             })
         } else {
             Ok(ty)
@@ -1144,22 +1138,51 @@ fn semantic_function(
     let mut param_names = Vec::new();
     let mut param_defaults = Vec::new();
     let mut vararg = None;
+    let mut context_receivers = Vec::new();
     for body in &function.context_receiver_bodies {
-        top_params.push(tables.ty(body, &type_parameters, 0, "context receiver")?);
-        param_names.push(String::new());
-        param_defaults.push(false);
+        context_receivers.push(tables.ty(body, &type_parameters, 0, "context receiver")?);
     }
     for id in &function.context_receiver_type_ids {
-        top_params.push(tables.ty_by_id(*id, &type_parameters, 0, "context receiver")?);
-        param_names.push(String::new());
-        param_defaults.push(false);
+        context_receivers.push(tables.ty_by_id(*id, &type_parameters, 0, "context receiver")?);
     }
+    let mut context_params = Vec::new();
     for body in context_parameter_bodies {
-        let parameter =
-            semantic_value_parameter(body, tables, &type_parameters, "context parameter")?;
-        top_params.push(parameter.ty);
-        param_names.push(parameter.name);
-        param_defaults.push(parameter.has_default);
+        context_params.push(semantic_value_parameter(
+            body,
+            tables,
+            &type_parameters,
+            "context parameter",
+        )?);
+    }
+    // Kotlin 2.2+ writes a context parameter twice: as `context_parameter` and, for older readers,
+    // as the legacy `context_receiver_type` of the same type. A function has one context list.
+    let contexts = if context_params.is_empty() {
+        context_receivers
+            .into_iter()
+            .map(|ty| (ty, String::new(), false))
+            .collect::<Vec<_>>()
+    } else if context_receivers.is_empty()
+        || context_receivers
+            .iter()
+            .eq(context_params.iter().map(|parameter| &parameter.ty))
+    {
+        context_params
+            .into_iter()
+            .map(|parameter| (parameter.ty, parameter.name, parameter.has_default))
+            .collect()
+    } else {
+        return Err(semantic_error(
+            "function context parameters disagree with its legacy context receivers",
+        ));
+    };
+    let context_types = contexts
+        .iter()
+        .map(|(ty, _, _)| ty.clone())
+        .collect::<Vec<_>>();
+    for (ty, name, has_default) in contexts {
+        top_params.push(ty);
+        param_names.push(name);
+        param_defaults.push(has_default);
     }
     let value_bodies = message_bodies(body, 6, "function declaration")?;
     if value_bodies.len() != function.value_params.len() {
@@ -1193,6 +1216,9 @@ fn semantic_function(
     let leading = top_params.len() - written;
     let member = metadata::KotlinMember {
         name: name.clone(),
+        receiver: receiver.clone(),
+        context_params: context_types.clone(),
+        visibility: function.visibility,
         params: member_params,
         ret: ret.clone(),
         is_property: false,
@@ -1226,9 +1252,7 @@ fn semantic_function(
         is_suspend: function.is_suspend,
         is_operator: function.is_operator,
         is_infix: function.is_infix,
-        context_count: function.context_receiver_bodies.len()
-            + function.context_receiver_type_ids.len()
-            + function.context_params.len(),
+        context_count: context_types.len(),
         annotations,
     });
     Ok((member, top))
@@ -1269,7 +1293,8 @@ fn semantic_property(
     let mut modern_flags = None;
     let mut receiver_body = None;
     let mut receiver_id = None;
-    let mut context_count = 0usize;
+    let mut context_receivers = Vec::new();
+    let mut context_params = Vec::new();
     let mut constant = None;
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "property declaration")?;
@@ -1288,10 +1313,18 @@ fn semantic_property(
                 tables.ty_by_id(id, &type_parameters, 0, "property receiver")?;
                 receiver_id = Some(id);
             }
-            (12 | 18, 2) => {
+            (12, 2) => {
+                let nested = cursor.length_delimited("property context receiver type")?.0;
+                context_receivers.push(tables.ty(
+                    nested,
+                    &type_parameters,
+                    0,
+                    "property context receiver",
+                )?);
+            }
+            (18, 2) => {
                 let nested = cursor.length_delimited("property semantic type")?.0;
                 tables.ty(nested, &type_parameters, 0, "property semantic type")?;
-                context_count += usize::from(number == 12);
             }
             (19, 0) => {
                 let id = cursor.varint("property semantic type id")?;
@@ -1299,8 +1332,12 @@ fn semantic_property(
             }
             (13, 0) => {
                 let id = cursor.varint("property context receiver type id")?;
-                tables.ty_by_id(id, &type_parameters, 0, "property context receiver")?;
-                context_count += 1;
+                context_receivers.push(tables.ty_by_id(
+                    id,
+                    &type_parameters,
+                    0,
+                    "property context receiver",
+                )?);
             }
             (13, 2) => {
                 let (packed, base) =
@@ -1308,8 +1345,12 @@ fn semantic_property(
                 let mut packed = Cursor::new(packed, base);
                 while !packed.at_end() {
                     let id = packed.varint("property context receiver type id")?;
-                    tables.ty_by_id(id, &type_parameters, 0, "property context receiver")?;
-                    context_count += 1;
+                    context_receivers.push(tables.ty_by_id(
+                        id,
+                        &type_parameters,
+                        0,
+                        "property context receiver",
+                    )?);
                 }
             }
             (173, 2) => {
@@ -1318,14 +1359,26 @@ fn semantic_property(
                 constant = semantic_constant(value, tables.strings)?;
             }
             (11, 0) => modern_flags = Some(cursor.varint("property flags")?),
-            (6 | 17, 2) => {
-                let parameter = cursor.length_delimited("property value parameter")?.0;
+            (6, 2) => {
+                let parameter = cursor.length_delimited("property setter parameter")?.0;
                 semantic_value_parameter(
                     parameter,
                     tables,
                     &type_parameters,
-                    "property value parameter",
+                    "property setter parameter",
                 )?;
+            }
+            (17, 2) => {
+                let parameter = cursor.length_delimited("property context parameter")?.0;
+                context_params.push(
+                    semantic_value_parameter(
+                        parameter,
+                        tables,
+                        &type_parameters,
+                        "property context parameter",
+                    )?
+                    .ty,
+                );
             }
             (_, wire) => cursor.skip(wire, "property declaration")?,
         }
@@ -1348,8 +1401,22 @@ fn semantic_property(
         (None, None) => None,
         (body, id) => Some(tables.type_ref(body, id, &type_parameters, "property receiver")?),
     };
+    // As for functions, a context parameter is also written as a legacy context receiver.
+    let context_params = if context_params.is_empty() {
+        context_receivers
+    } else if context_receivers.is_empty() || context_receivers == context_params {
+        context_params
+    } else {
+        return Err(semantic_error(
+            "property context parameters disagree with its legacy context receivers",
+        ));
+    };
+    let visibility = metadata::declaration_visibility(flags);
     let member = metadata::KotlinMember {
         name: name.clone(),
+        receiver: receiver.clone(),
+        context_params: context_params.clone(),
+        visibility,
         params: Vec::new(),
         ret: ret.clone(),
         is_property: true,
@@ -1370,14 +1437,15 @@ fn semantic_property(
         vararg: None,
         annotations,
     };
-    let property = top_level.then(|| metadata::KotlinProperty {
+    let property = top_level.then_some(metadata::KotlinProperty {
         name,
         receiver,
         ty: ret,
         formals,
-        visibility: metadata::declaration_visibility(flags),
+        visibility,
         is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
-        context_count,
+        context_count: context_params.len(),
+        context_params,
         constant,
     });
     Ok((member, property))

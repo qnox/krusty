@@ -66,6 +66,8 @@ pub enum KotlinType {
     },
     InProjection(Box<KotlinType>),
     OutProjection(Box<KotlinType>),
+    /// The star projection `*` of a type argument.
+    Star,
 }
 
 impl KotlinType {
@@ -81,14 +83,16 @@ impl KotlinType {
     pub fn internal(&self) -> Option<&str> {
         match self {
             Self::Class { internal, .. } => Some(internal),
-            Self::Param { .. } | Self::InProjection(_) | Self::OutProjection(_) => None,
+            Self::Param { .. } | Self::InProjection(_) | Self::OutProjection(_) | Self::Star => {
+                None
+            }
         }
     }
 
     pub fn nullable(&self) -> bool {
         match self {
             Self::Class { nullable, .. } | Self::Param { nullable, .. } => *nullable,
-            Self::InProjection(_) | Self::OutProjection(_) => false,
+            Self::InProjection(_) | Self::OutProjection(_) | Self::Star => false,
         }
     }
 
@@ -104,6 +108,7 @@ impl KotlinType {
             Self::Param { name, nullable } => (name.clone(), &[][..], *nullable),
             Self::InProjection(inner) => return format!("in {}", inner.render()),
             Self::OutProjection(inner) => return format!("out {}", inner.render()),
+            Self::Star => return "*".to_string(),
         };
         let mut out = base;
         if !args.is_empty() {
@@ -133,6 +138,11 @@ pub(crate) fn project_kotlin_type(
 
 pub struct KotlinMember {
     pub name: String,
+    /// The extension receiver of a member extension.
+    pub receiver: Option<KotlinType>,
+    /// Context parameter types, in declaration order. They are not part of [`Self::params`].
+    pub context_params: Vec<KotlinType>,
+    pub visibility: Visibility,
     pub params: Vec<KotlinType>,
     pub ret: KotlinType,
     pub is_property: bool,
@@ -182,6 +192,8 @@ pub struct KotlinPackage {
 pub struct KotlinProperty {
     pub name: String,
     pub receiver: Option<KotlinType>,
+    /// Context parameter types, in declaration order; `context_count` is their number.
+    pub context_params: Vec<KotlinType>,
     pub ty: KotlinType,
     pub formals: Vec<KotlinTypeParameter>,
     pub visibility: Visibility,
@@ -507,6 +519,7 @@ pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<String, Ty>) -> Ty {
         }
         KotlinType::InProjection(inner) => Ty::in_projection(semantic_ty(inner, bounds)),
         KotlinType::OutProjection(inner) => Ty::out_projection(semantic_ty(inner, bounds)),
+        KotlinType::Star => Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
     };
     if ty.nullable() {
         Ty::nullable(semantic)

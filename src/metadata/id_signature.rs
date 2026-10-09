@@ -7,6 +7,20 @@
 
 use super::decode::{field, require_wire, Cursor, PackageFragmentDecodeError};
 
+mod city_hash;
+mod mangling;
+mod metadata_declarations;
+
+pub use mangling::{
+    callable_signature, class_signature, property_signature, CallableShape, ClassScope,
+    DeclarationContainer, ManglingError, PropertyShape, SignatureType, TypeParameterShape,
+    TypeView,
+};
+pub use metadata_declarations::{
+    constructor_signature, member_signature, metadata_class_signature, package_function_signature,
+    package_property_signature, MetadataContainer,
+};
+
 /// One exact qualified path in a public KLIB signature.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct KlibNamePath {

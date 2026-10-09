@@ -38,6 +38,15 @@ pub(super) fn ty_from_common(ty: common::KotlinType) -> super::BuiltinTy {
         common::KotlinType::OutProjection(inner) => {
             super::BuiltinTy::OutProjection(Box::new(ty_from_common(*inner)))
         }
+        // The JVM builtins records spell a star projection as `out Any?`.
+        common::KotlinType::Star => {
+            super::BuiltinTy::OutProjection(Box::new(super::BuiltinTy::Class {
+                internal: "kotlin/Any".to_string(),
+                args: Vec::new(),
+                nullable: true,
+                shape: common::KotlinFunctionTypeShape::default(),
+            }))
+        }
     }
 }
 
