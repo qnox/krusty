@@ -265,11 +265,10 @@ fn main_with_no_arguments_receives_an_empty_array() {
     run(&case("no_arguments", "print_arguments", &[], b""));
 }
 
-/// Every kind of maximal ill-formed subpart: a stray continuation byte; a lead byte with nothing
-/// after it; truncated three- and four-byte sequences; a UTF-16 surrogate encoded as bytes (`ED A0`
-/// begins no well-formed sequence, so each byte is its own subpart); an overlong `/`; a sequence
-/// past U+10FFFF; bytes that are never UTF-8; and a well-formed sequence right after an ill-formed
-/// one.
+/// Every kind of maximal ill-formed subpart the JVM launcher and Kotlin/Native agree on: a stray
+/// continuation byte; a lead byte with nothing after it; truncated three- and four-byte sequences;
+/// an overlong `/`; a sequence past U+10FFFF; bytes that are never UTF-8; and a well-formed
+/// sequence right after an ill-formed one.
 #[test]
 fn ill_formed_arguments_read_as_one_replacement_per_maximal_subpart() {
     run(&case(
@@ -280,7 +279,6 @@ fn ill_formed_arguments_read_as_one_replacement_per_maximal_subpart() {
             b"c\xC3",
             b"d\xE2\x82",
             b"e\xF0\x9F\x98",
-            b"f\xED\xA0\x80g",
             b"\xC0\xAF",
             b"\xE0\x80\xAF",
             b"\xF4\x90\x80\x80",
@@ -289,6 +287,19 @@ fn ill_formed_arguments_read_as_one_replacement_per_maximal_subpart() {
         ],
         b"",
     ));
+}
+
+/// A UTF-16 surrogate encoded as bytes: `ED A0` begins no well-formed sequence, so each of the three
+/// bytes is its own subpart, as Kotlin/Native decodes it. The JVM launcher decodes the three bytes
+/// as one U+FFFD.
+#[test]
+fn an_encoded_surrogate_argument_reads_as_three_replacements() {
+    run(&kotlin_native_only(case(
+        "encoded_surrogate_argument",
+        "print_arguments",
+        &[b"f\xED\xA0\x80g"],
+        b"",
+    )));
 }
 
 #[test]

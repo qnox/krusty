@@ -9731,7 +9731,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `main` overloads all start where kotlinc's frontend says. `main` receives the arguments the
   program was started with, without its own name (`argv[0]`). Bytes from outside are decoded as
   UTF-8 with one U+FFFD per maximal ill-formed subpart, which is what Kotlin/Native and the JVM
-  launcher under a UTF-8 locale both answer for arguments; the runtime's strings stay well-formed.
+  launcher under a UTF-8 locale both answer for arguments, except that the launcher reads a
+  surrogate encoded as bytes (`ED A0 80`) as one U+FFFD where Kotlin/Native and krusty read three;
+  the runtime's strings stay well-formed.
   `readLine()` and `readlnOrNull()` answer the next line of standard input without its `\n` or
   `\r\n` (a lone `\r` is the line's own text), keep an unterminated last line, and answer `null`
   at the end of input; `readln()` raises `kotlin.io.ReadAfterEOFException("EOF has already been
