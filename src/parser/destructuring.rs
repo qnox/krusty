@@ -6,7 +6,7 @@ impl Parser<'_> {
     /// A full-form destructuring statement starts with `(` (name-based) or `[` (positional, only
     /// under `+NameBasedDestructuring`) immediately followed by a `val`/`var` keyword.
     pub(super) fn at_full_form_destructure(&self) -> bool {
-        if !self.name_based_destructuring {
+        if !self.name_based_destructuring() {
             return false;
         }
         let opener = self.at(TokenKind::LParen) || self.at(TokenKind::LBracket);
@@ -81,7 +81,7 @@ impl Parser<'_> {
         let close = if self.at(TokenKind::LParen) {
             Some(TokenKind::RParen)
         } else if self.at(TokenKind::LBracket) {
-            self.note_ungated_bracket_destructure();
+            self.gate_bracket_destructuring();
             Some(TokenKind::RBracket)
         } else {
             None
@@ -191,17 +191,6 @@ impl Parser<'_> {
         )
     }
 
-    /// Square-bracket destructuring is parsed at every language level. The `[` span is retained so
-    /// the frontend can report the language-version diagnostic after module admission.
-    pub(super) fn note_ungated_bracket_destructure(&mut self) {
-        if !self.name_based_destructuring {
-            self.file
-                .destructuring
-                .ungated_bracket_spans
-                .push(self.tok().span);
-        }
-    }
-
     /// `= property` is an explicit rename. A parenthesized name-based entry without `=` names the
     /// property by the entry itself. The two stay distinct even when both strings are `_`.
     pub(super) fn destructure_property(
@@ -210,7 +199,7 @@ impl Parser<'_> {
         implicit: bool,
         entry_type: &mut Option<TypeRef>,
     ) -> Option<DestructureProperty> {
-        if self.name_based_destructuring && self.eat(TokenKind::Eq) {
+        if self.name_based_destructuring() && self.eat(TokenKind::Eq) {
             let source = self.ident_or_error("property name");
             if self.eat(TokenKind::Colon) {
                 *entry_type = Some(self.parse_type());

@@ -10,9 +10,11 @@ use crate::language_version::LanguageVersion;
 
 mod language_versions;
 mod table;
+mod unsupported;
 
 pub use language_versions::{vendored_language_versions, LanguageVersionPolicy, VersionStatus};
 pub use table::{vendored_table, BehaviorAfterSinceVersion, FeatureTable, LanguageFeature};
+pub use unsupported::FeatureGate;
 
 /// One explicit language-feature state, as kotlinc's `specificFeatures` map holds it: the effect of
 /// an `@Enables`/`@Disables` argument, a `-XXLanguage:` argument, or a `// LANGUAGE:` directive.
@@ -29,6 +31,7 @@ pub struct LangFeatures {
     /// The reference release whose feature table supplies the defaults.
     release: KotlinVersion,
     language_version: LanguageVersion,
+    api_version: LanguageVersion,
     enabled: HashSet<String>,
     /// The explicitly set features and their states, in kotlinc's `specificFeatures` sense. These
     /// decide whether the output is pre-release ([`Self::is_pre_release`]).
@@ -78,6 +81,7 @@ impl LangFeatures {
         Self {
             release,
             language_version,
+            api_version,
             enabled,
             specific: BTreeMap::new(),
             opted_in: BTreeSet::new(),
@@ -167,6 +171,11 @@ impl LangFeatures {
     /// compiler-specific switch.
     pub const fn language_version(&self) -> LanguageVersion {
         self.language_version
+    }
+
+    /// The API level these defaults were derived for.
+    pub const fn api_version(&self) -> LanguageVersion {
+        self.api_version
     }
 
     pub fn new() -> Self {

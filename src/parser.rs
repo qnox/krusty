@@ -33,6 +33,7 @@ mod properties;
 mod return_labels;
 mod superclass_references;
 mod type_parameters;
+mod syntax_gates;
 mod value_parameters;
 use class_recovery::error_class_decl;
 use declaration_modifiers::{
@@ -629,8 +630,8 @@ struct Parser<'a> {
     i: usize,
     file: File,
     diags: &'a mut DiagSink,
-    /// `NameBasedDestructuring` language feature: allow square-bracket destructuring (`[a, b]`).
-    name_based_destructuring: bool,
+    /// The language features whose syntax the parser gates, `NameBasedDestructuring` among them.
+    gates: syntax_gates::SyntaxGates,
     explicit_backing_fields: bool,
     /// `+EnableNameBasedDestructuringShortForm`: a plain paren entry `(a, b)` binds each variable to
     /// the RECEIVER PROPERTY of the same name (not `componentN`). An explicit `(a = prop)` still
@@ -789,7 +790,7 @@ impl<'a> Parser<'a> {
             i: 0,
             file,
             diags,
-            name_based_destructuring: features.has("NameBasedDestructuring"),
+            gates: syntax_gates::SyntaxGates::new(features),
             short_form_destructuring: features.has("EnableNameBasedDestructuringShortForm"),
             multi_dollar_interpolation: features.has("MultiDollarInterpolation"),
             explicit_backing_fields: features.has("ExplicitBackingFields"),
