@@ -38,3 +38,21 @@ class D : Greeter by Impl() {\n\
 fun box(): String = D().greet() + D().extra()\n";
     common::expect_box_ok_with_stdlib(SRC, "P");
 }
+
+#[test]
+fn delegate_expression_on_the_line_after_by() {
+    // A newline after `by` continues the clause; the delegate expression starts on the next line.
+    const SRC: &str = "// WITH_STDLIB\n\
+interface Greeter { fun greet(): String }\n\
+interface Named { fun name(): String }\n\
+class Impl(val s: String, val t: String = \"\") : Greeter { override fun greet() = s + t }\n\
+class D(\n\
+    val x: String,\n\
+) : Named,\n\
+    Greeter by\n\
+    Impl(x, t = \"K\") {\n\
+    override fun name() = \"\"\n\
+}\n\
+fun box(): String = D(\"O\").greet() + D(\"\").name()\n";
+    common::expect_box_same_as_kotlinc(SRC, "DelegateAfterBy");
+}
