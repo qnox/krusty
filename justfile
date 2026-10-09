@@ -12,7 +12,7 @@
 #   just test-all   suite against every supported Kotlin version, in parallel
 #   just kotlinc    download+unpack the reference kotlinc dist; prints bin path
 #   just kotlin-native download+unpack the matching Kotlin/Native distribution; prints root path
-#   just klib-semantics exercise the common KLIB metadata decoder against that distribution
+#   just klib-semantics exercise the KLIB metadata and IR decoders against that distribution
 #   just box-corpus clone+cache the Kotlin codegen/box corpus; prints box dir
 #   just conformance       print box-suite conformance "<pct> <passed> <applicable>" (stderr: JVM bytes)
 #   just profile-box [filter]  profile compiler-only box cases; writes target/flamegraph.svg
@@ -245,7 +245,7 @@ klib-semantics VERSION=`just max-version`:
     set -euo pipefail
     root="$(just kotlin-native "{{VERSION}}")"
     KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 \
-      ./run-tests.sh --test e2e klib_semantic_e2e -- --nocapture
+      ./run-tests.sh --test e2e -- klib_semantic_e2e klib_ir_trees_e2e --nocapture
 
 # Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and
 # print the path to compiler/testData/codegen/box. Blobless + sparse clone of just that directory at

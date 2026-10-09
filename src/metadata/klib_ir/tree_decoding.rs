@@ -302,12 +302,19 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
         }
     }
 
-    fn enter(&mut self, at: &Msg<'_>) -> Result<(), KlibIrDecodeError> {
-        self.depth += 1;
-        if self.depth > MAX_DEPTH {
+    /// Run `decode` one nesting level deeper. The level is released on every exit, error or not.
+    fn nested<T>(
+        &mut self,
+        at: &Msg<'_>,
+        decode: impl FnOnce(&mut Self) -> Result<T, KlibIrDecodeError>,
+    ) -> Result<T, KlibIrDecodeError> {
+        if self.depth >= MAX_DEPTH {
             return Err(at.error(format!("nesting exceeds {MAX_DEPTH} levels")));
         }
-        Ok(())
+        self.depth += 1;
+        let result = decode(self);
+        self.depth -= 1;
+        result
     }
 
     fn string(&self, index: u64, context: &str) -> Result<String, KlibIrDecodeError> {
@@ -370,9 +377,16 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             }
             None => {}
         }
-        self.types.insert(index, None);
         let msg = Msg::parse(self.file.types[index], 0, TYPES)?;
-        let ty = self.decode_type(&msg)?;
+        self.types.insert(index, None);
+        let ty = self.nested(&msg, |decoder| decoder.decode_type(&msg));
+        let ty = match ty {
+            Ok(ty) => ty,
+            Err(error) => {
+                self.types.remove(&index);
+                return Err(error);
+            }
+        };
         let id = KlibIrTypeId(u32::try_from(self.arena.types.len()).expect("arena fits u32"));
         self.arena.types.push(ty);
         self.types.insert(index, Some(id));
@@ -514,7 +528,10 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
     }
 
     fn expression(&mut self, msg: &Msg<'_>) -> Result<KlibIrExprId, KlibIrDecodeError> {
-        self.enter(msg)?;
+        self.nested(msg, |decoder| decoder.nested_expression(msg))
+    }
+
+    fn nested_expression(&mut self, msg: &Msg<'_>) -> Result<KlibIrExprId, KlibIrDecodeError> {
         let ty = self.optional_type(msg.varint(2, "expression type")?)?;
         let current = msg.oneof(5..=44, "IrExpression operation")?;
         let legacy = msg.message(1, "pre-2.4 operation")?;
@@ -534,7 +551,6 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             (None, None) => return Err(msg.error("expression has no operation")),
         };
         let kind = self.operation(number, &operation)?;
-        self.depth -= 1;
         Ok(self.push(ty, kind))
     }
 
@@ -1061,7 +1077,14 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
         msg: &Msg<'_>,
         constructor: bool,
     ) -> Result<KlibIrFunctionId, KlibIrDecodeError> {
-        self.enter(msg)?;
+        self.nested(msg, |decoder| decoder.nested_function(msg, constructor))
+    }
+
+    fn nested_function(
+        &mut self,
+        msg: &Msg<'_>,
+        constructor: bool,
+    ) -> Result<KlibIrFunctionId, KlibIrDecodeError> {
         let base = msg.required(1, "function base")?;
         let (symbol, origin, flags) = self.base(&base)?;
         let (name, return_type) = self.name_and_type(&base, 2)?;
@@ -1096,7 +1119,6 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
                 .map(|code| self.symbol(code))
                 .collect::<Result<_, _>>()?
         };
-        self.depth -= 1;
         let id =
             KlibIrFunctionId(u32::try_from(self.arena.functions.len()).expect("arena fits u32"));
         self.arena.functions.push(KlibIrFunction {
@@ -1202,7 +1224,10 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
     }
 
     fn class(&mut self, msg: &Msg<'_>) -> Result<KlibIrClassId, KlibIrDecodeError> {
-        self.enter(msg)?;
+        self.nested(msg, |decoder| decoder.nested_class(msg))
+    }
+
+    fn nested_class(&mut self, msg: &Msg<'_>) -> Result<KlibIrClassId, KlibIrDecodeError> {
         let (symbol, origin, flags) = self.base(msg)?;
         let name = self.string(msg.required_varint(2, "class name")?, "name")?;
         let this_receiver = msg
@@ -1227,7 +1252,6 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             .into_iter()
             .map(|code| self.symbol(code))
             .collect::<Result<_, _>>()?;
-        self.depth -= 1;
         let id = KlibIrClassId(u32::try_from(self.arena.classes.len()).expect("arena fits u32"));
         self.arena.classes.push(KlibIrClass {
             symbol,
@@ -1476,6 +1500,49 @@ mod tests {
         assert!(mapped.iter().all(|number| (5..=43).contains(number)));
         assert_eq!(current_operation(0), None);
         assert_eq!(current_operation(40), None);
+    }
+
+    /// A type table where type `i` is `type(i + 1) & Any` and the last type is a plain class.
+    fn definitely_not_null_chain(length: usize) -> Vec<Vec<u8>> {
+        let mut types = (1..length)
+            .map(|next| {
+                let mut packed = Vec::new();
+                push_varint(next as u64, &mut packed);
+                bytes_field(4, &bytes_field(1, &packed))
+            })
+            .collect::<Vec<_>>();
+        types.push(bytes_field(5, &varint_field(2, symbol(0, 6))));
+        types
+    }
+
+    #[test]
+    fn an_over_deep_acyclic_type_chain_is_an_error_and_releases_its_depth() {
+        let strings = strings();
+        let signatures = [public_signature(0, 1)];
+        let signatures = signatures.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let deep = definitely_not_null_chain(MAX_DEPTH + 1);
+        let mut file = FileTables {
+            strings: &strings,
+            signatures: SignatureTable::new(0, &signatures, &strings),
+            types: deep.iter().map(Vec::as_slice).collect(),
+            bodies: Vec::new(),
+        };
+        let mut decoder = TreeDecoder::new(&mut file);
+        let error = decoder.ty(0).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("invalid KLIB IR types.knt at byte 0: nesting exceeds {MAX_DEPTH} levels")
+        );
+        assert_eq!(decoder.depth, 0);
+        assert!(decoder.types.is_empty(), "{:?}", decoder.types);
+        // The deepest type that fits is still decoded after the failure, from the same decoder.
+        let fitting = decoder.ty(1).unwrap();
+        assert!(matches!(
+            decoder.arena.ty(fitting),
+            KlibIrType::DefinitelyNotNull(_)
+        ));
+        assert_eq!(decoder.depth, 0);
+        assert_eq!(decoder.arena.types.len(), MAX_DEPTH);
     }
 
     #[test]

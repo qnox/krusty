@@ -154,12 +154,51 @@ fn render(arena: &KlibIrArena, id: KlibIrExprId, parameters: &[&KlibIrSymbol]) -
     }
 }
 
+/// What one stdlib serializes, counted after decoding: declaration trees, linkable (public or
+/// public-accessor) functions, function bodies, and expressions.
+#[derive(Debug, PartialEq)]
+struct Inventory {
+    trees: usize,
+    linkable_functions: usize,
+    bodies: usize,
+    expressions: usize,
+}
+
+/// The exact inventory of each Kotlin/Native stdlib this repository validates, keyed by the
+/// `compiler_version` its manifest records (2.4.0 and 2.4.10 ship the same stdlib build).
+fn expected_inventory(compiler_version: &str) -> Inventory {
+    match compiler_version {
+        "2.4.0-dev-8449" => Inventory {
+            trees: 6_469,
+            linkable_functions: 10_889,
+            bodies: 11_747,
+            expressions: 246_354,
+        },
+        "2.4.20-dev-7885" => Inventory {
+            trees: 6_603,
+            linkable_functions: 11_022,
+            bodies: 11_969,
+            expressions: 250_586,
+        },
+        other => panic!("no recorded stdlib inventory for compiler_version {other}; add one"),
+    }
+}
+
 #[test]
 fn every_stdlib_declaration_tree_decodes() {
-    let Some(trees) = stdlib_trees() else {
+    let Some(root) = distribution_root() else {
         eprintln!("KLIB IR integration requires KRUSTY_KOTLIN_NATIVE");
         return;
     };
+    let stdlib = root.join("klib/common/stdlib");
+    let archive = KlibArchive::open(&stdlib)
+        .unwrap_or_else(|error| panic!("open {}: {error}", stdlib.display()));
+    let manifest = archive.manifest().expect("stdlib manifest");
+    let compiler_version = manifest
+        .get("compiler_version")
+        .expect("stdlib manifest records its compiler_version");
+    let trees = read_declaration_trees(&archive)
+        .unwrap_or_else(|error| panic!("decode {}: {error}", stdlib.display()));
     let mut bodies = 0usize;
     let mut expressions = 0usize;
     for tree in trees.trees() {
@@ -168,19 +207,15 @@ fn every_stdlib_declaration_tree_decodes() {
             .filter(|index| tree.arena.function_at(*index).body.is_some())
             .count();
     }
-    eprintln!(
-        "stdlib: {} trees, {} linkable functions, {bodies} bodies, {expressions} expressions",
-        trees.trees().len(),
-        trees.function_count()
+    assert_eq!(
+        Inventory {
+            trees: trees.trees().len(),
+            linkable_functions: trees.function_count(),
+            bodies,
+            expressions,
+        },
+        expected_inventory(compiler_version)
     );
-    assert!(trees.trees().len() > 1_000, "{} trees", trees.trees().len());
-    assert!(
-        trees.function_count() > 10_000,
-        "{} functions",
-        trees.function_count()
-    );
-    assert!(bodies > 10_000, "{bodies} bodies");
-    assert!(expressions > 100_000, "{expressions} expressions");
 }
 
 #[test]
