@@ -157,6 +157,32 @@ impl ProductionSignatureSemantics<'_> {
         reference
     }
 
+    /// `@Suppress("INVISIBLE_REFERENCE")` on a declaration covers that declaration and every
+    /// declaration written inside it. Signature lookup runs before the body policy stack, so a
+    /// class annotation has to be visible from the class supertype and from a member signature.
+    pub(super) fn declaration_or_enclosing_suppresses_visibility(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> bool {
+        let mut current = Some(declaration);
+        let mut seen = Vec::new();
+        while let Some(id) = current {
+            if seen.contains(&id) {
+                return false;
+            }
+            seen.push(id);
+            if self.table.declaration_suppresses_visibility(id) {
+                return true;
+            }
+            current = self
+                .headers
+                .declarations
+                .anchor(id)
+                .and_then(|anchor| anchor.owner);
+        }
+        false
+    }
+
     /// Resolve a classifier header type in the lexical scope immediately outside the classifier
     /// body. The classifier's own type parameters remain in `lexical`, but nested declarations from
     /// its body are not visible in its supertype list (`class C : Base { interface Base }`).
@@ -263,7 +289,7 @@ impl ProductionSignatureSemantics<'_> {
                     })
             })
         {
-            if !self.table.declaration_suppresses_visibility(scope.owner) {
+            if !self.declaration_or_enclosing_suppresses_visibility(scope.owner) {
                 let access = self
                     .with_resolver(scope, |resolver| {
                         resolver.inaccessible_classifier_access(internal)

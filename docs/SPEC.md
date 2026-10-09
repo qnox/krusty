@@ -8419,6 +8419,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_nested_class_reaches_the_outer_class_private_member`,
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
+- **A class `@Suppress("INVISIBLE_REFERENCE")` covers that class's signature and its members'
+  signatures.** The suppression is recorded on the annotated declaration. A supertype, a member
+  parameter, and a member result are checked before the body policy stack exists, so signature
+  lookup treats the declaration and each lexically enclosing declaration as suppressed. A call in
+  the body was already covered by the class policy pushed for the class walk. A nested class's own
+  annotation covers that nested class the same way. Test:
+  `tests/internal_classpath_access_e2e.rs::invisible_reference_suppression_matches_kotlinc_exactly`
+  (`SupertypeSuppressed.kt`, `MemberSignatureSuppressed.kt`, `NestedSuppressed.kt`).
 - **A public-API `inline` function cannot call a non-public-API function.** Public and protected
   are public API, and so is `@PublishedApi internal`: the annotation's resolved classifier
   identity (`kotlin/PublishedApi`) is the declaration fact, on both the inline function and the

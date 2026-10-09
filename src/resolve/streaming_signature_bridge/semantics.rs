@@ -1946,7 +1946,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         }
         let scoped_classifier = self.bound_or_scoped_classifier(scope, spelling, classifier);
         let selected = self.with_resolver(scope, |resolver| {
-            let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
+            let include_invisible =
+                self.declaration_or_enclosing_suppresses_visibility(scope.owner);
             let candidates = if include_invisible {
                 resolver.top_level_candidates(spelling)
             } else {
@@ -2460,7 +2461,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             (Vec<Ty>, Vec<Option<usize>>, crate::libraries::CallSig),
             _,
         > = self.with_resolver(scope, |resolver| {
-            let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
+            let include_invisible =
+                self.declaration_or_enclosing_suppresses_visibility(scope.owner);
             let candidates = if include_invisible {
                 resolver.top_level_candidates(spelling)
             } else {

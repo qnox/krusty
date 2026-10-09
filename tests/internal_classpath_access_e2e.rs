@@ -484,6 +484,28 @@ fn invisible_reference_suppression_matches_kotlinc_exactly() {
                  }\n",
         ),
         (
+            "MemberSignatureSuppressed.kt",
+            "package membersignaturecase\n\
+                 @Suppress(\"INVISIBLE_REFERENCE\")\n\
+                 class Holder {\n\
+                 fun inner(): lib.Hidden = lib.Hidden(1)\n\
+                 }\n",
+        ),
+        (
+            "NestedSuppressed.kt",
+            "package nestedcase\n\
+                 class Outer {\n\
+                 @Suppress(\"INVISIBLE_REFERENCE\")\n\
+                 class Nested : lib.Hidden(1)\n\
+                 }\n",
+        ),
+        (
+            "SupertypeSuppressed.kt",
+            "package supertypecase\n\
+                 @Suppress(\"INVISIBLE_REFERENCE\")\n\
+                 class Child : lib.Hidden(1)\n",
+        ),
+        (
             "LocalBackingFieldSuppressed.kt",
             "// LANGUAGE: +ExplicitBackingFields\n\
                  package localbackingfieldcase\n\
@@ -603,6 +625,18 @@ fn invisible_reference_suppression_matches_kotlinc_exactly() {
                 message: warning.to_string(),
             },
             ObservedDiagnostic {
+                file: "MemberSignatureSuppressed.kt".to_string(),
+                line: 2,
+                column: 11,
+                message: warning.to_string(),
+            },
+            ObservedDiagnostic {
+                file: "NestedSuppressed.kt".to_string(),
+                line: 3,
+                column: 11,
+                message: warning.to_string(),
+            },
+            ObservedDiagnostic {
                 file: "PrimaryConstructorSuppressed.kt".to_string(),
                 line: 2,
                 column: 21,
@@ -623,6 +657,12 @@ fn invisible_reference_suppression_matches_kotlinc_exactly() {
             ObservedDiagnostic {
                 file: "SecondaryConstructorSuppressed.kt".to_string(),
                 line: 3,
+                column: 11,
+                message: warning.to_string(),
+            },
+            ObservedDiagnostic {
+                file: "SupertypeSuppressed.kt".to_string(),
+                line: 2,
                 column: 11,
                 message: warning.to_string(),
             },
