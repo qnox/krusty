@@ -662,7 +662,6 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
     );
     for key in [
         "key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}",
-        "key: klib-semantics-box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}",
         "key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}",
     ] {
         assert!(
@@ -676,14 +675,24 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
     );
     assert_eq!(
         workflow.matches("path: target/cache/box-corpus").count(),
-        3,
-        "run-tests.sh provisions the box corpus, so the coverage, KLIB and conformance lanes each cache it"
+        2,
+        "only the coverage and conformance lanes read the box and CLI corpus; the KLIB lane caches none"
+    );
+    let justfile = fs::read_to_string(root.join("justfile")).expect("read justfile");
+    let klib_recipe = justfile
+        .split("\nklib-semantics ")
+        .nth(1)
+        .and_then(|recipe| recipe.split("\n\n").next())
+        .expect("justfile has a klib-semantics recipe");
+    assert!(
+        klib_recipe.contains("KRUSTY_PROVISION_BOX_CORPUS=0 "),
+        "the KLIB lane caches no corpus, so its harness run must not provision one"
     );
     assert_eq!(
         workflow
             .matches("if: steps.box-corpus.outputs.cache-hit == 'true'\n        run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> \"$GITHUB_ENV\"")
             .count(),
-        3,
+        2,
         "a restored box corpus must be complete, so every lane forbids fetching after a hit"
     );
     assert!(

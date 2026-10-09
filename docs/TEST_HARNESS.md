@@ -172,11 +172,13 @@ is checked on the combined commit before master moves. A branch that falls behin
 and re-blesses.
 
 All existing platform/version manifests only shrink. The required `ci` job runs
-`scripts/check-box-lists.sh` before building and fails a pull request that adds an entry to any
+`scripts/check-outcome-lists.sh` before building and fails a pull request that adds an entry to any
 existing outcome manifest compared with its merge base, including one entry swapped for another:
 a regression is fixed, not recorded, and a fix does not pay for one. A manifest for a newly
 supported Kotlin version is exempt. Native and JVM inventories use the same script and repository
-layout.
+layout, and it covers the CLI corpus's expected failures (`tests/cli_expected_failures`) too. The CLI
+not-applicable lists are not under this gate: they record what the reference kotlinc cannot run in
+this environment, and the required reference run proves every entry against that compiler.
 
 The rest of the suite is version-sensitive too, because the supported kotlinc releases do not word
 every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the

@@ -43,11 +43,11 @@ jobs:
         run: scripts/check-attribution.sh "$RANGE"
       - name: validate pinned IntelliJ patch
         run: scripts/check-intellij-patch.sh
-      - name: box outcome manifests only shrink
+      - name: outcome manifests only shrink
         env:
           BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.after }}
-        run: scripts/check-box-lists.sh "$BASE" "$HEAD"
+        run: scripts/check-outcome-lists.sh "$BASE" "$HEAD"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -162,17 +162,6 @@ jobs:
         with:
           path: target/cache/kotlinc
           key: klib-semantics-kotlinc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
-      # klib-semantics runs through run-tests.sh, which provisions the box corpus before any test.
-      - name: cache box corpus
-        id: box-corpus
-        uses: actions/cache@v6
-        with:
-          path: target/cache/box-corpus
-          key: klib-semantics-box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}
-      # A hit must already hold every corpus input: provisioning then refuses to fetch.
-      - name: forbid corpus fetches after a cache hit
-        if: steps.box-corpus.outputs.cache-hit == 'true'
-        run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> "$GITHUB_ENV"
       - name: decode the Kotlin/Native stdlib through common metadata
         run: just klib-semantics
 
