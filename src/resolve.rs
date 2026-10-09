@@ -28375,17 +28375,18 @@ fun box(): String {
 
     #[test]
     fn classpath_property_reads_record_resolved_members_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "val String.length: String get() = \"bad\"\n\
-             fun len(s: String, n: String?): Int = s.length + (n?.length ?: 0)",
-            &mut d,
-        );
-        let files = vec![file];
+        let source = "val String.length: String get() = \"bad\"\n\
+             fun len(s: String, n: String?): Int = s.length + (n?.length ?: 0)";
+        let mut diagnostics = DiagSink::new();
         let cp = std::rc::Rc::new(crate::toolchain::stdlib_classpath());
-        let mut syms =
-            collect_signatures_with_cp(&files, Box::new(initialized_jvm_libraries(cp)), &mut d);
-        let string = syms
+        let (file, symbols, info) = crate::frontend::analyze_source(
+            source,
+            Box::new(initialized_jvm_libraries(cp)),
+            &mut diagnostics,
+        );
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        let info = info.expect("production frontend must check the source");
+        let string = symbols
             .libraries
             .classifier(type_name("kotlin/String"))
             .expect("the platform must publish the String classifier record");
@@ -28396,13 +28397,16 @@ fun box(): String {
                 .is_some_and(|callables| !callables.properties().is_empty()),
             "String.length must be an ordinary property declaration"
         );
-        let info = check_file(&files[0], &mut syms, &mut d);
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
-        let member = files[0]
+        let member = file
             .expr_arena
             .iter()
             .enumerate()
@@ -28418,7 +28422,7 @@ fun box(): String {
             ),
             "checker must record the selected classpath getter for lowering"
         );
-        let safe_call = files[0]
+        let safe_call = file
             .expr_arena
             .iter()
             .enumerate()
@@ -28451,13 +28455,12 @@ fun box(): String {
     /// classifier receiver to evaluate, which is not a value.
     #[test]
     fn source_enum_entries_records_the_declaring_owner_and_its_accessor() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "enum class Direct { VALUE }\n\
+        let source = "enum class Direct { VALUE }\n\
              class Owner { enum class Nested { VALUE } }\n\
-             fun inspect() { Direct.entries; Owner.Nested.entries }",
-            &mut diagnostics,
-        );
+             fun inspect() { Direct.entries; Owner.Nested.entries }";
+        let platform =
+            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
+        let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         let reads = file
             .expr_arena
             .iter()
@@ -28468,11 +28471,6 @@ fun box(): String {
             })
             .collect::<Vec<_>>();
         assert_eq!(reads.len(), 2);
-        let files = vec![file];
-        let platform =
-            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let owners = ["Direct", "Owner$Nested"];
@@ -28508,11 +28506,9 @@ fun box(): String {
         // read-only child probe. FakeMemberPlatform has no construction phase, so model that one
         // indexing step explicitly rather than making `symbols` intern every queried spelling.
         let _java_state = crate::types::type_name("test/JavaState");
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "import test.JavaState\nfun inspect() { JavaState.entries }",
-            &mut diagnostics,
-        );
+        let source = "import test.JavaState\nfun inspect() { JavaState.entries }";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         let entries = file
             .expr_arena
             .iter()
@@ -28522,10 +28518,6 @@ fun box(): String {
                     .then_some(ExprId(index as u32))
             })
             .expect("source should contain the entries property");
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
         assert!(matches!(
             info.expr_lowers.get(&entries),
@@ -28536,20 +28528,14 @@ fun box(): String {
 
     #[test]
     fn enum_name_and_ordinal_are_ordinary_inherited_properties() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "enum class State { READY }\n\
-             fun inspect(state: State): String = state.name + state.ordinal",
-            &mut diagnostics,
-        );
-        let files = vec![file];
+        let source = "enum class State { READY }\n\
+             fun inspect(state: State): String = state.name + state.ordinal";
         let platform =
             initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         assert_no_diags(&diagnostics);
 
-        let resolved_properties = files[0]
+        let resolved_properties = file
             .expr_arena
             .iter()
             .enumerate()
@@ -28575,28 +28561,27 @@ fun box(): String {
 
     #[test]
     fn classpath_member_calls_record_resolved_members_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "fun direct(s: String): String = s.known(b = 2, a = 1)\n\
+        let source = "fun direct(s: String): String = s.known(b = 2, a = 1)\n\
              fun String.implicit(): String = known(a = 2)\n\
-             fun overloaded(s: String): String = s.choose(a = 1)",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+             fun overloaded(s: String): String = s.choose(a = 1)";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert!(
-            d.diags.is_empty(),
+            diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
         );
 
-        let direct = files[0]
+        let direct = file
             .expr_arena
             .iter()
             .enumerate()
             .find_map(|(idx, expr)| match expr {
-                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                Expr::Call { callee, .. } => match file.expr(*callee) {
                     Expr::Member { name, .. } if name == "known" => Some(ExprId(idx as u32)),
                     _ => None,
                 },
@@ -28617,7 +28602,7 @@ fun box(): String {
         let direct_values: Vec<_> = direct_slots
             .iter()
             .map(|slot| {
-                slot.and_then(|arg| match files[0].expr(arg) {
+                slot.and_then(|arg| match file.expr(arg) {
                     Expr::IntLit(v) => Some(*v),
                     _ => None,
                 })
@@ -28625,12 +28610,12 @@ fun box(): String {
             .collect();
         assert_eq!(direct_values, vec![Some(1), Some(2)]);
 
-        let implicit = files[0]
+        let implicit = file
             .expr_arena
             .iter()
             .enumerate()
             .find_map(|(idx, expr)| match expr {
-                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                Expr::Call { callee, .. } => match file.expr(*callee) {
                     Expr::Name(name) if name == "known" => Some(ExprId(idx as u32)),
                     _ => None,
                 },
@@ -28651,7 +28636,7 @@ fun box(): String {
         let implicit_values: Vec<_> = implicit_slots
             .iter()
             .map(|slot| {
-                slot.and_then(|arg| match files[0].expr(arg) {
+                slot.and_then(|arg| match file.expr(arg) {
                     Expr::IntLit(v) => Some(*v),
                     _ => None,
                 })
@@ -28659,12 +28644,12 @@ fun box(): String {
             .collect();
         assert_eq!(implicit_values, vec![Some(2), None]);
 
-        let overloaded = files[0]
+        let overloaded = file
             .expr_arena
             .iter()
             .enumerate()
             .find_map(|(idx, expr)| match expr {
-                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                Expr::Call { callee, .. } => match file.expr(*callee) {
                     Expr::Member { name, .. } if name == "choose" => Some(ExprId(idx as u32)),
                     _ => None,
                 },
