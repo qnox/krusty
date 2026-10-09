@@ -18,7 +18,7 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rendering::problems;
+use rendering::{problems, Ledgers, Reported};
 use support::kotlin::{self, Invocation, Resolving};
 use support::oracle::Output;
 
@@ -134,16 +134,27 @@ fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
             continue;
         }
         let (warnings, result) = problems(&project_root, &toolchain.stdout);
-        let lines = |problems: &[String]| -> String {
+        let ledgers = match Ledgers::of_streams(errors, warnings) {
+            Ok(ledgers) => ledgers,
+            Err(error) => {
+                failures.push(format!("{name}: {error}"));
+                continue;
+            }
+        };
+        let lines = |problems: &[Reported]| -> String {
             problems
                 .iter()
-                .map(|problem| format!("{problem}\n"))
+                .map(|problem| format!("{}\n", problem.text))
                 .collect()
         };
         let expected = (
             toolchain.code,
-            format!("{}{}", lines(&warnings), placed(&toolchain.root, result)),
-            lines(&errors),
+            format!(
+                "{}{}",
+                lines(&ledgers.warnings),
+                placed(&toolchain.root, result)
+            ),
+            lines(&ledgers.errors),
         );
         // krusty-toolchain's, with paths relative to the project as the toolchain's are read back.
         let relative = |bytes: &[u8]| {
@@ -167,6 +178,11 @@ fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
                     "{name}: krusty-toolchain exited {} with stdout\n{}\nstderr\n{}\nthe `krusty` section expects exit 1, no stdout and stderr\n{}",
                     printed.0, printed.1, printed.2, refusal.2
                 ));
+            }
+            // krusty-toolchain writes only errors to stderr, so a section is a refusal unless it
+            // is empty.
+            if krusty.is_empty() {
+                failures.push(format!("{name}: the `krusty` section refuses nothing"));
             }
             if expected == refusal {
                 failures.push(format!(

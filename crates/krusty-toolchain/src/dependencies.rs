@@ -26,11 +26,17 @@ pub fn show(
     let root = Store::default_root()
         .ok_or("cannot locate the user cache directory: set KOTLIN_SHARED_CACHE_DIR")?;
     // The local Maven repository is read, before the cache, when any module lists it.
-    let local = declarations
-        .iter()
-        .any(|module| module.maven_local)
-        .then(Store::local_repository)
-        .flatten();
+    let local = if declarations.iter().any(|module| module.maven_local) {
+        match Store::local_repository() {
+            Ok(local) => local,
+            Err(problem) => {
+                diagnostics.push(problem.diagnostic());
+                return Ok(String::new());
+            }
+        }
+    } else {
+        None
+    };
     let store = match local {
         Some(local) => Store::with_local(&local, &root),
         None => Store::new(&root),

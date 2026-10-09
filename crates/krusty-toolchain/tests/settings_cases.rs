@@ -11,8 +11,8 @@ mod support;
 
 use krusty_toolchain::diagnostic::Diagnostics;
 use krusty_toolchain::{configuration, model, show};
-use rendering::problems;
-use reported::{is_error, reported};
+use rendering::{problems, Ledgers};
+use reported::reported;
 use support::kotlin::{self, Invocation};
 
 #[test]
@@ -40,6 +40,8 @@ fn every_settings_case_is_shown_as_the_toolchain_shows_it() {
             String::from_utf8_lossy(unread)
         );
         let (warnings, result) = problems(&toolchain.root, &toolchain.stdout);
+        let expected =
+            Ledgers::of_streams(errors, warnings).unwrap_or_else(|error| panic!("{name}: {error}"));
         let temp = support::TempDir::new(&format!("settings-case-{name}"));
         let root = support::materialize(&temp, &case.files);
         let mut diagnostics = Diagnostics::default();
@@ -47,13 +49,10 @@ fn every_settings_case_is_shown_as_the_toolchain_shows_it() {
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap_or_else(|| panic!("{name}: the project was not read"));
         let configured = configuration::configure(&root, &model.modules, &mut diagnostics);
-        let (actual_errors, actual_warnings): (Vec<String>, Vec<String>) =
-            reported(&root, &diagnostics)
-                .into_iter()
-                .partition(|line| is_error(line));
-        if actual_errors != errors || actual_warnings != warnings {
+        let actual = Ledgers::of(reported(&root, &diagnostics));
+        if actual != expected {
             failures.push(format!(
-                "{name}:\n  expected errors {errors:#?}\n  actual   errors {actual_errors:#?}\n  expected warnings {warnings:#?}\n  actual   warnings {actual_warnings:#?}"
+                "{name}:\n  expected {expected:#?}\n  actual   {actual:#?}"
             ));
         }
         // The command's result, byte for byte: the settings, printed only when nothing was an

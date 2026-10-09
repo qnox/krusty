@@ -5,22 +5,20 @@ use std::path::Path;
 
 use krusty_toolchain::diagnostic::Diagnostics;
 
-/// krusty-toolchain's problems as the toolchain's are read back: paths relative to `root`, line
-/// breaks as `\n`.
-pub fn reported(root: &Path, diagnostics: &Diagnostics) -> Vec<String> {
+use crate::rendering::Reported;
+
+/// krusty-toolchain's problems as the toolchain's are read back: each one's severity, and its
+/// rendering with paths relative to `root` and line breaks as `\n`.
+pub fn reported(root: &Path, diagnostics: &Diagnostics) -> Vec<Reported> {
     let prefix = format!("{}/", root.display());
     diagnostics
         .iter()
-        .map(|diagnostic| {
-            diagnostic
+        .map(|diagnostic| Reported {
+            severity: diagnostic.severity,
+            text: diagnostic
                 .to_string()
                 .replace(&prefix, "")
-                .replace('\n', "\\n")
+                .replace('\n', "\\n"),
         })
         .collect()
-}
-
-/// Whether a problem, as [`reported`] writes it, is an error.
-pub fn is_error(line: &str) -> bool {
-    line.contains(": ERROR: ") || line.starts_with("ERROR: ")
 }

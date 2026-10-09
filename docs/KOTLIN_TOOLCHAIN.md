@@ -79,9 +79,12 @@ Versions compare as Maven compares them (`maven_version.rs`), as the toolchain d
   `KOTLIN_SHARED_CACHE_DIR`, else the platform's user cache directory followed by
   `JetBrains/Kotlin`), and, when a module lists `mavenLocal` in its `repositories`, first from the
   local Maven repository (`<localRepository>` of `~/.m2/settings.xml` or
-  `$M2_HOME/conf/settings.xml`, else `~/.m2/repository`). `mavenLocal` applies to the whole
-  project. A file is read from the first repository that has it; one that is there but cannot be
-  read is a problem, not a reason to read the next. Coordinates name a file only when each part
+  `$M2_HOME/conf/settings.xml`, else `~/.m2/repository`). Only an absent settings file, or one
+  without `<localRepository>`, falls through to the next; one that cannot be read, is not
+  well-formed, or sets an empty location or one through a property is an error, where the
+  toolchain silently reads another repository. `mavenLocal` applies to the whole project. A file
+  is read from the first repository that has it; one that is there but cannot be read is a
+  problem, not a reason to read the next. Coordinates name a file only when each part
   (every group segment, the artifact, version and classifier) is one file name: not empty, `.` or
   `..`, and without `/`, `\`, `:` or NUL.
 - Every artifact in a printed graph must be read completely. An artifact in no repository

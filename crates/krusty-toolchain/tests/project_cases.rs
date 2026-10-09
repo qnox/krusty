@@ -15,8 +15,8 @@ use std::process::{Command, Output};
 
 use krusty_toolchain::diagnostic::Diagnostics;
 use krusty_toolchain::{model, show};
-use rendering::problems;
-use reported::{is_error, reported};
+use rendering::{problems, Ledgers};
+use reported::reported;
 use support::kotlin::{self, Invocation};
 
 fn run_toolchain(root: &Path) -> Output {
@@ -52,39 +52,47 @@ fn every_project_case_is_read_as_the_toolchain_reads_it() {
             String::from_utf8_lossy(unread)
         );
         let (warnings, result) = problems(&toolchain.root, &toolchain.stdout);
+        let expected =
+            Ledgers::of_streams(errors, warnings).unwrap_or_else(|error| panic!("{name}: {error}"));
         let temp = support::TempDir::new(&format!("project-case-{name}"));
         let root = support::materialize(&temp, &case.files);
         let mut diagnostics = Diagnostics::default();
         let model = model::read(model::Start::Discover(&root), &mut diagnostics)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
-        let actual = reported(&root, &diagnostics);
+        let reported = reported(&root, &diagnostics);
+        let texts: Vec<&str> = reported
+            .iter()
+            .map(|problem| problem.text.as_str())
+            .collect();
+        let actual = Ledgers::of(reported.clone());
         match &case.krusty {
             Some(krusty) => {
-                // krusty-toolchain differs only by refusing, in its own name, or where the
-                // toolchain rejects the project too.
-                let refuses = krusty
-                    .iter()
-                    .any(|line| line.contains("ERROR: krusty-toolchain "));
-                if !krusty.iter().any(|line| is_error(line)) || !refuses && errors.is_empty() {
+                // krusty-toolchain differs only by refusing: what it reports, exactly and in
+                // order, is the `krusty` section, and holds an error.
+                if texts != *krusty {
+                    failures.push(format!(
+                        "{name}:\n  expected {krusty:#?}\n  actual   {texts:#?}"
+                    ));
+                }
+                if actual.errors.is_empty() {
                     failures.push(format!("{name}: krusty-toolchain differs without refusing"));
                 }
-                if errors.iter().chain(&warnings).eq(krusty.iter()) {
+                if expected
+                    .errors
+                    .iter()
+                    .chain(&expected.warnings)
+                    .map(|problem| &problem.text)
+                    .eq(krusty)
+                {
                     failures.push(format!(
                         "{name}: the `krusty` section is what the toolchain reports"
                     ));
                 }
-                if &actual != krusty {
-                    failures.push(format!(
-                        "{name}:\n  expected {krusty:#?}\n  actual   {actual:#?}"
-                    ));
-                }
             }
             None => {
-                let (actual_errors, actual_warnings): (Vec<String>, Vec<String>) =
-                    actual.into_iter().partition(|line| is_error(line));
-                if actual_errors != errors || actual_warnings != warnings {
+                if actual != expected {
                     failures.push(format!(
-                        "{name}:\n  expected errors {errors:#?}\n  actual   errors {actual_errors:#?}\n  expected warnings {warnings:#?}\n  actual   warnings {actual_warnings:#?}"
+                        "{name}:\n  expected {expected:#?}\n  actual   {actual:#?}"
                     ));
                 }
                 // The command's result, byte for byte: the module table, or nothing.

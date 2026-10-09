@@ -11,7 +11,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use super::{Coordinates, Problem};
+use super::{Coordinates, ParseError, Problem};
 
 pub struct Store {
     /// The repositories read, in order; the cache is the last.
@@ -40,20 +40,18 @@ impl Store {
         }
     }
 
-    /// The local Maven repository (`LocalM2RepositoryFinder`): the `<localRepository>` of
-    /// `~/.m2/settings.xml`, else of `$M2_HOME/conf/settings.xml`, else `~/.m2/repository`.
-    pub fn local_repository() -> Option<PathBuf> {
-        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-            .filter(|home| !home.is_empty())
-            .map(PathBuf::from)?;
-        let m2_home = std::env::var_os("M2_HOME")
-            .filter(|path| !path.is_empty())
-            .map(|path| PathBuf::from(path).join("conf").join("settings.xml"));
-        let configured = [Some(home.join(".m2").join("settings.xml")), m2_home]
-            .into_iter()
-            .flatten()
-            .find_map(|settings| local_repository_setting(&settings));
-        Some(configured.unwrap_or_else(|| home.join(".m2").join("repository")))
+    /// The local Maven repository (`LocalM2RepositoryFinder`) of this host: see
+    /// [`local_repository_in`]. `None` when there is no home directory to find it in.
+    pub fn local_repository() -> Result<Option<PathBuf>, Problem> {
+        let variable = |name: &str| {
+            std::env::var_os(name)
+                .filter(|value| !value.to_string_lossy().trim().is_empty())
+                .map(PathBuf::from)
+        };
+        let Some(home) = variable(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) else {
+            return Ok(None);
+        };
+        local_repository_in(&home, variable("M2_HOME").as_deref()).map(Some)
     }
 
     /// The cache root the toolchain uses on this host (`AmperUserCacheRoot`): the
@@ -163,22 +161,95 @@ fn is_safe(part: &str) -> bool {
     !part.is_empty() && part != "." && part != ".." && !part.contains(['/', '\\', ':', '\0'])
 }
 
-/// The `<localRepository>` a Maven `settings.xml` sets, if it exists and sets one.
-fn local_repository_setting(settings: &Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(settings).ok()?;
-    let document = roxmltree::Document::parse(&text).ok()?;
-    let value = document
-        .root_element()
+/// The local Maven repository for the home directory `home` and Maven installation `m2_home`:
+/// the `<localRepository>` of `<home>/.m2/settings.xml`, else of `<m2_home>/conf/settings.xml`,
+/// else `<home>/.m2/repository`. Only an absent settings file, or one that sets no
+/// `<localRepository>`, falls through to the next; one that cannot be read, is not a settings
+/// file, or sets an empty location or one through a property (which is not substituted) is a
+/// problem. The toolchain ignores such a file and reads another repository than the one it names.
+fn local_repository_in(home: &Path, m2_home: Option<&Path>) -> Result<PathBuf, Problem> {
+    let user = home.join(".m2").join("settings.xml");
+    let installation = m2_home.map(|m2_home| m2_home.join("conf").join("settings.xml"));
+    for settings in std::iter::once(user).chain(installation) {
+        if let Some(local) = local_repository_setting(&settings)? {
+            return Ok(local);
+        }
+    }
+    Ok(home.join(".m2").join("repository"))
+}
+
+/// The `<localRepository>` the Maven settings file `settings` sets; `None` when there is no such
+/// file or it sets none.
+fn local_repository_setting(settings: &Path) -> Result<Option<PathBuf>, Problem> {
+    let bytes = match std::fs::read(settings) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Problem::in_file(
+                settings,
+                None,
+                format!("cannot read the Maven settings: {error}"),
+            ));
+        }
+    };
+    let text = String::from_utf8(bytes)
+        .map_err(|_| Problem::in_file(settings, None, "the Maven settings are not UTF-8"))?;
+    let at = |document: &roxmltree::Document, node: roxmltree::Node, message: &str| {
+        let position = document.text_pos_at(node.range().start);
+        let error = ParseError::at(position.row as usize, position.col as usize, message, "");
+        Problem::in_file(settings, error.position, error.message)
+    };
+    let document = roxmltree::Document::parse(&text).map_err(|error| {
+        let position = error.pos();
+        let error = ParseError::at(
+            position.row as usize,
+            position.col as usize,
+            &format!("the Maven settings are not well-formed XML: {error}"),
+            &format!(" at {position}"),
+        );
+        Problem::in_file(settings, error.position, error.message)
+    })?;
+    let root = document.root_element();
+    if root.tag_name().name() != "settings" {
+        return Err(at(
+            &document,
+            root,
+            &format!(
+                "the Maven settings' root element is `{}`, not `settings`",
+                root.tag_name().name()
+            ),
+        ));
+    }
+    let Some(element) = root
         .children()
-        .find(|node| node.tag_name().name() == "localRepository")?
-        .text()?
-        .trim();
-    (!value.is_empty()).then(|| PathBuf::from(value))
+        .find(|node| node.tag_name().name() == "localRepository")
+    else {
+        return Ok(None);
+    };
+    let value = element.text().unwrap_or_default().trim();
+    if value.is_empty() {
+        return Err(at(
+            &document,
+            element,
+            "`localRepository` is empty: it names no local Maven repository",
+        ));
+    }
+    if value.contains("${") {
+        return Err(at(
+            &document,
+            element,
+            &format!(
+                "`localRepository` `{value}` uses a property, and krusty-toolchain does not substitute properties in the Maven settings"
+            ),
+        ));
+    }
+    Ok(Some(PathBuf::from(value)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::yaml::Position;
 
     fn temp(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("krusty-store-{name}-{}", std::process::id()));
@@ -288,6 +359,126 @@ mod tests {
                 "cannot read org.example:a:1: {}",
                 std::fs::read(&in_local).unwrap_err()
             )
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_user_settings_win_over_the_installation_settings_over_the_default() {
+        let root = temp("local-precedence");
+        let home = root.join("home");
+        let m2_home = root.join("maven");
+        let user = home.join(".m2/settings.xml");
+        let installation = m2_home.join("conf/settings.xml");
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(installation.parent().unwrap()).unwrap();
+        let default = home.join(".m2/repository");
+
+        // No settings at all, and settings that set no location, fall through to the default.
+        assert_eq!(
+            local_repository_in(&home, Some(&m2_home)),
+            Ok(default.clone())
+        );
+        std::fs::write(&user, "<settings><offline>true</offline></settings>").unwrap();
+        assert_eq!(
+            local_repository_in(&home, Some(&m2_home)),
+            Ok(default.clone())
+        );
+
+        std::fs::write(
+            &installation,
+            "<settings><localRepository>/from/installation</localRepository></settings>",
+        )
+        .unwrap();
+        assert_eq!(
+            local_repository_in(&home, Some(&m2_home)),
+            Ok(PathBuf::from("/from/installation"))
+        );
+        assert_eq!(local_repository_in(&home, None), Ok(default));
+
+        std::fs::write(
+            &user,
+            "<settings>\n  <localRepository> /from/user </localRepository>\n</settings>",
+        )
+        .unwrap();
+        assert_eq!(
+            local_repository_in(&home, Some(&m2_home)),
+            Ok(PathBuf::from("/from/user"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn settings_that_exist_but_name_no_repository_are_problems() {
+        let root = temp("local-invalid");
+        let home = root.join("home");
+        let user = home.join(".m2/settings.xml");
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        // The installation's settings would name a repository; an invalid user file stops there.
+        let m2_home = root.join("maven");
+        std::fs::create_dir_all(m2_home.join("conf")).unwrap();
+        std::fs::write(
+            m2_home.join("conf/settings.xml"),
+            "<settings><localRepository>/from/installation</localRepository></settings>",
+        )
+        .unwrap();
+        let position = |line, column| Some(Position { line, column });
+        let cases: [(&[u8], Problem); 5] = [
+            (
+                b"<settings>\n  <localRepository>\n",
+                Problem::in_file(
+                    &user,
+                    position(1, 1),
+                    "the Maven settings are not well-formed XML: the root node was opened but never closed",
+                ),
+            ),
+            (
+                b"<project/>",
+                Problem::in_file(
+                    &user,
+                    position(1, 1),
+                    "the Maven settings' root element is `project`, not `settings`",
+                ),
+            ),
+            (
+                b"<settings>\n  <localRepository>  </localRepository>\n</settings>",
+                Problem::in_file(
+                    &user,
+                    position(2, 3),
+                    "`localRepository` is empty: it names no local Maven repository",
+                ),
+            ),
+            (
+                b"<settings><localRepository>${user.home}/m2</localRepository></settings>",
+                Problem::in_file(
+                    &user,
+                    position(1, 11),
+                    "`localRepository` `${user.home}/m2` uses a property, and krusty-toolchain does not substitute properties in the Maven settings",
+                ),
+            ),
+            (
+                &[0xff, 0xfe],
+                Problem::in_file(&user, None, "the Maven settings are not UTF-8"),
+            ),
+        ];
+        for (text, problem) in cases {
+            std::fs::write(&user, text).unwrap();
+            assert_eq!(local_repository_in(&home, Some(&m2_home)), Err(problem));
+        }
+
+        // Nor is one that cannot be read at all: here, a directory where the file should be.
+        std::fs::remove_file(&user).unwrap();
+        std::fs::create_dir(&user).unwrap();
+        assert_eq!(
+            local_repository_in(&home, Some(&m2_home)),
+            Err(Problem::in_file(
+                &user,
+                None,
+                format!(
+                    "cannot read the Maven settings: {}",
+                    std::fs::read(&user).unwrap_err()
+                )
+            ))
         );
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -15,6 +15,6 @@ dependencies:
   <!-- do_not_remove: published-with-gradle-metadata -->
 </project>
 --- m2/org/example/broken/1.0/broken-1.0.module
-{ "formatVersion": "1.1", "component": { "group": "org.example", 
+{ "formatVersion": "1.1", "component": { "group": "org.example",
 --- krusty
 <directory>/home/.m2/repository/org/example/broken/1.0/broken-1.0.module:2:1: ERROR: Unable to parse the module metadata of org.example:broken:1.0: the module metadata is not JSON: EOF while parsing a value
