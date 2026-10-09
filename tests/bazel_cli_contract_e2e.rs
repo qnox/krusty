@@ -168,11 +168,11 @@ fn the_projects_kotlinc_flags_are_accepted() {
     assert!(jar_entries(&jar).iter().any(|e| e == "demo/FKt.class"));
 }
 
-/// A language-feature name is not implemented merely because the generic feature set can retain
-/// it. The batch rule must refuse a feature krusty does not model instead of compiling under
-/// unchanged semantics.
+/// The rule forwards kotlinc's raw language-feature channel through the shared settings model. A
+/// release-known feature must not be rejected by a second, hand-maintained CLI capability list;
+/// the compiler phase that owns the feature consumes the same identity.
 #[test]
-fn an_unmodeled_language_feature_is_refused() {
+fn a_release_known_raw_language_feature_reaches_compilation() {
     let dir = workspace("unmodeled-language-feature");
     let source = dir.join("U.kt");
     std::fs::write(&source, "package demo\nfun value(): Int = 1\n").expect("write source");
@@ -186,13 +186,15 @@ fn an_unmodeled_language_feature_is_refused() {
             source.display().to_string(),
         ],
     );
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "krusty: error: krusty does not implement the language feature \
-         'ErrorAboutDataClassCopyVisibilityChange' selected by '-XXLanguage'\n"
+    assert!(
+        output.status.success(),
+        "release-known raw feature was rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!jar.exists(), "a refused feature must not write the jar");
+    assert!(
+        jar.exists(),
+        "the successful compilation must write the jar"
+    );
 }
 
 /// intellij-community also sets `-progressive`. krusty does not implement the progressive

@@ -510,10 +510,6 @@ pub(super) fn finish_language_settings(
                     &progressive,
                     &before_progressive,
                 ));
-            opts.errors
-                .extend(language_features::unmodeled_manual_errors(
-                    &manual, table, versions,
-                ));
             let redundant = language_features::redundancy_warnings(
                 &feature_arguments,
                 &defaults,

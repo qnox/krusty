@@ -203,32 +203,6 @@ fn cannot_be_disabled(
         && feature.behavior_after_since_version == BehaviorAfterSinceVersion::CannotBeDisabled
 }
 
-/// The refusal of each `-XXLanguage` setting that names a feature krusty does not model: a raw
-/// toggle may change syntax, checking or emitted code, so accepting it would compile under
-/// semantics the build did not ask for. A setting kotlinc already refuses (a feature that cannot be
-/// disabled) is left to that error.
-pub(super) fn unmodeled_manual_errors(
-    manual: &[ManualSetting],
-    table: &FeatureTable,
-    versions: &LanguageVersionPolicy,
-) -> Vec<String> {
-    manual
-        .iter()
-        .filter(|manual| {
-            let feature = table
-                .get(&manual.setting.feature)
-                .expect("a manual setting names a known feature");
-            !LangFeatures::models(&feature.name) && !cannot_be_disabled(manual, feature, versions)
-        })
-        .map(|manual| {
-            format!(
-                "krusty does not implement the language feature '{}' selected by '-XXLanguage'",
-                manual.setting.feature
-            )
-        })
-        .collect()
-}
-
 /// The refusal of `-progressive` when a feature it turns on is one krusty does not model, named as
 /// an `@Enables` argument's refusal names its feature. `before` is the state the defaults and the
 /// `@Enables`/`@Disables` arguments leave; a progressive feature already on there is no change.

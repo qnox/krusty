@@ -12204,11 +12204,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   part of the name) is a warning and is skipped; a test-only feature is an error. Every accepted
   setting except one enabling a progressive feature is listed in the "ATTENTION! This build uses
   unsafe internal compiler arguments" warning. Disabling a `CannotBeDisabled` feature whose
-  `sinceVersion` the release no longer supports is a configuration error. A setting naming a feature
-  krusty does not model is refused with
-  `krusty does not implement the language feature '<name>' selected by '-XXLanguage'`, whichever
-  state it puts: a raw toggle is accepted only for semantics krusty implements. Enabling a feature that no stable
-  language version has released and that forces pre-release binaries (before its
+  `sinceVersion` the release no longer supports is a configuration error. A release-known setting
+  is installed in the shared feature set; there is no second hand-maintained list at this raw,
+  unsafe boundary. Compiler phases consume those stable feature identities directly, and the
+  conformance harness uses the same channel for upstream `// LANGUAGE:` directives. Enabling a
+  feature that no stable language version has released and that forces pre-release binaries (before its
   `forcesPreReleaseBinariesBefore`, when it has one) gets kotlinc's "following manually enabled
   features will force generation of pre-release binaries" warning.
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is

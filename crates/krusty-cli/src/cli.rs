@@ -1386,35 +1386,34 @@ mod tests {
         }
     }
 
-    /// A `-XXLanguage` setting naming a feature krusty does not implement is refused whichever state
-    /// it puts. As in kotlinc, enabling a progressive feature is left out of the unsafe-arguments
+    /// A release-known `-XXLanguage` setting reaches the shared feature set. This is kotlinc's raw,
+    /// unsafe feature interface, not a second support declaration: the compiler phases that own a
+    /// feature consume the same identity, and conformance runs use this channel for upstream test
+    /// directives. As in kotlinc, enabling a progressive feature is left out of the unsafe-arguments
     /// notice and disabling one is listed.
     #[test]
-    fn xxlanguage_refuses_a_feature_krusty_does_not_model() {
-        for setting in ["+", "-"] {
-            let o = parse_args(&[
-                "-Xkotlin-reference-version=2.4.20",
-                &format!("-XXLanguage:{setting}ErrorAboutDataClassCopyVisibilityChange"),
-                "f.kt",
-            ]);
-            assert_eq!(
-                o.errors,
-                ["krusty does not implement the language feature \
-                  'ErrorAboutDataClassCopyVisibilityChange' selected by '-XXLanguage'"
-                    .to_string()]
-            );
-        }
+    fn xxlanguage_applies_a_release_known_feature_without_a_second_capability_list() {
         let enabled = parse_args(&[
             "-Xkotlin-reference-version=2.4.20",
             "-XXLanguage:+ErrorAboutDataClassCopyVisibilityChange",
             "f.kt",
         ]);
+        assert!(enabled.errors.is_empty(), "{:?}", enabled.errors);
         assert!(enabled.language_feature_problems.is_empty());
+        assert!(enabled
+            .language_settings
+            .features
+            .has("ErrorAboutDataClassCopyVisibilityChange"));
         let disabled = parse_args(&[
             "-Xkotlin-reference-version=2.4.20",
             "-XXLanguage:-ErrorAboutDataClassCopyVisibilityChange",
             "f.kt",
         ]);
+        assert!(disabled.errors.is_empty(), "{:?}", disabled.errors);
+        assert!(!disabled
+            .language_settings
+            .features
+            .has("ErrorAboutDataClassCopyVisibilityChange"));
         assert_eq!(
             disabled.language_feature_problems,
             [ArgumentProblem::warning(
