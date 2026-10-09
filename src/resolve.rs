@@ -24941,6 +24941,23 @@ val result = object { fun value(): String = captured }
         (errs, info)
     }
 
+    fn retained_standalone_analysis(src: &str) -> (File, TypeInfo, DiagSink) {
+        let mut diagnostics = DiagSink::new();
+        let (file, _, info) = crate::frontend::analyze_source_standalone(src, &mut diagnostics);
+        let info = info.expect("production frontend must retain checked standalone analysis");
+        (file, info, diagnostics)
+    }
+
+    fn retained_platform_analysis(
+        src: &str,
+        platform: Box<dyn crate::libraries::SemanticPlatform>,
+    ) -> (File, TypeInfo, DiagSink) {
+        let mut diagnostics = DiagSink::new();
+        let (file, _, info) = crate::frontend::analyze_source(src, platform, &mut diagnostics);
+        let info = info.expect("production frontend must retain checked platform analysis");
+        (file, info, diagnostics)
+    }
+
     fn check_with_annotation_fixtures(
         src: &str,
         detected_features: bool,
@@ -25185,11 +25202,7 @@ fun rejected(owner: Owner) { owner.hidden() }
                       \u{20}   }\n\
                       \u{20} )\n\
                       }";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, info, diagnostics) = retained_standalone_analysis(source);
 
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         let captures = info
@@ -25217,9 +25230,7 @@ fun rejected(owner: Owner) { owner.hidden() }
                       \u{20} class T\n\
                       \u{20} return object {}\n\
                       }";
-        let mut diagnostics = DiagSink::new();
-        let tokens = lex(source, &mut diagnostics);
-        let file = parse(source, &tokens, &mut diagnostics);
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         let function_start = file
             .decls
             .iter()
@@ -25236,10 +25247,6 @@ fun rejected(owner: Owner) { owner.hidden() }
                 _ => None,
             })
             .expect("anonymous object");
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
-
         assert_no_diags(&diagnostics);
         let function_parameters = info.resolved_declaration_type_parameters(function_start);
         let anonymous_parameters = info.resolved_declaration_type_parameters(anonymous_start);
@@ -25254,8 +25261,10 @@ fun rejected(owner: Owner) { owner.hidden() }
         // Lowering must receive that semantic identity directly instead of an `Obj("T")` marker it
         // would have to reinterpret by spelling.
         let source = "class T\ninline fun <reified T : Any> literal() = T::class";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(Vec::new()),
+        ));
+        let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         let literal = file
             .expr_arena
             .iter()
@@ -25275,13 +25284,6 @@ fun rejected(owner: Owner) { owner.hidden() }
                 _ => None,
             })
             .expect("generic function declaration");
-        let files = vec![file];
-        let platform = initialized_jvm_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(Vec::new()),
-        ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
-
         assert_no_diags(&diagnostics);
         let [semantic] = info.resolved_declaration_type_parameters(declaration_start) else {
             panic!("one declaration-owned type-parameter identity expected");
@@ -25310,8 +25312,9 @@ fun rejected(owner: Owner) { owner.hidden() }
         let source = "import kotlin.reflect.KClass\n\
             interface Core { fun <T : Any> getFor(id: String, type: KClass<T>): T }\n\
             inline fun <reified T : Any> Core.getFor(id: String): T = getFor(id, T::class)";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
+        let platform =
+            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
+        let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         let call = file
             .expr_arena
             .iter()
@@ -25335,12 +25338,6 @@ fun rejected(owner: Owner) { owner.hidden() }
                 _ => None,
             })
             .expect("generic extension declaration");
-        let files = vec![file];
-        let platform =
-            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
-
         assert_no_diags(&diagnostics);
         let [semantic] = info.resolved_declaration_type_parameters(declaration_start) else {
             panic!("one declaration-owned type-parameter identity expected");
@@ -25843,11 +25840,10 @@ fun use() {
 
     #[test]
     fn named_function_runtime_check_records_its_metadata_callable_shape() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "fun inspect(value: Any) = value is Function1<*, *>",
-            &mut diagnostics,
-        );
+        let source = "fun inspect(value: Any) = value is Function1<*, *>";
+        let platform =
+            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
+        let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         let check = file
             .expr_arena
             .iter()
@@ -25856,11 +25852,6 @@ fun use() {
                 matches!(expression, Expr::Is { .. }).then_some(ExprId(index as u32))
             })
             .expect("type check expression");
-        let files = vec![file];
-        let platform =
-            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
         assert!(matches!(
             info.expr_lowers.get(&check),
