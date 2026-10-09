@@ -4564,15 +4564,21 @@ code is the one the code generator already names: provider-owned bodies through 
   stay exact serialized identities: a public `CommonIdSignature`, a public property's accessor, or
   a file-local slot that is never matched by spelling. The Kotlin/Native 2.4.20 stdlib decodes
   completely (11,969 function bodies); so do the linuxX64 KLIBs of kotlinx-coroutines-core 1.11.0,
-  kotlinx-serialization-json 1.9.0, ktor-server-cio 3.6.0 and kaml 0.104.0. Declaration
-  annotations, source coordinates and file entries are not decoded yet.
+  kotlinx-serialization-json 1.9.0, ktor-server-cio 3.6.0 and kaml 0.104.0. A tree keeps every
+  serialized declaration and expression fact (origins, raw flags, declaration and type annotations,
+  value-class representations, type-alias expansions, inlined-block file entries) except source
+  coordinates; `IrFile`-level facts are outside the trees.
 - **Joining (next).** A selected dependency callable is joined to its decoded body through its
   exact public signature, never through a name or parameter tuple.
 - **Lowering (next).** The decoded body is lowered into checked common IR so the native generator
   compiles it as it compiles a module function; a body using an operation the lowering does not
   model declines by name.
-- Tests: `tests/klib_ir_trees_e2e.rs` (needs `KRUSTY_KOTLIN_NATIVE`) and the unit tests in
-  `metadata/klib_ir/tree_decoding.rs`.
+- Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`. End-to-end coverage comes through
+  the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
+  topology, where krusty compiles each dependency module to a KLIB itself (metadata and serialized
+  IR) and then compiles the main module against it; kotlinc only supplies the expected output.
+  That needs a KLIB writer whose output this decoder reads back, and lands with lowering, the first
+  consumer of the trees.
 
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 

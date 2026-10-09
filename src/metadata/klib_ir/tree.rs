@@ -6,6 +6,13 @@
 //! identities ([`KlibIrSymbol`]), origins stay the serializer's strings, and flags stay raw, so
 //! a consumer joining this to a semantic model decides what each fact means and declines what it
 //! does not model.
+//!
+//! Every serialized declaration and expression fact is kept except source coordinates (the
+//! `global_coordinates`/`local_coordinates` offsets on declarations, statements and
+//! expressions). Those feed debug information only, and the native target emits none yet; a
+//! consumer that needs them extends the decoder rather than recovering positions elsewhere.
+//! The facts of the `IrFile` that holds a declaration (its package name, file annotations and
+//! file entry) belong to the file rather than to any tree and are not part of this model.
 
 use super::symbols::KlibIrSymbol;
 use super::KlibIrConstant;
@@ -82,7 +89,7 @@ pub enum KlibIrType {
         nullability: KlibIrNullability,
         arguments: Vec<KlibIrTypeArgument>,
         /// Constructors of the type's annotations (`@ExtensionFunctionType`, ...).
-        annotations: Vec<KlibIrSymbol>,
+        annotations: Vec<KlibIrAnnotation>,
     },
     DefinitelyNotNull(KlibIrTypeId),
     Dynamic,
@@ -196,18 +203,17 @@ pub enum KlibIrStatement {
     Function(KlibIrFunctionId),
     Class(KlibIrClassId),
     LocalDelegatedProperty(KlibIrLocalDelegatedProperty),
-    TypeAlias(KlibIrSymbol),
+    TypeAlias(KlibIrTypeAlias),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrLocalDelegatedProperty {
-    pub symbol: KlibIrSymbol,
+    pub base: KlibIrDeclarationBase,
     pub name: String,
     pub ty: KlibIrTypeId,
     pub delegate: Option<KlibIrVariableId>,
     pub getter: Option<KlibIrFunctionId>,
     pub setter: Option<KlibIrFunctionId>,
-    pub flags: u64,
 }
 
 /// `IrExpression`'s operation.
@@ -280,6 +286,10 @@ pub enum KlibIrExprKind {
     },
     InlinedFunctionBlock {
         inlined_function: Option<KlibIrSymbol>,
+        /// The file that declared the inlined function, and its offsets there.
+        file: KlibIrFileEntry,
+        start_offset: i32,
+        end_offset: i32,
         statements: Vec<KlibIrStatement>,
         origin: Option<String>,
     },
@@ -363,24 +373,47 @@ pub enum KlibIrExprKind {
     Missing,
 }
 
+/// `IrDeclarationBase`: what every declaration carries besides its own fields.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KlibIrDeclarationBase {
+    pub symbol: KlibIrSymbol,
+    /// The serializer's `IrDeclarationOrigin` name (`DEFINED`, `FAKE_OVERRIDE`, ...).
+    pub origin: String,
+    /// The serialized flag word, bit layout per declaration kind, kept undecoded.
+    pub flags: u64,
+    pub annotations: Vec<KlibIrAnnotation>,
+}
+
+/// An annotation application: a constructor call of the annotation class.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KlibIrAnnotation {
+    pub access: KlibIrMemberAccess,
+    pub constructor_type_arguments: u32,
+}
+
+/// Where an inlined function's offsets point: an entry of the KLIB's `fileEntries.knf` table,
+/// or, before Kotlin 2.3, a file name stored in place.
+#[derive(Clone, Debug, PartialEq)]
+pub enum KlibIrFileEntry {
+    Id(u32),
+    Named(String),
+}
+
 /// A value parameter or receiver of a function.
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrParameter {
-    pub symbol: KlibIrSymbol,
+    pub base: KlibIrDeclarationBase,
     pub name: String,
     pub ty: KlibIrTypeId,
     pub vararg_element_type: Option<KlibIrTypeId>,
     pub default_value: Option<KlibIrExprId>,
-    pub origin: String,
-    pub flags: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrTypeParameter {
-    pub symbol: KlibIrSymbol,
+    pub base: KlibIrDeclarationBase,
     pub name: String,
     pub supertypes: Vec<KlibIrTypeId>,
-    pub flags: u64,
 }
 
 /// What a function's body is.
@@ -401,11 +434,9 @@ pub enum KlibIrSyntheticBody {
 /// A function, constructor or accessor, with its body when the KLIB carries one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrFunction {
-    pub symbol: KlibIrSymbol,
+    pub base: KlibIrDeclarationBase,
     pub name: String,
     pub constructor: bool,
-    pub origin: String,
-    pub flags: u64,
     pub type_parameters: Vec<KlibIrTypeParameter>,
     pub dispatch_receiver: Option<KlibIrParameter>,
     pub context_parameters: Vec<KlibIrParameter>,
@@ -413,33 +444,34 @@ pub struct KlibIrFunction {
     pub regular_parameters: Vec<KlibIrParameter>,
     pub return_type: KlibIrTypeId,
     pub overridden: Vec<KlibIrSymbol>,
+    /// The class whose companion this extension's receiver denotes (`companionExtensionClass`).
+    pub companion_extension_class: Option<KlibIrSymbol>,
+    /// For an inline function prepared for cross-module inlining, the file entry its body's
+    /// offsets refer to.
+    pub prepared_inline_file: Option<u32>,
     pub body: Option<KlibIrBody>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrVariable {
-    pub symbol: KlibIrSymbol,
+    pub base: KlibIrDeclarationBase,
     pub name: String,
     pub ty: KlibIrTypeId,
     pub initializer: Option<KlibIrExprId>,
-    pub origin: String,
-    pub flags: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrField {
-    pub symbol: KlibIrSymbol,
+    pub base: KlibIrDeclarationBase,
     pub name: String,
     pub ty: KlibIrTypeId,
     pub initializer: Option<KlibIrExprId>,
-    pub flags: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrProperty {
-    pub symbol: KlibIrSymbol,
+    pub base: KlibIrDeclarationBase,
     pub name: String,
-    pub flags: u64,
     pub backing_field: Option<KlibIrField>,
     pub getter: Option<KlibIrFunctionId>,
     pub setter: Option<KlibIrFunctionId>,
@@ -447,7 +479,7 @@ pub struct KlibIrProperty {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrEnumEntry {
-    pub symbol: KlibIrSymbol,
+    pub base: KlibIrDeclarationBase,
     pub name: String,
     pub initializer: Option<KlibIrExprId>,
     pub class: Option<KlibIrClassId>,
@@ -462,21 +494,35 @@ pub enum KlibIrMember {
     Class(KlibIrClassId),
     EnumEntry(KlibIrEnumEntry),
     AnonymousInitializer {
-        symbol: KlibIrSymbol,
+        base: KlibIrDeclarationBase,
         statements: Vec<KlibIrStatement>,
     },
-    TypeAlias(KlibIrSymbol),
+    TypeAlias(KlibIrTypeAlias),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct KlibIrTypeAlias {
+    pub base: KlibIrDeclarationBase,
+    pub name: String,
+    pub expanded: KlibIrTypeId,
+    pub type_parameters: Vec<KlibIrTypeParameter>,
+}
+
+/// A value class's single underlying property and its type.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KlibIrInlineClassRepresentation {
+    pub underlying_property: String,
+    pub underlying_type: KlibIrTypeId,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrClass {
-    pub symbol: KlibIrSymbol,
+    pub base: KlibIrDeclarationBase,
     pub name: String,
-    pub origin: String,
-    pub flags: u64,
     pub this_receiver: Option<KlibIrParameter>,
     pub type_parameters: Vec<KlibIrTypeParameter>,
     pub supertypes: Vec<KlibIrTypeId>,
     pub members: Vec<KlibIrMember>,
+    pub inline_class_representation: Option<KlibIrInlineClassRepresentation>,
     pub sealed_subclasses: Vec<KlibIrSymbol>,
 }

@@ -7,9 +7,8 @@
 //! requires and the bytes lack, a reference to an absent table entry, or an unknown operation is
 //! an error naming where it was found; nothing is skipped to make a body decode.
 //!
-//! Three kinds of serialized fact are deliberately not decoded yet, because nothing consumes them:
-//! source coordinates, the annotations of declarations (a type's annotations are decoded) and the
-//! file entries an inlined block records.
+//! The model in [`super::tree`] states what a tree keeps: every declaration and expression fact
+//! except source coordinates.
 
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -18,12 +17,14 @@ use crate::klib::KlibArchive;
 
 use super::symbols::{string, KlibIrSignature, KlibIrSymbol, SignatureTable};
 use super::tree::{
-    KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrBranch, KlibIrCatch, KlibIrClass,
-    KlibIrClassId, KlibIrEnumEntry, KlibIrExpr, KlibIrExprId, KlibIrExprKind, KlibIrField,
-    KlibIrFunction, KlibIrFunctionId, KlibIrLocalDelegatedProperty, KlibIrLoop, KlibIrMember,
+    KlibIrAnnotation, KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrBranch, KlibIrCatch,
+    KlibIrClass, KlibIrClassId, KlibIrDeclarationBase, KlibIrEnumEntry, KlibIrExpr, KlibIrExprId,
+    KlibIrExprKind, KlibIrField, KlibIrFileEntry, KlibIrFunction, KlibIrFunctionId,
+    KlibIrInlineClassRepresentation, KlibIrLocalDelegatedProperty, KlibIrLoop, KlibIrMember,
     KlibIrMemberAccess, KlibIrNullability, KlibIrParameter, KlibIrProperty, KlibIrStatement,
-    KlibIrSyntheticBody, KlibIrType, KlibIrTypeArgument, KlibIrTypeId, KlibIrTypeOperator,
-    KlibIrTypeParameter, KlibIrVarargElement, KlibIrVariable, KlibIrVariableId, KlibIrVariance,
+    KlibIrSyntheticBody, KlibIrType, KlibIrTypeAlias, KlibIrTypeArgument, KlibIrTypeId,
+    KlibIrTypeOperator, KlibIrTypeParameter, KlibIrVarargElement, KlibIrVariable, KlibIrVariableId,
+    KlibIrVariance,
 };
 use super::wire::{
     declaration_index, entries, message, packed_field, packed_values, read_per_file_table,
@@ -74,20 +75,23 @@ impl KlibIrModuleTrees {
     fn index(&mut self) -> Result<(), KlibIrDecodeError> {
         for (tree_index, tree) in self.trees.iter().enumerate() {
             for (function_index, function) in tree.arena.functions.iter().enumerate() {
-                if matches!(function.symbol.signature, KlibIrSignature::FileLocal { .. }) {
+                if matches!(
+                    function.base.symbol.signature,
+                    KlibIrSignature::FileLocal { .. }
+                ) {
                     continue;
                 }
                 let id = KlibIrFunctionId(u32::try_from(function_index).expect("arena fits u32"));
                 if let Some((previous, _)) = self
                     .functions
-                    .insert(function.symbol.signature.clone(), (tree_index, id))
+                    .insert(function.base.symbol.signature.clone(), (tree_index, id))
                 {
                     return Err(KlibIrDecodeError::malformed(
                         DECLARATIONS,
                         0,
                         format!(
                             "declaration trees {previous} and {tree_index} both define {:?}",
-                            function.symbol.signature
+                            function.base.symbol.signature
                         ),
                     ));
                 }
@@ -430,14 +434,7 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
                         }
                     });
                 }
-                let mut annotations = Vec::new();
-                for annotation in ty.messages(1, "type annotation")? {
-                    annotations.push(self.required_symbol(
-                        &annotation,
-                        1,
-                        "annotation constructor",
-                    )?);
-                }
+                let annotations = self.annotations(&ty, 1)?;
                 KlibIrType::Simple {
                     classifier,
                     nullability,
@@ -942,9 +939,17 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             },
             43 => {
                 let inlined_function = self.optional_symbol(op, 1, "inlined function")?;
+                let file = self
+                    .file_reference(op, 2, 6)?
+                    .ok_or_else(|| op.error("inlined block names no file"))?;
+                let start_offset = int32(op.required_varint(4, "inlined start offset")?);
+                let end_offset = int32(op.required_varint(5, "inlined end offset")?);
                 let (statements, origin) = self.block(&op.required(3, "inlined block base")?)?;
                 K::InlinedFunctionBlock {
                     inlined_function,
+                    file,
+                    start_offset,
+                    end_offset,
                     statements,
                     origin,
                 }
@@ -983,7 +988,7 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
                     11 => KlibIrStatement::LocalDelegatedProperty(
                         self.local_delegated_property(&declaration)?,
                     ),
-                    12 => KlibIrStatement::TypeAlias(self.declaration_symbol(&declaration)?),
+                    12 => KlibIrStatement::TypeAlias(self.type_alias(&declaration)?),
                     other => {
                         return Err(declaration
                             .error(format!("declaration kind {other} cannot be a statement")))
@@ -997,23 +1002,41 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
 
     // ---- declarations -----------------------------------------------------------------------
 
-    /// `IrDeclarationBase` of a declaration message: symbol, origin and flags.
-    fn base(
+    /// `IrAnnotation`: a constructor call of the annotation class.
+    fn annotation(&mut self, msg: &Msg<'_>) -> Result<KlibIrAnnotation, KlibIrDecodeError> {
+        let symbol = self.required_symbol(msg, 1, "annotation constructor")?;
+        let count = msg.required_varint(2, "annotation type argument count")?;
+        Ok(KlibIrAnnotation {
+            access: self.access(msg, symbol, 3, 5, 6, Some(4))?,
+            constructor_type_arguments: u32::try_from(int32(count))
+                .map_err(|_| msg.error("negative annotation type argument count"))?,
+        })
+    }
+
+    fn annotations(
         &mut self,
-        declaration: &Msg<'_>,
-    ) -> Result<(KlibIrSymbol, String, u64), KlibIrDecodeError> {
+        msg: &Msg<'_>,
+        number: u64,
+    ) -> Result<Vec<KlibIrAnnotation>, KlibIrDecodeError> {
+        msg.messages(number, "annotation")?
+            .iter()
+            .map(|annotation| self.annotation(annotation))
+            .collect()
+    }
+
+    /// The `IrDeclarationBase` a declaration message carries as its field 1.
+    fn base(&mut self, declaration: &Msg<'_>) -> Result<KlibIrDeclarationBase, KlibIrDecodeError> {
         let base = declaration.required(1, "declaration base")?;
         let symbol = self.required_symbol(&base, 1, "declaration symbol")?;
         let origin = self.string(base.required_varint(2, "declaration origin")?, "origin")?;
         let flags = base.varint(4, "declaration flags")?.unwrap_or(0);
-        Ok((symbol, origin, flags))
-    }
-
-    fn declaration_symbol(
-        &mut self,
-        declaration: &Msg<'_>,
-    ) -> Result<KlibIrSymbol, KlibIrDecodeError> {
-        Ok(self.base(declaration)?.0)
+        let annotations = self.annotations(&base, 5)?;
+        Ok(KlibIrDeclarationBase {
+            symbol,
+            origin,
+            flags,
+            annotations,
+        })
     }
 
     fn name_and_type(
@@ -1025,8 +1048,41 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
         Ok((self.string(name, "name")?, self.ty(ty)?))
     }
 
+    fn file_entry(&self, msg: &Msg<'_>) -> Result<KlibIrFileEntry, KlibIrDecodeError> {
+        if let Some(name) = msg.varint(4, "file entry name")? {
+            return Ok(KlibIrFileEntry::Named(
+                self.string(name, "file entry name")?,
+            ));
+        }
+        let name = unique_bytes(&msg.fields, 1, "file entry name", msg.entry)?
+            .ok_or_else(|| msg.error("file entry has no name"))?;
+        let name = std::str::from_utf8(name.value)
+            .map_err(|_| msg.error("file entry name is not UTF-8"))?;
+        Ok(KlibIrFileEntry::Named(name.to_owned()))
+    }
+
+    /// A file entry given either by its table id (`id_number`) or in place (`entry_number`).
+    fn file_reference(
+        &self,
+        msg: &Msg<'_>,
+        entry_number: u64,
+        id_number: u64,
+    ) -> Result<Option<KlibIrFileEntry>, KlibIrDecodeError> {
+        match (
+            msg.message(entry_number, "file entry")?,
+            msg.varint(id_number, "file entry id")?,
+        ) {
+            (None, None) => Ok(None),
+            (Some(entry), None) => self.file_entry(&entry).map(Some),
+            (None, Some(id)) => Ok(Some(KlibIrFileEntry::Id(
+                u32::try_from(id).map_err(|_| msg.error("file entry id exceeds u32"))?,
+            ))),
+            (Some(_), Some(_)) => Err(msg.error("file given both in place and by id")),
+        }
+    }
+
     fn parameter(&mut self, msg: &Msg<'_>) -> Result<KlibIrParameter, KlibIrDecodeError> {
-        let (symbol, origin, flags) = self.base(msg)?;
+        let base = self.base(msg)?;
         let (name, ty) = self.name_and_type(msg, 2)?;
         let vararg_element_type = msg
             .varint(3, "vararg element type")?
@@ -1037,13 +1093,11 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             .map(|raw| self.expression_entry(raw, "default value"))
             .transpose()?;
         Ok(KlibIrParameter {
-            symbol,
+            base,
             name,
             ty,
             vararg_element_type,
             default_value,
-            origin,
-            flags,
         })
     }
 
@@ -1054,7 +1108,7 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
     ) -> Result<Vec<KlibIrTypeParameter>, KlibIrDecodeError> {
         let mut parameters = Vec::new();
         for parameter in msg.messages(number, "type parameter")? {
-            let (symbol, _, flags) = self.base(&parameter)?;
+            let base = self.base(&parameter)?;
             let name = self.string(parameter.required_varint(2, "type parameter name")?, "name")?;
             let supertypes = parameter
                 .packed(3, "type parameter bound")?
@@ -1062,10 +1116,9 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
                 .map(|raw| self.ty(raw))
                 .collect::<Result<_, _>>()?;
             parameters.push(KlibIrTypeParameter {
-                symbol,
+                base,
                 name,
                 supertypes,
-                flags,
             });
         }
         Ok(parameters)
@@ -1085,48 +1138,54 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
         msg: &Msg<'_>,
         constructor: bool,
     ) -> Result<KlibIrFunctionId, KlibIrDecodeError> {
-        let base = msg.required(1, "function base")?;
-        let (symbol, origin, flags) = self.base(&base)?;
-        let (name, return_type) = self.name_and_type(&base, 2)?;
-        let type_parameters = self.type_parameters(&base, 3)?;
-        let dispatch_receiver = base
+        let function = msg.required(1, "function base")?;
+        let base = self.base(&function)?;
+        let (name, return_type) = self.name_and_type(&function, 2)?;
+        let type_parameters = self.type_parameters(&function, 3)?;
+        let dispatch_receiver = function
             .message(4, "dispatch receiver")?
             .map(|p| self.parameter(&p))
             .transpose()?;
-        let context_parameters = base
+        let context_parameters = function
             .messages(9, "context parameter")?
             .iter()
             .map(|p| self.parameter(p))
             .collect::<Result<_, _>>()?;
-        let extension_receiver = base
+        let extension_receiver = function
             .message(5, "extension receiver")?
             .map(|p| self.parameter(&p))
             .transpose()?;
-        let regular_parameters = base
+        let regular_parameters = function
             .messages(6, "regular parameter")?
             .iter()
             .map(|p| self.parameter(p))
             .collect::<Result<_, _>>()?;
-        let body = base
+        let body = function
             .varint(7, "function body")?
             .map(|raw| self.statement_body_entry(raw, "function body"))
             .transpose()?;
-        let overridden = if constructor {
-            Vec::new()
+        let companion_extension_class =
+            self.optional_symbol(&function, 10, "companion extension class")?;
+        let (overridden, prepared_inline_file) = if constructor {
+            (Vec::new(), None)
         } else {
-            msg.packed(2, "overridden function")?
+            let overridden = msg
+                .packed(2, "overridden function")?
                 .into_iter()
                 .map(|code| self.symbol(code))
-                .collect::<Result<_, _>>()?
+                .collect::<Result<_, _>>()?;
+            let file = msg
+                .varint(3, "prepared inline file entry")?
+                .map(|id| u32::try_from(id).map_err(|_| msg.error("file entry id exceeds u32")))
+                .transpose()?;
+            (overridden, file)
         };
         let id =
             KlibIrFunctionId(u32::try_from(self.arena.functions.len()).expect("arena fits u32"));
         self.arena.functions.push(KlibIrFunction {
-            symbol,
+            base,
             name,
             constructor,
-            origin,
-            flags,
             type_parameters,
             dispatch_receiver,
             context_parameters,
@@ -1134,46 +1193,45 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             regular_parameters,
             return_type,
             overridden,
+            companion_extension_class,
+            prepared_inline_file,
             body,
         });
         Ok(id)
     }
 
     fn variable(&mut self, msg: &Msg<'_>) -> Result<KlibIrVariableId, KlibIrDecodeError> {
-        let (symbol, origin, flags) = self.base(msg)?;
+        let base = self.base(msg)?;
         let (name, ty) = self.name_and_type(msg, 2)?;
         let initializer = self.optional_expression(msg, 3, "variable initializer")?;
         let id =
             KlibIrVariableId(u32::try_from(self.arena.variables.len()).expect("arena fits u32"));
         self.arena.variables.push(KlibIrVariable {
-            symbol,
+            base,
             name,
             ty,
             initializer,
-            origin,
-            flags,
         });
         Ok(id)
     }
 
     fn field(&mut self, msg: &Msg<'_>) -> Result<KlibIrField, KlibIrDecodeError> {
-        let (symbol, _, flags) = self.base(msg)?;
+        let base = self.base(msg)?;
         let (name, ty) = self.name_and_type(msg, 2)?;
         let initializer = msg
             .varint(3, "field initializer")?
             .map(|raw| self.expression_entry(raw, "field initializer"))
             .transpose()?;
         Ok(KlibIrField {
-            symbol,
+            base,
             name,
             ty,
             initializer,
-            flags,
         })
     }
 
     fn property(&mut self, msg: &Msg<'_>) -> Result<KlibIrProperty, KlibIrDecodeError> {
-        let (symbol, _, flags) = self.base(msg)?;
+        let base = self.base(msg)?;
         let name = self.string(msg.required_varint(2, "property name")?, "name")?;
         let backing_field = msg
             .message(3, "backing field")?
@@ -1188,9 +1246,8 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             .map(|setter| self.function(&setter, false))
             .transpose()?;
         Ok(KlibIrProperty {
-            symbol,
+            base,
             name,
-            flags,
             backing_field,
             getter,
             setter,
@@ -1201,10 +1258,10 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
         &mut self,
         msg: &Msg<'_>,
     ) -> Result<KlibIrLocalDelegatedProperty, KlibIrDecodeError> {
-        let (symbol, _, flags) = self.base(msg)?;
+        let base = self.base(msg)?;
         let (name, ty) = self.name_and_type(msg, 2)?;
         Ok(KlibIrLocalDelegatedProperty {
-            symbol,
+            base,
             name,
             ty,
             delegate: msg
@@ -1219,7 +1276,17 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
                 .message(5, "setter")?
                 .map(|setter| self.function(&setter, false))
                 .transpose()?,
-            flags,
+        })
+    }
+
+    fn type_alias(&mut self, msg: &Msg<'_>) -> Result<KlibIrTypeAlias, KlibIrDecodeError> {
+        let base = self.base(msg)?;
+        let (name, expanded) = self.name_and_type(msg, 2)?;
+        Ok(KlibIrTypeAlias {
+            base,
+            name,
+            expanded,
+            type_parameters: self.type_parameters(msg, 3)?,
         })
     }
 
@@ -1228,7 +1295,7 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
     }
 
     fn nested_class(&mut self, msg: &Msg<'_>) -> Result<KlibIrClassId, KlibIrDecodeError> {
-        let (symbol, origin, flags) = self.base(msg)?;
+        let base = self.base(msg)?;
         let name = self.string(msg.required_varint(2, "class name")?, "name")?;
         let this_receiver = msg
             .message(3, "this receiver")?
@@ -1244,9 +1311,19 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             .into_iter()
             .map(|raw| self.ty(raw))
             .collect::<Result<_, _>>()?;
-        if let Some(representation) = msg.message(7, "inline class representation")? {
-            self.ty(representation.required_varint(2, "underlying type")?)?;
-        }
+        let inline_class_representation = msg
+            .message(7, "inline class representation")?
+            .map(|representation| {
+                Ok::<_, KlibIrDecodeError>(KlibIrInlineClassRepresentation {
+                    underlying_property: self.string(
+                        representation.required_varint(1, "underlying property")?,
+                        "underlying property",
+                    )?,
+                    underlying_type: self
+                        .ty(representation.required_varint(2, "underlying type")?)?,
+                })
+            })
+            .transpose()?;
         let sealed_subclasses = msg
             .packed(8, "sealed subclass")?
             .into_iter()
@@ -1254,14 +1331,13 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             .collect::<Result<_, _>>()?;
         let id = KlibIrClassId(u32::try_from(self.arena.classes.len()).expect("arena fits u32"));
         self.arena.classes.push(KlibIrClass {
-            symbol,
+            base,
             name,
-            origin,
-            flags,
             this_receiver,
             type_parameters,
             supertypes,
             members,
+            inline_class_representation,
             sealed_subclasses,
         });
         Ok(id)
@@ -1274,7 +1350,7 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             .ok_or_else(|| msg.error("declaration is empty"))?;
         Ok(match kind {
             1 => {
-                let (symbol, _, _) = self.base(&declaration)?;
+                let base = self.base(&declaration)?;
                 let body = self.statement_body_entry(
                     declaration.required_varint(2, "anonymous initializer body")?,
                     "anonymous initializer body",
@@ -1282,12 +1358,12 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
                 let KlibIrBody::Block(statements) = body else {
                     return Err(declaration.error("anonymous initializer has a synthetic body"));
                 };
-                KlibIrMember::AnonymousInitializer { symbol, statements }
+                KlibIrMember::AnonymousInitializer { base, statements }
             }
             2 => KlibIrMember::Class(self.class(&declaration)?),
             3 => KlibIrMember::Function(self.function(&declaration, true)?),
             4 => {
-                let (symbol, _, _) = self.base(&declaration)?;
+                let base = self.base(&declaration)?;
                 let name = self.string(declaration.required_varint(2, "entry name")?, "name")?;
                 let initializer = declaration
                     .varint(3, "enum entry initializer")?
@@ -1298,7 +1374,7 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
                     .map(|class| self.class(&class))
                     .transpose()?;
                 KlibIrMember::EnumEntry(KlibIrEnumEntry {
-                    symbol,
+                    base,
                     name,
                     initializer,
                     class,
@@ -1307,7 +1383,7 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             5 => KlibIrMember::Field(self.field(&declaration)?),
             6 => KlibIrMember::Function(self.function(&declaration, false)?),
             7 => KlibIrMember::Property(self.property(&declaration)?),
-            12 => KlibIrMember::TypeAlias(self.declaration_symbol(&declaration)?),
+            12 => KlibIrMember::TypeAlias(self.type_alias(&declaration)?),
             other => {
                 return Err(declaration.error(format!(
                     "declaration kind {other} cannot be a file or class member"
@@ -1543,6 +1619,136 @@ mod tests {
         ));
         assert_eq!(decoder.depth, 0);
         assert_eq!(decoder.arena.types.len(), MAX_DEPTH);
+    }
+
+    /// `BinaryLattice.encode(even, odd)`.
+    fn lattice_of(even: u64, odd: u64) -> u64 {
+        (0..32).fold(0, |packed, bit| {
+            packed | ((even >> bit) & 1) << (2 * bit) | ((odd >> bit) & 1) << (2 * bit + 1)
+        })
+    }
+
+    const CLASS: u64 = 6;
+    const TYPE_PARAMETER: u64 = 7;
+    const TYPEALIAS: u64 = 14;
+
+    fn declaration_strings() -> Vec<String> {
+        ["kotlin", "Box", "DEFINED", "value", "Alias", "T", "Marker"]
+            .map(str::to_string)
+            .to_vec()
+    }
+
+    /// `IrDeclarationBase` with origin `DEFINED`, the given flags, and one `@Marker` annotation.
+    fn declaration_base(symbol_code: u64, flags: u64) -> Vec<u8> {
+        let mut base = varint_field(1, symbol_code);
+        base.extend(varint_field(2, 2));
+        base.extend(varint_field(4, flags));
+        let mut annotation = varint_field(1, symbol(2, FUNCTION));
+        annotation.extend(varint_field(2, 0));
+        base.extend(bytes_field(5, &annotation));
+        bytes_field(1, &base)
+    }
+
+    fn decode_member(declaration: &[u8]) -> (KlibIrArena, KlibIrMember) {
+        let strings = declaration_strings();
+        let signatures = [
+            public_signature(0, 1),
+            local_signature(9),
+            public_signature(0, 6),
+            public_signature(0, 4),
+        ];
+        let signatures = signatures.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        // Type 0 is a class type over symbol slot 0; type 1 is the type parameter in slot 1.
+        let types = [
+            bytes_field(5, &varint_field(2, symbol(0, CLASS))),
+            bytes_field(5, &varint_field(2, symbol(1, TYPE_PARAMETER))),
+        ];
+        let mut file = FileTables {
+            strings: &strings,
+            signatures: SignatureTable::new(0, &signatures, &strings),
+            types: types.iter().map(Vec::as_slice).collect(),
+            bodies: Vec::new(),
+        };
+        let mut decoder = TreeDecoder::new(&mut file);
+        let member = decoder
+            .member(&Msg::parse(declaration, 0, DECLARATIONS).unwrap())
+            .unwrap();
+        (decoder.arena, member)
+    }
+
+    fn expected_base(slot: u64, kind: u64, flags: u64) -> KlibIrDeclarationBase {
+        let strings = declaration_strings();
+        let signatures = [
+            public_signature(0, 1),
+            local_signature(9),
+            public_signature(0, 6),
+            public_signature(0, 4),
+        ];
+        let signatures = signatures.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let mut table = SignatureTable::new(0, &signatures, &strings);
+        KlibIrDeclarationBase {
+            symbol: table.symbol(symbol(slot, kind)).unwrap(),
+            origin: "DEFINED".to_string(),
+            flags,
+            annotations: vec![KlibIrAnnotation {
+                access: KlibIrMemberAccess {
+                    symbol: table.symbol(symbol(2, FUNCTION)).unwrap(),
+                    arguments: KlibIrArguments::Flat(Vec::new()),
+                    type_arguments: Vec::new(),
+                    origin: None,
+                },
+                constructor_type_arguments: 0,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_value_class_keeps_its_underlying_property_and_declaration_facts() {
+        let mut class = declaration_base(symbol(0, CLASS), 0x2a);
+        class.extend(varint_field(2, 1));
+        let mut representation = varint_field(1, 3);
+        representation.extend(varint_field(2, 0));
+        class.extend(bytes_field(7, &representation));
+        let (arena, member) = decode_member(&bytes_field(2, &class));
+        let KlibIrMember::Class(id) = member else {
+            panic!("{member:?}");
+        };
+        let class = arena.class(id);
+        assert_eq!(class.base, expected_base(0, CLASS, 0x2a));
+        assert_eq!(class.name, "Box");
+        let Some(representation) = &class.inline_class_representation else {
+            panic!("{class:?}");
+        };
+        assert_eq!(representation.underlying_property, "value");
+        assert!(matches!(
+            arena.ty(representation.underlying_type),
+            KlibIrType::Simple { classifier, .. } if classifier == &expected_base(0, CLASS, 0).symbol
+        ));
+    }
+
+    #[test]
+    fn a_type_alias_keeps_its_expansion_and_type_parameters() {
+        let mut parameter = declaration_base(symbol(1, TYPE_PARAMETER), 0);
+        parameter.extend(varint_field(2, 5));
+        let mut alias = declaration_base(symbol(3, TYPEALIAS), 1);
+        alias.extend(varint_field(2, lattice_of(4, 1)));
+        alias.extend(bytes_field(3, &parameter));
+        let (arena, member) = decode_member(&bytes_field(12, &alias));
+        let KlibIrMember::TypeAlias(alias) = member else {
+            panic!("{member:?}");
+        };
+        assert_eq!(alias.base, expected_base(3, TYPEALIAS, 1));
+        assert_eq!(alias.name, "Alias");
+        let [parameter] = alias.type_parameters.as_slice() else {
+            panic!("{:?}", alias.type_parameters);
+        };
+        assert_eq!(parameter.base, expected_base(1, TYPE_PARAMETER, 0));
+        assert_eq!(parameter.name, "T");
+        assert!(parameter.supertypes.is_empty());
+        assert!(matches!(
+            arena.ty(alias.expanded),
+            KlibIrType::Simple { classifier, .. } if classifier == &parameter.base.symbol
+        ));
     }
 
     #[test]
