@@ -205,6 +205,10 @@ fn run_driver(driver: &str) {
     let Some(output) = build_and_run(driver) else {
         return;
     };
+    assert_ok(driver, &output);
+}
+
+fn assert_ok(driver: &str, output: &Output) {
     assert!(
         output.status.success() && output.stdout == b"OK\n" && output.stderr.is_empty(),
         "{driver}: expected status 0, stdout \"OK\\n\" and an empty stderr, got {}\n\
@@ -543,6 +547,10 @@ fn run_driver_expecting_failure(driver: &str, message: &str) {
     let Some(output) = build_and_run(driver) else {
         return;
     };
+    assert_failed(driver, &output, message);
+}
+
+fn assert_failed(driver: &str, output: &Output, message: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.code() == Some(134) && stderr == message && output.stdout.is_empty(),
@@ -551,6 +559,163 @@ fn run_driver_expecting_failure(driver: &str, message: &str) {
         output.status,
         String::from_utf8_lossy(&output.stdout)
     );
+}
+
+// ---- every architecture --------------------------------------------------------------------
+//
+// The thread drivers check what assembly does: which callee-saved registers a released thread
+// records and where, how `clone` takes its arguments and sets up the child's stack, and that the
+// kernel clears and wakes the id word when the thread ends. All of it is written once per
+// architecture, and a wrong register list or offset still compiles; only running it shows it. So
+// these drivers also run on every other supported architecture, built with clang and lld for that
+// target and run under a QEMU user-mode emulator. CI installs both and must run them.
+
+/// The architectures the runtime supports, by clang's and QEMU's name for each.
+const ARCHITECTURES: &[&str] = &["x86_64", "aarch64", "riscv64"];
+
+/// One architecture other than the host's, with its emulator and the runtime built for it.
+struct ForeignArchitecture {
+    arch: &'static str,
+    emulator: PathBuf,
+    objects: Result<Vec<PathBuf>, String>,
+}
+
+/// Every supported architecture but the host's, each with its emulator and runtime objects; empty
+/// when the host cannot run drivers at all. Outside CI a missing emulator or linker leaves an
+/// architecture out, with a note; CI must have them.
+fn foreign_architectures() -> &'static [ForeignArchitecture] {
+    static FOREIGN: OnceLock<Vec<ForeignArchitecture>> = OnceLock::new();
+    FOREIGN.get_or_init(|| {
+        if !host_can_run() {
+            return Vec::new();
+        }
+        let lld = Command::new("ld.lld")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        ARCHITECTURES
+            .iter()
+            .filter(|arch| **arch != std::env::consts::ARCH)
+            .filter_map(|arch| {
+                let emulator = std::env::split_paths(&path)
+                    .map(|directory| directory.join(format!("qemu-{arch}")))
+                    .find(|candidate| candidate.is_file());
+                let Some(emulator) = emulator.filter(|_| lld) else {
+                    assert!(
+                        std::env::var_os("CI").is_none(),
+                        "CI must run the thread drivers on {arch}, but this host has no \
+                         qemu-{arch} on PATH or no ld.lld"
+                    );
+                    eprintln!("thread drivers not run on {arch}: no qemu-{arch} or no ld.lld");
+                    return None;
+                };
+                Some(ForeignArchitecture {
+                    arch,
+                    emulator,
+                    objects: foreign_runtime_objects(arch),
+                })
+            })
+            .collect()
+    })
+}
+
+fn foreign_flags(arch: &str) -> Vec<String> {
+    let mut flags = vec![format!("--target={arch}-linux-gnu")];
+    flags.extend(compile_flags().iter().map(|flag| flag.to_string()));
+    flags
+}
+
+/// Every runtime source compiled for `arch`, or what clang said.
+fn foreign_runtime_objects(arch: &str) -> Result<Vec<PathBuf>, String> {
+    let scratch = common::scratch_dir()
+        .expect("scratch directory")
+        .join(format!("runtime-{arch}"));
+    fs::create_dir_all(&scratch).expect("create the architecture's scratch directory");
+    let mut sources: Vec<PathBuf> = fs::read_dir(runtime_dir())
+        .expect("read the runtime directory")
+        .map(|entry| entry.expect("runtime directory entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "c"))
+        .collect();
+    sources.sort();
+    let mut objects = Vec::new();
+    let mut errors = String::new();
+    for source in sources {
+        let object = scratch
+            .join(source.file_name().expect("runtime source name"))
+            .with_extension("o");
+        let output = Command::new("clang")
+            .args(foreign_flags(arch))
+            .arg("-I")
+            .arg(runtime_dir())
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .output()
+            .expect("run clang");
+        if !output.status.success() {
+            errors.push_str(&String::from_utf8_lossy(&output.stderr));
+        }
+        objects.push(object);
+    }
+    if errors.is_empty() {
+        Ok(objects)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Build `driver` for `foreign`'s architecture and run it under its emulator.
+fn build_and_run_on(foreign: &ForeignArchitecture, driver: &str) -> Output {
+    let arch = foreign.arch;
+    let objects = foreign.objects.as_ref().unwrap_or_else(|errors| {
+        panic!("{driver} on {arch}: the runtime did not build:\n{errors}")
+    });
+    let executable = common::scratch_dir()
+        .expect("scratch directory")
+        .join(format!("{driver}-{arch}"));
+    let build = Command::new("clang")
+        .args(foreign_flags(arch))
+        // The host's linker knows only the host's machine; lld links every target.
+        .arg("-fuse-ld=lld")
+        .arg("-I")
+        .arg(runtime_dir())
+        .args(objects)
+        .arg(driver_dir().join(format!("{driver}.c")))
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .expect("run clang");
+    assert!(
+        build.status.success(),
+        "{driver} on {arch}: the driver and runtime did not build:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    Command::new(&foreign.emulator)
+        .arg(&executable)
+        .output()
+        .expect("run the driver under its emulator")
+}
+
+/// `run_driver`, on the host and on every other supported architecture.
+fn run_driver_everywhere(driver: &str) {
+    run_driver(driver);
+    for foreign in foreign_architectures() {
+        assert_ok(
+            &format!("{driver} on {}", foreign.arch),
+            &build_and_run_on(foreign, driver),
+        );
+    }
+}
+
+/// `run_driver_expecting_failure`, on the host and on every other supported architecture.
+fn run_driver_everywhere_expecting_failure(driver: &str, message: &str) {
+    run_driver_expecting_failure(driver, message);
+    for foreign in foreign_architectures() {
+        let output = build_and_run_on(foreign, driver);
+        assert_failed(&format!("{driver} on {}", foreign.arch), &output, message);
+    }
 }
 
 #[test]
@@ -603,6 +768,42 @@ fn a_collection_started_during_a_collection_fails() {
     run_driver_expecting_failure(
         "gc_reentrant_collection_fails",
         "krusty: a collection started during a collection\n",
+    );
+}
+
+#[test]
+fn threads_started_by_foreign_code_share_the_heap_through_collections() {
+    run_driver_everywhere("threads_share_the_heap");
+}
+
+#[test]
+fn each_thread_keeps_its_own_exception_in_flight() {
+    run_driver_everywhere("threads_keep_their_own_exception");
+}
+
+#[test]
+fn an_exception_a_callback_leaves_uncaught_ends_the_process_holding_the_lock() {
+    run_driver_everywhere_expecting_failure(
+        "callback_uncaught_exception",
+        "Exception in thread \"Thread-0\" kotlin.IllegalStateException: leaked\n",
+    );
+}
+
+#[test]
+fn threads_the_runtime_starts_keep_their_argument_until_they_run() {
+    run_driver_everywhere("threads_started_by_the_runtime");
+}
+
+#[test]
+fn a_started_threads_stack_has_a_guard_below_it() {
+    run_driver_everywhere("thread_stack_guard");
+}
+
+#[test]
+fn an_exception_a_started_thread_leaves_uncaught_ends_the_process_on_its_name() {
+    run_driver_everywhere_expecting_failure(
+        "thread_uncaught_exception",
+        "Exception in thread \"Thread-1\" kotlin.IllegalStateException: boom\n",
     );
 }
 
@@ -1981,6 +2182,7 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
              cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
@@ -2005,7 +2207,7 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
          /// The runtime sources every target's objects were compiled from, in the table's order. Only\n\
          /// the test that checks the table against them reads it.\n\
          #[cfg(test)]\n\
-         pub const SOURCES: &[&str] = &[\"krusty_rt.c\", \"krusty_collections.c\", \"krusty_maps.c\", \"krusty_classes.c\", \"krusty_lang.c\", \"krusty_fp.c\", \"krusty_gc.c\", \"krusty_start.c\"];\n"
+         pub const SOURCES: &[&str] = &[\"krusty_rt.c\", \"krusty_collections.c\", \"krusty_maps.c\", \"krusty_classes.c\", \"krusty_lang.c\", \"krusty_fp.c\", \"krusty_gc.c\", \"krusty_threads.c\", \"krusty_start.c\"];\n"
     );
 }
 
@@ -2042,6 +2244,7 @@ fn a_failing_runtime_compiler_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
@@ -2103,6 +2306,7 @@ fn a_runtime_compiler_that_emits_another_machines_code_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
@@ -2177,6 +2381,7 @@ fn a_runtime_object_aligned_past_the_targets_page_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
