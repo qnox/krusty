@@ -318,7 +318,7 @@ pub(super) fn build_class_metadata_with_facts(
             // A delegated property's JVM field is its `x$delegate` storage, which metadata names.
             let delegate = property
                 .delegate_field
-                .and_then(|i| c.fields.get(i as usize));
+                .and_then(|index| c.fields.get(index as usize).map(|field| (index, field)));
             let mut spellings = ir
                 .prop_declared_spellings
                 .get(&(c.fq_name_id(), property.source_order))
@@ -395,7 +395,7 @@ pub(super) fn build_class_metadata_with_facts(
                     ),
                     field_desc: backing
                         .map(|(_, field)| field.ty)
-                        .or(delegate.map(|field| field.ty))
+                        .or(delegate.map(|(_, field)| field.ty))
                         .or_else(|| {
                             static_fields::hoisted_static_for(ir, c, property_index)
                                 .map(|storage| storage.ty)
@@ -405,9 +405,8 @@ pub(super) fn build_class_metadata_with_facts(
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
                     field_name: backing
-                        .map(|(_, field)| field)
                         .or(delegate)
-                        .map(|field| instance_field_jvm_name(ir, c, field))
+                        .map(|(index, _)| instance_field_jvm_name(ir, run, c, index as usize))
                         .filter(|physical| *physical != property.name),
                     // A property-targeted annotation lives on its synthetic marker method; the
                     // record here is what connects the property to it (and the marker's FINAL name,
@@ -492,7 +491,9 @@ pub(super) fn build_class_metadata_with_facts(
                 )
             })
         };
-        let ext_delegate = ext.delegate_field.and_then(|i| c.fields.get(i as usize));
+        let ext_delegate = ext
+            .delegate_field
+            .and_then(|index| c.fields.get(index as usize).map(|field| (index, field)));
         props.push(PropMeta {
             return_value_status: Default::default(),
             spellings: ir
@@ -517,9 +518,10 @@ pub(super) fn build_class_metadata_with_facts(
             setter: ext.setter.and_then(accessor_sig),
             setter_parameter_name: super::super::parameter_names::explicit_setter(ir, ext.setter),
             field_desc: ext_delegate
-                .map(|field| desc(field.ty))
+                .map(|(_, field)| desc(field.ty))
                 .filter(|physical| requires_field_signature(ext.ty, physical)),
-            field_name: ext_delegate.map(|field| instance_field_jvm_name(ir, c, field)),
+            field_name: ext_delegate
+                .map(|(index, _)| instance_field_jvm_name(ir, run, c, index as usize)),
             annotations: property_metadata_annotations(c, &ext.name),
             field_annotations: Default::default(),
             accessor_annotations: Default::default(),
