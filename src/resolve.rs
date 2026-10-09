@@ -24078,7 +24078,7 @@ mod tests {
     use super::*;
     use crate::features::LangFeatures;
     use crate::lexer::lex;
-    use crate::parser::{parse, parse_script_with_features, parse_with_features};
+    use crate::parser::{parse, parse_script_with_features};
 
     mod explicit_backing_fields;
     mod range_membership;
@@ -27170,12 +27170,6 @@ fun box(): String {
     fn parse_file(src: &str, d: &mut DiagSink) -> File {
         let toks = lex(src, d);
         parse(src, &toks, d)
-    }
-
-    fn parse_file_with_detected_features(src: &str, d: &mut DiagSink) -> File {
-        let toks = lex(src, d);
-        let features = LangFeatures::from_source(src);
-        parse_with_features(src, &toks, d, &features)
     }
 
     fn assert_no_diags(d: &DiagSink) {
