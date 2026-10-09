@@ -18,6 +18,7 @@ mod constructors;
 mod declaration_prefixes;
 pub(crate) mod definitely_evaluated;
 mod destructuring;
+mod language_gates;
 mod operators;
 mod type_refs;
 mod use_site_annotations;
@@ -26,7 +27,9 @@ pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
 pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
+pub use language_gates::{LanguageGates, UnsupportedSyntax};
 pub use operators::{BinOp, UnOp};
+pub use type_refs::TrFlags;
 pub use use_site_annotations::UseSiteAnnotation;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -540,87 +543,6 @@ pub struct ForRange {
     pub start: ExprId,
     pub end: ExprId,
     pub kind: RangeKind,
-}
-
-/// Bit-packed [`TypeRef`] flags.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TrFlags(u16);
-
-impl TrFlags {
-    const NULLABLE: u16 = 1 << 0;
-    const DEFINITELY_NON_NULL: u16 = 1 << 1;
-    const FUN_HAS_RECEIVER: u16 = 1 << 2;
-    const FUN_SUSPEND: u16 = 1 << 3;
-    const IN_PROJECTION: u16 = 1 << 4;
-    const OUT_PROJECTION: u16 = 1 << 5;
-    const IMPORT: u16 = 1 << 6;
-    // Parsing still represents `*` as its semantic upper bound (`Any?`) for ordinary type
-    // resolution, but an `is FunctionN<*, ...>` check must distinguish that runtime-checkable
-    // projection from an explicitly written `Any?`. Preserve the source distinction in the last
-    // available flag bit instead of recovering it from source text in individual consumers.
-    const STAR_PROJECTION: u16 = 1 << 7;
-    // Annotation classifier references are also present in `detached_type_refs` so Pass 1 can bind
-    // their identities before compact header projection. The declaration annotation checker is the
-    // sole diagnostic authority, however; marking the duplicate detached occurrence prevents a
-    // file-scope fallback from rechecking it outside its declaration's lexical suppression scope.
-    const ANNOTATION: u16 = 1 << 8;
-    /// The element type written on a `vararg` parameter; the parameter's type is its array.
-    const VARARG_ELEMENT: u16 = 1 << 9;
-
-    #[inline]
-    const fn with(mut self, mask: u16, on: bool) -> Self {
-        if on {
-            self.0 |= mask;
-        } else {
-            self.0 &= !mask;
-        }
-        self
-    }
-    #[inline]
-    const fn has(self, mask: u16) -> bool {
-        self.0 & mask != 0
-    }
-
-    #[inline]
-    pub const fn with_nullable(self, on: bool) -> Self {
-        self.with(Self::NULLABLE, on)
-    }
-    #[inline]
-    pub const fn with_definitely_non_null(self, on: bool) -> Self {
-        self.with(Self::DEFINITELY_NON_NULL, on)
-    }
-    #[inline]
-    pub const fn with_fun_has_receiver(self, on: bool) -> Self {
-        self.with(Self::FUN_HAS_RECEIVER, on)
-    }
-    #[inline]
-    pub const fn with_fun_suspend(self, on: bool) -> Self {
-        self.with(Self::FUN_SUSPEND, on)
-    }
-    #[inline]
-    pub const fn with_in_projection(self, on: bool) -> Self {
-        self.with(Self::IN_PROJECTION, on)
-    }
-    #[inline]
-    pub const fn with_out_projection(self, on: bool) -> Self {
-        self.with(Self::OUT_PROJECTION, on)
-    }
-    #[inline]
-    pub const fn with_import(self, on: bool) -> Self {
-        self.with(Self::IMPORT, on)
-    }
-    #[inline]
-    pub const fn with_star_projection(self, on: bool) -> Self {
-        self.with(Self::STAR_PROJECTION, on)
-    }
-    #[inline]
-    pub const fn with_annotation(self, on: bool) -> Self {
-        self.with(Self::ANNOTATION, on)
-    }
-    #[inline]
-    pub const fn with_vararg_element(self, on: bool) -> Self {
-        self.with(Self::VARARG_ELEMENT, on)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -1609,6 +1531,7 @@ pub struct ExpectDeclaration {
 #[derive(Default)]
 pub struct File {
     pub package: Option<String>,
+    pub language_gates: LanguageGates,
     pub is_script: bool,
     /// Common-source role supplied by the source-set driver, not parsed from Kotlin syntax.
     pub is_common: bool,

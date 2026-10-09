@@ -4585,7 +4585,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is `underscore in name-based destructuring without renaming is forbidden.` and reads no
   property. Tests: `multiDecl/*` box corpus (+96 gate),
   `tests/name_based_destructuring_e2e.rs`.
-
+- **`UNSUPPORTED_FEATURE` messages.** `src/features/unsupported.rs` ports kotlinc's
+  `LanguageFeatureMessageRenderer` for an unsupported feature, with the first letter lowercased as
+  kotlinc's CLI renders it: language versions 1.x before a 2.0-only feature, a test-only feature
+  (`unsupported.`), `only available since language version`/`API version`, `disabled` for a stable
+  feature switched off, and `experimental and should be enabled explicitly` naming the feature's own
+  `-X` argument or `-XXLanguage:+Name`, followed by the feature's hint URL. Every syntax gate takes
+  its message from there, including name-based destructuring's. Parse-time gates are kept on the
+  file (`File::language_gates`) and reported by the frontend in source order with every other
+  diagnostic. Tests: `src/features/unsupported.rs`.
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and
   `.idea/misc.xml`; no IDE, JVM, or build tool is launched. Detection order is `Explicit` > `BSP` >

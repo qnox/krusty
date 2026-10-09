@@ -30,6 +30,7 @@ mod lexical_type_parameters;
 mod nesting;
 mod properties;
 mod return_labels;
+mod syntax_gates;
 mod value_parameters;
 use declaration_modifiers::{function_flags, has_visibility_modifier, visibility_of};
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
@@ -739,8 +740,8 @@ struct Parser<'a> {
     i: usize,
     file: File,
     diags: &'a mut DiagSink,
-    /// `NameBasedDestructuring` language feature: allow square-bracket destructuring (`[a, b]`).
-    name_based_destructuring: bool,
+    /// The language features whose syntax the parser gates, `NameBasedDestructuring` among them.
+    gates: syntax_gates::SyntaxGates,
     explicit_backing_fields: bool,
     /// `+EnableNameBasedDestructuringShortForm`: a plain paren entry `(a, b)` binds each variable to
     /// the RECEIVER PROPERTY of the same name (not `componentN`). An explicit `(a = prop)` still
@@ -894,7 +895,7 @@ impl<'a> Parser<'a> {
             i: 0,
             file,
             diags,
-            name_based_destructuring: features.has("NameBasedDestructuring"),
+            gates: syntax_gates::SyntaxGates::new(features),
             short_form_destructuring: features.has("EnableNameBasedDestructuringShortForm"),
             multi_dollar_interpolation: features.has("MultiDollarInterpolation"),
             explicit_backing_fields: features.has("ExplicitBackingFields"),

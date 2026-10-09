@@ -183,7 +183,7 @@ impl Parser<'_> {
                     roles.push(LambdaParameterRole::Destructured);
                     destructures.push((synth, entries, source_props, entry_types, sp));
                 } else if self.at(TokenKind::LBracket) {
-                    self.note_ungated_bracket_destructure();
+                    self.gate_bracket_destructuring();
                     // The short-form bracket destructuring `{ [a, b] -> … }` (NameBasedDestructuring) —
                     // identical to the `(a, b)` form, just with `[ ]`.
                     let sp = self.tok().span;

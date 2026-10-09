@@ -16,7 +16,7 @@ impl Parser<'_> {
         } else if self.at(TokenKind::LBracket) {
             // Always parse the brackets. Without the feature this is kotlinc's language-version
             // error, and the rest of the file — including declarations after the loop — stays bound.
-            self.note_ungated_bracket_destructure();
+            self.gate_bracket_destructuring();
             Some(TokenKind::RBracket)
         } else {
             None

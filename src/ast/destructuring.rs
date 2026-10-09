@@ -1,7 +1,6 @@
 //! Parser-owned syntax retained for destructuring declarations across later compiler phases.
 
 use super::{StmtId, TypeRef};
-use crate::diag::Span;
 use std::collections::{HashMap, HashSet};
 
 /// Whether a name-based entry names its property by the entry itself or by an explicit rename.
@@ -36,10 +35,6 @@ pub struct DestructuringSyntax {
     /// Loops whose variable is a destructuring pattern, each with the destructuring statement
     /// prepended to its body, the only consumer of the synthetic loop variable.
     pub loops: HashMap<StmtId, StmtId>,
-    /// Square-bracket destructures parsed while `NameBasedDestructuring` is disabled. Retaining the
-    /// opening bracket span lets the frontend report the language-version diagnostic after module
-    /// admission without discarding declarations later in the file.
-    pub ungated_bracket_spans: Vec<Span>,
     /// Explicit type annotations on destructured bindings, parallel to the statement's entries.
     pub entry_types: HashMap<u32, Vec<Option<TypeRef>>>,
 }
