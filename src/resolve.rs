@@ -24963,10 +24963,23 @@ val result = object { fun value(): String = captured }
     }
 
     fn retained_standalone_source_set(sources: &[&str]) -> (Vec<File>, Vec<TypeInfo>, DiagSink) {
+        retained_standalone_source_set_with_prepare(sources, |_, _| {})
+    }
+
+    fn retained_standalone_source_set_with_prepare(
+        sources: &[&str],
+        prepare_symbols: impl FnOnce(&[File], &mut SymbolTable),
+    ) -> (Vec<File>, Vec<TypeInfo>, DiagSink) {
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set(
-            sources,
+        let inputs = sources
+            .iter()
+            .map(|source| crate::frontend::SourceInput::kotlin(source))
+            .collect::<Vec<_>>();
+        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+            &inputs,
             Box::new(crate::libraries::EmptySymbolSource),
+            &LangFeatures::new(),
+            prepare_symbols,
             &mut diagnostics,
         );
         let types = analysis
@@ -29647,20 +29660,23 @@ fun box(): String {
 
     #[test]
     fn module_top_level_cross_file_calls_record_source_key_for_lowering() {
-        let mut d = DiagSink::new();
-        let files = vec![
-            parse_file("fun helper(s: String): String = s", &mut d),
-            parse_file("fun box(): String = helper(\"OK\")", &mut d),
+        let sources = [
+            "fun helper(s: String): String = s",
+            "fun box(): String = helper(\"OK\")",
         ];
-        let mut syms = collect_signatures(&files, &mut d);
+        let (files, types, diagnostics) =
+            retained_standalone_source_set_with_prepare(&sources, |files, symbols| {
+                let helper = top_level_fun_decl(&files[0], "helper", |_| true);
+                symbols
+                    .fn_facades_by_decl
+                    .insert((0, helper.0), crate::types::type_name("AKt"));
+                symbols
+                    .fn_facades
+                    .insert("helper".to_string(), crate::types::type_name("AKt"));
+            });
         let helper_decl = top_level_fun_decl(&files[0], "helper", |_| true);
-        syms.fn_facades_by_decl
-            .insert((0, helper_decl.0), crate::types::type_name("AKt"));
-        syms.fn_facades
-            .insert("helper".to_string(), crate::types::type_name("AKt"));
-        d.set_file(1);
-        let info = check_file_at(&files[1], 1, &mut syms, &mut d);
-        assert_no_diags(&d);
+        let info = &types[1];
+        assert_no_diags(&diagnostics);
 
         let call = named_call(&files[1], "helper");
         let target = module_top_level_target(&info, call);
@@ -29672,24 +29688,28 @@ fun box(): String {
 
     #[test]
     fn module_top_level_cross_file_overload_uses_selected_source_key() {
-        let mut d = DiagSink::new();
-        let files = vec![
-            parse_file("fun helper(x: Int): String = \"int\"", &mut d),
-            parse_file("fun helper(s: String): String = s", &mut d),
-            parse_file("fun box(): String = helper(\"OK\")", &mut d),
+        let sources = [
+            "fun helper(x: Int): String = \"int\"",
+            "fun helper(s: String): String = s",
+            "fun box(): String = helper(\"OK\")",
         ];
-        let mut syms = collect_signatures(&files, &mut d);
-        let int_decl = top_level_fun_decl(&files[0], "helper", |_| true);
+        let (files, types, diagnostics) =
+            retained_standalone_source_set_with_prepare(&sources, |files, symbols| {
+                let int = top_level_fun_decl(&files[0], "helper", |_| true);
+                let string = top_level_fun_decl(&files[1], "helper", |_| true);
+                symbols
+                    .fn_facades_by_decl
+                    .insert((0, int.0), crate::types::type_name("AKt"));
+                symbols
+                    .fn_facades_by_decl
+                    .insert((1, string.0), crate::types::type_name("BKt"));
+                symbols
+                    .fn_facades
+                    .insert("helper".to_string(), crate::types::type_name("AKt"));
+            });
         let string_decl = top_level_fun_decl(&files[1], "helper", |_| true);
-        syms.fn_facades_by_decl
-            .insert((0, int_decl.0), crate::types::type_name("AKt"));
-        syms.fn_facades_by_decl
-            .insert((1, string_decl.0), crate::types::type_name("BKt"));
-        syms.fn_facades
-            .insert("helper".to_string(), crate::types::type_name("AKt"));
-        d.set_file(2);
-        let info = check_file_at(&files[2], 2, &mut syms, &mut d);
-        assert_no_diags(&d);
+        let info = &types[2];
+        assert_no_diags(&diagnostics);
 
         let call = named_call(&files[2], "helper");
         let target = module_top_level_target(&info, call);
@@ -29701,16 +29721,14 @@ fun box(): String {
 
     #[test]
     fn module_top_level_selection_respects_package_scope() {
-        let mut d = DiagSink::new();
-        let files = vec![
-            parse_file("package a\nfun helper(): String = \"a\"", &mut d),
-            parse_file("package b\nfun helper(): String = \"OK\"", &mut d),
-            parse_file("package b\nfun box(): String = helper()", &mut d),
+        let sources = [
+            "package a\nfun helper(): String = \"a\"",
+            "package b\nfun helper(): String = \"OK\"",
+            "package b\nfun box(): String = helper()",
         ];
-        let mut syms = collect_signatures(&files, &mut d);
-        d.set_file(2);
-        let info = check_file_at(&files[2], 2, &mut syms, &mut d);
-        assert_no_diags(&d);
+        let (files, types, diagnostics) = retained_standalone_source_set(&sources);
+        let info = &types[2];
+        assert_no_diags(&diagnostics);
 
         let call = named_call(&files[2], "helper");
         let target = module_top_level_target(&info, call);
@@ -32315,14 +32333,8 @@ fun use(counter: Counter) {
             "class Counter\nprivate operator fun Counter.unaryMinus(): Counter = this",
             "fun use(counter: Counter): Counter = -counter",
         ];
-        let mut diagnostics = DiagSink::new();
-        let files = sources
-            .iter()
-            .map(|source| parse_file(source, &mut diagnostics))
-            .collect::<Vec<_>>();
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        diagnostics.set_file(1);
-        let info = check_file_in_source_set(&files, 1, &mut symbols, &mut diagnostics);
+        let (files, types, diagnostics) = retained_standalone_source_set(&sources);
+        let info = &types[1];
 
         let unary = files[1]
             .expr_arena
@@ -32334,15 +32346,10 @@ fun use(counter: Counter) {
             })
             .expect("cross-file unary expression");
         assert!(info.resolved_operator_call(unary, "unaryMinus").is_none());
-        let error = diagnostics
-            .diags
-            .iter()
-            .find(|diagnostic| diagnostic.file == 1)
-            .expect("private extension visibility diagnostic");
-        assert!(
-            error.msg.contains("operator cannot be applied"),
-            "{error:?}"
-        );
+        assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
+        let error = &diagnostics.diags[0];
+        assert_eq!(error.file, 1);
+        assert_eq!(error.msg, "operator cannot be applied to 'Counter'");
         assert_eq!(
             &sources[1][error.span.lo as usize..error.span.hi as usize],
             "-counter"
@@ -35590,27 +35597,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     info
 }
 
-#[cfg(test)]
-pub(crate) fn check_file_at(
-    file: &File,
-    file_index: u32,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    check_file_on_checker_stack(file, file_index, None, syms, diags)
-}
-
-#[cfg(test)]
-pub(crate) fn check_file_in_source_set(
-    files: &[File],
-    file_index: u32,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    let file = &files[file_index as usize];
-    check_file_on_checker_stack(file, file_index, Some(files), syms, diags)
-}
-
 /// Check only the active declaration fragment that owns inline body work. Every non-active source
 /// declaration is resolved from `resolved_index`/`syms`; no sibling parser `File` is available at
 /// this boundary. This lets Pass 1 release each legacy declaration arena as soon as its retained
@@ -35708,62 +35694,6 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
             SourceFragmentMode::SignatureDefaults,
             None,
         )
-    })
-}
-
-/// Enter the check on a same-thread grown stack segment; `expr_with_context` rechecks the remaining
-/// stack per recursion level so paths with large helper frames can chain further segments before
-/// reaching [`crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH`]. This keeps the explicit depth guard —
-/// not the calling thread's stack — authoritative without moving non-`Send` symbols or
-/// caller-defined platform state (see [`crate::wide_stack`]).
-#[cfg(test)]
-fn check_file_on_checker_stack(
-    file: &File,
-    file_index: u32,
-    source_files: Option<&[File]>,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    crate::wide_stack::on_wide_stack(move || {
-        let published = syms.pass_one_symbols().is_some_and(|symbols| {
-            file.anonymous_object_classes.values().all(|declaration| {
-                symbols
-                    .anonymous_object_capture_discovered
-                    .contains(&(file_index, *declaration))
-            })
-        });
-        let info = check_file_at_impl_mode_with_index(
-            file,
-            file_index,
-            source_files,
-            syms,
-            None,
-            diags,
-            if published {
-                CaptureDiscovery::Published
-            } else {
-                CaptureDiscovery::AtConstruction
-            },
-            None,
-            None,
-            None,
-            None,
-            None,
-            SourceFragmentMode::Complete,
-            None,
-        );
-        if !published {
-            // Every object constructed in the file was reached, so one without captures captures
-            // nothing.
-            let mut discovered = info.anonymous_object_captures_by_class.clone();
-            for declaration in file.anonymous_object_classes.values() {
-                discovered.entry(*declaration).or_default();
-            }
-            syms.begin_module_mutation();
-            install_anonymous_object_captures(syms, file_index, discovered);
-            syms.finish_module_mutation();
-        }
-        info
     })
 }
 
