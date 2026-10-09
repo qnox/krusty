@@ -7,7 +7,7 @@ pub(crate) mod kotlinc_lib;
 pub(crate) mod kotlinc_server;
 pub mod language_directives;
 mod metadata_diff;
-mod native_backend;
+pub mod native_backend;
 pub(crate) mod producing_jdk;
 pub(crate) mod server_pool;
 pub use kotlinc_lib::kotlinc_lib_out;

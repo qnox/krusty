@@ -40,7 +40,10 @@
 //! * `krusty_gc.c` is the heap: allocator and a mark-sweep collector with conservative roots and a
 //!   precisely traced heap. It knows nothing about any particular type; every object tells it,
 //!   through its `KType` descriptor, which of its fields are references.
-//! * `krusty_start.c` is `_start`, which with no C library the runtime must supply itself.
+//! * `krusty_start.c` is the process boundary: `_start`, which with no C library the runtime must
+//!   supply itself, the arguments and environment the kernel leaves on the initial stack, and
+//!   standard input's lines. Text from outside is decoded from UTF-8 here, ill-formed bytes and all,
+//!   so every `String` the rest of the runtime walks is well-formed.
 //!
 //! Every value the runtime allocates, it allocates through the collector.
 //!

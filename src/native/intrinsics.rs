@@ -437,6 +437,25 @@ pub(super) fn runtime_function(signature: FunctionSignature<'_>) -> Option<Strin
             _ => None,
         };
     }
+    if signature.owner.package_matches("kotlin/io") {
+        // The console's input half. `readLine` and `readlnOrNull` are one function, answering
+        // `null` at the end of input; `readln` raises `ReadAfterEOFException` there instead.
+        return match (
+            signature.name,
+            signature.params,
+            signature.ret.canonical_semantic(),
+        ) {
+            ("readLine" | "readlnOrNull", [], Ty::Nullable(line))
+                if classifier_is(*line, "kotlin/String") =>
+            {
+                Some("kt_read_line".to_string())
+            }
+            ("readln", [], line @ Ty::Obj(..)) if classifier_is(line, "kotlin/String") => {
+                Some("kt_read_line_or_throw".to_string())
+            }
+            _ => None,
+        };
+    }
     if signature.owner.package_matches("kotlin/collections") {
         // The overflow guard `forEachIndexed` and its relatives carry. A jar provider presents
         // those as INLINE declarations, so their bodies are spliced into the caller and this call
@@ -2500,14 +2519,38 @@ mod tests {
             "a missing runtime function must produce a diagnostic, never a call to a symbol that \
              does not exist"
         );
+    }
+
+    #[test]
+    fn console_input_is_matched_by_its_whole_declaration() {
+        let read =
+            |name, ret| runtime_function(function(facade("kotlin/io/ConsoleKt"), name, &[], ret));
+        assert_eq!(
+            read("readLine", Ty::nullable(Ty::String)).as_deref(),
+            Some("kt_read_line")
+        );
+        assert_eq!(
+            read("readlnOrNull", Ty::nullable(Ty::String)).as_deref(),
+            Some("kt_read_line")
+        );
+        assert_eq!(
+            read("readln", Ty::String).as_deref(),
+            Some("kt_read_line_or_throw")
+        );
+        assert_eq!(
+            read("readln", Ty::nullable(Ty::String)),
+            None,
+            "`readln` never answers null, so a nullable shape is not it"
+        );
         assert_eq!(
             runtime_function(function(
                 facade("kotlin/io/ConsoleKt"),
                 "readLine",
-                &[],
+                &[Ty::Int],
                 Ty::nullable(Ty::String),
             )),
-            None
+            None,
+            "a parameter makes it a different declaration"
         );
     }
 

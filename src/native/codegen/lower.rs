@@ -226,37 +226,20 @@ pub fn lower_file(
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let file_init = lowering.define_file_init(source, statics_init)?;
+    let program_entry = program_entry(ir, entry, |function| lowering.carrier(function.ret));
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
-        let function = &ir.functions[index];
-        let is_entry = function.params.is_empty()
-            && function.is_static
-            && function.dispatch_receiver.is_none()
-            && match entry {
-                Entry::Main => function.name == "main",
-                Entry::Box => {
-                    function.name == "box" && lowering.carrier(function.ret) == Carrier::Ref
-                }
-            };
-        if is_entry {
-            lowering.define_program_entry(index, entry, file_init, statics_init.is_some())?;
+        if let Some((_, takes_arguments)) = program_entry.filter(|(chosen, _)| *chosen == index) {
+            lowering.define_program_entry(
+                index,
+                entry,
+                file_init,
+                statics_init.is_some(),
+                takes_arguments,
+            )?;
             defines_entry = true;
         }
-    }
-    // Kotlin's other entry point, `fun main(args: Array<String>)`, is a program whose arguments
-    // this target does not pass yet. Declining here names it; without this the file lowers with no
-    // entry and the link fails on an undefined symbol that says nothing about `main`.
-    if matches!(entry, Entry::Main)
-        && !defines_entry
-        && ir.functions.iter().any(|function| {
-            function.name == "main"
-                && function.is_static
-                && function.dispatch_receiver.is_none()
-                && function.params.len() == 1
-        })
-    {
-        return Err("a `main` that takes its arguments".to_string());
     }
     let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
@@ -270,6 +253,48 @@ pub fn lower_file(
         defines_entry,
         abi,
     })
+}
+
+/// The function the process starts at, and whether it takes the program's arguments.
+///
+/// Kotlin prefers `main(args: Array<String>)` when a file declares both forms, as the JVM launcher
+/// and Kotlin/Native both do; the parameterless `main` is the entry only on its own. A `box` case
+/// answers through a parameterless `box(): String`.
+fn program_entry(
+    ir: &IrFile,
+    entry: Entry,
+    carrier: impl Fn(&crate::ir::IrFunction) -> Carrier,
+) -> Option<(usize, bool)> {
+    let candidate = |takes_arguments: bool| {
+        ir.functions.iter().position(|function| {
+            let shape = match function.params.as_slice() {
+                [] => !takes_arguments,
+                [arguments] => takes_arguments && takes_program_arguments(*arguments),
+                _ => false,
+            };
+            shape
+                && function.is_static
+                && function.dispatch_receiver.is_none()
+                && match entry {
+                    Entry::Main => function.name == "main",
+                    Entry::Box => function.name == "box" && carrier(function) == Carrier::Ref,
+                }
+        })
+    };
+    match entry {
+        Entry::Main => candidate(true)
+            .map(|index| (index, true))
+            .or_else(|| candidate(false).map(|index| (index, false))),
+        Entry::Box => candidate(false).map(|index| (index, false)),
+    }
+}
+
+/// Whether a `main` parameter is the program's arguments: an array whose elements read as `String`.
+fn takes_program_arguments(parameter: Ty) -> bool {
+    parameter.is_reference_array()
+        && parameter
+            .array_read_elem()
+            .is_some_and(|element| element == Ty::String)
 }
 
 struct FileLowering<'a> {

@@ -982,6 +982,8 @@ extern const KType kt_type_no_such_element_exception;
 extern const KType kt_type_concurrent_modification_exception;
 extern const KType kt_type_uninitialized_property_access_exception;
 extern const KType kt_type_no_when_branch_matched_exception;
+/* What `readln()` raises at the end of standard input. */
+extern const KType kt_type_read_after_eof_exception;
 
 /* Allocate one. `message` may be NULL, which is Kotlin's `null` message. */
 KRef kt_throwable_new(const KType *type, KRef message);
@@ -1237,5 +1239,18 @@ void kt_println_unit(void);
 
 /* The generated entry point calls this after running the program's `main`. */
 void kt_exit(kt_int status);
+
+/* ---- the process boundary ---------------------------------------------------------------------- */
+
+/* `main(args)`'s `args`: an `Array<String>` of the arguments the program was started with, without
+   its own name, each decoded from UTF-8 with U+FFFD for what is ill-formed. */
+KRef kt_program_arguments(void);
+
+/* `readLine()` and `readlnOrNull()`: the next line of standard input without its `\n` or `\r\n`,
+   or NULL at the end of input. A last line with no terminator is still a line. */
+KRef kt_read_line(void);
+
+/* `readln()`: the same line, raising `ReadAfterEOFException` where `kt_read_line` answers NULL. */
+KRef kt_read_line_or_throw(void);
 
 #endif /* KRUSTY_RT_H */
