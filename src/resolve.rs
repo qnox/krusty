@@ -28708,55 +28708,32 @@ fun box(): String {
             fun top(): Int = knownPair(b = 2, 1)\n\
             fun member(): String = \"\".known(b = 2, 1)\n\
             fun extension(): Int = \"\".mixExt(b = 2, 1)";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
-        let expected = "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.";
-        let matching = diagnostics
+        let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(FakeMemberPlatform));
+        let mixing = "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.";
+        let missing = "no value passed for parameter 'a'.";
+        let expected = ["knownPair", "known", "mixExt"]
+            .into_iter()
+            .flat_map(|callee| {
+                [
+                    (mixing, "1", None),
+                    (missing, missing_argument_anchor("1)", callee), Some(callee)),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let actual = diagnostics
             .diags
             .iter()
-            .filter(|diagnostic| diagnostic.msg == expected)
+            .map(|diagnostic| {
+                (
+                    diagnostic.msg.as_str(),
+                    &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+                    diagnostic
+                        .editor_span
+                        .map(|span| &source[span.lo as usize..span.hi as usize]),
+                )
+            })
             .collect::<Vec<_>>();
-        assert_eq!(
-            matching.len(),
-            3,
-            "expected one canonical error per call, got: {:?}",
-            diagnostics
-                .diags
-                .iter()
-                .map(|diagnostic| &diagnostic.msg)
-                .collect::<Vec<_>>()
-        );
-        for diagnostic in matching {
-            assert_eq!(
-                &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
-                "1"
-            );
-        }
-        let missing = diagnostics
-            .diags
-            .iter()
-            .filter(|diagnostic| diagnostic.msg == "no value passed for parameter 'a'.")
-            .collect::<Vec<_>>();
-        assert_eq!(
-            missing.len(),
-            3,
-            "expected one recovered missing-parameter error per call, got: {:?}",
-            diagnostics
-                .diags
-                .iter()
-                .map(|diagnostic| &diagnostic.msg)
-                .collect::<Vec<_>>()
-        );
-        for (diagnostic, callee) in missing.into_iter().zip(["knownPair", "known", "mixExt"]) {
-            assert_eq!(
-                &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
-                missing_argument_anchor("1)", callee)
-            );
-        }
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -28764,36 +28741,27 @@ fun box(): String {
         let source = "import test.conflictingNamesExt\n\
             fun top(): Int = conflictingNames(a = 1, a = 2)\n\
             fun extension(): Int = \"\".conflictingNamesExt(a = 1, a = 2)";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
-
-        let matching = diagnostics
-            .diags
-            .iter()
-            .filter(|diagnostic| diagnostic.msg.starts_with(INAPPLICABLE_OVERLOAD_PREFIX))
-            .collect::<Vec<_>>();
+        let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         assert_eq!(
-            matching.len(),
-            2,
-            "conflicting mapping failures must reject instead of falling back positionally: {:?}",
             diagnostics
                 .diags
                 .iter()
-                .map(|diagnostic| &diagnostic.msg)
-                .collect::<Vec<_>>()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "none of the following candidates is applicable:\n\nfun conflictingNames(a: Int, c: Int): Int\nfun conflictingNames(b: String, d: String): Int",
+                "none of the following candidates is applicable:\n\nfun String.conflictingNamesExt(a: Int, c: Int): Int\nfun String.conflictingNamesExt(b: String, d: String): Int",
+            ],
         );
         assert_eq!(
-            matching
+            diagnostics
+                .diags
                 .iter()
                 .map(|diagnostic| {
                     &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize]
                 })
                 .collect::<Vec<_>>(),
-            vec!["conflictingNames", "conflictingNamesExt"]
+            ["conflictingNames", "conflictingNamesExt"],
         );
     }
 
@@ -28803,43 +28771,32 @@ fun box(): String {
             fun top(): String = knownTop(b = \"x\", a = 1)\n\
             fun member(): String = \"\".typedKnown(b = \"x\", a = 1)\n\
             fun extension(): Int = \"\".typedExt(b = \"x\", a = 1)";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
-        let type_errors = diagnostics
+        let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(FakeMemberPlatform));
+        let expected = [
+            (
+                "argument type mismatch: actual type is 'String', but 'Int' was expected.",
+                "\"x\"",
+            ),
+            (
+                "argument type mismatch: actual type is 'Int', but 'String' was expected.",
+                "1",
+            ),
+        ]
+        .into_iter()
+        .cycle()
+        .take(6)
+        .collect::<Vec<_>>();
+        let actual = diagnostics
             .diags
             .iter()
-            .filter(|diagnostic| diagnostic.msg.starts_with("argument type mismatch:"))
-            .count();
-        assert_eq!(
-            type_errors,
-            6,
-            "top-level, member, and explicitly imported extension calls should reject both wrong bindings: {:?}",
-            diagnostics
-                .diags
-                .iter()
-                .map(|diagnostic| (
-                    &diagnostic.msg,
+            .map(|diagnostic| {
+                (
+                    diagnostic.msg.as_str(),
                     &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
-                ))
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            diagnostics
-                .diags
-                .iter()
-                .all(|diagnostic| diagnostic.msg
-                    != "none of the following candidates is applicable:"),
-            "a uniquely imported extension should report its mapped argument errors directly: {:?}",
-            diagnostics
-                .diags
-                .iter()
-                .map(|diagnostic| &diagnostic.msg)
-                .collect::<Vec<_>>()
-        );
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -28848,36 +28805,15 @@ fun box(): String {
         // the bare prefix alone reads as a compiler bug, not a verdict (the captured-`it`
         // `sink.emit { … }` false positive surfaced with an empty list).
         let source = "fun f(): String = \"\".choose(\"x\")\n";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
-
-        let message = diagnostics
-            .diags
-            .iter()
-            .map(|diagnostic| diagnostic.msg.as_str())
-            .find(|msg| msg.starts_with("none of the following candidates is applicable:"))
-            .unwrap_or_else(|| {
-                panic!(
-                    "the inapplicable member call should report its candidates: {:?}",
-                    diagnostics
-                        .diags
-                        .iter()
-                        .map(|diagnostic| &diagnostic.msg)
-                        .collect::<Vec<_>>()
-                )
-            });
-        assert!(
-            message.contains("fun choose(a: Boolean): String")
-                && message.contains("fun choose(a: Int): String"),
-            "every rejected overload should be listed, got: {message:?}"
+        let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(FakeMemberPlatform));
+        assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
+        assert_eq!(
+            diagnostics.diags[0].msg,
+            "none of the following candidates is applicable:\n\nfun choose(a: Boolean): String\nfun choose(a: Int): String"
         );
-        assert!(
-            message.find("Boolean").unwrap() < message.find("Int").unwrap(),
-            "candidate diagnostics must be sorted independently of provider order: {message:?}"
+        assert_eq!(
+            &source[diagnostics.diags[0].span.lo as usize..diagnostics.diags[0].span.hi as usize],
+            "choose"
         );
     }
 
@@ -31222,25 +31158,22 @@ fun use() {
 
     #[test]
     fn classpath_member_slot_ties_do_not_fall_back_to_first_match() {
-        let mut d = DiagSink::new();
-        let file = parse_file("fun ambiguous(s: String): String = s.tie(a = 1)", &mut d);
-        let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert!(
-            d.diags
-                .iter()
-                .any(|diag| diag.msg.contains("overload resolution ambiguity")),
-            "expected ambiguity diagnostic, got {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+        let source = "fun ambiguous(s: String): String = s.tie(a = 1)";
+        let (file, info, diagnostics) =
+            retained_platform_analysis(source, Box::new(FakeMemberPlatform));
+        assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
+        assert_eq!(diagnostics.diags[0].msg, "overload resolution ambiguity");
+        assert_eq!(
+            &source[diagnostics.diags[0].span.lo as usize..diagnostics.diags[0].span.hi as usize],
+            "tie"
         );
 
-        let call = files[0]
+        let call = file
             .expr_arena
             .iter()
             .enumerate()
             .find_map(|(idx, expr)| match expr {
-                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                Expr::Call { callee, .. } => match file.expr(*callee) {
                     Expr::Member { name, .. } if name == "tie" => Some(ExprId(idx as u32)),
                     _ => None,
                 },
