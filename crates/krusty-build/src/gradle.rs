@@ -986,8 +986,9 @@ mod tests {
                 "{language_2_2_run:?}",
             );
 
-            // `-Werror` and `allWarningsAsErrors` both reach krusty as one warning policy.
-            // A pre-release compilerVersion is not that release: it is rejected.
+            // The Kotlin repository's warning and argument surface must reach krusty. Its
+            // bootstrap pre-release is not a krusty compiler version; the repository is
+            // configured to a supported release before this plugin runs.
             for case in ["all-warnings-as-errors", "free-werror"] {
                 let _ = std::fs::remove_file(&log);
                 build()
@@ -1000,6 +1001,28 @@ mod tests {
                     invocation.iter().filter(|argument| argument.as_str() == "-Werror").count(),
                     1,
                     "{case}: {invocation:?}"
+                );
+            }
+            let _ = std::fs::remove_file(&log);
+            build()
+                .property("krusty.negative", "repo-arguments")
+                .tasks([":compiler:util:compileKotlin"])
+                .run()
+                .unwrap_or_else(|error| panic!("repository arguments: {error}"));
+            let repo_args = single_invocation(&log);
+            for argument in [
+                "-Xallow-kotlin-package",
+                "-XXexplicit-return-types=warning",
+                "-Xreturn-value-checker=full",
+                "-Xannotation-target-all",
+                "-Xstdlib-compilation",
+                "-Xexpect-actual-classes",
+                "-Xcommon-sources=/repo/common",
+            ] {
+                assert_eq!(
+                    repo_args.iter().filter(|actual| actual.as_str() == argument).count(),
+                    1,
+                    "{argument} missing from {repo_args:?}"
                 );
             }
         }
@@ -2194,6 +2217,17 @@ tasks.withType<KotlinJvmCompile>().configureEach {
                 allWarningsAsErrors.set(true)
                 freeCompilerArgs.add("-Werror")
             }
+            "repo-arguments" -> freeCompilerArgs.addAll(
+                listOf(
+                    "-Xallow-kotlin-package",
+                    "-XXexplicit-return-types=warning",
+                    "-Xreturn-value-checker=full",
+                    "-Xannotation-target-all",
+                    "-Xstdlib-compilation",
+                    "-Xexpect-actual-classes",
+                    "-Xcommon-sources=/repo/common",
+                ),
+            )
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
             "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
             "warning-level-missing-colon" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG")

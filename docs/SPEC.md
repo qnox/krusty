@@ -12124,7 +12124,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unchanged; neither owns a duplicate diagnostic-name registry. `-Werror`, and Gradle's
   `compilerOptions.allWarningsAsErrors` which forwards that flag, fails the compilation when
   any warning remains: a named warning the policy did not disable, a compiler warning
-  diagnostic, or a module warning. A disabled named warning stays omitted.
+  diagnostic, or a module warning. A disabled named warning stays omitted. The Gradle
+  plugin forwards the Kotlin repository's JVM free arguments (`-Xallow-kotlin-package`,
+  `-XXexplicit-return-types`, `-Xreturn-value-checker`, and the stdlib compilation flags).
   `compilerVersion` must equal the applied Kotlin Gradle plugin version, which must be an
   exact supported release; a pre-release or RC suffix is rejected.
   (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;

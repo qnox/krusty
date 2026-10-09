@@ -410,7 +410,21 @@ private val ALLOWED_FREE_FLAGS = setOf(
     "-Xdont-warn-on-error-suppression",
     "-Xrender-internal-diagnostic-names",
     "-Xskip-metadata-version-check",
+    // The Kotlin repository passes these on JVM modules. They select diagnostics or a
+    // compilation mode krusty does not restrict (the `kotlin` package is already accepted),
+    // and dropping them at this boundary would reject the build before the compiler runs.
+    "-Xallow-kotlin-package",
+    "-Xstdlib-compilation",
+    "-Xexpect-actual-classes",
+    "-Xannotation-target-all",
+    "-Xno-new-java-annotation-targets",
+    "-Xmultifile-parts-inherit",
+    "-Xuse-14-inline-classes-mangling-scheme",
+    "-Xoutput-builtins-metadata",
+    "-Xmulti-platform",
 )
+
+private val RETURN_VALUE_CHECKER_MODES = setOf("check", "full", "disable")
 
 private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "complete", "disable")
 
@@ -469,6 +483,12 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
             argument == "-Xname-based-destructuring" -> "-Xname-based-destructuring"
             argument.startsWith("-Xname-based-destructuring=") &&
                 argument.substringAfter('=') in NAME_DESTRUCTURING_MODES -> "-Xname-based-destructuring"
+            argument.startsWith("-XXexplicit-return-types=") &&
+                argument.substringAfter('=') in EXPLICIT_API_MODES -> "-XXexplicit-return-types"
+            argument.startsWith("-Xreturn-value-checker=") &&
+                argument.substringAfter('=') in RETURN_VALUE_CHECKER_MODES -> "-Xreturn-value-checker"
+            argument.startsWith("-Xcommon-sources=") &&
+                argument.substringAfter('=').isNotEmpty() -> "-Xcommon-sources"
             else -> throw GradleException(
                 "unsupported freeCompilerArg '$argument'; use a supported compilerOptions property",
             )
