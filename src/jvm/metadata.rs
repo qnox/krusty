@@ -319,8 +319,8 @@ struct ParsedFunction {
     /// Only the current `Function.flags` word (field 9) has the status bits; `old_flags` predates
     /// them.
     return_value_status: crate::types::ReturnValueStatus,
-    /// `Function.flags` companion bit: a `companion { … }` block member, or a written
-    /// `companion fun C.f()` when a receiver is present.
+    /// `Function.flags.isStatic`, represented here as the companion-source shape it denotes for
+    /// JVM declarations.
     is_companion: bool,
     visibility: crate::types::Visibility,
     name_id: u64,
@@ -517,9 +517,9 @@ fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
         is_operator: flags & IS_OPERATOR_BIT != 0,
         is_infix: flags & IS_INFIX_BIT != 0,
         return_value_status,
-        // The companion bit exists only in the modern flag layout.
+        // The static bit exists only in the modern flag layout.
         is_companion: modern_flags
-            .is_some_and(|flags| flags & crate::metadata::function_flags::IS_COMPANION != 0),
+            .is_some_and(|flags| flags & crate::metadata::function_flags::IS_STATIC != 0),
         visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
         name_id,
         jvm_sig,
@@ -2541,6 +2541,7 @@ pub enum BuiltinTy {
     },
     Param {
         name: String,
+        id: crate::metadata::semantic::KotlinTypeParameterId,
         nullable: bool,
     },
     InProjection(Box<BuiltinTy>),
@@ -2583,7 +2584,7 @@ impl BuiltinTy {
                 nullable,
                 ..
             } => (internal.clone(), args.as_slice(), *nullable),
-            BuiltinTy::Param { name, nullable } => (name.clone(), &[][..], *nullable),
+            BuiltinTy::Param { name, nullable, .. } => (name.clone(), &[][..], *nullable),
             BuiltinTy::InProjection(inner) => return format!("in {}", inner.render()),
             BuiltinTy::OutProjection(inner) => return format!("out {}", inner.render()),
         };
@@ -2684,6 +2685,7 @@ pub struct BuiltinConstructor {
 /// (`E` unbounded, `T : Comparable<T>`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltinTypeParam {
+    pub id: crate::metadata::semantic::KotlinTypeParameterId,
     pub name: String,
     pub bounds: Vec<BuiltinTy>,
     pub variance: crate::types::TypeVariance,

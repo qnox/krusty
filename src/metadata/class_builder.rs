@@ -318,7 +318,7 @@ fn property_flags(prop: &PropMeta) -> u64 {
         }
         | prop.return_value_status.metadata_value() << property_flags::RETURN_VALUE_STATUS_SHIFT
         | if prop.companion {
-            property_flags::IS_COMPANION
+            property_flags::IS_STATIC
         } else {
             0
         }

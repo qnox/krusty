@@ -21,7 +21,7 @@ fn shaped_function_type(ty: &KotlinType) -> bool {
                 || shape.suspend
                 || args.iter().any(shaped_function_type)
         }
-        KotlinType::Param { .. } => false,
+        KotlinType::Param { .. } | KotlinType::Star => false,
         KotlinType::InProjection(inner) | KotlinType::OutProjection(inner) => {
             shaped_function_type(inner)
         }
