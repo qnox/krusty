@@ -2450,12 +2450,12 @@ impl JvmLibraries {
                 source_file: None,
                 stable_declaration: None,
                 is_nested: ci.inner_class_self().is_some(),
-                outer_instance: ci.inner_class_self().and_then(|entry| {
-                    (entry.access & ACC_STATIC == 0)
-                        .then(|| entry.outer.as_deref().map(type_name))
-                        .flatten()
-                }),
+                outer_instance: ci
+                    .inner_class_self()
+                    .filter(|entry| entry.access & ACC_STATIC == 0)
+                    .and_then(|entry| entry.outer.as_deref().map(type_name)),
                 kind,
+                is_data: ci.meta.is_data,
                 inheritance,
                 supertypes,
                 supertype_templates,

@@ -1260,7 +1260,7 @@ impl MetaProp {
 /// decode: nothing downstream re-reads the protobuf, and the raw metadata never lives in a cache. A
 /// plain-Java class (no `@Metadata`) is the `Default` (all projections empty) — consumers need not
 /// distinguish the sources.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct KotlinMeta {
     /// `Class.flags` visibility for a Kotlin class (`None` for plain Java classes and package facades).
     /// JVM access flags cannot represent Kotlin `internal`, so classifier access must prefer this fact.
@@ -1272,6 +1272,8 @@ pub struct KotlinMeta {
     /// SAM conversion only when this declaration flag is present; structural single-method detection
     /// remains valid for Java interfaces, which have no Kotlin metadata.
     pub is_fun_interface: bool,
+    /// `Flags.IS_DATA` from the Kotlin `Class.flags` word: the declaration is a `data class`.
+    pub is_data: bool,
     /// `Class.type_parameter` and `Class.supertype`/`supertype_id`, decoded in source terms. These
     /// define the semantic class graph for a Kotlin class; the classfile's superclass/interfaces are
     /// only its JVM realization and must never be unioned into this list.
@@ -1315,32 +1317,6 @@ pub struct KotlinMeta {
     /// [`crate::jvm::classreader::ClassInfo::declaring_package`] rather than re-deriving the
     /// fallback. Held as an option so the overwhelmingly common case costs no allocation.
     pub package: Option<String>,
-}
-
-impl Default for KotlinMeta {
-    fn default() -> Self {
-        KotlinMeta {
-            class_visibility: None,
-            class_kind: None,
-            is_fun_interface: false,
-            class_type_parameters: crate::types::TypeParameters::default(),
-            class_supertypes: Vec::new(),
-            class_functions: std::sync::Arc::from([]),
-            package_functions: std::sync::Arc::from([]),
-            class_properties: std::sync::Arc::from([]),
-            package_properties: std::sync::Arc::from([]),
-            type_aliases: Vec::new(),
-            constructors: std::sync::Arc::from([]),
-            is_inner: false,
-            type_parameter_scope: Vec::new(),
-            class_qualified_name: None,
-            companion_name: None,
-            sealed_subclasses: Vec::new(),
-            inline: None,
-            multifile_parts: Vec::new(),
-            package: None,
-        }
-    }
 }
 
 impl KotlinMeta {
@@ -1504,9 +1480,8 @@ pub fn decode_metadata_within(
         }
         functions
     };
-    let data_equality_bound = class_flags
-        .is_some_and(|flags| flags & (1u64 << 10) != 0)
-        .then(|| Ty::obj(this_class));
+    let is_data = class_flags.is_some_and(class_identity::is_data);
+    let data_equality_bound = is_data.then(|| Ty::obj(this_class));
     let class_functions = stamp_functions(decode_functions(
         &ctx,
         9,
@@ -1534,6 +1509,7 @@ pub fn decode_metadata_within(
             .map(crate::types::Visibility::from_metadata),
         class_kind: class_flags.map(class_identity::class_kind),
         is_fun_interface: class_flags.is_some_and(|flags| flags & (1u64 << 14) != 0),
+        is_data,
         class_type_parameters: crate::types::TypeParameters::new(
             class_type_params,
             class_type_param_bounds,

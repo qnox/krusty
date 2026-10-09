@@ -722,16 +722,21 @@ mod tests {
     }
 
     #[test]
-    fn feature_argument_values_cannot_enable_unmodeled_semantics() {
-        for mode in ["name-mismatch", "complete"] {
+    fn name_based_destructuring_modes_select_their_modeled_features() {
+        for (mode, short_form) in [("name-mismatch", false), ("complete", true)] {
             let flag = format!("-Xname-based-destructuring={mode}");
             let parsed = parse_args(&[&flag, "x.kt"]);
+            assert!(parsed.ignored.is_empty(), "{mode}: {:?}", parsed.ignored);
+            assert!(parsed.errors.is_empty(), "{mode}: {:?}", parsed.errors);
+            let features = &parsed.language_settings.features;
+            assert!(features.has("NameBasedDestructuring"), "{mode}");
+            assert!(
+                features.has("DeprecateNameMismatchInShortDestructuringWithParentheses"),
+                "{mode}"
+            );
             assert_eq!(
-                parsed.errors,
-                ["krusty does not implement the language feature \
-                  'DeprecateNameMismatchInShortDestructuringWithParentheses' selected by \
-                  '-Xname-based-destructuring'"
-                    .to_string()],
+                features.has("EnableNameBasedDestructuringShortForm"),
+                short_form,
                 "{mode}"
             );
         }

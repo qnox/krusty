@@ -24,6 +24,9 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.unit_conversions_on_arbitrary_expressions =
         features.has("UnitConversionsOnArbitraryExpressions");
     file.eager_lambda_analysis = features.has("EagerLambdaAnalysis");
+    file.destructuring.warns_parenthesized_short_form = features
+        .has("DeprecateNameMismatchInShortDestructuringWithParentheses")
+        && !features.has("EnableNameBasedDestructuringShortForm");
     file.lambda_implementation_uses_inferred_result =
         features.language_version() < crate::language_version::LanguageVersion::V2_4;
     file.full_value_classes = features.has("FullValueClasses");

@@ -62,6 +62,10 @@ const OBSERVED_FEATURES: &[(&str, Option<(u16, u16)>)] = &[
     ("ContextReceivers", None),
     ("ContextSensitiveResolutionUsingExpectedType", None),
     ("DataClassCopyRespectsConstructorVisibility", None),
+    (
+        "DeprecateNameMismatchInShortDestructuringWithParentheses",
+        None,
+    ),
     ("EagerLambdaAnalysis", None),
     ("EnableNameBasedDestructuringShortForm", None),
     ("EnumEntries", Some((1, 9))),
@@ -227,17 +231,27 @@ impl LangFeatures {
         }
         if let Some(rest) = arg.strip_prefix("-Xname-based-destructuring") {
             // `-Xname-based-destructuring[=only-syntax|name-mismatch|complete|disable]`.
+            const DEPRECATE_SHORT_FORM: &str =
+                "DeprecateNameMismatchInShortDestructuringWithParentheses";
             match rest {
                 "=disable" => {
                     self.disable("NameBasedDestructuring");
+                    self.disable(DEPRECATE_SHORT_FORM);
                     self.disable("EnableNameBasedDestructuringShortForm");
                 }
                 "=complete" => {
                     self.enable("NameBasedDestructuring");
+                    self.enable(DEPRECATE_SHORT_FORM);
                     self.enable("EnableNameBasedDestructuringShortForm");
+                }
+                "=name-mismatch" => {
+                    self.enable("NameBasedDestructuring");
+                    self.enable(DEPRECATE_SHORT_FORM);
+                    self.disable("EnableNameBasedDestructuringShortForm");
                 }
                 _ => {
                     self.enable("NameBasedDestructuring");
+                    self.disable(DEPRECATE_SHORT_FORM);
                     self.disable("EnableNameBasedDestructuringShortForm");
                 }
             }
@@ -311,6 +325,10 @@ mod tests {
         assert!(g.apply_cli_arg("-Xname-based-destructuring=complete"));
         assert!(g.has("NameBasedDestructuring"));
         assert!(g.has("EnableNameBasedDestructuringShortForm"));
+        assert!(g.has("DeprecateNameMismatchInShortDestructuringWithParentheses"));
+        assert!(g.apply_cli_arg("-Xname-based-destructuring=name-mismatch"));
+        assert!(g.has("DeprecateNameMismatchInShortDestructuringWithParentheses"));
+        assert!(!g.has("EnableNameBasedDestructuringShortForm"));
         assert!(g.apply_cli_arg("-Xname-based-destructuring=disable"));
         assert!(!g.has("NameBasedDestructuring"));
         assert!(!g.has("EnableNameBasedDestructuringShortForm"));

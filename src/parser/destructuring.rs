@@ -38,8 +38,8 @@ impl Parser<'_> {
                     .error(self.tok().span, "expected 'val' or 'var'".to_string());
             }
             let ignored = self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
+            let name_span = self.syntactic_ident_span(self.tok());
             let name = self.ident_or_error("variable name");
-            let name_span = self.declaration_name_span;
             let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
             let source_property =
                 self.destructure_property(&name, close == TokenKind::RParen, &mut entry_type);
@@ -94,8 +94,8 @@ impl Parser<'_> {
             loop {
                 let ignored =
                     self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
+                let name_span = self.syntactic_ident_span(self.tok());
                 let name = self.ident_or_error("variable name");
-                let name_span = self.declaration_name_span;
                 let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
                 let implicit = self.short_form_destructuring && close == TokenKind::RParen;
                 let source_property = self.destructure_property(&name, implicit, &mut entry_type);
@@ -128,6 +128,12 @@ impl Parser<'_> {
             let init = self.parse_expr();
             let statement = self.finish_stmt(Stmt::Destructure { entries, init }, start);
             self.record_destructure_syntax(statement, source_properties, entry_types);
+            if close == TokenKind::RParen {
+                self.file
+                    .destructuring
+                    .parenthesized_short_form
+                    .insert(statement);
+            }
             return statement;
         }
 

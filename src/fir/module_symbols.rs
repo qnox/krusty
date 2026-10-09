@@ -252,6 +252,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         projected.inheritance.is_extensible =
             !flags.has(DeclarationFlags::INTERFACE) && !flags.has(DeclarationFlags::FINAL);
         projected.sam_eligible = flags.has(DeclarationFlags::FUN_INTERFACE);
+        projected.is_data = flags.has(DeclarationFlags::DATA);
         let mut supertype_templates = classifier_header
             .declared_supertypes()
             .map(|supertype| supertype.get())
@@ -421,10 +422,13 @@ impl<'a> StreamedModuleSymbols<'a> {
             constructor.call_sig = call_sig.clone();
             constructor.context_count = callable.shape.context_parameter_count as usize;
             constructor.reified = reified;
-            constructor.visibility = self
-                .index
-                .declaration_header(declaration)
+            let constructor_header = self.index.declaration_header(declaration);
+            constructor.visibility = constructor_header
                 .map_or(declaration_header.visibility, |header| header.visibility);
+            constructor.set_is_primary_constructor(
+                constructor_header
+                    .is_some_and(|header| header.flags.has(DeclarationFlags::PRIMARY_CONSTRUCTOR)),
+            );
             constructor.annotations = self.index.declaration_annotations(declaration).to_vec();
             constructor.stable_declaration = Some(declaration);
             if !parameter_names.is_empty() {

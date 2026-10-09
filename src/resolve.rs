@@ -28,6 +28,8 @@ use crate::types::{
     existing_type_name, semantic_value_parameter_ty, ty_mentions_param, type_name,
     type_name_nested_child, Ty, TypeName, Visibility,
 };
+pub use class_flags::ClassFlags;
+use class_flags::{source_class_flags, streamed_source_class_flags};
 use scope::ScopeKind;
 use scope::{ContextReceiver, ContextReceiverKind, ContextValue, FlowExclusion, NarrowPath, Ns};
 
@@ -53,6 +55,7 @@ mod anonymous_receiver_labels;
 mod applied_hierarchy;
 mod checked_annotation_publication;
 mod checked_constant_publication;
+mod class_flags;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
@@ -194,6 +197,7 @@ use source_type_resolution::{
 };
 mod scope;
 mod selected_argument_commitment;
+mod short_form_destructuring_meaning;
 use selected_argument_commitment::{
     indexed_operator_argument_parameters, indexed_operator_argument_slots, SelectedArgumentBinding,
     SelectedArgumentCommitment,
@@ -1251,128 +1255,10 @@ impl MemberExtFunSig {
     }
 }
 
-/// Bit-packed boolean modifiers for a [`ClassSig`]. The eight per-class flags below each cost a full
-/// byte as a separate `bool` field (plus struct padding); collapsed into one `u8` they save several
-/// bytes per sig, and the compiler builds a few thousand. Built with the `with_*` chain from
-/// [`ClassFlags::default`]; read through the `ClassSig::is_*` / `has_*` accessors. All eight bits are
-/// in use — a ninth flag needs a wider field.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ClassFlags(u8);
-
-impl ClassFlags {
-    const INTERFACE: u8 = 1 << 0;
-    const OBJECT: u8 = 1 << 1;
-    const ABSTRACT: u8 = 1 << 2;
-    const FUN_INTERFACE: u8 = 1 << 3;
-    const SEALED: u8 = 1 << 4;
-    const FINAL: u8 = 1 << 5;
-    const HAS_ABSTRACT_MEMBERS: u8 = 1 << 6;
-    const ANNOTATION: u8 = 1 << 7;
-
-    #[inline]
-    const fn with(mut self, mask: u8, on: bool) -> Self {
-        if on {
-            self.0 |= mask;
-        } else {
-            self.0 &= !mask;
-        }
-        self
-    }
-    #[inline]
-    const fn has(self, mask: u8) -> bool {
-        self.0 & mask != 0
-    }
-
-    #[inline]
-    pub const fn with_interface(self, on: bool) -> Self {
-        self.with(Self::INTERFACE, on)
-    }
-    #[inline]
-    pub const fn with_object(self, on: bool) -> Self {
-        self.with(Self::OBJECT, on)
-    }
-    #[inline]
-    pub const fn with_abstract(self, on: bool) -> Self {
-        self.with(Self::ABSTRACT, on)
-    }
-    #[inline]
-    pub const fn with_fun_interface(self, on: bool) -> Self {
-        self.with(Self::FUN_INTERFACE, on)
-    }
-    #[inline]
-    pub const fn with_sealed(self, on: bool) -> Self {
-        self.with(Self::SEALED, on)
-    }
-    #[inline]
-    pub const fn with_final(self, on: bool) -> Self {
-        self.with(Self::FINAL, on)
-    }
-    #[inline]
-    pub const fn with_has_abstract_members(self, on: bool) -> Self {
-        self.with(Self::HAS_ABSTRACT_MEMBERS, on)
-    }
-    #[inline]
-    pub const fn with_annotation(self, on: bool) -> Self {
-        self.with(Self::ANNOTATION, on)
-    }
-}
-
 #[derive(Clone, Debug)]
 struct SourceClassHeader {
     flags: ClassFlags,
     direct_supertypes: crate::types::TypeNameList,
-}
-
-/// One source of truth for declaration-level classifier flags. The same packed value seeds the
-/// all-files header index and is later installed on the complete `ClassSig`, preventing early
-/// inference and final checking from classifying a declaration differently.
-fn source_class_flags(class: &ClassDecl) -> ClassFlags {
-    ClassFlags::default()
-        .with_interface(class.is_interface())
-        .with_object(class.is_singleton())
-        .with_abstract(class.is_abstract())
-        .with_fun_interface(class.is_fun_interface)
-        .with_sealed(class.is_sealed())
-        .with_final(class.is_final())
-        .with_has_abstract_members(
-            class.methods.iter().any(|method| method.is_abstract())
-                || class.body_props.iter().any(|property| property.is_abstract),
-        )
-        .with_annotation(class.is_annotation())
-}
-
-/// Classifier flags read from the compact Pass-1 declaration inventory.
-///
-/// `HAS_ABSTRACT_MEMBERS` is a property of the classifier's direct declaration children, not of
-/// its parser container. Computing it from stable ownership lets production bootstrap source
-/// classifiers after the corresponding `ClassDecl` has been destroyed.
-fn streamed_source_class_flags(
-    headers: &crate::fir::StreamedHeaderModule,
-    classifier: &crate::fir::DeclarationStub,
-) -> ClassFlags {
-    let flags = classifier.flags;
-    let has_abstract_members = headers.stubs.iter().any(|candidate| {
-        candidate.flags.has(crate::fir::DeclarationFlags::ABSTRACT)
-            && matches!(
-                candidate.kind,
-                crate::fir::DeclarationKind::Function
-                    | crate::fir::DeclarationKind::Property
-                    | crate::fir::DeclarationKind::Accessor
-            )
-            && headers
-                .declarations
-                .anchor(candidate.id)
-                .is_some_and(|anchor| anchor.owner == Some(classifier.id))
-    });
-    ClassFlags::default()
-        .with_interface(flags.has(crate::fir::DeclarationFlags::INTERFACE))
-        .with_object(flags.has(crate::fir::DeclarationFlags::SINGLETON))
-        .with_abstract(flags.has(crate::fir::DeclarationFlags::ABSTRACT))
-        .with_fun_interface(flags.has(crate::fir::DeclarationFlags::FUN_INTERFACE))
-        .with_sealed(flags.has(crate::fir::DeclarationFlags::SEALED))
-        .with_final(flags.has(crate::fir::DeclarationFlags::FINAL))
-        .with_has_abstract_members(has_abstract_members)
-        .with_annotation(flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS))
 }
 
 /// Capture the source-level callable inventory before functions and properties are normalized into
@@ -1935,6 +1821,11 @@ impl ClassSig {
     #[inline]
     pub fn is_fun_interface(&self) -> bool {
         self.flags.has(ClassFlags::FUN_INTERFACE)
+    }
+    /// True if declared `data class`.
+    #[inline]
+    pub fn is_data(&self) -> bool {
+        self.flags.has(ClassFlags::DATA)
     }
     /// True if declared `sealed` — all subclasses are known in this module.
     #[inline]
@@ -24759,6 +24650,7 @@ val result = object { fun value(): String = captured }
             is_nested: false,
             outer_instance: None,
             kind: crate::libraries::TypeKind::Class,
+            is_data: false,
             inheritance: Default::default(),
             supertypes: crate::types::TypeNameList::new(),
             supertype_templates: Vec::new(),
@@ -27614,6 +27506,7 @@ fun box(): String {
                     is_nested: false,
                     outer_instance: None,
                     kind: crate::libraries::TypeKind::Interface,
+                    is_data: false,
                     inheritance: Default::default(),
                     supertypes,
                     supertype_templates,
@@ -27747,6 +27640,7 @@ fun box(): String {
                     } else {
                         crate::libraries::TypeKind::Class
                     },
+                    is_data: false,
                     inheritance: Default::default(),
                     supertypes: crate::types::TypeNameList::new(),
                     supertype_templates: Vec::new(),

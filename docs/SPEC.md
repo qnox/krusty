@@ -4580,6 +4580,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property. Tests: `multiDecl/*` box corpus (+96 gate),
   `tests/name_based_destructuring_e2e.rs`.
 
+- **`DeprecateNameMismatchInShortDestructuringWithParentheses` (off by default, no
+  `sinceVersion`).** Enabled while `EnableNameBasedDestructuringShortForm` is off, every positional
+  entry of the parenthesized short form — `val`/`var (a, b) = e`, `for ((a, b) in xs)`, and the
+  lambda parameter `{ (a, b) -> }`, never the bracket forms nor the full form `(val a, val b)` —
+  warns at the entry as kotlinc 2.4.20's `FirDestructuringDeclarationChecker` does. The parser
+  records which statements use that form (`DestructuringSyntax::parenthesized_short_form`); the
+  checker never recovers it from spelling. An `_` entry is `DESTRUCTURING_SHORT_FORM_UNDERSCORE`.
+  Otherwise the destructured type (initializer, loop element, or lambda parameter type; smart
+  casts included) must be a classifier type — a type parameter reports nothing. A data class's
+  property for component N is its primary constructor's Nth value parameter; the read-only
+  `Map.Entry` face (the provider's mapped-collection role, not a name) has `key`/`value`; no
+  property on a non-data class reports `non-data class '<type>'` once, on component 1; a data
+  class without one reports `custom component operators of data class '<type>'`; a different
+  name reports `DESTRUCTURING_SHORT_FORM_NAME_MISMATCH`. Data-class-ness and primary-constructor
+  parameter names come from the declaration: the source `data` modifier (`ClassFlags::DATA`) or
+  Kotlin metadata's `IS_DATA` class flag and the constructor without `IS_SECONDARY`, published on
+  the common classifier record (`LibraryType::is_data`). Tests:
+  `tests/short_destructuring_meaning_e2e.rs` (complete warning blocks vs kotlinc).
+
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and
   `.idea/misc.xml`; no IDE, JVM, or build tool is launched. Detection order is `Explicit` > `BSP` >

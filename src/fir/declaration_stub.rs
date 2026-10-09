@@ -104,6 +104,14 @@ impl DeclarationFlags {
     /// A compiler-generated structural identity member of a data or value class. This role is
     /// declaration-owned: consumers must not rediscover it from the callable's spelling.
     pub const GENERATED_STRUCTURAL_MEMBER: u64 = 1 << 42;
+    /// The classifier's primary constructor, as opposed to a secondary one. Consumers that need the
+    /// primary constructor's parameters (data-class components) read this declaration fact.
+    pub const PRIMARY_CONSTRUCTOR: u64 = 1 << 43;
+
+    /// Exactly `flag`, with every other flag clear.
+    pub const fn only(flag: u64) -> Self {
+        Self(flag)
+    }
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

@@ -12,6 +12,11 @@ pub(super) fn class_kind(flags: u64) -> TypeKind {
     }
 }
 
+/// `Class.flags.IS_DATA` (bit 10): the class is declared `data class`.
+pub(super) fn is_data(flags: u64) -> bool {
+    flags & (1 << 10) != 0
+}
+
 /// Kotlin `Class.flags`. The protobuf default is PUBLIC FINAL (`6`); decode the word once through
 /// this boundary helper so every individual class flag uses identical wire-format defaulting.
 pub(super) fn class_flags(ctx: &MetaCtx<'_>) -> u64 {

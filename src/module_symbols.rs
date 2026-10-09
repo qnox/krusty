@@ -427,6 +427,7 @@ impl<'a> ModuleSymbols<'a> {
             is_nested: c.internal_name().contains("$"),
             outer_instance: c.inner_of,
             kind,
+            is_data: c.is_data(),
             inheritance: crate::libraries::ClassifierInheritance {
                 is_abstract: c.is_abstract() || c.is_interface(),
                 is_extensible: !c.is_interface() && !c.is_final(),

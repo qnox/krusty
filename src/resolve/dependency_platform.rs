@@ -258,6 +258,7 @@ fn merge_type(
     }
     primary.access = source.access;
     primary.source_file = source.source_file;
+    primary.is_data = source.is_data;
     if !source.type_params.is_empty() {
         primary.type_parameters = source.type_parameters.clone();
     }
@@ -642,6 +643,7 @@ mod tests {
             is_nested: false,
             outer_instance: None,
             kind: TypeKind::Class,
+            is_data: false,
             inheritance: Default::default(),
             supertypes: Default::default(),
             supertype_templates: Vec::new(),
