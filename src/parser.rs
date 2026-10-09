@@ -624,7 +624,9 @@ fn fixup_parenless_base_classes(file: &mut File) {
                 .position(|s| base_candidates.contains(&s.name))
             {
                 let base = c.supertypes.remove(pos);
-                detached.push(base.clone());
+                let mut reference = base.clone();
+                reference.flags = reference.flags.with_superclass(true);
+                detached.push(reference);
                 c.base_class_span = Some(base.span);
                 c.base_class = Some(base.name);
                 c.base_type_args = base.targs;
@@ -3459,7 +3461,13 @@ impl<'a> Parser<'a> {
                     }
                     continue;
                 }
-                let name = self.parse_qualified_name();
+                let segments = self.parse_qualified_name_segments();
+                let callee_span = segments.last().map(|(_, span)| *span);
+                let name = segments
+                    .into_iter()
+                    .map(|(segment, _)| segment)
+                    .collect::<Vec<_>>()
+                    .join(".");
                 let simple = name.rsplit('.').next().unwrap_or(&name).to_string();
                 // Fully-qualified name (e.g. java.util.RandomAccess) → JVM internal format.
                 let effective = if name.contains('.') {
@@ -3523,7 +3531,13 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::RParen, "')'");
                     let mut reference = simple_type_ref(&name, sup_span);
                     reference.targs = targs.clone();
+                    reference.flags = reference.flags.with_superclass(true);
                     self.file.detached_type_refs.push(reference);
+                    if let Some(callee) = callee_span {
+                        self.file
+                            .base_class_callee_spans
+                            .insert(sup_span.lo, callee);
+                    }
                     base = Some(effective.clone());
                     base_span = Some(sup_span);
                     base_type_args = targs;

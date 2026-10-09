@@ -220,6 +220,9 @@ pub enum HeaderDeclarationKind {
         /// The one superclass constructor target, kept distinct from interfaces so later semantic
         /// graph construction never recovers class-vs-interface ownership from source spelling.
         base: Option<HeaderTypeId>,
+        /// The callee name of the superclass constructor call (`Base` in `: pkg.Base(args)`).
+        /// The call names its classifier apart from `base`, and kotlinc checks its access there.
+        base_callee: Option<crate::diag::Span>,
         /// Class context parameters in source order. They are shared by every constructor and are
         /// implicit receivers of instance bodies.
         context_parameters: HeaderParameterRange,
@@ -2407,6 +2410,9 @@ pub fn extract_file_header_syntax(
                 bounds,
                 supertypes,
                 base,
+                base_callee: class
+                    .base_class_span
+                    .and_then(|span| file.base_class_callee_spans.get(&span.lo).copied()),
                 context_parameters,
                 primary_parameters,
                 delegations,

@@ -34913,11 +34913,10 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 // lose nested classifiers and violate bind-once resolution.
                 continue;
             }
-            if reference.is_annotation() {
-                // Annotation occurrences are retained by their owning declaration and checked in
-                // that declaration's lexical scope. `detached_type_refs` carries the same reference
-                // only so Pass 1 can bind its identity for compact-header projection; rechecking it
-                // here from file scope loses local/nested scope and declaration suppressions.
+            if reference.is_annotation() || reference.is_superclass() {
+                // Annotation and superclass occurrences are checked by their owning declaration (a
+                // superclass by signature solving); the detached copy only lets Pass 1 bind it, and
+                // rechecking it from file scope loses its declaration's lexical policies.
                 continue;
             }
             c.type_ref_ty(scope, reference);
@@ -50090,10 +50089,8 @@ impl<'a> Checker<'a> {
                     )
                 })
         }) {
-            let inheritance = self
-                .resolver()
-                .classifier(superclass)
-                .map(|shape| shape.inheritance);
+            let shape = self.resolver().classifier(superclass);
+            let inheritance = shape.as_ref().map(|shape| shape.inheritance);
             crate::trace_compiler!(
                 "resolve",
                 "superclass capability class={} declaration={d:?} superclass={} separate_emission={separate_emission} inheritance={inheritance:?}",
@@ -50108,21 +50105,24 @@ impl<'a> Checker<'a> {
                         .msg
                         .contains("cycle in supertypes and/or containing declarations")
             });
-            let diagnostic = match inheritance {
-                _ if cyclic_header => None,
-                _ if cl.is_enum() => None,
-                None => None,
-                Some(shape) if !shape.is_extensible => Some("it is not extensible"),
+            let diagnostic = match &shape {
+                _ if cyclic_header || cl.is_enum() => None,
+                Some(shape) if !shape.inheritance.is_extensible => {
+                    Some(if shape.kind == crate::libraries::TypeKind::Class {
+                        let final_supertype = "this type is final, so it cannot be extended.";
+                        (
+                            cl.base_class_span.unwrap_or(cl.span),
+                            final_supertype.into(),
+                        )
+                    } else {
+                        let superclass = superclass.render();
+                        (cl.span, format!("krusty: superclass '{superclass}' cannot be subclassed: it is not extensible"))
+                    })
+                }
                 _ => None,
             };
-            if let Some(reason) = diagnostic {
-                self.diags.error(
-                    cl.span,
-                    format!(
-                        "krusty: superclass '{}' cannot be subclassed: {reason}",
-                        superclass.render()
-                    ),
-                );
+            if let Some((span, message)) = diagnostic {
+                self.diags.error(span, message);
             }
             // `sealed` is abstract: its own subclasses discharge members the sealed class leaves
             // open, including members inherited from a superclass emitted in another unit.

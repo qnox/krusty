@@ -907,6 +907,10 @@ pub struct SymbolResolver<'a> {
     access_package: Option<TypeName>,
     /// Current source file, for top-level `private` declarations in this compilation module.
     access_file: Option<u32>,
+    /// The access site's lexical `@Suppress("INVISIBLE_REFERENCE")`/`("INVISIBLE_MEMBER")` policy.
+    /// Every access predicate of this resolver consumes it, so candidate collection, overload
+    /// applicability, and classifier access diagnostics read one decision.
+    visibility_suppressed: bool,
     /// Type variables of the enclosing postponed calls; extension receivers match over them.
     type_variables: &'a [String],
 }
@@ -1116,10 +1120,21 @@ impl<'a> SymbolResolver<'a> {
         self
     }
 
+    /// Install the access site's lexical visibility-suppression policy (see
+    /// [`Self::visibility_suppressed`]). The policy is resolved by the caller from the
+    /// `kotlin.Suppress` applications in force at the site; this resolver never derives it.
+    pub(crate) fn with_visibility_suppression(mut self, suppressed: bool) -> Self {
+        self.visibility_suppressed = suppressed;
+        self
+    }
+
     fn classifier_accessible(&self, internal: TypeName) -> bool {
         let Some(classifier) = self.src.classifier(internal) else {
             return false;
         };
+        if self.visibility_suppressed {
+            return true;
+        }
         // A companion's physical nested classifier may be non-public even though source code exposes
         // it through the outer classifier's public companion value (`Double.Companion`). Admit exactly
         // that metadata edge; an arbitrary internal nested classifier remains inaccessible.
@@ -1223,8 +1238,15 @@ impl<'a> SymbolResolver<'a> {
     }
 
     fn package_private_member_accessible(&self, owner: TypeName) -> bool {
-        self.access_package
-            .is_some_and(|package| package == owner.namespace())
+        self.visibility_suppressed
+            || self
+                .access_package
+                .is_some_and(|package| package == owner.namespace())
+    }
+
+    /// Source visibility of a package-level or extension property from this access site.
+    fn property_visible(&self, property: &PropertyInfo) -> bool {
+        self.visibility_suppressed || source_property_visible(self.lib, property)
     }
 
     /// Whether the type named `internal` — or anything in its (classpath) supertype chain — declares a
@@ -1840,7 +1862,7 @@ impl<'a> SymbolResolver<'a> {
         let receiver_mro = self.receiver_mro(receiver);
         let mut candidates = properties
             .filter(|property| property.kind == PropKind::Extension)
-            .filter(|property| source_property_visible(self.lib, property))
+            .filter(|property| self.property_visible(property))
             .filter(|property| {
                 generic_bounds_admit(
                     &self.src,
@@ -2180,10 +2202,11 @@ impl<'a> SymbolResolver<'a> {
         )
     }
 
-    /// Select from a caller-provided family when Kotlin's `INVISIBLE_REFERENCE` or
-    /// `INVISIBLE_MEMBER` suppression makes otherwise hidden declarations applicable. Visibility
-    /// is the only relaxed predicate; argument mapping, applicability, generic inference and
-    /// specificity remain the ordinary top-level algorithm.
+    /// Select from a caller-provided family without the source visibility gate, for a
+    /// compiler-selected runtime callable that no source reference names. Visibility is the only
+    /// relaxed predicate; argument mapping, applicability, generic inference and specificity
+    /// remain the ordinary top-level algorithm. A source site under a lexical visibility
+    /// suppression installs that policy with [`Self::with_visibility_suppression`] instead.
     pub(crate) fn select_top_level_function_candidates_ignoring_visibility(
         &self,
         name: &str,
@@ -2193,19 +2216,6 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<(FunctionInfo, LibraryCallable)> {
         self.select_top_level_function_candidates_with_visibility(
             name, candidates, args, type_args, None, true,
-        )
-    }
-
-    pub(crate) fn select_top_level_function_candidates_with_expected_ignoring_visibility(
-        &self,
-        name: &str,
-        candidates: Vec<FunctionInfo>,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        expected: Option<Ty>,
-    ) -> Option<(FunctionInfo, LibraryCallable)> {
-        self.select_top_level_function_candidates_with_visibility(
-            name, candidates, args, type_args, expected, true,
         )
     }
 
@@ -2472,7 +2482,7 @@ impl<'a> SymbolResolver<'a> {
                             .into_iter()
                             .flat_map(|symbols| property_overloads(&symbols.callables))
                             .filter(|property| property.kind == PropKind::TopLevel)
-                            .filter(|property| source_property_visible(self.lib, property))
+                            .filter(|property| self.property_visible(property))
                             .collect::<Vec<_>>()
                     })
                     .find(|properties| !properties.is_empty())

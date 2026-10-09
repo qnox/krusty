@@ -566,6 +566,11 @@ impl TrFlags {
     const ANNOTATION: u16 = 1 << 8;
     /// The element type written on a `vararg` parameter; the parameter's type is its array.
     const VARARG_ELEMENT: u16 = 1 << 9;
+    // A classifier's superclass reference (`: Base(args)`) is retained by its `ClassDecl` and also
+    // present in `detached_type_refs` so Pass 1 can bind it. Signature solving is its sole
+    // diagnostic authority, under its declaration's lexical policy; the mark keeps the file-scope
+    // fallback from rechecking it outside that policy, as for annotations.
+    const SUPERCLASS: u16 = 1 << 10;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -620,6 +625,10 @@ impl TrFlags {
     #[inline]
     pub const fn with_vararg_element(self, on: bool) -> Self {
         self.with(Self::VARARG_ELEMENT, on)
+    }
+    #[inline]
+    pub const fn with_superclass(self, on: bool) -> Self {
+        self.with(Self::SUPERCLASS, on)
     }
 }
 
@@ -1856,6 +1865,10 @@ pub struct File {
     /// argument's `ExprId.0`. The checker/lowerer reorder the base args to the base constructor's
     /// parameter order before use. Absent ⇒ all base args are positional.
     pub base_arg_names: std::collections::HashMap<u32, Vec<Option<String>>>,
+    /// The callee name of a superclass constructor call (`Base` in `: pkg.Base(args)`), keyed by
+    /// the start offset of the class's `base_class_span`. The call's access diagnostic is reported
+    /// there, apart from the type reference's own.
+    pub base_class_callee_spans: std::collections::HashMap<u32, Span>,
     /// Declared return type of an anonymous function (`fun (…): T = …`), keyed by the desugared
     /// lambda's `ExprId.0`. A block body that ends in `return` has body type `Nothing`, so the checker
     /// must take the function's type from this annotation, not from the (diverging) body value.

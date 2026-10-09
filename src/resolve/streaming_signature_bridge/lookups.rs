@@ -157,30 +157,36 @@ impl ProductionSignatureSemantics<'_> {
         reference
     }
 
-    /// `@Suppress("INVISIBLE_REFERENCE")` on a declaration covers that declaration and every
-    /// declaration written inside it. Signature lookup runs before the body policy stack, so a
-    /// class annotation has to be visible from the class supertype and from a member signature.
-    pub(super) fn declaration_or_enclosing_suppresses_visibility(
+    /// A superclass constructor call (`: pkg.Base(args)`) names its classifier apart from the
+    /// supertype reference, and kotlinc reports an inaccessible one at the call's callee as well.
+    /// The scope's resolver carries the declaration's lexical visibility policy, so a suppressed
+    /// declaration reports neither.
+    pub(super) fn check_superclass_call_access(
         &self,
-        declaration: crate::fir::DeclarationId,
-    ) -> bool {
-        let mut current = Some(declaration);
-        let mut seen = Vec::new();
-        while let Some(id) = current {
-            if seen.contains(&id) {
-                return false;
-            }
-            seen.push(id);
-            if self.table.declaration_suppresses_visibility(id) {
-                return true;
-            }
-            current = self
-                .headers
-                .declarations
-                .anchor(id)
-                .and_then(|anchor| anchor.owner);
+        scope: crate::fir::SignatureScope,
+        callee: Span,
+        superclass: crate::types::TypeName,
+    ) {
+        let access = self
+            .with_resolver(scope, |resolver| {
+                resolver.inaccessible_classifier_access(superclass)
+            })
+            .ok();
+        crate::trace_compiler!(
+            "resolve",
+            "superclass call access declaration={:?} superclass={superclass} inaccessible={access:?}",
+            scope.owner,
+        );
+        if let Some(access) = access {
+            let display = superclass.render().replace(['/', '$'], ".");
+            self.record_classifier_access_diagnostic_at(
+                scope.owner,
+                scope.source,
+                callee,
+                superclass,
+                super::super::inaccessible_classifier_message(&display, access),
+            );
         }
-        false
     }
 
     /// Resolve a classifier header type in the lexical scope immediately outside the classifier
@@ -289,29 +295,27 @@ impl ProductionSignatureSemantics<'_> {
                     })
             })
         {
-            if !self.declaration_or_enclosing_suppresses_visibility(scope.owner) {
-                let access = self
-                    .with_resolver(scope, |resolver| {
-                        resolver.inaccessible_classifier_access(internal)
-                    })
-                    .ok();
-                crate::trace_compiler!(
-                    "resolve",
-                    "compact type access declaration={:?} source={:?} spelling={} classifier={} inaccessible={access:?}",
+            let access = self
+                .with_resolver(scope, |resolver| {
+                    resolver.inaccessible_classifier_access(internal)
+                })
+                .ok();
+            crate::trace_compiler!(
+                "resolve",
+                "compact type access declaration={:?} source={:?} spelling={} classifier={} inaccessible={access:?}",
+                scope.owner,
+                scope.source,
+                reference.name,
+                internal,
+            );
+            if let Some(access) = access {
+                self.record_classifier_access_diagnostic_at(
                     scope.owner,
                     scope.source,
-                    reference.name,
+                    reference.span,
                     internal,
+                    super::super::inaccessible_classifier_message(&reference.name, access),
                 );
-                if let Some(access) = access {
-                    self.record_classifier_access_diagnostic_at(
-                        scope.owner,
-                        scope.source,
-                        reference.span,
-                        internal,
-                        super::super::inaccessible_classifier_message(&reference.name, access),
-                    );
-                }
             }
             // The provider-normalized declaration, whichever module or classpath entry supplies it:
             // its variances check the written projections and its formal bounds give each `*` its

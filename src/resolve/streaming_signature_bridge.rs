@@ -1049,8 +1049,18 @@ impl ProductionSignatureSemantics<'_> {
             &imports,
         )
         .with_access_context(package, scope.source.raw(), lexical_classes)
+        .with_visibility_suppression(self.scope_suppresses_visibility(scope))
         .with_type_variables(&type_variables);
         select(&resolver).ok_or_else(Self::failure)
+    }
+
+    /// The lexical visibility-suppression policy of a signature scope. It is the resolved
+    /// `kotlin.Suppress` fact its owning declaration publishes — covering the file, the lexically
+    /// enclosing declarations, and the declaration itself — and every signature access check reads
+    /// it here: each resolver this bridge builds for the scope installs it, and a member access
+    /// site reports it.
+    fn scope_suppresses_visibility(&self, scope: crate::fir::SignatureScope) -> bool {
+        self.table.declaration_suppresses_visibility(scope.owner)
     }
 
     fn classifier_is_singleton(&self, classifier: crate::types::TypeName) -> bool {
@@ -4649,6 +4659,7 @@ pub(crate) fn finalized_streamed_signature_index(
     {
         diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
     }
+    let solver_diagnostics = semantics.diagnostics.borrow().len();
     if !failed.is_empty() || !finalization_failures.is_empty() {
         crate::trace_compiler!(
             "fir",
@@ -4680,8 +4691,22 @@ pub(crate) fn finalized_streamed_signature_index(
         failed.sort_by_key(|declaration| declaration.raw());
         failed.dedup();
     }
+    // Classifier publication resolves supertype and delegation headers after the solver's report.
+    // A classifier-access finding recorded there (already filtered by the declaration's lexical
+    // visibility policy) belongs to the same module report, on every exit from publication.
+    macro_rules! emit_publication_diagnostics {
+        () => {
+            for diagnostic in semantics.diagnostics.borrow()[solver_diagnostics..]
+                .iter()
+                .filter(|diagnostic| diagnostic.unconditional)
+            {
+                diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
+            }
+        };
+    }
     macro_rules! stop_with_failure {
         ($declaration:expr) => {{
+            emit_publication_diagnostics!();
             failed.push($declaration);
             failed.sort_by_key(|declaration| declaration.raw());
             failed.dedup();
@@ -6142,6 +6167,7 @@ pub(crate) fn finalized_streamed_signature_index(
         };
         index.publish_interface_delegations(declaration, delegations);
     }
+    emit_publication_diagnostics!();
     let resolved_contracts = match resolved_contracts {
         Ok(contracts) => contracts,
         Err(mut declarations) => {

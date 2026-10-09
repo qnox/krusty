@@ -1946,13 +1946,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         }
         let scoped_classifier = self.bound_or_scoped_classifier(scope, spelling, classifier);
         let selected = self.with_resolver(scope, |resolver| {
-            let include_invisible =
-                self.declaration_or_enclosing_suppresses_visibility(scope.owner);
-            let candidates = if include_invisible {
-                resolver.top_level_candidates(spelling)
-            } else {
-                resolver.accessible_top_level_candidates(spelling)
-            };
+            let candidates = resolver.accessible_top_level_candidates(spelling);
             crate::trace_compiler!(
                 "signature",
                 "top-level candidates spelling={spelling} arguments={argument_types:?} candidates={:?}",
@@ -1972,23 +1966,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 arguments,
                 trailing_lambda,
             ) {
-                let (selected, callable) = if include_invisible {
-                        resolver.select_top_level_function_candidates_with_expected_ignoring_visibility(
-                            spelling,
-                            explicit.candidates,
-                            &explicit.arguments,
-                            &resolved_type_arguments,
-                            expected.map(crate::fir::ResolvedTy::get),
-                        )?
-                } else {
-                    resolver.select_top_level_function_candidates_with_expected(
+                let (selected, callable) = resolver
+                    .select_top_level_function_candidates_with_expected(
                         spelling,
                         explicit.candidates,
                         &explicit.arguments,
                         &resolved_type_arguments,
                         expected.map(crate::fir::ResolvedTy::get),
-                    )?
-                };
+                    )?;
                 return Some((
                     SelectedTopLevelCall::Callable {
                         parameter_by_argument: Self::selected_argument_parameters(
@@ -2018,36 +2003,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let (selected_arguments, selected_argument_types) = mapped
                 .clone()
                 .unwrap_or_else(|| (argument_kinds.clone(), argument_types.clone()));
-            if include_invisible {
-                let all_top_level = candidates
-                    .iter()
-                    .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if let Some((selected, callable)) = resolver
-                    .select_top_level_function_candidates_with_expected_ignoring_visibility(
-                        spelling,
-                        all_top_level,
-                        &selected_arguments,
-                        &resolved_type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    )
-                {
-                    return Some((
-                        SelectedTopLevelCall::Callable {
-                            parameter_by_argument: Self::selected_argument_parameters(
-                                &selected,
-                                arguments,
-                                trailing_lambda,
-                            ),
-                            callable: Box::new(callable),
-                            source: selected.source_key,
-                            declaration: selected.stable_declaration,
-                        },
-                        selected_argument_types,
-                    ));
-                }
-            }
             let selected_top_level = resolver.select_top_level_function_candidates_with_expected(
                 spelling,
                 candidates.clone(),
@@ -2088,27 +2043,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                 .filter(|candidate| {
                     let family = vec![(*candidate).clone()];
-                    if include_invisible {
-                        resolver
-                            .select_top_level_function_candidates_with_expected_ignoring_visibility(
-                                spelling,
-                                family,
-                                &selected_arguments,
-                                &resolved_type_arguments,
-                                expected.map(crate::fir::ResolvedTy::get),
-                            )
-                            .is_some()
-                    } else {
-                        resolver
-                            .select_top_level_function_candidates_with_expected(
-                                spelling,
-                                family,
-                                &selected_arguments,
-                                &resolved_type_arguments,
-                                expected.map(crate::fir::ResolvedTy::get),
-                            )
-                            .is_some()
-                    }
+                    resolver
+                        .select_top_level_function_candidates_with_expected(
+                            spelling,
+                            family,
+                            &selected_arguments,
+                            &resolved_type_arguments,
+                            expected.map(crate::fir::ResolvedTy::get),
+                        )
+                        .is_some()
                 })
                 .take(2)
                 .count();
@@ -2461,13 +2404,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             (Vec<Ty>, Vec<Option<usize>>, crate::libraries::CallSig),
             _,
         > = self.with_resolver(scope, |resolver| {
-            let include_invisible =
-                self.declaration_or_enclosing_suppresses_visibility(scope.owner);
-            let candidates = if include_invisible {
-                resolver.top_level_candidates(spelling)
-            } else {
-                resolver.accessible_top_level_candidates(spelling)
-            };
+            let candidates = resolver.accessible_top_level_candidates(spelling);
             let argument_names = arguments
                 .iter()
                 .map(|argument| match argument {
@@ -2501,22 +2438,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             );
             let (kinds, slots) =
                 Self::probe_call_arguments(&candidates, arguments, trailing_lambda)?;
-            let visibility_override = include_invisible
-                .then(|| {
-                    resolver.select_top_level_function_candidates_ignoring_visibility(
-                        spelling,
-                        candidates
-                            .iter()
-                            .filter(|candidate| {
-                                candidate.kind == crate::libraries::FnKind::TopLevel
-                            })
-                            .cloned()
-                            .collect(),
-                        &kinds,
-                        &resolved_type_arguments,
-                    )
-                })
-                .flatten()
+            let (selected, specialized_parameters) = resolver
+                .select_top_level_function_candidates(
+                    spelling,
+                    candidates.clone(),
+                    &kinds,
+                    &resolved_type_arguments,
+                )
                 .and_then(|(selected, _)| {
                     let parameters = crate::symbol_resolver::specialized_function_params(
                         &selected,
@@ -2525,27 +2453,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     );
                     let value_parameters = parameters.get(selected.context_count..)?.to_vec();
                     Some((selected, Some(value_parameters)))
-                });
-            let (selected, specialized_parameters) = visibility_override
-                .or_else(|| {
-                    resolver
-                        .select_top_level_function_candidates(
-                            spelling,
-                            candidates.clone(),
-                            &kinds,
-                            &resolved_type_arguments,
-                        )
-                        .and_then(|(selected, _)| {
-                            let parameters =
-                                crate::symbol_resolver::specialized_function_params(
-                                    &selected,
-                                    &kinds,
-                                    &resolved_type_arguments,
-                                );
-                            let value_parameters =
-                                parameters.get(selected.context_count..)?.to_vec();
-                            Some((selected, Some(value_parameters)))
-                        })
                 })
                 .or_else(|| {
                     let mut visible = candidates.iter().filter(|candidate| {
