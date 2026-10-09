@@ -4,7 +4,7 @@
 //! first — so every program here keeps the range instead: stores it, asks it a question, renders
 //! it. Each must be LOWERED, not declined, which is what `expect_native_box` claims.
 
-use super::common::expect_native_box;
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 #[test]
 fn a_stored_int_range_answers_membership() {
@@ -755,8 +755,7 @@ fn a_stepped_until_loop_counts_to_its_last_reached_element() {
     // Native counts `start until end step k` from `start` through the last element the
     // progression reaches, without building it. The bound is exclusive, the step lands short of
     // it, the start may be a local, and `until Int.MIN_VALUE` is still the empty range.
-    expect_native_box(
-        "fun box(): String {\n\
+    let source = "fun box(): String {\n\
          \x20   var s = \"\"\n\
          \x20   for (i in 0 until 10 step 3) s += \"$i,\"\n\
          \x20   if (s != \"0,3,6,9,\") return \"fail until: $s\"\n\
@@ -781,24 +780,23 @@ fn a_stepped_until_loop_counts_to_its_last_reached_element() {
          \x20   for (c in 'a' until 'g' step 2) s += c\n\
          \x20   if (s != \"ace\") return \"fail char: $s\"\n\
          \x20   return \"OK\"\n\
-         }\n",
-        "SteppedUntil",
-        "OK",
-    );
+         }\n";
+    expect_box_ok_with_stdlib(source, "SteppedUntil");
+    expect_native_box(source, "SteppedUntil", "OK");
 }
 
 #[test]
 fn a_stepped_until_loop_rejects_a_step_that_is_not_positive() {
-    expect_native_box(
-        "fun box(): String {\n\
+    // The step is checked before the loop runs, with the message Kotlin's `step` raises.
+    let source = "fun box(): String {\n\
          \x20   try {\n\
          \x20       for (i in 0 until 10 step 0) return \"fail: iterated $i\"\n\
          \x20   } catch (e: IllegalArgumentException) {\n\
-         \x20       return \"OK\"\n\
+         \x20       val expected = \"Step must be positive, was: 0.\"\n\
+         \x20       return if (e.message == expected) \"OK\" else \"fail message: \" + e.message\n\
          \x20   }\n\
          \x20   return \"fail: no exception\"\n\
-         }\n",
-        "SteppedUntilZeroStep",
-        "OK",
-    );
+         }\n";
+    expect_box_ok_with_stdlib(source, "SteppedUntilZeroStep");
+    expect_native_box(source, "SteppedUntilZeroStep", "OK");
 }

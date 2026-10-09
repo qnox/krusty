@@ -82,7 +82,11 @@ fn only_the_jvm_policy_realizes_the_header_s_inlined_calls() {
 fn stored_progressions(ir: &IrFile) -> usize {
     let progression = crate::types::Ty::obj("kotlin/ranges/IntProgression");
     let mut stored = 0;
-    let mut pending: Vec<_> = ir.functions.iter().filter_map(|function| function.body).collect();
+    let mut pending: Vec<_> = ir
+        .functions
+        .iter()
+        .filter_map(|function| function.body)
+        .collect();
     while let Some(expression) = pending.pop() {
         if matches!(
             &ir.exprs[expression as usize],
@@ -90,9 +94,7 @@ fn stored_progressions(ir: &IrFile) -> usize {
         ) {
             stored += 1;
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-            pending.push(child)
-        });
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
     stored
 }

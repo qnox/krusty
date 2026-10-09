@@ -18,8 +18,8 @@ use crate::ir::{
 use crate::types::Ty;
 
 use super::{
-    constant_bound, constant_value, is_unsigned, step_constant, CounterLoopStyle, Operand, Realizer,
-    UntilSteps,
+    constant_bound, constant_value, is_unsigned, step_constant, CounterLoopStyle, Operand,
+    Realizer, UntilSteps,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
