@@ -9,11 +9,15 @@ use super::{Parser, TokenKind};
 use crate::diag::Span;
 use crate::features::{FeatureGate, LangFeatures};
 
-/// The parser's view of the features it gates.
+/// The parser's view of the features it gates, and whether it is inside a body: a statement or an
+/// expression, where every declaration is local.
 #[derive(Default)]
 pub(super) struct SyntaxGates {
     name_based_destructuring: FeatureGate,
     unnamed_local_variables: FeatureGate,
+    local_type_aliases: FeatureGate,
+    /// How many statements and expressions enclose the cursor.
+    body_depth: u32,
 }
 
 impl SyntaxGates {
@@ -21,7 +25,23 @@ impl SyntaxGates {
         Self {
             name_based_destructuring: features.gate("NameBasedDestructuring"),
             unnamed_local_variables: features.gate("UnnamedLocalVariables"),
+            local_type_aliases: features.gate("LocalTypeAliases"),
+            body_depth: 0,
         }
+    }
+
+    pub(super) fn enter_body(&mut self) {
+        self.body_depth += 1;
+    }
+
+    pub(super) fn leave_body(&mut self) {
+        self.body_depth -= 1;
+    }
+
+    /// A declaration starting here is local: kotlinc's `isLocal`, which holds for everything
+    /// declared in a body, including the members of local and anonymous classes.
+    fn in_body(&self) -> bool {
+        self.body_depth > 0
     }
 }
 
@@ -61,5 +81,15 @@ impl Parser<'_> {
     /// variable called `_`.
     pub(super) fn at_unnamed_local_name(&self) -> bool {
         self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident()
+    }
+
+    /// A type alias declared at `start` (its annotations and modifiers included). Outside a body it
+    /// is top-level or nested in a classifier, which `NestedTypeAliases` governs; in a body it is
+    /// local and needs `LocalTypeAliases`.
+    pub(super) fn gate_type_alias(&mut self, start: Span) {
+        if self.gates.in_body() {
+            let gate = self.gates.local_type_aliases.clone();
+            self.file.language_gates.require(&gate, start);
+        }
     }
 }

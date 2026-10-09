@@ -24,12 +24,22 @@ impl Parser<'_> {
         }
 
         *nesting.counter_mut(self) += 1;
+        let body = matches!(
+            nesting,
+            ParserNesting::Expression | ParserNesting::Statement
+        );
+        if body {
+            self.gates.enter_body();
+        }
         // Check/grow at EVERY recursive level. A single grown segment was measured to fail before
         // the bound because each semantic level stacks several large unoptimized parser frames.
         // `maybe_grow` is cheap while enough stack remains and chains a segment only near its
         // low-water mark.
         let result = crate::wide_stack::on_wide_stack(|| parse(self));
         *nesting.counter_mut(self) -= 1;
+        if body {
+            self.gates.leave_body();
+        }
         result
     }
 

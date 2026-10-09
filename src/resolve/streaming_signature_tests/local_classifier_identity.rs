@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn local_classifier_header_resolves_statement_local_type_alias() {
     let source = r#"
+// LANGUAGE: +LocalTypeAliases
 abstract class A { abstract val p: String }
 fun make(): A {
     typealias Text = String

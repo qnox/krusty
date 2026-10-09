@@ -182,7 +182,6 @@ languageVersion/languageVersion.args
 languageVersion/languageVersionInvalid.args
 languageVersion/languageVersionUnsupported.args
 legacySmartCastsAfterTry.args
-localTypeAliasesEnabled.args
 localTypeAliasesError.args
 modulesWithDependencyCycle.args
 multipleBackendThreads.args
