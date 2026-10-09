@@ -806,6 +806,23 @@ mod tests {
             );
         }
 
+        // `compilerOptions.progressiveMode` reaches krusty as kotlinc's `-progressive`, once.
+        let _ = std::fs::remove_file(&log);
+        build()
+            .property("krusty.negative", "progressive-mode")
+            .tasks([":compiler:util:compileKotlin"])
+            .run()
+            .unwrap_or_else(|error| panic!("{kgp}: progressive mode: {error}"));
+        let progressive = single_invocation(&log);
+        assert_eq!(
+            progressive
+                .iter()
+                .filter(|argument| argument.as_str() == "-progressive")
+                .count(),
+            1,
+            "{kgp}: {progressive:?}"
+        );
+
         if kgp == "2.4.10" {
             for (case, expected) in [
                 (
@@ -945,7 +962,6 @@ mod tests {
                     refused("-Xjdk-release=17"),
                 ),
                 ("free-werror", "-Werror", refused("-Werror")),
-                ("progressive-mode", "-progressive", refused("-progressive")),
                 (
                     "warning-level-bad-severity",
                     "-Xwarning-level=REDUNDANT_CLI_ARG:loud",
