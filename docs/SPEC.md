@@ -13853,6 +13853,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `checkcast` or unbox is that landing, with the value already on the stack. A `Unit` use stores
   the object and does not reload it. (`tests/closeable_use_receiver_e2e.rs`.)
 
+- **A literal lambda spliced into `Closeable.use` reloads its result after `finally`.** The lambda's
+  value parameters and its `$i$a$` marker sit inside the protected region, after the `try`'s opening
+  `nop`. A capture that is already a local is read from that local. The result is stored once those
+  locals have left, so it reuses the parameter slot. The normal path loads that slot after
+  `closeFinally` and jumps over the handlers. A used result is the landing. A discarded result,
+  including `Unit`, is popped there: the load and the pop are not adjacent, so temporary elimination
+  keeps the store and pop-backward removes the reload. The store is on the call's line again even
+  when the lambda's closing brace was that same line. Common IR represents this as a result-bearing
+  protected expression and records its inline-cleanup provenance; it does not invent a result local,
+  loop, or suspension-dependent control-flow path. The JVM emitter owns the temporary, reload,
+  landing, and coroutine-slot decisions, so a suspending lambda uses the same semantic shape without
+  exposing JVM slot reuse to common lowering.
+  (`tests/inline_use_lambda_e2e.rs`, `tests/use_inline_finally_e2e.rs`.)
+
 - **An inline expansion's parameters are locals OF THAT EXPANSION, named by their ROLE.** A spilled
   local's debug name is what a debugger shows while stepping through an inlined body, and krusty
   produced the wrong one in three distinct ways:
