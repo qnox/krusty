@@ -54,5 +54,5 @@ class D(\n\
     override fun name() = \"\"\n\
 }\n\
 fun box(): String = D(\"O\").greet() + D(\"\").name()\n";
-    common::expect_box_ok_with_stdlib(SRC, "P");
+    common::expect_box_same_as_kotlinc(SRC, "DelegateAfterBy");
 }
