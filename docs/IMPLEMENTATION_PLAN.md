@@ -5231,3 +5231,23 @@ caller's own access. A nested copy marks the outer frame's line on a `nop` befor
 the caller continues. A private inline function with no default, expanded only from
 non-inline callers, still reads the field directly. Test:
 `tests/private_inline_property_access_e2e.rs`.
+
+## KLIB writer — krusty compiles a module to a Kotlin library  ◐
+
+A non-JVM dependency is distributed as a KLIB, and a dependent compilation reads its declarations
+(and, on Native, its bodies) from it. For krusty to build a multi-module Native program it has to
+write the dependency libraries itself; kotlinc only supplies the expected output.
+
+- **Package metadata (done).** `klib::backend::KlibBackend` is a `Backend` that writes one
+  `PackageFragment` per checked file and lays them out with `klib::write::KlibWriter` (manifest,
+  `linkdata/module`, `package_<fq>/<n>_<seg>.knm`, `root_package/`). The records come from the same
+  builders as JVM `@Metadata` (`metadata::builder`), fed by target-free declaration records
+  (`metadata::declaration_records`); `metadata::klib_fragment` owns only the carrier: the fragment's
+  `StringTable` and `QualifiedNameTable`, per-container type tables, the file and constant-value
+  extensions, and the package name. Top-level functions, properties and typealiases are byte-equal
+  to `kotlinc-native -p library` for Kotlin 2.4.0, 2.4.10 and 2.4.20 (`tests/klib_writer_e2e.rs`).
+- **Class metadata (next).** A file declaring a class is declined by name until the class record
+  is written for the KLIB carrier.
+- **Serialized IR (next).** Bodies are written as the IR the `metadata::klib_ir` decoder reads back.
+- **Box tests (next).** The Native lane's `// MODULE:` cases compile each dependency to a KLIB with
+  this backend, then the main module against it.

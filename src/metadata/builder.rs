@@ -323,7 +323,9 @@ fn condition_expression(
                 panic!("unresolved source type reached metadata contract emission");
             };
             let it = type_pb_generic(st, *ty, tps);
-            p.field_varint(5, types.id(it)); // Expression.is_instance_type_id
+            // A KLIB has one type table per container, which the contract shares.
+            let id = st.type_id(&it).map_or_else(|| types.id(it), u64::from);
+            p.field_varint(5, id); // Expression.is_instance_type_id
         }
         Condition::BoolParam(param) => {
             p.field_varint(2, param.to_wire());
@@ -366,6 +368,11 @@ fn condition_expression(
 
 fn zigzag_i64(value: i64) -> u64 {
     ((value as u64) << 1) ^ ((value >> 63) as u64)
+}
+
+/// A constant as an `Annotation.Argument.Value`, the message a KLIB `const val` records its value in.
+pub(crate) fn constant_value_pb(st: &mut StringTable<'_>, constant: &crate::ir::IrConst) -> Pb {
+    annotation_value_pb(st, &crate::ir::AnnoValue::Const(constant.clone()))
 }
 
 fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -> Pb {
@@ -537,7 +544,7 @@ fn function_pb(
         semantic_names.into_iter(),
     );
     let ret = type_pb_declared(st, f.ret, &f.spellings.ret, &tps);
-    p.field_message(3, &ret); // Function.return_type = 3
+    st.put_type(&mut p, 3, 7, &ret); // Function.return_type(_id) = 3 / 7
     for (id, (tp_name, reified)) in f.type_params.iter().enumerate() {
         let tp = encode_metadata_type_parameter(
             st,
@@ -563,19 +570,23 @@ fn function_pb(
     // matching kotlinc's ascending field order. Its presence marks the function an extension.
     if let Some(recv) = f.receiver {
         let rt = type_pb_declared(st, recv, &f.spellings.receiver, &tps);
-        p.field_message(5, &rt);
+        st.put_type(&mut p, 5, 8, &rt); // Function.receiver_type(_id) = 5 / 8
     }
     assert_eq!(
         f.context_parameter_kinds.len(),
         f.context_count,
         "metadata function context roles must match the leading parameter prefix"
     );
+    let mut context_receiver_ids = Vec::new();
     for (i, (pname, pty)) in f.params.iter().enumerate() {
         let context_kind = f.context_parameter_kinds.get(i);
         if context_kind.is_some() {
             // Kotlin keeps the type-only compatibility list for named context parameters too.
             let ty = type_pb_declared(st, *pty, f.spellings.param(i), &tps);
-            p.repeated_message(10, &ty); // Function.context_receiver_type = 10
+            match st.type_id(&ty) {
+                Some(id) => context_receiver_ids.push(u64::from(id)),
+                None => p.repeated_message(10, &ty), // Function.context_receiver_type = 10
+            }
         }
         if context_kind == Some(&crate::types::ContextParameterKind::LegacyReceiver) {
             continue;
@@ -614,16 +625,16 @@ fn function_pb(
             (*pty, f.spellings.param(i).clone())
         };
         let ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
-        vp.field_message(3, &ty); // ValueParameter.type = 3
-                                  // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
-                                  // kotlinc's declared type stays the array.
+        st.put_type(&mut vp, 3, 5, &ty); // ValueParameter.type(_id) = 3 / 5
+                                         // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
+                                         // kotlinc's declared type stays the array.
         if f.vararg_index == Some(i) {
             let elem = pty
                 .array_elem()
                 .or_else(|| pty.type_args().first().copied());
             if let Some(elem) = elem {
                 let et = type_pb_declared(st, elem, f.spellings.param(i), &tps);
-                vp.field_message(4, &et); // ValueParameter.vararg_element_type = 4
+                st.put_type(&mut vp, 4, 6, &et); // ValueParameter.vararg_element_type(_id) = 4 / 6
             }
         }
         crate::metadata::class_builder::append_param_annotations(
@@ -640,6 +651,8 @@ fn function_pb(
             p.repeated_message(6, &vp); // Function.value_parameter = 6
         }
     }
+    // Function.context_receiver_type_id = 11, packed.
+    p.field_packed_varints(11, &context_receiver_ids);
     // Function.flags = 9 — in kotlinc's ASCENDING field order (after name/types/params), emitted
     // only when non-default (`6` = public final is the proto default; an `internal fun`'s 0 is
     // explicit). Bit 13 = IS_SUSPEND, bit 10 = IS_INLINE; visibility bits ride along.
@@ -659,8 +672,10 @@ fn function_pb(
     // language level 2.4) gates the records, not the flags: an older source-language configuration
     // keeps the `HAS_ANNOTATIONS` bit above and writes nothing here.
     if annotations_in_metadata {
+        // Function.annotation = 12, or `KlibMetadataProtoBuf.functionAnnotation` = 170.
+        let field = if st.is_klib() { 170 } else { 12 };
         for annotation in f.annotations.records() {
-            p.repeated_message(12, &annotation_pb(st, annotation));
+            p.repeated_message(field, &annotation_pb(st, annotation));
         }
     }
     // Function.version_requirement = 31: an index into the package's requirement table.
@@ -829,9 +844,9 @@ pub(crate) fn type_alias_pb(st: &mut StringTable<'_>, alias: &TypeAliasMeta) -> 
         &tps,
     )
     .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"));
-    p.field_message(4, &underlying); // TypeAlias.underlying_type = 4
+    st.put_type(&mut p, 4, 5, &underlying); // TypeAlias.underlying_type(_id) = 4 / 5
     let expanded = type_pb_declared(st, alias.expansion, &alias.expansion_spelling, &tps);
-    p.field_message(6, &expanded); // TypeAlias.expanded_type = 6
+    st.put_type(&mut p, 6, 7, &expanded); // TypeAlias.expanded_type(_id) = 6 / 7
     p
 }
 
@@ -935,7 +950,7 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
         }
         parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
         let ty = type_pb_declared(st, m.ty, &m.spellings.ret, &setter_tps);
-        parameter.field_message(3, &ty); // ValueParameter.type = 3
+        st.put_type(&mut parameter, 3, 5, &ty); // ValueParameter.type(_id) = 3 / 5
         crate::metadata::class_builder::append_param_annotations(
             st,
             &mut parameter,
@@ -946,7 +961,7 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
     });
     p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
     let ret = type_pb_declared(st, m.ty, &m.spellings.ret, &tps);
-    p.field_message(3, &ret); // Property.return_type = 3
+    st.put_type(&mut p, 3, 9, &ret); // Property.return_type(_id) = 3 / 9
     for (id, name) in m.type_params.iter().enumerate() {
         let tp = encode_metadata_type_parameter(
             st,
@@ -970,16 +985,21 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
     }
     if let Some(recv) = m.receiver {
         let rt = type_pb_declared(st, recv, &m.spellings.receiver, &tps);
-        p.field_message(5, &rt); // Property.receiver_type = 5 (extension properties only)
+        // Property.receiver_type(_id) = 5 / 10 (extension properties only)
+        st.put_type(&mut p, 5, 10, &rt);
     }
     if let Some(parameter) = &setter_parameter {
         p.field_message(6, parameter); // Property.setter_value_parameter = 6
     }
+    let mut context_receiver_ids = Vec::new();
     for (name, kind, ty) in &m.context_params {
         // Kotlin keeps the type-only compatibility list for every context entry, including a
         // named context parameter that is also published below as `context_parameter`.
         let ty = type_pb_declared(st, *ty, crate::spelling::Spelled::NONE, &tps);
-        p.repeated_message(12, &ty); // Property.context_receiver_type = 12
+        match st.type_id(&ty) {
+            Some(id) => context_receiver_ids.push(u64::from(id)),
+            None => p.repeated_message(12, &ty), // Property.context_receiver_type = 12
+        }
         if *kind == crate::types::ContextParameterKind::LegacyReceiver {
             continue;
         }
@@ -990,9 +1010,11 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
         };
         let mut parameter = Pb::new();
         parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
-        parameter.field_message(3, &ty); // ValueParameter.type = 3
+        st.put_type(&mut parameter, 3, 5, &ty); // ValueParameter.type(_id) = 3 / 5
         p.repeated_message(17, &parameter); // Property.context_parameter = 17
     }
+    // Property.context_receiver_type_id = 13, packed.
+    p.field_packed_varints(13, &context_receiver_ids);
     let vis = visibility_bits(m.visibility);
     let base = if m.is_var {
         PKG_VAR_FLAGS
@@ -1038,6 +1060,31 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
     if let Some(setter_flags) = words.setter {
         p.field_varint(8, setter_flags); // Property.setter_flags = 8
     }
+    if !st.is_klib() {
+        jvm_property_signature(st, &mut p, m);
+    }
+
+    // The accessors' records intern after the JVM signature, the getter's first.
+    if annotations_in_metadata {
+        let accessors = &m.accessor_annotations;
+        // Property.getter_annotation / setter_annotation = 15 / 16, or the KLIB extensions
+        // `propertyGetterAnnotation` / `propertySetterAnnotation` = 177 / 178.
+        let fields = if st.is_klib() { [177, 178] } else { [15, 16] };
+        for (field, annotations) in fields
+            .into_iter()
+            .zip([&accessors.getter, &accessors.setter])
+        {
+            for annotation in annotations.records() {
+                p.repeated_message(field, &annotation_pb(st, annotation));
+            }
+        }
+    }
+    p
+}
+
+/// `JvmProtoBuf.propertySignature` (f100): the field and accessors a JVM facade realizes the
+/// property with.
+fn jvm_property_signature(st: &mut StringTable<'_>, p: &mut Pb, m: &PropMeta) {
     // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
     // entry alone.
     let (getter, setter) = if m.is_const {
@@ -1068,18 +1115,104 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
         jvm.field_message(4, setter);
     }
     p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
+}
 
-    // The accessors' records intern after the JVM signature, the getter's first.
-    if annotations_in_metadata {
-        let accessors = &m.accessor_annotations;
-        for (field, annotations) in [(15, &accessors.getter), (16, &accessors.setter)] {
-            for annotation in annotations.records() {
-                // Property.getter_annotation = 15 / setter_annotation = 16
-                p.repeated_message(field, &annotation_pb(st, annotation));
-            }
-        }
+/// The top-level declarations of one file, as package metadata records them.
+pub(crate) struct PackageMembers<'a> {
+    pub(crate) functions: &'a [FnMeta],
+    pub(crate) properties: &'a [PropMeta],
+    pub(crate) aliases: &'a [TypeAliasMeta],
+}
+
+/// One package member, for a carrier that appends its own fields after the shared ones.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PackageMember {
+    // Ordering within one `decl_order` slot: a `typealias` carries the index of the declaration it
+    // PRECEDES (it is not itself an entry in the file's declaration arena), so on a tie it interns
+    // first — which is what source order means.
+    Alias(usize),
+    Function(usize),
+    Property(usize),
+}
+
+/// The container-wide tables a member's record indexes into.
+pub(crate) struct MemberTables<'a> {
+    pub(crate) requirements: &'a mut VersionRequirementTable,
+    pub(crate) contract_types: &'a mut ContractTypeTable,
+}
+
+/// Write `members` into `package` (`function` = 3, `property` = 4, `type_alias` = 5).
+///
+/// STRINGS INTERN IN SOURCE DECLARATION ORDER across kinds (a `const val` before a `fun` interns
+/// first), while the proto still writes functions before properties — so the string indices match
+/// kotlinc's. Each record is built in declaration order and emitted by field. `finish` appends a
+/// carrier's own fields to each record right after the shared ones, in that same order.
+pub(crate) fn write_package_members(
+    package: &mut Pb,
+    st: &mut StringTable<'_>,
+    members: PackageMembers<'_>,
+    tables: &mut MemberTables<'_>,
+    (param_assertions, annotations_in_metadata): (bool, bool),
+    finish: &mut dyn FnMut(&mut StringTable<'_>, PackageMember, &mut Pb),
+) {
+    let mut build_order: Vec<(usize, PackageMember)> = members
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(index, f)| (f.decl_order, PackageMember::Function(index)))
+        .chain(
+            members
+                .properties
+                .iter()
+                .enumerate()
+                .map(|(index, m)| (m.decl_order, PackageMember::Property(index))),
+        )
+        .chain(
+            members
+                .aliases
+                .iter()
+                .enumerate()
+                .map(|(index, a)| (a.decl_order, PackageMember::Alias(index))),
+        )
+        .collect();
+    build_order.sort();
+    let mut fn_pbs: Vec<Option<Pb>> = (0..members.functions.len()).map(|_| None).collect();
+    let mut prop_pbs: Vec<Option<Pb>> = (0..members.properties.len()).map(|_| None).collect();
+    let mut alias_pbs: Vec<Option<Pb>> = (0..members.aliases.len()).map(|_| None).collect();
+    for (_, member) in build_order {
+        let (slot, mut record) = match member {
+            PackageMember::Function(index) => (
+                &mut fn_pbs[index],
+                function_pb(
+                    st,
+                    &members.functions[index],
+                    tables.requirements,
+                    tables.contract_types,
+                    param_assertions,
+                    annotations_in_metadata,
+                ),
+            ),
+            PackageMember::Property(index) => (
+                &mut prop_pbs[index],
+                property_pb(st, &members.properties[index], annotations_in_metadata),
+            ),
+            PackageMember::Alias(index) => (
+                &mut alias_pbs[index],
+                type_alias_pb(st, &members.aliases[index]),
+            ),
+        };
+        finish(st, member, &mut record);
+        *slot = Some(record);
     }
-    p
+    for fp in fn_pbs.iter().flatten() {
+        package.repeated_message(3, fp); // Package.function = 3
+    }
+    for pp in prop_pbs.iter().flatten() {
+        package.repeated_message(4, pp); // Package.property = 4
+    }
+    for ap in alias_pbs.iter().flatten() {
+        package.repeated_message(5, ap); // Package.type_alias = 5
+    }
 }
 
 /// Build `(d1 bytes, d2 strings)` for a file facade. `d1 = delimited(StringTableTypes) + Package`.
@@ -1117,66 +1250,21 @@ pub(crate) fn build_package_with_intersection_approximation(
     let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();
     let mut package = Pb::new();
-    // STRINGS INTERN IN SOURCE DECLARATION ORDER across kinds (a `const val` before a `fun`
-    // interns first), while the proto still writes functions (f3) before properties (f4) — so the
-    // d2 indices match kotlinc's. Build each sub-message in declaration order, emit by field.
-    // Ordering within one `decl_order` slot: a `typealias` carries the index of the declaration it
-    // PRECEDES (it is not itself an entry in the file's declaration arena), so on a tie it interns
-    // first — which is what source order means.
-    #[derive(PartialEq, Eq, PartialOrd, Ord)]
-    enum Kind {
-        Alias,
-        Function,
-        Property,
-    }
-    let mut build_order: Vec<(usize, Kind, usize)> = funcs
-        .iter()
-        .enumerate()
-        .map(|(index, f)| (f.decl_order, Kind::Function, index))
-        .chain(
-            props
-                .iter()
-                .enumerate()
-                .map(|(index, m)| (m.decl_order, Kind::Property, index)),
-        )
-        .chain(
-            aliases
-                .iter()
-                .enumerate()
-                .map(|(index, a)| (a.decl_order, Kind::Alias, index)),
-        )
-        .collect();
-    build_order.sort();
-    let mut fn_pbs: Vec<Option<Pb>> = (0..funcs.len()).map(|_| None).collect();
-    let mut prop_pbs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
-    let mut alias_pbs: Vec<Option<Pb>> = (0..aliases.len()).map(|_| None).collect();
-    for (_, kind, index) in build_order {
-        match kind {
-            Kind::Function => {
-                fn_pbs[index] = Some(function_pb(
-                    &mut st,
-                    &funcs[index],
-                    &mut requirements,
-                    &mut contract_types,
-                    param_assertions,
-                    annotations_in_metadata,
-                ))
-            }
-            Kind::Property => {
-                prop_pbs[index] = Some(property_pb(&mut st, &props[index], annotations_in_metadata))
-            }
-            Kind::Alias => alias_pbs[index] = Some(type_alias_pb(&mut st, &aliases[index])),
-        }
-    }
-    for fp in fn_pbs.iter().flatten() {
-        package.repeated_message(3, fp); // Package.function = 3
-    }
-    for pp in prop_pbs.iter().flatten() {
-        package.repeated_message(4, pp); // Package.property = 4
-    }
-    for ap in alias_pbs.iter().flatten() {
-        package.repeated_message(5, ap); // Package.type_alias = 5
-    }
+    write_package_members(
+        &mut package,
+        &mut st,
+        PackageMembers {
+            functions: funcs,
+            properties: props,
+            aliases,
+        },
+        &mut MemberTables {
+            requirements: &mut requirements,
+            contract_types: &mut contract_types,
+        },
+        (param_assertions, annotations_in_metadata),
+        &mut |_, _, _| {},
+    );
     if let Some(table) = contract_types.encode() {
         package.field_message(30, &table); // Package.type_table = 30
     }

@@ -1303,6 +1303,8 @@ mod kclass_type_e2e;
 mod klib_container_e2e;
 #[path = "klib_semantic_e2e.rs"]
 mod klib_semantic_e2e;
+#[path = "klib_writer_e2e.rs"]
+mod klib_writer_e2e;
 #[path = "kotlin_fun_java_sam_param_e2e.rs"]
 mod kotlin_fun_java_sam_param_e2e;
 #[path = "kotlin_native_provisioning_e2e.rs"]
