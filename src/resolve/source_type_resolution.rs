@@ -39,7 +39,7 @@ pub(super) struct FunctionTypeRefShape<'a> {
 }
 
 pub(super) fn function_type_ref_shape(ty: &TypeRef) -> Option<FunctionTypeRefShape<'_>> {
-    if !ty.fun_params.is_empty() || ty.name == "<fun>" {
+    if ty.is_function_type_syntax() {
         return Some(FunctionTypeRefShape {
             params: &ty.fun_params,
             ret: ty.arg.as_deref(),

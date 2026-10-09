@@ -13,7 +13,7 @@
 //! everywhere.
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures};
+use krusty::frontend::analyze_source_standalone;
 use krusty::jvm::classpath::Classpath;
 use krusty::lexer::lex;
 use krusty::parser::parse;
@@ -122,10 +122,7 @@ fn deep_inferred_return_chain_preinfers_on_two_mib_stack() {
     let src = format!("fun deep() = {chain}\n");
     let es = on_regression_stack(move || {
         let mut d = DiagSink::new();
-        let toks = lex(&src, &mut d);
-        let files = vec![parse(&src, &toks, &mut d)];
-        let mut syms = collect_signatures(&files, &mut d);
-        check_file(&files[0], &mut syms, &mut d);
+        let _ = analyze_source_standalone(&src, &mut d);
         d.diags.iter().map(|x| x.msg.clone()).collect::<Vec<_>>()
     });
     assert!(es.is_empty(), "expected no diagnostics, got: {es:?}");

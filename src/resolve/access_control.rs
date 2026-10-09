@@ -172,20 +172,15 @@ impl<'a> Checker<'a> {
 
 #[cfg(test)]
 mod tests {
-    /// The pre-finalization checker carries `ModuleSymbols`, not a resolved index. Its normalized
-    /// declaration record must still prove that an internal member belongs to this compilation.
+    /// The production frontend's stable declaration index must prove that an internal member
+    /// belongs to this compilation.
     #[test]
-    fn legacy_checker_uses_module_identity_for_internal_members() {
+    fn production_checker_uses_module_identity_for_internal_members() {
         let source = "package first\n\
                       class Owner { internal fun hidden(): Int = 1 }\n\
                       fun use(owner: Owner): Int = owner.hidden()";
         let mut diagnostics = crate::diag::DiagSink::new();
-        let tokens = crate::lexer::lex(source, &mut diagnostics);
-        let file = crate::parser::parse(source, &tokens, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = super::super::collect_signatures(&files, &mut diagnostics);
-
-        let _ = super::super::check_file(&files[0], &mut symbols, &mut diagnostics);
+        let _ = crate::frontend::analyze_source_standalone(source, &mut diagnostics);
 
         assert_eq!(
             diagnostics

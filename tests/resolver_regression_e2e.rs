@@ -1909,20 +1909,30 @@ class Box<out T : Any?> private constructor(private val value: Any?) {
             .collect::<Vec<_>>()
     });
     assert_eq!(diagnostics, Vec::<String>::new());
+    let [(owner, name, Some(receiver), parameters, member, extension)] = selected.as_slice() else {
+        panic!("expected one selected member extension, got {selected:#?}")
+    };
+    assert!(owner.matches("Box$Companion"));
+    assert_eq!(name, "getOrDefault");
+    assert!(*member);
+    assert!(*extension);
+    let [parameter] = parameters.as_slice() else {
+        panic!("getOrDefault must retain one value parameter")
+    };
+    let krusty::types::Ty::TyParam(parameter_identity, parameter_bound) = parameter else {
+        panic!("generic value parameter was erased: {parameter:?}")
+    };
     assert_eq!(
-        selected,
-        [(
-            krusty::types::type_name("Box$Companion"),
-            "getOrDefault".to_string(),
-            Some(krusty::types::Ty::obj_args(
-                "Box",
-                &[krusty::types::Ty::obj("kotlin/Any")],
-            )),
-            vec![krusty::types::Ty::obj("kotlin/Any")],
-            true,
-            true,
-        )]
+        **parameter_bound,
+        krusty::types::Ty::nullable(krusty::types::Ty::obj("kotlin/Any"))
     );
+    assert!(matches!(
+        receiver,
+        krusty::types::Ty::Obj(owner, arguments)
+            if owner.matches("Box")
+                && matches!(arguments.as_ref(), [krusty::types::Ty::TyParam(receiver_identity, receiver_bound)]
+                    if receiver_identity == parameter_identity && *receiver_bound == *parameter_bound)
+    ));
 }
 
 #[test]

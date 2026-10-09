@@ -36,6 +36,13 @@ impl TypeRef {
     pub fn fun_suspend(&self) -> bool {
         self.flags.has(TrFlags::FUN_SUSPEND)
     }
+    /// Whether this node retains a source arrow-function shape. Ordinary function types use the
+    /// parser-internal `<fun>` spelling; a function type in a supertype list additionally keeps its
+    /// nominal `FunctionN` classifier spelling, so spelling alone is not the structural identity.
+    #[inline]
+    pub(crate) fn is_function_type_syntax(&self) -> bool {
+        self.name == "<fun>" || !self.fun_params.is_empty()
+    }
     #[inline]
     pub fn in_projection(&self) -> bool {
         self.flags.has(TrFlags::IN_PROJECTION)

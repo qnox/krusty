@@ -368,7 +368,7 @@ impl HeaderSyntaxArena {
 
     pub(crate) fn add_type(&mut self, ty: &TypeRef, names: &mut LookupNames) -> HeaderTypeId {
         let flags = HeaderTypeFlags::from_type_ref(ty);
-        let kind = if ty.name == "<fun>" {
+        let kind = if ty.is_function_type_syntax() {
             let parameters = ty
                 .fun_params
                 .iter()

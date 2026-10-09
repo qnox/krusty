@@ -189,6 +189,28 @@ impl ProductionSignatureSemantics<'_> {
                 bound
             });
         }
+        // Arrow syntax is already a complete semantic function type. Its parser-internal `<fun>`
+        // spelling is not a classifier lookup key: rebinding it through the normalized FunctionN
+        // inventory erases receiver, context, and suspend shape. Resolve the components in the
+        // same lexical scope before considering aliases or classifiers.
+        if super::super::function_type_ref_shape(reference).is_some() {
+            let mut unresolved = false;
+            let function = super::super::typeref_leaf(reference, &mut |component| match self
+                .signature_type_ref_at(scope, lexical, component, include_scope_owner_body)
+            {
+                Some(ty) => ty,
+                None => {
+                    unresolved = true;
+                    Ty::Error
+                }
+            });
+            let function = function.filter(|_| !unresolved)?;
+            return Some(if reference.nullable() {
+                Ty::nullable(function)
+            } else {
+                function
+            });
+        }
         let associated_receiver = self
             .headers
             .stub(scope.owner)

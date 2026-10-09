@@ -13,6 +13,26 @@ pub(super) fn checked_function_body(
     checked_function_body_with_platform(source, function_name, Box::new(EmptySymbolSource))
 }
 
+pub(super) fn checked_source_set_function_body(
+    sources: &[&str],
+    source_index: usize,
+    function_name: &str,
+) -> (FirBody, ResolvedModuleIndex) {
+    let inputs = sources
+        .iter()
+        .map(|source| SourceInput::kotlin(*source))
+        .collect::<Vec<_>>();
+    try_checked_source_set_function_body_rewriting(
+        &inputs,
+        source_index,
+        function_name,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        |_, _| {},
+    )
+    .expect("body must build checked FIR")
+}
+
 pub(super) fn checked_function_body_with_platform(
     source: &str,
     function_name: &str,
@@ -66,30 +86,51 @@ pub(super) fn try_checked_function_body_rewriting(
     features: &LangFeatures,
     rewrite: impl FnOnce(&mut crate::ast::File, &mut crate::resolve::TypeInfo),
 ) -> Result<(FirBody, ResolvedModuleIndex), BodyCheckFailure> {
+    let inputs = [SourceInput::kotlin(source).with_file_stem("FirBody")];
+    try_checked_source_set_function_body_rewriting(
+        &inputs,
+        0,
+        function_name,
+        platform,
+        features,
+        rewrite,
+    )
+}
+
+fn try_checked_source_set_function_body_rewriting(
+    inputs: &[SourceInput<'_>],
+    source_index: usize,
+    function_name: &str,
+    platform: Box<dyn SemanticPlatform>,
+    features: &LangFeatures,
+    rewrite: impl FnOnce(&mut crate::ast::File, &mut crate::resolve::TypeInfo),
+) -> Result<(FirBody, ResolvedModuleIndex), BodyCheckFailure> {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
-        &[SourceInput::kotlin(source).with_file_stem("FirBody")],
+        inputs,
         platform,
         features,
         &mut diagnostics,
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let types = analysis.types[0].as_mut().expect("checked file");
-    rewrite(&mut analysis.files[0], types);
+    let types = analysis.types[source_index].as_mut().expect("checked file");
+    rewrite(&mut analysis.files[source_index], types);
     let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
     let (mut index, _, _, mut sources) = streamed.module.into_parts();
-    let file = &analysis.files[0];
+    let file = &analysis.files[source_index];
+    let source = SourceFileId::from_raw(
+        u32::try_from(source_index).expect("focused FIR source index exceeds u32"),
+    );
     crate::resolve::publish_checked_local_signatures(
         file,
-        SourceFileId::from_raw(0),
+        source,
         &mut analysis.symbols,
-        analysis.types[0].as_ref().expect("checked file"),
+        analysis.types[source_index].as_ref().expect("checked file"),
         &mut index,
     )
     .expect("checked local signatures must publish before FIR body checking");
-    let active =
-        ActiveSourceDeclarations::bind_complete_source(file, SourceFileId::from_raw(0), &index)
-            .expect("focused FIR tests must bind the live parser arena to stable declarations");
+    let active = ActiveSourceDeclarations::bind_complete_source(file, source, &index)
+        .expect("focused FIR tests must bind the live parser arena to stable declarations");
     let function = file
         .decls
         .iter()
@@ -139,8 +180,8 @@ pub(super) fn try_checked_function_body_rewriting(
     session.install_active_source(&active);
     let body = check_body_unit_with_parameters_and_defaults(
         file,
-        analysis.types[0].as_ref().expect("checked file"),
-        SourceFileId::from_raw(0),
+        analysis.types[source_index].as_ref().expect("checked file"),
+        source,
         BodyOwnerId::from_raw(declaration.raw()),
         file.expr_span(root).expect("function body span"),
         Some(root),
