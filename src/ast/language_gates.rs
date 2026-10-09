@@ -1,5 +1,5 @@
 //! Language-feature gates one parsed file carries: the uses of syntax its language settings do not
-//! support, found while parsing.
+//! support, found while parsing, and the gates of features whose uses only checking can find.
 
 use std::sync::Arc;
 
@@ -19,6 +19,9 @@ pub struct LanguageGates {
     /// gated use does not count as a syntax error that keeps the file's declarations out of the
     /// module; the frontend reports them once the file is admitted.
     pub unsupported_syntax: Vec<UnsupportedSyntax>,
+    /// `CompanionBlocksAndExtensions`, for references to companion-block members and companion
+    /// extensions.
+    pub companion_blocks_and_extensions: FeatureGate,
 }
 
 impl LanguageGates {
