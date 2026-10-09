@@ -353,6 +353,7 @@ private fun compilerArguments(task: KotlinJvmCompile, kotlinVersion: String): Li
     }
     val languageVersion = options.languageVersion.orNull?.version
     val apiVersion = options.apiVersion.orNull?.version
+    reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
     // `-Werror` is not yet modeled, so its structured equivalent stays rejected. Named
@@ -388,7 +389,6 @@ private fun compilerArguments(task: KotlinJvmCompile, kotlinVersion: String): Li
     }
     options.jvmTarget.orNull?.let { arguments.addPair("-jvm-target", it.target) }
     options.jvmDefault.orNull?.let { arguments.addPair("-jvm-default", it.compilerArgument) }
-    if (options.progressiveMode.getOrElse(false)) arguments.add("-progressive")
     if (options.javaParameters.getOrElse(false)) arguments.add("-java-parameters")
     if (options.noJdk.getOrElse(false)) arguments.add("-no-jdk")
     return arguments

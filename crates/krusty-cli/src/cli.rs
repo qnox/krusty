@@ -33,10 +33,6 @@ pub enum WarningName {
     ExperimentalLanguageVersion,
     RedundantCliArg,
     RemovedCliArg,
-    /// kotlinc gives the old-language-level progressive warning no public diagnostic name, so this
-    /// identity is deliberately absent from [`WarningName::parse`] and cannot be targeted by
-    /// `-Xwarning-level`.
-    UnnamedProgressiveMode,
 }
 
 impl WarningName {
@@ -586,37 +582,6 @@ mod tests {
 
     fn parse_args(args: &[&str]) -> Options {
         parse(args.iter().map(|s| s.to_string()))
-    }
-
-    /// `-progressive` enables the selected release's progressive features, and an explicit
-    /// `-XXLanguage` still overrides one wherever it appears, as in kotlinc's
-    /// `configureLanguageFeatures`.
-    #[test]
-    fn progressive_mode_enables_the_releases_progressive_features() {
-        let feature = "AllowEagerSupertypeAccessibilityChecks";
-        let enabled = |args: &[&str]| {
-            let o = parse_args(args);
-            assert_eq!(o.errors, Vec::<String>::new());
-            assert!(o.warnings.is_empty());
-            o.language_settings.features.has(feature)
-        };
-        assert!(!enabled(&["-Xkotlin-reference-version=2.4.20", "f.kt"]));
-        assert!(enabled(&[
-            "-Xkotlin-reference-version=2.4.20",
-            "-progressive",
-            "f.kt"
-        ]));
-        assert!(!enabled(&[
-            "-Xkotlin-reference-version=2.4.10",
-            "-progressive",
-            "f.kt"
-        ]));
-        assert!(!enabled(&[
-            "-Xkotlin-reference-version=2.4.20",
-            "-XXLanguage:-AllowEagerSupertypeAccessibilityChecks",
-            "-progressive",
-            "f.kt",
-        ]));
     }
 
     /// `-Xkotlin-reference-version` selects a supported release and refuses any other, rather than

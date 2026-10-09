@@ -15,6 +15,7 @@ fn an_unsupported_kotlinc_argument_exits_nonzero_and_writes_nothing() {
         "-Werror",
         "-nowarn",
         // Language semantics.
+        "-progressive",
         "-Xallow-reified-type-in-catch",
         "-Xjsr305=strict",
         // JVM output shape.

@@ -139,10 +139,6 @@ fn translate_language_features(
     value: &str,
     source_flag: &str,
 ) -> Result<(), Refusal> {
-    let reference = krusty::kotlin_version::configured_target()
-        .unwrap_or_else(|_| krusty::kotlin_version::KotlinVersion::newest());
-    let table = crate::kotlinc_arguments::FeatureTable::for_version(reference)
-        .expect("every supported worker reference has a feature table");
     let tokens = value.split(',').collect::<Vec<_>>();
     if tokens.iter().any(|token| token.is_empty()) {
         return Err(Refusal::Malformed(format!(
@@ -160,11 +156,11 @@ fn translate_language_features(
                 "{source_flag} {token}: feature name is empty"
             )));
         }
-        if table.contains(name) {
+        if krusty::features::LangFeatures::models(name) {
             unit.kotlinc_args.push(format!("-XXLanguage:{token}"));
         } else {
             return Err(Refusal::Unsupported(format!(
-                "{source_flag} {token}: language feature is not declared by kotlinc {reference}"
+                "{source_flag} {token}: language feature is not modeled by krusty"
             )));
         }
     }
@@ -823,7 +819,16 @@ mod tests {
 
     #[test]
     fn the_real_argument_surface_translates() {
-        let request = intellij_request();
+        // These two options are part of the real request but deliberately refused until their
+        // semantics are implemented. Keep exercising every other field of that request here.
+        let request = intellij_request()
+            .into_iter()
+            .filter(|argument| {
+                argument != "--progressive"
+                    && argument != "--x_xlanguage"
+                    && argument != "+AllowEagerSupertypeAccessibilityChecks"
+            })
+            .collect::<Vec<_>>();
         let unit = translate(&request).expect("must translate");
         assert_eq!(unit.output_jar, PathBuf::from("out/util.jar"));
         assert_eq!(unit.abi_jar, Some(PathBuf::from("out/util.abi.jar")));
@@ -866,31 +871,25 @@ mod tests {
         }
     }
 
-    /// The worker and batch surfaces normalize every progressive spelling to the same release-
-    /// driven language-feature set.
+    /// The worker and batch surfaces must not disagree about a semantic option. Until progressive
+    /// language features are implemented, neither the rule-owned spelling nor a forwarded
+    /// kotlinc spelling may compile while silently using ordinary language semantics.
     #[test]
-    fn progressive_reaches_the_shared_cli_through_every_worker_surface() {
-        for (progressive, warnings) in [
-            (vec!["--progressive"], Vec::<String>::new()),
-            (vec!["--kotlinc-arg", "-progressive"], Vec::new()),
-            (
-                vec!["--kotlinc-arg", "-Xprogressive"],
-                vec![
-                    "Argument -Xprogressive is deprecated. Please use -progressive instead"
-                        .to_string(),
-                ],
-            ),
+    fn progressive_is_refused_through_every_worker_surface() {
+        for progressive in [
+            vec!["--progressive"],
+            vec!["--kotlinc-arg", "-progressive"],
+            vec!["--kotlinc-arg", "-Xprogressive"],
         ] {
             let mut request = progressive;
             request.extend(["--srcs", "A.kt", "--out", "o.jar"]);
-            let unit = translate(&args(&request)).expect("progressive request translates");
-            assert_eq!(unit.argument_warnings, warnings);
-            let parsed = crate::cli::parse(unit.kotlinc_args);
-            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
-            assert!(parsed
-                .language_settings
-                .features
-                .has("AllowEagerSupertypeAccessibilityChecks"));
+            let refusal = translate(&args(&request)).unwrap_err();
+            assert_eq!(
+                refusal,
+                Refusal::Unsupported(
+                    "krusty does not implement the kotlinc argument '-progressive'".to_string()
+                )
+            );
         }
     }
 
@@ -1596,7 +1595,7 @@ mod tests {
         let request = WorkRequest {
             arguments: args(&[
                 "--kotlinc-arg",
-                "-Xprogressive",
+                "-Xopt-in=marker.Experimental",
                 "--srcs",
                 "A.kt",
                 "--out",
@@ -1610,7 +1609,7 @@ mod tests {
             response,
             WorkResponse {
                 exit_code: 0,
-                output: "warning: argument -Xprogressive is deprecated. Please use -progressive instead\n"
+                output: "warning: argument -Xopt-in is deprecated. Please use -opt-in instead\n"
                     .to_string(),
                 request_id: 5,
             }
