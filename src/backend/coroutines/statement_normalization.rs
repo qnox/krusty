@@ -1,7 +1,7 @@
 //! Statement/value-region normalization required before coroutine state splitting.
 //!
 //! These rewrites preserve checked Kotlin meaning while making the consumer position explicit in
-//! common IR. They neither discover suspension points nor choose JVM representations.
+//! common IR. They neither discover suspension points nor choose a target representation.
 
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::types::Ty;

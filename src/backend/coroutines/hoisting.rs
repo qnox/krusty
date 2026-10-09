@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrFile};
+use crate::ir::{ExprId, IrExpr, IrFile};
 use crate::types::Ty;
 
 use super::block_splicing::{
@@ -147,11 +147,11 @@ fn normalize_when_statement_body(
 
 /// Hoist the suspensions inside the bodies of lambdas that will be SPLICED into this frame.
 ///
-/// A suspension leaves the method at the `areturn` that yields `COROUTINE_SUSPENDED`, and the
-/// operand stack does not survive that — only locals do, in the continuation's spill fields. So a
-/// suspension has to stand alone, with its result bound to a local, exactly as this pass arranges
-/// for the suspensions the IR machine can see. `f(one(it) + one(it))` reaches the second call with
-/// the first one's result on the stack; bound to temps, both are ordinary statements.
+/// A suspension leaves the function by returning `COROUTINE_SUSPENDED`, and an operand already
+/// evaluated beside it does not survive that — only locals do, in the continuation's spill fields.
+/// So a suspension has to stand alone, with its result bound to a local, exactly as this pass
+/// arranges for the suspensions the machine can see. `f(one(it) + one(it))` reaches the second call
+/// with the first one's result pending; bound to temps, both are ordinary statements.
 ///
 /// The bodies are rewritten in place where they are blocks; a bare expression body becomes one, so
 /// the lambda's `inline_body` is repointed at the new block.
@@ -224,9 +224,9 @@ fn hoist_spliced_walk(
 
 /// The value-`try` desugar for a spliced body, run before the body is hoisted.
 ///
-/// A suspending arm's value is the call's raw `Object`; a `try` used as a VALUE would store it
-/// straight into the result slot the emitter types by the `try`'s own type, and the frame would
-/// describe an `int` that never was one. The desugar binds each arm's value to a typed local first,
+/// A suspending arm's value is the call's erased result; a `try` used as a VALUE would store it
+/// straight into the result slot the target types by the `try`'s own type, and the frame would
+/// describe an `Int` that never was one. The desugar binds each arm's value to a typed local first,
 /// where the machine adapts it — the same normalization a function body gets, which stops at every
 /// lambda and so never reached a spliced body.
 ///
@@ -287,7 +287,7 @@ fn desugar_spliced_value_try(
 /// `coerce(Block { …; try { … } })`. The coercion converts only the block's value, so it is moved
 /// onto that value, where the tail value-`try` is recognized with the coercion applied to each arm,
 /// exactly as for an expression body. Left outside, the `try` stayed a value whose arm stored the
-/// call's raw `Object`, and the body was declined; the function was then emitted with no
+/// call's erased result, and the body was declined; the function was then emitted with no
 /// continuation to pass (`call arity mismatch`).
 ///
 /// Rewritten only when that value is a suspending `try`, into a NEW block: the original nodes may be
@@ -780,7 +780,7 @@ fn hoist_expr(
             return e;
         }
         // Logical return type of the suspension: from common lowering for a cross-unit call or intrinsic
-        // point, else the callee's `typing` entry (a same-file callee), else `Object`.
+        // point, else the callee's `typing` entry (a same-file callee), else `Any?`.
         let ty = value_class_suspension_result(ir, e, suspend_set)
             .map(crate::ir::IrValueClassSuspendResult::boundary_ty)
             .or_else(|| recorded_suspension_result(ir, e))
@@ -1150,8 +1150,8 @@ fn hoist_expr(
         }
         // Constructors obey the same ordered-operand contract as calls and string concatenation.
         // Reuse the shared planner so an effectful argument before a later suspension is snapshotted
-        // in source order (`New(effect(), suspend())`), while an operand whose verifier type cannot
-        // be recovered still declines safely. A constructor-only purity list would duplicate the
+        // in source order (`New(effect(), suspend())`), while an operand whose temporary the target
+        // cannot type still declines safely. A constructor-only purity list would duplicate the
         // planner and reject shapes it already handles generically.
         IrExpr::New { args, .. } => {
             let operands: Vec<Option<ExprId>> = args.iter().map(|&arg| Some(arg)).collect();
@@ -1377,8 +1377,8 @@ fn hoist_call_operands_in_order(
 /// operand of such a call), so `f(g(), susp())` runs `g()` before the suspension. `None` slots
 /// (default-argument holes) pass through untouched.
 ///
-/// Returns `None` — with `ir` and `prelude` unmodified — when a required snapshot cannot be given
-/// a verifier type; the caller leaves the whole expression unhoisted so the flattener declines the
+/// Returns `None` — with `ir` and `prelude` unmodified — when the target cannot type a required
+/// snapshot; the caller leaves the whole expression unhoisted so the flattener declines the
 /// shape (skip, never miscompile). The snapshot plan is decided and typed on the ORIGINAL operands
 /// before any rewrite: bailing mid-hoist would strand already-bound prelude temps next to a
 /// returned original expression, double-evaluating their effects. Typing the original is valid for
@@ -1408,7 +1408,11 @@ fn hoist_operands_in_order(
                 continue;
             }
             if suspends[i] || operand_needs_snapshot(ir, x, value_types) {
-                let Some(ty) = hoisted_value_ty(ir, x, typing, value_types) else {
+                let Some(ty) =
+                    typing
+                        .representation
+                        .snapshot_type(ir, x, typing.orig_rets, value_types)
+                else {
                     crate::trace_compiler!(
                         "suspend",
                         "hoist_operands_in_order BAIL: operand {i} untypeable: {:?} logical={:?}",
@@ -1455,7 +1459,7 @@ fn hoist_operands_in_order(
 /// Whether evaluating an operand before a later suspension must be materialized. Literal values and a
 /// `Null`-typed local are the only values allowed to commute: the latter's semantic domain is the
 /// singleton `null`, and the state machine deliberately rematerializes it rather than treating it as an
-/// ordinary JVM local spill. Every other runtime read or evaluation snapshots at its source position. A
+/// ordinary spilled local. Every other runtime read or evaluation snapshots at its source position. A
 /// plain `GetValue` is not intrinsically stable because an inline-spliced later operand can write that
 /// local before the residual call reads it; likewise, a static `val` read can trigger initialization and
 /// is still a runtime field access. This semantic rule preserves exceptions and effects without a
@@ -1470,168 +1474,32 @@ fn operand_needs_snapshot(ir: &IrFile, expression: ExprId, value_types: &HashMap
     }
 }
 
-/// The semantic JVM value type needed when suspend normalization materializes an already-evaluated
-/// expression into a temporary. This is deliberately an IR-identity query: it reads the selected
-/// callee/field/type node and never re-resolves a source name. It covers the common runtime-read and
-/// expression shapes that can precede a suspension in any ordered operand list; returning `None` makes
-/// an unexpected lowering shape decline safely instead of emitting a temp with a guessed verifier type.
-fn hoisted_value_ty(
-    ir: &IrFile,
-    expression: ExprId,
-    typing: &SuspensionTyping<'_>,
-    value_types: &HashMap<u32, Ty>,
-) -> Option<Ty> {
-    match &ir.exprs[expression as usize] {
-        IrExpr::Const(constant) => Some(match constant {
-            IrConst::Boolean(_) => Ty::Boolean,
-            IrConst::UByte(_) => Ty::UByte,
-            IrConst::UShort(_) => Ty::UShort,
-            IrConst::UInt(_) => Ty::UInt,
-            IrConst::ULong(_) => Ty::ULong,
-            IrConst::Int(_) => Ty::Int,
-            IrConst::Long(_) => Ty::Long,
-            IrConst::Double(_) => Ty::Double,
-            IrConst::Float(_) => Ty::Float,
-            IrConst::Char(_) => Ty::Char,
-            IrConst::String(_) => Ty::String,
-            IrConst::Short(_) => Ty::Short,
-            IrConst::Byte(_) => Ty::Byte,
-            IrConst::Null => Ty::Null,
-        }),
-        // A class literal is emitted as an `ldc Class`, which is still a runtime resolution action and
-        // therefore must stay before a later suspension (including any linkage failure it can raise).
-        IrExpr::ClassConst { .. } => Some(typing.representation.class_constant_type()),
-        // Value indices are local to one function. Looking through the complete arena can find a
-        // declaration with the same numeric index in an unrelated method and poison the verifier type
-        // of the new temp. The caller supplies the current function's parameter/local environment.
-        IrExpr::GetValue(index) => value_types.get(index).copied(),
-        IrExpr::Call { callee, .. } => {
-            if let Some(function) = callee.source_function() {
-                typing.orig_rets.get(function as usize).copied()
-            } else {
-                match callee {
-                    Callee::CrossFile { ret, .. }
-                    | Callee::Module { ret, .. }
-                    | Callee::Super { ret, .. }
-                    | Callee::External { ret, .. } => Some(*ret),
-                    Callee::Static { .. } | Callee::Special { .. } => {
-                        typing.representation.physical_call_result(callee)
-                    }
-                    Callee::Virtual { params, .. } => params
-                        .as_ref()
-                        .map(|(_, ret)| *ret)
-                        .or_else(|| typing.representation.physical_call_result(callee)),
-                    Callee::Intrinsic { ret, .. } => Some(*ret),
-                    _ => unreachable!("source-function callees were handled above"),
-                }
-            }
-        }
-        IrExpr::MethodCall { class, index, .. } => ir
-            .classes
-            .get(*class as usize)
-            .and_then(|class| class.methods.get(*index as usize))
-            .and_then(|function| typing.orig_rets.get(*function as usize))
-            .copied(),
-        IrExpr::InvokeFunction { ret, .. } => Some(*ret),
-        IrExpr::Equality { .. } => Some(Ty::Boolean),
-        IrExpr::PrimitiveBinOp { op, lhs, .. } => Some(match op {
-            IrBinOp::Lt
-            | IrBinOp::Le
-            | IrBinOp::Gt
-            | IrBinOp::Ge
-            | IrBinOp::Eq
-            | IrBinOp::Ne
-            | IrBinOp::RefEq
-            | IrBinOp::RefNe
-            | IrBinOp::And
-            | IrBinOp::Or => Ty::Boolean,
-            _ => hoisted_value_ty(ir, *lhs, typing, value_types)?,
-        }),
-        IrExpr::PrimitiveNeg { ty, .. }
-        | IrExpr::TypeOp {
-            type_operand: ty, ..
-        } => Some(*ty),
-        // A constructed instance's verifier type is its class; generic arguments are erased at this
-        // boundary (the temp only needs the internal name).
-        IrExpr::New { internal, .. } => Some(Ty::Obj(*internal, &[])),
-        // `operand!!` yields its operand's value unchanged (the assert only throws), matching
-        // `value_ty`'s treatment in the emitter.
-        IrExpr::BottomValue { .. } => Some(Ty::Nothing),
-        IrExpr::NotNullAssert { operand, .. } => {
-            hoisted_value_ty(ir, *operand, typing, value_types)
-        }
-        // A value block is an evaluation wrapper, not a distinct value representation. Hoisting its
-        // statements collapses the wrapper to the final expression, so a snapshot uses that final
-        // expression's exact type. An empty/statement-only block has no value to materialize.
-        IrExpr::Block {
-            value: Some(value), ..
-        } => hoisted_value_ty(ir, *value, typing, value_types),
-        // Declared storage types, read straight off the IR declaration the node indexes — the same
-        // sources the emitter's `value_ty` consults. `PropertyRead` carries its type inline; a
-        // `Unit`-typed property realizes through a `()V` accessor (nothing to bind) and a bare
-        // type-parameter's erasure is the emitter's concern, so both decline.
-        IrExpr::GetStatic(i) => Some(ir.statics[*i as usize].ty),
-        // Static/singleton reads share the same semantic rule regardless of whether their declaration
-        // originated in this file, another module, or the classpath. Recover their physical type from
-        // the identity already stored on the IR node; the descriptor parser is shared with emission so
-        // array/object/primitive handling cannot drift into a suspend-only copy.
-        IrExpr::StaticInstance { ty, .. } => ir
-            .classes
-            .get(*ty as usize)
-            .map(|class| Ty::obj_name(class.fq_name)),
-        IrExpr::ExternalStaticInstance { ty, .. } => Some(Ty::obj_name(*ty)),
-        IrExpr::ExternalStaticField { descriptor, .. } => {
-            typing.representation.static_field_type(descriptor)
-        }
-        IrExpr::EnumEntry { classifier, .. } => Some(Ty::obj_name(*classifier)),
-        IrExpr::EnumValueOf { classifier, .. } => Some(Ty::obj_name(*classifier)),
-        IrExpr::EnumValues { classifier } => Some(Ty::array(Ty::obj_name(*classifier))),
-        IrExpr::EnumEntries { classifier } => Some(Ty::obj_args_name(
-            crate::types::type_name("kotlin/enums/EnumEntries"),
-            &[Ty::obj_name(*classifier)],
-        )),
-        IrExpr::UnitInstance => Some(Ty::obj("kotlin/Unit")),
-        IrExpr::GetField { class, index, .. } => ir
-            .classes
-            .get(*class as usize)
-            .and_then(|class| class.fields.get(*index as usize))
-            .map(|field| field.ty),
-        IrExpr::EnclosingInstance { outer, .. } => Some(Ty::obj_name(*outer)),
-        IrExpr::LateinitInitialized { class, index, .. } => ir
-            .classes
-            .get(*class as usize)
-            .and_then(|class| class.fields.get(*index as usize))
-            .map(|field| field.ty),
-        IrExpr::PropertyRead { ty, .. } => {
-            (!matches!(ty, Ty::Unit | Ty::Error | Ty::TyParam(..))).then_some(*ty)
-        }
-        IrExpr::RefGet { elem, .. } => Some(*elem),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::coroutines::CoroutineRepresentation;
+    use crate::ir::IrConst;
     use crate::ir::IrIntrinsicSuspensionPoint;
     use crate::types::type_name;
 
-    /// A representation that declines every physical fact: these tests exercise only semantic IR.
+    /// A representation that answers from the recorded IR types: these tests exercise only semantic IR.
     struct SemanticOnly;
 
     impl CoroutineRepresentation for SemanticOnly {
         fn zero(&self, ty: &Ty) -> IrConst {
             IrConst::zero_for_value_type(*ty)
         }
-        fn physical_call_result(&self, _: &Callee) -> Option<Ty> {
-            None
-        }
-        fn static_field_type(&self, _: &str) -> Option<Ty> {
-            None
-        }
-        fn class_constant_type(&self) -> Ty {
-            Ty::obj("kotlin/reflect/KClass")
+        fn snapshot_type(
+            &self,
+            ir: &IrFile,
+            expression: ExprId,
+            _: &[Ty],
+            value_types: &HashMap<u32, Ty>,
+        ) -> Option<Ty> {
+            match ir.exprs[expression as usize] {
+                IrExpr::GetValue(index) => value_types.get(&index).copied(),
+                _ => ir.logical_types.get(&expression).copied(),
+            }
         }
     }
 
@@ -1655,6 +1523,7 @@ mod tests {
             arg: suspension,
             declaration: crate::ir::EnumValueOfDeclaration::Member,
         });
+        ir.logical_types.insert(shared, Ty::obj("example/Level"));
         let concat = ir.add_expr(IrExpr::StringConcat(vec![shared, shared]));
         let returned = ir.add_expr(IrExpr::Return(Some(concat)));
         let body = ir.add_expr(IrExpr::Block {
@@ -1711,11 +1580,13 @@ mod tests {
                 suspension,
                 IrIntrinsicSuspensionPoint { result: Ty::String },
             );
-            ir.add_expr(IrExpr::EnumValueOf {
+            let level = ir.add_expr(IrExpr::EnumValueOf {
                 classifier: type_name("example/Level"),
                 arg: suspension,
                 declaration: crate::ir::EnumValueOfDeclaration::Member,
-            })
+            });
+            ir.logical_types.insert(level, Ty::obj("example/Level"));
+            level
         };
         let operands = vec![level(), level()];
         let body = ir.add_expr(IrExpr::StringConcat(operands));
@@ -1742,21 +1613,6 @@ mod tests {
             "the suspension is hoisted out of the operand"
         );
         assert_eq!(ir.logical_types.get(&rewritten), Some(&Ty::String));
-    }
-
-    #[test]
-    fn a_static_instance_uses_the_stored_class_identity() {
-        let mut ir = IrFile::default();
-        ir.classes
-            .push(crate::ir::test_support::blank_class("example/Outer$Widget"));
-        let instance = ir.add_expr(IrExpr::StaticInstance {
-            owner: 0,
-            ty: 0,
-            field: "INSTANCE",
-        });
-        let ty = hoisted_value_ty(&ir, instance, &typing(), &HashMap::new())
-            .expect("static instance type");
-        assert_eq!(ty, Ty::obj_name(type_name("example/Outer$Widget")));
     }
 
     #[test]

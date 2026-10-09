@@ -58,6 +58,7 @@ use spill_layout::{
     kind_positions, rematerialized_nulls, spill_field_ty, spill_order, suspension_points_in_order,
     SpillLayout,
 };
+mod snapshot_types;
 mod specialized_lambda_classes;
 pub(crate) use specialized_lambda_classes::SpecializedLambdaClasses;
 mod suspend_lambda;
@@ -67,25 +68,23 @@ pub(crate) use value_class_results::completion_box;
 use value_class_results::{boxed_carrier, boxed_on_resume, resumed_carrier};
 mod value_liveness;
 
-use crate::backend::coroutines::block_splicing::{diverging_control_core, splice_return_blocks};
-use crate::backend::coroutines::bottom_completion::{
-    suspension_completion, unwrap_suspend_cast, SuspensionCompletion,
-};
-use crate::backend::coroutines::control_flow::{
-    expr_contains_owned_loop_jump, expr_has_return, stmt_diverges,
-};
-use crate::backend::coroutines::hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
-use crate::backend::coroutines::statement_normalization::{
-    normalize_block_inits, normalize_statement_try_results, split_unit_conditional_returns,
-};
-pub(in crate::jvm) use crate::backend::coroutines::suspension_points::suspend_call_fid;
-use crate::backend::coroutines::suspension_points::{
+use crate::backend::coroutines::desugar_value_try;
+use crate::backend::coroutines::desugar_value_when;
+pub(in crate::jvm) use crate::backend::coroutines::suspend_call_fid;
+use crate::backend::coroutines::{
     count_suspensions, expr_calls_suspend, is_suspension_point, recorded_suspension_result,
     value_class_suspension_result,
 };
-use crate::backend::coroutines::value_namespace::{function_value_types, max_value_index};
-use crate::backend::coroutines::value_try::desugar_value_try;
-use crate::backend::coroutines::value_when::desugar_value_when;
+use crate::backend::coroutines::{diverging_control_core, splice_return_blocks};
+use crate::backend::coroutines::{expr_contains_owned_loop_jump, expr_has_return, stmt_diverges};
+use crate::backend::coroutines::{function_value_types, max_value_index};
+use crate::backend::coroutines::{hoist_spliced_inline_bodies, hoist_suspensions};
+use crate::backend::coroutines::{
+    normalize_block_inits, normalize_statement_try_results, split_unit_conditional_returns,
+};
+use crate::backend::coroutines::{
+    suspension_completion, unwrap_suspend_cast, SuspensionCompletion,
+};
 use crate::backend::coroutines::{CoroutineRepresentation, SuspensionTyping};
 use crate::ir::{
     for_each_child, Callee, ClassId, ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp,
@@ -110,24 +109,14 @@ impl CoroutineRepresentation for JvmCoroutineRepresentation {
         IrConst::zero_for_value_type(super::physical_type::ir_ty_to_jvm(ty))
     }
 
-    fn physical_call_result(&self, callee: &Callee) -> Option<Ty> {
-        match callee {
-            Callee::Static { descriptor, .. }
-            | Callee::Special { descriptor, .. }
-            | Callee::Virtual { descriptor, .. } => {
-                crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
-            }
-            _ => None,
-        }
-    }
-
-    fn static_field_type(&self, descriptor: &str) -> Option<Ty> {
-        let ty = crate::jvm::ir_emit::ty_from_field_descriptor(descriptor);
-        (!matches!(ty, Ty::Unit | Ty::Error)).then_some(ty)
-    }
-
-    fn class_constant_type(&self) -> Ty {
-        Ty::obj("java/lang/Class")
+    fn snapshot_type(
+        &self,
+        ir: &IrFile,
+        expression: ExprId,
+        orig_rets: &[Ty],
+        value_types: &std::collections::HashMap<u32, Ty>,
+    ) -> Option<Ty> {
+        snapshot_types::snapshot_type(ir, expression, orig_rets, value_types)
     }
 }
 
@@ -143,7 +132,7 @@ fn jvm_typing(orig_rets: &[Ty]) -> SuspensionTyping<'_> {
 /// restored from the continuation field at the loop top, so this placeholder is immediately
 /// overwritten (kotlinc passes `iconst_0`).
 pub(crate) fn zero_value(ir: &mut IrFile, ty: &Ty) -> ExprId {
-    crate::backend::coroutines::value_namespace::zero_value(ir, &JvmCoroutineRepresentation, ty)
+    crate::backend::coroutines::zero_value(ir, &JvmCoroutineRepresentation, ty)
 }
 /// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
 type Branches = Vec<(Option<ExprId>, ExprId)>;

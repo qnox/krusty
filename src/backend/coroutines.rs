@@ -16,17 +16,38 @@
 //! one (the default a fresh temporary starts from, or the result type of a call a target pass has
 //! already made physical), it asks the target through [`CoroutineRepresentation`].
 
-pub(crate) mod block_splicing;
-pub(crate) mod bottom_completion;
-pub(crate) mod control_flow;
-pub(crate) mod hoisting;
-pub(crate) mod statement_normalization;
-pub(crate) mod suspension_points;
-pub(crate) mod value_namespace;
-pub(crate) mod value_try;
-pub(crate) mod value_when;
+mod block_splicing;
+mod bottom_completion;
+mod control_flow;
+mod hoisting;
+mod statement_normalization;
+mod suspension_points;
+mod value_namespace;
+mod value_try;
+mod value_when;
 
-use crate::ir::{Callee, IrConst};
+pub(crate) use block_splicing::{diverging_control_core, splice_return_blocks};
+pub(crate) use bottom_completion::{
+    suspension_completion, unwrap_suspend_cast, SuspensionCompletion,
+};
+pub(crate) use control_flow::{expr_contains_owned_loop_jump, expr_has_return, stmt_diverges};
+pub(crate) use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
+pub(crate) use statement_normalization::{
+    normalize_block_inits, normalize_statement_try_results, split_unit_conditional_returns,
+};
+pub(crate) use suspension_points::{
+    count_suspensions, expr_calls_suspend, is_suspension_point, recorded_suspension_result,
+    suspend_call_fid, value_class_suspension_result,
+};
+pub(crate) use value_namespace::{
+    function_value_types, is_rematerialized_null, max_value_index, zero_value,
+};
+pub(crate) use value_try::desugar_value_try;
+pub(crate) use value_when::desugar_value_when;
+
+use std::collections::HashMap;
+
+use crate::ir::{ExprId, IrConst, IrFile};
 use crate::types::Ty;
 
 /// The representation facts a target supplies to the shared suspend normalizations.
@@ -34,16 +55,16 @@ pub(crate) trait CoroutineRepresentation {
     /// The constant a fresh temporary of type `ty` starts from before its first real assignment.
     fn zero(&self, ty: &Ty) -> IrConst;
 
-    /// The result type of a call whose callee a target pass has already made physical, such as a
-    /// descriptor-carrying static or virtual call. `None` declines to snapshot it.
-    fn physical_call_result(&self, callee: &Callee) -> Option<Ty>;
-
-    /// The value type of a dependency static field read, from the physical field identity the
-    /// target recorded. `None` declines to snapshot it.
-    fn static_field_type(&self, descriptor: &str) -> Option<Ty>;
-
-    /// The type of a class-literal constant (`Foo::class.java`).
-    fn class_constant_type(&self) -> Ty;
+    /// The type of a temporary holding the already-evaluated operand `expression`, which hoisting
+    /// binds ahead of a later suspension. `None` leaves the operand list unhoisted, and the state
+    /// machine declines the residual suspension.
+    fn snapshot_type(
+        &self,
+        ir: &IrFile,
+        expression: ExprId,
+        orig_rets: &[Ty],
+        value_types: &HashMap<u32, Ty>,
+    ) -> Option<Ty>;
 }
 
 /// What hoisting needs to type the temporaries it introduces.

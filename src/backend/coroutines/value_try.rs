@@ -27,8 +27,8 @@ pub(super) struct ValueTryParts {
 #[derive(Clone)]
 pub(super) enum ValueBranchWrap {
     TypeOp(IrTypeOp, Ty),
-    /// A JVM value-class representation wrapper already selected and emitted by the preceding target
-    /// pass. It is a pure one-argument conversion, so applying it to each selected `try` value preserves
+    /// A value-class representation wrapper a target pass already selected before this
+    /// normalization. It is a pure one-argument conversion, so applying it to each selected `try` value preserves
     /// the wrapper around the value while exposing the suspension to the state-machine normalizer.
     ValueClassBox(Callee),
 }

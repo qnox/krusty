@@ -1,4 +1,5 @@
-//! Checked bottom-value completion at JVM suspension points.
+//! Seeing a suspension point through the checked wrappers around it, and the bottom-value
+//! completion its resume path keeps.
 
 use super::suspension_points::is_suspension_point;
 use crate::ir::{ExprId, IrBottomValueCompletion, IrExpr, IrFile, IrTypeOp};
@@ -13,7 +14,7 @@ pub(crate) struct UnwrappedSuspension {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SuspensionCompletion {
     /// The raw call's checked result is semantic bottom, so its pre-CPS logical marker must not be
-    /// interpreted as the physical `Object` result of the rewritten call.
+    /// interpreted as the erased result of the rewritten call.
     pub(crate) semantic_bottom: bool,
     /// The resumed path terminates in this exact use context. A substituted generic bottom value
     /// used as a statement is semantic bottom but deliberately falls through after being discarded.
@@ -22,15 +23,14 @@ pub(crate) struct SuspensionCompletion {
 
 /// Peel checked result wrappers off `e` when their producer is a suspend call, returning the
 /// underlying call and any bottom completion; otherwise return `e` unchanged. A generic suspend
-/// member call (`suspend fun findAll(): List<T>`) has its erased `Object` result cast to the declared
-/// type at the call site. The coroutine flattener binds the raw call and re-applies the cast via
-/// `bind_from_r`, so the wrapper must be seen through to recognize the suspension.
+/// member call (`suspend fun findAll(): List<T>`) has its erased `Any?` result cast to the declared
+/// type at the call site. The state machine binds the raw call and re-applies the cast on its
+/// resume path, so the wrapper must be seen through to recognize the suspension.
 ///
-/// `ref_only` restricts the peel to a reference `Cast` (a redundant checkcast on the erased `Object`):
-/// a tail-forward returns the callee's `Object` result verbatim with no re-coercion, so an
-/// `ImplicitCoercion` that boxes a primitive result must be kept. Dropping it would `areturn` an
-/// unboxed value where a reference is required. The flattener path re-applies the coercion via
-/// `bind_from_r`, so it peels both.
+/// `ref_only` restricts the peel to a reference `Cast` of the erased result: a tail-forward returns
+/// the callee's erased result verbatim with no re-coercion, so an `ImplicitCoercion` that boxes a
+/// primitive result must be kept, or the function would return an unboxed value where its erased
+/// result is a reference. The state-machine path re-applies the coercion, so it peels both.
 pub(crate) fn unwrap_suspend_cast(
     ir: &IrFile,
     e: ExprId,
@@ -53,7 +53,7 @@ pub(crate) fn unwrap_suspend_cast(
                 completion: selected,
             } => {
                 // A tail-forward must expose the physical suspend call so the caller's
-                // continuation owns completion. It deliberately returns the callee's Object
+                // continuation owns completion. It deliberately returns the callee's erased
                 // result verbatim, so the checked bottom completion does not run in this frame.
                 // The state-machine path keeps the exact completion for its resume state.
                 if !ref_only && completion.is_none() {

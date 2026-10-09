@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{is_suspension_point, object_ty};
-pub(super) use crate::backend::coroutines::value_namespace::is_rematerialized_null;
+pub(super) use crate::backend::coroutines::is_rematerialized_null;
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::types::Ty;
 

@@ -99,8 +99,9 @@ pub(crate) fn zero_value(
 }
 
 /// A local of the bottom type (`var x = null` — `Ty::Null`) has exactly one possible value, so
-/// kotlinc gives it no continuation field and rematerializes it in every resume arm. Keeping it out
-/// of the spill layout also preserves its verifier `null` type instead of widening it to `Object`.
+/// the state machine gives it no continuation field and rematerializes it in every resume arm, as
+/// kotlinc does. Keeping it out of the spill layout also keeps its type `Nothing?` rather than a
+/// wider spill type.
 pub(crate) fn is_rematerialized_null(ty: &Ty) -> bool {
     matches!(ty.non_null(), Ty::Null)
 }

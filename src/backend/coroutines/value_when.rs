@@ -138,7 +138,7 @@ pub(super) fn bind_value_when_to_fresh_local(
     Some((declaration, conditional, value))
 }
 
-pub(crate) fn value_when(ir: &IrFile, expression: ExprId) -> Option<ExprId> {
+pub(super) fn value_when(ir: &IrFile, expression: ExprId) -> Option<ExprId> {
     match ir.exprs[expression as usize] {
         IrExpr::When { .. } => Some(expression),
         IrExpr::TypeOp { arg, .. } if matches!(ir.exprs[arg as usize], IrExpr::When { .. }) => {
