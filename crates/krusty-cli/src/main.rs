@@ -150,6 +150,11 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     let mut promoted = String::new();
     for warning in &opts.warnings {
         match opts.warning_policy.level(warning.name) {
+            cli::WarningLevel::Warning if opts.warnings_as_errors => {
+                promoted.push_str("error: ");
+                promoted.push_str(&warning.message);
+                promoted.push('\n');
+            }
             cli::WarningLevel::Warning => eprintln!("warning: {}", warning.message),
             cli::WarningLevel::Error => {
                 promoted.push_str("error: ");
@@ -270,7 +275,19 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
             diags.diags.len()
         ));
     }
-    // Warnings alone do not fail the compilation, but they are still reported.
+    // Warnings alone do not fail the compilation, but they are still reported. `-Werror`
+    // promotes every one of them, including module warnings that have no source span.
+    let warning_diagnostics = diags
+        .diags
+        .iter()
+        .any(|diagnostic| diagnostic.severity == krusty::diag::Severity::Warning)
+        || !diags.module_warnings.is_empty();
+    if opts.warnings_as_errors && warning_diagnostics {
+        return Err(format!(
+            "{}krusty: warnings found and -Werror is specified\n",
+            diags.render_all(&rendered)
+        ));
+    }
     eprint!("{}", diags.render_all(&rendered));
 
     let emitted = outputs

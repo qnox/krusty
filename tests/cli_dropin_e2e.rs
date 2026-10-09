@@ -571,3 +571,70 @@ fn cross_file_value_class_property_read_uses_mangled_getter() {
     assert_eq!(out.trim(), "NEXT");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// `-Werror` fails a compilation that emits a warning and leaves a warning-clean compilation alone.
+#[test]
+fn werror_fails_only_when_a_warning_is_emitted() {
+    let krusty = common::krusty_binary();
+    let dir = std::env::temp_dir().join(format!("krusty_werror_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("Clean.kt");
+    fs::write(&source, "fun f(): Int = 1\n").unwrap();
+    let out_dir = dir.join("out");
+
+    // The Gradle plugin always disables the implicit reflect jar. This environment has a
+    // stdlib jar and no reflect jar, so the warning policy is what the invocations test.
+    let clean = Command::new(&krusty)
+        .args(["-Werror", "-no-reflect"])
+        .arg("-d")
+        .arg(&out_dir)
+        .arg(&source)
+        .output()
+        .expect("run krusty");
+    assert!(
+        clean.status.success(),
+        "a warning-clean file must compile under -Werror: {}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    assert!(out_dir.join("CleanKt.class").is_file());
+
+    let redundant = Command::new(&krusty)
+        .args([
+            "-language-version",
+            "2.4",
+            "-Xcontext-parameters",
+            "-Werror",
+            "-no-reflect",
+        ])
+        .arg("-d")
+        .arg(dir.join("redundant"))
+        .arg(&source)
+        .output()
+        .expect("run krusty");
+    assert!(
+        !redundant.status.success(),
+        "a redundant language flag is a warning, and -Werror must fail the compilation"
+    );
+    let redundant_stderr = String::from_utf8_lossy(&redundant.stderr);
+    assert!(
+        redundant_stderr.contains("-Werror") || redundant_stderr.contains("redundant"),
+        "{redundant_stderr}"
+    );
+    assert!(!dir.join("redundant/CleanKt.class").exists());
+
+    let explicit = Command::new(&krusty)
+        .args(["-Xexplicit-api=warning", "-Werror", "-no-reflect"])
+        .arg("-d")
+        .arg(dir.join("explicit"))
+        .arg(&source)
+        .output()
+        .expect("run krusty");
+    assert!(
+        !explicit.status.success(),
+        "an explicit-API warning must fail the compilation under -Werror: {}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    assert!(!dir.join("explicit/CleanKt.class").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
