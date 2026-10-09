@@ -430,8 +430,22 @@ pub(crate) fn resolve_bound_violating_bindings(
 pub(crate) fn generic_bindings_satisfy_bounds(
     generic_sig: &GenericSig,
     bindings: &GSigBinds,
-    mut admits: impl FnMut(Ty, Ty) -> bool,
+    admits: impl FnMut(Ty, Ty) -> bool,
 ) -> bool {
+    generic_binding_bound_violation(generic_sig, bindings, admits).is_none()
+}
+
+/// Return the first declaration-bound relation rejected by the completed call-site bindings.
+///
+/// Classifier type arguments are concrete instantiations, so constructor selection uses this
+/// operation after incorporating its expected result. Ordinary generic call selection may instead
+/// use [`generic_bindings_admit_expected_return_intersection`] when Kotlin permits a non-denotable
+/// intersection for a return-only method variable.
+pub(crate) fn generic_binding_bound_violation(
+    generic_sig: &GenericSig,
+    bindings: &GSigBinds,
+    mut admits: impl FnMut(Ty, Ty) -> bool,
+) -> Option<(Ty, Ty)> {
     // A bound can constrain another formal: `<T : X, X : Comparable<UInt>>`. When an argument binds
     // `T` but no argument mentions `X`, Kotlin infers the most specific `X` from that subtype
     // constraint. Complete those relationships before substituting/checking the bound graph; leaving
@@ -443,14 +457,13 @@ pub(crate) fn generic_bindings_satisfy_bounds(
         .formals
         .iter()
         .zip(&generic_sig.formal_bounds)
-        .all(|(formal, bounds)| {
-            let Some(actual) = bindings.get(formal).copied() else {
-                return true;
-            };
+        .find_map(|(formal, bounds)| {
+            let actual = bindings.get(formal).copied()?;
             let actual = actual.projection_inner().unwrap_or(actual);
             bounds
                 .iter()
-                .all(|bound| admits(actual, ty_subst(*bound, &bindings)))
+                .map(|bound| ty_subst(*bound, &bindings))
+                .find_map(|bound| (!admits(actual, bound)).then_some((bound, actual)))
         })
 }
 

@@ -18,6 +18,8 @@ pub(crate) use local_class_names::{settle_generated_class_names, SettledGenerate
 mod local_function_names;
 mod no_expect_for_actual;
 mod retained_syntax;
+#[cfg(test)]
+pub(crate) use crate::resolve::collect_signatures;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
 pub(crate) use crate::resolve::DeclaredPropertySig as FrontendDeclaredPropertySig;
@@ -26,9 +28,8 @@ pub(crate) use crate::resolve::Signature;
 pub use crate::resolve::SymbolTable as FrontendSymbols;
 pub use crate::resolve::TypeInfo as FrontendTypeInfo;
 pub use crate::resolve::{
-    check_file, check_file_at, check_file_in_source_set, collect_signatures,
-    collect_signatures_with_cp, AnonymousObjectCapture, AnonymousObjectCaptureSource,
-    CompoundAssignmentTarget, SourceConstructorMatcher,
+    AnonymousObjectCapture, AnonymousObjectCaptureSource, CompoundAssignmentTarget,
+    SourceConstructorMatcher,
 };
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
@@ -827,6 +828,35 @@ where
         project_features,
         prepare_symbols,
         diags,
+    )
+}
+
+#[cfg(test)]
+/// Run the production source-set pipeline while retaining its parser-coordinate inspection views
+/// for tests that need to seed source symbols before checking. Production emission deliberately
+/// uses the non-retaining entry point above.
+pub(crate) fn analyze_source_set_with_features_and_prepare_retained<F, P>(
+    sources: &[SourceInput<'_>],
+    platform: P,
+    project_features: &LangFeatures,
+    prepare_symbols: F,
+    diags: &mut DiagSink,
+) -> SourceSetAnalysis
+where
+    F: FnOnce(&[File], &mut FrontendSymbols),
+    P: Into<PlatformProvider>,
+{
+    analyze_source_set_impl(
+        sources,
+        sources.len(),
+        sources.len(),
+        platform.into(),
+        project_features,
+        DEFAULT_MODULE_NAME,
+        prepare_symbols,
+        diags,
+        false,
+        true,
     )
 }
 

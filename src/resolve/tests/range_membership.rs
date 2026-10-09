@@ -64,18 +64,14 @@ fn floating_membership_without_a_selected_range_operator_fails_closed() {
 #[test]
 fn reference_range_in_records_operator_calls_for_lowering() {
     let mut diagnostics = DiagSink::new();
-    let file = parse_file(
-        "class VR { operator fun contains(v: V): Boolean = true }\n\
+    let source = "class VR { operator fun contains(v: V): Boolean = true }\n\
          class V { operator fun rangeTo(o: V): VR = VR() }\n\
-         fun box(): Boolean = V() in V()..V()",
-        &mut diagnostics,
-    );
-    let files = vec![file];
-    let mut symbols = collect_signatures(&files, &mut diagnostics);
-    let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+         fun box(): Boolean = V() in V()..V()";
+    let (file, _, info) = crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+    let info = info.expect("production retained analysis must check the source");
     assert_no_diags(&diagnostics);
 
-    let in_range = files[0]
+    let in_range = file
         .expr_arena
         .iter()
         .enumerate()

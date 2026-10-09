@@ -1,7 +1,7 @@
 use super::test_support::{
     checked_function_body, checked_function_body_with_features,
     checked_function_body_with_platform, checked_function_body_with_platform_and_features,
-    jvm_semantics, jvm_stdlib_semantics, root_expression,
+    checked_source_set_function_body, jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
 use crate::fir::{FirExpressionDebugLines, FirInlineBodyPlan};
@@ -134,6 +134,180 @@ fn same_named_source_declaration_wins_over_provider_default() {
     let target = call.target.module().expect("source declaration identity");
     assert_eq!(index.callable_name(target), Some("sameName"));
     assert!(call.arguments.is_empty());
+}
+
+#[test]
+fn source_overload_call_keeps_the_selected_stable_callable() {
+    let (body, index) = checked_function_body(
+        "fun pick(value: Int): String = \"int\"\n\
+         fun pick(value: String): String = value\n\
+         fun box(): String = pick(\"OK\")\n",
+        "box",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("source overload call")
+        .kind
+    else {
+        panic!("selected source overload must become checked call FIR")
+    };
+    let callable = index
+        .callable(call.target.module().expect("stable source target"))
+        .expect("selected source callable");
+    let signature = index
+        .signature(callable.declaration)
+        .expect("selected source signature");
+    assert_eq!(
+        signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>(),
+        [Ty::String]
+    );
+    assert_eq!(signature.result.get(), Ty::String);
+}
+
+#[test]
+fn cross_file_call_keeps_the_selected_stable_source_declaration() {
+    let (body, index) = checked_source_set_function_body(
+        &[
+            "fun helper(value: String): String = value",
+            "fun box(): String = helper(\"OK\")",
+        ],
+        1,
+        "box",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("cross-file source call")
+        .kind
+    else {
+        panic!("cross-file source call must become checked call FIR")
+    };
+    let callable = index
+        .callable(call.target.module().expect("stable source target"))
+        .expect("selected source callable");
+    assert_eq!(index.callable_name(callable.id), Some("helper"));
+    assert_eq!(
+        index
+            .declaration_anchor(callable.declaration)
+            .expect("stable source declaration")
+            .source,
+        SourceFileId::from_raw(0),
+    );
+    let signature = index
+        .signature(callable.declaration)
+        .expect("selected source signature");
+    assert_eq!(
+        signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>(),
+        [Ty::String],
+    );
+}
+
+#[test]
+fn cross_file_overload_keeps_the_selected_stable_source_declaration() {
+    let (body, index) = checked_source_set_function_body(
+        &[
+            "fun helper(value: Int): String = \"int\"",
+            "fun helper(value: String): String = value",
+            "fun box(): String = helper(\"OK\")",
+        ],
+        2,
+        "box",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("cross-file overload call")
+        .kind
+    else {
+        panic!("selected cross-file overload must become checked call FIR")
+    };
+    let callable = index
+        .callable(call.target.module().expect("stable source target"))
+        .expect("selected source callable");
+    assert_eq!(
+        index
+            .declaration_anchor(callable.declaration)
+            .expect("stable source declaration")
+            .source,
+        SourceFileId::from_raw(1),
+    );
+    let signature = index
+        .signature(callable.declaration)
+        .expect("selected source signature");
+    assert_eq!(
+        signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>(),
+        [Ty::String],
+    );
+}
+
+#[test]
+fn package_scope_call_keeps_the_selected_stable_source_declaration() {
+    let (body, index) = checked_source_set_function_body(
+        &[
+            "package a\nfun helper(): String = \"a\"",
+            "package b\nfun helper(): String = \"OK\"",
+            "package b\nfun box(): String = helper()",
+        ],
+        2,
+        "box",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("package-scoped source call")
+        .kind
+    else {
+        panic!("package-scoped source call must become checked call FIR")
+    };
+    let callable = index
+        .callable(call.target.module().expect("stable source target"))
+        .expect("selected source callable");
+    assert_eq!(index.callable_name(callable.id), Some("helper"));
+    assert_eq!(
+        index
+            .declaration_anchor(callable.declaration)
+            .expect("stable source declaration")
+            .source,
+        SourceFileId::from_raw(1),
+    );
+}
+
+#[test]
+fn source_context_call_keeps_context_and_default_argument_ordinals() {
+    let (body, index) = checked_function_body(
+        "class A(val value: String)\n\
+         context(a: A) fun leaf(text: String = \"OK\"): String = text\n\
+         context(a: A) fun mid(): String = leaf()\n",
+        "mid",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("context call")
+        .kind
+    else {
+        panic!("context call must become checked call FIR")
+    };
+    let target = call.target.module().expect("stable source target");
+    let callable = index.callable(target).expect("selected source callable");
+    assert_eq!(callable.shape.context_parameter_count, 1);
+    assert_eq!(call.arguments.len(), 2);
+    assert!(matches!(
+        call.arguments[0],
+        FirCallArgument::Expression { parameter: 0, .. }
+    ));
+    assert!(matches!(
+        call.arguments[1],
+        FirCallArgument::Default { parameter: 1, .. }
+    ));
 }
 
 #[test]

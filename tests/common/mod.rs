@@ -2538,20 +2538,25 @@ pub fn inspect_checker_with_classpath<T>(
     ) -> T,
 ) -> (Vec<String>, T) {
     use krusty::diag::DiagSink;
-    use krusty::frontend::{check_file, collect_signatures_with_cp};
+    use krusty::frontend::{analyze_source_set_with_features, SourceInput};
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(main);
-    let toks = krusty::lexer::lex(main, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
-        main, &toks, &mut diags, &features,
-    )];
     let cp = std::rc::Rc::new(Classpath::new(classpath));
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
     );
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    let info = check_file(&files[0], &mut syms, &mut diags);
-    let inspected = inspect(&files[0], &info, &syms);
+    let inputs = [SourceInput::kotlin(main)];
+    let analysis = analyze_source_set_with_features(&inputs, platform, &features, &mut diags);
+    let file = analysis
+        .files
+        .first()
+        .expect("retained inspection analysis must keep its source file");
+    let info = analysis
+        .types
+        .first()
+        .and_then(Option::as_ref)
+        .expect("retained inspection analysis must check its source file");
+    let inspected = inspect(file, info, &analysis.symbols);
     (
         diags.diags.iter().map(|m| m.msg.clone()).collect(),
         inspected,

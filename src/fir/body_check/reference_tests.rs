@@ -5,6 +5,127 @@ use super::test_support::{
 use super::*;
 
 #[test]
+fn overloaded_source_reference_keeps_the_selected_stable_callable() {
+    let (body, index) = checked_function_body(
+        "fun pick(value: Int, marker: Any): Int = value\n\
+         fun pick(value: Any, marker: Int): Int = marker\n\
+         fun reference(): (Int, Any) -> Unit = ::pick\n",
+        "reference",
+    );
+    let FirExprKind::CallableReference { target, .. } = &body
+        .expr(root_expression(&body))
+        .expect("callable reference")
+        .kind
+    else {
+        panic!("selected source overload must become checked callable-reference FIR")
+    };
+    let callable = index
+        .callable(target.module().expect("stable source target"))
+        .expect("selected source callable");
+    let signature = index
+        .signature(callable.declaration)
+        .expect("selected source signature");
+    assert_eq!(
+        signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>(),
+        [Ty::Int, Ty::obj("kotlin/Any")]
+    );
+    assert_eq!(signature.result.get(), Ty::Int);
+}
+
+#[test]
+fn bound_and_unbound_extension_references_share_the_selected_stable_callable() {
+    let (body, index) = checked_function_body(
+        "class C\n\
+         fun C.pick(value: Int): Unit {}\n\
+         fun C.pick(value: Any): Unit {}\n\
+         fun references(c: C) {\n\
+             val bound: (Int) -> Unit = c::pick\n\
+             val unbound: (C, Int) -> Unit = C::pick\n\
+         }\n",
+        "references",
+    );
+    let references = (0..body.expression_count())
+        .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::CallableReference {
+                target, binding, ..
+            } => Some((target.module().expect("stable extension target"), *binding)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(references.len(), 2);
+    assert_eq!(references[0].0, references[1].0);
+    assert_eq!(references[0].1, FirCallableReferenceBinding::Bound);
+    assert_eq!(references[1].1, FirCallableReferenceBinding::Unbound);
+
+    let callable = index
+        .callable(references[0].0)
+        .expect("selected extension callable");
+    assert_eq!(
+        callable.shape.extension_receiver.map(ResolvedTy::get),
+        Some(Ty::obj("C"))
+    );
+    let signature = index
+        .signature(callable.declaration)
+        .expect("selected extension signature");
+    assert_eq!(
+        signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>(),
+        [Ty::Int]
+    );
+}
+
+#[test]
+fn immediate_invocation_context_selects_references_inside_when_branches() {
+    let (body, index) = checked_function_body(
+        "fun String.asFloat(): Float = 1.0f\n\
+         fun String.asInt(): Int = 1\n\
+         fun String.asInt(radix: Int): Int = radix\n\
+         fun decode(value: String, flag: Boolean): Any = when (flag) {\n\
+             true -> String::asFloat\n\
+             else -> String::asInt\n\
+         }(value)\n",
+        "decode",
+    );
+    let mut selected = (0..body.expression_count())
+        .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::CallableReference { target, .. } => target.module(),
+            _ => None,
+        })
+        .map(|target| {
+            let callable = index.callable(target).expect("selected source callable");
+            let signature = index
+                .signature(callable.declaration)
+                .expect("selected source signature");
+            (
+                index
+                    .callable_name(target)
+                    .expect("callable name")
+                    .to_string(),
+                signature.parameters.len(),
+                signature.result.get(),
+            )
+        })
+        .collect::<Vec<_>>();
+    selected.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        selected,
+        [
+            ("asFloat".to_string(), 0, Ty::Float),
+            ("asInt".to_string(), 0, Ty::Int),
+        ]
+    );
+}
+
+#[test]
 fn top_level_function_reference_keeps_only_stable_callable_identity() {
     let (body, index) = checked_function_body(
         "fun double(value: Int): Int = value * 2\n\

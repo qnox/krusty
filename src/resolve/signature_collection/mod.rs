@@ -46,6 +46,7 @@ pub(in crate::resolve) use written_supertypes::*;
 /// Stage C: collect top-level function + class signatures across all files. Two passes so that a
 /// class type can be referenced before its declaration (and across files).
 /// Convenience wrapper — uses an empty classpath (no stdlib type scanning).
+#[cfg(test)]
 pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
     collect_signatures_with_cp(files, Box::new(EmptySymbolSource), diags)
 }
@@ -53,6 +54,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
 /// Like `collect_signatures` but also seeds class names and type aliases from the target's
 /// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists. No native
 /// compiler plugin runs; see [`collect_signatures_with_cp_and_plugins`].
+#[cfg(test)]
 pub fn collect_signatures_with_cp(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,
