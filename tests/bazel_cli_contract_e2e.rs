@@ -149,7 +149,6 @@ fn the_projects_kotlinc_flags_are_accepted() {
             "-d".to_string(),
             jar.display().to_string(),
             "-Xjvm-default=all".to_string(),
-            "-progressive".to_string(),
             "-XXLanguage:+AllowEagerSupertypeAccessibilityChecks".to_string(),
             "-api-version".to_string(),
             "2.4".to_string(),
@@ -166,6 +165,32 @@ fn the_projects_kotlinc_flags_are_accepted() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(jar_entries(&jar).iter().any(|e| e == "demo/FKt.class"));
+}
+
+/// intellij-community also sets `-progressive`. krusty does not implement the progressive
+/// features it turns on, so the rule's action must fail with the refusal and write nothing rather
+/// than compile under semantics the project did not ask for.
+#[test]
+fn the_projects_progressive_flag_is_refused() {
+    let dir = workspace("progressive");
+    let source = dir.join("P.kt");
+    std::fs::write(&source, "package demo\nfun value(): Int = 1\n").expect("write source");
+    let jar = dir.join("progressive.jar");
+    let output = run_with_param_file(
+        &dir,
+        &[
+            "-d".to_string(),
+            jar.display().to_string(),
+            "-progressive".to_string(),
+            source.display().to_string(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "krusty: error: krusty does not implement the kotlinc argument '-progressive'\n"
+    );
+    assert!(!jar.exists(), "a refused argument must not write the jar");
 }
 
 /// A failing compile must FAIL the action. A rule whose compiler exits 0 on a broken source

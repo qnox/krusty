@@ -12155,18 +12155,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `-Xskip-prerelease-check`); or *unsupported*, which fails the command line with
   `krusty: error: krusty does not implement the kotlinc argument '<argument>'`, exit 2, before
   anything is written. An argument krusty does not implement is never dropped silently.
-  `-progressive` enables the release's progressive features (its `LanguageFeature` entries with
-  `actuallyEnabledInProgressiveMode`, dumped to `releases/<ver>.progressive.txt`) after the
-  `@Enables` arguments and before `-XXLanguage`, skipping any an `@Enables` argument set, and warns
-  below the latest stable language version unless `-Xsuppress-version-warnings`; like kotlinc,
-  only `@Enables` arguments, never `-XXLanguage`, get `REDUNDANT_CLI_ARG`.
+  `-progressive` is unsupported: it turns on the release's progressive language features (the
+  `LanguageFeature` entries with `actuallyEnabledInProgressiveMode`, vendored per release in
+  `releases/<ver>.features.tsv`), and krusty implements none of those not already on at the
+  language version (the 2.5/2.6 `Forbid…`/`Report…` errors). `@Enables` arguments apply before
+  `-XXLanguage`, which overrides them, and like kotlinc only `@Enables` arguments, never
+  `-XXLanguage`, get `REDUNDANT_CLI_ARG`.
   (`tests/kotlinc_argument_conformance_e2e.rs` compares the table with the reference compiler and
   the parser with kotlinc's `parseCommandLineArguments` over every argument and value form;
   `crates/krusty-cli/src/kotlinc_arguments/tokenize.rs` unit tests;
   `every_kotlinc_argument_takes_its_dispositions_path` in `crates/krusty-cli/src/cli.rs` checks
-  each argument of each release against its disposition; `tests/unsupported_kotlinc_arguments_e2e.rs`,
-  `tests/inert_kotlinc_arguments_e2e.rs` and `tests/progressive_mode_e2e.rs` check exit code,
-  complete stderr and output against kotlinc.)
+  each argument of each release against its disposition; `tests/unsupported_kotlinc_arguments_e2e.rs`
+  and `tests/inert_kotlinc_arguments_e2e.rs` check exit code, complete stderr and output against
+  kotlinc.)
 - **A companion object's nested classifiers are in scope in the class that declares it.** Each
   lexical class rung contributes its own nested classifiers, then those of its companion object
   (kotlinc's companion static scope), before the next enclosing rung. A body call (`Edge(2)`), a

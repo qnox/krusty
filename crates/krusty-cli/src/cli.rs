@@ -108,9 +108,7 @@ impl WarningPolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CliWarning {
-    /// `None` for a warning kotlinc reports without a diagnostic name, which `-Xwarning-level`
-    /// cannot reach.
-    pub name: Option<WarningName>,
+    pub name: WarningName,
     pub message: String,
 }
 
@@ -283,10 +281,10 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
     let lifecycle = kotlinc_arguments::lifecycle_warnings(&tokenized, reference_version)
         .into_iter()
         .map(|(lifecycle, message)| CliWarning {
-            name: Some(match lifecycle {
+            name: match lifecycle {
                 Lifecycle::Deprecated => WarningName::DeprecatedCliArg,
                 Lifecycle::Removed => WarningName::RemovedCliArg,
-            }),
+            },
             message: kotlinc_arguments::render(&message),
         })
         .collect();
@@ -548,38 +546,6 @@ mod tests {
 
     fn parse_args(args: &[&str]) -> Options {
         parse(args.iter().map(|s| s.to_string()))
-    }
-
-    /// `-progressive` enables the selected release's progressive features, and an explicit
-    /// `-XXLanguage` still overrides one wherever it appears, as in kotlinc's
-    /// `configureLanguageFeatures`.
-    #[test]
-    fn progressive_mode_enables_the_releases_progressive_features() {
-        let feature = "AllowEagerSupertypeAccessibilityChecks";
-        let enabled = |args: &[&str]| {
-            let o = parse_args(args);
-            assert_eq!(o.errors, Vec::<String>::new());
-            assert!(o.warnings.is_empty());
-            o.language_settings.features.has(feature)
-        };
-        assert!(!enabled(&["-Xkotlin-reference-version=2.4.20", "f.kt"]));
-        assert!(enabled(&[
-            "-Xkotlin-reference-version=2.4.20",
-            "-progressive",
-            "f.kt"
-        ]));
-        // 2.4.10 has no such progressive feature.
-        assert!(!enabled(&[
-            "-Xkotlin-reference-version=2.4.10",
-            "-progressive",
-            "f.kt"
-        ]));
-        assert!(!enabled(&[
-            "-Xkotlin-reference-version=2.4.20",
-            "-XXLanguage:-AllowEagerSupertypeAccessibilityChecks",
-            "-progressive",
-            "f.kt",
-        ]));
     }
 
     /// `-Xkotlin-reference-version` selects a supported release and refuses any other, rather than
@@ -1110,7 +1076,7 @@ mod tests {
         assert_eq!(
             parse_args(&["-language-version", "2.0", "f.kt"]).warnings,
             [CliWarning {
-                name: Some(WarningName::DeprecatedLanguageVersion),
+                name: WarningName::DeprecatedLanguageVersion,
                 message: "language version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
             }]
         );
@@ -1125,11 +1091,11 @@ mod tests {
             .warnings,
             [
                 CliWarning {
-                    name: Some(WarningName::DeprecatedLanguageVersion),
+                    name: WarningName::DeprecatedLanguageVersion,
                     message: "API version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
                 },
                 CliWarning {
-                    name: Some(WarningName::ExperimentalLanguageVersion),
+                    name: WarningName::ExperimentalLanguageVersion,
                     message: "language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.".to_owned(),
                 },
             ]
@@ -1173,7 +1139,7 @@ mod tests {
         assert_eq!(
             redundant.warnings,
             [CliWarning {
-                name: Some(WarningName::RedundantCliArg),
+                name: WarningName::RedundantCliArg,
                 message: "the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
             }]
         );
@@ -1271,7 +1237,7 @@ mod tests {
         assert_eq!(
             parsed.warnings,
             [CliWarning {
-                name: Some(WarningName::RedundantCliArg),
+                name: WarningName::RedundantCliArg,
                 message: "the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
             }]
         );
@@ -1285,7 +1251,7 @@ mod tests {
         assert_eq!(
             parsed.warnings,
             [CliWarning {
-                name: Some(WarningName::RedundantCliArg),
+                name: WarningName::RedundantCliArg,
                 message: "the argument '-Xnested-type-aliases' is redundant for the current language version 2.4.".to_string(),
             }]
         );
