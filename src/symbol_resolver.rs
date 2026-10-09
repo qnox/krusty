@@ -14,6 +14,7 @@ use crate::libraries::{
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName, Visibility};
+mod argument_compatibility;
 mod call_argument;
 mod callable_shapes;
 mod candidate_access;
@@ -47,6 +48,12 @@ pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
 mod source_view;
 mod statically_known_subtype;
+#[cfg(test)]
+use argument_compatibility::arg_fits;
+use argument_compatibility::{arg_fits_platform, arg_fits_source, untyped_lambda_pertinent};
+pub(crate) use argument_compatibility::{
+    function_input_types, resolution_subtype, sam_arg_matches, sam_return_matches,
+};
 pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
@@ -498,161 +505,6 @@ fn preserve_receiver_identity_bindings(declared: Ty, actual: Ty, bindings: &mut 
         }
         _ => {}
     }
-}
-
-/// If `sig` is a function type, the partially substituted semantic types of its lambda parameters.
-/// Unbound formals remain symbolic: this helper shapes a postponed lambda before its body contributes
-/// inference constraints, so erasing `T` to its bound here would turn real evidence from `it` into
-/// `Any` before overload selection runs. Empty for anything else.
-pub(crate) fn function_input_types(
-    source: &dyn SymbolSource,
-    sig: Ty,
-    binds: &GSigBinds,
-) -> Vec<Ty> {
-    match sig.non_null() {
-        Ty::Fun(fsig) => fsig
-            .params
-            .iter()
-            // A lambda PARAMETER is an ordinary value slot: a formal bound to a projection by a
-            // projected receiver shapes `it` as the approximation, never as `out X` itself.
-            .map(|parameter| {
-                instantiate_slot(
-                    source,
-                    None,
-                    *parameter,
-                    binds,
-                    TypePosition::Out,
-                    UnboundSpecialization::Preserve,
-                )
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Whether argument `a` can be passed where parameter `p` is expected, in erased Kotlin terms: an
-/// exact match, any argument into an erased `Any` parameter, or the *same erased class* (a parameter
-/// `Pair` accepts an argument `Pair<Int, String>` — generic parameters erase to the raw type).
-pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
-    // A lambda value fits a function-typed parameter when arities agree; its body result is handled by
-    // the selected call's generic binding, not by erased descriptor matching. An erased `Any` parameter —
-    // whether spelled `kotlin/Any` or its JVM form `java/lang/Object` (a generic vararg element erases to
-    // it) — accepts any reference argument.
-    p == a
-        || matches!(p, Ty::Obj(n, _)
-            if (crate::types::same(*n, crate::types::wk::any())
-                || crate::types::same(*n, crate::types::wk::java_object()))
-                && !matches!(a, Ty::Null | Ty::Nullable(_)))
-        || matches!((p.fun_arity(), a.fun_arity()), (Some(pn), Some(an)) if pn == an)
-        || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
-}
-
-/// Whether a function-shaped argument can adapt to a functional-interface parameter.
-///
-/// `arg` is sometimes an unchecked lambda probe rather than a completed function type. Keeping that
-/// syntax state in [`CallArgKind`] at callers, then reducing it to `Ty::Error` here, lets every call
-/// origin use the same arity rule without teaching this semantic operation about AST forms.
-pub(crate) fn sam_arg_matches(
-    lib: &dyn SemanticPlatform,
-    src: &dyn SymbolSource,
-    param: Ty,
-    arg: Ty,
-) -> bool {
-    let Some(sam) = semantic_sam_signature(src, param) else {
-        return false;
-    };
-    if arg == Ty::Error {
-        return sam.params.len() <= 1;
-    }
-    let Some(arity) = arg.fun_arity() else {
-        return false;
-    };
-    // A checked lambda has an authoritative arity and must match exactly. An unchecked literal uses
-    // the `Error` probe above; its selected call path performs the first body check and may synthesize
-    // implicit `it` for a one-parameter SAM. Keeping those states distinct avoids syntax-specific
-    // exceptions for call paths that happened to check a lambda too early.
-    if sam.params.len() != usize::from(arity) {
-        return false;
-    }
-    let Some(arg_ret) = arg.fun_ret() else {
-        return false;
-    };
-    sam_return_matches(lib, src, sam.ret, arg_ret)
-}
-
-pub(crate) fn sam_return_matches(
-    _lib: &dyn SemanticPlatform,
-    src: &dyn SymbolSource,
-    expected: Ty,
-    actual: Ty,
-) -> bool {
-    if expected == Ty::Unit || matches!(actual, Ty::Error | Ty::Nothing) {
-        return true;
-    }
-    // A method-owned result formal is intentionally still open while overload applicability is
-    // decided. Its lambda result constrains that formal after selection; at this stage only the
-    // declared upper bound can reject the candidate.
-    let expected = match expected {
-        Ty::TyParam(_, bound) => *bound,
-        expected => expected,
-    };
-    semantic_arg_assignable(src, &expected, &actual)
-}
-
-fn arg_fits_platform(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
-    arg_fits(param, arg)
-        || param
-            .fun_arity()
-            .zip(lib.function_like_arity(*arg))
-            .is_some_and(|(p, a)| usize::from(p) == a)
-}
-
-fn arg_fits_source(
-    lib: &dyn SemanticPlatform,
-    src: &dyn SymbolSource,
-    param: &Ty,
-    arg: &Ty,
-) -> bool {
-    arg_fits_platform(lib, param, arg)
-        || semantic_arg_assignable(src, param, arg)
-        // An unresolved type parameter is an inference slot during candidate collection. Keep the
-        // candidate so `null` can either infer `Nothing?` from a callable-owned formal or reach the
-        // ordinary checker, which rejects a fixed enclosing bare `T` with the precise nullability
-        // diagnostic. This is not assignability: [`semantic_arg_assignable`] remains strict.
-        || (*arg == Ty::Null && matches!(param.non_null(), Ty::TyParam(..)))
-}
-
-/// Whether a parameter can host a function value at all — the applicability test for an implicitly
-/// typed lambda literal argument. A bare `{ … }` is typed only against an expected type (its
-/// recorded type until then is `Ty::Error`), so overload pruning must go by the parameter's SHAPE:
-/// kotlinc counts such a lambda as applicable only to function-typed, `kotlin.Function*`, SAM,
-/// type-parameter, or `Any` parameters — the same doctrine as javac, where an implicitly typed
-/// lambda is not pertinent to applicability against non-functional parameters (JLS 15.12.2.2).
-/// Probed against kotlinc 2.4.10: `(f: () -> Unit)` vs `(name: String)` resolves to the function
-/// overload; vs `(x: Any)` the function overload wins on specificity. Without this test the
-/// lambda's placeholder `Ty::Error` is wildcard-assignable to EVERY parameter, and a resolvable
-/// overload pair reads as ambiguous.
-fn untyped_lambda_pertinent(lib: &dyn SemanticPlatform, src: &dyn SymbolSource, param: Ty) -> bool {
-    let shape = param.non_null();
-    shape.fun_arity().is_some()
-        || matches!(shape, Ty::TyParam(..))
-        || shape.is_erased_top()
-        // A bare lambda with no explicit parameters can be zero-arity or use implicit `it`.
-        // Recognize erased/marker function supertypes through the provider's declared hierarchy;
-        // a classifier merely named `Function...` carries no callable semantics.
-        || (0..=1)
-            .filter_map(|arity| lib.function_type(arity))
-            .any(|function| semantic_arg_assignable(src, &shape, &function))
-        || sam_arg_matches(lib, src, param, Ty::Error)
-}
-
-pub(crate) fn resolution_subtype(src: &dyn SymbolSource, sub: Ty, sup: Ty) -> bool {
-    crate::assignable::is_subtype(
-        &crate::assignable::TyCtx::new(),
-        &SourceOracle(src),
-        sub,
-        sup,
-    )
 }
 
 pub(crate) enum CandidateSelection<T> {
