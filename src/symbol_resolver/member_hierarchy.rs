@@ -530,6 +530,7 @@ fn normalize_inherited_member_functions_with_family(
         }
     }
     inherit_overridden_semantic_roles(source, functions, intersection_parts);
+    record_overridden_declarations(source, functions, intersection_parts);
     result_enhancement::enhance_overriding_flexible_results(source, functions);
     inherit_overridden_default_arguments(source, functions);
     inherit_overridden_results(source, functions);
@@ -558,25 +559,7 @@ fn inherit_overridden_semantic_roles(
             let Some(role) = inherited.callable.semantic_role else {
                 continue;
             };
-            if inherited.receiver_rank <= implementation.receiver_rank
-                || !intersection_parts.is_none_or(|parts| {
-                    owners_share_intersection_component(
-                        source,
-                        parts,
-                        implementation.callable.owner,
-                        inherited.callable.owner,
-                    )
-                })
-            {
-                continue;
-            }
-            if !function_input_shapes_match(source, inherited, implementation)
-                || !resolution_subtype(
-                    source,
-                    implementation.ret.apply(implementation.callable.ret),
-                    inherited.ret.apply(inherited.callable.ret),
-                )
-            {
+            if !overrides_in_family(source, inherited, implementation, intersection_parts) {
                 continue;
             }
             match inherited_role {
@@ -588,6 +571,95 @@ fn inherit_overridden_semantic_roles(
         if !conflicting {
             implementation.callable.semantic_role = inherited_role;
         }
+    }
+}
+
+/// Whether `implementation` overrides `inherited` within one normalized member family: a
+/// declaration further up the receiver's hierarchy (sharing an intersection component when the
+/// receiver is one) whose complete override input shape matches and whose result the
+/// implementation's refines.
+fn overrides_in_family(
+    source: &dyn SymbolSource,
+    inherited: &FunctionInfo,
+    implementation: &FunctionInfo,
+    intersection_parts: Option<&[Ty]>,
+) -> bool {
+    inherited.receiver_rank > implementation.receiver_rank
+        && intersection_parts.is_none_or(|parts| {
+            owners_share_intersection_component(
+                source,
+                parts,
+                implementation.callable.owner,
+                inherited.callable.owner,
+            )
+        })
+        && function_input_shapes_match(source, inherited, implementation)
+        && resolution_subtype(
+            source,
+            implementation.ret.apply(implementation.callable.ret),
+            inherited.ret.apply(inherited.callable.ret),
+        )
+}
+
+/// Freeze on each dependency declaration the exact identities of the declarations it overrides.
+///
+/// The override edges are the ones this hierarchy proves (see [`overrides_in_family`]); providers
+/// still publish only direct declarations. A target that implements a language declaration
+/// specially (`kotlin/Any.toString(): String`) asks whether the selected declaration is that one
+/// or overrides it, rather than classifying a member by its spelling or shape.
+fn record_overridden_declarations(
+    source: &dyn SymbolSource,
+    functions: &mut FunctionSet,
+    intersection_parts: Option<&[Ty]>,
+) {
+    let declarations = &functions.overloads;
+    let recorded = declarations
+        .iter()
+        .map(|implementation| {
+            let mut overridden = Vec::<crate::types::OverriddenDeclaration>::new();
+            if implementation.callable.external_identity.is_none() {
+                return overridden.into_boxed_slice();
+            }
+            for inherited in declarations {
+                if !overrides_in_family(source, inherited, implementation, intersection_parts) {
+                    continue;
+                }
+                let identity = declaration_identity(inherited);
+                if !overridden.contains(&identity) {
+                    overridden.push(identity);
+                }
+            }
+            overridden.into_boxed_slice()
+        })
+        .collect::<Vec<_>>();
+    for (implementation, overridden) in functions.overloads.iter_mut().zip(recorded) {
+        implementation.callable.overridden_declarations = overridden;
+    }
+}
+
+/// The exact semantic identity of one declaration in a member family: its declaring classifier,
+/// Kotlin name, and declared receiver, parameter and result types before use-site substitution.
+fn declaration_identity(declaration: &FunctionInfo) -> crate::types::OverriddenDeclaration {
+    let callable = &declaration.callable;
+    let owner = match callable.declaration_owner {
+        Some(crate::types::SemanticCallableOwner::Classifier(owner)) => owner,
+        _ => callable.owner,
+    };
+    let signature = declaration.generic_sig.as_ref();
+    crate::types::OverriddenDeclaration {
+        owner,
+        name: callable.name.as_str().into(),
+        receiver: signature
+            .and_then(|signature| signature.receiver)
+            .or(callable.source_receiver),
+        params: declaration
+            .semantic_params()
+            .into_owned()
+            .into_boxed_slice(),
+        ret: signature
+            .map(|signature| signature.ret)
+            .or(callable.declared_ret)
+            .unwrap_or(callable.ret),
     }
 }
 
@@ -1257,6 +1329,69 @@ mod tests {
             functions.overloads[0].callable.semantic_role,
             Some(KotlinAnyToString)
         );
+    }
+
+    fn dependency(
+        owner: &str,
+        rank: u32,
+        params: Vec<Ty>,
+        identity: u32,
+    ) -> crate::libraries::FunctionInfo {
+        let mut function = member(owner, rank, params, None);
+        function.callable.external_identity =
+            Some(crate::fir::ExternalCallableId::from_raw(identity));
+        function
+    }
+
+    #[test]
+    fn an_override_records_the_exact_declaration_it_overrides() {
+        let mut functions = FunctionSet {
+            overloads: vec![
+                dependency("sample/Derived", 0, Vec::new(), 0),
+                dependency("sample/Base", 1, Vec::new(), 1),
+                dependency("kotlin/Any", 2, Vec::new(), 2),
+            ],
+        };
+        record_overridden_declarations(&crate::libraries::EmptySymbolSource, &mut functions, None);
+
+        let identity = |owner: &str| crate::types::OverriddenDeclaration {
+            owner: crate::types::type_name(owner),
+            name: "operation".into(),
+            receiver: None,
+            params: Box::new([]),
+            ret: Ty::String,
+        };
+        assert_eq!(
+            &*functions.overloads[0].callable.overridden_declarations,
+            &[identity("sample/Base"), identity("kotlin/Any")]
+        );
+        assert_eq!(
+            &*functions.overloads[1].callable.overridden_declarations,
+            &[identity("kotlin/Any")]
+        );
+        assert!(
+            functions.overloads[2]
+                .callable
+                .overridden_declarations
+                .is_empty(),
+            "the root declaration overrides nothing"
+        );
+    }
+
+    #[test]
+    fn a_same_named_overload_records_no_overridden_declaration() {
+        let mut functions = FunctionSet {
+            overloads: vec![
+                dependency("sample/Derived", 0, vec![Ty::Int], 0),
+                dependency("kotlin/Any", 1, Vec::new(), 1),
+            ],
+        };
+        record_overridden_declarations(&crate::libraries::EmptySymbolSource, &mut functions, None);
+
+        assert!(functions.overloads[0]
+            .callable
+            .overridden_declarations
+            .is_empty());
     }
 
     #[test]

@@ -1471,7 +1471,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 callee,
                 dispatch_receiver,
                 args,
-            } => self.call(id, &callee, dispatch_receiver, &args),
+            } => self.call(&callee, dispatch_receiver, &args),
             IrExpr::TypeOp {
                 op,
                 arg,

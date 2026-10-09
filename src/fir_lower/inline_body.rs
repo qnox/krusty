@@ -889,6 +889,7 @@ impl BodyLowering<'_> {
             declared_result: None,
             overridden_results: &[],
             semantic_role: None,
+            overridden_declarations: &[],
             suspend: false,
             can_inline: false,
             inline_plan: None,
