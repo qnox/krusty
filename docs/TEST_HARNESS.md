@@ -281,10 +281,17 @@ KRUSTY_BLESS_CLI_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
 ```
 
 `tests/cli_expected_not_applicable/jvm/<version>.txt` lists the cases the reference kotlinc does not
-reproduce outside JetBrains' environment, each under a comment saying why. The ignored
-`the_reference_compiler_reproduces_every_applicable_cli_case` runs kotlinc through the same runner
-and must pass every other case. Cases needing a JDK the machine lacks are skipped at run time; point
-`KRUSTY_JDK_<release>_HOME` (8, 11, 17, 21) at one to include them.
+reproduce outside JetBrains' environment, and the cases no released compiler can run (the `.env`
+cases), each under a comment saying why. `the_reference_compiler_reproduces_every_applicable_cli_case`
+runs kotlinc through the same runner: it must pass every unlisted case and no listed one. It takes
+minutes, so ordinary runs ignore it; `scripts/conformance-regressions.sh`, which the conformance job
+runs for every supported release, runs it explicitly under `KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS`.
+
+The corpus names JDK 8, 11, 17 and 21 homes. A case whose JDK the machine lacks fails rather than
+being skipped, so the gate never tests fewer cases than it claims. JDKs are found under
+`/usr/lib/jvm` and `/Library/Java/JavaVirtualMachines`, from `JAVA_HOME`, from the
+`JAVA_HOME_<release>_X64` variables `actions/setup-java` exports, and from
+`KRUSTY_JDK_<release>_HOME`, which overrides the rest.
 
 ## JVM processes
 

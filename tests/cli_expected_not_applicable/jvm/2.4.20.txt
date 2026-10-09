@@ -1,7 +1,7 @@
 # Kotlin 2.4.20 compiler/testData/cli/jvm cases the reference kotlinc itself does not reproduce outside
-# JetBrains' test environment, relative to that directory. Each group says why. The ignored test
-# kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case proves the
-# list: kotlinc must pass every other case and fail every listed one.
+# JetBrains' test environment, relative to that directory. Each group says why. The conformance job
+# runs kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case for
+# this release, which requires kotlinc to pass every other case and no listed one.
 
 # The expected output assumes a JDK 8 runtime: javax.xml.bind and sun.nio.cs.ext are on its
 # classpath, and its ArrayIndexOutOfBoundsException message is the bare index.
@@ -9,3 +9,12 @@ XjdkRelease/jdkRelease20WithCorruptedClass.args
 diagnosticTests/classpath.args
 diagnosticTests/kt19628_13.args
 kt19628_progressive.args
+
+# AbstractCliTest passes the .env text through kotlin.language.settings, which CLICompiler reads
+# only when its class path carries LanguageVersionSettings.RESOURCE_NAME_TO_ALLOW_READING_FROM_ENVIRONMENT.
+# A release dist does not, so no released compiler reads it.
+readingConfigFromEnvironment/appendingArgs.args
+readingConfigFromEnvironment/overridingArgs.args
+readingConfigFromEnvironment/overridingLv.args
+readingConfigFromEnvironment/overridingXx.args
+readingConfigFromEnvironment/simple.args

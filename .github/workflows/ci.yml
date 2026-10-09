@@ -235,10 +235,18 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # Kotlin's CLI corpus names JDK 8, 11, 17 and 21 homes; kotlin_cli_jvm_conformance finds them
+      # through the JAVA_HOME_<release>_X64 variables this exports and fails a case it cannot run.
+      # The last version listed stays JAVA_HOME.
       - uses: actions/setup-java@v6.0.1
         with:
           distribution: zulu
-          java-version: '25'
+          java-version: |
+            8
+            11
+            17
+            21
+            25
       - name: cache kotlin toolchain and conformance corpora (${{ matrix.version }})
         if: matrix.target == 'jvm'
         uses: actions/cache@v6
@@ -263,9 +271,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
-          # The checkout also carries the mock JDK the box tests compile against. A key hit is never
-          # re-saved, so an entry from before that requirement must not be reused.
-          key: box-corpus-mock-jdk-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          # The checkout also carries the mock JDK the box tests compile against and the CLI corpus.
+          # A key hit is never re-saved, so an entry from before those requirements must not be reused.
+          key: box-corpus-cli-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       # One archive per Kotlin version. A restored entry is replayed; a missing test compiles with
       # that lane's kotlinc. Master saves newly observed recordings under the exact version/commit.
       - name: restore recorded kotlinc bytes (${{ matrix.version }})

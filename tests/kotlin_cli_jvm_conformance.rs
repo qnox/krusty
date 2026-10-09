@@ -158,19 +158,46 @@ fn link_dist(root: &Path) {
     }
 }
 
-/// JDK homes by feature release: `JAVA_HOME` for its own release, and `KRUSTY_JDK_<release>_HOME`
-/// for any other the corpus names.
+/// The JDK feature releases the corpus names (`$JDK_1_8`, `$JDK_11_0`, `$JDK_17$`, `$JDK_21`).
+const CORPUS_JDKS: [u32; 4] = [8, 11, 17, 21];
+
+/// JDK homes by feature release. Installed JDKs are found where the platform puts them
+/// (`/usr/lib/jvm`, `/Library/Java/JavaVirtualMachines`), then `JAVA_HOME`, then the
+/// `JAVA_HOME_<release>_X64` variables `actions/setup-java` exports, then `KRUSTY_JDK_<release>_HOME`;
+/// a later source overrides an earlier one. Each home's own `release` file says its release.
 fn available_jdks() -> BTreeMap<u32, PathBuf> {
-    let mut jdks = BTreeMap::new();
-    if let Some(home) = std::env::var_os("JAVA_HOME").filter(|home| !home.is_empty()) {
-        let home = PathBuf::from(home);
-        if let Some(release) = jdk_release(&home) {
-            jdks.insert(release, home);
+    let mut homes: Vec<PathBuf> = Vec::new();
+    for parent in ["/usr/lib/jvm", "/Library/Java/JavaVirtualMachines"] {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            let mut found: Vec<PathBuf> = entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .map(|path| {
+                    let mac = path.join("Contents/Home");
+                    if mac.is_dir() {
+                        mac
+                    } else {
+                        path
+                    }
+                })
+                .collect();
+            found.sort();
+            homes.extend(found);
         }
     }
-    for release in [8, 11, 17, 21] {
-        if let Some(home) = std::env::var_os(format!("KRUSTY_JDK_{release}_HOME")) {
-            jdks.insert(release, PathBuf::from(home));
+    homes.extend(std::env::var_os("JAVA_HOME").map(PathBuf::from));
+    for release in CORPUS_JDKS {
+        for variable in [
+            format!("JAVA_HOME_{release}_X64"),
+            format!("JAVA_HOME_{release}_ARM64"),
+            format!("KRUSTY_JDK_{release}_HOME"),
+        ] {
+            homes.extend(std::env::var_os(variable).map(PathBuf::from));
+        }
+    }
+    let mut jdks = BTreeMap::new();
+    for home in homes {
+        if let Some(release) = jdk_release(&home) {
+            jdks.insert(release, home);
         }
     }
     jdks
@@ -195,8 +222,12 @@ fn jdk_release(home: &Path) -> Option<u32> {
 enum Outcome {
     Pass,
     Fail(String),
-    /// The case needs something this environment cannot supply.
-    NotApplicable(String),
+    /// The case exercises something no released compiler does, whatever machine runs it; the
+    /// not-applicable list must name it.
+    Excluded(String),
+    /// The case needs something this machine does not supply, such as a JDK. That is always an
+    /// error: a gate that quietly ran fewer cases would stay green while testing less.
+    Unavailable(String),
 }
 
 /// One invocation's arguments, with every placeholder expanded the way `AbstractCliTest.readArg`
@@ -404,15 +435,20 @@ fn comparable(text: &str) -> String {
 
 fn run_case(toolchain: &Toolchain, args_file: &Path) -> Outcome {
     if args_file.with_extension("env").exists() {
-        return Outcome::NotApplicable(
-            "reads compiler settings from a JVM system property (.env)".to_string(),
+        // `AbstractCliTest` passes the `.env` text through `kotlin.language.settings`, which
+        // `CLICompiler` reads only when its class path carries
+        // `LanguageVersionSettings.RESOURCE_NAME_TO_ALLOW_READING_FROM_ENVIRONMENT`. A release
+        // dist does not, so neither kotlinc nor krusty is expected to read it.
+        return Outcome::Excluded(
+            "reads compiler settings from the environment, which a release compiler never does"
+                .to_string(),
         );
     }
     let temp = common::scratch_dir().expect("allocate a scratch directory");
     let test_data = args_file.parent().unwrap();
     let invocations = match read_args(toolchain, args_file, &temp) {
         Ok(invocations) => invocations,
-        Err(reason) => return Outcome::NotApplicable(reason),
+        Err(reason) => return Outcome::Unavailable(reason),
     };
     let mut output = String::new();
     let mut exit = Some(0);
@@ -596,7 +632,13 @@ fn krusty_reproduces_kotlincs_cli_test_corpus() {
             Outcome::Fail(reason) => {
                 failed.insert(key.clone(), reason.clone());
             }
-            Outcome::NotApplicable(_) => {}
+            Outcome::Excluded(_) if not_applicable.contains(key) => {}
+            Outcome::Excluded(reason) => problems.push(format!(
+                "{key}: {reason}; add it to the not-applicable list with that reason"
+            )),
+            Outcome::Unavailable(reason) => {
+                problems.push(format!("{key}: cannot run here: {reason}"))
+            }
         }
     }
     for key in &not_applicable {
@@ -631,20 +673,21 @@ fn krusty_reproduces_kotlincs_cli_test_corpus() {
                 "{key}: now passes; remove it from {}",
                 failures_path.display()
             )),
-            Some(Outcome::NotApplicable(reason)) => {
-                eprintln!(
-                    "cli corpus: {key} is listed as failing but not applicable here: {reason}"
-                )
-            }
+            // Already reported above as a case that could not run.
+            Some(Outcome::Unavailable(_)) => {}
+            Some(Outcome::Excluded(reason)) => problems.push(format!(
+                "{key}: listed as failing but excluded ({reason}); remove it from {}",
+                failures_path.display()
+            )),
             _ => problems.push(format!(
                 "{key}: listed as failing but absent from the corpus"
             )),
         }
     }
     eprintln!(
-        "cli corpus: {passed} passed, {} expected failures, {} not applicable, of {}",
+        "cli corpus: {passed} passed, {} expected failures, {} listed as not applicable, of {}",
         failing.len(),
-        outcomes.len() - passed - failing.len(),
+        not_applicable.len(),
         outcomes.len()
     );
     assert!(
@@ -661,8 +704,10 @@ fn krusty_reproduces_kotlincs_cli_test_corpus() {
 }
 
 /// Runs the reference kotlinc through the same runner. Every case the not-applicable list does not
-/// excuse must pass, which proves the runner reproduces `AbstractCliTest` and that each listed case
-/// is an environment difference rather than a krusty gap.
+/// excuse must pass and every listed one must not, which checks that the runner reproduces
+/// `AbstractCliTest` and that each listed case is an environment difference rather than a krusty
+/// gap. It is ignored in ordinary runs because it takes minutes; the conformance job runs it for
+/// every supported release (`scripts/conformance-regressions.sh`).
 #[test]
 #[ignore = "runs the reference kotlinc over the whole CLI corpus (several minutes)"]
 fn the_reference_compiler_reproduces_every_applicable_cli_case() {
@@ -691,7 +736,18 @@ fn the_reference_compiler_reproduces_every_applicable_cli_case() {
             Outcome::Pass if not_applicable.contains(key) => problems.push(format!(
                 "{key}: the reference compiler passes it here; remove it from the not-applicable list"
             )),
+            Outcome::Excluded(reason) if !not_applicable.contains(key) => problems.push(format!(
+                "{key}: {reason}; add it to the not-applicable list with that reason"
+            )),
+            Outcome::Unavailable(reason) => problems.push(format!("{key}: cannot run here: {reason}")),
             _ => {}
+        }
+    }
+    for key in &not_applicable {
+        if !outcomes.contains_key(key) {
+            problems.push(format!(
+                "{key}: listed as not applicable but absent from the corpus"
+            ));
         }
     }
     assert!(
