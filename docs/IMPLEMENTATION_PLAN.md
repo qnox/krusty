@@ -4396,8 +4396,19 @@ deliberately much less than a general linker; each limit below is a decision, no
   multiple of the architecture's maximum page size (`Arch::max_page_size` in
   `src/native/target_contract.rs`: 4 KiB on x86_64 and riscv64, 64 KiB on AArch64) in the file and
   in memory, so file offset and address stay congruent and no kernel page size puts both segments
-  in one page. Both segments are aligned to that size. No PIC, GOT, PLT, dynamic section or section
-  headers. The whole image must fit the 4 GiB the small code models address.
+  in one page. Both segments are aligned to that size. No PIC or section headers. The whole image
+  must fit the 4 GiB the small code models address.
+- **Imports from shared libraries** (`src/native/linker/{dynamic,libraries}.rs`; design in
+  `docs/NATIVE.md`, "Importing from shared libraries"). A program that references functions it
+  does not define, which an `ImportLibrary` exports, is linked dynamically. The output adds
+  `PT_PHDR`, `PT_INTERP`, `PT_DYNAMIC` and `PT_GNU_STACK`, and gets one bind-now offset-table slot
+  plus one stub per import. Each import is bound at its library's default symbol version. It stays
+  non-PIE at the fixed base, so references to an import resolve at link time to its stub. Only
+  libraries something is imported from are `DT_NEEDED`; with no imports the image is the static
+  one, byte for byte. Variables in shared libraries (copy relocations) are refused. Tests:
+  `dynamic.rs` links a call for every target from in-memory `ImportLibrary`s and checks the
+  headers, dynamic entries, versions, relocation and stub. `mod.rs` links a program against the
+  host's own zlib and C library and runs it.
 - **Read-only data shares the executable segment.** A separate read-only segment is cheap to add
   when the runtime holds something worth protecting; until then `.rodata` is readable and
   executable.

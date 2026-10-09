@@ -33,6 +33,9 @@ mod target_contract;
 mod value_classes;
 
 pub use codegen::{CraneliftBackend, Entry, BOX_RESULT_FRAME};
-pub use linker::{can_link, link_program, runtime_symbols, ProgramLinkError};
+pub use linker::{
+    can_link, link_program, link_program_with_libraries, runtime_symbols, Export, ExportKind,
+    ImportLibrary, ProgramLinkError,
+};
 pub use prebuilt::{prebuilt_available, runtime_objects};
 pub use target::{Arch, NativeTarget, Os};

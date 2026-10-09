@@ -371,7 +371,7 @@ fn relocate_riscv64(image: &mut [u8], relocations: &[Reloc]) -> Result<(), Progr
 /// Split a 32-bit value into RISC-V's `hi20`/`lo12` pair, where `lo12` is sign-extended and `hi20`
 /// is adjusted so that `(hi20 << 12) + sext(lo12) == value`. A `LO12` alone has no range to check,
 /// so `value` may be anything; only its low 32 bits matter.
-fn split_hi_lo(value: i128) -> (u32, u32) {
+pub(super) fn split_hi_lo(value: i128) -> (u32, u32) {
     let hi = ((value + 0x800) >> 12) as u32 & 0xf_ffff;
     let lo = (value as u32).wrapping_sub(hi << 12) & 0xfff;
     (hi, lo)
