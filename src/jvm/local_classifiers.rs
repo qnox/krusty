@@ -70,8 +70,17 @@ pub(super) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<Str
 /// holds, and enum entry bodies.
 ///
 /// Each class's metadata asks for this set, so its owner lookups go through one index of the file's
-/// classes rather than a scan of them per lookup.
+/// classes rather than a scan of them per lookup. Locality starts at a local class, an anonymous
+/// object or an enum entry body: a file declaring none of them has no local class id, and its
+/// classes' owners need no lookup at all.
 pub(super) fn names(ir: &IrFile) -> HashSet<TypeName> {
+    if !ir
+        .classes
+        .iter()
+        .any(|class| class.is_local_class || class.is_anonymous_object || class.is_enum_entry)
+    {
+        return HashSet::new();
+    }
     let mut class_ids = HashMap::with_capacity(ir.classes.len());
     for (id, class) in ir.classes.iter().enumerate() {
         // `class_id_by_name` answers with the first class of a name.
