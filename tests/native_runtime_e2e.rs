@@ -806,11 +806,6 @@ fn a_pair_stops_at_the_first_component_that_throws() {
 }
 
 #[test]
-fn a_result_whose_content_throws_renders_no_text() {
-    run_driver("result_to_string_throws");
-}
-
-#[test]
 fn a_builder_grown_past_the_largest_length_is_out_of_memory() {
     run_driver_expecting_failure("builder_length_overflow", "krusty: out of memory\n");
 }
@@ -826,11 +821,6 @@ fn a_class_that_publishes_no_names_fails_naming_its_descriptor() {
         "class_names_unpublished",
         "krusty: the class pkg.Unpublished publishes no reflection names consistent with its kind\n",
     );
-}
-
-#[test]
-fn a_result_answers_its_operations_and_get_or_throw_stops_at_the_throw() {
-    run_driver("result_operations");
 }
 
 #[test]

@@ -49,7 +49,7 @@ impl<'a> FileLowering<'a> {
             }
             let target = body.func_ref(target);
             let call = body.emit_call(target, arguments)?;
-            if body.terminated || carrier(ret) == Carrier::Void {
+            if body.terminated || body.carrier(ret) == Carrier::Void {
                 return Ok(());
             }
             let result = body.builder.inst_results(call)[0];

@@ -8,6 +8,8 @@ use cranelift_codegen::ir::{types, AbiParam, Type};
 
 use crate::types::Ty;
 
+use super::FileLowering;
+
 /// How a Kotlin type is carried in machine code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Carrier {
@@ -45,7 +47,7 @@ impl Carrier {
 
 /// A nullable primitive is a reference: `Int?` has to represent `null`, so it boxes, exactly as it
 /// does on the JVM and as the C runtime already expects.
-pub(super) fn carrier(ty: Ty) -> Carrier {
+pub(super) fn machine_carrier(ty: Ty) -> Carrier {
     match ty {
         Ty::Unit => Carrier::Void,
         Ty::Boolean => Carrier::Scalar(types::I8, false),
@@ -64,6 +66,14 @@ pub(super) fn carrier(ty: Ty) -> Carrier {
         Ty::UInt => Carrier::Scalar(types::I32, false),
         Ty::ULong => Carrier::Scalar(types::I64, false),
         _ => Carrier::Ref,
+    }
+}
+
+impl FileLowering<'_> {
+    /// How a semantic type is carried: a value class projected to its underlying value wherever
+    /// this target's representation policy says so, then the machine rule for what that is.
+    pub(super) fn carrier(&self, ty: Ty) -> Carrier {
+        machine_carrier(self.values.project(ty))
     }
 }
 
