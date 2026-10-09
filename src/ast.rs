@@ -1910,6 +1910,10 @@ pub struct File {
     /// [`Self::type_annotations`]: `class C<@Ann T>` annotates the declaration of `T`, not a type use.
     pub declaration_type_parameter_annotations:
         std::collections::HashMap<u32, Vec<AnnotatedTypeParameter>>,
+    /// The declaring type parameter of each upper bound, keyed by the start of the bound's type
+    /// reference: `<T : B>` and `where T : B` both map `B` to the parameter as `<…>` wrote it,
+    /// annotations and inline bound included, which is where kotlinc reports about the parameter.
+    pub type_parameter_bound_owners: std::collections::HashMap<u32, crate::diag::Span>,
     /// Signature starts for typealiases with declaration type parameters. Typealiases currently live
     /// in the structural alias tables rather than `Decl`; this exact owner set lets semantic annotation
     /// resolution use file scope without guessing from names or source text.
@@ -1953,6 +1957,9 @@ pub struct File {
     /// `+EagerLambdaAnalysis`: a lambda that does not discriminate applicable candidates by its
     /// shape is analyzed before the most specific candidate is chosen.
     pub eager_lambda_analysis: bool,
+    /// `+AllowEagerSupertypeAccessibilityChecks`: a missing supertype found at a constructor call
+    /// (or behind a dispatch receiver already reported) is an error rather than a warning.
+    pub allow_eager_supertype_accessibility_checks: bool,
     /// Before Kotlin language level 2.4, a lambda implementation keeps the body's inferred result
     /// separately from the caller-facing function result. The checked FIR boundary records that
     /// semantic choice so a backend never needs its own language-version switch.

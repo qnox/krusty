@@ -5377,7 +5377,16 @@ mod fq_tests {
             .chain(malformed_type_parameter.into_iter().map(char::from))
             .collect::<String>();
         let mut class = crate::jvm::classfile::ClassWriter::new(internal, "java/lang/Object");
-        class.set_kotlin_metadata(2, &[2, 2, 0], 0, &[d1], &[]);
+        class.set_kotlin_metadata(
+            2,
+            crate::jvm::classfile::MetadataStamp {
+                version: [2, 2, 0],
+                pre_release: false,
+            },
+            0,
+            &[d1],
+            &[],
+        );
         let file = directory.join(format!("{internal}.class"));
         std::fs::create_dir_all(file.parent().expect("facade package")).expect("create package");
         std::fs::write(file, class.finish()).expect("write invalid Kotlin facade");
@@ -5683,7 +5692,16 @@ mod fq_tests {
             .collect::<String>();
         let mut invalid =
             crate::jvm::classfile::ClassWriter::new("shadow/Chosen", "java/lang/Object");
-        invalid.set_kotlin_metadata(1, &[2, 2, 0], 0, &[d1], &[]);
+        invalid.set_kotlin_metadata(
+            1,
+            crate::jvm::classfile::MetadataStamp {
+                version: [2, 2, 0],
+                pre_release: false,
+            },
+            0,
+            &[d1],
+            &[],
+        );
         std::fs::write(earlier.join("shadow/Chosen.class"), invalid.finish())
             .expect("write invalid Kotlin class");
         let valid =

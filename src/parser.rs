@@ -794,6 +794,9 @@ struct Parser<'a> {
     /// about a declaration as a whole point at its name rather than at its keyword.
     declaration_name_span: Span,
     declaration_prefix: declaration_modifiers::PrefixInProgress,
+    /// The type parameters of the declaration whose `<…>` list was parsed last, with their spans,
+    /// so its `where` clause can name the parameter each bound constrains.
+    type_parameter_spans: Vec<(String, crate::diag::Span)>,
     is_script: bool,
     script_stmts: Vec<StmtId>,
     /// Current expression-recursion depth (see [`Parser::parse_bp`]). Bounded by
@@ -913,6 +916,7 @@ impl<'a> Parser<'a> {
             member_declaration_prefix: None,
             declaration_name_span: Span::new(0, 0),
             declaration_prefix: Default::default(),
+            type_parameter_spans: Vec::new(),
             is_script,
             script_stmts: Vec::new(),
             expr_depth: 0,
@@ -2658,6 +2662,15 @@ impl<'a> Parser<'a> {
             }
             if self.eat(TokenKind::Colon) {
                 let bound = self.parse_type();
+                if let Some((_, parameter)) = self
+                    .type_parameter_spans
+                    .iter()
+                    .find(|(name, _)| *name == tp_name)
+                {
+                    self.file
+                        .type_parameter_bound_owners
+                        .insert(bound.span.lo, *parameter);
+                }
                 if !tp_name.is_empty() {
                     bounds.push((tp_name.clone(), bound));
                 }
@@ -4391,11 +4404,13 @@ impl<'a> Parser<'a> {
         let mut reified = std::collections::HashSet::new();
         let mut bounds: Vec<(String, TypeRef)> = Vec::new();
         let mut variances = Vec::new();
+        self.type_parameter_spans.clear();
         if !self.eat(TokenKind::Lt) {
             return (names, non_null, reified, bounds, variances);
         }
         loop {
             self.skip_plain_newlines();
+            let parameter_start = self.tok().span.lo;
             // Annotations and variance/reified modifiers may be interleaved. `in` is a keyword;
             // `out`/`reified` are idents.
             let mut is_reified = false;
@@ -4451,6 +4466,7 @@ impl<'a> Parser<'a> {
                 }
             }
             self.skip_plain_newlines();
+            let mut inline_bound = None;
             if self.eat(TokenKind::Colon) {
                 self.skip_plain_newlines();
                 let bound = self.parse_type();
@@ -4458,11 +4474,20 @@ impl<'a> Parser<'a> {
                 if bound.name == "Any" && !bound.nullable() && !tname.is_empty() {
                     non_null.insert(tname.clone());
                 }
+                inline_bound = Some(bound.span);
                 // Retain the semantic bound. JVM specialization/boxing is not syntax validity.
                 // Retain explicit bounds independently of erasure.
                 if !tname.is_empty() {
                     bounds.push((tname.clone(), bound));
                 }
+            }
+            if !tname.is_empty() {
+                let end = inline_bound.map_or(tname_span.hi, |bound| bound.hi);
+                let span = crate::diag::Span::new(parameter_start, end);
+                if let Some(bound) = inline_bound {
+                    self.file.type_parameter_bound_owners.insert(bound.lo, span);
+                }
+                self.type_parameter_spans.push((tname.clone(), span));
             }
             self.skip_plain_newlines();
             if !self.eat(TokenKind::Comma) {

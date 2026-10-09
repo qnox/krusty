@@ -4,22 +4,34 @@
 //! run against that release's `kotlin-compiler.jar`: it reflects over the compiler's own
 //! `@Argument`, `@Enables`/`@Disables` and `@Deprecated` annotations. The parser reads these facts
 //! instead of re-spelling them, so a name, alias, value type, delimiter or lifecycle is never copied
-//! by hand. A table is named after the first release that declares it; a later release with the
-//! same surface reuses that file. Regenerate a table with `just kotlinc-arguments <version>`.
+//! by hand. Every release has its own table, even when it equals another release's. Regenerate a
+//! table with `just kotlinc-arguments <version>`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
 use krusty::kotlin_version::KotlinVersion;
 
-/// The release tables, by reference version. A release whose table is identical to an earlier
-/// one's shares that file instead of a copy. `every_supported_release_has_a_table` keeps this list
-/// equal to the `kotlin-versions` manifest.
-const RELEASES: &[(KotlinVersion, &str)] = &[
-    (KotlinVersion::V2_4_0, include_str!("releases/2.4.0.tsv")),
-    (KotlinVersion::V2_4_10, include_str!("releases/2.4.0.tsv")),
-    (KotlinVersion::V2_4_20, include_str!("releases/2.4.20.tsv")),
-];
+/// The release tables, by reference version.
+/// `every_supported_release_has_a_table` keeps this list equal to the
+/// `kotlin-versions` manifest, and `every_release_reads_its_own_file` keeps each entry on the file
+/// named after its release.
+macro_rules! releases {
+    ($($version:ident => $file:literal),+ $(,)?) => {
+        const RELEASES: &[(KotlinVersion, &str)] = &[$((
+            KotlinVersion::$version,
+            include_str!(concat!("releases/", $file, ".tsv")),
+        )),+];
+        #[cfg(test)]
+        const RELEASE_FILES: &[(KotlinVersion, &str)] = &[$((KotlinVersion::$version, $file)),+];
+    };
+}
+
+releases! {
+    V2_4_0 => "2.4.0",
+    V2_4_10 => "2.4.10",
+    V2_4_20 => "2.4.20",
+}
 
 /// The Kotlin type of an argument's field, which decides how kotlinc reads its value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -298,6 +310,15 @@ mod tests {
         for version in KotlinVersion::supported() {
             let catalog = Catalog::for_version(version).expect("a table");
             assert_eq!(catalog.version, version);
+        }
+    }
+
+    /// A release never reads another release's file, even one with the same bytes: a later refresh
+    /// of one release must not silently change another's policy.
+    #[test]
+    fn every_release_reads_its_own_file() {
+        for &(version, file) in RELEASE_FILES {
+            assert_eq!(file, version.to_string());
         }
     }
 

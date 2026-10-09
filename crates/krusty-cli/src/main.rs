@@ -48,6 +48,13 @@ fn main() {
     for warning in &opts.argument_warnings {
         eprintln!("warning: {}", kotlinc_arguments::render(warning));
     }
+    for problem in &opts.language_feature_problems {
+        let severity = if problem.is_error { "error" } else { "warning" };
+        eprintln!(
+            "{severity}: {}",
+            kotlinc_arguments::render(&problem.message)
+        );
+    }
     for ig in &opts.ignored {
         eprintln!("krusty: ignoring unsupported option '{ig}'");
     }
@@ -174,21 +181,34 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
 /// instead of terminating: a worker that exits on a broken source takes the whole build's worker
 /// process down with it.
 pub fn compile(opts: &cli::Options) -> Result<usize, String> {
-    let mut promoted = String::new();
+    // kotlinc reports the configuration errors, then the configuration warnings, some of which
+    // `-Xwarning-level` may promote. Any error, or an error among the `-XXLanguage` problems already
+    // printed, fails the invocation once everything is reported.
+    let mut report = String::new();
+    let mut failed = opts
+        .language_feature_problems
+        .iter()
+        .any(|problem| problem.is_error);
+    for error in &opts.configuration_errors {
+        report.push_str(&format!("error: {error}\n"));
+        failed = true;
+    }
     for warning in &opts.warnings {
         match opts.warning_policy.level(warning.name) {
-            cli::WarningLevel::Warning => eprintln!("warning: {}", warning.message),
+            cli::WarningLevel::Warning => {
+                report.push_str(&format!("warning: {}\n", warning.message));
+            }
             cli::WarningLevel::Error => {
-                promoted.push_str("error: ");
-                promoted.push_str(&warning.message);
-                promoted.push('\n');
+                report.push_str(&format!("error: {}\n", warning.message));
+                failed = true;
             }
             cli::WarningLevel::Disabled => {}
         }
     }
-    if !promoted.is_empty() {
-        return Err(promoted);
+    if failed {
+        return Err(report);
     }
+    eprint!("{report}");
     let version = match opts.kotlin_reference_version {
         Some(version) => version,
         None => krusty::kotlin_version::configured_target()

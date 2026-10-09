@@ -304,13 +304,9 @@ fn unit_options<'a>(
                 .is_none()
                 .then_some(options.language_settings.api_version)
         });
-        let feature_arguments: Vec<String> = configuration
-            .arguments
-            .iter()
-            .filter(|argument| argument.starts_with("-XXLanguage:"))
-            .cloned()
-            .collect();
-        options.override_language_versions(language_version, api_version, &feature_arguments)?;
+        // The command line already read the feature settings; only the levels change.
+        let feature_settings = options.language_settings.feature_settings();
+        options.override_language_versions(language_version, api_version, &feature_settings)?;
     }
     Ok(options)
 }

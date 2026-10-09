@@ -1351,6 +1351,8 @@ mod lambda_result_inference_e2e;
 mod lambda_result_type_variable_e2e;
 #[path = "lambda_vs_block_fun_type_e2e.rs"]
 mod lambda_vs_block_fun_type_e2e;
+#[path = "language_feature_arguments_e2e.rs"]
+mod language_feature_arguments_e2e;
 #[path = "language_level_features_e2e.rs"]
 mod language_level_features_e2e;
 #[path = "lateinit_companion_read_e2e.rs"]
@@ -1539,6 +1541,8 @@ mod method_access_flags_e2e;
 mod method_generic_signature_e2e;
 #[path = "method_pool_order_e2e.rs"]
 mod method_pool_order_e2e;
+#[path = "missing_dependency_supertypes_e2e.rs"]
+mod missing_dependency_supertypes_e2e;
 #[path = "missing_return_check_e2e.rs"]
 mod missing_return_check_e2e;
 #[path = "mixed_numeric_comparison_e2e.rs"]

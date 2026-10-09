@@ -206,17 +206,23 @@ mod tests {
                 continue;
             }
             let mut allowed = vec!["analysis", "diag", "jvm", "source", "types"];
-            // `features` is the compiler's language-toggle surface. It is in budget exactly where a
-            // module turns a PROJECT's own configuration into compiler settings: option parsing, the
-            // project sync that reads them off the model, the analysis worker that applies them, and
-            // the parity scanner, which is a batch worker applying each module's own toggles.
+            // `features` and the language settings built on it are the compiler's language-toggle
+            // surface. They are in budget exactly where a module turns a PROJECT's own
+            // configuration into compiler settings: option parsing, the project sync that reads
+            // them off the model, the analysis worker that applies them, and the parity scanner,
+            // which is a batch worker applying each module's own toggles.
             if path.ends_with("options.rs")
                 || path.ends_with("project/sync.rs")
                 || path.ends_with("worker.rs")
                 || path.ends_with("parity.rs")
                 || path.ends_with("jvm_analysis.rs")
             {
-                allowed.push("features");
+                allowed.extend(["features", "language_settings", "language_version"]);
+            }
+            // The worker validates the levels the supervisor sends against the kotlinc release it
+            // targets, the same check the command line makes.
+            if path.ends_with("worker.rs") {
+                allowed.push("kotlin_version");
             }
             // Standalone analysis has no project model to supply a configured target. Keep JDK
             // discovery in one explicit JVM adapter; compiler_analysis itself remains target-free.

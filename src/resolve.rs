@@ -138,6 +138,7 @@ mod local_method_dependencies;
 mod loop_flow;
 mod member_extension_selection;
 mod member_overload_clash;
+mod missing_dependency_supertypes;
 mod named_class_constructors;
 mod operator_calls;
 mod opt_in_usage;
@@ -22017,6 +22018,7 @@ impl<'a> Checker<'a> {
     fn stmt(&mut self, scope: &CheckerScope<'_>, s: StmtId) {
         let policy_depth = self.push_statement_policies(scope, s);
         self.stmt_inner(scope, s);
+        self.check_statement_missing_supertypes(s);
         self.active_lexical_policies.truncate(policy_depth);
     }
 
@@ -46499,6 +46501,8 @@ impl<'a> Checker<'a> {
         let checked = self.type_ref_ty(scope, bound);
         if checked.contains_error() {
             self.report_unresolved_type_ref(bound);
+        } else {
+            self.check_bound_missing_supertypes(bound, checked);
         }
         let bound_is_interface =
             crate::fir::ResolvedTypeParameterBound::is_interface_type(checked, |owner| {
@@ -50069,6 +50073,9 @@ impl<'a> Checker<'a> {
                         .insert(owner, supertypes.into_boxed_slice());
                 }
             }
+        }
+        if !self.fragment.is_type_use_annotations() {
+            self.check_class_missing_supertypes(cl, d, current_owner, is_anonymous_object);
         }
         if let Some((owner, superclass, separate_emission)) = current_owner.and_then(|owner| {
             cl.base_class.as_ref()?;
@@ -55701,6 +55708,7 @@ impl<'a> Checker<'a> {
             self.expr_inner(scope, e, expected, value_required)
         });
         self.check_expression_opt_in(scope, e);
+        self.check_expression_missing_supertypes(e);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
         self.expr_depth -= 1;

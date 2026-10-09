@@ -1999,7 +1999,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   consumption), `tests/interface_default_superclass_e2e.rs` (a subclass keeps a superclass
   override or the same default, and still forwards a more specific interface override), and the
   `-jvm-default` parsing tests in `crates/krusty-cli/src/cli.rs`.
-- Language level 2.4, kotlinc 2.4.20's default, enables every feature krusty models whose
+- The default feature set of a language/API version pair is kotlinc's `isEnabledByDefault` over
+  the reference release's own `LanguageFeature` table (`src/features/releases/<ver>.features.tsv`,
+  dumped from `kotlin-compiler.jar`): a feature is on when the language version reaches its
+  `sinceVersion` and the API version its `sinceApiVersion`. The table differs per release (2.4.0
+  gives `NameBasedDestructuring` no `sinceVersion`; 2.4.20 gives it 2.5), so the defaults follow
+  `-Xkotlin-reference-version`.
+  Language level 2.4, kotlinc 2.4.20's default, therefore enables every feature whose
   `sinceVersion` is at most 2.4. Explicit backing fields and `when` guards are in that set, so
   `val items: List<String> field = mutableListOf()` and `is A if v.ok ->` compile with no `-X`
   flag. A protected property of a superclass companion is readable from the subclass for the
@@ -12062,8 +12068,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   static scope with neither receiver still follows every receiver.
   (`tests/companion_block_members_e2e.rs`,
   `a_block_member_names_its_block_before_the_companion_object`; corpus
-  `multiplatform/k2/expectStatic.kt`.) Classes compiled with this experimental feature match
-  kotlinc's except the `@Metadata` pre-release flag kotlinc sets (`xi` 50 against 48).
+  `multiplatform/k2/expectStatic.kt`.) Classes compiled with this experimental feature carry the
+  `@Metadata` pre-release flag, as kotlinc's do (see the pre-release rule below).
 
 - **Language and API versions are standard compiler settings, not a Gradle bridge.**
   `-language-version` selects the source-language feature baseline and the default version written
@@ -12174,11 +12180,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `LanguageFeature` entries with `actuallyEnabledInProgressiveMode`, vendored per release in
   `releases/<ver>.features.tsv`). `@Enables` arguments apply first, progressive features not owned
   by one of those arguments apply next, and `-XXLanguage` overrides both. Like kotlinc, only
-  `@Enables` arguments, never `-XXLanguage`, get `REDUNDANT_CLI_ARG`. Raw `-XXLanguage` feature
-  names are validated against the selected release's same table rather than a krusty-owned list;
-  an invented name is rejected. The frontend/backend capability list remains the boundary for
-  dedicated feature-switch aliases, whose accepted spelling promises a concrete implementation.
-  An old language level under `-progressive` emits kotlinc's unnamed warning; it is deliberately
+  `@Enables` arguments, never `-XXLanguage`, get `REDUNDANT_CLI_ARG` (when no entry changes a
+  default) or `CLI_ARG_DISABLES_STABLE_FEATURE` (when a `@Disables` entry turns off a default).
+  An `@Enables`/`@Disables` argument puts the states its entries name for its last value, never a
+  hand-written mapping, and is refused when an entry it applies enables a feature krusty does not
+  model (`MODELED_FEATURES` in `src/features.rs`): its accepted spelling promises an
+  implementation. `-progressive` turns on the release's progressive features that no such
+  argument set, and is refused while one it turns on is a feature krusty does not model, naming
+  the first such feature
+  (`krusty does not implement the language feature '<name>' selected by '-progressive'`). An old
+  language level under `-progressive` emits kotlinc's unnamed warning; it is deliberately
   unavailable to named `-Xwarning-level` policy and is removed by `-Xsuppress-version-warnings`.
   The Gradle plugin forwards `freeCompilerArgs` verbatim, so a free argument meets the same
   dispositions as on the command line; it refuses only the arguments it derives from structured
@@ -12188,6 +12199,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   table, and
   refuses `--`, any `@argfile`, and a free source path, since each could reach a plugin-owned
   argument or input without naming it.
+  Each `-XXLanguage:` argument is one setting, read as kotlinc's `LanguageSettingsParser` reads
+  it: a value without `+`/`-`, with an empty name, or naming no feature of the release (a comma is
+  part of the name) is a warning and is skipped; a test-only feature is an error. Every accepted
+  setting except one enabling a progressive feature is listed in the "ATTENTION! This build uses
+  unsafe internal compiler arguments" warning. Disabling a `CannotBeDisabled` feature whose
+  `sinceVersion` the release no longer supports is a configuration error. A setting naming a feature
+  krusty does not model is refused with
+  `krusty does not implement the language feature '<name>' selected by '-XXLanguage'`, whichever
+  state it puts: a raw toggle is accepted only for semantics krusty implements. Enabling a feature that no stable
+  language version has released and that forces pre-release binaries (before its
+  `forcesPreReleaseBinariesBefore`, when it has one) gets kotlinc's "following manually enabled
+  features will force generation of pre-release binaries" warning.
+- **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
+  pre-release when its language version is not stable in the release or any explicitly set feature (an
+  `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and
+  forces pre-release binaries. Every `@kotlin.Metadata` it writes then carries the pre-release flag
+  (`xi` bit `1 << 1`); the `.kotlin_module` header is unchanged.
+  The command line, the build worker and the language server build these settings through one
+  boundary, `krusty_cli::cli::language_settings`: the language server reads a module's kotlinc
+  arguments followed by its own language flags exactly as the command line would, refuses at
+  startup what the command line refuses, and carries the resulting language/API versions and
+  feature settings to its analysis worker.
+  Which language and API versions are stable, deprecated, or unsupported, and so the default level,
+  the accepted `-language-version`/`-api-version` values and the version warnings, come from the
+  release's own `LanguageVersion`/`ApiVersion` policy (`releases/<ver>.language-versions.tsv`),
+  never from a range of releases.
+  (`tests/language_feature_arguments_e2e.rs` compares exit code, complete stderr and the complete
+  output tree with kotlinc; `src/features.rs`, `src/features/table.rs` and
+  `src/features/language_versions.rs` unit tests.)
   (`tests/kotlinc_argument_conformance_e2e.rs` compares the table with the reference compiler and
   the parser with kotlinc's `parseCommandLineArguments` over every argument and value form;
   `crates/krusty-cli/src/kotlinc_arguments/tokenize.rs` unit tests;
@@ -12195,6 +12235,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   each argument of each release against its disposition; `tests/unsupported_kotlinc_arguments_e2e.rs`
   and `tests/inert_kotlinc_arguments_e2e.rs` check exit code, complete stderr and output against
   kotlinc.)
+- **A supertype missing from the classpath is `MISSING_DEPENDENCY_SUPERCLASS`.** As kotlinc's
+  `FirMissingDependencySupertype*` checkers, a classpath classifier naming a supertype that no
+  source or classpath entry provides makes every use that depends on that hierarchy an error:
+  `cannot access '<missing>' which is a supertype of '<classifier>'. Check your module classpath
+  for missing or conflicting dependencies.`, once per missing supertype in depth-first order.
+  Only an edge out of a classpath classifier is a missing dependency; an unresolvable supertype
+  the module itself names is an unresolved reference. It is reported at a class or object that
+  inherits one (from its `class`/`object` keyword through its name; a nameless companion and an
+  object expression whole; a local class as `<local>.L`, an object expression as
+  `<package>.<anonymous>`), at a type parameter whose bound inherits one (an inline bound with
+  the parameter, a `where` bound at the parameter name), and at each qualified access: the
+  selected name of a call, property read or write, callable reference, `componentN`, the
+  operator of a binary operator, a whole index expression, the iterable of a `for` loop. An
+  access checks its dispatch receiver, then the selected member's owner and an extension's
+  declared receiver, each classifier once; an unresolved call checks its explicit receiver and
+  is reported ahead of the unresolved reference. A constructor call, or an access whose dispatch
+  receiver already reported, is kotlinc's eager check: the warning `… This may be forbidden soon.
+  Check the module classpath for missing or conflicting dependencies.`, an error under
+  `AllowEagerSupertypeAccessibilityChecks`. This includes `-no-jdk`: platform supertypes absent
+  from that deliberately restricted classpath are reported exactly as kotlinc reports them.
+  (`tests/missing_dependency_supertypes_e2e.rs` builds the library chain with krusty and compares
+  exit code, every diagnostic's file, line, column, message and order, and the output tree with
+  kotlinc, with and without the feature.)
 - **`-Xjdk-release` compiles against the selected JDK's own API.** As in kotlinc's
   `configureJvmTargetAndRelease`, the release names the JVM target (`8` is `1.8`; `6`/`7` require
   an explicit `-jvm-target 1.8`), an explicit `-jvm-target` must equal it (or be `1.8` for 6–8),

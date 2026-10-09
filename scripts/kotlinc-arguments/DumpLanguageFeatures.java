@@ -1,10 +1,16 @@
 import java.lang.reflect.Method;
+import java.util.Map;
 
 /** Prints kotlinc's `LanguageFeature` table, in declaration order, read from the compiler itself. */
 public class DumpLanguageFeatures {
     public static void main(String[] args) throws Exception {
         Class<?> feature = Class.forName("org.jetbrains.kotlin.config.LanguageFeature");
-        System.out.println("# name\tsinceVersion\tsinceApiVersion\tprogressive\tforcesPreReleaseBinaries\tforcesPreReleaseBinariesBefore\ttestOnly\tbehaviorAfterSinceVersion");
+        // The argument `LanguageFeatureMessageRenderer` names for enabling a feature, from the
+        // compiler's own `@Enables` map; a feature without one is named `-XXLanguage:+Feature`.
+        Map<?, ?> flags = (Map<?, ?>) Class.forName("org.jetbrains.kotlin.diagnostics.rendering.RuntimeFeatureToFlagMapKt")
+            .getMethod("buildRuntimeFeatureToFlagMap", ClassLoader.class)
+            .invoke(null, feature.getClassLoader());
+        System.out.println("# name\tsinceVersion\tsinceApiVersion\tprogressive\tforcesPreReleaseBinaries\tforcesPreReleaseBinariesBefore\ttestOnly\tbehaviorAfterSinceVersion\thintUrl\tflag\tpresentableName");
         for (Object entry : feature.getEnumConstants()) {
             System.out.println(String.join("\t",
                 ((Enum<?>) entry).name(),
@@ -14,7 +20,11 @@ public class DumpLanguageFeatures {
                 flag(get(feature, entry, "getForcesPreReleaseBinaries"), "prerelease"),
                 version(get(feature, entry, "getForcesPreReleaseBinariesBefore")),
                 flag(get(feature, entry, "getTestOnly"), "testOnly"),
-                behavior(get(feature, entry, "getBehaviorAfterSinceVersion"))));
+                behavior(get(feature, entry, "getBehaviorAfterSinceVersion")),
+                text(get(feature, entry, "getHintUrl")),
+                text(flags.get(entry)),
+                // Last: every feature has one, so no row ends in an empty cell's tab.
+                text(get(feature, entry, "getPresentableName"))));
         }
     }
 
@@ -32,6 +42,10 @@ public class DumpLanguageFeatures {
     /** `LanguageVersion` and `ApiVersion` both expose `getVersionString`. */
     private static String version(Object version) throws Exception {
         return version == null ? "" : (String) version.getClass().getMethod("getVersionString").invoke(version);
+    }
+
+    private static String text(Object value) {
+        return value == null ? "" : (String) value;
     }
 
     private static String flag(Object value, String name) {

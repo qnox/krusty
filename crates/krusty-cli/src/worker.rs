@@ -483,6 +483,16 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
     if !parsed.errors.is_empty() {
         return Err(Refusal::Unsupported(parsed.errors.join("; ")));
     }
+    let feature_errors: Vec<&str> = parsed
+        .language_feature_problems
+        .iter()
+        .filter(|problem| problem.is_error)
+        .map(|problem| problem.message.as_str())
+        .chain(parsed.configuration_errors.iter().map(String::as_str))
+        .collect();
+    if !feature_errors.is_empty() {
+        return Err(Refusal::Unsupported(feature_errors.join("; ")));
+    }
     if !parsed.ignored.is_empty() {
         return Err(Refusal::Unsupported(format!(
             "compiler option(s) not modeled by krusty: {}",
@@ -819,15 +829,11 @@ mod tests {
 
     #[test]
     fn the_real_argument_surface_translates() {
-        // These two options are part of the real request but deliberately refused until their
-        // semantics are implemented. Keep exercising every other field of that request here.
+        // `--progressive` is part of the real request but refused while it turns on features krusty
+        // does not implement. Keep exercising every other field of that request here.
         let request = intellij_request()
             .into_iter()
-            .filter(|argument| {
-                argument != "--progressive"
-                    && argument != "--x_xlanguage"
-                    && argument != "+AllowEagerSupertypeAccessibilityChecks"
-            })
+            .filter(|argument| argument != "--progressive")
             .collect::<Vec<_>>();
         let unit = translate(&request).expect("must translate");
         assert_eq!(unit.output_jar, PathBuf::from("out/util.jar"));
@@ -887,7 +893,7 @@ mod tests {
             assert_eq!(
                 refusal,
                 Refusal::Unsupported(
-                    "krusty does not implement the kotlinc argument '-progressive'".to_string()
+                    "krusty does not implement the language feature 'ErrorAboutDataClassCopyVisibilityChange' selected by '-progressive'".to_string()
                 )
             );
         }

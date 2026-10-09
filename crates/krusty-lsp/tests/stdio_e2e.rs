@@ -986,7 +986,7 @@ fun combine(entries: Array<Entry>): String {
     return result
 }";
     let diagnostics = diagnostics_after_open(
-        &["-Xname-based-destructuring=complete"],
+        &["-Xname-based-destructuring=only-syntax"],
         "file:///feature.kt",
         source,
     );
