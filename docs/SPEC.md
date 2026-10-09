@@ -9714,6 +9714,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   result boundary. Tests: `tests/native_boxed_numbers_e2e.rs`
   (`a_generic_result_widened_to_a_nullable_primitive_keeps_its_null`); the box corpus's
   `boxing/kt84727.kt` in the native lane.
+- **Native: `E.entries` and `enumEntries<E>()` are one `EnumEntriesList` per enum.** Kotlin/Native
+  assigns an enum's `$ENTRIES` during class initialization, after every constant and before the
+  companion. The enum's initializer does the same: it builds the list over a fresh `values()` array
+  into a static slot rooted for the collector, and a failed initialization withdraws it with the
+  constants. A read initializes the enum, then loads the slot. A constant's own construction reads
+  `null`, and the companion reads every constant, as kotlinc-native 2.4.20 does.
+  `enumEntries<E>()`, realized after inline specialization, reads the same slot, so
+  `E.entries === E.entries === enumEntries<E>()`. The list's class is
+  `kotlin.enums.EnumEntriesList` and implements `kotlin.enums.EnumEntries` besides `List`,
+  `Collection`, `Iterable` and `RandomAccess`, so `is`, `as?` and `as` against `EnumEntries` hold
+  for it and fail for any other list. It equals, hashes and renders like `listOf` of the same
+  constants, and its iterator is `kotlin.collections.AbstractList.IteratorImpl`. The one divergence
+  is the existing enum retry rule: after a failed initialization krusty builds the enum again on the
+  next access, where Kotlin/Native and the JVM fail every later access; a successful rebuild's
+  entries hold the rebuilt constants. Tests: `tests/native_enum_entries_e2e.rs`.
 - **Native: a null cast to an erased type parameter names the parameter.** `null as T` with
   `T : Any` has no descriptor left to test against, yet it still raises a NullPointerException.
   Kotlin/Native 2.4.10 and 2.4.20 raise it with no message. krusty uses the JVM's text, rendered

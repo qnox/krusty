@@ -1578,6 +1578,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             } => self.ref_set(holder, elem, value),
             IrExpr::EnumEntry { classifier, name } => self.enum_entry(classifier, &name),
             IrExpr::EnumValues { classifier } => self.enum_values(classifier),
+            IrExpr::EnumEntries { classifier } => self.enum_entries(classifier),
             // `declaration` separates the classifier's own `E.valueOf(name)` from the standard
             // library's INLINE `enumValueOf<E>(name)`. Both name the same lookup by entry name, and
             // the two differ only in what a consumer that records SOURCE POSITIONS attributes an
@@ -2150,6 +2151,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             } => Ty::Obj(*internal, &[]),
             IrExpr::EnumValues { classifier } => {
                 Ty::obj_args("kotlin/Array", &[Ty::Obj(*classifier, &[])])
+            }
+            IrExpr::EnumEntries { classifier } => {
+                Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::Obj(*classifier, &[])])
             }
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.file.ir.classes[*class as usize].methods[*index as usize];

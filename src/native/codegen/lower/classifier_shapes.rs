@@ -153,6 +153,11 @@ pub(super) fn is_sequence(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/sequences/Sequence"])
 }
 
+/// `kotlin.enums.EnumEntries`, which the runtime's `EnumEntriesList` implements.
+pub(super) fn is_enum_entries(internal: TypeName) -> bool {
+    is_identity(internal, &["kotlin/enums/EnumEntries"])
+}
+
 fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
     Some(if is_comparable(internal) {
         "kt_type_comparable"

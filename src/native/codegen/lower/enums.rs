@@ -15,18 +15,22 @@
 //! starting it again — which is what the JVM's re-entrant class initialization does.
 //!
 //! **`values()` is a fresh array each call**, which is Kotlin's contract: the caller may write to
-//! it without another caller seeing the change. `valueOf` compares the argument against each
+//! it without another caller seeing the change. **`entries` is one list per enum**, kept in a
+//! static slot the initializer fills after the last constant and before the companion, as
+//! Kotlin/Native assigns `$ENTRIES`: every read answers the same object, and a read from inside a
+//! constant's construction finds the slot still empty (`null`), as Kotlin/Native's does. `valueOf` compares the argument against each
 //! constant's name in declaration order, and fails loudly on no match, as Kotlin does.
 
 use super::*;
 use crate::types::TypeName;
 
 /// What one enum class needs: a slot per constant, a flag saying the class has been initialized,
-/// and the initializer itself.
+/// the slot keeping its `entries` list once made, and the initializer itself.
 #[derive(Clone)]
 pub(super) struct EnumItems {
     pub(super) slots: Vec<DataId>,
     flag: DataId,
+    entries: DataId,
     initializer: FuncId,
 }
 
@@ -60,6 +64,7 @@ impl<'a> FileLowering<'a> {
                 slots.push(self.declare_local_data(&format!("kt_enum_{symbol}"), true)?);
             }
             let flag = self.declare_local_data(&format!("kt_enum_{base}_ready"), true)?;
+            let entries = self.declare_local_data(&format!("kt_enum_{base}_entries"), true)?;
             let initializer =
                 self.declare_local_function(&format!("kt_enum_{base}_init"), &[], Ty::Unit)?;
             self.enum_entries.insert(
@@ -67,6 +72,7 @@ impl<'a> FileLowering<'a> {
                 EnumItems {
                     slots,
                     flag,
+                    entries,
                     initializer,
                 },
             );
@@ -133,12 +139,17 @@ impl<'a> FileLowering<'a> {
                 .define_data(*slot, &description)
                 .map_err(|error| format!("defining an enum constant's slot ({error})"))?;
         }
-        let mut description = DataDescription::new();
-        description.define_zeroinit(8);
-        description.set_align(8);
-        self.module
-            .define_data(items.flag, &description)
-            .map_err(|error| format!("defining an enum's initialization flag ({error})"))?;
+        for (slot, what) in [
+            (items.flag, "initialization flag"),
+            (items.entries, "entries slot"),
+        ] {
+            let mut description = DataDescription::new();
+            description.define_zeroinit(8);
+            description.set_align(8);
+            self.module
+                .define_data(slot, &description)
+                .map_err(|error| format!("defining an enum's {what} ({error})"))?;
+        }
 
         let companion = declaration
             .companion_class
@@ -265,6 +276,22 @@ impl<'a> FileLowering<'a> {
                             let func_ref = body.func_ref(target);
                             body.emit_call(func_ref, &operands)?;
                         }
+                        // `$ENTRIES`: after every constant exists and before the companion runs,
+                        // over an array of its own.
+                        let values = body.enum_values_array(class)?;
+                        let list = body
+                            .runtime_call("kt_enum_entries_of", &[any()], any(), &[values])?
+                            .expect("`kt_enum_entries_of` returns the list");
+                        let entries_address = body.data_address(items.entries);
+                        body.runtime_call(
+                            "kt_gc_add_global_root",
+                            &[any()],
+                            Ty::Unit,
+                            &[entries_address],
+                        )?;
+                        body.builder
+                            .ins()
+                            .store(trusted(), list, entries_address, 0);
                         // The companion comes after every constant, which is the order a program sees.
                         if let Some(getter) = companion {
                             let func_ref = body.func_ref(getter);
@@ -278,7 +305,7 @@ impl<'a> FileLowering<'a> {
                     &mut |body| {
                         let zero = body.builder.ins().iconst(types::I64, 0);
                         body.builder.ins().store(trusted(), zero, flag_address, 0);
-                        for &slot in &slots {
+                        for &slot in slots.iter().chain([&items.entries]) {
                             let address = body.data_address(slot);
                             body.builder.ins().store(trusted(), zero, address, 0);
                         }
@@ -325,9 +352,16 @@ impl BodyLowering<'_, '_, '_> {
         classifier: TypeName,
     ) -> Result<Option<Value>, Unsupported> {
         let class = self.file.class_of(classifier, "the enum")?;
+        self.build_enum(class)?;
+        self.enum_values_array(class).map(Some)
+    }
+
+    /// A fresh array over the constants' slots as they stand, without initializing the enum: the
+    /// initializer itself builds `$ENTRIES` from one.
+    fn enum_values_array(&mut self, class: ClassId) -> Result<Value, Unsupported> {
+        let classifier = self.file.ir.classes[class as usize].fq_name;
         let count = self.file.ir.classes[class as usize].enum_entries.len();
         let slots = self.file.enum_entries[&class].slots.clone();
-        self.build_enum(class)?;
         // The constants first, then the array: a constant's construction allocates, and a
         // half-filled array must not be what a collection finds.
         let mut values = Vec::with_capacity(slots.len());
@@ -353,7 +387,26 @@ impl BodyLowering<'_, '_, '_> {
                 .ins()
                 .store(trusted(), value, array, offset as i32);
         }
-        Ok(Some(array))
+        Ok(array)
+    }
+
+    /// `Color.entries` and `enumEntries<Color>()`: the enum's one `EnumEntriesList`, which its
+    /// initializer made. Read after initializing the enum, as reading `$ENTRIES` initializes the
+    /// class; from inside that initialization, before the constants are all built, it is `null`.
+    pub(super) fn enum_entries(
+        &mut self,
+        classifier: TypeName,
+    ) -> Result<Option<Value>, Unsupported> {
+        let class = self.file.class_of(classifier, "the enum")?;
+        let slot = self.file.enum_entries[&class].entries;
+        self.build_enum(class)?;
+        let address = self.data_address(slot);
+        Ok(Some(self.builder.ins().load(
+            types::I64,
+            trusted(),
+            address,
+            0,
+        )))
     }
 
     /// `Color.valueOf(text)`: the constant of that name, or a loud failure.
