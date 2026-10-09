@@ -9724,18 +9724,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_null_cast_to_an_erased_type_parameter_names_it_by_its_owner`),
   `tests/unboxing_coercion_e2e.rs`
   (`failed_null_casts_name_primitive_and_qualified_type_parameter_targets`).
-- **Native: the process boundary — `main(args)` and standard input.** `fun main(args:
-  Array<String>)` and `fun main(vararg args: String)` receive the arguments the program was started
-  with, without its own name (`argv[0]`), as the JVM launcher and Kotlin/Native pass them. When a
-  file declares both forms, the one taking arguments is the entry, as on both of those. `readLine()`
-  and `readlnOrNull()` answer the next line of standard input without its `\n` or `\r\n` (a lone `\r`
-  is the line's own text), keep an unterminated last line, and answer `null` at the end of input;
-  `readln()` raises `kotlin.io.ReadAfterEOFException("EOF has already been reached")` there. Bytes
-  from outside are decoded as UTF-8 with one U+FFFD per maximal ill-formed subpart, which is what the
-  JVM's decoder and Kotlin/Native's `decodeToString` answer; the runtime's strings stay well-formed.
-  `_start` hands the kernel's initial stack to `kt_process_start`, which records `argc`, `argv` and
-  the environment block. Tests: `tests/native_process_e2e.rs`;
-  `native::intrinsics::tests::console_input_is_matched_by_its_whole_declaration`.
+- **Native: the process boundary — `main(args)` and standard input.** The program's entry is the
+  `main` the frontend selected (`IrFile::entry_point`): the backend realizes that record and reads
+  its form only to decide whether to build and pass the argument array, so `main(args:
+  Array<String>?)`, `main(vararg args: String)` and a file that also declares `main()` or other
+  `main` overloads all start where kotlinc's frontend says. `main` receives the arguments the
+  program was started with, without its own name (`argv[0]`). Bytes from outside are decoded as
+  UTF-8 with one U+FFFD per maximal ill-formed subpart, which is what Kotlin/Native and the JVM
+  launcher under a UTF-8 locale both answer for arguments; the runtime's strings stay well-formed.
+  `readLine()` and `readlnOrNull()` answer the next line of standard input without its `\n` or
+  `\r\n` (a lone `\r` is the line's own text), keep an unterminated last line, and answer `null`
+  at the end of input; `readln()` raises `kotlin.io.ReadAfterEOFException("EOF has already been
+  reached")` there. Line splitting is the JVM's and the common stdlib's: Kotlin/Native's own
+  `readLine` is one `read(2)` of up to 4095 bytes with trailing CR/LF trimmed, a line only on a
+  terminal. Ill-formed input is decoded as Kotlin/Native decodes it, where the JVM's `readLine`
+  raises `MalformedInputException`. `_start` hands the kernel's initial stack to `kt_process_start`,
+  which records `argc`, `argv` and the environment block. Tests: `tests/native_process_e2e.rs`,
+  each case compared exactly (status, stdout, stderr) with a recorded Kotlin/Native run, a live JVM
+  run, or both; `native::intrinsics::tests::console_input_is_matched_by_its_whole_declaration`.
 - **Native runtime: exceptions and integer arithmetic.** `src/native/runtime/krusty_rt.c` raises
   what Kotlin raises and does not stop there: `kt_throw` RECORDS the exception in the one pending
   slot and returns, and the caller's check of that slot is the propagation. So every runtime entry

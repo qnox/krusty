@@ -63,7 +63,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ir::{
     Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
-    IrLocalPropertyLayout, IrStatic, IrTypeOp,
+    IrLocalPropertyLayout, IrStatic, IrTypeOp, MainEntryParameters,
 };
 use crate::types::{Ty, TypeName};
 
@@ -226,7 +226,28 @@ pub fn lower_file(
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let file_init = lowering.define_file_init(source, statics_init)?;
-    let program_entry = program_entry(ir, entry, |function| lowering.carrier(function.ret));
+    let program_entry = match entry {
+        // The frontend selected the file's `main` and its form; the backend only realizes it.
+        Entry::Main => ir.entry_point.map(|point| {
+            (
+                point.function as usize,
+                point.parameters == MainEntryParameters::Arguments,
+            )
+        }),
+        // A `box` case answers through a parameterless `box(): String`, the test corpus's own
+        // convention rather than a Kotlin entry point.
+        Entry::Box => ir
+            .functions
+            .iter()
+            .position(|function| {
+                function.params.is_empty()
+                    && function.is_static
+                    && function.dispatch_receiver.is_none()
+                    && function.name == "box"
+                    && lowering.carrier(function.ret) == Carrier::Ref
+            })
+            .map(|index| (index, false)),
+    };
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
@@ -253,48 +274,6 @@ pub fn lower_file(
         defines_entry,
         abi,
     })
-}
-
-/// The function the process starts at, and whether it takes the program's arguments.
-///
-/// Kotlin prefers `main(args: Array<String>)` when a file declares both forms, as the JVM launcher
-/// and Kotlin/Native both do; the parameterless `main` is the entry only on its own. A `box` case
-/// answers through a parameterless `box(): String`.
-fn program_entry(
-    ir: &IrFile,
-    entry: Entry,
-    carrier: impl Fn(&crate::ir::IrFunction) -> Carrier,
-) -> Option<(usize, bool)> {
-    let candidate = |takes_arguments: bool| {
-        ir.functions.iter().position(|function| {
-            let shape = match function.params.as_slice() {
-                [] => !takes_arguments,
-                [arguments] => takes_arguments && takes_program_arguments(*arguments),
-                _ => false,
-            };
-            shape
-                && function.is_static
-                && function.dispatch_receiver.is_none()
-                && match entry {
-                    Entry::Main => function.name == "main",
-                    Entry::Box => function.name == "box" && carrier(function) == Carrier::Ref,
-                }
-        })
-    };
-    match entry {
-        Entry::Main => candidate(true)
-            .map(|index| (index, true))
-            .or_else(|| candidate(false).map(|index| (index, false))),
-        Entry::Box => candidate(false).map(|index| (index, false)),
-    }
-}
-
-/// Whether a `main` parameter is the program's arguments: an array whose elements read as `String`.
-fn takes_program_arguments(parameter: Ty) -> bool {
-    parameter.is_reference_array()
-        && parameter
-            .array_read_elem()
-            .is_some_and(|element| element == Ty::String)
 }
 
 struct FileLowering<'a> {
