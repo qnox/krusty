@@ -10,7 +10,7 @@
 //! ABI are not part of resolution.
 use crate::libraries::{
     CallSig, Callables, FnKind, FunctionInfo, FunctionSet, GenericSig, LibraryCallable,
-    LibraryMember, Origin, PropKind, PropertyInfo, PropertySet, SemanticPlatform, SourceMember,
+    LibraryMember, Origin, PropKind, PropertyInfo, PropertySet, SemanticPlatform,
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName, Visibility};
@@ -38,6 +38,7 @@ mod property_candidates;
 mod qualified_classifiers;
 pub(crate) use qualified_classifiers::ClassifierMiss;
 mod receiver_mro;
+mod resolved_symbol;
 mod sam;
 mod scope_level_callables;
 mod selected_call_instantiation;
@@ -95,6 +96,10 @@ use property_candidates::{
     specialize_property,
 };
 pub(crate) use receiver_mro::{function_shape_matches, ReceiverMro};
+pub(crate) use resolved_symbol::ErrorReceiverSelection;
+pub use resolved_symbol::{
+    AmbiguousExtensionProperty, MemberFacets, ResolvedPropertySetter, SymRecv, Symbol,
+};
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
 use scope_level_callables::{
     callables_from_symbols, fn_in_scope, function_set_from_symbols, level_functions,
@@ -1047,268 +1052,6 @@ pub struct SymbolResolver<'a> {
     type_variables: &'a [String],
 }
 
-/// The receiver of a reference: a value, an implicit `this`, or a named type.
-#[derive(Clone, Copy)]
-pub enum SymRecv<'q> {
-    Value(Ty),
-    ImplicitValue(Ty),
-    Type(&'q str),
-    TypeName(TypeName),
-    /// No receiver — a plain `name(args)` resolved against the import scope's top-level (and same-facade
-    /// extension) functions. A DOTTED `name` (`kotlinx.coroutines.runBlocking`) is a fully-qualified
-    /// reference: it resolves against its own package, not the import scope.
-    TopLevel,
-}
-
-/// What a name DENOTES on its receiver — the declared thing the resolver found, NOT how it is used.
-/// [`SymbolResolver::resolve_symbol`] resolves a name to one of these; the CALLER then applies whatever
-/// its syntax needs (invoke it, read it, write its setter, take a reference), including handling a
-/// mismatch itself (`Test()` where `Test` is a property — the caller emits an `invoke`). The resolver
-/// does not care whether the site is a call, a read, a write, or a reference.
-/// The facets a `recv.name` member supports — see [`Symbol::Member`]. Boxed into the enum so a member
-/// symbol stays pointer-sized.
-pub struct MemberFacets {
-    pub call: Option<ResolvedMember>,
-    pub read: Option<ResolvedMember>,
-    pub write: Option<ResolvedPropertySetter>,
-    pub method_ref: Option<LibraryMember>,
-    pub property_ref: Option<ResolvedPropertyRef>,
-    /// Receiver-less property declarations denoted by this name. Contextual overloads remain in the
-    /// family because applicability depends on the caller's lexical/implicit-receiver scope, which
-    /// the symbol resolver deliberately does not own.
-    pub values: Vec<PropertyInfo>,
-    /// Every overload named `name` applicable to the receiver — instance members, operators, AND in-scope
-    /// extension functions with a matching receiver — most-derived/member-first. A caller inspecting the
-    /// whole family (named-arg mapping, defaults, return agreement, member-vs-extension dispatch) filters
-    /// this by [`FunctionInfo::kind`]/`receiver_rank`.
-    pub overloads: Vec<FunctionInfo>,
-    pub inaccessible_extensions: Vec<FunctionInfo>,
-    /// For a receiver-less [`SymRecv::TopLevel`] name: the single top-level callable selected against
-    /// `args`/`type_args` (default/vararg-aware), ready for the emit seam. `None` for a value/type receiver.
-    pub top_level_call: Option<LibraryCallable>,
-    /// For a value receiver: the classpath EXTENSION callable `recv.name(args)` selected against
-    /// `args`/`type_args` (default/vararg-aware; admits `@InlineOnly` splice candidates), ready for the emit
-    /// seam. A same-module extension is `None` (it emits through the module path, not a library callable).
-    pub extension_call: Option<LibraryCallable>,
-    /// The RESULT of invoking the selected extension, for every declaration origin.
-    ///
-    /// [`Self::extension_call`] is an emit handle, and a same-module extension emits through the
-    /// module path rather than as a library callable, so it is absent there — but the semantic
-    /// result of the call is the same question for all origins and is answered here. Without it a
-    /// consumer asking only "what does this name return on this receiver" had to know which provider
-    /// declared the callable, which is a provenance test standing in for a semantic one.
-    pub extension_result: Option<Ty>,
-    pub extension_property: Option<PropertyInfo>,
-}
-
-impl MemberFacets {
-    /// Materialize the callable-reference view of the already-discovered extension property.
-    /// Consumers that need several facets of one name can keep this structure and must not repeat
-    /// symbol lookup merely to ask for the property-reference form.
-    pub(crate) fn extension_property_ref(&self) -> Option<ResolvedPropertyRef> {
-        self.extension_property
-            .clone()
-            .and_then(select_extension_property_ref)
-    }
-}
-
-pub enum Symbol {
-    /// A member of a value receiver `recv.name`, with whichever facets the declaration supports. A name
-    /// may support several at once — a Java zero-argument method (`list.size`, `str.length`) is both a
-    /// property `read` and a `call`/method `reference` — so the resolver reports them all and the caller
-    /// takes the one its syntax needs (`recv.name(args)` → `call`, `recv.name` → `read`, `recv.name = v`
-    /// → `write`, `recv::name` → `method_ref`/`property_ref`).
-    Member(Box<MemberFacets>),
-    /// An object/companion instance member `Type.name(args)`.
-    Instance(LibraryMember),
-    /// A static/companion member `Type.name(args)`.
-    Companion(LibraryMember),
-    /// A constructor `Type(args)`: one semantic overload-selection result carrying the platform
-    /// application selected for it. Direct and marker/default realization are not separate symbols.
-    Constructor(SelectedConstructorCall),
-}
-
-impl Symbol {
-    pub(crate) fn selected_member(self) -> Option<LibraryMember> {
-        match self {
-            Symbol::Member(f) => f.call.map(|resolved| resolved.member),
-            Symbol::Instance(member) | Symbol::Companion(member) => Some(member),
-            Symbol::Constructor(SelectedConstructorCall::Direct(selected)) => {
-                Some(selected.declaration)
-            }
-            Symbol::Constructor(SelectedConstructorCall::Platform(_)) => None,
-        }
-    }
-
-    /// This name invoked as a method with the resolved arguments (`recv.name(args)`).
-    pub fn call(self) -> Option<ResolvedMember> {
-        match self {
-            Symbol::Member(f) => f.call,
-            _ => None,
-        }
-    }
-    /// Semantic result of invoking the selected value-receiver callable. Member and extension are
-    /// candidate kinds inside overload selection; a non-emitting consumer must not branch on their
-    /// physical realization merely to read the result type.
-    pub fn call_return(self) -> Option<Ty> {
-        match self {
-            Symbol::Member(f) => match f.call {
-                Some(call) => Some(call.ret),
-                // The emit handle first (it carries the call-site realization), then the result the
-                // selection itself produced — the only answer a same-module extension has.
-                None => f.extension_call.map(|call| call.ret).or(f.extension_result),
-            },
-            _ => None,
-        }
-    }
-    /// The selected callable's own SYMBOLIC signature, its type variables still unbound.
-    ///
-    /// Reported through the same member-or-extension family as [`Self::call_return`]: which physical
-    /// kind answered the call is a realization detail, and a consumer binding a type variable from an
-    /// argument must not have to branch on it.
-    pub fn call_generic_sig(self) -> Option<crate::libraries::GenericSig> {
-        match self {
-            Symbol::Member(f) => match f.call {
-                Some(call) => call.member.generic_sig,
-                None => f
-                    .extension_call
-                    .and_then(|call| call.generic_sig)
-                    .map(|generic| *generic),
-            },
-            Symbol::Instance(member) | Symbol::Companion(member) => member.generic_sig,
-            Symbol::Constructor(_) => None,
-        }
-    }
-    /// This name read as a property (`recv.name`).
-    pub fn property(self) -> Option<ResolvedMember> {
-        match self {
-            Symbol::Member(f) => f.read,
-            _ => None,
-        }
-    }
-    /// Semantic result of reading the selected receiver property, independent of whether its getter
-    /// is an ordinary member or an extension realization.
-    pub fn property_return(self) -> Option<Ty> {
-        match self {
-            Symbol::Member(f) => match f.read {
-                Some(read) => Some(read.ret),
-                None => f.extension_property.map(|property| property.ty),
-            },
-            _ => None,
-        }
-    }
-    /// The setter of this property (`recv.name = v`).
-    pub fn property_setter(self) -> Option<ResolvedPropertySetter> {
-        match self {
-            Symbol::Member(f) => f.write,
-            _ => None,
-        }
-    }
-    /// A bound method reference to this name (`recv::name`).
-    pub fn method_ref(self) -> Option<LibraryMember> {
-        match self {
-            Symbol::Member(f) => f.method_ref,
-            _ => None,
-        }
-    }
-    /// A bound property reference to this name (`recv::name`).
-    pub fn property_ref(self) -> Option<ResolvedPropertyRef> {
-        match self {
-            Symbol::Member(f) => f.property_ref,
-            _ => None,
-        }
-    }
-    pub fn value(self) -> Option<PropertyInfo> {
-        match self {
-            Symbol::Member(mut f) if f.values.len() == 1 => f.values.pop(),
-            _ => None,
-        }
-    }
-    pub fn values(self) -> Vec<PropertyInfo> {
-        match self {
-            Symbol::Member(f) => f.values,
-            _ => Vec::new(),
-        }
-    }
-    /// Every overload named this on the receiver — members, operators, and applicable in-scope extensions.
-    pub fn overloads(self) -> Vec<FunctionInfo> {
-        match self {
-            Symbol::Member(f) => f.overloads,
-            _ => Vec::new(),
-        }
-    }
-    /// The selected receiver-less top-level callable ([`SymRecv::TopLevel`]).
-    pub fn top_level_call(self) -> Option<LibraryCallable> {
-        match self {
-            Symbol::Member(f) => f.top_level_call,
-            _ => None,
-        }
-    }
-    /// The selected classpath extension callable for `recv.name(args)`.
-    pub fn extension_call(self) -> Option<LibraryCallable> {
-        match self {
-            Symbol::Member(f) => f.extension_call,
-            _ => None,
-        }
-    }
-    /// The getter of a classpath extension property `recv.name`.
-    pub fn extension_property_getter(self) -> Option<LibraryCallable> {
-        match self {
-            Symbol::Member(f) => f.extension_property.map(|property| property.getter),
-            _ => None,
-        }
-    }
-    pub fn extension_property(self) -> Option<PropertyInfo> {
-        match self {
-            Symbol::Member(f) => f.extension_property,
-            _ => None,
-        }
-    }
-    pub fn extension_property_ref(self) -> Option<ResolvedPropertyRef> {
-        match self {
-            Symbol::Member(f) => f.extension_property_ref(),
-            _ => None,
-        }
-    }
-    /// The object/companion instance member this resolved to (`Type.name(args)`).
-    pub fn instance(self) -> Option<LibraryMember> {
-        if let Symbol::Instance(m) = self {
-            Some(m)
-        } else {
-            None
-        }
-    }
-    /// The static/companion member this resolved to (`Type.name(args)`).
-    pub fn companion(self) -> Option<LibraryMember> {
-        if let Symbol::Companion(m) = self {
-            Some(m)
-        } else {
-            None
-        }
-    }
-    /// The constructor this resolved to (`Type(args)`).
-    pub fn constructor(self) -> Option<SelectedConstructorCall> {
-        if let Symbol::Constructor(m) = self {
-            Some(m)
-        } else {
-            None
-        }
-    }
-}
-
-/// A selected property setter with the semantic access fact needed by the checker. Lowering receives
-/// only `callable` after the checker has accepted `visibility`; it never reconstructs either fact.
-#[derive(Clone, Debug)]
-pub struct ResolvedPropertySetter {
-    pub callable: LibraryCallable,
-    pub visibility: crate::types::Visibility,
-    pub source_member: Option<SourceMember>,
-    pub stable_declaration: Option<crate::fir::DeclarationId>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AmbiguousExtensionProperty;
-
 /// The emit-independent facts about a selected extension call. One computation feeds both the
 /// callable the backend emits and the type the front end reports, so the two cannot disagree.
 struct ExtensionCallShape {
@@ -1324,13 +1067,6 @@ struct ExtensionCallShape {
     /// property's inferred type, because `Any`-from-failed-inference and a genuine `Any` are then
     /// indistinguishable.
     determined: bool,
-}
-
-/// Binding result for a name on the compiler's error receiver.
-pub(crate) enum ErrorReceiverSelection<T> {
-    Absent,
-    Bind(Vec<T>),
-    Silent,
 }
 
 impl<'a> SymbolResolver<'a> {
