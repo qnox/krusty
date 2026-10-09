@@ -4665,6 +4665,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or object expression, including the members of local classes) is `UNSUPPORTED_FEATURE` at the
   declaration's start, its annotations included. Nested type aliases in a classifier are
   `NestedTypeAliases`, not this feature. Tests: `tests/local_type_aliases_e2e.rs`.
+- **Collection literals off (`CollectionLiterals`, `-Xcollection-literals`).** Without the feature an
+  `operator fun of` is `UNSUPPORTED_FEATURE` at its `operator` modifier. A `[…]` outside an
+  annotation argument (at any depth, e.g. `arrayOf(*["a"])`) or an annotation class's parameter
+  default reports `array literals outside of annotations are unsupported.` and
+  `UNSUPPORTED_FEATURE` at the literal, as `ExpressionChecker` diagnostics that follow any type
+  mismatch at the same position. The literal is typed as kotlinc's array-literal fallback: a primitive array when one is expected,
+  otherwise `Array<T>` with `T` the common supertype of the elements (each checked against the
+  expected element type), or the expected element type (else `Any?`) when it has none. That type
+  drives the mismatch (`expected 'List<Int>', actual 'Array<Int>'`). Tests:
+  `tests/collection_literals_gate_e2e.rs`.
 - **Companion blocks and extensions off (`CompanionBlocksAndExtensions`,
   `-Xcompanion-blocks-and-extensions`).** Without the feature a classifier's first `companion { … }`
   block is `UNSUPPORTED_FEATURE` at its `companion` keyword (later blocks are not reported again).

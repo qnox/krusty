@@ -232,6 +232,7 @@ fn diagnostic_key(diagnostic: &Diagnostic) -> DiagnosticKey {
             DiagnosticKind::Inspection => 2,
             DiagnosticKind::ValReassignment => 3,
             DiagnosticKind::Actualization => 4,
+            DiagnosticKind::ExpressionChecker => 5,
         },
     )
 }

@@ -17,6 +17,7 @@ pub(super) struct SyntaxGates {
     unnamed_local_variables: FeatureGate,
     local_type_aliases: FeatureGate,
     companion_blocks_and_extensions: FeatureGate,
+    collection_literals: FeatureGate,
     /// How many statements and expressions enclose the cursor.
     body_depth: u32,
 }
@@ -28,6 +29,7 @@ impl SyntaxGates {
             unnamed_local_variables: features.gate("UnnamedLocalVariables"),
             local_type_aliases: features.gate("LocalTypeAliases"),
             companion_blocks_and_extensions: features.gate("CompanionBlocksAndExtensions"),
+            collection_literals: features.gate("CollectionLiterals"),
             body_depth: 0,
         }
     }
@@ -114,5 +116,14 @@ impl Parser<'_> {
             companion_keyword,
             "modifier 'companion' is not applicable inside 'file'.",
         );
+    }
+
+    /// An `operator` function named `of` is the collection-literal factory convention; kotlinc's
+    /// operator checks first require `CollectionLiterals`, at the `operator` modifier.
+    pub(super) fn gate_operator(&mut self, name: &str, operator_modifier: Span) {
+        if name == "of" {
+            let gate = self.gates.collection_literals.clone();
+            self.file.language_gates.require(&gate, operator_modifier);
+        }
     }
 }
