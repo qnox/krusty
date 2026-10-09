@@ -32289,24 +32289,28 @@ fun use(counter: Counter) {
                           var current = counter\n\
                           current++\n\
                       }";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
-
-        let access_errors = diagnostics
-            .diags
-            .iter()
-            .filter(|diagnostic| diagnostic.msg.contains("cannot access"))
-            .collect::<Vec<_>>();
-        assert_eq!(access_errors.len(), 2, "{:?}", diagnostics.diags);
-        let mut slices = access_errors
-            .iter()
-            .map(|diagnostic| &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize])
-            .collect::<Vec<_>>();
-        slices.sort_unstable();
-        assert_eq!(slices, ["-counter", "current++"]);
+        let (_, _, diagnostics) = retained_standalone_analysis(source);
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "cannot access 'unaryMinus': it is private in 'PrivateCounter'",
+                "cannot access 'inc': it is private in 'PrivateCounter'",
+            ],
+        );
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| {
+                    &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize]
+                })
+                .collect::<Vec<_>>(),
+            ["-counter", "current++"],
+        );
     }
 
     #[test]
