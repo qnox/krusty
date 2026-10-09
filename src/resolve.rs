@@ -31583,15 +31583,13 @@ fun use() {
     #[test]
     fn subclass_constructor_prefers_package_type_to_nested_type_from_superclass() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class Category\n\
+        let source = "class Category\n\
              open class Parent { enum class Category { FIRST } }\n\
-             class Child(category: Category) : Parent()",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+             class Child(category: Category) : Parent()";
+        let (_, symbols, info) =
+            crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        assert!(info.is_some(), "production frontend must check the source");
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -31614,14 +31612,12 @@ fun use() {
     #[test]
     fn subclass_infers_property_type_from_inherited_nested_classifier() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "open class Parent { enum class Category { FIRST } }\n\
-             class Child : Parent() { val category = Category.FIRST }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let source = "open class Parent { enum class Category { FIRST } }\n\
+             class Child : Parent() { val category = Category.FIRST }";
+        let (_, symbols, info) =
+            crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        assert!(info.is_some(), "production frontend must check the source");
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -31637,14 +31633,12 @@ fun use() {
     #[test]
     fn subclass_inference_is_independent_of_superclass_declaration_order() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class Child : Parent() { val category = Category.FIRST }\n\
-             open class Parent { enum class Category { FIRST } }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let source = "class Child : Parent() { val category = Category.FIRST }\n\
+             open class Parent { enum class Category { FIRST } }";
+        let (_, symbols, info) =
+            crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        assert!(info.is_some(), "production frontend must check the source");
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -31660,15 +31654,13 @@ fun use() {
     #[test]
     fn private_inherited_nested_classifier_does_not_shadow_top_level_type() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "class Category\n\
+        let source = "class Category\n\
              open class Parent { private class Category }\n\
-             class Child(category: Category) : Parent()",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+             class Child(category: Category) : Parent()";
+        let (_, symbols, info) =
+            crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        assert!(info.is_some(), "production frontend must check the source");
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -31994,11 +31986,11 @@ fun use() {
     #[test]
     fn bounded_star_projection_uses_the_source_classifier_bound() {
         let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "interface E\nclass Box<T : E>(val value: T)\nclass Wrapper(val box: Box<*>)",
-            &mut diagnostics,
-        );
-        let mut symbols = collect_signatures(std::slice::from_ref(&file), &mut diagnostics);
+        let source = "interface E\nclass Box<T : E>(val value: T)\nclass Wrapper(val box: Box<*>)";
+        let (file, symbols, info) =
+            crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        let info = info.expect("production frontend must check the source");
         assert_no_diags(&diagnostics);
 
         let source = crate::module_symbols::ModuleSymbols::new(&symbols);
@@ -32006,8 +31998,6 @@ fun use() {
             .expect("source Box classifier");
         assert_eq!(classifier.type_param_bounds, vec![vec![Ty::obj("E")]]);
 
-        let info = check_file(&file, &mut symbols, &mut diagnostics);
-        assert_no_diags(&diagnostics);
         let property_type = file
             .decls
             .iter()
@@ -32113,9 +32103,7 @@ fun use() {
 
     #[test]
     fn unary_and_inc_dec_expressions_record_exact_operator_targets() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            r#"
+        let source = r#"
 class Counter {
     operator fun unaryMinus(): Counter = this
     operator fun inc(): Counter = this
@@ -32128,15 +32116,11 @@ fun use(counter: Counter) {
     val previous = current++
     val next = ++current
 }
-"#,
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+"#;
+        let (file, info, diagnostics) = retained_standalone_analysis(source);
         assert_no_diags(&diagnostics);
 
-        let unary = files[0]
+        let unary = file
             .expr_arena
             .iter()
             .enumerate()
@@ -32152,13 +32136,13 @@ fun use(counter: Counter) {
                     && member.member.name == "unaryMinus"
         ));
 
-        let expression_inc_dec = files[0]
+        let expression_inc_dec = file
             .expr_arena
             .iter()
             .enumerate()
             .filter_map(|(index, _)| {
                 let expression = ExprId(index as u32);
-                (matches!(files[0].expr(expression), Expr::IncDec { .. })
+                (matches!(file.expr(expression), Expr::IncDec { .. })
                     && info.ty(expression) != Ty::Error)
                     .then_some(expression)
             })
@@ -32179,7 +32163,7 @@ fun use(counter: Counter) {
             "missing increment targets: {expression_targets:?}"
         );
 
-        let statement_inc_dec = files[0]
+        let statement_inc_dec = file
             .stmt_arena
             .iter()
             .enumerate()
@@ -32286,11 +32270,7 @@ fun use(counter: Counter) {
                           current++\n\
                           return negative\n\
                       }";
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(source, &mut diagnostics);
-        let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (_, info, diagnostics) = retained_standalone_analysis(source);
         assert_no_diags(&diagnostics);
 
         let targets = info
@@ -32477,26 +32457,20 @@ fun use(counter: Counter) {
         let Some(jdk_modules) = crate::toolchain::jdk_modules() else {
             return;
         };
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "data class A(val a: Int)\n\
+        let source = "data class A(val a: Int)\n\
              fun box(): String {\n\
                  val v1 = A(-10.toInt()).hashCode()\n\
                  val v2 = (-10.toInt() as Int?)!!.hashCode()\n\
                  return if (v1 == v2) \"OK\" else \"$v1 $v2\"\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
+             }";
         let mut classpath_entries = crate::toolchain::classpath_jars_for("");
         classpath_entries.push(jdk_modules);
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath_entries));
         let platform = initialized_jvm_libraries(classpath);
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         assert_no_diags(&diagnostics);
 
-        let unary_expressions = files[0]
+        let unary_expressions = file
             .expr_arena
             .iter()
             .enumerate()
@@ -32508,7 +32482,7 @@ fun use(counter: Counter) {
         assert!(!unary_expressions.is_empty());
         for unary in unary_expressions {
             assert_eq!(info.ty(unary), Ty::Int);
-            let operand = match files[0].expr(unary) {
+            let operand = match file.expr(unary) {
                 Expr::Unary { operand, .. } => *operand,
                 _ => unreachable!(),
             };
@@ -32527,20 +32501,19 @@ fun use(counter: Counter) {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file(
-            "import kotlin.reflect.KProperty0\n\
+        let source = "import kotlin.reflect.KProperty0\n\
              class Sample { companion object { val maxValue = 1 } }\n\
              fun box(): String {\n\
                  val property: KProperty0<Int> = Sample::maxValue\n\
                  return if (property.get() == 1) \"OK\" else \"fail\"\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
+             }";
+        let mut diagnostics = DiagSink::new();
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib]));
         let platform = initialized_jvm_libraries(classpath);
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
+        let (_, symbols, info) =
+            crate::frontend::analyze_source(source, Box::new(platform), &mut diagnostics);
+        let symbols = symbols.expect("production frontend must retain finalized symbols");
+        assert!(info.is_some(), "production frontend must check the source");
         {
             let module = crate::module_symbols::ModuleSymbols::new(&symbols);
             let outer = module
@@ -32568,7 +32541,6 @@ fun use(counter: Counter) {
                 .and_then(crate::symbol_resolver::Symbol::property_ref)
                 .is_some());
         }
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
     }
 
