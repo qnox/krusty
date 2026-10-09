@@ -6135,6 +6135,12 @@ impl<'a> Emitter<'a> {
         self.probe_intrinsic_suspension(e, code);
         self.machine_after(suspension, code);
         self.close_declared_suspension(e, code);
+        if !code.is_dead() {
+            if let Some(line) = self.ir.evaluated_result_end_line(e) {
+                self.mark_expression_line(e, line, code);
+                code.nop();
+            }
+        }
     }
 
     /// Realize `IrExpr::PropertyRead` — the one place that decides what reading a Kotlin property
