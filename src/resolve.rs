@@ -24936,13 +24936,9 @@ val result = object { fun value(): String = captured }
 
     fn check(src: &str) -> (Vec<String>, Option<TypeInfo>) {
         let mut d = DiagSink::new();
-        let toks = lex(src, &mut d);
-        let file = parse(src, &toks, &mut d);
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let (_, _, info) = crate::frontend::analyze_source_standalone(src, &mut d);
         let errs: Vec<String> = d.diags.iter().map(|x| x.msg.clone()).collect();
-        (errs, Some(info))
+        (errs, info)
     }
 
     fn check_with_annotation_fixtures(
