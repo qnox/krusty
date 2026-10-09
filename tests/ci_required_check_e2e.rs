@@ -1,5 +1,5 @@
 //! The `ci-and-conformance` job in `.github/workflows/ci.yml`: the single non-matrix check a branch
-//! ruleset can require in place of `ci`, green only when `ci` and every conformance lane are green.
+//! ruleset can require in place of individual jobs, green only when every merge gate is green.
 
 use std::fs;
 use std::io::Write;
@@ -58,13 +58,23 @@ fn run_script(job: &str) -> String {
     script
 }
 
-fn run_predicate(script: &str, ci: &str, conformance: &str) -> std::process::Output {
+fn run_predicate(
+    script: &str,
+    ci: &str,
+    klib: &str,
+    conformance: &str,
+    gradle_plugin: &str,
+    gradle: &str,
+) -> std::process::Output {
     let mut child = Command::new("bash")
         .arg("-s")
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("CI_RESULT", ci)
+        .env("KLIB_RESULT", klib)
         .env("CONFORMANCE_RESULT", conformance)
+        .env("GRADLE_PLUGIN_RESULT", gradle_plugin)
+        .env("GRADLE_RESULT", gradle)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -80,7 +90,7 @@ fn run_predicate(script: &str, ci: &str, conformance: &str) -> std::process::Out
 }
 
 #[test]
-fn aggregate_is_one_stable_always_scheduled_job_over_ci_and_the_whole_matrix() {
+fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     let workflow = workflow();
     let aggregate = job(&workflow, AGGREGATE);
     assert!(
@@ -88,8 +98,10 @@ fn aggregate_is_one_stable_always_scheduled_job_over_ci_and_the_whole_matrix() {
         "the check context is pinned by an explicit name: {aggregate}"
     );
     assert!(
-        aggregate.contains("\n    needs: [ci, conformance]\n"),
-        "the aggregate waits on `ci` and the complete conformance matrix only: {aggregate}"
+        aggregate.contains(
+            "\n    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle]\n"
+        ),
+        "the aggregate waits on every merge gate: {aggregate}"
     );
     assert!(
         aggregate.contains("\n    if: always()\n"),
@@ -101,7 +113,11 @@ fn aggregate_is_one_stable_always_scheduled_job_over_ci_and_the_whole_matrix() {
     );
     assert!(
         aggregate.contains("CI_RESULT: ${{ needs.ci.result }}\n")
-            && aggregate.contains("CONFORMANCE_RESULT: ${{ needs.conformance.result }}\n"),
+            && aggregate.contains("KLIB_RESULT: ${{ needs.klib-semantics.result }}\n")
+            && aggregate.contains("CONFORMANCE_RESULT: ${{ needs.conformance.result }}\n")
+            && aggregate
+                .contains("GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}\n")
+            && aggregate.contains("GRADLE_RESULT: ${{ needs.gradle.result }}\n"),
         "the step reads each dependency's own result: {aggregate}"
     );
     assert_eq!(
@@ -136,36 +152,83 @@ fn aggregate_is_one_stable_always_scheduled_job_over_ci_and_the_whole_matrix() {
 }
 
 #[test]
-fn aggregate_passes_only_when_ci_and_conformance_both_succeeded() {
+fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     let workflow = workflow();
     let script = run_script(job(&workflow, AGGREGATE));
-    let results = ["success", "failure", "cancelled", "skipped", ""];
-    for ci in results {
-        for conformance in results {
-            let output = run_predicate(&script, ci, conformance);
-            let passed = output.status.success();
+    let run = |results: [&str; 5]| {
+        run_predicate(
+            &script, results[0], results[1], results[2], results[3], results[4],
+        )
+    };
+    let success = ["success"; 5];
+    let output = run(success);
+    assert!(
+        output.status.success(),
+        "all-success aggregate failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "ci: success\nklib-semantics: success\nconformance: success\nbuild-gradle-plugin: success\ngradle: success\n",
+        "the log names every dependency result"
+    );
+
+    let gates = [
+        "ci",
+        "klib-semantics",
+        "conformance",
+        "build-gradle-plugin",
+        "gradle",
+    ];
+    for (gate, index) in gates.into_iter().zip(0..) {
+        for result in ["failure", "cancelled", "skipped", ""] {
+            let mut results = success;
+            results[index] = result;
+            let output = run(results);
+            assert!(
+                !output.status.success(),
+                "{gate}={result:?} incorrectly passed"
+            );
             assert_eq!(
-                passed,
-                ci == "success" && conformance == "success",
-                "ci={ci:?} conformance={conformance:?} stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
+                "core CI, KLIB semantics, conformance, and every Gradle gate must succeed\n",
+                "{gate}={result:?}"
             );
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert_eq!(
-                stdout,
-                format!("ci: {ci}\nconformance: {conformance}\n"),
-                "the log names each dependency result"
-            );
-            if !passed {
-                assert_eq!(
-                    String::from_utf8_lossy(&output.stderr),
-                    "ci and every conformance lane must succeed\n",
-                    "ci={ci:?} conformance={conformance:?}"
-                );
-            }
         }
     }
+}
+
+#[test]
+fn gradle_matrix_caches_the_isolated_user_home_it_actually_consumes() {
+    let workflow = workflow();
+    let gradle = job(&workflow, "gradle");
+    assert!(
+        gradle.contains("          cache-provider: external\n"),
+        "setup-gradle must not restore an unused default user home: {gradle}"
+    );
+    assert!(
+        gradle.contains("          path: ${{ runner.temp }}/krusty-gradle-user-home/caches\n")
+            && gradle.contains(
+                "          KRUSTY_GRADLE_USER_HOME: ${{ runner.temp }}/krusty-gradle-user-home\n"
+            ),
+        "the cache path and harness user home must be the same directory: {gradle}"
+    );
+    for key_input in [
+        "${{ matrix.gradle }}",
+        "${{ matrix.kotlin }}",
+        "${{ matrix.ksp }}",
+        "crates/krusty-build/src/gradle.rs",
+        "tools/krusty-gradle/**",
+    ] {
+        assert!(
+            gradle.contains(key_input),
+            "the integration cache key must track {key_input}: {gradle}"
+        );
+    }
+    assert!(
+        job(&workflow, "build-gradle-plugin").contains("          cache-provider: basic\n"),
+        "the plugin build itself still uses setup-gradle caching"
+    );
 }
 
 #[test]
