@@ -2860,8 +2860,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   import, star import, and the default imports, so a later `java.io.File`, a bare `List`, and an
   extension receiver `CharSequence` still resolve. Aborting the whole per-file scope on the first
   unresolved qualifier reported those names as unresolved too. An unresolved star import is
-  omitted from the star level the same way. The import diagnostic itself is a file fact: body
-  checking re-enters the file once per declaration group and reports that segment only once.
+  omitted from the star level the same way. The import diagnostic itself is a file fact: the
+  module import pass reports it once before signature finalization, independently of whether any
+  declaration signature succeeds and reaches body checking.
   Tests:
   `import_resolution_diag_e2e::an_unresolved_import_keeps_the_rest_of_the_file_scope`,
   `::an_unresolved_star_import_keeps_default_imports`.
@@ -2873,10 +2874,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   header — `class Same<T> : Any`, or `typealias Same<T> = List<T>` for an alias import. An
   expression qualifier commits its root first, so a constructor call `Same()` binds no root and
   reports `unresolved reference 'Same'.` (kotlinc 2.4.20). Signature collection and the body
-  checker read the same facet-based explicit candidates; neither picks the last import. KNOWN GAP:
-  the Pass-2 module provider (`StreamedModuleSymbols::symbols`) publishes no classifier facet for a
-  same-module `typealias`, so a same-module alias import neither conflicts nor becomes a candidate
-  in body checking; the alias tests therefore import the alias from a kotlinc-compiled dependency.
+  checker read the same facet-based explicit candidates; both current-module providers publish a
+  typealias as its own declaration identity plus its expanded classifier, including an alias nested
+  in a classifier, and neither picks the last import. Import conflicts are reported before
+  signature finalization, so a file whose only use is in a rejected signature retains the complete
+  import ledger.
   Tests: `import_scope_conformance_e2e::conflicting_classifier_imports_report_the_complete_kotlinc_ledger`
   and its `conflicting_*` siblings.
 - **A signature-pass member call hands its parameter to a nested generic call.** A nested call

@@ -305,6 +305,52 @@ fn conflicting_generic_classifier_imports_render_type_parameters() {
     );
 }
 
+#[test]
+fn conflicting_same_module_typealias_imports_keep_both_declarations() {
+    assert_conflicting_classifier_imports(
+        &[
+            ("A.kt", "package a\ntypealias Same = String\n"),
+            ("B.kt", "package b\ntypealias Same = Int\n"),
+        ],
+        &[],
+        "import a.Same\nimport b.Same\nfun use(value: Same?) = value\n",
+        &[(3, 16, "overload resolution ambiguity between candidates:\ntypealias Same = String\ntypealias Same = Int")],
+    );
+}
+
+#[test]
+fn conflicting_class_and_same_module_typealias_keep_both_declarations() {
+    assert_conflicting_classifier_imports(
+        &[
+            ("A.kt", "package a\nclass Same\n"),
+            ("B.kt", "package b\ntypealias Same = Int\n"),
+        ],
+        &[],
+        "import a.Same\nimport b.Same\nfun use(value: Same?) = value\n",
+        &[(3, 16, "overload resolution ambiguity between candidates:\nclass Same : Any\ntypealias Same = Int")],
+    );
+}
+
+#[test]
+fn conflicting_imports_are_reported_when_only_the_signature_fails() {
+    assert_conflicting_classifier_imports(
+        &[
+            ("A.kt", "package a\ntypealias Same = String\n"),
+            ("B.kt", "package b\ntypealias Same = Int\n"),
+        ],
+        &[],
+        "import a.Same\nimport b.Same\nfun use(value: Same): Missing = value\n",
+        &[
+            (
+                3,
+                16,
+                "overload resolution ambiguity between candidates:\ntypealias Same = String\ntypealias Same = Int",
+            ),
+            (3, 23, "unresolved reference 'Missing'."),
+        ],
+    );
+}
+
 fn assert_mixed_imports_run(main: &str) {
     let sources = [
         (
