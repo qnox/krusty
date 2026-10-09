@@ -20,14 +20,60 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
-/// The platform a KLIB is compiled for, as its manifest names it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+use crate::kotlin_version::KotlinVersion;
+use crate::language_version::LanguageVersion;
+
+/// The platform a KLIB's declarations are compiled for, as its manifest names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KlibPlatform {
-    /// Kotlin/Native, for the listed Konan targets (`linux_x64`, …).
-    Native { targets: Vec<String> },
+    /// Kotlin/Native. A metadata library is not bound to a Konan target, so its manifest lists none.
+    Native,
 }
 
-/// A KLIB under construction.
+/// The versions a KLIB's manifest is stamped with: the compiler release that wrote it and the
+/// metadata version of its fragments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KlibStamp {
+    pub compiler: KotlinVersion,
+    /// `metadata_version`: what the finalized language level stamps, or a selected
+    /// `-Xmetadata-version`.
+    pub metadata_version: [i32; 3],
+}
+
+impl KlibStamp {
+    /// What `compiler` stamps on a library compiled at source-language level `language`.
+    ///
+    /// Read off `kotlinc-native -p library -Xmetadata-klib -language-version <language>`: 2.4.0 and
+    /// 2.4.10 stamp `1.4.1` below language 2.3, and 2.4.20 stamps the language level itself. Keyed
+    /// by exact releases, as the supported language levels are.
+    pub fn new(compiler: KotlinVersion, language: LanguageVersion) -> Self {
+        let legacy_stamp = matches!(compiler, KotlinVersion::V2_4_0 | KotlinVersion::V2_4_10)
+            && language < LanguageVersion::V2_3;
+        Self {
+            compiler,
+            metadata_version: if legacy_stamp {
+                [1, 4, 1]
+            } else {
+                language.metadata_version()
+            },
+        }
+    }
+
+    /// Stamp `metadata_version` instead of the language level's (`-Xmetadata-version`).
+    pub fn with_metadata_version(mut self, metadata_version: [i32; 3]) -> Self {
+        self.metadata_version = metadata_version;
+        self
+    }
+
+    /// `abi_version`: the KLIB ABI of the compiler release. Every supported release writes its
+    /// own major and minor at every language level (2.4.0 at language 2.0 through 2.4).
+    fn abi_version(self) -> String {
+        format!("{}.{}.0", self.compiler.major, self.compiler.minor)
+    }
+}
+
+/// A metadata KLIB under construction: the `linkdata` declarations of a module and no serialized
+/// IR, laid out as `kotlinc-native -p library -Xmetadata-klib` lays one out.
 pub struct KlibWriter {
     manifest: BTreeMap<String, String>,
     module_name: String,
@@ -36,35 +82,33 @@ pub struct KlibWriter {
 }
 
 impl KlibWriter {
-    /// A library named `unique_name`, compiled by the Kotlin `compiler_version` for `platform`,
-    /// whose declarations reference `depends` (other libraries' unique names, `stdlib` included).
-    pub fn new(
-        unique_name: &str,
-        compiler_version: crate::kotlin_version::KotlinVersion,
-        platform: &KlibPlatform,
-        depends: &[String],
-    ) -> Self {
-        // The ABI and metadata versions are the compiler's language version.
-        let language_version = format!("{}.{}.0", compiler_version.major, compiler_version.minor);
+    /// A library named `unique_name`, stamped with `stamp`, for `platform`.
+    ///
+    /// The manifest is the reference compiler's for a metadata library: no dependencies, no Konan
+    /// target, and `ir_signature_versions=1,2`, which the reference compiler writes on a library
+    /// with no serialized IR too. The entry therefore says nothing about IR being present; the
+    /// absence of `default/ir` does.
+    pub fn new(unique_name: &str, stamp: KlibStamp, platform: KlibPlatform) -> Self {
+        let version = |[major, minor, patch]: [i32; 3]| format!("{major}.{minor}.{patch}");
         let mut manifest = BTreeMap::new();
-        manifest.insert("abi_version".to_string(), language_version.clone());
+        manifest.insert("abi_version".to_string(), stamp.abi_version());
         manifest.insert(
             "compiler_version".to_string(),
             format!(
                 "{}.{}.{}",
-                compiler_version.major, compiler_version.minor, compiler_version.patch
+                stamp.compiler.major, stamp.compiler.minor, stamp.compiler.patch
             ),
         );
         manifest.insert("ir_signature_versions".to_string(), "1,2".to_string());
-        manifest.insert("metadata_version".to_string(), language_version);
+        manifest.insert(
+            "metadata_version".to_string(),
+            version(stamp.metadata_version),
+        );
         manifest.insert("unique_name".to_string(), unique_name.to_string());
-        if !depends.is_empty() {
-            manifest.insert("depends".to_string(), depends.join(" "));
-        }
         match platform {
-            KlibPlatform::Native { targets } => {
+            KlibPlatform::Native => {
                 manifest.insert("builtins_platform".to_string(), "NATIVE".to_string());
-                manifest.insert("native_targets".to_string(), targets.join(" "));
+                manifest.insert("native_targets".to_string(), String::new());
             }
         }
         Self {
@@ -159,15 +203,8 @@ mod tests {
     fn writer() -> KlibWriter {
         let mut writer = KlibWriter::new(
             "lib",
-            crate::kotlin_version::KotlinVersion {
-                major: 2,
-                minor: 4,
-                patch: 10,
-            },
-            &KlibPlatform::Native {
-                targets: vec!["linux_x64".to_string()],
-            },
-            &["stdlib".to_string()],
+            KlibStamp::new(KotlinVersion::V2_4_10, LanguageVersion::V2_4),
+            KlibPlatform::Native,
         );
         writer.add_fragment("p.two", b"two-0".to_vec());
         writer.add_fragment("p.one", b"one-0".to_vec());
@@ -203,23 +240,97 @@ mod tests {
         );
     }
 
+    fn manifest(writer: &KlibWriter) -> String {
+        String::from_utf8(writer.manifest_bytes()).expect("a UTF-8 manifest")
+    }
+
+    /// `kotlinc-native 2.4.10 -p library -Xmetadata-klib -o lib`, byte for byte.
     #[test]
-    fn the_manifest_is_sorted_with_no_header() {
-        let entries = writer().entries();
-        let manifest = &entries
-            .iter()
-            .find(|(name, _)| name == "default/manifest")
-            .expect("a manifest")
-            .1;
+    fn the_manifest_is_the_reference_metadata_library_manifest() {
         assert_eq!(
-            String::from_utf8_lossy(manifest),
+            manifest(&writer()),
             "abi_version=2.4.0\n\
              builtins_platform=NATIVE\n\
              compiler_version=2.4.10\n\
-             depends=stdlib\n\
              ir_signature_versions=1,2\n\
              metadata_version=2.4.0\n\
-             native_targets=linux_x64\n\
+             native_targets=\n\
+             unique_name=lib\n"
+        );
+    }
+
+    /// The `abi_version` and `metadata_version` the reference compilers write with
+    /// `-language-version <level> -Xmetadata-klib`, for every supported release and language level.
+    #[test]
+    fn the_stamp_follows_the_language_level_as_each_release_does() {
+        let releases = [
+            KotlinVersion::V2_4_0,
+            KotlinVersion::V2_4_10,
+            KotlinVersion::V2_4_20,
+        ];
+        let languages = [
+            LanguageVersion::V2_0,
+            LanguageVersion::V2_1,
+            LanguageVersion::V2_2,
+            LanguageVersion::V2_3,
+            LanguageVersion::V2_4,
+        ];
+        let stamps = releases
+            .iter()
+            .flat_map(|&compiler| {
+                languages.iter().map(move |&language| {
+                    let writer = KlibWriter::new(
+                        "lib",
+                        KlibStamp::new(compiler, language),
+                        KlibPlatform::Native,
+                    );
+                    let versions = manifest(&writer)
+                        .lines()
+                        .filter(|line| {
+                            line.starts_with("abi_version=")
+                                || line.starts_with("metadata_version=")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!("{compiler} {language}: {versions}")
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stamps,
+            [
+                "2.4.0 2.0: abi_version=2.4.0 metadata_version=1.4.1",
+                "2.4.0 2.1: abi_version=2.4.0 metadata_version=1.4.1",
+                "2.4.0 2.2: abi_version=2.4.0 metadata_version=1.4.1",
+                "2.4.0 2.3: abi_version=2.4.0 metadata_version=2.3.0",
+                "2.4.0 2.4: abi_version=2.4.0 metadata_version=2.4.0",
+                "2.4.10 2.0: abi_version=2.4.0 metadata_version=1.4.1",
+                "2.4.10 2.1: abi_version=2.4.0 metadata_version=1.4.1",
+                "2.4.10 2.2: abi_version=2.4.0 metadata_version=1.4.1",
+                "2.4.10 2.3: abi_version=2.4.0 metadata_version=2.3.0",
+                "2.4.10 2.4: abi_version=2.4.0 metadata_version=2.4.0",
+                "2.4.20 2.0: abi_version=2.4.0 metadata_version=2.0.0",
+                "2.4.20 2.1: abi_version=2.4.0 metadata_version=2.1.0",
+                "2.4.20 2.2: abi_version=2.4.0 metadata_version=2.2.0",
+                "2.4.20 2.3: abi_version=2.4.0 metadata_version=2.3.0",
+                "2.4.20 2.4: abi_version=2.4.0 metadata_version=2.4.0",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_selected_metadata_version_replaces_the_language_stamp() {
+        let stamp = KlibStamp::new(KotlinVersion::V2_4_20, LanguageVersion::V2_4)
+            .with_metadata_version([2, 3, 0]);
+        let writer = KlibWriter::new("lib", stamp, KlibPlatform::Native);
+        assert_eq!(
+            manifest(&writer),
+            "abi_version=2.4.0\n\
+             builtins_platform=NATIVE\n\
+             compiler_version=2.4.20\n\
+             ir_signature_versions=1,2\n\
+             metadata_version=2.3.0\n\
+             native_targets=\n\
              unique_name=lib\n"
         );
     }
@@ -242,8 +353,8 @@ mod tests {
         let archive = crate::klib::KlibArchive::open(&root).expect("open the written library");
         let manifest = archive.manifest().expect("a parsable manifest");
         assert_eq!(manifest.unique_name(), Some("lib"));
-        assert_eq!(manifest.depends(), ["stdlib"]);
-        assert_eq!(manifest.targets(), ["linux_x64"]);
+        assert_eq!(manifest.depends(), Vec::<&str>::new());
+        assert_eq!(manifest.targets(), Vec::<&str>::new());
         assert_eq!(
             archive
                 .package_fragments()

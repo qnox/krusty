@@ -11,7 +11,7 @@ use crate::diag::DiagSink;
 use crate::metadata::declaration_records;
 use crate::metadata::klib_fragment::{package_fragment, KlibFileMembers};
 
-use super::write::{KlibPlatform, KlibWriter};
+use super::write::{KlibPlatform, KlibStamp, KlibWriter};
 
 /// The prefix of every construct this backend declines; what follows names the construct.
 pub const DECLINE_PREFIX: &str = "krusty: the KLIB writer does not support ";
@@ -19,17 +19,16 @@ pub const DECLINE_PREFIX: &str = "krusty: the KLIB writer does not support ";
 /// Writes a module as a KLIB.
 pub struct KlibBackend {
     platform: KlibPlatform,
-    depends: Vec<String>,
+    stamp: KlibStamp,
     annotations_in_metadata: bool,
 }
 
 impl KlibBackend {
-    /// A library for `platform` whose declarations reference `depends` (the unique names of the
-    /// libraries it was compiled against, `stdlib` first).
-    pub fn new(platform: KlibPlatform, depends: Vec<String>) -> Self {
+    /// A library for `platform`, stamped with the compilation's finalized versions.
+    pub fn new(platform: KlibPlatform, stamp: KlibStamp) -> Self {
         Self {
             platform,
-            depends,
+            stamp,
             annotations_in_metadata: true,
         }
     }
@@ -108,12 +107,7 @@ impl Backend for KlibBackend {
     }
 
     fn finalize(&self, state: Self::State, module_name: &str) -> Vec<Artifact> {
-        let mut writer = KlibWriter::new(
-            module_name,
-            crate::kotlin_version::target(),
-            &self.platform,
-            &self.depends,
-        );
+        let mut writer = KlibWriter::new(module_name, self.stamp, self.platform);
         for (package, fragment) in state.fragments {
             writer.add_fragment(&package, fragment);
         }
