@@ -705,6 +705,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 &resolved_arguments,
                 &resolved_type_arguments,
                 selection.trailing_lambda,
+                qualified,
                 expected,
                 demand,
             )

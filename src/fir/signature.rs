@@ -668,6 +668,9 @@ pub trait SignatureSemantics {
         arguments: &[ResolvedSigCallArgument<'_>],
         type_arguments: &[ResolvedTy],
         trailing_lambda: bool,
+        // The compact graph already bound a syntactically qualified call's root as a namespace.
+        // Final selection must not retry that root as a value.
+        qualified_namespace: bool,
         expected: Option<ResolvedTy>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;

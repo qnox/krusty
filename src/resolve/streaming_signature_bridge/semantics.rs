@@ -1254,6 +1254,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
+        qualified_namespace: bool,
         expected: Option<crate::fir::ResolvedTy>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
@@ -1338,28 +1339,30 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     demand,
                 );
             }
-            if let Some(receiver) =
-                self.qualified_value_receiver(scope, qualifier, origin, demand)?
-            {
-                return self
-                    .select_member_call(
-                        scope,
-                        name,
-                        origin,
-                        receiver,
-                        arguments,
-                        type_arguments,
-                        trailing_lambda,
-                        expected,
-                        demand,
-                    )
-                    .and_then(|selection| selection.ty.ok_or_else(Self::failure));
+            if !qualified_namespace {
+                if let Some(receiver) =
+                    self.qualified_value_receiver(scope, qualifier, origin, demand)?
+                {
+                    return self
+                        .select_member_call(
+                            scope,
+                            name,
+                            origin,
+                            receiver,
+                            arguments,
+                            type_arguments,
+                            trailing_lambda,
+                            expected,
+                            demand,
+                        )
+                        .and_then(|selection| selection.ty.ok_or_else(Self::failure));
+                }
             }
             // A dotted callee is either PACKAGE-qualified (`kotlin.collections.listOf`) or a member
             // call on a qualified RECEIVER (`E.valueOf`, `E.OK.toString`, `C.Companion.of`). The
-            // value-root form was committed above. With no value root, package and classifier
-            // namespace interpretations remain; associated values reached through those namespaces
-            // are folded into a receiver only after namespace resolution.
+            // compact graph has already committed an ordinary value-root form before this call.
+            // Package and classifier namespace interpretations remain; associated values reached
+            // through those namespaces are folded into a receiver only after namespace resolution.
             let package_call = self.select_qualified_package_call(
                 scope,
                 spelling,
