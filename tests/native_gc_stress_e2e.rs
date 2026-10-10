@@ -29,17 +29,8 @@ use super::common;
 struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new(tag: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "krusty-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |elapsed| elapsed.as_nanos())
-        ));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("create scratch directory");
-        Self(path)
+    fn new() -> Self {
+        Self(common::scratch_dir().expect("allocate native GC stress scratch directory"))
     }
 
     fn path(&self) -> &Path {
@@ -100,7 +91,7 @@ fn run(source: &str) -> String {
         .map(|(_, bytes)| bytes.as_slice())
         .collect::<Vec<_>>();
     let image = krusty::native::link_program(&objects, target).expect("link");
-    let scratch = Scratch::new("stress");
+    let scratch = Scratch::new();
     let executable = scratch.path().join("program");
     std::fs::write(&executable, &image).expect("write");
     #[cfg(unix)]

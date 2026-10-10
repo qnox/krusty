@@ -6828,6 +6828,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A fully-qualified CONSTRUCTOR call via a package path `a.b.Ctx(x = 1, y = 2)`.** The prefix commits
   as a package and `Ctx` is one classifier edge. The checker records the selected constructor and
   result identity; lowering consumes those facts. Test: `tests/fq_ctor_call_e2e.rs`.
+- **A construction of a module class records the selected constructor declaration.** Common IR
+  maps each construction to the checked constructor declaration the checker selected, and copies
+  one module record per such declaration, and per constructor the file itself declares: the
+  constructed classifier's qualified identity and declaration flags, the constructor's flags,
+  visibility, context-parameter count, its complete declared parameter list at stored value types,
+  and an inner class's enclosing classifier. The declaring file and every constructing file copy
+  the record from the same declaration, so a backend realizes both sides of the call from
+  identical facts. Test: `a_cross_file_construction_records_the_selected_constructor_and_its_declaration`
+  in `src/fir_lower/construction_target_tests.rs`.
 - **`break` / `continue` in EXPRESSION position (`val v = x ?: continue`, a `when` arm).** Kotlin's
   `break`/`continue` are `Nothing`-typed expressions (like `return`/`throw`), not only statements — new
   `Expr::Break`/`Expr::Continue` (parsed in `parse_prefix`, typed `Ty::Nothing`, `expr_diverges`), lowered
@@ -7633,9 +7642,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`src/jvm/java_stub.rs::interface_fields_are_implicitly_public_static_final`).
 
 - **All-caps Java getters map to decapitalize-smart properties.** `getID()` reads as `id`,
-  `getURLPath()` as `urlPath` — the physical-getter fallback tries the re-uppercased leading-run
-  spelling after the conventional `getX`
+  `getURLPath()` as `urlPath`: the method's spelling lowercases its leading uppercase run
   (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_maps_all_caps_java_getters_to_properties`).
+  An `isX` property keeps `isX()` and also accepts `getIsX()` (`getIsInstanceType()` reads as
+  `isInstanceType`), including from inside an extension of the same name
+  (`tests/java_source_interop_e2e.rs::java_get_is_accessor_is_an_is_property`). kotlinc never
+  reads `getIsX()` as `x`, reads a non-boolean `String isX()` as `isX`, and makes no property of a
+  lowercase `getisX()`, a getter with a parameter, or a static getter; both compilers report the
+  same unresolved references (`java_is_prefixed_getter_spellings_match_kotlinc`). The JVM provider
+  inventories a Java classifier's methods once and indexes each by the property its spelling
+  declares; lookup reads that index and never guesses getter spellings from the property name.
+  `isX()` and `getIsX()` both declaring `isX` make a read ambiguous ("overload resolution ambiguity
+  between candidates:" listing `val isX: …` for each, the `isX` getter first). A setter is named
+  from its getter's spelling: `isX` pairs with `setX`, `getIsX` with `setIsX` (so `getIsX` plus
+  `setX` is a `val`), and `getURLPath` with `setURLPath`. Verified against kotlinc 2.4.20
+  (`java_accessor_collisions_and_setter_pairing_match_kotlinc`,
+  `java_get_is_accessor_pairs_with_its_own_setter`).
 
 - **Modifier-prefixed local functions parse in any body.** `tailrec fun`/`suspend fun` local
   declarations are statements everywhere, not only in scripts; the soft-keyword prefix no longer
@@ -12340,14 +12362,79 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Native: a file's top-level initializers run once, including from another file.** Each source
   file exports one initializer. The entry calls its own before `main` or `box`. A call to a
   top-level function defined in another file of the module calls that file's initializer first, so
-  a property declared there has its value even when that file is not the entry. The initializer
+  a property declared there has its value even when that file is not the entry. A read or write of a
+  package-level property declared in another file calls that property's getter or setter entry
+  point, which the declaring file defines from the checked property identity: the entry point runs
+  the initializer, then reads or writes the property the way a use in its own file does (its slot,
+  or its source-written or delegated accessor), converting between that storage and the declared
+  type. The value crosses at the declared type, so a value-class property is its underlying value
+  and a property with an explicit backing field is read at its public type. An inline function
+  spliced into the caller still updates the property in the file that declared it. An assignment
+  evaluates its right-hand side before the setter runs the initializer, so the initializer cannot
+  observe the assigned value and cannot overwrite it. The initializer
   runs at most once: a second call, from the entry or from another file, is a return. The
   once-only flag is set before the initializers run, so an initializer that reaches back into its
   own file sees the property defaults and does not recurse. A property initializer that increments
-  a `var` and is then read through two calls still reports the one increment.
+  a `var` and is then read through two calls still reports the one increment. A `lateinit` read
+  from another file throws `UninitializedPropertyAccessException` until the property is assigned.
   Tests: `tests/native_cross_file_e2e.rs`
   (`a_top_level_property_in_another_file_is_initialized_before_the_call`,
-  `a_file_initializer_runs_once_however_many_calls_arrive`).
+  `a_file_initializer_runs_once_however_many_calls_arrive`,
+  `a_package_property_is_read_from_the_file_that_stores_it`,
+  `an_inline_function_updates_a_package_property_in_its_own_file`,
+  `an_assignment_evaluates_its_value_before_the_defining_file_initializes`,
+  `a_lateinit_package_property_throws_until_assigned`,
+  `a_package_value_class_property_is_stored_as_its_value`,
+  `an_explicit_backing_field_is_read_at_the_public_type`,
+  `a_source_written_package_accessor_runs_in_its_own_file`).
+- **Native: a member property declared in another file is reached through its declaring file.**
+  A member property of a class, object, or enum declared in another file of the module is read and
+  written through the same getter and setter entry points as a package property, keyed by the
+  checked property identity; they take the receiver first, typed as the declaring classifier. The
+  declaring file realizes the access as a use in that file does: a backing field (a `lateinit`
+  field throws `UninitializedPropertyAccessException` until assigned), a source-written or
+  delegated accessor, or the dispatch slot of an `open` member, so an override in a subclass is
+  selected. The value crosses at the declared type: a value-class-typed member is its underlying
+  value, and a generic member is its declared type parameter, which each use site adapts to its own
+  instantiation (`Box<Int>` reads an `Int`, `Box<String>` a `String`). The using file evaluates the
+  receiver first and, for an assignment, the new value next. The entry point does not run the
+  declaring file's top-level initializer: the instance's constructor has already run. An interface
+  or annotation member, a classifier constant, an extension or context property, and a property of
+  a local or anonymous class are not this access.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`a_member_val_is_read_from_the_file_that_declares_the_class`,
+  `a_member_var_is_updated_from_another_file`,
+  `an_initializer_in_another_file_reads_a_member`,
+  `a_member_assignment_evaluates_the_receiver_before_the_value`,
+  `a_lateinit_member_throws_until_assigned`,
+  `a_value_class_typed_member_is_carried_as_its_value`,
+  `a_generic_member_is_read_at_each_instantiation`,
+  `an_open_member_and_a_source_written_getter_run_in_the_declaring_file`).
+- **Native: a class declared in another file is constructed through its declaring file.** A
+  construction of a module class whose layout this file does not hold calls the allocating entry
+  point of the constructor the checker selected. Both files derive that entry point from one
+  module record of the constructor declaration: its symbol spells the class's qualified name and
+  the constructor's complete declared parameter list (behind an inner class's enclosing
+  classifier), so two constructors of one class never share it and neither file depends on the
+  other's lowering. The constructing file evaluates every argument in source order first. The
+  entry point then runs the declaring file's top-level initializer, allocates, converts each
+  declared parameter to what that file's constructor takes, and calls it; a value class answers
+  its underlying value. An inner class takes its enclosing instance first. A generic class takes
+  its declared type parameters, which each construction adapts from its own instantiation. An
+  interface, annotation, enum, object, abstract, sealed, local, or `expect` class, a private
+  constructor, a constructor with context parameters, and a call that leaves a default argument
+  to the declaration are not this call. A constructor the plan supports but the declaring file
+  cannot realize is an internal error in that file, not a missing symbol.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`a_class_is_constructed_from_the_file_that_does_not_declare_it`,
+  `a_constructed_member_var_is_updated_from_the_calling_file`,
+  `an_empty_constructor_runs_the_property_initializer`,
+  `a_secondary_constructor_in_another_file_delegates`,
+  `overloaded_constructors_in_another_file_stay_distinct`,
+  `a_constructor_reads_its_own_file_after_the_arguments_are_evaluated`,
+  `a_generic_class_is_constructed_at_each_instantiation_from_another_file`,
+  `an_inner_class_is_constructed_with_its_outer_instance`,
+  `a_value_class_constructed_in_another_file_is_its_value`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs
@@ -12375,8 +12462,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's wording. The configured severity is applied before compilation: `error` fails the
   invocation, `warning` reports it, and `disabled` omits it. The Bazel worker normalizes
   `--x_warning_level` to the standard compiler option, and the Gradle plugin transports the option
-  unchanged; neither owns a duplicate diagnostic-name registry. `-Werror` and
-  `allWarningsAsErrors` remain rejected until the compiler models their global policy.
+  unchanged; neither owns a duplicate diagnostic-name registry. One warning policy owns the
+  global and named settings. `-Werror` reports and fails on every warning without an explicit
+  override; `-nowarn` suppresses compiler and module warnings; and `-Werror` wins when both global
+  flags are present, independent of order. Kotlinc's command-line configuration warnings remain
+  visible under plain `-nowarn`. An explicit named `warning`, `error`, or `disabled` level wins over
+  either global flag. Gradle's `compilerOptions.allWarningsAsErrors` forwards `-Werror` into that
+  same policy. `compilerVersion` must equal the applied Kotlin Gradle plugin version, which must be
+  an exact supported release; a pre-release or RC suffix is rejected.
   (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
   `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
@@ -14587,6 +14680,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_nearer_double_range_to_is_a_contains_call`,
   `tests/custom_floating_range_membership_e2e.rs`, box
   `ranges/contains/inComparableRange.kt`.
+
+- **A KLIB body's built-in relation is the source comparison.** Kotlin serializes `a < b` (and `<=`,
+  `>`, `>=`) on two operands of one primitive type as a call of a compiler built-in,
+  `kotlin.internal.ir.less` (`lessOrEqual`, `greater`, `greaterOrEqual`), which no library declares.
+  Lowering a dependency body joins such a call by exact public signature to a closed table of those
+  declarations, each signed by the KLIB mangler from its shape `name(T, T)`, and lowers it exactly as
+  checked FIR lowers the source operator: the primitive relation over the two operands. On `Float`
+  and `Double` that relation is IEEE (`1.0 < NaN` and `-0.0 < 0.0` are false), as the built-in is,
+  never `compareTo`'s total order. The table covers `Int`, `Long`, `Float` and `Double`; any other
+  built-in call declines by its signature. Tests:
+  `klib_lowering::ir_builtins::tests::relations_are_signed_as_the_stdlib_calls_them`,
+  `klib_lowering::tests::a_built_in_relation_lowers_as_the_source_comparison_does`,
+  `stdlib_coerce_bodies_lower_as_their_source_does`.
 
 - **Open-end membership names `rangeUntil`.** `x in a..<b`, `x in a until b`, and
   `x in a downTo b` first select that syntax's operator. The result then uses `contains` unless the

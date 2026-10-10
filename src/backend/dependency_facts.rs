@@ -96,6 +96,19 @@ impl BackendCallableFact {
             ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
         )
     }
+
+    /// The target-free declaration view used when a selected KLIB body is lowered to common IR.
+    pub fn klib_body_callable(&self) -> Option<crate::libraries::KlibBodyCallable<'_>> {
+        crate::libraries::KlibBodyCallable::new(
+            &self.name,
+            self.kind,
+            &self.params,
+            self.ret,
+            &self.parameter_identities,
+            self.context_count,
+            self.declaration_signature.as_ref(),
+        )
+    }
 }
 
 /// What the provider normalized for one selected dependency property.
