@@ -1960,7 +1960,16 @@ fn invalid_dependency_metadata_is_one_terminal_frontend_diagnostic() {
         .chain(malformed_type_parameter.into_iter().map(char::from))
         .collect::<String>();
     let mut invalid = ClassWriter::new("shadow/Chosen", "java/lang/Object");
-    invalid.set_kotlin_metadata(1, &[2, 2, 0], 0, &[d1], &[]);
+    invalid.set_kotlin_metadata(
+        1,
+        crate::jvm::classfile::MetadataStamp {
+            version: [2, 2, 0],
+            pre_release: false,
+        },
+        0,
+        &[d1],
+        &[],
+    );
     std::fs::write(earlier.join("Chosen.class"), invalid.finish())
         .expect("write invalid Kotlin class");
     std::fs::write(

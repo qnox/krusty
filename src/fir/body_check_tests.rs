@@ -1507,11 +1507,11 @@ fn mixed_open_end_membership_selects_range_until() {
 
 #[test]
 fn uniform_open_end_double_membership_stays_a_comparison() {
-    let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+    if crate::toolchain::stdlib_jar().is_none() {
         return;
-    };
+    }
     let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        crate::toolchain::stdlib_and_jdk_classpath(),
     ))
     .expect("stdlib provider");
     let mut diagnostics = DiagSink::new();
@@ -1935,7 +1935,7 @@ suspend fun inspect(): Boolean {
 "#;
     let mut diagnostics = DiagSink::new();
     let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+        crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
             "// WITH_REFLECT",
         )),
     ))
@@ -1995,7 +1995,7 @@ fun invokeRaw(
 "#;
     let mut diagnostics = DiagSink::new();
     let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for("")),
+        crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for("")),
     ))
     .expect("JVM provider initialization");
     let analysis = crate::frontend::analyze_source_set_with_features(
@@ -2037,7 +2037,7 @@ fun box(): String {
 "#;
     let mut diagnostics = DiagSink::new();
     let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+        crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
             "// WITH_REFLECT",
         )),
     ))

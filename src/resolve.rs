@@ -142,10 +142,11 @@ mod local_method_dependencies;
 mod loop_flow;
 mod member_extension_selection;
 mod member_overload_clash;
+mod missing_dependency_supertypes;
 mod named_class_constructors;
 mod operator_calls;
 mod opt_in_usage;
-use operator_calls::{range_operator, ResolvedInRangeComparison};
+use operator_calls::{range_operator, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess};
 mod enhanced_values;
 mod overload_diagnostics;
 mod override_plans;
@@ -22016,6 +22017,7 @@ impl<'a> Checker<'a> {
     fn stmt(&mut self, scope: &CheckerScope<'_>, s: StmtId) {
         let policy_depth = self.push_statement_policies(scope, s);
         self.stmt_inner(scope, s);
+        self.check_statement_missing_supertypes(s);
         self.active_lexical_policies.truncate(policy_depth);
     }
 
@@ -23340,152 +23342,6 @@ impl<'a> Checker<'a> {
             self.report_assignability_error(expected, Ty::Unit, span, "return");
         }
         expected
-    }
-
-    fn stmt_for(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        statement: StmtId,
-        name: String,
-        range: ForRange,
-        body: ExprId,
-        label: Option<String>,
-    ) {
-        let st = self.expr(scope, range.start);
-        let et = self.expr(scope, range.end);
-        let semantic_st = self.builtin_operator_operand(scope, st);
-        let semantic_et = self.builtin_operator_operand(scope, et);
-        // The counter type is the (uniform) bound type — `Int`, but also `Long` and the
-        // unsigned `UInt`/`ULong` (whose loop the backend emits with unsigned comparison).
-        // A `Byte`/`Short` range widens to an `IntRange` (kotlinc's `Short.rangeTo(Short): IntRange`),
-        // so the counter is `Int` and the bounds coerce up — exactly like a range *value*.
-        let counter = if st == Ty::Nothing {
-            semantic_et.range_counter_type()
-        } else if et == Ty::Nothing {
-            semantic_st.range_counter_type()
-        } else {
-            Ty::range_counter_type_for(semantic_st, semantic_et)
-        };
-        let elem = if let Some(counter) = counter {
-            // The loop counts over a range class's selected members and helpers.
-            self.record_progression_plans();
-            counter
-        } else {
-            let convention = range_operator(range.kind);
-            let span = self.file.stmt_spans[statement.0 as usize];
-            match self.operator_call_ret(
-                scope,
-                range.start,
-                st,
-                convention.name,
-                &[et],
-                &[range.end],
-                span,
-                None,
-            ) {
-                Some((range_ty, range_call)) if range_ty != Ty::Error => {
-                    match self.iterator_protocol_target(
-                        scope,
-                        Some(statement),
-                        range_ty,
-                        span,
-                        true,
-                    ) {
-                        Ok(Some(protocol)) => {
-                            let elem = protocol.elem_ty;
-                            self.resolved_stmt_operator_calls
-                                .insert((statement, convention.key), range_call.clone());
-                            self.resolved_stmt_operator_arg_slots
-                                .insert((statement, convention.key), vec![Some(range.end)]);
-                            self.for_range_iterator_protocols.insert(
-                                statement,
-                                ForRangeIteratorTarget {
-                                    range: Box::new(range_call),
-                                    protocol,
-                                },
-                            );
-                            elem
-                        }
-                        Ok(None) => {
-                            self.diags.error(
-                                span,
-                                format!(
-                                    "krusty: 'for' over '{}' is not supported (missing iterator convention)",
-                                    range_ty.source_name()
-                                ),
-                            );
-                            Ty::Error
-                        }
-                        Err(()) => Ty::Error,
-                    }
-                }
-                Some(_) => Ty::Error,
-                None => {
-                    self.diags.error(
-                        span,
-                        format!(
-                            "operator '{}' cannot be applied to '{}' and '{}'",
-                            convention.name,
-                            st.source_name(),
-                            et.source_name()
-                        ),
-                    );
-                    Ty::Error
-                }
-            }
-        };
-        {
-            let body_scope = scope.child(ScopeKind::Block);
-            let scope = &body_scope;
-            self.declare(scope, &name, elem, true); // loop variable (mutated by the lowering)
-            self.check_loop_body(scope, body, &label);
-        }
-    }
-
-    fn stmt_for_each(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        statement: StmtId,
-        name: String,
-        iterable: ExprId,
-        body: ExprId,
-        label: Option<String>,
-    ) {
-        let it = self.expr(scope, iterable);
-        self.record_iteration_plans(scope, statement, iterable);
-        // Java collection accessors yield flexible platform types (`Set<E>!`). A `for` loop is a
-        // value-consuming operation, so it selects the non-null lower bound exactly as a member call
-        // would; source `Set<E>?` remains nullable and is still rejected.
-        let iteration_ty = it.platform_lower_bound();
-        // An array element type covers primitive arrays and a boxed `Array<T>`
-        // (`Obj("kotlin/Array", [T])`) — iterate either as an array. The variable is a read of
-        // that element: `Array<out T>` and `Array<*>` yield `T`, not the projection wrapper.
-        let elem = if let Some(e) = iteration_ty.array_read_elem() {
-            e
-        } else {
-            if iteration_ty == Ty::String {
-                Ty::Char // iterating a String yields its chars
-            } else if iteration_ty == Ty::Error {
-                Ty::Error
-            } else {
-                match self.record_iterator_protocol(scope, Some(statement), iterable, iteration_ty)
-                {
-                    Ok(Some(elem)) => elem,
-                    Ok(None) => {
-                        self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.source_name()));
-                        Ty::Error
-                    }
-                    Err(()) => Ty::Error,
-                }
-            }
-        };
-        {
-            let body_scope = scope.child(ScopeKind::Block);
-            let scope = &body_scope;
-            let flow_identity = self.declare(scope, &name, elem, false);
-            self.record_enhanced_loop_variable(flow_identity, iterable);
-            self.check_loop_body(scope, body, &label);
-        }
     }
 
     /// Type-check a local function declaration (`fun` inside a function body). Non-capturing local
@@ -28343,7 +28199,7 @@ fun box(): String {
         let source = "val String.length: String get() = \"bad\"\n\
              fun len(s: String, n: String?): Int = s.length + (n?.length ?: 0)";
         let mut diagnostics = DiagSink::new();
-        let cp = std::rc::Rc::new(crate::toolchain::stdlib_classpath());
+        let cp = std::rc::Rc::new(crate::toolchain::stdlib_and_jdk_classpath());
         let (file, symbols, info) = crate::frontend::analyze_source(
             source,
             jvm_platform(Box::new(initialized_jvm_libraries(cp))),
@@ -28422,8 +28278,9 @@ fun box(): String {
         let source = "enum class Direct { VALUE }\n\
              class Owner { enum class Nested { VALUE } }\n\
              fun inspect() { Direct.entries; Owner.Nested.entries }";
-        let platform =
-            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
+            crate::toolchain::stdlib_and_jdk_classpath(),
+        ));
         let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         let reads = file
             .expr_arena
@@ -28492,8 +28349,9 @@ fun box(): String {
     fn enum_name_and_ordinal_are_ordinary_inherited_properties() {
         let source = "enum class State { READY }\n\
              fun inspect(state: State): String = state.name + state.ordinal";
-        let platform =
-            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
+            crate::toolchain::stdlib_and_jdk_classpath(),
+        ));
         let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         assert_no_diags(&diagnostics);
 
@@ -33505,8 +33363,10 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         extension_receiver_expr_uses: vec![Vec::new(); file.expr_arena.len()],
         extension_receiver_stmt_uses: vec![Vec::new(); file.stmt_arena.len()],
         resolved_operator_calls: HashMap::new(),
+        resolved_builtin_operator_accesses: HashMap::new(),
         resolved_in_range_comparisons: HashMap::new(),
         resolved_stmt_operator_calls: HashMap::new(),
+        resolved_stmt_builtin_operator_accesses: HashMap::new(),
         resolved_stmt_operator_arg_slots: HashMap::new(),
         indexed_operator_ambiguous: false,
         resolved_inc_dec: HashMap::new(),
@@ -36129,8 +35989,15 @@ struct Checker<'a> {
     extension_receiver_expr_uses: Vec<Vec<Span>>,
     extension_receiver_stmt_uses: Vec<Vec<Span>>,
     resolved_operator_calls: HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
+    /// Builtin scalar operators lower without a callable target, but checking still records
+    /// their exact semantic dispatch classifier for qualified-access diagnostics.
+    resolved_builtin_operator_accesses:
+        HashMap<(ExprId, SyntheticOperatorCall), SelectedBuiltinOperatorAccess>,
     resolved_in_range_comparisons: HashMap<ExprId, ResolvedInRangeComparison>,
     resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
+    /// Statement counterpart of [`Self::resolved_builtin_operator_accesses`].
+    resolved_stmt_builtin_operator_accesses:
+        HashMap<(StmtId, SyntheticOperatorCall), SelectedBuiltinOperatorAccess>,
     resolved_stmt_operator_arg_slots: HashMap<(StmtId, SyntheticOperatorCall), Vec<Option<ExprId>>>,
     /// Set by indexed operator selection so assignment never retries `put` after an ambiguous `set`.
     indexed_operator_ambiguous: bool,
@@ -46471,6 +46338,8 @@ impl<'a> Checker<'a> {
         let checked = self.type_ref_ty(scope, bound);
         if checked.contains_error() {
             self.report_unresolved_type_ref(bound);
+        } else {
+            self.check_bound_missing_supertypes(bound, checked);
         }
         let bound_is_interface =
             crate::fir::ResolvedTypeParameterBound::is_interface_type(checked, |owner| {
@@ -50053,6 +49922,9 @@ impl<'a> Checker<'a> {
                         .insert(owner, supertypes.into_boxed_slice());
                 }
             }
+        }
+        if !self.fragment.is_type_use_annotations() {
+            self.check_class_missing_supertypes(cl, d, current_owner, is_anonymous_object);
         }
         self.validate_class_superclass(d, cl, current_owner);
         // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so
@@ -55618,6 +55490,7 @@ impl<'a> Checker<'a> {
             self.expr_inner(scope, e, expected, value_required)
         });
         self.check_expression_opt_in(scope, e);
+        self.check_expression_missing_supertypes(e);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
         self.expr_depth -= 1;
@@ -58850,9 +58723,13 @@ impl<'a> Checker<'a> {
             IncDecSite::Expression(expression) => {
                 self.resolved_operator_calls
                     .remove(&(expression, operator_key));
+                self.resolved_builtin_operator_accesses
+                    .remove(&(expression, operator_key));
             }
             IncDecSite::Statement(statement) => {
                 self.resolved_stmt_operator_calls
+                    .remove(&(statement, operator_key));
+                self.resolved_stmt_builtin_operator_accesses
                     .remove(&(statement, operator_key));
             }
         }
@@ -58870,6 +58747,18 @@ impl<'a> Checker<'a> {
         let mut selected = None;
         for receiver_ty in receivers {
             if let Some(updated_ty) = builtin_inc_dec_result(receiver_ty) {
+                if let Some(access) = SelectedBuiltinOperatorAccess::member(receiver_ty) {
+                    match site {
+                        IncDecSite::Expression(expression) => {
+                            self.resolved_builtin_operator_accesses
+                                .insert((expression, operator_key), access);
+                        }
+                        IncDecSite::Statement(statement) => {
+                            self.resolved_stmt_builtin_operator_accesses
+                                .insert((statement, operator_key), access);
+                        }
+                    }
+                }
                 selected = Some((receiver_ty, updated_ty, None));
                 break;
             }
@@ -60578,6 +60467,17 @@ impl<'a> Checker<'a> {
             operator_span,
             prepared_lhs,
         } = operands;
+        let operator_key = match op {
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(SyntheticOperatorCall::CompareTo),
+            _ => op
+                .arith_operator_name()
+                .and_then(SyntheticOperatorCall::from_name),
+        };
+        if let Some(operator) = operator_key {
+            self.resolved_operator_calls.remove(&(e, operator));
+            self.resolved_builtin_operator_accesses
+                .remove(&(e, operator));
+        }
         let t = {
             if matches!(op, BinOp::And | BinOp::Or) {
                 let lt = match prepared_lhs {
@@ -60887,7 +60787,17 @@ impl<'a> Checker<'a> {
             }
             let builtin_lt = self.builtin_operator_operand(scope, lt);
             let builtin_rt = self.builtin_operator_operand(scope, rt);
-            self.check_binary(op, builtin_lt, builtin_rt, self.span(e))
+            let result = self.check_binary(op, builtin_lt, builtin_rt, self.span(e));
+            if result != Ty::Error {
+                if let (Some(operator), Some(access)) = (
+                    operator_key,
+                    SelectedBuiltinOperatorAccess::member(builtin_lt),
+                ) {
+                    self.resolved_builtin_operator_accesses
+                        .insert((e, operator), access);
+                }
+            }
+            result
         };
         self.set(e, t)
     }
@@ -63609,10 +63519,18 @@ impl<'a> Checker<'a> {
         // Expected-type checking may revisit the same arena node.
         self.resolved_operator_calls
             .remove(&(expression, target_key));
+        self.resolved_builtin_operator_accesses
+            .remove(&(expression, target_key));
         // Treat boxed Kotlin primitives as built-in unary operands.
         let semantic_operand = self.builtin_operator_operand(scope, ot);
         match builtin_unary_result(self.libraries, semantic_operand, op) {
-            Some(result) => result,
+            Some(result) => {
+                if let Some(access) = SelectedBuiltinOperatorAccess::member(semantic_operand) {
+                    self.resolved_builtin_operator_accesses
+                        .insert((expression, target_key), access);
+                }
+                result
+            }
             _ if ot == Ty::Error => Ty::Error,
             _ => {
                 let operator_span = Span::new(span.lo, span.lo.saturating_add(1));

@@ -163,8 +163,9 @@ impl Emitter<'_> {
     fn try_emit_indy_concat(&mut self, parts: &[u32], code: &mut CodeBuilder) -> bool {
         const TAG_ARG: char = '\u{1}';
         const TAG_CONST: char = '\u{2}';
-        // JVM 9 = major 53; kotlinc's `-Xstring-concat` default flips to `indy-with-constants` there.
-        if self.cw.major() < 53 {
+        // JVM 9 = major 53; kotlinc's `-Xstring-concat` default flips to `indy-with-constants` there,
+        // unless the invocation selects `inline`.
+        if self.cw.major() < 53 || self.inline_string_concat {
             return false;
         }
         // A branchy part records a merge frame mid-build; matching kotlinc's operand-stack shape across
