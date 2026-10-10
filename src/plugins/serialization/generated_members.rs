@@ -39,6 +39,7 @@ pub(super) fn publish_write_self(ir: &mut IrFile, owner: TypeName, function: u32
     ir.publish_generated_members(owner, write_self_publication(function, owner_line));
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct GeneratedSerializerMembers {
     pub(super) descriptor: u32,
     pub(super) serialize: u32,
@@ -48,6 +49,25 @@ pub(super) struct GeneratedSerializerMembers {
 }
 
 impl GeneratedSerializerMembers {
+    /// The exact members [`add_serializer_members`] declared on `serializer`.
+    pub(super) fn declared(ir: &IrFile, serializer: TypeName) -> Self {
+        let member = |role| {
+            ir.generated_function(serializer, role)
+                .expect("a declared $serializer publishes every generated member role")
+        };
+        Self {
+            descriptor: member(crate::ir::IrGeneratedFunctionRole::SerializationDescriptor),
+            serialize: member(crate::ir::IrGeneratedFunctionRole::SerializationSerialize),
+            deserialize: member(crate::ir::IrGeneratedFunctionRole::SerializationDeserialize),
+            child_serializers: member(
+                crate::ir::IrGeneratedFunctionRole::SerializationChildSerializers,
+            ),
+            type_parameter_serializers: member(
+                crate::ir::IrGeneratedFunctionRole::SerializationTypeParameterSerializers,
+            ),
+        }
+    }
+
     pub(super) fn publication(
         &self,
         generic: bool,
@@ -156,7 +176,21 @@ pub(super) fn descriptor_property(
     }
 }
 
-/// Declare the complete member surface shared by generated serializer classes.
+/// The array both `GeneratedSerializer` array methods return: `Array<KSerializer<*>>`. The
+/// serializers' element types are unrelated; `KSerializer<Any>` is a different Kotlin contract
+/// despite the same erasure. The stored star bound is a semantic read fact; metadata omits its
+/// nested type.
+fn serializer_array() -> Ty {
+    Ty::obj_args(
+        "kotlin/Array",
+        &[kserializer_of(Ty::star_projection(Ty::nullable(class_ty(
+            "kotlin/Any",
+        ))))],
+    )
+}
+
+/// Declare the complete member surface shared by generated serializer classes. Each member's body
+/// is a placeholder its target realization replaces.
 pub(super) fn add_serializer_members(
     ir: &mut IrFile,
     owner: TypeName,
@@ -165,14 +199,17 @@ pub(super) fn add_serializer_members(
     owner_end_line: u32,
     has_type_parameters: bool,
 ) -> GeneratedSerializerMembers {
+    let declared_body = |ir: &mut IrFile| Some(super::generated_body_placeholder(ir, owner));
+    let body = declared_body(ir);
     let descriptor = add_instance_method(
         ir,
         owner,
         "getDescriptor",
         vec![],
         class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-        None,
+        body,
     );
+    let body = declared_body(ir);
     let serialize = add_guarded_instance_method(
         ir,
         owner,
@@ -185,8 +222,9 @@ pub(super) fn add_serializer_members(
             GuardedParameter::new(serialized_type, SERIALIZE_PARAMETER_NAMES[1]),
         ],
         unit(),
-        None,
+        body,
     );
+    let body = declared_body(ir);
     let deserialize = add_guarded_instance_method(
         ir,
         owner,
@@ -196,27 +234,78 @@ pub(super) fn add_serializer_members(
             DESERIALIZE_PARAMETER_NAMES[0],
         )],
         serialized_type,
-        None,
+        body,
     );
-    // Both GeneratedSerializer array methods publish `Array<KSerializer<*>>`: the serializers'
-    // element types are unrelated. `KSerializer<Any>` is a different Kotlin contract despite the
-    // same erasure. The stored star bound is a semantic read fact; metadata omits its nested type.
-    let serializer_array = Ty::obj_args(
-        "kotlin/Array",
-        &[kserializer_of(Ty::star_projection(Ty::nullable(class_ty(
-            "kotlin/Any",
-        ))))],
-    );
+    let body = declared_body(ir);
     let child_serializers = add_instance_method(
         ir,
         owner,
         "childSerializers",
         vec![],
-        serializer_array,
-        None,
+        serializer_array(),
+        body,
     );
-    // `GeneratedSerializer` owns the default implementation. Keep that semantic super-member call
-    // in common IR; a target backend chooses its nonvirtual calling convention and descriptor.
+    let body = declared_body(ir);
+    let type_parameter_serializers = add_instance_method(
+        ir,
+        owner,
+        "typeParametersSerializers",
+        vec![],
+        serializer_array(),
+        body,
+    );
+    // A non-generic serializer delegates to the interface default and publishes that adapter as an
+    // open bridge. A generic serializer supplies its own final array-returning override.
+    if !has_type_parameters {
+        ir.open_methods.insert(type_parameter_serializers);
+        ir.bridge_methods.insert(type_parameter_serializers);
+    }
+    let members = GeneratedSerializerMembers {
+        descriptor,
+        serialize,
+        deserialize,
+        child_serializers,
+        type_parameter_serializers,
+    };
+    for (role, function) in [
+        (
+            crate::ir::IrGeneratedFunctionRole::SerializationDescriptor,
+            members.descriptor,
+        ),
+        (
+            crate::ir::IrGeneratedFunctionRole::SerializationSerialize,
+            members.serialize,
+        ),
+        (
+            crate::ir::IrGeneratedFunctionRole::SerializationDeserialize,
+            members.deserialize,
+        ),
+        (
+            crate::ir::IrGeneratedFunctionRole::SerializationChildSerializers,
+            members.child_serializers,
+        ),
+        (
+            crate::ir::IrGeneratedFunctionRole::SerializationTypeParameterSerializers,
+            members.type_parameter_serializers,
+        ),
+    ] {
+        ir.record_generated_function(owner, role, function);
+    }
+    ir.publish_generated_members(
+        owner,
+        members.publication(has_type_parameters, owner_line, owner_end_line),
+    );
+    members
+}
+
+/// Give a non-generic serializer's `typeParametersSerializers` its body: the `GeneratedSerializer`
+/// default. The call stays a semantic super-member call in common IR; a target backend chooses its
+/// nonvirtual calling convention and descriptor.
+pub(super) fn install_inherited_type_parameter_serializers(
+    ir: &mut IrFile,
+    owner: TypeName,
+    function: u32,
+) {
     let this = ir.add_expr(IrExpr::GetValue(0));
     let inherited = ir.add_expr(IrExpr::Call {
         callee: Callee::Super {
@@ -226,7 +315,7 @@ pub(super) fn add_serializer_members(
             kind: crate::ir::IrSuperCallKind::Function,
             name: "typeParametersSerializers".to_string(),
             params: Vec::new(),
-            ret: serializer_array,
+            ret: serializer_array(),
             interface: true,
             realization: crate::libraries::MemberRealization::Dispatch,
             descriptor: String::new(),
@@ -242,32 +331,7 @@ pub(super) fn add_serializer_members(
         stmts: vec![returned],
         value: None,
     });
-    let type_parameter_serializers = add_instance_method(
-        ir,
-        owner,
-        "typeParametersSerializers",
-        vec![],
-        serializer_array,
-        Some(body),
-    );
-    // A non-generic serializer delegates to the interface default and publishes that adapter as an
-    // open bridge. A generic serializer supplies its own final array-returning override.
-    if !has_type_parameters {
-        ir.open_methods.insert(type_parameter_serializers);
-        ir.bridge_methods.insert(type_parameter_serializers);
-    }
-    let members = GeneratedSerializerMembers {
-        descriptor,
-        serialize,
-        deserialize,
-        child_serializers,
-        type_parameter_serializers,
-    };
-    ir.publish_generated_members(
-        owner,
-        members.publication(has_type_parameters, owner_line, owner_end_line),
-    );
-    members
+    super::complete_generated_body(ir, function, body);
 }
 
 /// A non-null generated-method parameter whose source-visible name is also used by the JVM entry
@@ -508,6 +572,7 @@ mod tests {
         let function = members.type_parameter_serializers;
         assert!(ir.open_methods.contains(&function));
         assert!(ir.bridge_methods.contains(&function));
+        super::install_inherited_type_parameter_serializers(&mut ir, owner, function);
         let body = ir.functions[function as usize]
             .body
             .expect("generated default delegation body");
@@ -581,5 +646,39 @@ mod tests {
         assert!(!ir
             .bridge_methods
             .contains(&members.type_parameter_serializers));
+    }
+
+    #[test]
+    fn generated_member_roles_recover_the_exact_declared_functions() {
+        let mut ir = IrFile::default();
+        let owner = type_name("demo/Box$$serializer");
+        let declared = super::add_serializer_members(
+            &mut ir,
+            owner,
+            Ty::obj_args("demo/Box", &[Ty::ty_param("T", Ty::obj("kotlin/Any"))]),
+            17,
+            23,
+            true,
+        );
+
+        assert_eq!(GeneratedSerializerMembers::declared(&ir, owner), declared);
+        for function in [
+            declared.descriptor,
+            declared.serialize,
+            declared.deserialize,
+            declared.child_serializers,
+            declared.type_parameter_serializers,
+        ] {
+            assert!(matches!(
+                ir.functions[function as usize]
+                    .body
+                    .map(|body| ir.expr(body)),
+                Some(IrExpr::PluginPlaceholder {
+                    plugin: "serialization",
+                    kind: super::super::GENERATED_BODY,
+                    ..
+                })
+            ));
+        }
     }
 }

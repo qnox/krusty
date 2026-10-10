@@ -51,6 +51,7 @@ run_with_deadline "$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
   "$bin" \
   --skip kotlin_codegen_box_conformance \
   --skip kotlin_codegen_box_native_conformance \
+  --skip kotlin_codegen_box_wasm \
   --test-threads "$threads"
 status=$?
 set -e

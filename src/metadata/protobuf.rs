@@ -119,6 +119,11 @@ impl Pb {
         self.field_bytes(field, payload.as_bytes());
     }
 
+    /// Append `other`'s already-framed fields to this message.
+    pub fn append(&mut self, other: &Pb) {
+        self.buf.extend_from_slice(&other.buf);
+    }
+
     /// One element of a `repeated <message>` field (emit the tag+message once per element).
     pub fn repeated_message(&mut self, field: u32, msg: &Pb) {
         self.field_message(field, msg);
