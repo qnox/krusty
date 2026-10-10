@@ -343,9 +343,11 @@ macro_rules! cache_stat {
 
 mod builtin_members;
 mod inline_plan_cache;
+mod versioned_records;
 
 pub(super) use inline_plan_cache::InlinePlanCacheInput;
 use inline_plan_cache::{global_plan_cache, PlanCache, PlanMemo};
+use versioned_records::{ResolvedTypeCache, SymbolsMemo};
 
 /// Hit/miss counter for one cache, aggregated across every `Classpath` and worker thread (per-instance
 /// caches are short-lived, so only a process-global tally shows whole-run efficiency).
@@ -1480,12 +1482,6 @@ type MetaOverloadCache =
 const OPEN_ARCHIVE_CAP: usize = 16;
 const ALIAS_PACKAGE_CAP: usize = 1024;
 const GLOBAL_ALIAS_PACKAGE_CAP: usize = 8192;
-const SYMBOLS_CAP: usize = 65536;
-/// Per API version, the bound of the composed classifier record cache (`resolved_types`).
-const RESOLVED_TYPES_CAP: usize = 65536;
-type ResolvedTypeCache =
-    crate::lru::LruCache<TypeName, Option<std::sync::Arc<crate::libraries::LibraryType>>>;
-type SymbolsMemo = crate::lru::LruCache<String, std::rc::Rc<crate::libraries::ResolvedSymbols>>;
 
 pub struct Classpath {
     entries: Vec<Entry>,
@@ -2024,47 +2020,6 @@ impl Classpath {
             || build_jar_packages(&self.entries[entry_id]),
             |packages| packages.complete,
         )
-    }
-
-    /// Memoized `resolve_type` result for `internal` as seen at `api_version` (the outer `Option` =
-    /// cached-vs-not; the inner = resolved-vs-absent). Warm across compiles because this `Classpath`
-    /// is reused per worker thread.
-    pub fn cached_library_type_name(
-        &self,
-        api_version: LanguageVersion,
-        internal: TypeName,
-    ) -> Option<Option<std::sync::Arc<crate::libraries::LibraryType>>> {
-        if !self.catalog_complete() {
-            cache_stat!(resolved_types, false);
-            return None;
-        }
-        // Deliberately per-INSTANCE only: a `LibraryType` embeds whole-classpath facts (mapped
-        // builtins from whichever stdlib wins THIS set, shadowable supertype walks, member-scope
-        // recursion), so no entry-keyed process-global layer can serve it across compositions.
-        let hit = self
-            .resolved_types
-            .borrow_mut()
-            .get_mut(&api_version)
-            .and_then(|types| types.get(&internal))
-            .cloned();
-        cache_stat!(resolved_types, hit.is_some());
-        hit
-    }
-
-    pub fn cache_library_type_name(
-        &self,
-        api_version: LanguageVersion,
-        internal: TypeName,
-        ty: Option<std::sync::Arc<crate::libraries::LibraryType>>,
-    ) {
-        if !self.catalog_complete() {
-            return;
-        }
-        self.resolved_types
-            .borrow_mut()
-            .entry(api_version)
-            .or_insert_with(|| crate::lru::LruCache::new(RESOLVED_TYPES_CAP))
-            .insert(internal, ty);
     }
 
     /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
@@ -3996,55 +3951,6 @@ impl Classpath {
     /// `PkgMembers`; NOT a whole-classpath scan. A package is consulted at most once.
     pub fn functions_in_scope(&self, name: &str, packages: &[TypeName]) -> Vec<ExtCandidate> {
         candidate_union::functions_in_scope(self, name, packages)
-    }
-
-    /// The spec's top-level memo lookup: the already-composed [`ResolvedSymbols`](crate::libraries::ResolvedSymbols)
-    /// namespace record for a declaration key, or `None` on a cold miss. The classpath `SymbolSource`
-    /// composes the record once (classifier + callables) and stores it with
-    /// [`memoize_symbols`](Self::memoize_symbols).
-    pub fn cached_symbols(
-        &self,
-        api_version: LanguageVersion,
-        namespace: SymbolNamespace,
-        name: &str,
-    ) -> Option<std::rc::Rc<crate::libraries::ResolvedSymbols>> {
-        if !self.catalog_complete() {
-            cache_stat!(symbols_memo, false);
-            return None;
-        }
-        let hit = self
-            .symbols_memo
-            .borrow_mut()
-            .get_mut(&(api_version, namespace))
-            .and_then(|symbols| symbols.get(name))
-            .cloned();
-        cache_stat!(symbols_memo, hit.is_some());
-        hit
-    }
-
-    /// Store the composed namespace record for a declaration key, returning the shared `Rc` the caller
-    /// hands back. See [`cached_symbols`](Self::cached_symbols).
-    pub fn memoize_symbols(
-        &self,
-        api_version: LanguageVersion,
-        namespace: SymbolNamespace,
-        name: &str,
-        symbols: crate::libraries::ResolvedSymbols,
-    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-        let rc = std::rc::Rc::new(symbols);
-        // Misses are records too. Repeating an absent library probe is common when a source module
-        // contributes a same-named local/top-level declaration: the composite source must still ask
-        // every provider so overloads can mix, but the classpath answer stays empty. Cache that answer
-        // under the textual leaf just like a hit. This does not intern the leaf in the name tree, and
-        // the per-namespace LRU keeps the negative working set bounded.
-        if self.catalog_complete() {
-            self.symbols_memo
-                .borrow_mut()
-                .entry((api_version, namespace))
-                .or_insert_with(|| crate::lru::LruCache::new(SYMBOLS_CAP))
-                .insert(name.to_string(), rc.clone());
-        }
-        rc
     }
 
     /// The memoized rebuild for `method_name`, shared across threads and grouped by receiver — a hot name

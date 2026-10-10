@@ -1,8 +1,45 @@
 use super::JvmLibraries;
+use crate::libraries::SemanticPlatform;
+use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, Ty};
 
 fn initialized_libraries(classpath: std::rc::Rc<super::Classpath>) -> JvmLibraries {
     JvmLibraries::new(classpath).expect("JVM provider initialization")
+}
+
+/// Classpath records are shared across worker compilations, but `@SinceKotlin` filtering belongs to
+/// one provider's API version. An older compile must not leave its narrower normalized view behind.
+#[test]
+fn an_older_api_compile_does_not_narrow_a_later_one_on_the_same_classpath() {
+    let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+        return;
+    };
+    fn set_value_receivers(libraries: &JvmLibraries) -> Vec<Ty> {
+        let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "setValue");
+        let mut receivers: Vec<Ty> = symbols
+            .callables
+            .functions()
+            .iter()
+            .filter_map(|function| function.receiver)
+            .collect();
+        receivers.sort_by_key(|receiver| format!("{receiver:?}"));
+        receivers
+    }
+    let shared = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib.clone()]));
+    let older = set_value_receivers(
+        &initialized_libraries(shared.clone())
+            .with_api_version(crate::language_version::LanguageVersion::new(1, 3)),
+    );
+    let current_after_older = set_value_receivers(&initialized_libraries(shared));
+    let current_alone = set_value_receivers(&initialized_libraries(std::rc::Rc::new(
+        crate::jvm::classpath::Classpath::new(vec![stdlib]),
+    )));
+
+    assert!(
+        older.len() < current_alone.len(),
+        "API 1.3 withholds the @SinceKotlin(\"1.4\") property-reference setValue: {older:?}"
+    );
+    assert_eq!(current_after_older, current_alone);
 }
 
 #[test]
