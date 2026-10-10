@@ -95,9 +95,9 @@ impl Backend for WasmBackend {
             );
         };
         let selected = self.entry.selected(&file.ir);
-        if selected
-            .is_some_and(|(_, parameters)| parameters == crate::ir::MainEntryParameters::Arguments)
-        {
+        if selected.is_some_and(|(_, parameters)| {
+            parameters == crate::backend::MainEntryParameters::Arguments
+        }) {
             decline(state, "a `main` that takes its arguments".to_string());
             return Vec::new();
         }

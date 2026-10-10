@@ -15,6 +15,8 @@ pub use dependency_facts::{
     CheckedBackendCallables, DependencyFactError,
 };
 
+/// The parameter form [`Entry::selected`] reports beside the selected function.
+pub(crate) use crate::ir::MainEntryParameters;
 pub use entry::{Entry, BOX_RESULT_FRAME};
 
 pub use module_facts::{
