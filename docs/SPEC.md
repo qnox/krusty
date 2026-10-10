@@ -4728,6 +4728,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   annotated `expect` class under `FullValueClasses`. A matched `expect` value class with a secondary
   constructor in a source set with another error still reaches a recovery internal error. Tests:
   `tests/value_class_feature_gates_e2e.rs`.
+- **Klib inliner phases (`IrIntraModuleInlinerBeforeKlibSerialization`,
+  `IrCrossModuleInlinerBeforeKlibSerialization`): no effect on JVM output.** kotlinc 2.4.x consults
+  them only in `loweringsOfTheFirstPhase` (`ir.inline/CommonLoweringPhases.kt`, the JS and Wasm
+  pre-serialization phases) and `NativeFirstPhaseLoweringPhases`: lowerings that run before a klib
+  is serialized. The JVM pipeline (`JvmLoweringPhases`) and the frontend never read them, and krusty
+  serializes no klib for any target, so either state compiles identically. The command line keeps
+  kotlinc's own consumers: enabling `IrCrossModuleInlinerBeforeKlibSerialization` forces
+  pre-release binaries, and kotlinc's `configureLanguageFeaturesFromInternalArgs` refuses an
+  explicitly enabled cross-module inliner unless the intra-module one is explicitly enabled too
+  (its default state does not count): `-XXLanguage:+IrCrossModuleInlinerBeforeKlibSerialization
+  requires -XXLanguage:+IrIntraModuleInlinerBeforeKlibSerialization. Enable the intra-module
+  inliner as well to avoid inconsistent configuration.`, reported with the other configuration
+  errors before the pre-release warning. Tests: `tests/language_feature_arguments_e2e.rs`
+  (`klib_inliner_features_*`: messages, exit status and output tree byte for byte vs kotlinc).
 
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and
