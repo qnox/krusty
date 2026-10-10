@@ -1,0 +1,27 @@
+Strings YAML would read as something else, printed in string, list and map settings: the toolchain prints a value as it is and a map key as written in the file inside double quotes, escaping neither.
+--- module.yaml
+product: jvm/app
+settings:
+  jvm:
+    mainClass: "a: b # c"
+  java:
+    freeCompilerArgs:
+      - "true"
+      - "null"
+      - "a: b"
+      - "x # y"
+      - " lead"
+      - "trail "
+      - "say \"hi\" 'there'"
+      - "two\nlines"
+      - ""
+    annotationProcessing:
+      processorOptions:
+        "true": "null"
+        "a: b": "x # y"
+        " lead": "trail "
+        "q\"uote": "two\nlines"
+        "": "'single'"
+        'it''s': plain
+        "two\nlines \u0041": x
+        plain key: "\u0041"

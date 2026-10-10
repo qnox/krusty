@@ -1,0 +1,104 @@
+A POM's profiles apply when their activation holds for the module's JDK and the build's
+properties, else those active by default do.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:profiled:1.0
+  - org.example:defaulted:1.0
+settings:
+  jvm:
+    release: 17
+    jdk:
+      version: 17
+--- m2/org/example/profiled/1.0/profiled-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>profiled</artifactId>
+  <version>1.0</version>
+  <profiles>
+    <profile><id>modern</id><activation><jdk>[11,)</jdk></activation>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>for-modern</artifactId><version>1.0</version></dependency>
+  </dependencies>
+    </profile>
+    <profile><id>legacy</id><activation><jdk>1.8</jdk></activation>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>for-legacy</artifactId><version>1.0</version></dependency>
+  </dependencies>
+    </profile>
+    <profile><id>unset</id><activation><property><name>!some.unset.property</name></property></activation>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>for-unset</artifactId><version>1.0</version></dependency>
+  </dependencies>
+    </profile>
+  </profiles>
+</project>
+--- m2/org/example/defaulted/1.0/defaulted-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>defaulted</artifactId>
+  <version>1.0</version>
+  <profiles>
+    <profile><id>default</id><activation><activeByDefault>true</activeByDefault></activation>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>by-default</artifactId><version>1.0</version></dependency>
+  </dependencies>
+    </profile>
+    <profile><id>never</id><activation><jdk>1.6</jdk></activation>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>never</artifactId><version>1.0</version></dependency>
+  </dependencies>
+    </profile>
+  </profiles>
+</project>
+--- m2/org/example/for-modern/1.0/for-modern-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>for-modern</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/for-legacy/1.0/for-legacy-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>for-legacy</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/for-unset/1.0/for-unset-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>for-unset</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/by-default/1.0/by-default-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>by-default</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/never/1.0/never-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>never</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/by-default/1.0/by-default-1.0.jar
+--- m2/org/example/defaulted/1.0/defaulted-1.0.jar
+--- m2/org/example/for-modern/1.0/for-modern-1.0.jar
+--- m2/org/example/for-unset/1.0/for-unset-1.0.jar
+--- m2/org/example/profiled/1.0/profiled-1.0.jar

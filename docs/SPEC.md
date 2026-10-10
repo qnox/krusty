@@ -9745,6 +9745,105 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_null_cast_to_an_erased_type_parameter_names_it_by_its_owner`),
   `tests/unboxing_coercion_e2e.rs`
   (`failed_null_casts_name_primitive_and_qualified_type_parameter_targets`).
+- **Native: threads share one heap under one mutator lock.** A static program's threads are the
+  runtime's own: `kt_thread_start` registers the new thread (released, its argument a root) before
+  `clone` creates it on a stack the runtime maps, as Go does with no C library, with an
+  inaccessible guard page directly below it so that a thread that overflows its stack faults
+  instead of running into a neighbouring mapping; `kt_thread_join`
+  waits with the lock released and frees the stack. An exception a started thread leaves uncaught
+  ends the process, reported on `Thread-<n>` as the JVM names an unnamed thread. Creating the kernel
+  thread is the one replaceable step, so a program that links a C library starts them with
+  `pthread_create` instead. A thread that foreign code starts attaches when it calls into Kotlin
+  (`kt_callback_enter`) and detaches when that outermost call returns; a callback on a thread that
+  is already attached re-enters as that thread, found by its kernel thread id. Every attached thread
+  shares the heap, as Kotlin/Native's memory model has them share it. One lock keeps it consistent:
+  a thread holds it while it runs Kotlin or the runtime, and releases it for a call into foreign
+  code (`kt_native_enter`/`kt_native_leave`), which is where threads block. So collection stays a
+  stop-the-world mark-sweep without safepoints: the collector holds the lock, and every other
+  attached thread is released with its callee-saved registers and stack pointer recorded. The entry
+  that records them is assembly, because a C function's prologue may reuse a callee-saved register
+  before its first statement, and the value it held would then be in no root at all. The exception
+  slot generated code reads after every call stays one global, saved into the thread on release and
+  restored on acquisition, so an exception in flight is its own thread's; a callback starts with
+  none. An exception a callback leaves uncaught ends the process, reported on the thread's name
+  (`Thread-<n>` for one foreign code started, numbered with the runtime's own), while the lock is
+  still held, as Kotlin/Native ends one that escapes a `staticCFunction`: the foreign code it would
+  return to cannot handle it, and a heap reference handed back across the release would be held by
+  no root while another thread collects. Every hand-off is a release and an acquire, so
+  `@Volatile` needs nothing beyond ordinary accesses. Not yet: threads running Kotlin in parallel,
+  and preemption of a thread that loops in Kotlin without calling out, which needs safepoint polls in
+  generated code. Portability: what is per-OS is two primitives in `krusty_sys.h` (wait and wake on
+  a word, and the calling thread's id; Linux's futex and gettid) and the assembly register spill,
+  per architecture as the syscall shim already is. A macOS or Windows runtime supplies its own pair
+  (`__ulock_wait`/`__ulock_wake` and `pthread_threadid_np`; `WaitOnAddress`/`WakeByAddressSingle`
+  and `GetCurrentThreadId`) and keeps the lock, the registry and the scan unchanged; the runtime is
+  cross-compiled per target by clang as before. Tests: `tests/native_runtime_e2e.rs`
+  (`threads_started_by_foreign_code_share_the_heap_through_collections`,
+  `each_thread_keeps_its_own_exception_in_flight`,
+  `threads_the_runtime_starts_keep_their_argument_until_they_run`,
+  `an_exception_a_started_thread_leaves_uncaught_ends_the_process_on_its_name`,
+  `an_exception_a_callback_leaves_uncaught_ends_the_process_holding_the_lock`,
+  `a_started_threads_stack_has_a_guard_below_it`), each run on x86_64, aarch64 and riscv64 (the
+  architectures other than the host's built with clang and lld and run under QEMU's user-mode
+  emulators, which CI installs and must use), and `tests/native_concurrency_e2e.rs`.
+- **Native: a static program's POSIX comes from the kernel, not a C library.** `platform.posix`
+  is how Kotlin/Native code reaches the system, and a static program links no libc, so the runtime
+  serves the POSIX functions a server needs straight from system calls, as Go's `syscall` package
+  does: descriptors, `stat`, directories and a minimal unbuffered-write `stdio`
+  (`krusty_posix_io.c`); sockets and epoll (`krusty_posix_net.c`); the environment, `sysconf`,
+  signals, clocks, sleeping and `exit` (`krusty_posix_process.c`); `pthread_create`/`join`/`detach`
+  on the runtime's own `clone`, futex mutexes and condition variables (`krusty_posix_thread.c`); and
+  `<string.h>` (`krusty_posix_string.c`). Each has the C library's name and signature, returns -1 and
+  sets `errno` on failure, and takes glibc's struct layouts for the target: `stat` and `dirent` are
+  the kernel's on every supported target and pass through, as does `epoll_event` (packed on x86_64
+  only), while `sigaction` is translated from glibc's 1024-bit `sigset_t` to the kernel's 64-bit one,
+  with a restorer on x86_64 and aarch64. `errno` is per thread through `__errno_location`: the layer
+  owns the thread pointer (`%fs`, `tpidr_el0`, `tp`), which points at a block that is also the
+  `pthread_t`; the runtime reaches it only through two weak hooks, `kt_os_thread_begin`/`_end`, so a
+  program that links a real C library (which owns the thread pointer) leaves these translation units
+  out and nothing else changes. Where C's own rules are stricter than the kernel's, the layer keeps
+  C's: `fcntl` reads its third argument as nothing, an `int` or a pointer as the command says (a
+  command it does not know is EINVAL), since a variadic argument that was never passed cannot be
+  read; `raise` signals the calling thread (`tgkill`), not the process, whose handler could run on
+  another thread; `abort` unblocks SIGABRT, so a blocked one still ends the process on the signal
+  rather than with an exit status; and `memmove` picks its direction on the addresses as integers,
+  since `<` between pointers into two objects is undefined. Not yet: `printf`, `malloc`, buffered
+  writes, `fork`/`exec`. Tests: `tests/native_runtime_e2e.rs`
+  (`posix_files_answer_with_glibcs_layouts_and_errno`,
+  `posix_process_calls_cover_the_environment_signals_and_clocks`,
+  `posix_sockets_and_epoll_serve_a_loopback_connection`,
+  `posix_threads_keep_their_own_errno_and_share_mutexes`,
+  `posix_memmove_copies_between_objects_and_within_one_either_way`,
+  `posix_abort_ends_the_process_on_sigabrt_even_when_it_is_blocked`,
+  `posix_numbers_are_each_targets_own`), whose drivers compile against each target's own glibc
+  headers and link with no C library. Every number the layer copied by hand (open flags, `fcntl`
+  commands, errno values, `sysconf` names, signal flags, system call numbers) is checked by
+  `_Static_assert` against those headers (`posix_abi.c`), so a value copied from another
+  architecture fails that target's build; aarch64's `O_DIRECTORY`, for one, is `040000`, not the
+  asm-generic `0200000`. The drivers run on x86_64, aarch64 and riscv64, the last two under QEMU,
+  except that the two that install signal actions are only built for riscv64: QEMU 8.2's riscv64
+  `rt_sigaction` takes a structure one word longer than the riscv64 kernel's, which has no
+  `sa_restorer`.
+- **Native: the process boundary — `main(args)` and standard input.** The program's entry is the
+  `main` the frontend selected (`IrFile::entry_point`): the backend realizes that record and reads
+  its form only to decide whether to build and pass the argument array, so `main(args:
+  Array<String>?)`, `main(vararg args: String)` and a file that also declares `main()` or other
+  `main` overloads all start where kotlinc's frontend says. `main` receives the arguments the
+  program was started with, without its own name (`argv[0]`). Bytes from outside are decoded as
+  UTF-8 with one U+FFFD per maximal ill-formed subpart, which is what Kotlin/Native and the JVM
+  launcher under a UTF-8 locale both answer for arguments, except that the launcher reads a
+  surrogate encoded as bytes (`ED A0 80`) as one U+FFFD where Kotlin/Native and krusty read three;
+  the runtime's strings stay well-formed.
+  `readLine()` and `readlnOrNull()` answer the next line of standard input without its `\n` or
+  `\r\n` (a lone `\r` is the line's own text), keep an unterminated last line, and answer `null`
+  at the end of input; `readln()` raises `kotlin.io.ReadAfterEOFException("EOF has already been
+  reached")` there. Line splitting is the JVM's and the common stdlib's: Kotlin/Native's own
+  `readLine` is one `read(2)` of up to 4095 bytes with trailing CR/LF trimmed, a line only on a
+  terminal. Ill-formed input is decoded as Kotlin/Native decodes it, where the JVM's `readLine`
+  raises `MalformedInputException`. `_start` hands the kernel's initial stack to `kt_process_start`,
+  which records `argc`, `argv` and the environment block. Tests: `tests/native_process_e2e.rs`,
+  each case compared exactly (status, stdout, stderr) with a recorded Kotlin/Native run, a live JVM
+  run, or both; `native::intrinsics::tests::console_input_is_matched_by_its_whole_declaration`.
 - **Native runtime: exceptions and integer arithmetic.** `src/native/runtime/krusty_rt.c` raises
   what Kotlin raises and does not stop there: `kt_throw` RECORDS the exception in the one pending
   slot and returns, and the caller's check of that slot is the propagation. So every runtime entry
@@ -9995,6 +10094,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `entrySet()`/`keySet()` realize the renamed builtin properties `entries`/`keys`, is still
   rejected. Tests: `tests/java_abstract_override_e2e.rs` (runs, a byte-identical class to kotlinc's
   for the plain override, JDK skeleton collections, and the shapes that stay rejected).
+- **A sealed class is abstract, so it may leave abstract members unimplemented.** kotlinc treats
+  `sealed` as abstract: the sealed class may declare abstract members, and a subclass discharges
+  both those and any abstract members inherited from a superclass compiled in another unit.
+  krusty required the class modality to be exactly `abstract`, so
+  a sealed class that extended such a superclass and left a member open was rejected as "not
+  abstract and does not implement all abstract members". A sealed class now shares the abstract
+  exemption; a concrete or `open` class still has to implement every abstract member itself.
+  Tests: `tests/classpath_abstract_subclass_e2e.rs` (repository-owned classpath superclass,
+  source-declared members, concrete/open negatives, and kotlinc differentials).
 - **A caller's type parameter in an extension receiver is a fixed type, not a wildcard.** Only the
   callee's own formals in its declared receiver bind at the call. In
   `fun <T> lowest(xs: Iterable<T>) where T : Comparable<T> = xs.minOrNull()`, the caller's `T` is a
@@ -12438,6 +12546,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property, object member or parameter is "'R|pkg/NAME|' is not a valid invocation kind." (object
   members as `Q|Owner|.R|/Owner.NAME|`, parameters as `R|<local>/name|`). Verified against kotlinc
   2.4.20. (`tests/contract_smart_casts_e2e.rs`, `tests/contract_declarations_e2e.rs`.)
+- **An implicit extension call's not-null contract narrows that receiver.**
+  `returns(true) implies (this@f != null)` on `fun T?.f()` applies when the call is written
+  without a receiver (`f() && this.member`). The proof is the extension receiver the call
+  selected, so the right operand of `&&` and a later explicit `this` see the non-null type. An
+  explicit receiver (`x.f()`) still narrows `x`. Among competing implicit receivers the proof
+  belongs only to the receiver overload selection bound (the nearest applicable one); another
+  receiver of the same nullable shape stays nullable, read bare or as `this@label`.
+  (`tests/contract_user_e2e.rs::implicit_extension_receiver_not_null_contract_narrows_the_conjunction`,
+  `implicit_receiver_contract_narrows_only_the_selected_receiver`,
+  `implicit_receiver_contract_selected_receiver_runs`.)
+- **A labeled `this` reads its receiver's flow type.** `this@f` denotes the same receiver-tower
+  coordinate as the bare `this` it labels, so `if (this@f != null)`, `if (this != null)` and
+  `if (this@f is C)` narrow a later `this@f` read, including an outer receiver read inside a
+  receiver lambda. Verified against kotlinc 2.4.20.
+  (`tests/this_smartcast_e2e.rs::a_labeled_this_reads_the_narrowed_receiver`.)
 - **The receiver of a compound member assignment.** `receiver.x op= value` evaluates `receiver`
   once. A read of a `val`, a parameter, or a value a lambda or local function lifted to a method
   receives as a parameter is read again for the setter, and so is every `this` receiver, including

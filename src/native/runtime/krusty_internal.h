@@ -37,6 +37,11 @@ struct KObject {
             KRef storage;
             const char *bytes;
             kt_int byte_length;
+            /* The text's length in UTF-16 units plus one, once `kt_string_length` has counted it;
+               zero until then. A string's text never changes, so it is normally counted at most
+               once. INT32_MAX units cannot be encoded with this sentinel and remain uncached. A
+               count equal to `byte_length` says every byte is ASCII: `s[i]` is then byte `i`. */
+            kt_int units_plus_one;
         } string;
         kt_byte byte_value;
         kt_short short_value;
@@ -48,6 +53,61 @@ struct KObject {
         kt_double double_value;
     } as;
 };
+
+/* A thread that runs Kotlin (`krusty_threads.c`). The first two fields are stored by assembly, at
+   the offsets that file asserts. */
+struct KThread {
+    /* While released: the callee-saved registers as the code that released it left them. */
+    uintptr_t registers[KT_SAVED_REGISTERS];
+    /* While released: the stack pointer of that code. Its Kotlin frames lie between this and
+       `stack_bottom`. */
+    uintptr_t saved_sp;
+    uintptr_t stack_bottom;
+    /* While released: its exception in flight, which `kt_pending` holds while it runs. */
+    KRef pending;
+    long tid;
+    bool released;
+    KThread *next;
+    /* A thread the runtime started, until it first runs: what it runs, and its argument, which is
+       a root until the thread takes it. */
+    void (*start_routine)(KRef);
+    KRef start_argument;
+    /* Its start order, which names it in an uncaught report. */
+    uint32_t number;
+};
+
+/* The roots a collection finds outside its own stack, which `krusty_threads.c` knows and
+   `krusty_gc.c` marks: the bottom of the holder's stack (0 before `kt_runtime_init`), and every
+   released thread's recorded registers, exception and stack, handed to the two scanners below. */
+/* `kt_check_uncaught` for a thread of another name: report what is in flight, if anything, as
+   Kotlin reports an exception nothing caught on `thread`, and end the process with 134. */
+void kt_report_uncaught(const char *thread, size_t thread_length);
+
+/* The environment block the kernel left on the initial stack: NULL-terminated `NAME=value`
+   strings, followed by the auxiliary vector. */
+char **kt_process_environment(void);
+
+/* Called first on every thread the runtime creates, the program's first among them, and last on
+   every one but that, before it ends. Defined weakly to nothing: a static program's POSIX layer
+   defines them to give each thread the state a C program expects of its own, such as `errno`. A
+   program that links a C library has the library's instead. */
+void kt_os_thread_begin(void);
+void kt_os_thread_end(void);
+
+/* `clone(2)` a thread sharing this process onto the stack ending at `stack_top`, running
+   `routine(argument)`, which must not return; the kernel clears `*exited` and wakes it when the
+   thread ends. Answers the thread's id or a negated errno. */
+long kt_clone(unsigned long flags, void *stack_top, uint32_t *exited, void (*routine)(void *),
+              void *argument);
+
+/* The flags a thread of this process is cloned with: the address space, files, filesystem view and
+   signal handlers shared, and its id word cleared and woken when it ends. */
+#define KT_CLONE_THREAD_FLAGS 0x00250f00ul
+
+uintptr_t kt_threads_running_bottom(void);
+void kt_threads_scan_released(void);
+void kt_gc_scan_word(uintptr_t word);
+void kt_gc_scan_range(uintptr_t low, uintptr_t high);
 
 /* A `ByteArray`, the storage of a string's text, and its body. */
 typedef KArray KByteArray;

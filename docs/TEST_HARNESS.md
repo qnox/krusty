@@ -243,7 +243,7 @@ modification time of its `lib/modules` image, so retargeting or upgrading a JDK 
 still recompiles. Set `KRUSTY_SECOND_JAVA_HOME` to a JDK of another feature release to make
 `a_changed_producing_jdk_misses_the_reference_cache_across_processes` also check the cross-JDK miss.
 Recording each of those compiles into the archive as well rewrote the whole archive per store and
-pushed a cold scored shard past its deadline.
+pushed a cold scored run past its deadline.
 
 A live kotlinc invocation writes one line straight to the test process's stderr (libtest's capture
 does not hide it), and a passing replay writes nothing:
@@ -481,7 +481,7 @@ is compiled once and the cfg(test) harness overlaps the binaries. Nightly rustc 
 job per core (`-Z threads`). The run ends with `coverage: phases` repeating every
 finished phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
-`conformance-run: phase box-shard-N-of-M <seconds>s`. The shared binary job prints
+`conformance-run: phase box-conformance <seconds>s`. The shared binary job prints
 `shared-bins: phase conformance-test-binary`, `shared-bins: phase krusty-cli`, and
 `shared-bins: phase krusty-build-tests`. Conformance lanes and Gradle lanes run those binaries. A
 Gradle lane does not compile krusty.
@@ -511,20 +511,11 @@ Optional profiling knobs:
 - `KRUSTY_TEST_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline applied to every test
   binary except conformance and e2e; raise it explicitly on slow systems.
 - `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 120-second deadline for each
-  full-suite or focused conformance pass and for each shard of the scored run
-  (`conformance-run.sh`).
+  full-suite or focused conformance pass and for the scored run (`conformance-run.sh`).
 - `KRUSTY_E2E_TIMEOUT_SECONDS=<seconds>` overrides the 1800-second deadline for the single-process
   e2e suite, including a focused e2e run.
 - `KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS=<seconds>` overrides the 600-second deadline for the
   single-process native codegen/box suite.
-- `KRUSTY_CONFORMANCE_SHARDS=<count>` overrides the four corpus shards the plain gate's box pass is
-  partitioned into (no reference compilation, so the pass is cheap).
-- `KRUSTY_SCORED_CONFORMANCE_SHARDS=<count>` overrides the twelve shards the scored byte-equality run
-  (`conformance-run.sh`) partitions the corpus into. That run reference-compiles every applicable
-  case with the real kotlinc, so it is partitioned more finely than the plain gate's box pass.
-  The scored run has no deadline of its own: a shard that reference-compiles every applicable case
-  cold (empty ref-class cache on a first run or CI cache miss) still fits the plain conformance
-  deadline.
 - `KRUSTY_TEST_JOBS=<n>` overrides full-suite test-binary parallelism.
 - `KRUSTY_TEST_THREADS=<n>` overrides conformance worker threads.
 - `KRUSTY_BOX_LIMIT=<n>` caps conformance corpus scanning for fast sampling.
@@ -613,7 +604,7 @@ version lane and contribute neither cases nor bytes.
 
 The scores and runtime correctness are separate gates. A case whose classes differ from kotlinc's but
 whose `box()` returns `OK` still passes, and the exact outcome manifests (see "Box Outcome
-Manifests") still decide whether the run succeeds. The run's stderr keeps both per-shard summaries:
+Manifests") still decide whether the run succeeds. The run's stderr keeps both summaries:
 the `cases: … | box()=OK: … | FAIL: …` line, and `byte-score: matched M | total T | P%  (N
 applicable cases scored)`.
 
@@ -626,19 +617,19 @@ just native-conformance-run "$(just conformance-bin)" <version> [NATIVE]
 just conformance-badge [CASES BYTES NATIVE]   # writes docs/badges/*.json previews
 ```
 
-`scripts/conformance-run.sh` runs `KRUSTY_SCORED_CONFORMANCE_SHARDS` shards. Each shard writes the
+`scripts/conformance-run.sh` runs the full JVM corpus once. The process writes the
 case report `<pct> <passed> <applicable>` to `KRUSTY_CONFORMANCE_REPORT` and the JVM byte report
 `<pct> <matched> <total>` to `KRUSTY_JVM_BYTE_REPORT`; `KRUSTY_JVM_BYTE_REPORT` is also what turns
-reference scoring on. The runner prints the combined case report on stdout, and the combined JVM
+reference scoring on. The runner prints the case report on stdout, and the JVM
 byte report on stderr (`conformance-run: Kotlin <version> JVM byte equality (matched/total .class
-bytes): …`) and to the `BYTES` file when one is given. Either shard report missing or malformed, a
-shard timeout, or a manifest mismatch fails the run; both combined reports are still written after a
+bytes): …`) and to the `BYTES` file when one is given. Either report missing or malformed, a
+timeout, or a manifest mismatch fails the run; both reports are still written after a
 manifest mismatch so the scores stay visible, and a run that stops earlier leaves `BYTES` empty.
 `scripts/conformance-report.sh` owns the shared line format. A reference-cache miss compiles live
-with kotlinc, so no recorded-byte setting is needed. Each scored shard prints a reference profile
+with kotlinc, so no recorded-byte setting is needed. The scored run prints a reference profile
 after its timing line: reference-cache hits, cached rejections, and misses with the thread-summed
 cache-read, compile, cleanup, and store time, then the kotlinc server's requests, starts, restarts,
-pool wait, start time, and compile time. A cold shard shows one miss per applicable case; a warm one
+pool wait, start time, and compile time. A cold run shows one miss per applicable case; a warm one
 shows hits and no server requests.
 
 `just conformance-badge` renders all three reports of the max version's target runs with

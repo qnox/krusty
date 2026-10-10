@@ -1075,57 +1075,21 @@ impl BuiltinsFile {
     fn from_package(package: super::metadata::BuiltinPackage) -> Self {
         let mut file = BuiltinsFile::default();
         for function in package.functions {
-            let bounds = builtin_bounds(&function.formals, &HashMap::new());
-            let generic_sig = GenericSig {
-                formals: function.formals.iter().map(|p| p.name.clone()).collect(),
-                formal_bounds: function
-                    .formals
-                    .iter()
-                    .map(|p| {
-                        p.bounds
-                            .iter()
-                            .map(|bound| builtin_ty(bound, &bounds))
-                            .collect()
-                    })
-                    .collect(),
-                receiver: function
-                    .receiver
-                    .as_ref()
-                    .map(|receiver| builtin_ty(receiver, &bounds)),
-                params: function
-                    .params
-                    .iter()
-                    .map(|parameter| builtin_ty(parameter, &bounds))
-                    .collect(),
-                ret: builtin_ty(&function.ret, &bounds),
-                return_policy: Default::default(),
-            };
             file.functions.push(BuiltinFunction {
+                generic_sig: crate::libraries::function_generic_sig(&function),
+                only_input_type_formals: crate::libraries::only_input_type_formals(
+                    &function.formals,
+                ),
+                reified_type_parameter_ordinals: crate::libraries::reified_type_parameter_ordinals(
+                    &function.formals,
+                ),
                 name: function.name,
-                only_input_type_formals: function
-                    .formals
-                    .iter()
-                    .filter(|parameter| parameter.only_input)
-                    .map(|parameter| parameter.name.clone())
-                    .collect(),
-                generic_sig,
                 param_names: function.param_names,
                 param_defaults: function.param_defaults,
                 vararg: function.vararg,
                 visibility: function.visibility,
                 is_inline: function.is_inline,
                 has_reified_type_params: function.has_reified_type_params,
-                reified_type_parameter_ordinals: function
-                    .formals
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(ordinal, parameter)| {
-                        parameter
-                            .reified
-                            .then(|| u32::try_from(ordinal).ok())
-                            .flatten()
-                    })
-                    .collect(),
                 is_suspend: function.is_suspend,
                 is_operator: function.is_operator,
                 is_infix: function.is_infix,

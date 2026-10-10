@@ -25,10 +25,6 @@ pub(crate) enum CopyError {
     Assemble(AssembleError),
 }
 
-/// `kotlin.jvm.internal.SourceDebugExtension`, the copy of the source map kotlinc also writes as an
-/// annotation.
-const SOURCE_DEBUG_EXTENSION_DESC: &str = "Lkotlin/jvm/internal/SourceDebugExtension;";
-
 const ACC_STATIC: u16 = 0x0008;
 
 impl ClassWriter {
@@ -176,6 +172,7 @@ impl ClassWriter {
             identity,
             node.clone(),
             None,
+            false,
             &mut pool,
         );
         if let Some(optimized) = optimized {
@@ -199,6 +196,7 @@ impl ClassWriter {
             owner: &self.internal_name,
             value_classes: &*self.value_classes,
             parameter_slots,
+            post_coroutine: false,
         };
         let mut optimized = node.clone();
         match pipeline::optimize(&mut optimized, &context) {
@@ -220,9 +218,7 @@ impl ClassWriter {
             self.cp.utf8(&source_file);
         }
         if let Some(map) = self.source_map.render() {
-            self.cp.utf8(SOURCE_DEBUG_EXTENSION_DESC);
-            self.cp.utf8("value");
-            self.cp.utf8(&map);
+            self.cp.source_map_annotation(&map);
         }
     }
 

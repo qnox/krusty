@@ -935,6 +935,8 @@ mod fq_targ_trailing_lambda_e2e;
 mod fq_toplevel_call_e2e;
 #[path = "fq_vararg_call_e2e.rs"]
 mod fq_vararg_call_e2e;
+#[path = "friend_module_smart_cast_e2e.rs"]
+mod friend_module_smart_cast_e2e;
 #[path = "front_end_errors_e2e.rs"]
 mod front_end_errors_e2e;
 #[path = "front_end_errors_more_e2e.rs"]
@@ -1355,6 +1357,8 @@ mod lambda_vs_block_fun_type_e2e;
 mod language_feature_arguments_e2e;
 #[path = "language_level_features_e2e.rs"]
 mod language_level_features_e2e;
+#[path = "large_metadata_parts_e2e.rs"]
+mod large_metadata_parts_e2e;
 #[path = "lateinit_companion_read_e2e.rs"]
 mod lateinit_companion_read_e2e;
 #[path = "lateinit_field_nullability_e2e.rs"]
@@ -1591,6 +1595,8 @@ mod result_generic_override_argument_e2e;
 mod same_module_inline_frame_markers_e2e;
 #[path = "setter_return_line_e2e.rs"]
 mod setter_return_line_e2e;
+#[path = "source_map_annotation_parts_e2e.rs"]
+mod source_map_annotation_parts_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
 #[path = "super_delegation_line_e2e.rs"]
@@ -1607,6 +1613,8 @@ mod suspend_lambda_private_property_e2e;
 mod suspend_lambda_shared_capture_e2e;
 #[path = "suspend_result_nullability_e2e.rs"]
 mod suspend_result_nullability_e2e;
+#[path = "suspend_safe_call_receiver_e2e.rs"]
+mod suspend_safe_call_receiver_e2e;
 #[path = "suspend_under_try_e2e.rs"]
 mod suspend_under_try_e2e;
 #[path = "suspend_value_class_delegation_e2e.rs"]
@@ -1762,6 +1770,8 @@ mod native_classes_e2e;
 mod native_codegen_e2e;
 #[path = "native_collection_indices_e2e.rs"]
 mod native_collection_indices_e2e;
+#[path = "native_collection_members_e2e.rs"]
+mod native_collection_members_e2e;
 #[path = "native_collection_shape_guard_e2e.rs"]
 mod native_collection_shape_guard_e2e;
 #[path = "native_collection_walks_e2e.rs"]
@@ -1810,6 +1820,8 @@ mod native_float_predicates_e2e;
 mod native_floating_ranges_e2e;
 #[path = "native_floor_mod_e2e.rs"]
 mod native_floor_mod_e2e;
+#[path = "native_frame_objects_e2e.rs"]
+mod native_frame_objects_e2e;
 #[path = "native_function_slot_bridge_e2e.rs"]
 mod native_function_slot_bridge_e2e;
 #[path = "native_function_type_checks_e2e.rs"]
@@ -1846,6 +1858,8 @@ mod native_number_subclass_e2e;
 mod native_pair_construction_e2e;
 #[path = "native_preconditions_e2e.rs"]
 mod native_preconditions_e2e;
+#[path = "native_process_e2e.rs"]
+mod native_process_e2e;
 #[path = "native_property_reference_e2e.rs"]
 mod native_property_reference_e2e;
 #[path = "native_range_bound_control_e2e.rs"]

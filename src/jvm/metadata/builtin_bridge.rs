@@ -31,12 +31,23 @@ pub(super) fn ty_from_common(ty: common::KotlinType) -> super::BuiltinTy {
             nullable,
             shape,
         },
-        common::KotlinType::Param { name, nullable } => super::BuiltinTy::Param { name, nullable },
+        common::KotlinType::Param { name, id, nullable } => {
+            super::BuiltinTy::Param { name, id, nullable }
+        }
         common::KotlinType::InProjection(inner) => {
             super::BuiltinTy::InProjection(Box::new(ty_from_common(*inner)))
         }
         common::KotlinType::OutProjection(inner) => {
             super::BuiltinTy::OutProjection(Box::new(ty_from_common(*inner)))
+        }
+        // The JVM builtins records spell a star projection as `out Any?`.
+        common::KotlinType::Star => {
+            super::BuiltinTy::OutProjection(Box::new(super::BuiltinTy::Class {
+                internal: "kotlin/Any".to_string(),
+                args: Vec::new(),
+                nullable: true,
+                shape: common::KotlinFunctionTypeShape::default(),
+            }))
         }
     }
 }
@@ -54,8 +65,9 @@ pub(crate) fn ty_to_common(ty: &super::BuiltinTy) -> common::KotlinType {
             nullable: *nullable,
             shape: *shape,
         },
-        super::BuiltinTy::Param { name, nullable } => common::KotlinType::Param {
+        super::BuiltinTy::Param { name, id, nullable } => common::KotlinType::Param {
             name: name.clone(),
+            id: *id,
             nullable: *nullable,
         },
         super::BuiltinTy::InProjection(inner) => {
@@ -69,6 +81,7 @@ pub(crate) fn ty_to_common(ty: &super::BuiltinTy) -> common::KotlinType {
 
 fn type_param_from_common(parameter: common::KotlinTypeParameter) -> super::BuiltinTypeParam {
     super::BuiltinTypeParam {
+        id: parameter.id,
         name: parameter.name,
         bounds: parameter.bounds.into_iter().map(ty_from_common).collect(),
         variance: parameter.variance,
@@ -172,31 +185,6 @@ fn package_from_common(package: common::KotlinPackage) -> BuiltinPackage {
                 constant: property.constant,
             })
             .collect(),
-        functions: package
-            .functions
-            .into_iter()
-            .map(|function| super::BuiltinFunction {
-                name: function.name,
-                receiver: function.receiver.map(ty_from_common),
-                params: function.params.into_iter().map(ty_from_common).collect(),
-                ret: ty_from_common(function.ret),
-                formals: function
-                    .formals
-                    .into_iter()
-                    .map(type_param_from_common)
-                    .collect(),
-                param_names: function.param_names,
-                param_defaults: function.param_defaults,
-                vararg: function.vararg,
-                visibility: function.visibility,
-                is_inline: function.is_inline,
-                has_reified_type_params: function.has_reified_type_params,
-                is_suspend: function.is_suspend,
-                is_operator: function.is_operator,
-                is_infix: function.is_infix,
-                context_count: function.context_count,
-                annotations: function.annotations,
-            })
-            .collect(),
+        functions: package.functions,
     }
 }

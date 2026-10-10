@@ -7,6 +7,22 @@
 
 use super::decode::{field, require_wire, Cursor, PackageFragmentDecodeError};
 
+mod city_hash;
+mod mangling;
+mod metadata_declarations;
+
+pub use mangling::{
+    accessor_signature, callable_signature, class_signature, enum_entry_signature,
+    property_signature, Accessor, CallableShape, ClassScope, DeclarationContainer, ManglingError,
+    Placement, PropertyShape, SignatureType, TypeParameterShape, TypeView,
+};
+pub use metadata_declarations::{
+    constructor_signature, enum_class_member_signatures, member_property_accessor_signature,
+    member_signature, metadata_class_signature, metadata_enum_entry_signature,
+    package_function_signature, package_property_accessor_signature, package_property_signature,
+    MetadataAccessor, MetadataClass, MetadataContainer,
+};
+
 /// One exact qualified path in a public KLIB signature.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct KlibNamePath {
@@ -79,6 +95,59 @@ impl KlibPublicIdSignature {
             && self.member_id == Some(member_id)
             && self.mask == mask
     }
+}
+
+/// Kotlin's `AccessorIdSignature`: a getter or setter of a public property, named by the
+/// property's identity, the accessor's name (`<get-size>`) and the accessor's own member id.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct KlibAccessorIdSignature {
+    property: KlibPublicIdSignature,
+    name: String,
+    member_id: u64,
+    mask: u64,
+}
+
+impl KlibAccessorIdSignature {
+    pub(crate) fn new(
+        property: KlibPublicIdSignature,
+        name: String,
+        member_id: u64,
+        mask: u64,
+    ) -> Self {
+        Self {
+            property,
+            name,
+            member_id,
+            mask,
+        }
+    }
+
+    pub fn property(&self) -> &KlibPublicIdSignature {
+        &self.property
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn member_id(&self) -> u64 {
+        self.member_id
+    }
+
+    pub fn mask(&self) -> u64 {
+        self.mask
+    }
+}
+
+/// The exact serialized-IR identity of one dependency declaration a KLIB provider publishes.
+///
+/// A function, property, or class carries its public signature; a property accessor carries the
+/// accessor signature nested in its property's. This is the join key between a selected metadata
+/// declaration and its decoded IR body; it is never derived from a declaration spelling.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum KlibDeclarationSignature {
+    Public(KlibPublicIdSignature),
+    Accessor(KlibAccessorIdSignature),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

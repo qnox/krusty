@@ -38,6 +38,7 @@ impl BodyLowering<'_> {
             result,
             declared_result,
             semantic_role,
+            overridden_declarations,
             suspend: declaration_suspend,
         } = target
         else {
@@ -191,6 +192,7 @@ impl BodyLowering<'_> {
             declared_result,
             overridden_results: &[],
             semantic_role,
+            overridden_declarations: &overridden_declarations,
             suspend: declaration_suspend,
             can_inline: false,
             inline_plan: None,

@@ -351,26 +351,18 @@ ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 # The JVM and Native Kotlin codegen corpus tests are memory-heavy, so run each in its own process,
 # then run every other conformance test in a fresh process. This still executes the full conformance
 # binary's test set; it just avoids carrying earlier external-suite state between the large corpus
-# passes on small machines. The JVM test parallelizes internally (rayon) and partitions its sorted
-# corpus across fresh processes so every shard receives the ordinary deadline. Native deliberately
-# stays in one process under its larger dedicated deadline. The remaining ~40 independent
+# passes on small machines. The JVM test parallelizes internally (rayon) and runs once under its
+# suite-wide deadline. Native also runs once under its larger dedicated deadline. The remaining ~40 independent
 # JVM-backed tests get real threads (bounded: each can hold a compiler-server/runner JVM, so `ncpu`
 # capped at 4 keeps the JVM count sane on big hosts).
 conf_threads="$ncpu"; [ "$conf_threads" -gt 4 ] && conf_threads=4
 gate="$(printf '%s\n' "${bins[@]}" | grep '/conformance-' || true)"
 if [ -n "$gate" ]; then
-  conformance_shards="$KRUSTY_CONFORMANCE_SHARDS"
-  libtest_require_positive_shard_count \
-    "$conformance_shards" "run-tests.sh: KRUSTY_CONFORMANCE_SHARDS"
-  for ((shard = 0; shard < conformance_shards; shard++)); do
-    label="box-shard-$((shard + 1))-of-$conformance_shards"
-    echo "run-tests.sh: conformance $label" >&2
-    KRUSTY_CONFORMANCE_SHARD_INDEX="$shard" \
-      KRUSTY_CONFORMANCE_SHARD_COUNT="$conformance_shards" \
-      KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
-      run_one \
-        "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1" "$label"
-  done
+  echo "run-tests.sh: conformance jvm-box" >&2
+  KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
+    run_one \
+      "$logdir" "$gate::--exact kotlin_codegen_box_conformance::kotlin_codegen_box_conformance --test-threads=1" \
+      "jvm-box"
   # The native box lane compiles, links and runs every accepted case in one process under its own
   # suite-wide deadline. It reads the same committed platform/version expectations locally and in
   # CI; KRUSTY_BLESS_BOX_EXPECTATIONS=1 is the explicit local update path.

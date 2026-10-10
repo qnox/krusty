@@ -8,6 +8,25 @@ use std::process::Command;
 
 use super::common_core as common;
 
+/// [`common::compile_in_process`] with selected classpath entries treated as Kotlin friend modules
+/// (kotlinc `-Xfriend-paths`), as a test source set compiles against its main output.
+pub fn compile_in_process_with_friend_paths(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    friend_paths: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    let mut paths = cp_jars.to_vec();
+    paths.extend(jdk_modules.map(std::path::Path::to_path_buf));
+    let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new_with_friend_paths(
+        paths,
+        friend_paths.to_vec(),
+    ));
+    let report = common::compile_in_process_report_with_classpath(src, stem, cp);
+    (!report.has_errors && !report.classes.is_empty()).then_some(report.classes)
+}
+
 /// Compile with an internal metadata stamp (`[X, Y, 0]`; `None` keeps the default). This is not
 /// `-language-version`. It lives in the e2e-only helper so the conformance binary does not compile
 /// an unused entry point.
@@ -243,7 +262,7 @@ pub fn compiler_diagnostics_with_reference_args(
     classpath: &[PathBuf],
     reference_extra_args: &[String],
 ) -> CompilerDiagnosticResult {
-    compiler_diagnostics_with_args(sources, classpath, &[], reference_extra_args)
+    compiler_diagnostics_with_args(sources, classpath, &[], &[], reference_extra_args)
 }
 
 /// Compile named sources with krusty and kotlinc, handing both the same `shared_args` — switches a
@@ -253,12 +272,28 @@ pub fn compiler_diagnostics_with_shared_args(
     classpath: &[PathBuf],
     shared_args: &[String],
 ) -> CompilerDiagnosticResult {
-    compiler_diagnostics_with_args(sources, classpath, shared_args, shared_args)
+    compiler_diagnostics_with_args(sources, classpath, &[], shared_args, shared_args)
+}
+
+/// Compile named sources with selected classpath entries treated as friend modules by both
+/// compilers. This is the diagnostic counterpart of [`compile_in_process_with_friend_paths`].
+pub fn compiler_diagnostics_with_friend_paths(
+    sources: &[(&str, &str)],
+    classpath: &[PathBuf],
+    friend_paths: &[PathBuf],
+) -> CompilerDiagnosticResult {
+    let friends = std::env::join_paths(friend_paths)
+        .expect("build compiler-diagnostic friend paths")
+        .to_string_lossy()
+        .into_owned();
+    let reference_args = [format!("-Xfriend-paths={friends}")];
+    compiler_diagnostics_with_args(sources, classpath, friend_paths, &[], &reference_args)
 }
 
 fn compiler_diagnostics_with_args(
     sources: &[(&str, &str)],
     classpath: &[PathBuf],
+    friend_paths: &[PathBuf],
     krusty_extra_args: &[String],
     reference_extra_args: &[String],
 ) -> CompilerDiagnosticResult {
@@ -276,7 +311,13 @@ fn compiler_diagnostics_with_args(
     // invocation is the production pipeline in-process: a process per snippet rebuilt the stdlib
     // and JDK indexes, and that startup dominated the diagnostic suites.
     let (krusty_code, krusty_stdout, krusty_stderr) = if krusty_extra_args.is_empty() {
-        krusty_cli_diagnostics_in_process(&source_paths, &source_texts, classpath, &krusty_out)
+        krusty_cli_diagnostics_in_process(
+            &source_paths,
+            &source_texts,
+            classpath,
+            friend_paths,
+            &krusty_out,
+        )
     } else {
         let mut krusty = Command::new(common::krusty_binary());
         krusty.args(["-d", krusty_out.to_str().expect("UTF-8 output path")]);
@@ -322,10 +363,12 @@ fn krusty_cli_diagnostics_in_process(
     source_paths: &[PathBuf],
     source_texts: &[String],
     explicit_classpath: &[PathBuf],
+    friend_paths: &[PathBuf],
     dest: &std::path::Path,
 ) -> (i32, String, String) {
     use krusty::diag::{DiagSink, Severity};
     use krusty::frontend::PlatformProvider;
+    use krusty::jvm::classpath::Classpath;
     use krusty::jvm::jvm_libraries::JvmLibraries;
     use krusty::language_settings::LanguageSettings;
     use krusty::source::SourceInput;
@@ -355,7 +398,16 @@ fn krusty_cli_diagnostics_in_process(
     }
     let jdk = common::jdk_modules();
     let jdk_arg = (!jars.iter().any(|path| path == &jdk)).then_some(jdk.as_path());
-    let cp = common::cached_classpath(&jars, jdk_arg);
+    let cp = if friend_paths.is_empty() {
+        common::cached_classpath(&jars, jdk_arg)
+    } else {
+        let mut paths = jars.clone();
+        paths.extend(jdk_arg.map(std::path::Path::to_path_buf));
+        std::rc::Rc::new(Classpath::new_with_friend_paths(
+            paths,
+            friend_paths.to_vec(),
+        ))
+    };
     let settings = LanguageSettings::default();
     let libraries = JvmLibraries::new(cp.clone())
         .map(|libraries| libraries.with_api_version(settings.api_version));
@@ -508,6 +560,13 @@ pub fn reference_error_blocks(sources: &[(&str, &str)], extra_args: &[String]) -
     let (_, stderr) = kotlinc_paths_result(&source_paths, &work.join("out"), extra_args);
     let _ = std::fs::remove_dir_all(work);
     error_blocks(&stderr, true)
+}
+
+/// Complete error messages already rendered by one compiler invocation. Each diagnostic starts
+/// with `file:line:column: first line`; subsequent message lines are prefixed with `| `. Kotlinc's
+/// source excerpt and caret are omitted.
+pub fn rendered_error_blocks(output: &str, excerpted: bool) -> Vec<String> {
+    error_blocks(output, excerpted)
 }
 
 /// Krusty's error blocks with the standard language/API settings from the reference invocation.

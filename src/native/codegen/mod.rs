@@ -5,7 +5,7 @@
 //! that was prebuilt when krusty itself was built. A user's build touches no C toolchain. The one
 //! text artifact is the module's public C header: the names a C caller can link, not a program.
 //!
-//! **Why Cranelift, and what it owns.** `docs/BUILD_AND_NATIVE_PLAN.md`, *Decided: Cranelift, as a
+//! **Why Cranelift, and what it owns.** `docs/NATIVE.md`, *Decided: Cranelift, as a
 //! library*: Cranelift owns instruction selection and register allocation — and only those. The
 //! lowering below, the calling convention at every runtime boundary, object layout, collector
 //! integration and the linker are krusty's. The lowering sits behind this module's boundary so a
@@ -47,6 +47,7 @@ pub enum Entry {
 pub struct CraneliftBackend {
     target: NativeTarget,
     entry: Entry,
+    verify: bool,
 }
 
 impl CraneliftBackend {
@@ -54,7 +55,16 @@ impl CraneliftBackend {
         Self {
             target,
             entry: Entry::Main,
+            verify: false,
         }
+    }
+
+    /// Run Cranelift's verifier over every lowered function. It costs about a sixth of code
+    /// generation, so a build leaves it off; tests turn it on, where a malformed function should
+    /// fail at the lowering that produced it rather than as a miscompiled program.
+    pub fn verified(mut self) -> Self {
+        self.verify = true;
+        self
     }
 
     /// Start the program in `entry` instead of `main`.
@@ -142,6 +152,7 @@ impl Backend for CraneliftBackend {
             self.target,
             &stem,
             self.entry,
+            self.verify,
         ) {
             Ok(lowered) => lowered,
             Err(unsupported) => {
@@ -179,8 +190,9 @@ impl Backend for CraneliftBackend {
 /// Native keeps the entry test at the top and carries unsigned counters in their own machine
 /// representation. The common backend-boundary realizer therefore needs no JVM-style inline-call
 /// provenance or Java loop shape.
-const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
+pub(crate) const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
     crate::backend::counted_loops::CountedLoopPolicy {
         style: crate::backend::counted_loops::CounterLoopStyle::PreTested,
         inlining: crate::backend::counted_loops::HeaderInlining::None,
+        until_steps: crate::backend::counted_loops::UntilSteps::Counted,
     };

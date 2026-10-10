@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn a_matching_shard_does_not_judge_another_slice() {
+    fn a_matching_focused_selection_does_not_judge_unselected_cases() {
         let expected = Baseline {
             failures: set(&["other-failure.kt"]),
             not_applicable: set(&["other-na.kt"]),

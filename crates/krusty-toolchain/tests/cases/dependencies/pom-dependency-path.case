@@ -1,0 +1,21 @@
+A POM's dependency whose artifact would leave the repository names no file.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:lib:1.0
+--- m2/org/example/lib/1.0/lib-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>lib</artifactId>
+  <version>1.0</version>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>../../../escaped</artifactId><version>1.0</version></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/lib/1.0/lib-1.0.jar
+--- krusty-refusal
+error	<directory>/home/.m2/repository/org/example/lib/1.0/lib-1.0.pom:8:7: ERROR: org.example:../../../escaped:1.0 names no file in a Maven repository: its artifact `../../../escaped` is not a file name

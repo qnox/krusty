@@ -26,6 +26,7 @@ mod defaults;
 mod entry;
 mod enums;
 mod exceptions;
+mod frame_objects;
 mod intrinsic_operations;
 use arithmetic::{arithmetic_result, scalar_bound};
 use carrier::{box_suffix, machine_carrier, scalar_suffix, Carrier};
@@ -63,7 +64,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ir::{
     Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
-    IrLocalPropertyLayout, IrStatic, IrTypeOp,
+    IrLocalPropertyLayout, IrStatic, IrTypeOp, MainEntryParameters,
 };
 use crate::types::{Ty, TypeName};
 
@@ -93,7 +94,10 @@ fn trusted() -> MemFlagsData {
     MemFlagsData::trusted()
 }
 
-fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIsa, Unsupported> {
+fn isa_for(
+    target: NativeTarget,
+    verify: bool,
+) -> Result<cranelift_codegen::isa::OwnedTargetIsa, Unsupported> {
     let triple: target_lexicon::Triple = target
         .triple()
         .parse()
@@ -102,7 +106,7 @@ fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIs
     for (name, value) in [
         ("is_pic", "false"),
         ("opt_level", "none"),
-        ("enable_verifier", "true"),
+        ("enable_verifier", if verify { "true" } else { "false" }),
         ("use_colocated_libcalls", "false"),
     ] {
         flags
@@ -146,6 +150,7 @@ pub fn lower_file(
     target: NativeTarget,
     stem: &str,
     entry: Entry,
+    verify: bool,
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
         ir,
@@ -159,7 +164,7 @@ pub fn lower_file(
     } = input;
     let class_model = model::build(ir, value_classes)?;
 
-    let isa = isa_for(target)?;
+    let isa = isa_for(target, verify)?;
     let builder = ObjectBuilder::new(
         isa,
         format!("{stem}.o"),
@@ -226,37 +231,41 @@ pub fn lower_file(
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let file_init = lowering.define_file_init(source, statics_init)?;
+    let program_entry = match entry {
+        // The frontend selected the file's `main` and its form; the backend only realizes it.
+        Entry::Main => ir.entry_point.map(|point| {
+            (
+                point.function as usize,
+                point.parameters == MainEntryParameters::Arguments,
+            )
+        }),
+        // A `box` case answers through a parameterless `box(): String`, the test corpus's own
+        // convention rather than a Kotlin entry point.
+        Entry::Box => ir
+            .functions
+            .iter()
+            .position(|function| {
+                function.params.is_empty()
+                    && function.is_static
+                    && function.dispatch_receiver.is_none()
+                    && function.name == "box"
+                    && lowering.carrier(function.ret) == Carrier::Ref
+            })
+            .map(|index| (index, false)),
+    };
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
-        let function = &ir.functions[index];
-        let is_entry = function.params.is_empty()
-            && function.is_static
-            && function.dispatch_receiver.is_none()
-            && match entry {
-                Entry::Main => function.name == "main",
-                Entry::Box => {
-                    function.name == "box" && lowering.carrier(function.ret) == Carrier::Ref
-                }
-            };
-        if is_entry {
-            lowering.define_program_entry(index, entry, file_init, statics_init.is_some())?;
+        if let Some((_, takes_arguments)) = program_entry.filter(|(chosen, _)| *chosen == index) {
+            lowering.define_program_entry(
+                index,
+                entry,
+                file_init,
+                statics_init.is_some(),
+                takes_arguments,
+            )?;
             defines_entry = true;
         }
-    }
-    // Kotlin's other entry point, `fun main(args: Array<String>)`, is a program whose arguments
-    // this target does not pass yet. Declining here names it; without this the file lowers with no
-    // entry and the link fails on an undefined symbol that says nothing about `main`.
-    if matches!(entry, Entry::Main)
-        && !defines_entry
-        && ir.functions.iter().any(|function| {
-            function.name == "main"
-                && function.is_static
-                && function.dispatch_receiver.is_none()
-                && function.params.len() == 1
-        })
-    {
-        return Err("a `main` that takes its arguments".to_string());
     }
     let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
@@ -548,6 +557,7 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
+                    frame_objects: std::collections::HashSet::new(),
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -637,6 +647,7 @@ impl<'a> FileLowering<'a> {
                     let variable = lowering.declare_value(slot as u32, *ty)?;
                     lowering.builder.def_var(variable, *value);
                 }
+                lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)
             },
         );
@@ -721,6 +732,8 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
+    /// The constructions of this body whose object lives in this frame; see `frame_objects`.
+    frame_objects: std::collections::HashSet<u32>,
 }
 
 /// One `finally` the current position is inside.
@@ -1471,7 +1484,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 callee,
                 dispatch_receiver,
                 args,
-            } => self.call(id, &callee, dispatch_receiver, &args),
+            } => self.call(&callee, dispatch_receiver, &args),
             IrExpr::TypeOp {
                 op,
                 arg,
@@ -1531,11 +1544,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .iter()
                     .map(|ordinal| ordinal + default_prefix_count)
                     .collect();
+                let placement = if self.frame_objects.contains(&id) {
+                    frame_objects::Placement::Frame
+                } else {
+                    frame_objects::Placement::Heap
+                };
                 self.construction(
                     internal,
                     &args,
                     ctor_params.as_deref(),
                     (!omitted.is_empty()).then_some(omitted.as_slice()),
+                    placement,
                 )
             }
             IrExpr::MethodCall {
@@ -1704,7 +1723,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .expect("checked by the guard");
                 match self.list_property_member(&name, receiver, Ty::Int) {
                     Some(realized) => realized,
-                    None => Err(format!("`{name}` of a receiver that is not a list")),
+                    None => Err(format!("`{name}` of a receiver that is not a collection")),
                 }
             }
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -1712,13 +1731,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 receiver: Some(receiver),
                 ..
             }) if self.map_getter(target, receiver).is_some() => {
-                let name = self
+                let property = self
                     .map_getter(target, receiver)
                     .expect("checked by the guard");
-                let answer = maps::map_getter_ty(&name);
-                match self.map_property_member(&name, receiver, answer) {
+                match self.map_property_member(property, receiver, property.answer()) {
                     Some(realized) => realized,
-                    None => Err(format!("`{name}` of a receiver that is not a map")),
+                    None => Err(format!(
+                        "`{}` of a receiver that is not a map",
+                        property.name()
+                    )),
                 }
             }
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
@@ -2236,10 +2257,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         }
                         Some(receiver) if self.list_getter(*target, *receiver).is_some() => Ty::Int,
                         Some(receiver) if self.map_getter(*target, *receiver).is_some() => {
-                            let name = self
+                            let property = self
                                 .map_getter(*target, *receiver)
                                 .expect("checked by the guard");
-                            let answer = maps::map_getter_ty(&name);
+                            let answer = property.answer();
                             // The runtime's answer is only the carrier; the checked result names
                             // the collection the read IS (`m.keys` is a `Set`). A walk over the
                             // read itself, `for (k in m.keys)`, finds its collection shape there.
@@ -2590,5 +2611,12 @@ mod tests {
             machine_carrier(Ty::Boolean).abi_param().unwrap().extension == ArgumentExtension::Uext
         );
         assert!(machine_carrier(Ty::Int).abi_param().unwrap().extension == ArgumentExtension::None);
+    }
+
+    #[test]
+    fn only_a_verified_build_runs_the_cranelift_verifier() {
+        let target = NativeTarget::host().expect("a supported host");
+        assert!(!isa_for(target, false).unwrap().flags().enable_verifier());
+        assert!(isa_for(target, true).unwrap().flags().enable_verifier());
     }
 }

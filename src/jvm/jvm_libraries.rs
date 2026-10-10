@@ -3570,7 +3570,7 @@ impl JvmLibraries {
                     setter_declaration: None,
                     source_member: None,
                     producer: PropertyProducer::KotlinAccessor,
-                    read_stability: crate::libraries::PropertyReadStability::Unstable,
+                    read_stability: self.module_read_stability(&mp, cn),
                 });
             }
 

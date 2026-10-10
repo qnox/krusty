@@ -1,7 +1,6 @@
 /* krusty native runtime: the garbage collector. Hand-written freestanding C; build.rs compiles it
    into the runtime for every target. */
-#include "krusty_rt.h"
-#include "krusty_sys.h"
+#include "krusty_internal.h"
 
 /* ---- heap geometry --------------------------------------------------------------------------- */
 
@@ -25,6 +24,10 @@ typedef struct KChunk {
     void *free_list;
     size_t mapped_bytes;
     uint32_t object_size;
+    /* `2^32 / (object_size / 16)`, rounded up: which slot an offset falls in, by a multiply
+       rather than a division. See kt_slot_of. Wider than 32 bits, because one-granule slots
+       need `2^32` itself. */
+    uint64_t slot_magic;
     uint32_t object_count;
     /* Objects never yet handed out; cheaper than seeding the free list at chunk creation. */
     uint32_t high_water;
@@ -34,6 +37,10 @@ typedef struct KChunk {
 } KChunk;
 
 static KChunk *kt_class_chunks[KT_CLASS_COUNT];
+/* Where each class's next allocation starts looking. Only a sweep frees an object, so every chunk
+   an allocation has passed over since the last sweep is still full: starting there instead of at
+   the head keeps an allocation from re-walking them all. A sweep resets every cursor to its head. */
+static KChunk *kt_class_cursor[KT_CLASS_COUNT];
 static KChunk *kt_all_chunks;
 
 /* Chunks sorted by address, so a candidate root resolves by binary search. Kept in raw mapped
@@ -103,13 +110,37 @@ static KChunk *kt_chunk_of(uintptr_t address) {
     return NULL;
 }
 
+/* The smallest size class holding `size` bytes, or KT_CLASS_COUNT for a large object.
+
+   In 16-byte granules the classes are 1, 2, 3, 4 and then two per power of two: 6 and 8, 12 and
+   16, … up to 96 and 128. Above 4 granules, `g - 1` has its top bit at `p` and the bit below it
+   picks the lower or upper class of that pair, so the class follows from a count of leading zeros
+   instead of a walk over the table. */
 static uint32_t kt_class_for(uint32_t size) {
-    for (uint32_t i = 0; i < KT_CLASS_COUNT; i++) {
-        if (size <= kt_size_classes[i]) {
-            return i;
-        }
+    /* Checked before rounding, which would wrap a size near the 32-bit limit to a small class. */
+    if (size > kt_size_classes[KT_CLASS_COUNT - 1]) {
+        return KT_CLASS_COUNT;
     }
-    return KT_CLASS_COUNT;
+    uint32_t granules = (size + 15u) >> 4;
+    if (granules <= 4u) {
+        return granules == 0 ? 0 : granules - 1u;
+    }
+    uint32_t below = granules - 1u;
+    uint32_t top = 31u - (uint32_t)__builtin_clz(below);
+    return 2u * top + ((below >> (top - 1u)) & 1u);
+}
+
+/* The slot of `chunk` that `offset` bytes into its object area falls in.
+
+   A small chunk's slots are `k` granules of 16 bytes, at most 128, and a chunk holds at most 4096
+   granules, so multiplying the granule by the rounded-up `2^32 / k` and keeping the top half is the
+   exact quotient: the rounding error stays below `4096 / 2^32` of a slot, short of the `1 / k` gap
+   between a granule and the next slot boundary. A large chunk has one slot. */
+static uint32_t kt_slot_of(const KChunk *chunk, uintptr_t offset) {
+    if (chunk->large) {
+        return 0;
+    }
+    return (uint32_t)(((uint64_t)(offset >> 4) * chunk->slot_magic) >> 32);
 }
 
 static KChunk *kt_new_chunk(uint32_t object_size, uint32_t object_count, bool large) {
@@ -126,6 +157,10 @@ static KChunk *kt_new_chunk(uint32_t object_size, uint32_t object_count, bool la
     chunk->marked = chunk->allocated + bitmap_words;
     chunk->objects = (uint8_t *)chunk + header;
     chunk->object_size = object_size;
+    if (!large) {
+        uint64_t granules = object_size / 16u;
+        chunk->slot_magic = (((uint64_t)1 << 32) + granules - 1u) / granules;
+    }
     /* Page rounding may leave room past `object_count` objects; the bitmaps were sized for
        exactly that many, so the slack stays unused rather than unaccounted for. */
     chunk->object_count = object_count;
@@ -144,10 +179,6 @@ static bool kt_bit(const uint64_t *bits, uint32_t index) {
 
 static void kt_set_bit(uint64_t *bits, uint32_t index) {
     bits[index / 64u] |= (uint64_t)1 << (index % 64u);
-}
-
-static void kt_clear_bit(uint64_t *bits, uint32_t index) {
-    bits[index / 64u] &= ~((uint64_t)1 << (index % 64u));
 }
 
 /* ---- marking --------------------------------------------------------------------------------- */
@@ -183,7 +214,7 @@ static void kt_mark_candidate(uintptr_t address) {
     if (chunk == NULL) {
         return;
     }
-    uint32_t index = (uint32_t)((address - (uintptr_t)chunk->objects) / chunk->object_size);
+    uint32_t index = kt_slot_of(chunk, address - (uintptr_t)chunk->objects);
     if (!kt_bit(chunk->allocated, index) || kt_bit(chunk->marked, index)) {
         return;
     }
@@ -253,7 +284,7 @@ static void kt_mark_array_ending_at(uintptr_t end) {
     if (chunk == NULL) {
         return;
     }
-    uint32_t index = (uint32_t)((last - (uintptr_t)chunk->objects) / chunk->object_size);
+    uint32_t index = kt_slot_of(chunk, last - (uintptr_t)chunk->objects);
     if (!kt_bit(chunk->allocated, index)) {
         return;
     }
@@ -278,9 +309,6 @@ static void kt_mark_scanned(uintptr_t address) {
 }
 
 /* ---- roots ----------------------------------------------------------------------------------- */
-
-/* Where the program's stack began, recorded by kt_runtime_init. */
-static uintptr_t kt_stack_bottom;
 
 /* Global reference slots the emitted program declares (top-level properties). Registered rather
    than discovered, because a freestanding program has no portable way to find its own data
@@ -308,22 +336,22 @@ void kt_gc_add_global_root(void **slot) {
     kt_globals[kt_global_count++] = slot;
 }
 
-void kt_runtime_init(void *stack_bottom) { kt_stack_bottom = (uintptr_t)stack_bottom; }
-
 /* Scan a stack range word by word. A reference is stored aligned, so stepping by pointer size is
    sufficient. */
-static void kt_scan_range(uintptr_t low, uintptr_t high) {
+void kt_gc_scan_range(uintptr_t low, uintptr_t high) {
     low = (low + sizeof(void *) - 1) & ~(uintptr_t)(sizeof(void *) - 1);
     for (uintptr_t at = low; at + sizeof(void *) <= high; at += sizeof(void *)) {
         kt_mark_scanned(kt_load_word((const void *)at));
     }
 }
 
+void kt_gc_scan_word(uintptr_t word) { kt_mark_scanned(word); }
+
 /* Spill the callee-saved registers to the stack so the scan below sees them. A reference whose
    only copy is in a register is invisible to a stack scan, and would be collected while live.
    Not inlined: the scan starts at this frame's `saved`, which must be the deepest frame with
    anything to find. */
-__attribute__((noinline)) static void kt_scan_registers_and_stack(void) {
+__attribute__((noinline)) static void kt_scan_registers_and_stack(uintptr_t stack_bottom) {
     uintptr_t saved[16];
     for (unsigned i = 0; i < 16; i++) {
         saved[i] = 0;
@@ -359,8 +387,8 @@ __attribute__((noinline)) static void kt_scan_registers_and_stack(void) {
         kt_mark_scanned(saved[i]);
     }
 
-    /* Every frame between this one and the program's entry lies above `saved`. */
-    kt_scan_range((uintptr_t)&saved[0], kt_stack_bottom);
+    /* Every frame between this one and the thread's entry into Kotlin lies above `saved`. */
+    kt_gc_scan_range((uintptr_t)&saved[0], stack_bottom);
 }
 
 /* ---- collection ------------------------------------------------------------------------------ */
@@ -373,20 +401,25 @@ static size_t kt_sweep(void) {
     while (*link != NULL) {
         KChunk *chunk = *link;
         chunk->live = 0;
-        for (uint32_t index = 0; index < chunk->high_water; index++) {
-            if (!kt_bit(chunk->allocated, index)) {
-                continue;
+        /* A word of the bitmaps at a time: what was allocated and marked survives, what was
+           allocated and not marked dies, and every mark is cleared for the next collection. Bits
+           at and past `high_water` were never allocated, so they are zero in both. */
+        uint32_t words = (chunk->high_water + 63u) / 64u;
+        for (uint32_t word = 0; word < words; word++) {
+            uint64_t allocated = chunk->allocated[word];
+            uint64_t survivors = allocated & chunk->marked[word];
+            uint64_t dead = allocated & ~survivors;
+            chunk->allocated[word] = survivors;
+            chunk->marked[word] = 0;
+            chunk->live += (uint32_t)__builtin_popcountll(survivors);
+            while (dead != 0) {
+                uint32_t index = word * 64u + (uint32_t)__builtin_ctzll(dead);
+                dead &= dead - 1u;
+                void *object = chunk->objects + (size_t)index * chunk->object_size;
+                /* Thread the reuse list through the dead object itself. */
+                *(void **)object = chunk->free_list;
+                chunk->free_list = object;
             }
-            if (kt_bit(chunk->marked, index)) {
-                kt_clear_bit(chunk->marked, index);
-                chunk->live++;
-                continue;
-            }
-            kt_clear_bit(chunk->allocated, index);
-            void *object = chunk->objects + (size_t)index * chunk->object_size;
-            /* Thread the reuse list through the dead object itself. */
-            *(void **)object = chunk->free_list;
-            chunk->free_list = object;
         }
         live_bytes += (size_t)chunk->live * chunk->object_size;
         if (chunk->large && chunk->live == 0) {
@@ -407,7 +440,8 @@ void kt_gc_collect(void) {
     /* Without the stack bottom there are no roots, and "no roots" would free everything the
        program holds. That is a bug in whoever produced the entry point, and it must not look
        like a subtle memory corruption. */
-    if (kt_stack_bottom == 0) {
+    uintptr_t stack_bottom = kt_threads_running_bottom();
+    if (stack_bottom == 0) {
         KT_SYS_FAIL("krusty: collection before kt_runtime_init recorded the stack\n");
     }
     /* Nothing a collection calls allocates from the collected heap, so a collection never starts
@@ -425,9 +459,15 @@ void kt_gc_collect(void) {
             kt_mark_candidate(value);
         }
     }
-    kt_scan_registers_and_stack();
+    kt_scan_registers_and_stack(stack_bottom);
+    /* Every other attached thread is released, since this one holds the lock: its frames, its
+       registers as it left them, and its exception in flight. */
+    kt_threads_scan_released();
     kt_trace();
     size_t live_bytes = kt_sweep();
+    for (uint32_t i = 0; i < KT_CLASS_COUNT; i++) {
+        kt_class_cursor[i] = kt_class_chunks[i];
+    }
     /* The next collection comes after as many bytes again as survived this one (at least the
        minimum), so the heap settles at about twice the live set rather than collecting on every
        few allocations when the live set is large. */
@@ -442,7 +482,7 @@ static void *kt_take_from(KChunk *chunk) {
     if (chunk->free_list != NULL) {
         void *object = chunk->free_list;
         chunk->free_list = *(void **)object;
-        uint32_t index = (uint32_t)(((uint8_t *)object - chunk->objects) / chunk->object_size);
+        uint32_t index = kt_slot_of(chunk, (uintptr_t)((uint8_t *)object - chunk->objects));
         kt_set_bit(chunk->allocated, index);
         chunk->live++;
         return object;
@@ -456,7 +496,22 @@ static void *kt_take_from(KChunk *chunk) {
     return NULL;
 }
 
-void *kt_gc_allocate(const KType *type, uint32_t size) {
+/* A taken slot, cleared and stamped with its type. Every slot size is a multiple of 16, so
+   clearing by words covers it exactly. */
+static void *kt_initialize(uint8_t *object, uint32_t object_size, const KType *type) {
+    kt_allocated_since_collect += object_size;
+    uint64_t *words = (uint64_t *)object;
+    for (uint32_t i = 0; i < object_size / sizeof(uint64_t); i++) {
+        words[i] = 0;
+    }
+    ((KObjectHeader *)object)->type = type;
+    return object;
+}
+
+/* Every allocation the fast path in kt_gc_allocate does not take: a collection is due, the
+   class's current chunk is full, or the object is large. Kept out of line so the common case
+   saves and restores no registers. */
+__attribute__((noinline)) static void *kt_gc_allocate_slow(const KType *type, uint32_t size) {
     /* Room for the header, which also covers the reuse-list link a swept object holds. */
     if (size < sizeof(KObjectHeader)) {
         size = sizeof(KObjectHeader);
@@ -471,10 +526,11 @@ void *kt_gc_allocate(const KType *type, uint32_t size) {
     uint32_t class_index = kt_class_for(size);
     if (class_index < KT_CLASS_COUNT) {
         object_size = kt_size_classes[class_index];
-        for (KChunk *chunk = kt_class_chunks[class_index]; chunk != NULL;
+        for (KChunk *chunk = kt_class_cursor[class_index]; chunk != NULL;
              chunk = chunk->next_in_class) {
             object = (uint8_t *)kt_take_from(chunk);
             if (object != NULL) {
+                kt_class_cursor[class_index] = chunk;
                 break;
             }
         }
@@ -482,6 +538,7 @@ void *kt_gc_allocate(const KType *type, uint32_t size) {
             KChunk *chunk = kt_new_chunk(object_size, KT_CHUNK_BYTES / object_size, false);
             chunk->next_in_class = kt_class_chunks[class_index];
             kt_class_chunks[class_index] = chunk;
+            kt_class_cursor[class_index] = chunk;
             object = (uint8_t *)kt_take_from(chunk);
         }
     } else {
@@ -500,15 +557,26 @@ void *kt_gc_allocate(const KType *type, uint32_t size) {
     if (object == NULL) {
         kt_fail_oom();
     }
-    kt_allocated_since_collect += object_size;
+    return kt_initialize(object, object_size, type);
+}
 
-    /* Every slot size is a multiple of 16, so clearing by words covers it exactly. */
-    uint64_t *words = (uint64_t *)object;
-    for (uint32_t i = 0; i < object_size / sizeof(uint64_t); i++) {
-        words[i] = 0;
+/* The common case first: a small object, no collection due, and room in the chunk its class last
+   allocated from. That chunk is where the slow path would start looking too, so taking from it
+   here hands out exactly the slot the slow path would. */
+void *kt_gc_allocate(const KType *type, uint32_t size) {
+    if (size <= kt_size_classes[KT_CLASS_COUNT - 1] &&
+        kt_allocated_since_collect < kt_next_collect_at) {
+        uint32_t class_index =
+            kt_class_for(size < sizeof(KObjectHeader) ? (uint32_t)sizeof(KObjectHeader) : size);
+        KChunk *chunk = kt_class_cursor[class_index];
+        if (chunk != NULL) {
+            uint8_t *object = (uint8_t *)kt_take_from(chunk);
+            if (object != NULL) {
+                return kt_initialize(object, chunk->object_size, type);
+            }
+        }
     }
-    ((KObjectHeader *)object)->type = type;
-    return object;
+    return kt_gc_allocate_slow(type, size);
 }
 
 /* ---- introspection, for tests ---------------------------------------------------------------- */

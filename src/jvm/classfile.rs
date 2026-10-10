@@ -32,6 +32,7 @@ mod method_parameters;
 mod method_rewrite;
 mod pool_layout;
 mod pool_noting;
+mod source_map_annotation;
 mod stack_maps;
 mod utf8_pool;
 
@@ -39,7 +40,11 @@ use descriptor_mentions::DescriptorMentionCache;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
 pub(crate) use coroutine_transform::{CoroutineOutcome, CoroutineRequest, TransformedCoroutine};
-pub(crate) use {copied_class::CopyError, inner_classes::DeclarationPaths};
+pub use inner_classes::{InnerClassDetails, InnerClassResolver, InnerClassSpec};
+pub(crate) use {
+    copied_class::CopyError,
+    inner_classes::{DeclarationPaths, TableOrders},
+};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
@@ -273,13 +278,13 @@ impl ConstPool {
                 Const::Utf8(s) => {
                     out.push(1);
                     let b = crate::metadata::encoding::modified_utf8(s);
-                    u2(out, b.len() as u16);
+                    u2(out, utf8_pool::entry_length(&b));
                     out.extend_from_slice(&b);
                 }
                 Const::Utf8Units(units) => {
                     out.push(1);
                     let b = crate::metadata::encoding::modified_utf8_units(units.iter().copied());
-                    u2(out, b.len() as u16);
+                    u2(out, utf8_pool::entry_length(&b));
                     out.extend_from_slice(&b);
                 }
                 Const::Integer(v) => {
@@ -556,25 +561,6 @@ pub struct ClassWriter {
     enclosing_method: Option<(String, String, String)>,
     pub internal_name: String,
 }
-
-/// One candidate `InnerClasses` entry: the nested class, its enclosing class (`None` for an anonymous
-/// local), its simple name (`None` when anonymous), and the entry's access flags.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InnerClassSpec {
-    pub inner: String,
-    pub outer: Option<String>,
-    pub name: Option<String>,
-    pub access: u16,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InnerClassDetails {
-    pub outer: Option<String>,
-    pub name: Option<String>,
-    pub access: u16,
-}
-
-pub type InnerClassResolver = Rc<dyn Fn(&str) -> Option<InnerClassDetails>>;
 
 impl ClassWriter {
     pub fn new(internal_name: &str, super_internal: &str) -> ClassWriter {
@@ -1415,20 +1401,10 @@ impl ClassWriter {
         // The source map is also published as a BINARY-retained annotation, which is how a Kotlin
         // consumer reads it back without parsing the class file's own attribute. kotlinc visits it
         // when the class is done, after the `SourceFile` value and before the method attribute names.
-        let smap_annotation = self.source_map.render().map(|smap| {
-            let mut body = Vec::new();
-            let annotation = self.cp.utf8("Lkotlin/jvm/internal/SourceDebugExtension;");
-            u2(&mut body, annotation);
-            u2(&mut body, 1); // one element pair
-            let name = self.cp.utf8("value");
-            u2(&mut body, name);
-            body.push(b'['); // an array of one string, which is how kotlinc spells it
-            u2(&mut body, 1);
-            body.push(b's');
-            let value = self.cp.utf8(&smap);
-            u2(&mut body, value);
-            body
-        });
+        let smap_annotation = self
+            .source_map
+            .render()
+            .map(|smap| self.cp.source_map_annotation(&smap));
         // Code-related attribute NAMES intern in kotlinc's real first-use order, which is driven by
         // its field-then-method visiting — NOT a fixed order. kotlinc visits fields first, so a field
         // annotation interns `RuntimeInvisibleAnnotations` BEFORE `Code`; then each method, in emit

@@ -17,7 +17,7 @@
 //! Only the compiler-provided freestanding headers are used (`stdint.h`, `stddef.h`, `stdbool.h`),
 //! which C11 §4 guarantees exist without a hosted implementation.
 //!
-//! The runtime is eight translation units over three headers:
+//! The runtime is fourteen translation units over four headers:
 //!
 //! * `SYS_HEADER` (`krusty_sys.h`) is the kernel interface — the syscall shim per architecture
 //!   and the page-mapping primitives over it. It is the whole of the target-specific surface, a
@@ -40,7 +40,23 @@
 //! * `krusty_gc.c` is the heap: allocator and a mark-sweep collector with conservative roots and a
 //!   precisely traced heap. It knows nothing about any particular type; every object tells it,
 //!   through its `KType` descriptor, which of its fields are references.
-//! * `krusty_start.c` is `_start`, which with no C library the runtime must supply itself.
+//! * `krusty_threads.c` is the mutator lock, the registry of threads that run Kotlin, and the
+//!   threads the runtime starts itself with `clone`; one that foreign code started attaches when
+//!   it calls into Kotlin.
+//!   A thread holds the lock while it runs Kotlin and releases it in foreign code, recording its
+//!   registers and stack pointer, which is what the collector scans it by.
+//! * `krusty_start.c` is the process boundary: `_start`, which with no C library the runtime must
+//!   supply itself, the arguments and environment the kernel leaves on the initial stack, and
+//!   standard input's lines. Text from outside is decoded from UTF-8 here, ill-formed bytes and all,
+//!   so every `String` the rest of the runtime walks is well-formed.
+//!
+//! * `krusty_posix.h` and the `krusty_posix_*.c` units are the POSIX a static program calls in
+//!   place of a C library, served from system calls with glibc's names, errno and struct layouts:
+//!   files (`_io`), sockets and epoll (`_net`), the process, signals and clocks (`_process`),
+//!   threads, mutexes and the per-thread `errno` behind the thread pointer (`_thread`), and
+//!   `<string.h>` (`_string`). The rest of the runtime never calls them; it reaches the layer only
+//!   through two weak hooks a thread runs at its start and end, so a program that links a real C
+//!   library can leave the layer out.
 //!
 //! Every value the runtime allocates, it allocates through the collector.
 //!

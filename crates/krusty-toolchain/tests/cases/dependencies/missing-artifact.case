@@ -1,0 +1,22 @@
+An artifact found in no repository fails resolution, as does one a found artifact depends on.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:absent:1.0
+  - org.example:present:1.0
+--- m2/org/example/present/1.0/present-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>present</artifactId>
+  <version>1.0</version>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>gone</artifactId><version>2.0</version></dependency>
+  </dependencies>
+</project>
+--- krusty-refusal
+error	ERROR: The POM or module metadata of org.example:absent:1.0 is in no local repository, and krusty-toolchain does not download artifacts
+error	ERROR: The POM or module metadata of org.example:gone:2.0 is in no local repository, and krusty-toolchain does not download artifacts

@@ -12,7 +12,7 @@ use crate::kt_string::{KtString, KtStringBuf};
 const UTF8_ENTRY_LIMIT: usize = 65535;
 
 pub(crate) fn push_string(value: &KtString, code: &mut CodeBuilder, cw: &mut ClassWriter) {
-    let parts = split(value);
+    let parts = utf8_entry_parts(value);
     let [single] = parts.as_slice() else {
         // Each constant is interned where the instruction using it is emitted, as kotlinc's
         // pool order follows its instruction stream.
@@ -44,8 +44,15 @@ pub(crate) fn push_string(value: &KtString, code: &mut CodeBuilder, cw: &mut Cla
     code.push_string_kt(single, cw);
 }
 
+/// [`utf8_entry_parts`] of compiler-written text, such as a class's source map.
+pub(crate) fn text_entry_parts(text: &str) -> Vec<KtString> {
+    let mut value = KtStringBuf::new();
+    value.push_str(text);
+    utf8_entry_parts(&value.finish())
+}
+
 /// `value` cut into the fewest leading-greedy parts that each fit one `CONSTANT_Utf8` entry.
-fn split(value: &KtString) -> Vec<KtString> {
+pub(crate) fn utf8_entry_parts(value: &KtString) -> Vec<KtString> {
     let mut parts = Vec::new();
     let mut part = KtStringBuf::new();
     let mut size = 0;
@@ -68,13 +75,13 @@ fn split(value: &KtString) -> Vec<KtString> {
 
 #[cfg(test)]
 mod tests {
-    use super::split;
+    use super::utf8_entry_parts;
     use crate::kt_string::KtString;
 
     #[test]
     fn a_constant_within_one_entry_stays_whole() {
         let value = KtString::from_units(vec![u16::from(b'a'); 65535]);
-        assert_eq!(split(&value), vec![value]);
+        assert_eq!(utf8_entry_parts(&value), vec![value]);
     }
 
     #[test]
@@ -82,7 +89,7 @@ mod tests {
         // 21845 three-byte units fill 65535 bytes; the pair's low half starts the next part.
         let mut units = vec![0x0800; 21844];
         units.extend([0xd83c, 0xdf09, 0x0000]);
-        let parts = split(&KtString::from_units(units));
+        let parts = utf8_entry_parts(&KtString::from_units(units));
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].len_utf16(), 21845);
         assert_eq!(parts[0].units().last(), Some(0xd83c));

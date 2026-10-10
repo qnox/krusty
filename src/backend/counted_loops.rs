@@ -54,17 +54,33 @@ pub(crate) enum HeaderInlining {
     Kotlinc,
 }
 
+/// How a target iterates `start until end step step`, which kotlinc builds as a progression value
+/// because `step` needs an inclusive last.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UntilSteps {
+    /// Build the progression and read its `first`, `last` and `step`, as kotlinc does.
+    Built,
+    /// Count it with `end - 1` as the inclusive last when checked FIR published that form and the
+    /// constant end can move one down: no progression object is built.
+    Counted,
+}
+
 /// How a target realizes its counted loops: each backend names its own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CountedLoopPolicy {
     pub(crate) style: CounterLoopStyle,
     pub(crate) inlining: HeaderInlining,
+    pub(crate) until_steps: UntilSteps,
 }
 
 /// Realize every checked range loop. An unsigned loop compares through the function resolution
 /// selected for it, called like any other external declaration.
 pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
-    let CountedLoopPolicy { style, inlining } = policy;
+    let CountedLoopPolicy {
+        style,
+        inlining,
+        until_steps,
+    } = policy;
     let mut next_slot = None;
     for expression in 0..ir.exprs.len() {
         let IrExpr::Checked(IrCheckedOperation::RangeLoop {
@@ -86,6 +102,7 @@ pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
             ir: &mut *ir,
             style,
             inlining,
+            until_steps,
             unsigned_compare,
             inlined_calls: Vec::new(),
             represented: Vec::new(),
@@ -144,6 +161,7 @@ struct Realizer<'a> {
     ir: &'a mut IrFile,
     style: CounterLoopStyle,
     inlining: HeaderInlining,
+    until_steps: UntilSteps,
     next_slot: u32,
     unsigned_compare: Option<IrRuntimeFunction>,
     inlined_calls: Vec<ExprId>,

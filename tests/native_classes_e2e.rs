@@ -74,7 +74,7 @@ fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
     );
-    let backend = CraneliftBackend::new(target);
+    let backend = CraneliftBackend::new(target).verified();
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
 }

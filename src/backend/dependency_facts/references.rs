@@ -285,6 +285,10 @@ impl ReferencedDependencies {
                 self.progression(nested);
             }
             IrProgressionSource::Reversed(nested) => self.progression(nested),
+            IrProgressionSource::Value {
+                stepped: Some(stepped),
+                ..
+            } => self.progression(stepped),
             IrProgressionSource::Literal { .. } | IrProgressionSource::Value { .. } => {}
         }
     }

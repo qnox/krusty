@@ -167,6 +167,17 @@ fn translate_language_features(
     Ok(())
 }
 
+/// Whether a forwarded kotlinc argument selects an input or output the structured work request
+/// owns. Kotlinc accepts both `-name value` and `-name=value`; checking only the complete token lets
+/// the attached form override the structured value when `compile_work_unit` appends these options.
+fn is_worker_owned_kotlinc_option(argument: &str) -> bool {
+    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
+    matches!(
+        name,
+        "-d" | "-cp" | "-classpath" | "-class-path" | "-module-name"
+    ) || argument.starts_with('@')
+}
+
 /// Translate one `jvm-inc-builder` argument list into a [`WorkUnit`].
 pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
     let mut unit = WorkUnit::default();
@@ -367,11 +378,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             // not spell would silently not reach the compiler.
             "--kotlinc-arg" => {
                 let value = value_of(index, flag)?;
-                if matches!(
-                    value.as_str(),
-                    "-d" | "-cp" | "-classpath" | "-class-path" | "-module-name"
-                ) || value.starts_with('@')
-                {
+                if is_worker_owned_kotlinc_option(&value) {
                     return Err(Refusal::Unsupported(format!(
                         "{flag} {value}: output, module, sources, and classpath are owned by the work request"
                     )));
@@ -1401,7 +1408,19 @@ mod tests {
 
     #[test]
     fn forwarded_flags_cannot_replace_worker_owned_inputs_or_outputs() {
-        for option in ["-d", "-classpath", "-module-name", "@other.args"] {
+        for option in [
+            "-d",
+            "-d=elsewhere.jar",
+            "-cp",
+            "-cp=other.jar",
+            "-classpath",
+            "-classpath=other.jar",
+            "-class-path",
+            "-class-path=other.jar",
+            "-module-name",
+            "-module-name=other",
+            "@other.args",
+        ] {
             let refusal = translate(&args(&[
                 "--kotlinc-arg",
                 option,
@@ -1411,7 +1430,12 @@ mod tests {
                 "o.jar",
             ]))
             .unwrap_err();
-            assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+            assert_eq!(
+                refusal,
+                Refusal::Unsupported(format!(
+                    "--kotlinc-arg {option}: output, module, sources, and classpath are owned by the work request"
+                ))
+            );
         }
     }
 

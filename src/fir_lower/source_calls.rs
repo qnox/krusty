@@ -103,6 +103,7 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) declared_result: Option<ResolvedTy>,
     pub(super) overridden_results: &'a [ResolvedTy],
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(super) overridden_declarations: &'a [crate::types::OverriddenDeclaration],
     pub(super) suspend: bool,
     pub(super) can_inline: bool,
     pub(super) inline_plan: Option<&'a crate::fir::FirInlineBodyPlan>,
@@ -350,6 +351,7 @@ impl BodyLowering<'_> {
             declared_result,
             overridden_results,
             semantic_role,
+            overridden_declarations,
             suspend,
             can_inline,
             inline_plan,
@@ -434,6 +436,8 @@ impl BodyLowering<'_> {
         if let Some(role) = semantic_role {
             self.ir.semantic_call_roles.insert(call, role);
         }
+        self.ir
+            .record_external_overridden_declarations(target, overridden_declarations);
         if let Some(receiver) = source_receiver {
             self.ir
                 .ext_call_source_receiver

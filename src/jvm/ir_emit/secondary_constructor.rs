@@ -275,7 +275,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             let forwards_owner_prefix =
                 delegates_to_this || matches!(sc.delegate, CtorDelegateTarget::ImplicitEnumBase);
             if !delegates_to_this {
-                for &(parameter, field) in &c.pre_super_param_fields {
+                for &(parameter, field_index) in &c.pre_super_param_fields {
                     if parameter >= sc.prefix_params.len() as u32 {
                         continue;
                     }
@@ -293,7 +293,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                         .iter()
                         .map(|ty| slot_words(*ty))
                         .sum::<u16>();
-                    let Some(field) = c.fields.get(field as usize) else {
+                    let Some(field) = c.fields.get(field_index as usize) else {
                         e.run.set_emit_error(
                             "secondary constructor prefix store references a missing field"
                                 .to_string(),
@@ -302,7 +302,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     };
                     sctor.aload(0);
                     load(ty, slot, &mut sctor);
-                    let physical_name = instance_field_jvm_name(ir, c, field);
+                    let physical_name = instance_field_jvm_name(ir, e.run, c, field_index as usize);
                     let reference =
                         e.cw.fieldref(fq_name, &physical_name, &type_descriptor(field.ty));
                     sctor.putfield(reference, slot_words(field.ty) as i32);
@@ -409,7 +409,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                         .sum::<u16>();
                     sctor.aload(0);
                     load(ty, slot, &mut sctor);
-                    let physical_name = instance_field_jvm_name(ir, c, field);
+                    let physical_name = instance_field_jvm_name(ir, e.run, c, parameter);
                     let reference =
                         e.cw.fieldref(fq_name, &physical_name, &type_descriptor(field.ty));
                     sctor.putfield(reference, slot_words(field.ty) as i32);

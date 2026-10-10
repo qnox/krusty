@@ -319,8 +319,8 @@ struct ParsedFunction {
     /// Only the current `Function.flags` word (field 9) has the status bits; `old_flags` predates
     /// them.
     return_value_status: crate::types::ReturnValueStatus,
-    /// `Function.flags` companion bit: a `companion { … }` block member, or a written
-    /// `companion fun C.f()` when a receiver is present.
+    /// `Function.flags.isStatic`, represented here as the companion-source shape it denotes for
+    /// JVM declarations.
     is_companion: bool,
     visibility: crate::types::Visibility,
     name_id: u64,
@@ -517,9 +517,9 @@ fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
         is_operator: flags & IS_OPERATOR_BIT != 0,
         is_infix: flags & IS_INFIX_BIT != 0,
         return_value_status,
-        // The companion bit exists only in the modern flag layout.
+        // The static bit exists only in the modern flag layout.
         is_companion: modern_flags
-            .is_some_and(|flags| flags & crate::metadata::function_flags::IS_COMPANION != 0),
+            .is_some_and(|flags| flags & crate::metadata::function_flags::IS_STATIC != 0),
         visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
         name_id,
         jvm_sig,
@@ -1202,6 +1202,9 @@ pub struct MetaProp {
     /// Decoded from the current `Property.flags` word only; `old_flags` predates the status bits.
     pub return_value_status: crate::types::ReturnValueStatus,
     pub is_const: bool,
+    /// Whether repeated reads observe one value, from the declaration's flags alone. Only a reader
+    /// in the declaring module or a friend of it may rely on it (kotlinc's smart-cast stability).
+    pub read_stability: crate::libraries::PropertyReadStability,
     /// Semantic property modality from metadata. The classfile accessor can still be abstract when
     /// a legacy `$DefaultImpls` method realizes this concrete declaration.
     pub is_abstract: bool,
@@ -2541,6 +2544,7 @@ pub enum BuiltinTy {
     },
     Param {
         name: String,
+        id: crate::metadata::semantic::KotlinTypeParameterId,
         nullable: bool,
     },
     InProjection(Box<BuiltinTy>),
@@ -2583,7 +2587,7 @@ impl BuiltinTy {
                 nullable,
                 ..
             } => (internal.clone(), args.as_slice(), *nullable),
-            BuiltinTy::Param { name, nullable } => (name.clone(), &[][..], *nullable),
+            BuiltinTy::Param { name, nullable, .. } => (name.clone(), &[][..], *nullable),
             BuiltinTy::InProjection(inner) => return format!("in {}", inner.render()),
             BuiltinTy::OutProjection(inner) => return format!("out {}", inner.render()),
         };
@@ -2630,32 +2634,13 @@ pub struct BuiltinMember {
     pub annotations: Vec<crate::types::TypeName>,
 }
 
-/// A top-level `.kotlin_builtins` function. It has no JVM facade method; resolution consumes its
-/// complete semantic signature and the backend supplies its physical realization.
-pub struct BuiltinFunction {
-    pub name: String,
-    pub receiver: Option<BuiltinTy>,
-    pub params: Vec<BuiltinTy>,
-    pub ret: BuiltinTy,
-    pub formals: Vec<BuiltinTypeParam>,
-    pub param_names: Vec<String>,
-    pub param_defaults: Vec<bool>,
-    pub vararg: Option<usize>,
-    pub visibility: crate::types::Visibility,
-    pub is_inline: bool,
-    pub has_reified_type_params: bool,
-    pub is_suspend: bool,
-    pub is_operator: bool,
-    pub is_infix: bool,
-    /// Leading unnamed context receivers followed by named context parameters.
-    pub context_count: usize,
-    pub annotations: Vec<crate::types::TypeName>,
-}
-
 #[derive(Default)]
 pub struct BuiltinPackage {
     pub classes: std::collections::HashMap<String, BuiltinClass>,
-    pub functions: Vec<BuiltinFunction>,
+    /// Top-level functions in their common semantic shape. A builtin function has no JVM facade
+    /// method; resolution consumes this complete declaration and the backend supplies its physical
+    /// realization.
+    pub functions: Vec<crate::metadata::semantic::KotlinFunction>,
     pub properties: Vec<BuiltinProperty>,
 }
 
@@ -2684,6 +2669,7 @@ pub struct BuiltinConstructor {
 /// (`E` unbounded, `T : Comparable<T>`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltinTypeParam {
+    pub id: crate::metadata::semantic::KotlinTypeParameterId,
     pub name: String,
     pub bounds: Vec<BuiltinTy>,
     pub variance: crate::types::TypeVariance,
@@ -3002,7 +2988,7 @@ mod builtin_class_access_tests {
 mod module_reader_tests {
     use super::{
         builtin_bridge, decode_metadata_type, decode_properties, parse_function, parse_type_facts,
-        primary_erasure_bounds, read_kotlin_module, value_parameter_type, BuiltinTy, MetaCtx,
+        primary_erasure_bounds, read_kotlin_module, value_parameter_type, MetaCtx,
         ParsedValueParam,
     };
     use crate::metadata::module::build_kotlin_module;
@@ -3656,7 +3642,13 @@ mod module_reader_tests {
         assert!(package.classes.is_empty());
         assert_eq!(package.functions.len(), 1);
         assert_eq!(package.functions[0].name, "main");
-        assert_eq!(package.functions[0].params, Vec::<BuiltinTy>::new());
-        assert_eq!(package.functions[0].ret, BuiltinTy::class("kotlin/Unit"));
+        assert_eq!(
+            package.functions[0].params,
+            Vec::<crate::metadata::semantic::KotlinType>::new()
+        );
+        assert_eq!(
+            package.functions[0].ret,
+            crate::metadata::semantic::KotlinType::class("kotlin/Unit")
+        );
     }
 }

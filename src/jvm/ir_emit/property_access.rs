@@ -18,12 +18,19 @@ pub(super) fn declared_property_field<'a>(
     class: &'a crate::ir::IrClass,
     declared: Option<&crate::ir::IrProperty>,
     name: &str,
-) -> Option<&'a crate::ir::IrField> {
+) -> Option<(usize, &'a crate::ir::IrField)> {
     match declared {
-        Some(property) => property
-            .backing_field
-            .and_then(|index| class.fields.get(index as usize)),
-        None => class.fields.iter().find(|field| field.name == name),
+        Some(property) => property.backing_field.and_then(|index| {
+            class
+                .fields
+                .get(index as usize)
+                .map(|field| (index as usize, field))
+        }),
+        None => class
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, field)| field.name == name),
     }
 }
 
@@ -403,6 +410,7 @@ impl Emitter<'_> {
         static_accessors::cross_class_backing_field_method(
             self.cw,
             self.ir,
+            self.run,
             &self.facade,
             &planned,
             None,

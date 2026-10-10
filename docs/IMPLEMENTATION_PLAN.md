@@ -4396,8 +4396,19 @@ deliberately much less than a general linker; each limit below is a decision, no
   multiple of the architecture's maximum page size (`Arch::max_page_size` in
   `src/native/target_contract.rs`: 4 KiB on x86_64 and riscv64, 64 KiB on AArch64) in the file and
   in memory, so file offset and address stay congruent and no kernel page size puts both segments
-  in one page. Both segments are aligned to that size. No PIC, GOT, PLT, dynamic section or section
-  headers. The whole image must fit the 4 GiB the small code models address.
+  in one page. Both segments are aligned to that size. No PIC or section headers. The whole image
+  must fit the 4 GiB the small code models address.
+- **Imports from shared libraries** (`src/native/linker/{dynamic,libraries}.rs`; design in
+  `docs/NATIVE.md`, "Importing from shared libraries"). A program that references functions it
+  does not define, which an `ImportLibrary` exports, is linked dynamically. The output adds
+  `PT_PHDR`, `PT_INTERP`, `PT_DYNAMIC` and `PT_GNU_STACK`, and gets one bind-now offset-table slot
+  plus one stub per import. Each import is bound at its library's default symbol version. It stays
+  non-PIE at the fixed base, so references to an import resolve at link time to its stub. Only
+  libraries something is imported from are `DT_NEEDED`; with no imports the image is the static
+  one, byte for byte. Variables in shared libraries (copy relocations) are refused. Tests:
+  `dynamic.rs` links a call for every target from in-memory `ImportLibrary`s and checks the
+  headers, dynamic entries, versions, relocation and stub. `mod.rs` links a program against the
+  host's own zlib and C library and runs it.
 - **Read-only data shares the executable segment.** A separate read-only segment is cheap to add
   when the runtime holds something worth protecting; until then `.rodata` is readable and
   executable.
@@ -4568,12 +4579,38 @@ code is the one the code generator already names: provider-owned bodies through 
   serialized declaration and expression fact (origins, raw flags, declaration and type annotations,
   value-class representations, type-alias expansions, inlined-block file entries) except source
   coordinates; `IrFile`-level facts are outside the trees.
+- **Signatures (done).** `metadata::id_signature` computes a declaration's public `IdSignature`
+  from its shape, as Kotlin's `IrMangleComputer` (signature mode) and CityHash64 do. The mangler is
+  target-free: a declaration model implements `SignatureType`, so the KLIB reader (over decoded
+  metadata) and a KLIB writer (over krusty's own declarations) agree on one identity. A type
+  parameter is located by its declaration identity (metadata's `TypeParameter.id`), never by its
+  spelling. The mask is an explicit input: `IS_EXPECT` from the declaration's and its classes'
+  metadata flags, `IS_NATIVE_INTEROP_LIBRARY` from the library. Metadata's `isStatic` marks a
+  `companion { … }` block member, signed `#static`, and a companion extension, whose recorded
+  receiver is the extended class and is signed `#companion@<ClassId>` in place of a receiver. Enum
+  classes get their implicit static `values` and `valueOf`, and `entries` only when the class
+  metadata sets `hasEnumEntries`. The unit tests pin a kotlinc-native
+  fixture KLIB (`tests/fixtures/klib_signatures`) whose metadata must sign every declaration and
+  accessor exactly as its IR declares them. Over the Kotlin/Native 2.4.20 stdlib it also reproduces
+  every public function, property, accessor, constructor and class signature; the misses are
+  `@OptionalExpectation` annotation classes, which IR omits, and non-public nested classes.
+- **Provider (in progress).** `klib_libraries::KlibLibraries` is a target-neutral `SymbolSource`
+  over decoded KLIB metadata, shared by Native and Wasm. It signs every declaration when it is
+  built and normalizes lazily, memoized per lookup key, through the target-free
+  `libraries::metadata_normalization` (which the JVM `.kotlin_builtins` path also uses for its
+  function signatures). Each published callable's identity is interned by its exact public
+  signature, and its realization carries that signature (`declaration_signature`) through to the
+  frozen `BackendCallableFact`, together with the declaration's validated parameter identities
+  (context roles, extension receiver, values). Normalization attaches no compiler intrinsic: a
+  KLIB declaration's implementation is its serialized IR body, and the provider attaches only
+  declaration-level semantic roles. Top-level functions are published; classes, members, properties
+  and the `SemanticPlatform` hooks come next, then the Native lane switch.
 - **Joining (next).** A selected dependency callable is joined to its decoded body through its
   exact public signature, never through a name or parameter tuple.
 - **Lowering (next).** The decoded body is lowered into checked common IR so the native generator
   compiles it as it compiles a module function; a body using an operation the lowering does not
   model declines by name.
-- Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`. End-to-end coverage comes through
+- Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs` and `metadata/id_signature/`. End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
   topology, where krusty compiles each dependency module to a KLIB itself (metadata and serialized
   IR) and then compiles the main module against it; kotlinc only supplies the expected output.

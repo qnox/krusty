@@ -9731,6 +9731,10 @@ impl TypeInfo {
                 InvokeKind::Operator { target, .. } => specialize(target),
             }),
             Some(ExprLowering::ReceiverFnInvoke { ret, .. }) => Some(*ret),
+            // The getter selection records the declaration's result, while a stable property path
+            // may have proved a narrower type for this exact read. The resolver owns both facts and
+            // publishes their final semantic result here; FIR remains generic over lowering kinds.
+            Some(ExprLowering::MemberPropertyRead { .. }) => Some(self.semantic_ty(expression)),
             _ => self.resolved_calls.get(&expression).map(specialize),
         }
     }
@@ -49992,10 +49996,12 @@ impl<'a> Checker<'a> {
                     ),
                 );
             }
+            // `sealed` is abstract: its own subclasses discharge members the sealed class leaves
+            // open, including members inherited from a superclass emitted in another unit.
             let leaves_abstract_members = !cl.is_enum()
                 && separate_emission
                 && inheritance.is_some_and(|shape| shape.is_abstract)
-                && cl.modality != crate::ast::Modality::Abstract
+                && !cl.modality.is_abstract()
                 && !self.has_no_unimplemented_abstract_members(owner);
             if leaves_abstract_members {
                 // This is a Kotlin declaration error, not an emitter capability gate. Diagnose it
@@ -57883,7 +57889,9 @@ impl<'a> Checker<'a> {
                                 receiver_depth: label_depth,
                             },
                         };
-                        self.mark_implicit_receiver_selection(e, receiver);
+                        let ty = self
+                            .select_labeled_receiver(scope, e, receiver, idx == top)
+                            .unwrap_or(ty);
                         if idx == top {
                             self.expr_lowers.insert(e, ExprLowering::LabeledThisInner);
                         } else {
@@ -57908,7 +57916,9 @@ impl<'a> Checker<'a> {
                                     )
                             });
                         if let Some(receiver) = receiver {
-                            self.mark_implicit_receiver_selection(e, receiver);
+                            let ty = self
+                                .select_labeled_receiver(scope, e, receiver, receiver.current)
+                                .unwrap_or(receiver.ty);
                             self.expr_lowers.insert(
                                 e,
                                 if receiver.current {
@@ -57917,7 +57927,7 @@ impl<'a> Checker<'a> {
                                     ExprLowering::LabeledThisDispatch
                                 },
                             );
-                            receiver.ty
+                            ty
                         } else {
                             self.diags
                                 .error(self.span(e), format!("unresolved reference '{n}'."));

@@ -60,12 +60,17 @@ pub enum KotlinType {
         nullable: bool,
         shape: KotlinFunctionTypeShape,
     },
+    /// A reference to a type parameter in scope. `id` is its declaration's identity; `name` is
+    /// its spelling, kept for rendering and for consumers that scope parameters by name.
     Param {
         name: String,
+        id: KotlinTypeParameterId,
         nullable: bool,
     },
     InProjection(Box<KotlinType>),
     OutProjection(Box<KotlinType>),
+    /// The star projection `*` of a type argument.
+    Star,
 }
 
 impl KotlinType {
@@ -81,14 +86,16 @@ impl KotlinType {
     pub fn internal(&self) -> Option<&str> {
         match self {
             Self::Class { internal, .. } => Some(internal),
-            Self::Param { .. } | Self::InProjection(_) | Self::OutProjection(_) => None,
+            Self::Param { .. } | Self::InProjection(_) | Self::OutProjection(_) | Self::Star => {
+                None
+            }
         }
     }
 
     pub fn nullable(&self) -> bool {
         match self {
             Self::Class { nullable, .. } | Self::Param { nullable, .. } => *nullable,
-            Self::InProjection(_) | Self::OutProjection(_) => false,
+            Self::InProjection(_) | Self::OutProjection(_) | Self::Star => false,
         }
     }
 
@@ -101,9 +108,10 @@ impl KotlinType {
                 nullable,
                 ..
             } => (internal.clone(), args.as_slice(), *nullable),
-            Self::Param { name, nullable } => (name.clone(), &[][..], *nullable),
+            Self::Param { name, nullable, .. } => (name.clone(), &[][..], *nullable),
             Self::InProjection(inner) => return format!("in {}", inner.render()),
             Self::OutProjection(inner) => return format!("out {}", inner.render()),
+            Self::Star => return "*".to_string(),
         };
         let mut out = base;
         if !args.is_empty() {
@@ -133,12 +141,22 @@ pub(crate) fn project_kotlin_type(
 
 pub struct KotlinMember {
     pub name: String,
+    /// The extension receiver of a member extension.
+    pub receiver: Option<KotlinType>,
+    /// Context parameter types, in declaration order. They are not part of [`Self::params`].
+    pub context_params: Vec<KotlinType>,
+    pub visibility: Visibility,
     pub params: Vec<KotlinType>,
     pub ret: KotlinType,
     pub is_property: bool,
+    /// A `var` property; never set on a function.
+    pub is_var: bool,
+    pub is_expect: bool,
     pub is_operator: bool,
     pub is_infix: bool,
     pub is_abstract: bool,
+    /// Whether metadata declares this member static for KLIB signature mangling.
+    pub is_static: bool,
     pub return_value_status: crate::types::ReturnValueStatus,
     pub formals: Vec<KotlinTypeParameter>,
     pub ret_nullable: bool,
@@ -165,7 +183,15 @@ pub struct KotlinFunction {
     pub is_suspend: bool,
     pub is_operator: bool,
     pub is_infix: bool,
+    pub is_expect: bool,
+    /// Whether metadata declares this function static: a companion extension
+    /// (`companion fun C.name`), which KLIB signature mangling marks static.
+    pub is_static: bool,
     pub context_count: usize,
+    /// The role of each leading context parameter, one per context parameter: a legacy context
+    /// receiver (`context(String)`), an anonymous context parameter (`context(_: String)`) or a
+    /// named one.
+    pub context_kinds: Vec<crate::types::ContextParameterKind>,
     /// Qualified identities of annotations declared on this function.
     pub annotations: Vec<crate::types::TypeName>,
 }
@@ -182,10 +208,16 @@ pub struct KotlinPackage {
 pub struct KotlinProperty {
     pub name: String,
     pub receiver: Option<KotlinType>,
+    /// Context parameter types, in declaration order; `context_count` is their number.
+    pub context_params: Vec<KotlinType>,
     pub ty: KotlinType,
     pub formals: Vec<KotlinTypeParameter>,
     pub visibility: Visibility,
     pub is_var: bool,
+    pub is_expect: bool,
+    /// Whether metadata declares this property static: a companion extension property
+    /// (`companion val C.name`), which KLIB signature mangling marks static.
+    pub is_static: bool,
     pub context_count: usize,
     pub constant: Option<crate::libraries::LibConst>,
 }
@@ -198,8 +230,14 @@ pub struct KotlinConstructor {
     pub visibility: Visibility,
 }
 
+/// A type parameter's declaration identity: metadata's `TypeParameter.id`, unique along the chain
+/// of declarations whose type parameters are in scope.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct KotlinTypeParameterId(pub u64);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KotlinTypeParameter {
+    pub id: KotlinTypeParameterId,
     pub name: String,
     pub bounds: Vec<KotlinType>,
     pub variance: crate::types::TypeVariance,
@@ -219,6 +257,8 @@ pub struct KotlinClass {
     pub visibility: Visibility,
     pub is_expect: bool,
     pub enum_entries: Vec<String>,
+    /// Whether this enum's metadata declares the implicit `entries` property.
+    pub has_enum_entries: bool,
     pub sealed_subclasses: Vec<String>,
     pub inline_class_property: Option<String>,
     pub modality: KotlinModality,
@@ -484,7 +524,7 @@ fn source_suspend_function_type(ty: Ty) -> Ty {
 }
 
 /// Convert a decoded Kotlin metadata type without consulting a target provider.
-pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<String, Ty>) -> Ty {
+pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<KotlinTypeParameterId, Ty>) -> Ty {
     let semantic = match ty {
         KotlinType::Class {
             internal,
@@ -498,15 +538,16 @@ pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<String, Ty>) -> Ty {
                 .collect();
             kotlin_type(internal, args, *shape)
         }
-        KotlinType::Param { name, .. } => {
+        KotlinType::Param { name, id, .. } => {
             let bound = bounds
-                .get(name)
+                .get(id)
                 .copied()
                 .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
             Ty::ty_param(name, bound)
         }
         KotlinType::InProjection(inner) => Ty::in_projection(semantic_ty(inner, bounds)),
         KotlinType::OutProjection(inner) => Ty::out_projection(semantic_ty(inner, bounds)),
+        KotlinType::Star => Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
     };
     if ty.nullable() {
         Ty::nullable(semantic)
@@ -518,16 +559,19 @@ pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<String, Ty>) -> Ty {
 /// Declared primary upper bounds keyed by the metadata type-parameter identity.
 pub fn semantic_bounds(
     params: &[KotlinTypeParameter],
-    inherited: &HashMap<String, Ty>,
-) -> HashMap<String, Ty> {
+    inherited: &HashMap<KotlinTypeParameterId, Ty>,
+) -> HashMap<KotlinTypeParameterId, Ty> {
     let mut bounds = inherited.clone();
+    for parameter in params {
+        bounds.insert(parameter.id, Ty::nullable(Ty::obj("kotlin/Any")));
+    }
     for parameter in params {
         let bound = parameter
             .bounds
             .first()
-            .map(|bound| semantic_ty(bound, &HashMap::new()))
+            .map(|bound| semantic_ty(bound, &bounds))
             .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-        bounds.insert(parameter.name.clone(), bound);
+        bounds.insert(parameter.id, bound);
     }
     bounds
 }
@@ -646,5 +690,26 @@ mod tests {
         assert_eq!(signature.params.as_slice(), &[Ty::Int]);
         assert_eq!(signature.ret, Ty::String);
         assert!(signature.suspend);
+    }
+
+    #[test]
+    fn type_parameter_bounds_are_selected_by_identity_not_spelling() {
+        let outer = KotlinTypeParameterId(1);
+        let inner = KotlinTypeParameterId(2);
+        let bounds = HashMap::from([(outer, Ty::String), (inner, Ty::obj("kotlin/Number"))]);
+        let parameter = |id| KotlinType::Param {
+            name: "T".to_owned(),
+            id,
+            nullable: false,
+        };
+
+        assert_eq!(
+            semantic_ty(&parameter(outer), &bounds).ty_param_bound(),
+            Some(Ty::String)
+        );
+        assert_eq!(
+            semantic_ty(&parameter(inner), &bounds).ty_param_bound(),
+            Some(Ty::obj("kotlin/Number"))
+        );
     }
 }
