@@ -8,17 +8,18 @@ use super::common;
 const LIB: &str = "package dep\n\
 open class Node\n\
 class Leaf : Node()\n\
-class Holder(val nodes: Map<String, Node>) {\n\
+class Holder(val node: Node) {\n\
 \x20   inline fun <reified T> name(): String = T::class.java.simpleName\n\
-\x20   inline fun <reified T : Node> find(key: String): T? = nodes[key] as? T\n\
+\x20   inline fun <reified T : Node> find(): T? = node as? T\n\
 }\n";
 
 const MAIN: &str = "import dep.*\n\
 fun box(): String {\n\
-\x20   val holder = Holder(mapOf(\"leaf\" to Leaf(), \"node\" to Node()))\n\
-\x20   if (holder.name<Leaf>() != \"Leaf\") return \"name: \" + holder.name<Leaf>()\n\
-\x20   if (holder.find<Leaf>(\"leaf\") == null) return \"leaf\"\n\
-\x20   if (holder.find<Leaf>(\"node\") != null) return \"node\"\n\
+\x20   val leaf = Holder(Leaf())\n\
+\x20   val node = Holder(Node())\n\
+\x20   if (leaf.name<Leaf>() != \"Leaf\") return \"name: \" + leaf.name<Leaf>()\n\
+\x20   if (leaf.find<Leaf>() == null) return \"leaf\"\n\
+\x20   if (node.find<Leaf>() != null) return \"node\"\n\
 \x20   return \"OK\"\n\
 }\n";
 
