@@ -136,16 +136,32 @@ pub struct FrontendSelectedCall {
 /// receiver, name, argument types, and expected result the plugin supplies.
 pub struct FrontendExpressionContext<'a> {
     pub calls: Vec<FrontendSelectedCall>,
-    /// Qualified annotation identities for source and dependency classifiers named by these calls.
-    pub classifier_annotations: HashMap<TypeName, Vec<TypeName>>,
+    /// Qualified annotation identities for source classifiers and dependency classifiers named by
+    /// these calls.
+    pub classifier_annotations: &'a dyn FrontendClassifierAnnotations,
     /// Absent only in isolated plugin-unit tests that do not compose calls.
     pub call_resolver: Option<&'a dyn FrontendCallResolver>,
+}
+
+/// The annotation identities of one classifier, answered per query. The frontend serves this from
+/// its module index without materializing every source classifier for each planned body.
+pub trait FrontendClassifierAnnotations {
+    fn classifier_annotations(&self, classifier: TypeName) -> Option<&[TypeName]>;
+}
+
+/// An eagerly collected annotation table, keyed by classifier.
+pub type ClassifierAnnotationMap = HashMap<TypeName, Vec<TypeName>>;
+
+impl FrontendClassifierAnnotations for ClassifierAnnotationMap {
+    fn classifier_annotations(&self, classifier: TypeName) -> Option<&[TypeName]> {
+        self.get(&classifier).map(Vec::as_slice)
+    }
 }
 
 impl FrontendExpressionContext<'_> {
     pub fn has_classifier_annotation(&self, classifier: TypeName, annotation: TypeName) -> bool {
         self.classifier_annotations
-            .get(&classifier)
+            .classifier_annotations(classifier)
             .is_some_and(|annotations| annotations.contains(&annotation))
     }
 

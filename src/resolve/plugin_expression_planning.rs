@@ -108,7 +108,7 @@ pub(super) fn plan_plugin_expressions(
     let plans = {
         let context = crate::plugins::FrontendExpressionContext {
             calls,
-            classifier_annotations,
+            classifier_annotations: &classifier_annotations,
             call_resolver: Some(checker),
         };
         host.plan_frontend_expressions(&context)

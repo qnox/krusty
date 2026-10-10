@@ -39,7 +39,7 @@ pub(super) fn declared_method_access(
     let owner_is_iface = ir
         .classes
         .iter()
-        .any(|o| o.fq_name_matches(owner) && o.is_interface);
+        .any(|o| o.is_interface && o.fq_name_matches(owner));
     let access = if holder_static {
         // STATIC, with the member's own visibility: a private interface member's body is a PRIVATE
         // static on the holder, as kotlinc emits it.

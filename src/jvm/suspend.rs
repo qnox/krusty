@@ -200,7 +200,7 @@ pub(crate) fn lower_suspend(
         orig_rets: &orig_rets,
         null_out_dead_spills,
     };
-    let fids = suspend_lambda::innermost_first(ir, ir.suspend_funs.clone());
+    let (fids, lambda_values) = suspend_lambda::innermost_first(ir, ir.suspend_funs.clone());
     let mut pre_splice_scopes: std::collections::HashMap<u32, SuspensionScopes> =
         std::collections::HashMap::new();
     crate::trace_compiler!(
@@ -224,7 +224,7 @@ pub(crate) fn lower_suspend(
                 machines: emit_time_machines,
                 outputs: &mut outputs,
             };
-            match suspend_lambda::route(ir, fid, b, route) {
+            match suspend_lambda::route(ir, &lambda_values, fid, b, route) {
                 bytecode_machine::Routed::Taken => continue,
                 bytecode_machine::Routed::Failed => return false,
                 bytecode_machine::Routed::NotEligible => {}

@@ -40,7 +40,11 @@ use descriptor_mentions::DescriptorMentionCache;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
 pub(crate) use coroutine_transform::{CoroutineOutcome, CoroutineRequest, TransformedCoroutine};
-pub(crate) use {copied_class::CopyError, inner_classes::DeclarationPaths};
+pub use inner_classes::{InnerClassDetails, InnerClassResolver, InnerClassSpec};
+pub(crate) use {
+    copied_class::CopyError,
+    inner_classes::{DeclarationPaths, TableOrders},
+};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
@@ -535,25 +539,6 @@ pub struct ClassWriter {
     enclosing_method: Option<(String, String, String)>,
     pub internal_name: String,
 }
-
-/// One candidate `InnerClasses` entry: the nested class, its enclosing class (`None` for an anonymous
-/// local), its simple name (`None` when anonymous), and the entry's access flags.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InnerClassSpec {
-    pub inner: String,
-    pub outer: Option<String>,
-    pub name: Option<String>,
-    pub access: u16,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InnerClassDetails {
-    pub outer: Option<String>,
-    pub name: Option<String>,
-    pub access: u16,
-}
-
-pub type InnerClassResolver = Rc<dyn Fn(&str) -> Option<InnerClassDetails>>;
 
 impl ClassWriter {
     pub fn new(internal_name: &str, super_internal: &str) -> ClassWriter {
