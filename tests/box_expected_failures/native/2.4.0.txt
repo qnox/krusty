@@ -284,7 +284,6 @@ coroutines/featureIntersection/suspendFunctionIsAs.kt
 coroutines/featureIntersection/suspendInlineSuspendFinally.kt
 coroutines/featureIntersection/tailrec/controlFlowIf.kt
 coroutines/featureIntersection/tailrec/controlFlowWhen.kt
-coroutines/featureIntersection/tailrec/realStringEscape.kt
 coroutines/handleException.kt
 coroutines/indirectInlineUsedAsNonInline.kt
 coroutines/inlineClasses/direct/bridgeGenerationCrossinline.kt

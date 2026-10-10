@@ -303,7 +303,6 @@ coroutines/featureIntersection/suspendFunctionIsAs.kt
 coroutines/featureIntersection/suspendInlineSuspendFinally.kt
 coroutines/featureIntersection/tailrec/controlFlowIf.kt
 coroutines/featureIntersection/tailrec/controlFlowWhen.kt
-coroutines/featureIntersection/tailrec/realStringEscape.kt
 coroutines/functionReference_Function_SuspendFunction_casts.kt
 coroutines/handleException.kt
 coroutines/indirectInlineUsedAsNonInline.kt
