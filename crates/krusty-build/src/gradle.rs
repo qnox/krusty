@@ -1025,19 +1025,16 @@ error: warnings found and -Werror specified\n";
             // `-Xcontext-parameters` is redundant at language level 2.4, so success proves that
             // the transported `:warning` exception was applied rather than promoted by `-Werror`.
             let _ = std::fs::remove_file(&log);
-            let output = build()
+            let _ = std::fs::remove_file(&diagnostic_log);
+            build()
                 .property("krusty.negative", "werror-warning-exception")
                 .tasks([":compiler:util:compileKotlin"])
-                .run_output()
+                .run()
                 .unwrap_or_else(|error| panic!("werror warning exception: {error}"));
-            let expected_warning = "warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.";
             assert_eq!(
-                output
-                    .lines()
-                    .filter(|line| line.trim() == expected_warning)
-                    .count(),
-                1,
-                "werror warning exception output:\n{output}"
+                std::fs::read_to_string(&diagnostic_log).expect("recorded krusty diagnostics"),
+                "warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.\n",
+                "werror warning exception diagnostics",
             );
             let invocation = single_module_invocation(&log, "kotlin-compiler-util");
             for expected in [
