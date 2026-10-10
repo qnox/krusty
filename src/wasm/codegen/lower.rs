@@ -551,14 +551,25 @@ impl Body<'_> {
                 return Err(format!("a call to {}", callee_kind(&callee)));
             }
             IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion | IrTypeOp::Cast,
+                op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast),
                 arg,
                 type_operand,
             } => {
                 let source = self.carrier_of(arg)?;
+                // The checker widens a mixed operator's operand to the type the selected operator
+                // takes (`Int.plus(Long)` reads its receiver as a `Long`); only the instruction is
+                // this generator's. A source `as` never converts a number.
+                let widens = |target: ValType| {
+                    op == IrTypeOp::ImplicitCoercion
+                        && source
+                            .and_then(rank)
+                            .zip(rank(target))
+                            .is_some_and(|(from, to)| from < to)
+                };
                 match carrier(type_operand)? {
                     // A coercion to `Unit` discards the value.
                     None => self.statement(arg)?,
+                    Some(target) if widens(target) => self.value(arg, type_operand)?,
                     Some(target) if source.is_some_and(|source| source != target) => {
                         return Err(format!("a coercion to `{}`", describe(type_operand)));
                     }

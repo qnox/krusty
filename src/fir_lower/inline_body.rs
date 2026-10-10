@@ -662,11 +662,9 @@ impl BodyLowering<'_> {
                 };
                 let cursor = self.ir.add_expr(IrExpr::GetValue(cursor_slot));
                 let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-                let incremented = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: crate::ir::IrBinOp::Add,
-                    lhs: cursor,
-                    rhs: one,
-                });
+                let incremented =
+                    self.ir
+                        .add_arithmetic(crate::ir::IrBinOp::Add, cursor, one, Ty::Int);
                 let update = self.ir.add_expr(IrExpr::SetValue {
                     var: cursor_slot,
                     value: incremented,
@@ -721,11 +719,9 @@ impl BodyLowering<'_> {
             }));
             let current = self.ir.add_expr(IrExpr::GetValue(current_index_slot));
             let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-            let incremented = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: crate::ir::IrBinOp::Add,
-                lhs: current,
-                rhs: one,
-            });
+            let incremented =
+                self.ir
+                    .add_arithmetic(crate::ir::IrBinOp::Add, current, one, Ty::Int);
             body_statements.push(self.ir.add_expr(IrExpr::SetValue {
                 var: action_index_slot,
                 value: incremented,

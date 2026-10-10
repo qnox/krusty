@@ -184,11 +184,8 @@ impl ElementDecode<'_> {
             let bit = ir.add_expr(IrExpr::Const(IrConst::Int(
                 1i32.wrapping_shl((k % 32) as u32),
             )));
-            let marked = ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: crate::ir::IrBinOp::BitOr,
-                lhs: seen,
-                rhs: bit,
-            });
+            let marked =
+                ir.add_arithmetic(crate::ir::IrBinOp::BitOr, seen, bit, crate::types::Ty::Int);
             decoded_stmts.push(ir.add_expr(IrExpr::SetValue {
                 var: seen_local,
                 value: marked,
