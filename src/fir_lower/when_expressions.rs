@@ -132,6 +132,9 @@ impl BodyLowering<'_> {
         if prefix.is_empty() {
             Ok(when)
         } else {
+            // The block holding the subject is the checked expression; the `when` inside it yields
+            // the same value.
+            self.ir.logical_types.insert(when, result_ty);
             Ok(self.ir.add_expr(IrExpr::Block {
                 stmts: prefix,
                 value: Some(when),

@@ -84,13 +84,23 @@ argument, member, initializer, or assignment location is a test failure.
 
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
-binaries once with Cargo's `gate` profile, runs the conformance binary alone in three passes (JVM
-box corpus, Native box corpus, then everything else), then runs the internally parallel e2e binary
+binaries once with Cargo's `gate` profile, runs the conformance binary alone in five passes (JVM
+box corpus, Native box corpus, the `wasm-js` and `wasm-wasi` box corpora, then everything else), then runs the internally parallel e2e binary
 once, then runs the remaining small test binaries in parallel. The e2e suite is one process under
 `KRUSTY_E2E_TIMEOUT_SECONDS`. The native codegen/box lane also runs once, excluded from the
 "everything else" pass, under its dedicated `KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS` suite
-deadline. `scripts/native-conformance-run.sh` owns that same invocation for the `just` recipes and
-CI.
+deadline. `scripts/box-lane-run.sh <native|wasm-js|wasm-wasi>` owns that same invocation for the
+`just` recipes and CI (`scripts/native-conformance-run.sh` is its Native shorthand).
+
+The two Wasm lanes compile each case to one WasmGC module plus its `.mjs` loader and run it under
+Node.js 22 or newer: `wasm-js` through JavaScript imports, `wasm-wasi` through Node's WASI preview-1
+host. They still analyze each case against the JVM library surface (`kotlin-stdlib.jar` and the JDK),
+because no Wasm klib platform exists yet, so they gate the Wasm emitter, not wasm-js/wasm-wasi source
+semantics, and publish no badge. Without a Node.js 22+ the local run skips them with a notice; CI
+requires them (`KRUSTY_REQUIRE_WASM_JS_CONFORMANCE`, `KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE`). Their
+knobs mirror Native's with the `WASM_JS`/`WASM_WASI` infix (`KRUSTY_WASM_JS_BOX_ONLY`,
+`…_BOX_LIMIT`, `…_BOX_TRACE`). Each lane has its own ratchet, keyed by `wasm-js` or `wasm-wasi`,
+because the corpus mutes the two targets separately.
 
 The Native lane uses the same committed text ratchet as JVM, keyed by `native` and the exact Kotlin
 release. Backend declines, frontend rejections, and accepted-but-wrong executions are expected
@@ -158,6 +168,12 @@ KRUSTY_BLESS_BOX_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
 # Native failures and applicability (requires the provisioned Native runtime/corpus)
 KRUSTY_BLESS_BOX_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
   ./run-tests.sh --test conformance kotlin_codegen_box_native_conformance -- --nocapture
+
+# Wasm failures and applicability, one lane per target (requires Node.js 22+)
+KRUSTY_BLESS_BOX_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
+  ./run-tests.sh --test conformance kotlin_codegen_box_wasm_js_conformance -- --nocapture
+KRUSTY_BLESS_BOX_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
+  ./run-tests.sh --test conformance kotlin_codegen_box_wasm_wasi_conformance -- --nocapture
 ```
 
 Blessing requires the exact value `1` and is refused under CI and on a partial run. Each tracked file
@@ -614,6 +630,7 @@ Commands:
 just conformance [VERSION] [BYTES]      # stdout: "<pct> <passed> <applicable>"; default max version
 just conformance-run "$(just conformance-bin)" <version> [BYTES]   # the same, for a prebuilt binary
 just native-conformance-run "$(just conformance-bin)" <version> [NATIVE]
+just wasm-conformance-run <wasm-js|wasm-wasi> "$(just conformance-bin)" <version> [REPORT]
 just conformance-badge [CASES BYTES NATIVE]   # writes docs/badges/*.json previews
 ```
 

@@ -407,7 +407,7 @@ fn prebuilt_conformance_regressions_skip_the_box_suites() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--test-threads\n{}\n\
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n\
              bin={}\n--ignored\n--exact\n\
              kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
             sibling.display(),
@@ -457,7 +457,7 @@ fn prebuilt_conformance_regressions_recipe_runs_the_script() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--test-threads\n{}\n\
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n\
              bin={}\n--ignored\n--exact\n\
              kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
             sibling.display(),
@@ -562,8 +562,8 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
     );
     assert!(
         workflow.contains("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
-            && workflow.contains("target: [jvm, native]"),
-        "each exact Kotlin version must expose independent JVM and Native matrix rows"
+            && workflow.contains("target: [jvm, native, wasm]"),
+        "each exact Kotlin version must expose independent JVM, Native and Wasm matrix rows"
     );
     let box_run = workflow[matrix..]
         .find("just conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
@@ -593,6 +593,7 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
     for needle in [
         "- name: run box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
         "- name: run native box conformance ${{ matrix.version }}\n        if: matrix.target == 'native'",
+        "- name: run wasm box conformance ${{ matrix.version }}\n        if: matrix.target == 'wasm'",
         "- name: run non-box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
     ] {
         assert!(
@@ -609,8 +610,9 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         "the expanded corpus cache must not reuse the immutable box-only key"
     );
     assert!(
-        workflow.contains("kotlin-native-conformance-${{ matrix.version }}-"),
-        "a Native row must not race to publish the JVM row's broader immutable cache"
+        workflow.contains("kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-")
+            && workflow.contains("if: matrix.target != 'jvm'"),
+        "a Native or Wasm row must not race to publish the JVM row's broader immutable cache"
     );
     for key in [
         "key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}",

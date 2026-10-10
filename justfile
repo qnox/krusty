@@ -140,12 +140,15 @@ profile-box FILTER="":
 # for every supported version (see .github/workflows/ci.yml). Keep the memory-heavy JVM and Native
 # corpus tests isolated, then run every other conformance test in a fresh process. The Native lane
 # compiles, links and runs every accepted case once under its dedicated suite-wide deadline
-# (`scripts/native-conformance-run.sh`). The final independent JVM-backed tests are threaded (capped
+# (`scripts/native-conformance-run.sh`), and each Wasm lane the same way under Node.js
+# (`scripts/box-lane-run.sh`). The final independent JVM-backed tests are threaded (capped
 # at 4 — each thread can hold a compiler-server/runner JVM) instead of serializing ~40 tests.
 conformance-all-plain:
     just conformance
     just native-conformance-run "$(just conformance-bin)" "$(just max-version)"
-    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --test-threads=$(n=$(nproc 2>/dev/null || sysctl -n hw.ncpu); [ "$n" -gt 4 ] && n=4; echo $n)
+    just wasm-conformance-run wasm-js "$(just conformance-bin)" "$(just max-version)"
+    just wasm-conformance-run wasm-wasi "$(just conformance-bin)" "$(just max-version)"
+    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --skip kotlin_codegen_box_wasm --test-threads=$(n=$(nproc 2>/dev/null || sysctl -n hw.ncpu); [ "$n" -gt 4 ] && n=4; echo $n)
 
 # Run all conformance tests for one runtime-selected Kotlin version. The shared Cargo target avoids
 # per-version rebuilds; the reference compiler and corpus are provisioned on demand.
@@ -165,8 +168,10 @@ conformance-one VERSION:
     bin="$(just conformance-bin)"
     just conformance-run "$bin" "$v"
     bash scripts/native-conformance-run.sh "$bin"
+    bash scripts/box-lane-run.sh wasm-js "$bin"
+    bash scripts/box-lane-run.sh wasm-wasi "$bin"
     conf_threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"; [ "$conf_threads" -gt 4 ] && conf_threads=4
-    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --test-threads="$conf_threads"
+    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --skip kotlin_codegen_box_wasm --test-threads="$conf_threads"
 
 # Measure test coverage — regions, functions, lines and BRANCHES — via LLVM source-based coverage
 # (nightly, `-Zcoverage-options=branch`). Runs an instrumented build + the own suite in parallel and
@@ -501,6 +506,19 @@ native-conformance-run BIN VERSION REPORT="":
       KRUSTY_KOTLINC="$kotlinc" \
       KRUSTY_KOTLIN_BOX_DIR="$box_dir" \
       bash scripts/native-conformance-run.sh "{{BIN}}" {{ if REPORT != "" { quote(REPORT) } else { "" } }}
+
+# Run one Wasm box lane (`wasm-js` or `wasm-wasi`) of a prebuilt conformance binary for one Kotlin
+# version, as `native-conformance-run` does for Native. Needs Node.js 22 or newer on PATH.
+wasm-conformance-run LANE BIN VERSION REPORT="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="{{VERSION}}"
+    kotlinc="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
+    box_dir="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
+    KRUSTY_LANGUAGE_VERSION="$v" \
+      KRUSTY_KOTLINC="$kotlinc" \
+      KRUSTY_KOTLIN_BOX_DIR="$box_dir" \
+      bash scripts/box-lane-run.sh "{{LANE}}" "{{BIN}}" {{ if REPORT != "" { quote(REPORT) } else { "" } }}
 
 # Run every non-box conformance test with the binary from `conformance-bin`. CI invokes this beside
 # `conformance-run` in every supported-version JVM row. A sibling `krusty` next to BIN is the CLI.
