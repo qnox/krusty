@@ -30,6 +30,8 @@ use crate::value_classes::{
 #[derive(Debug, Default)]
 pub(super) struct NativeValueClasses {
     declarations: UnderlyingTypes,
+    /// The value classes this module's sources declare, in this file or another.
+    module_declared: HashSet<TypeName>,
 }
 
 /// This target's answer to the one question the shared traversal leaves to a backend: whether a
@@ -172,6 +174,24 @@ impl NativeValueClasses {
     /// Whether `classifier` is a value class.
     pub(super) fn is_value_class(&self, classifier: TypeName) -> bool {
         self.declarations.contains_key(&classifier)
+    }
+
+    /// This inventory, knowing which of its value classes the module's own sources declare: the
+    /// ones another file of the module boxes through entry points the declaring file defines.
+    pub(super) fn declared_in_module(
+        mut self,
+        classifiers: impl IntoIterator<Item = TypeName>,
+    ) -> Self {
+        self.module_declared = classifiers
+            .into_iter()
+            .filter(|classifier| self.declarations.contains_key(classifier))
+            .collect();
+        self
+    }
+
+    /// Whether `classifier` is a value class the module's own sources declare.
+    pub(super) fn is_module_declared(&self, classifier: TypeName) -> bool {
+        self.module_declared.contains(&classifier)
     }
 
     /// The underlying type `classifier` declares, when it is a value class.

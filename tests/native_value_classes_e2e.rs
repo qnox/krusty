@@ -10,7 +10,8 @@
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
 use super::common::{
-    expect_box_ok_with_stdlib, expect_native_box, kotlin_native_box, kotlinc_box_result,
+    expect_box_ok_files_with_stdlib, expect_box_ok_with_stdlib, expect_native_box,
+    expect_native_sources, kotlin_native_box, kotlinc_box_result,
 };
 
 /// Require kotlinc's answer, krusty's JVM answer and the NATIVE answer to agree.
@@ -459,4 +460,35 @@ fn a_value_class_collection_is_walked_through_its_own_members() {
          \x20   return \"OK\"\n\
          }\n";
     every_backend_agrees_with_kotlinc("ValueClassIterable", source);
+}
+
+/// A file boxes and unboxes a value class another file of the module declares: through `Any`, a
+/// cast back, and a function value whose parameter the value class is. The declaring file owns the
+/// box's layout, so the other file goes through the entry points it defines.
+#[test]
+fn a_value_class_from_another_file_is_boxed_and_unboxed() {
+    let sources: &[(&str, &str)] = &[
+        (
+            "ValueClassAcrossFiles",
+            "fun box(): String {\n\
+             \x20   val any: Any = Z(42)\n\
+             \x20   if ((any as Z).value != 42) return \"fail 1\"\n\
+             \x20   if (any.toString() != \"Z(value=42)\") return \"fail 2: $any\"\n\
+             \x20   if (made().value != 7) return \"fail 3\"\n\
+             \x20   var seen = 0\n\
+             \x20   val take: (Z) -> Unit = { seen = it.value }\n\
+             \x20   take(Z(5))\n\
+             \x20   if (seen != 5) return \"fail 4\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+        ),
+        (
+            "ValueClassAcrossFilesLib",
+            "@JvmInline\n\
+             value class Z(val value: Int)\n\
+             fun made(): Z = (Z(7) as Any) as Z\n",
+        ),
+    ];
+    expect_box_ok_files_with_stdlib(sources, "ValueClassAcrossFiles");
+    expect_native_sources(sources, "OK");
 }

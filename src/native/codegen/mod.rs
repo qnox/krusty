@@ -119,7 +119,13 @@ impl Backend for CraneliftBackend {
             &file.ir,
             &file.classifiers,
         ) {
-            Ok(inventory) => inventory,
+            Ok(inventory) => inventory.declared_in_module(
+                file.classifiers
+                    .module()
+                    .source_value_classes()
+                    .keys()
+                    .copied(),
+            ),
             Err(unsupported) => {
                 diags.error(
                     crate::diag::Span::new(0, 0),

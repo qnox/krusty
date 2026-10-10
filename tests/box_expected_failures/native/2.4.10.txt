@@ -54,7 +54,6 @@ basics/unchecked_cast9.kt
 basics/unit4.kt
 bce/forDownToWithStep.kt
 boxing/kt84727_if.kt
-boxing/missingValueClassUnboxing.kt
 boxingOptimization/kt46859.kt
 boxingOptimization/maxMinByOrNull.kt
 boxingOptimization/progressions.kt
@@ -1019,8 +1018,6 @@ inlineClasses/callableReferences/let/stringGeneric.kt
 inlineClasses/callableReferences/let/stringN.kt
 inlineClasses/callableReferences/let/stringNGeneric.kt
 inlineClasses/callableReferences/let/stringNGeneric2.kt
-inlineClasses/checkLambdaWithInlineClassesInFunctionalType.kt
-inlineClasses/checkLambdaWithInlineClassesInFunctionalTypeGeneric.kt
 inlineClasses/contextsAndAccessors/kt30780.kt
 inlineClasses/contextsAndAccessors/kt30780Generic.kt
 inlineClasses/crossinlineWithInlineClassInParameter.kt
@@ -1039,8 +1036,6 @@ inlineClasses/funInterface/mangledSamWrappersGeneric.kt
 inlineClasses/funInterface/returnResult.kt
 inlineClasses/funInterfaceDoubleSuffux.kt
 inlineClasses/funInterfaceDoubleSuffux2.kt
-inlineClasses/functionExpression.kt
-inlineClasses/functionExpressionGeneric.kt
 inlineClasses/genericInlineClassSynthMembers.kt
 inlineClasses/hiddenConstructor/kt28855.kt
 inlineClasses/inlineClassCollection/inlineListOfInlineClass.kt
