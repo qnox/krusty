@@ -177,7 +177,7 @@ impl<'a> FileLowering<'a> {
     /// The in-file class a name denotes, or the decline for one declared elsewhere.
     pub(super) fn class_of(&self, internal: TypeName, what: &str) -> Result<ClassId, Unsupported> {
         self.ir.class_id_by_name(internal).ok_or_else(|| {
-            format!(
+            declined!(
                 "{what} `{}`, which is not declared in this file",
                 internal.render()
             )
@@ -191,7 +191,7 @@ impl<'a> FileLowering<'a> {
     ) -> Result<DataId, Unsupported> {
         self.module
             .declare_data(name, Linkage::Local, writable, false)
-            .map_err(|error| format!("declaring `{name}` ({error})"))
+            .map_err(|error| declined!("declaring `{name}` ({error})"))
     }
 
     pub(super) fn declare_local_function(
@@ -203,7 +203,7 @@ impl<'a> FileLowering<'a> {
         let signature = self.signature_of(params, ret)?;
         self.module
             .declare_function(name, Linkage::Local, &signature)
-            .map_err(|error| format!("declaring `{name}` ({error})"))
+            .map_err(|error| declined!("declaring `{name}` ({error})"))
     }
 
     /// Declare every class's descriptor, constructor and singleton, and the field accessors the
@@ -217,7 +217,7 @@ impl<'a> FileLowering<'a> {
                 .collect();
             for argument in &params[1..] {
                 if self.carrier(*argument) == Carrier::Void {
-                    return Err(format!(
+                    return Err(declined!(
                         "a `Unit` constructor parameter of `{}`",
                         self.ir.classes[class as usize].fq_name()
                     ));
@@ -638,7 +638,7 @@ impl<'a> FileLowering<'a> {
                     // keeps its symbol, with a trap for a body where the body could not be
                     // lowered; see `FileLowering::define_function`.
                     None => {
-                        return Err(format!(
+                        return Err(declined!(
                             "a vtable entry for `{}`, which this file emits no body for",
                             self.ir.functions[*fid as usize].name
                         ));
@@ -828,10 +828,10 @@ impl<'a> FileLowering<'a> {
             let label = format!("{base}_walk_{name}");
             self.emit_function(thunk, signature, answers, &label, &mut |body, params| {
                 let Some(produced) = body.dispatch(params[0], slot, &[], declared, &[])? else {
-                    return Err(format!("a `Unit` answer from `{label}`"));
+                    return Err(declined!("a `Unit` answer from `{label}`"));
                 };
                 let Some(value) = body.convert(produced, Some(declared), answers)? else {
-                    return Err(format!("a `Unit` answer from `{label}`"));
+                    return Err(declined!("a `Unit` answer from `{label}`"));
                 };
                 body.builder.ins().return_(&[value]);
                 body.terminate();
@@ -855,15 +855,15 @@ impl<'a> FileLowering<'a> {
             let parameter = self.walk_slot_parameter(class, slot)?;
             self.emit_function(thunk, signature, Ty::Char, &name, &mut |body, params| {
                 let Some(index) = body.convert(params[1], Some(Ty::Int), parameter)? else {
-                    return Err(format!("a `Unit` index in `{name}`"));
+                    return Err(declined!("a `Unit` index in `{name}`"));
                 };
                 let Some(produced) =
                     body.dispatch(params[0], slot, &[parameter], declared, &[index])?
                 else {
-                    return Err(format!("a `Unit` answer from `{name}`"));
+                    return Err(declined!("a `Unit` answer from `{name}`"));
                 };
                 let Some(value) = body.convert(produced, Some(declared), Ty::Char)? else {
-                    return Err(format!("a `Unit` answer from `{name}`"));
+                    return Err(declined!("a `Unit` answer from `{name}`"));
                 };
                 body.builder.ins().return_(&[value]);
                 body.terminate();
@@ -887,11 +887,11 @@ impl<'a> FileLowering<'a> {
         let fid = match entry {
             Slot::Function(fid) => fid,
             Slot::Bridge { declared, .. } => declared,
-            other => return Err(format!("a walk through the vtable entry {other:?}")),
+            other => return Err(declined!("a walk through the vtable entry {other:?}")),
         };
         match self.ir.functions[fid as usize].params.as_slice() {
             [parameter] => Ok(*parameter),
-            _ => Err(format!(
+            _ => Err(declined!(
                 "a walk through `{}`, which takes no one operand",
                 self.ir.functions[fid as usize].name
             )),
@@ -913,7 +913,7 @@ impl<'a> FileLowering<'a> {
             // A stand-in for a base whose signature has another representation wears that base's,
             // which is what a caller reading the slot gets.
             Slot::Bridge { declared, .. } => Ok(self.ir.functions[declared as usize].ret),
-            other => Err(format!("a walk through the vtable entry {other:?}")),
+            other => Err(declined!("a walk through the vtable entry {other:?}")),
         }
     }
 
@@ -1082,7 +1082,7 @@ impl<'a> FileLowering<'a> {
         let secondary = declaration.secondary_ctors[ordinal].clone();
         let id = self.classes[class as usize].secondaries[ordinal];
         if !secondary.default_parameters.is_empty() {
-            return Err(format!(
+            return Err(declined!(
                 "a secondary constructor delegating with omitted arguments (`{}`)",
                 declaration.fq_name()
             ));
@@ -1171,7 +1171,7 @@ impl<'a> FileLowering<'a> {
                                     .prefix_params
                                     .is_empty()
                                 {
-                                    return Err(format!(
+                                    return Err(declined!(
                                         "a delegation to a superclass secondary constructor with \
                                      compiler-supplied parameters (`{}`)",
                                         owner.render()
@@ -1185,7 +1185,7 @@ impl<'a> FileLowering<'a> {
                                 if constructor_parameters(self.ir, parent).len()
                                     != target_params.len()
                                 {
-                                    return Err(format!(
+                                    return Err(declined!(
                                         "a delegation to a superclass constructor with \
                                      compiler-supplied parameters (`{}`)",
                                         owner.render()
@@ -1221,7 +1221,7 @@ impl<'a> FileLowering<'a> {
                         (None, target_params.clone())
                     }
                     None => {
-                        return Err(format!(
+                        return Err(declined!(
                     "a secondary constructor delegating to a superclass outside this file (`{}`)",
                     owner.render()
                 ))
@@ -1236,7 +1236,7 @@ impl<'a> FileLowering<'a> {
             // name here rather than emitting a constructor that leaves `name` and `ordinal`
             // unwritten.
             crate::ir::CtorDelegateTarget::ImplicitEnumBase => {
-                return Err(format!(
+                return Err(declined!(
                     "an enum secondary constructor initializing the implicit enum base (`{}`)",
                     declaration.fq_name()
                 ))
@@ -1314,7 +1314,7 @@ impl<'a> FileLowering<'a> {
                 body.statement(statement)?;
             }
             if arguments.len() != target_params.len() {
-                return Err("a constructor delegation of a different arity".to_string());
+                return Err("a constructor delegation of a different arity".into());
             }
             for &(slot, offset) in &pre_super_stores {
                 body.builder
@@ -1329,7 +1329,7 @@ impl<'a> FileLowering<'a> {
             }
             for (&argument, ty) in arguments.iter().zip(&target_params) {
                 let Some(value) = body.coerce(argument, *ty)? else {
-                    return Err("a `Unit` constructor delegation argument".to_string());
+                    return Err("a `Unit` constructor delegation argument".into());
                 };
                 operands.push(value);
             }
@@ -1519,7 +1519,7 @@ impl<'a> FileLowering<'a> {
             .collect();
         for (_, ty, _) in &members {
             if self.carrier(*ty).clif().is_none() {
-                return Err(format!(
+                return Err(declined!(
                     "an annotation member of `{ty:?}` (`{}`)",
                     declaration.fq_name()
                 ));
@@ -1673,7 +1673,7 @@ impl<'a> FileLowering<'a> {
                     None => constructor_parameters(self.ir, parent),
                 };
                 if declaration.super_args.len() != params.len() {
-                    return Err(format!(
+                    return Err(declined!(
                         "a superclass constructor call of a different arity (`{}`)",
                         declaration.fq_name()
                     ));
@@ -1722,7 +1722,7 @@ impl<'a> FileLowering<'a> {
             // `throwable_message_operand`, which declines a `cause` this storage cannot hold.
             None if model::external_base(declaration.superclass).is_some() => None,
             None if !declaration.super_args.is_empty() => {
-                return Err(format!(
+                return Err(declined!(
                     "a superclass constructor call to `{}`",
                     declaration.superclass.render()
                 ));
@@ -1767,7 +1767,7 @@ impl<'a> FileLowering<'a> {
             // base calling an overridden method that reads the outer instance sees it set.
             for &(parameter, field) in &declaration.pre_super_param_fields {
                 let Some(&(variable, _)) = body.values.get(&(parameter + 1)) else {
-                    return Err(format!(
+                    return Err(declined!(
                         "a pre-super store from an unknown parameter (`{}`)",
                         declaration.fq_name()
                     ));
@@ -1785,7 +1785,7 @@ impl<'a> FileLowering<'a> {
                         continue;
                     }
                     let Some(value) = body.coerce(argument, *ty)? else {
-                        return Err("a `Unit` superclass constructor argument".to_string());
+                        return Err("a `Unit` superclass constructor argument".into());
                     };
                     arguments.push(value);
                 }
@@ -1863,7 +1863,7 @@ impl<'a> FileLowering<'a> {
                     let Some(value) =
                         body.convert(params[index + 1], Some(argument_type), field_type)?
                     else {
-                        return Err("a `Unit` field".to_string());
+                        return Err("a `Unit` field".into());
                     };
                     let offset = layout.fields[field as usize].offset as i32;
                     body.builder.ins().store(trusted(), value, this, offset);
@@ -2173,7 +2173,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         let Some(value) = value else {
-            return Err("a `lateinit` read of a `Unit` value".to_string());
+            return Err("a `lateinit` read of a `Unit` value".into());
         };
         self.lateinit_guard(value, name)?;
         Ok(Some(value))
@@ -2224,7 +2224,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(());
         }
         let Some(value) = value else {
-            return Err("a `Unit` value stored to a field".to_string());
+            return Err("a `Unit` value stored to a field".into());
         };
         self.builder.ins().store(trusted(), value, object, offset);
         Ok(())
@@ -2256,10 +2256,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let class = self.file.class_of(internal, "construction of")?;
         let declaration = &self.file.ir.classes[class as usize];
         if declaration.is_object {
-            return Err(format!("construction of the object declaration `{name}`"));
+            return Err(declined!("construction of the object declaration `{name}`"));
         }
         if declaration.is_abstract || declaration.is_sealed {
-            return Err(format!("construction of the abstract class `{name}`"));
+            return Err(declined!("construction of the abstract class `{name}`"));
         }
         // Matching uses the DECLARED list, because that is what the construction node names;
         // filling the frame uses the physical one, because that is what the constructor declares.
@@ -2318,7 +2318,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             })?,
                         primary_params,
                     ),
-                    None => return Err(format!("a call to an unknown constructor (`{name}`)")),
+                    None => return Err(declined!("a call to an unknown constructor (`{name}`)")),
                 }
             }
             None => (
@@ -2329,7 +2329,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             ),
         };
         if args.len() != params.len() {
-            return Err(format!(
+            return Err(declined!(
                 "a constructor call with omitted arguments (`{name}`)"
             ));
         }
@@ -2375,11 +2375,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return self.defaulted_call(fid, &omitted, Some(receiver), &supplied);
         };
         if function.dispatch_receiver.is_none() {
-            return Err(format!("a class-static call (`{}`)", function.name));
+            return Err(declined!("a class-static call (`{}`)", function.name));
         }
         let key = model::function_key(self.file.ir, class, fid);
         let Some(slot) = self.file.model.slot(class, &key) else {
-            return Err(format!(
+            return Err(declined!(
                 "a method with no dispatch slot (`{}`)",
                 function.name
             ));
@@ -2396,7 +2396,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.dispatch(object, slot, &params, ret, &arguments)
     }
 
-    /// The property a checked operation names, as (class, property index).
+    /// The member or top-level realization a checked property operation names.
     /// Follow one enclosing-instance edge: `this@Outer` from inside an `inner` class.
     ///
     /// An `inner` class carries its outer instance in a field, written before the superclass
@@ -2416,7 +2416,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .iter()
             .find(|(parameter, _)| *parameter == 0)
         else {
-            return Err(format!(
+            return Err(declined!(
                 "an enclosing instance with no stored field (`{}`)",
                 declaration.fq_name()
             ));
@@ -2437,19 +2437,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     pub(super) fn checked_property(
         &self,
         target: &crate::fir::PropertyId,
-    ) -> Result<(ClassId, usize), Unsupported> {
+    ) -> Result<CheckedProperty, Unsupported> {
         match self.file.ir.local_property_layouts.get(target) {
             Some(crate::ir::IrLocalPropertyLayout::Member {
                 class, property, ..
-            }) => Ok((*class, *property as usize)),
+            }) => Ok(CheckedProperty::Member(*class, *property as usize)),
             Some(
                 crate::ir::IrLocalPropertyLayout::TopLevelStorage { .. }
                 | crate::ir::IrLocalPropertyLayout::TopLevelAccessor { .. },
-            ) => Err(TOP_LEVEL.to_string()),
+            ) => Ok(CheckedProperty::TopLevel),
             Some(crate::ir::IrLocalPropertyLayout::MemberExtension { .. }) => {
-                Err("a member-extension property reached ordinary member storage".to_string())
+                Err("a member-extension property reached ordinary member storage".into())
             }
-            None => Err("a property with no recorded realization".to_string()),
+            None => Err("a property with no recorded realization".into()),
         }
     }
 
@@ -2461,7 +2461,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     ) -> Result<Option<Value>, Unsupported> {
         let Some(receiver) = receiver else {
             let name = &self.file.ir.classes[class as usize].properties[index].name;
-            return Err(format!("a receiver-less read of `{name}`"));
+            return Err(declined!("a receiver-less read of `{name}`"));
         };
         // A member of a value class receives the VALUE as `this`. Reading one of that class's
         // properties therefore must not turn the value into an object merely because ordinary
@@ -2500,13 +2500,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(self.builder.inst_results(call).first().copied());
         }
         let Some(field) = property.backing_field else {
-            return Err(format!(
+            return Err(declined!(
                 "a value-class property with neither storage nor a getter (`{}`)",
                 property.name
             ));
         };
         if model::value_field(self.file.ir, class)? != field {
-            return Err(format!(
+            return Err(declined!(
                 "a value-class property backed by a non-value field (`{}`)",
                 property.name
             ));
@@ -2527,7 +2527,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .storage_ty
             .is_some_and(|storage| self.carrier(storage) != self.carrier(property.ty))
         {
-            return Err(format!(
+            return Err(declined!(
                 "a property whose storage differs from its type (`{}`)",
                 property.name
             ));
@@ -2556,7 +2556,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let ty = self.file.ir.classes[class as usize].fields[field as usize].ty;
                 self.load_field(object, class, field, ty).map(Some)
             }
-            None => Err(format!(
+            None => Err(declined!(
                 "a property with neither storage nor a getter (`{}`)",
                 property.name
             )),
@@ -2572,7 +2572,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     ) -> Result<(), Unsupported> {
         let Some(receiver) = receiver else {
             let name = &self.file.ir.classes[class as usize].properties[index].name;
-            return Err(format!("a receiver-less write of `{name}`"));
+            return Err(declined!("a receiver-less write of `{name}`"));
         };
         let target_ty = self.written_property_ty(class, index)?;
         let Some(object) = self.receiver(receiver)? else {
@@ -2584,7 +2584,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         let Some(value) = value else {
             let name = &self.file.ir.classes[class as usize].properties[index].name;
-            return Err(format!("a `Unit` value assigned to `{name}`"));
+            return Err(declined!("a `Unit` value assigned to `{name}`"));
         };
         self.property_write_of(class, index, object, value)
     }
@@ -2604,7 +2604,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             (None, None, Some(field)) => {
                 Ok(self.file.ir.classes[class as usize].fields[field as usize].ty)
             }
-            (None, None, None) => Err(format!(
+            (None, None, None) => Err(declined!(
                 "a property with neither storage nor a setter (`{}`)",
                 property.name
             )),
@@ -2660,7 +2660,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         let class = self.file.class_of(classifier, "the object")?;
         let Some((_, getter)) = self.file.classes[class as usize].singleton else {
-            return Err(format!(
+            return Err(declined!(
                 "a singleton value of `{}`, which is not an object declaration",
                 classifier.render()
             ));
@@ -2703,11 +2703,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             })?;
         let function = &ir.functions[fid as usize];
         if function.dispatch_receiver.is_none() {
-            return Err(format!("a virtual call to the static member `{name}`"));
+            return Err(declined!("a virtual call to the static member `{name}`"));
         }
         let key = model::function_key(ir, class, fid);
         let Some(slot) = self.file.model.slot(class, &key) else {
-            return Err(format!("a virtual call with no dispatch slot (`{name}`)"));
+            return Err(declined!("a virtual call with no dispatch slot (`{name}`)"));
         };
         // The ABI is the DECLARATION's, not the call site's: every override fills this slot with a
         // body compiled to the declaration's carriers, so an argument whose checked type is narrower
@@ -2741,9 +2741,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         receiver: u32,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
-        let (property_class, index) = self.checked_property(&target)?;
+        let CheckedProperty::Member(property_class, index) = self.checked_property(&target)? else {
+            return Err("a `super` access to a top-level property".into());
+        };
         if property_class != class {
-            return Err("a `super` property target owned by another class".to_string());
+            return Err("a `super` property target owned by another class".into());
         }
         let name = self.file.ir.classes[class as usize].properties[index]
             .name
@@ -2753,7 +2755,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             (true, [value]) => self
                 .direct_property_write(class, index, receiver, *value)
                 .map(|()| None),
-            _ => Err(format!(
+            _ => Err(declined!(
                 "a `super` access to `{name}` with {} operands",
                 args.len()
             )),
@@ -2772,7 +2774,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         };
         if let Some(getter) = property.getter {
             let Some(id) = self.file.functions[getter as usize] else {
-                return Err(format!(
+                return Err(declined!(
                     "a `super` read of the abstract `{}`",
                     property.name
                 ));
@@ -2782,7 +2784,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(self.builder.inst_results(call).first().copied());
         }
         let Some(field) = property.backing_field else {
-            return Err(format!(
+            return Err(declined!(
                 "a `super` read of `{}`, which has neither storage nor a getter",
                 property.name
             ));
@@ -2805,7 +2807,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             (Some(_), _) => property.ty,
             (None, Some(field)) => self.file.ir.classes[class as usize].fields[field as usize].ty,
             (None, None) => {
-                return Err(format!(
+                return Err(declined!(
                     "a `super` write of `{}`, which has neither storage nor a setter",
                     property.name
                 ));
@@ -2819,11 +2821,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(());
         }
         let Some(value) = value else {
-            return Err(format!("a `Unit` value assigned to `{}`", property.name));
+            return Err(declined!("a `Unit` value assigned to `{}`", property.name));
         };
         if let Some(setter) = property.setter {
             let Some(id) = self.file.functions[setter as usize] else {
-                return Err(format!(
+                return Err(declined!(
                     "a `super` write of the abstract `{}`",
                     property.name
                 ));
@@ -2856,7 +2858,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 ("toString", 0) => "kt_any_to_string",
                 ("hashCode", 0) => "kt_any_hash_code",
                 ("equals", 1) => "kt_any_equals",
-                _ => return Err(format!("a `super` call to `Any.{name}`")),
+                _ => return Err(declined!("a `super` call to `Any.{name}`")),
             };
             let (params, ret) = any_member(symbol).expect("a kotlin.Any member");
             let mut arguments = vec![self.reference(receiver)?];
@@ -2880,15 +2882,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         let ir = self.file.ir;
         let Some(crate::fir::ResolvedFunctionOverrideTarget::Module(source)) = declaration else {
-            return Err(format!(
+            return Err(declined!(
                 "a `super` call without a source declaration (`{name}`)"
             ));
         };
         let Some(&fid) = ir.checked_callable_functions.get(&source) else {
-            return Err(format!("a `super` call to an unknown method (`{name}`)"));
+            return Err(declined!("a `super` call to an unknown method (`{name}`)"));
         };
         let Some(id) = self.file.functions[fid as usize] else {
-            return Err(format!("a `super` call to the abstract method `{name}`"));
+            return Err(declined!("a `super` call to the abstract method `{name}`"));
         };
         let params = super::super::super::captures::carried_parameters(ir, fid);
         let Some(object) = self.receiver(receiver)? else {
@@ -2905,6 +2907,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 }
 
-/// Marks a checked property that turned out to be top-level, so the caller routes it to
-/// `super::statics` instead of looking for a class member. Never reaches a diagnostic.
-pub(super) const TOP_LEVEL: &str = "\u{0}top-level";
+/// The realization selected for an ordinary checked property operation.
+pub(super) enum CheckedProperty {
+    Member(ClassId, usize),
+    TopLevel,
+}
