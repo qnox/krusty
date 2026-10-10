@@ -22,6 +22,7 @@ pub(super) enum PropertyWriteSelection {
     /// cannot become a fallback target.
     ClassifierProperty(Box<crate::libraries::ClassifierProperty>),
     MissingContext(MissingContextParameter, Vec<String>),
+    AccessorAmbiguous(Vec<String>),
     Ambiguous,
 }
 
@@ -33,7 +34,10 @@ impl PropertyWriteSelection {
                 Some((property.property.ty, property.property.setter.is_some()))
             }
             Self::ClassifierProperty(property) => Some((property.ty, false)),
-            Self::None | Self::MissingContext(..) | Self::Ambiguous => None,
+            Self::None
+            | Self::MissingContext(..)
+            | Self::AccessorAmbiguous(_)
+            | Self::Ambiguous => None,
         }
     }
 }
@@ -54,8 +58,14 @@ impl Checker<'_> {
                     }
                 }
                 implicit_rungs::ImplicitRung::Receiver(receiver) => {
-                    if let Some(property) = self.property_write_on_receiver(scope, receiver, name) {
-                        return PropertyWriteSelection::Implicit(Box::new(property));
+                    match self.property_write_on_receiver(scope, receiver, name) {
+                        Ok(Some(property)) => {
+                            return PropertyWriteSelection::Implicit(Box::new(property));
+                        }
+                        Ok(None) => {}
+                        Err(candidates) => {
+                            return PropertyWriteSelection::AccessorAmbiguous(candidates);
+                        }
                     }
                 }
                 implicit_rungs::ImplicitRung::StaticScope(classifier) => {
@@ -75,9 +85,14 @@ impl Checker<'_> {
             }
         }
         if let Some((receiver, declared_name, _)) = self.imported_singleton_member(name) {
-            if let Some(property) = self.property_write_on_receiver(scope, receiver, &declared_name)
-            {
-                return PropertyWriteSelection::Implicit(Box::new(property));
+            match self.property_write_on_receiver(scope, receiver, &declared_name) {
+                Ok(Some(property)) => {
+                    return PropertyWriteSelection::Implicit(Box::new(property));
+                }
+                Ok(None) => {}
+                Err(candidates) => {
+                    return PropertyWriteSelection::AccessorAmbiguous(candidates);
+                }
             }
         }
         match self.select_declared_top_level_property(scope, name) {
@@ -97,9 +112,9 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         receiver: ImplicitReceiver,
         name: &str,
-    ) -> Option<ImplicitPropertyWriteResolution> {
+    ) -> Result<Option<ImplicitPropertyWriteResolution>, Vec<String>> {
         if let Some(property) = self.checked_body_local_property(receiver.ty, name) {
-            return Some(ImplicitPropertyWriteResolution {
+            return Ok(Some(ImplicitPropertyWriteResolution {
                 receiver,
                 property_ty: property.ty,
                 is_var: property.mutable,
@@ -108,7 +123,7 @@ impl Checker<'_> {
                 setter: None,
                 extension: None,
                 stable_declaration: property.stable_declaration,
-            });
+            }));
         }
         let selected = self.resolver().select_member_property_applicable_where(
             receiver.ty,
@@ -129,12 +144,20 @@ impl Checker<'_> {
                     })
             },
         );
-        if let Some((selected_ty, property)) = selected.and_then(|selected| {
-            let ty = selected.ty;
-            selected.property.map(|property| (ty, property))
-        }) {
-            let context_types = property.getter.params.get(..property.context_count)?;
-            let context_args = self.select_context_arguments(scope, context_types)?;
+        if let Some(selected) = selected {
+            if let Some(candidates) = self.competing_accessor_candidates(name, &selected) {
+                return Err(candidates);
+            }
+            let selected_ty = selected.ty;
+            let Some(property) = selected.property else {
+                return Ok(None);
+            };
+            let Some(context_types) = property.getter.params.get(..property.context_count) else {
+                return Ok(None);
+            };
+            let Some(context_args) = self.select_context_arguments(scope, context_types) else {
+                return Ok(None);
+            };
             let mut getter = crate::symbol_resolver::ResolvedMember::from_callable(
                 receiver.ty,
                 property.getter.clone(),
@@ -152,7 +175,7 @@ impl Checker<'_> {
                     stable_declaration: property.stable_declaration,
                 }
             });
-            return Some(ImplicitPropertyWriteResolution {
+            return Ok(Some(ImplicitPropertyWriteResolution {
                 receiver,
                 property_ty: selected_ty,
                 is_var: setter.is_some(),
@@ -161,14 +184,14 @@ impl Checker<'_> {
                 setter,
                 extension: None,
                 stable_declaration: property.stable_declaration,
-            });
+            }));
         }
         let getter = self.select_property_member(receiver.ty, name);
         let setter = self.select_property_setter(receiver.ty, name);
         if let Some(setter) = setter {
             let ty = setter.callable.params.first().copied().unwrap_or(Ty::Error);
             let stable_declaration = setter.stable_declaration;
-            return Some(ImplicitPropertyWriteResolution {
+            return Ok(Some(ImplicitPropertyWriteResolution {
                 receiver,
                 property_ty: ty,
                 is_var: true,
@@ -177,11 +200,11 @@ impl Checker<'_> {
                 setter: Some(setter),
                 extension: None,
                 stable_declaration,
-            });
+            }));
         }
         if let Some(property) = getter {
             let stable_declaration = property.member.stable_declaration;
-            return Some(ImplicitPropertyWriteResolution {
+            return Ok(Some(ImplicitPropertyWriteResolution {
                 receiver,
                 property_ty: property.ret,
                 is_var: false,
@@ -190,7 +213,7 @@ impl Checker<'_> {
                 setter: None,
                 extension: None,
                 stable_declaration,
-            });
+            }));
         }
         let type_variables = self.postponed_type_variables_in(receiver.ty);
         let resolver = self.resolver().with_type_variables(&type_variables);
@@ -198,10 +221,16 @@ impl Checker<'_> {
             let context_args = if property.context_count == 0 {
                 Vec::new()
             } else {
-                let context_types = property.getter.params.get(1..1 + property.context_count)?;
-                self.select_context_arguments(scope, context_types)?
+                let Some(context_types) = property.getter.params.get(1..1 + property.context_count)
+                else {
+                    return Ok(None);
+                };
+                let Some(context_args) = self.select_context_arguments(scope, context_types) else {
+                    return Ok(None);
+                };
+                context_args
             };
-            return Some(ImplicitPropertyWriteResolution {
+            return Ok(Some(ImplicitPropertyWriteResolution {
                 receiver,
                 property_ty: property.ty,
                 is_var: property.setter.is_some(),
@@ -213,9 +242,9 @@ impl Checker<'_> {
                     context_args,
                 }),
                 stable_declaration: None,
-            });
+            }));
         }
-        None
+        Ok(None)
     }
 
     fn implicit_property_write_target(
@@ -283,6 +312,7 @@ impl Checker<'_> {
             PropertyWriteSelection::None
             | PropertyWriteSelection::ClassifierProperty(_)
             | PropertyWriteSelection::MissingContext(..)
+            | PropertyWriteSelection::AccessorAmbiguous(_)
             | PropertyWriteSelection::Ambiguous => {}
         }
     }
@@ -311,6 +341,7 @@ impl Checker<'_> {
             PropertyWriteSelection::None
             | PropertyWriteSelection::ClassifierProperty(_)
             | PropertyWriteSelection::MissingContext(..)
+            | PropertyWriteSelection::AccessorAmbiguous(_)
             | PropertyWriteSelection::Ambiguous => {}
         }
     }

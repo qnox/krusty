@@ -40,7 +40,10 @@ pub(super) fn finalize_data_classes(
         let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() else {
             continue;
         };
-        let fields = data_property_fields(index, declaration, class, ir)?;
+        // kotlinc reads the properties through their getters when the class is not final, which
+        // only a compiler plugin (all-open) makes a data class, and from their fields otherwise.
+        let through_getters = !header.flags.has(DeclarationFlags::FINAL);
+        let fields = data_property_fields(index, declaration, class, through_getters, ir)?;
         if header.flags.has(DeclarationFlags::DATA)
             && !header.flags.has(DeclarationFlags::SINGLETON)
         {
@@ -57,6 +60,7 @@ fn data_property_fields(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
     class: ClassId,
+    through_getters: bool,
     ir: &IrFile,
 ) -> Result<Vec<DataField>, FirFileLoweringFailure> {
     let mut properties = ir
@@ -68,11 +72,11 @@ fn data_property_fields(
         })
         .filter_map(|property| {
             let anchor = index.declaration_anchor(property.declaration)?;
-            let field_index = ir.classes[class as usize]
+            let declared = ir.classes[class as usize]
                 .properties
                 .iter()
-                .find(|candidate| candidate.name == property.name)?
-                .backing_field?;
+                .find(|candidate| candidate.name == property.name)?;
+            let field_index = declared.backing_field?;
             let field = &ir.classes[class as usize].fields[field_index as usize];
             Some((
                 anchor.sibling,
@@ -81,6 +85,7 @@ fn data_property_fields(
                     name: property.name.clone(),
                     ty: field.ty,
                     generic: field.type_param.is_some(),
+                    getter: through_getters.then_some(declared.ty),
                 },
             ))
         })
@@ -106,6 +111,33 @@ struct DataField {
     name: String,
     ty: Ty,
     generic: bool,
+    /// The property's type when generated members read it through its getter rather than its
+    /// field.
+    getter: Option<Ty>,
+}
+
+impl DataField {
+    /// Read this property of `receiver`, an instance of `class`.
+    fn read(&self, ir: &mut IrFile, class: ClassId, receiver: ExprId) -> ExprId {
+        match self.getter {
+            Some(ty) => {
+                let owner = ir.classes[class as usize].fq_name_id();
+                ir.add_expr(IrExpr::PropertyRead {
+                    receiver: Some(receiver),
+                    owner,
+                    name: self.name.clone(),
+                    ty,
+                    interface: false,
+                    operation: None,
+                })
+            }
+            None => ir.add_expr(IrExpr::GetField {
+                receiver,
+                class,
+                index: self.index,
+            }),
+        }
+    }
 }
 
 enum GeneratedMethod {
@@ -164,11 +196,7 @@ fn synthesize_components_and_copy(
             function,
         );
         let this = ir.add_expr(IrExpr::GetValue(0));
-        let value = ir.add_expr(IrExpr::GetField {
-            receiver: this,
-            class,
-            index: field.index,
-        });
+        let value = field.read(ir, class, this);
         let returned = ir.add_expr(IrExpr::Return(Some(value)));
         ir.functions[function as usize].body = Some(ir.add_expr(IrExpr::Block {
             stmts: vec![returned],
@@ -213,11 +241,7 @@ fn synthesize_components_and_copy(
         .iter()
         .map(|field| {
             let this = ir.add_expr(IrExpr::GetValue(0));
-            Some(ir.add_expr(IrExpr::GetField {
-                receiver: this,
-                class,
-                index: field.index,
-            }))
+            Some(field.read(ir, class, this))
         })
         .collect();
     ir.fn_params.insert(
@@ -299,11 +323,7 @@ fn synthesize_to_string(
             ))));
         }
         let this = ir.add_expr(IrExpr::GetValue(0));
-        let mut value = ir.add_expr(IrExpr::GetField {
-            receiver: this,
-            class,
-            index: field.index,
-        });
+        let mut value = field.read(ir, class, this);
         // Backend representation may erase a value class to its carrier, but data-class rendering
         // is defined by the declared Kotlin field type. Keep that checked type on the generated read
         // so a target can choose the value class's semantic string conversion.
@@ -426,11 +446,7 @@ fn java_string_hash(text: &str) -> i32 {
 fn field_hash(class: ClassId, field: &DataField, ir: &mut IrFile) -> ExprId {
     let read = |ir: &mut IrFile| {
         let this = ir.add_expr(IrExpr::GetValue(0));
-        ir.add_expr(IrExpr::GetField {
-            receiver: this,
-            class,
-            index: field.index,
-        })
+        field.read(ir, class, this)
     };
     let value = read(ir);
     if !field.ty.is_nullable() && !field.generic {
@@ -518,17 +534,9 @@ fn synthesize_equals(
 
     for field in fields {
         let this_value = ir.add_expr(IrExpr::GetValue(0));
-        let left = ir.add_expr(IrExpr::GetField {
-            receiver: this_value,
-            class,
-            index: field.index,
-        });
+        let left = field.read(ir, class, this_value);
         let other_value = ir.add_expr(IrExpr::GetValue(OTHER));
-        let right = ir.add_expr(IrExpr::GetField {
-            receiver: other_value,
-            class,
-            index: field.index,
-        });
+        let right = field.read(ir, class, other_value);
         let equal = if matches!(
             field.ty,
             Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean | Ty::Long
