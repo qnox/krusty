@@ -151,6 +151,9 @@ impl BodyLowering<'_> {
         let result = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(matches), cast), (None, null)],
         });
+        self.ir
+            .logical_types
+            .insert(result, Ty::nullable(cast_target));
         Ok(match declaration {
             Some(declaration) => self.ir.add_expr(IrExpr::Block {
                 stmts: vec![declaration],

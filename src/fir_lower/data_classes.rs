@@ -463,9 +463,11 @@ fn field_hash(class: ClassId, field: &DataField, ir: &mut IrFile) -> ExprId {
         vec![non_null],
         Ty::Int,
     );
-    ir.add_expr(IrExpr::When {
+    let combined = ir.add_expr(IrExpr::When {
         branches: vec![(Some(is_null), zero), (None, hash)],
-    })
+    });
+    ir.logical_types.insert(combined, Ty::Int);
+    combined
 }
 
 fn synthesize_equals(

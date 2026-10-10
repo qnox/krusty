@@ -370,7 +370,7 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        let ty = self.type_of(receiver)?;
+        let ty = self.checked_type(receiver)?;
         // A file that declares its own map, set or entry puts an object of ITS own behind that
         // type, and the runtime would read a header that is not there. No static type tells the
         // two apart within a shape, so a receiver of a shape the file implements declines — the
@@ -422,7 +422,7 @@ impl BodyLowering<'_, '_, '_> {
         target: crate::fir::ExternalPropertyId,
         receiver: u32,
     ) -> Option<MapProperty> {
-        let ty = self.type_of(receiver)?;
+        let ty = self.checked_type(receiver)?;
         if self.file.implements_collection_of(ty)
             || !(is_map(self.file, ty) || is_set(self.file, ty) || is_map_entry(self.file, ty))
         {
