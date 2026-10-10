@@ -196,11 +196,6 @@ jobs:
         with:
           path: target/cache/kotlinc
           key: klib-semantics-kotlinc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
-      - name: cache box corpus
-        uses: actions/cache@v6
-        with:
-          path: target/cache/box-corpus
-          key: klib-semantics-box-corpus-mock-jdk-${{ hashFiles('kotlin-versions') }}
       - name: restore recorded kotlinc-native bytes
         id: native-recordings
         uses: actions/cache/restore@v6
