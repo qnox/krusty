@@ -236,6 +236,10 @@ impl Emitter<'_> {
             return;
         }
         if let Some(line) = self.ir.invocation_result_adaptation_line(expression) {
+            // This is the expansion's return to caller-owned code. Reset the callee line before
+            // marking it, just as the ordinary post-inline boundary does when no adaptation owns
+            // that transition.
+            code.forget_line();
             self.mark_expression_line(expression, line, code);
         }
         self.narrow_invocation_result(ret, code);

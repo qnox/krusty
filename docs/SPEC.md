@@ -16220,7 +16220,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and `pN` inline locals are retained without rediscovering the reference target. The other
   expressions use the common function-value invocation path. On the JVM, `FunctionN.invoke` remains
   inside the provider's inline frame, while adapting its erased result to the checked type closes
-  that frame and returns to the caller's line before any surrounding store. FIR storage
+  that frame and consumes the post-inline line reset, returning to the caller's line once before
+  any surrounding store. FIR storage
   representation therefore cannot make
   `object : R { override fun run(t: Throwable?) { t?.let(x) } }` reach a backend as an external
   `StandardKt.let` call. Tests:

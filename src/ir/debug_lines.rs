@@ -52,6 +52,10 @@ pub(super) struct GeneratedLineMarks {
     /// declaration stores the value. This is a source/debug decision, not a JVM type inference:
     /// common lowering records the line and the JVM boundary chooses the physical adaptation.
     invocation_result_adaptations: HashMap<ExprId, u32>,
+    /// An external inline expansion whose final result adaptation is also its return to the
+    /// caller's line. The adaptation consumes the ordinary post-inline line reset; repeating that
+    /// reset after the expansion would move the same caller line onto the following expression.
+    inline_result_adaptation_boundaries: HashSet<ExprId>,
 }
 
 impl IrFile {
@@ -153,6 +157,18 @@ impl IrFile {
             .copied()
     }
 
+    pub(crate) fn mark_inline_result_adaptation_boundary(&mut self, expression: ExprId) {
+        self.generated_lines
+            .inline_result_adaptation_boundaries
+            .insert(expression);
+    }
+
+    pub(crate) fn inline_result_adaptation_restores_caller(&self, expression: ExprId) -> bool {
+        self.generated_lines
+            .inline_result_adaptation_boundaries
+            .contains(&expression)
+    }
+
     pub(crate) fn move_generated_operand_start(&mut self, source: ExprId, target: ExprId) {
         if self
             .generated_lines
@@ -186,6 +202,9 @@ impl IrFile {
         }
         if let Some(&line) = marks.invocation_result_adaptations.get(&source) {
             marks.invocation_result_adaptations.insert(target, line);
+        }
+        if marks.inline_result_adaptation_boundaries.contains(&source) {
+            marks.inline_result_adaptation_boundaries.insert(target);
         }
     }
 }
