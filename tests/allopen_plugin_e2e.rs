@@ -276,6 +276,22 @@ fn all_open_classes_and_members_match_kotlinc() {
     assert_same_classes_and_box(&reference, &krusty, &stdlib);
 }
 
+/// The same program configured through kotlinc's modern syntax,
+/// `-Xcompiler-plugin=<jar>=annotation=AllOpen`: its options reach the plugin its jar loads.
+#[test]
+fn modern_syntax_options_match_kotlinc() {
+    let fixture = Fixture::new("modern-syntax");
+    let sources = [("Main.kt", SAME_MODULE)];
+    let switches = vec![format!(
+        "-Xcompiler-plugin={}=annotation=AllOpen",
+        allopen_jar().display()
+    )];
+    let stdlib = vec![common::stdlib_jar()];
+    let reference = fixture.kotlinc("main", &sources, &[], &switches);
+    let krusty = fixture.krusty("main", &sources, &[], &switches);
+    assert_same_classes_and_box(&reference, &krusty, &stdlib);
+}
+
 const SPRING_LIBRARY: &[(&str, &str)] = &[
     (
         "Component.kt",
