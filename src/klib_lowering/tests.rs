@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+mod body_forms;
+
 use super::*;
 use crate::backend::{BackendCallableFact, CheckedBackendCallables};
 use crate::fir::SourceFileId;
@@ -30,11 +32,23 @@ use crate::types::{type_name, Ty, Visibility};
 
 /// The fact the backend handoff freezes for the one function of `package` named `name` with this
 /// receiver and these value parameters.
-fn frozen(
+pub(super) fn frozen(
     libraries: &KlibLibraries,
     package: &str,
     name: &str,
     receiver: Ty,
+    params: &[Ty],
+) -> BackendCallableFact {
+    frozen_function(libraries, package, name, Some(receiver), params)
+}
+
+/// The fact the backend handoff freezes for the one function of `package` named `name` with this
+/// receiver, if any, and these value parameters.
+pub(super) fn frozen_function(
+    libraries: &KlibLibraries,
+    package: &str,
+    name: &str,
+    receiver: Option<Ty>,
     params: &[Ty],
 ) -> BackendCallableFact {
     let symbols = libraries.symbols(SymbolNamespace::Package(type_name(package)), name);
@@ -43,7 +57,7 @@ fn frozen(
         .functions()
         .iter()
         .filter(|function| {
-            function.semantic_receiver() == Some(receiver)
+            function.semantic_receiver() == receiver
                 && function.semantic_params().as_ref() == params
         })
         .collect::<Vec<_>>();
@@ -78,7 +92,7 @@ fn frozen(
         .clone()
 }
 
-fn validated(ir: &IrFile) {
+pub(super) fn validated(ir: &IrFile) {
     assert_eq!(ir.validate_determined_types(), Ok(()));
     assert_eq!(ir.validate_semantic_contracts(), Ok(()));
     // A dependency unit declares and references no property of any source file.
@@ -88,23 +102,28 @@ fn validated(ir: &IrFile) {
     );
 }
 
-fn type_name_of(ty: Ty) -> String {
+pub(super) fn type_name_of(ty: Ty) -> String {
     match ty {
         Ty::Int => "Int".to_owned(),
         Ty::Long => "Long".to_owned(),
         Ty::Float => "Float".to_owned(),
         Ty::Double => "Double".to_owned(),
         Ty::Boolean => "Boolean".to_owned(),
+        Ty::String => "String".to_owned(),
         Ty::Nothing => "Nothing".to_owned(),
         Ty::Unit => "Unit".to_owned(),
+        // Any other class without type arguments, by its qualified name (a test rendering).
+        Ty::Obj(name, []) => name.render(),
         other => format!("{other:?}"),
     }
 }
 
 /// Every fact a backend reads about an expression of a lowered body, as one text: its node, the
-/// logical type, a return's depth (`@0`), a stable binding read (`!`) and a `when`'s
-/// exhaustiveness (`exhaustive:`) and callable scope (`scope`).
-fn render(ir: &IrFile, expression: ExprId) -> String {
+/// logical type, a return's depth (`@0`), a stable (`!`) or mutable (`~`) binding read, a `when`'s
+/// exhaustiveness (`exhaustive:`), a callable scope (`scope`) and a recorded negation
+/// (`negation`). A call names its callee by source name, so two units' bodies compare whatever
+/// order their functions were declared in.
+pub(super) fn render(ir: &IrFile, expression: ExprId) -> String {
     let node = match ir.expr(expression) {
         IrExpr::Block { stmts, value } => {
             let statements = stmts
@@ -147,8 +166,48 @@ fn render(ir: &IrFile, expression: ExprId) -> String {
             format!("{exhaustive}when[{branches}]")
         }
         IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
-            format!("{op:?}({}, {})", render(ir, *lhs), render(ir, *rhs))
+            let negation = if ir.negations.contains(&expression) {
+                "negation "
+            } else {
+                ""
+            };
+            format!(
+                "{negation}{op:?}({}, {})",
+                render(ir, *lhs),
+                render(ir, *rhs)
+            )
         }
+        IrExpr::Equality { op, mode, lhs, rhs } => {
+            format!(
+                "{op:?}.{mode:?}({}, {})",
+                render(ir, *lhs),
+                render(ir, *rhs)
+            )
+        }
+        IrExpr::Call {
+            callee: Callee::Local(function),
+            dispatch_receiver: None,
+            args,
+        } => {
+            let args = args
+                .iter()
+                .map(|argument| render(ir, *argument))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("call {}({args})", ir.fn_source_names[function])
+        }
+        IrExpr::Variable {
+            index,
+            ty,
+            init,
+            named,
+        } => format!(
+            "{} v{index}: {} = {}",
+            if *named { "val" } else { "temp" },
+            type_name_of(*ty),
+            init.map_or(String::new(), |init| render(ir, init))
+        ),
+        IrExpr::SetValue { var, value } => format!("v{var} = {}", render(ir, *value)),
         IrExpr::GetValue(slot) => {
             let stable = match ir.binding_read_stability.get(&expression) {
                 Some(crate::ir::IrBindingStability::Stable) => "!",
@@ -167,7 +226,7 @@ fn render(ir: &IrFile, expression: ExprId) -> String {
 }
 
 /// The rendered body checked FIR lowering produces for the one function of `source` named `name`.
-fn source_body(source: &str, name: &str) -> String {
+pub(super) fn source_body(source: &str, name: &str) -> String {
     let ir = crate::fir_lower::tests::lower_single_source_with_platform(
         source,
         "KlibBodyEquivalent",
@@ -185,14 +244,14 @@ fn source_body(source: &str, name: &str) -> String {
     render(&ir, ir.functions[*function as usize].body.expect("a body"))
 }
 
-fn lowered_body(unit: &DependencyBodyUnit, function: FunId) -> String {
+pub(super) fn lowered_body(unit: &DependencyBodyUnit, function: FunId) -> String {
     let ir = unit.ir();
     render(ir, ir.functions[function as usize].body.expect("a body"))
 }
 
 // --- Hand-built trees -------------------------------------------------------------------------
 
-fn kotlin_class(name: &str) -> KotlinType {
+pub(super) fn kotlin_class(name: &str) -> KotlinType {
     KotlinType::Class {
         internal: format!("kotlin/{name}"),
         args: Vec::new(),
@@ -225,21 +284,24 @@ fn coerce_declaration() -> KotlinFunction {
     }
 }
 
-fn public_symbol(kind: KlibIrSymbolKind, signature: KlibPublicIdSignature) -> KlibIrSymbol {
+pub(super) fn public_symbol(
+    kind: KlibIrSymbolKind,
+    signature: KlibPublicIdSignature,
+) -> KlibIrSymbol {
     KlibIrSymbol {
         kind,
         signature: KlibIrSignature::Public(signature),
     }
 }
 
-fn local_symbol(kind: KlibIrSymbolKind, slot: u32) -> KlibIrSymbol {
+pub(super) fn local_symbol(kind: KlibIrSymbolKind, slot: u32) -> KlibIrSymbol {
     KlibIrSymbol {
         kind,
         signature: KlibIrSignature::FileLocal { file: 0, slot },
     }
 }
 
-fn base(symbol: KlibIrSymbol) -> KlibIrDeclarationBase {
+pub(super) fn base(symbol: KlibIrSymbol) -> KlibIrDeclarationBase {
     KlibIrDeclarationBase {
         symbol,
         origin: "DEFINED".to_owned(),
@@ -248,7 +310,7 @@ fn base(symbol: KlibIrSymbol) -> KlibIrDeclarationBase {
     }
 }
 
-fn less_int() -> KlibPublicIdSignature {
+pub(super) fn less_int() -> KlibPublicIdSignature {
     let package = ["kotlin", "internal", "ir"].map(str::to_owned);
     let int = kotlin_class("Int");
     callable_signature(
@@ -453,7 +515,11 @@ fn declined(body: impl FnOnce(&Parts, &mut KlibIrArena) -> Option<KlibIrBody>) -
     let (fact, bodies) = coerce_fixture(body);
     let mut unit = DependencyBodyUnit::default();
     let decline = unit
-        .lower_function(fact.klib_body_callable().expect("signed"), &bodies)
+        .lower_function(
+            fact.klib_body_callable().expect("signed"),
+            &bodies,
+            &KlibCalleeFacts::default(),
+        )
         .expect_err("the body declines");
     assert_eq!(
         Some(decline.declaration()),
@@ -478,7 +544,11 @@ fn a_built_in_relation_lowers_as_the_source_comparison_does() {
     let (fact, bodies) = coerce_fixture(|parts, arena| parts.stdlib_body(arena));
     let mut unit = DependencyBodyUnit::default();
     let function = unit
-        .lower_function(fact.klib_body_callable().expect("signed"), &bodies)
+        .lower_function(
+            fact.klib_body_callable().expect("signed"),
+            &bodies,
+            &KlibCalleeFacts::default(),
+        )
         .expect("the stdlib body shape lowers");
 
     validated(unit.ir());
@@ -508,9 +578,13 @@ fn a_signature_lowers_into_one_function() {
     let (fact, bodies) = coerce_fixture(|parts, arena| parts.stdlib_body(arena));
     let mut unit = DependencyBodyUnit::default();
     let callable = fact.klib_body_callable().expect("signed");
-    let first = unit.lower_function(callable, &bodies).expect("lowers");
+    let first = unit
+        .lower_function(callable, &bodies, &KlibCalleeFacts::default())
+        .expect("lowers");
     let expressions = unit.ir().exprs.len();
-    let second = unit.lower_function(callable, &bodies).expect("lowers");
+    let second = unit
+        .lower_function(callable, &bodies, &KlibCalleeFacts::default())
+        .expect("lowers");
     assert_eq!(first, second);
     assert_eq!(unit.ir().functions.len(), 1);
     assert_eq!(unit.ir().exprs.len(), expressions);
@@ -535,12 +609,56 @@ fn a_body_that_throws_declines_by_its_form() {
     );
 }
 
+/// `kotlin.ranges.coerceAtMost(Int)` on `Int`: a library declaration no fixture selects.
+fn coerce_at_most_int() -> KlibPublicIdSignature {
+    let package = ["kotlin", "ranges"].map(str::to_owned);
+    let int = kotlin_class("Int");
+    callable_signature(
+        DeclarationContainer::<KotlinType> {
+            package: &package,
+            classes: &[],
+            native_interop_library: false,
+        },
+        &CallableShape {
+            name: "coerceAtMost",
+            contexts: Vec::new(),
+            receiver: Some(&int),
+            params: vec![&int],
+            vararg: None,
+            type_parameters: Vec::new(),
+            expect: false,
+            placement: Placement::Ordinary,
+        },
+    )
+    .expect("a non-generic shape is signable")
+}
+
 #[test]
 fn a_call_of_a_library_declaration_declines_by_its_callee() {
+    let message = declined(|parts, arena| {
+        let call = parts.call(arena, coerce_at_most_int());
+        let minimum = parts.read(arena, &parts.value);
+        let conditional = parts.conditional(arena, call, minimum);
+        Some(KlibIrBody::Block(vec![parts.return_from(
+            arena,
+            parts.function.clone(),
+            conditional,
+        )]))
+    });
+    assert_eq!(
+        message,
+        "the KLIB body of `kotlin.ranges.coerceAtLeast` \
+         (it calls `kotlin.ranges.coerceAtMost`, which no selected declaration describes)"
+    );
+}
+
+#[test]
+fn a_call_typed_apart_from_its_callee_declines() {
     let message = declined(|parts, arena| {
         let KlibIrSignature::Public(own) = parts.function.signature.clone() else {
             unreachable!("the fixture function is public");
         };
+        // A recursive call is linked to the declaration being lowered, whose result is `Int`.
         let call = parts.call(arena, own);
         let minimum = parts.read(arena, &parts.value);
         let conditional = parts.conditional(arena, call, minimum);
@@ -553,7 +671,8 @@ fn a_call_of_a_library_declaration_declines_by_its_callee() {
     assert_eq!(
         message,
         "the KLIB body of `kotlin.ranges.coerceAtLeast` \
-         (it calls `kotlin.ranges.coerceAtLeast`)"
+         (its serialized declaration disagrees with the selected one: \
+         a call is typed apart from its callee's result)"
     );
 }
 
@@ -727,7 +846,11 @@ fn a_signature_no_library_serializes_declines() {
     let (fact, _) = coerce_fixture(|parts, arena| parts.stdlib_body(arena));
     let empty = KlibDeclarationBodies::from_libraries(Vec::new()).expect("no libraries");
     let decline = DependencyBodyUnit::default()
-        .lower_function(fact.klib_body_callable().expect("signed"), &empty)
+        .lower_function(
+            fact.klib_body_callable().expect("signed"),
+            &empty,
+            &KlibCalleeFacts::default(),
+        )
         .expect_err("nothing to join");
     assert_eq!(
         decline.to_string(),
@@ -780,7 +903,7 @@ fn a_signature_two_libraries_define_rejects_the_set() {
 
 // --- The Kotlin/Native stdlib -----------------------------------------------------------------
 
-fn distribution_root() -> Option<PathBuf> {
+pub(super) fn distribution_root() -> Option<PathBuf> {
     let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
@@ -791,7 +914,7 @@ fn distribution_root() -> Option<PathBuf> {
 }
 
 /// The common stdlib KLIB's declarations and their bodies.
-fn stdlib(root: &std::path::Path) -> (KlibLibraries, KlibDeclarationBodies) {
+pub(super) fn stdlib(root: &std::path::Path) -> (KlibLibraries, KlibDeclarationBodies) {
     let path = root.join("klib/common/stdlib");
     let archive =
         KlibArchive::open(&path).unwrap_or_else(|error| panic!("open {}: {error}", path.display()));
@@ -831,7 +954,11 @@ fn lowered_stdlib_body(
 ) -> String {
     let fact = frozen(libraries, "kotlin/ranges", name, receiver, &[receiver]);
     let function = unit
-        .lower_function(fact.klib_body_callable().expect("signed"), bodies)
+        .lower_function(
+            fact.klib_body_callable().expect("signed"),
+            bodies,
+            &KlibCalleeFacts::default(),
+        )
         .unwrap_or_else(|decline| panic!("{name} on {receiver:?}: {decline}"));
     lowered_body(unit, function)
 }
@@ -894,7 +1021,11 @@ fn stdlib_coerce_in_declines_by_its_throw() {
     );
     let mut unit = DependencyBodyUnit::default();
     let decline = unit
-        .lower_function(fact.klib_body_callable().expect("signed"), &bodies)
+        .lower_function(
+            fact.klib_body_callable().expect("signed"),
+            &bodies,
+            &KlibCalleeFacts::default(),
+        )
         .expect_err("coerceIn throws on an empty range");
     assert_eq!(
         decline.to_string(),

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use super::decline::KlibBodyDeclineReason;
 use super::klib_types::semantic_type;
 use crate::fir::ResolvedParameterIdentity;
-use crate::ir::{ExprId, FnParamInfo, FunId, IrFile, IrFunction, IrParameterIdentity};
+use crate::ir::{FnParamInfo, FunId, IrFile, IrFunction, IrParameterIdentity};
 use crate::libraries::KlibBodyCallable;
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrFunction};
 use crate::metadata::klib_ir::{KlibIrSymbol, KlibIrSymbolKind};
@@ -44,6 +44,11 @@ impl FunctionHeader {
 
     pub(super) fn value(&self, symbol: &KlibIrSymbol) -> Option<ParameterValue> {
         self.values.get(symbol).copied()
+    }
+
+    /// How many value slots the parameters take; a body's local variables follow them.
+    pub(super) fn parameter_count(&self) -> usize {
+        self.params.len()
     }
 }
 
@@ -208,42 +213,34 @@ fn mismatch(detail: String) -> KlibBodyDeclineReason {
     KlibBodyDeclineReason::SignatureMismatch(detail)
 }
 
-/// Add the declaration with its lowered `body` to `ir`, with the parameter facts checked FIR
-/// lowering publishes for a top-level function.
-pub(super) fn add_function(
+/// Declare the function to `ir`, with the parameter facts checked FIR lowering publishes for a
+/// top-level function. Its body is attached once lowered: a call cycle reaches the declaration
+/// before its body exists.
+pub(super) fn declare_function(
     ir: &mut IrFile,
     callable: KlibBodyCallable<'_>,
-    header: FunctionHeader,
-    body: ExprId,
+    header: &FunctionHeader,
 ) -> FunId {
-    let FunctionHeader {
-        params,
-        ret,
-        identities,
-        context_count,
-        extension_receiver,
-        values: _,
-    } = header;
     let function = ir.add_fun(IrFunction {
         name: callable.name().to_owned(),
         // A dependency declaration's parameters were checked where it was compiled; the
         // entry guards a backend adds are those of the module's own visible functions.
-        param_checks: vec![None; params.len()],
-        params,
-        ret,
-        body: Some(body),
+        param_checks: vec![None; header.params.len()],
+        params: header.params.clone(),
+        ret: header.ret,
+        body: None,
         is_static: true,
         dispatch_receiver: None,
     });
     ir.fn_source_names
         .insert(function, callable.name().to_owned());
     ir.fn_params
-        .insert(function, FnParamInfo::identities(identities));
-    if extension_receiver {
+        .insert(function, FnParamInfo::identities(header.identities.clone()));
+    if header.extension_receiver {
         ir.extension_receiver_fns.insert(function);
     }
-    if context_count != 0 {
-        ir.fn_context_counts.insert(function, context_count);
+    if header.context_count != 0 {
+        ir.fn_context_counts.insert(function, header.context_count);
     }
     function
 }
