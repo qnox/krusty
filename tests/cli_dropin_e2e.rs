@@ -613,21 +613,6 @@ fn warning_diagnostic_ledger(stderr: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// The ledger with `dir`'s per-process prefix removed from located diagnostics. kotlinc's
-/// diagnostics are replayed from the recorded class dump, whose invocation fingerprint does not
-/// depend on the scratch directory, so they name the directory of the process that recorded them.
-fn scratch_relative_ledger(ledger: Vec<String>, recorded_dir_prefix: &str) -> Vec<String> {
-    ledger
-        .into_iter()
-        .map(|line| match line.strip_prefix(recorded_dir_prefix) {
-            Some(rest) => rest
-                .split_once('/')
-                .map_or(line.clone(), |(_, relative)| relative.to_string()),
-            None => line,
-        })
-        .collect()
-}
-
 /// Global and named warning policy has kotlinc's exact status, ordered diagnostic ledger, stdout,
 /// and complete output-file set. This covers configuration, module, and located source warnings.
 #[test]
@@ -642,10 +627,6 @@ fn warning_policy_precedence_matches_kotlinc() {
 
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_warning_policy_{}", std::process::id()));
-    let scratch_prefix = std::env::temp_dir()
-        .join("krusty_warning_policy_")
-        .display()
-        .to_string();
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     // Recorded kotlinc diagnostics retain their source spelling. Keep it stable across test
@@ -798,11 +779,8 @@ fn warning_policy_precedence_matches_kotlinc() {
             });
         assert_eq!(reference_code, case.code, "{}", case.tag);
         assert_eq!(
-            scratch_relative_ledger(
-                warning_diagnostic_ledger(reference_stderr.as_bytes()),
-                &scratch_prefix,
-            ),
-            scratch_relative_ledger(case.diagnostics.clone(), &scratch_prefix),
+            warning_diagnostic_ledger(reference_stderr.as_bytes()),
+            case.diagnostics,
             "{}: reference diagnostics",
             case.tag
         );
