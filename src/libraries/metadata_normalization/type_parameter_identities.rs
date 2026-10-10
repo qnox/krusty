@@ -9,7 +9,7 @@ use crate::metadata::semantic::{KotlinTypeParameter, KotlinTypeParameterId};
 /// A provider constructs this only after it has established the declaration's exact external
 /// identity, and retains it with that signed declaration. Written names remain diagnostic data;
 /// two declarations that both spell a parameter `T` therefore never share an inference variable.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct TypeParameterIdentities {
     by_id: HashMap<KotlinTypeParameterId, &'static str>,
     by_source: HashMap<String, &'static str>,
@@ -17,13 +17,6 @@ pub(crate) struct TypeParameterIdentities {
 }
 
 impl TypeParameterIdentities {
-    pub(crate) fn from_provider(
-        formals: &[KotlinTypeParameter],
-        identity: impl FnMut(usize, &KotlinTypeParameter) -> &'static str,
-    ) -> Self {
-        Self::from_provider_with_enclosing(formals, None, identity)
-    }
-
     /// Assign identities to one declaration's own formals while retaining the identities its
     /// enclosing classifiers put in scope. A repeated metadata ID or source spelling is shadowed
     /// by the inner declaration, exactly as the metadata scope is.
@@ -77,8 +70,8 @@ impl TypeParameterIdentities {
             .iter()
             .map(|(source, identity)| (source.as_str(), *identity))
             .collect();
-        fn condition(condition: &Condition, identities: &HashMap<&str, &'static str>) -> Condition {
-            match condition {
+        fn condition(original: &Condition, identities: &HashMap<&str, &'static str>) -> Condition {
+            match original {
                 Condition::IsType { param, ty, negated } => Condition::IsType {
                     param: *param,
                     ty: match ty {

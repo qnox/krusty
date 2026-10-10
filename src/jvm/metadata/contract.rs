@@ -11,7 +11,7 @@ pub(super) fn decode_contract(
 ) -> MetadataResult<Option<crate::contracts::Contract>> {
     use crate::metadata::contract_decoder::ContractTypeRef;
 
-    let mut resolve_type = |reference| {
+    let mut resolve_type = |reference: crate::metadata::contract_decoder::ContractTypeRef<'_>| {
         let resolved = (|| {
             let (body, table_nullable) = match reference {
                 ContractTypeRef::Inline(body) => (body, false),

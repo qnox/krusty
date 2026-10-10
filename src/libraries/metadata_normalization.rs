@@ -25,8 +25,5 @@ pub(crate) use parameter_identities::{
 };
 pub(crate) use type_parameter_identities::TypeParameterIdentities;
 pub(crate) use type_signatures::{
-    declared_function_generic_sig, declared_property_generic_sig, function_generic_sig,
-    function_generic_sig_with_identities, only_input_type_formals,
-    only_input_type_formals_with_identities, property_generic_sig_with_identities,
-    reified_type_parameter_ordinals, EnclosingBounds,
+    function_generic_sig, only_input_type_formals, reified_type_parameter_ordinals, EnclosingBounds,
 };
