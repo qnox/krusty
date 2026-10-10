@@ -482,6 +482,23 @@ mod tests {
     }
 
     #[test]
+    fn the_wasm_backend_consumes_only_the_checked_handoff() {
+        // The module format, the host boundary and the runtime know nothing about Kotlin's
+        // frontend; only the code generator reads checked IR, and only through the backend facts.
+        for path in [
+            "src/wasm/mod.rs",
+            "src/wasm/encode.rs",
+            "src/wasm/target.rs",
+            "src/wasm/host.rs",
+            "src/wasm/runtime.rs",
+        ] {
+            assert_allowed_crate_modules(path, &[]);
+        }
+        assert_allowed_crate_modules("src/wasm/codegen.rs", &["backend", "diag", "types"]);
+        assert_allowed_crate_modules("src/wasm/codegen/lower.rs", &["ir", "types"]);
+    }
+
+    #[test]
     fn the_linker_knows_nothing_about_kotlin() {
         // Objects in, an executable out. A linker that imported the IR or the type system would be
         // a linker that had started making language decisions.
@@ -767,6 +784,7 @@ mod tests {
                 "toolchain",
                 "trace_compiler",
                 "types",
+                "wasm",
             ],
         );
     }

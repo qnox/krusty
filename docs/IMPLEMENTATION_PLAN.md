@@ -5299,6 +5299,25 @@ the caller continues. A private inline function with no default, expanded only f
 non-inline callers, still reads the field directly. Test:
 `tests/private_inline_property_access_e2e.rs`.
 
+## Wasm backend: wasm-js and wasm-wasi  🚧
+
+- `src/wasm/` lowers checked common IR to one WasmGC module per program for both kotlinc Wasm
+  targets; the targets share every instruction and differ only in the host write function and the
+  Node.js loader. Unsupported constructs decline the whole compilation by name.
+- First slice: top-level functions and properties over primitives and `String` (locals, `when`,
+  loops with labels, arithmetic with Kotlin's promotion and narrowing, equality, templates,
+  same-file calls).
+- Box lanes `wasm-js` and `wasm-wasi` share Native's driver (`tests/box_lane.rs`) and ratchet; CI
+  runs both in a `wasm` row. They analyze against the JVM library surface until a Wasm klib
+  platform exists, so they gate the emitter and publish no conformance badge yet.
+- The backend reads each value's checked type (`IrFile::checked_type`) and the frontend-selected
+  entry (`IrFile::entry_point`, `IrFile::box_entry`); a missing or duplicate entry is rejected in
+  `Backend::check_module` before anything is emitted.
+- Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
+- Next: classes as struct subtypes with vtables, exceptions on wasm EH, library calls keyed by the
+  selected declaration, multi-file and `// MODULE:` programs, then a klib-backed library provider
+  shared with Native.
+
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 
 A non-JVM dependency is distributed as a KLIB, and a dependent compilation reads its declarations

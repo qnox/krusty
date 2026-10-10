@@ -123,6 +123,8 @@ impl BodyLowering<'_> {
             let result = self.ir.add_expr(IrExpr::When {
                 branches: vec![(Some(matches), matched), (None, mismatch)],
             });
+            self.ir.logical_types.insert(matched, Ty::Boolean);
+            self.ir.logical_types.insert(result, Ty::Boolean);
             return Ok(self.ir.add_expr(IrExpr::Block {
                 stmts: declarations,
                 value: Some(result),

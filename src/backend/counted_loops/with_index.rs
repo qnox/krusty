@@ -69,11 +69,14 @@ impl Realizer<'_> {
         if !index.is_counter {
             let current = self.add(IrExpr::GetValue(index.slot));
             let one = self.add(IrExpr::Const(IrConst::Int(1)));
-            let next = self.add(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Add,
-                lhs: current,
-                rhs: one,
-            });
+            let next = self.add_checked(
+                IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Add,
+                    lhs: current,
+                    rhs: one,
+                },
+                Ty::Int,
+            );
             let step = self.add(IrExpr::SetValue {
                 var: index.slot,
                 value: next,

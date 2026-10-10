@@ -448,6 +448,7 @@ impl BodyLowering<'_> {
             lhs: index_read,
             rhs: one,
         });
+        self.ir.logical_types.insert(next_index, Ty::Int);
         let update = self.ir.add_expr(IrExpr::SetValue {
             var: index_slot,
             value: next_index,

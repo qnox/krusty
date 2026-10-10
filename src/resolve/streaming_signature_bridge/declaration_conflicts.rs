@@ -23,6 +23,7 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
         name: String,
         signature: Signature,
         entry_point: Option<MainEntryParameters>,
+        box_entry: bool,
     }
 
     let mut entries = Vec::new();
@@ -59,21 +60,31 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
         };
         let header = streamed_callable_header_by_declaration(headers, stub.id)
             .expect("a top-level function must retain its compact callable header");
-        let entry_point = crate::fir::MainEntryShape {
+        let shape = crate::fir::MainEntryShape {
             name,
             has_extension_receiver: header.receiver.is_some(),
             type_parameter_count: header.type_parameters.len(),
             context_parameter_count: header.context_count,
             parameters: &signature.params,
             result: signature.ret,
-        }
-        .entry_parameters();
+        };
+        let entry_point = shape.entry_parameters();
+        let box_entry = shape.is_box_entry(|result| {
+            let oracle = crate::symbol_resolver::SourceOracle(&*table.libraries);
+            crate::assignable::is_subtype(
+                &crate::assignable::TyCtx::new(),
+                &oracle,
+                result,
+                Ty::nullable(Ty::String),
+            )
+        });
         entries.push(Entry {
             declaration: stub.id,
             source: stub.source.raw(),
             name: name.to_string(),
             signature,
             entry_point,
+            box_entry,
         });
     }
 
@@ -120,6 +131,13 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
             let parameters = entry.entry_point?;
             Some((entry.source, entry.declaration, parameters))
         }),
+    );
+    publish_box_entries(
+        index,
+        entries
+            .iter()
+            .filter(|entry| entry.box_entry)
+            .map(|entry| (entry.source, entry.declaration)),
     );
     table.conflicting_top_level_key_by_source.clear();
     for entry in entries {
@@ -183,5 +201,27 @@ fn publish_entry_points(
                 parameters,
             },
         );
+    }
+}
+
+/// Select each source unit's `fun box(): String`. Two in one unit are conflicting overloads the
+/// classification above has just reported, so such a unit records none.
+fn publish_box_entries(
+    index: &mut crate::fir::ResolvedModuleIndex,
+    candidates: impl Iterator<Item = (u32, DeclarationId)>,
+) {
+    let mut by_source = BTreeMap::<u32, Vec<DeclarationId>>::new();
+    for (source, declaration) in candidates {
+        by_source.entry(source).or_default().push(declaration);
+    }
+    for (source, declarations) in by_source {
+        let [declaration] = declarations[..] else {
+            continue;
+        };
+        let callable = index
+            .callable_for_declaration(declaration)
+            .expect("a finalized top-level function has a callable header")
+            .id;
+        index.publish_source_box_entry(crate::fir::SourceFileId::from_raw(source), callable);
     }
 }

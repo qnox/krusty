@@ -37,6 +37,7 @@ mod bridges;
 mod callee;
 mod cast_targets;
 mod catches;
+mod checked_types;
 mod companion_blocks;
 mod constants;
 mod constructors;
@@ -1839,6 +1840,10 @@ pub struct IrFile {
     pub package_functions: Vec<IrPackageFunction>,
     /// The Kotlin `main` this file declares, if any. See [`IrEntryPoint`].
     pub entry_point: Option<IrEntryPoint>,
+    /// The `fun box(): String` test entry this file declares, as the frontend selected it
+    /// (`fir::ResolvedModuleIndex::source_box_entry`). A runnable backend starts a `codegen/box`
+    /// program here and never looks for `box` by its spelling.
+    pub box_entry: Option<FunId>,
     /// Source properties declared directly in this file's package. Storage/accessor representation
     /// remains target-owned; this record contains only checked Kotlin declaration semantics.
     pub package_properties: Vec<IrPackageProperty>,

@@ -2,6 +2,7 @@ name: ci
 
 # Build the conformance test binary once. Every supported Kotlin version gets independent JVM and
 # Native matrix rows: JVM runs its box corpus plus the non-box suites; Native runs its box corpus.
+# Wasm matrix rows run the box corpus through both Wasm targets, wasm-js and wasm-wasi.
 # Publish only after all rows pass and every version matches its committed platform expectations.
 # `ci-and-conformance` is the one required check over core CI, KLIB semantics, conformance, and
 # Gradle release/compatibility validation.
@@ -259,7 +260,7 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJson(needs.versions.outputs.matrix) }}
-        target: [jvm, native]
+        target: [jvm, native, wasm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -282,14 +283,14 @@ jobs:
           # Do not reuse the former box-only immutable cache: it can never acquire the newly
           # required serialization/KSP inputs.
           key: kotlin-conformance-all-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
-      - name: cache Kotlin compiler for Native conformance (${{ matrix.version }})
-        if: matrix.target == 'native'
+      - name: cache Kotlin compiler for ${{ matrix.target }} conformance (${{ matrix.version }})
+        if: matrix.target != 'jvm'
         uses: actions/cache@v6
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
-          # Do not let a Native row publish the JVM row's broader immutable cache before its
-          # serialization/KSP inputs exist. Both keys still identify one exact compiler version.
-          key: kotlin-native-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          # Do not let a Native or Wasm row publish the JVM row's broader immutable cache before its
+          # serialization/KSP inputs exist. Every key still identifies one exact compiler version.
+          key: kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       - name: cache box corpus (${{ matrix.version }})
         uses: actions/cache@v6
         with:
@@ -364,6 +365,22 @@ jobs:
       - name: enforce native box conformance ${{ matrix.version }}
         if: matrix.target == 'native' && steps.native_box.outcome == 'failure'
         run: exit 1
+      # Both Wasm lanes run every accepted case under Node.js, which runs WasmGC without flags from
+      # version 22. Each lane's ratchet fails the step on a regression or an unrecorded pass. The
+      # lanes still analyze against the JVM library surface, so they gate the Wasm emitter and
+      # publish no conformance badge until a Wasm klib platform backs them.
+      - uses: actions/setup-node@v4
+        if: matrix.target == 'wasm'
+        with:
+          node-version: '22'
+      - name: run wasm box conformance ${{ matrix.version }}
+        if: matrix.target == 'wasm'
+        run: |
+          set -euo pipefail
+          chmod +x conformance-bin
+          for lane in wasm-js wasm-wasi; do
+            just wasm-conformance-run "$lane" "$PWD/conformance-bin" "${{ matrix.version }}"
+          done
       - name: run non-box conformance ${{ matrix.version }}
         if: matrix.target == 'jvm'
         env:
