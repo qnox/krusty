@@ -14534,6 +14534,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/custom_floating_range_membership_e2e.rs`, box
   `ranges/contains/inComparableRange.kt`.
 
+- **A KLIB body's built-in relation is the source comparison.** Kotlin serializes `a < b` (and `<=`,
+  `>`, `>=`) on two operands of one primitive type as a call of a compiler built-in,
+  `kotlin.internal.ir.less` (`lessOrEqual`, `greater`, `greaterOrEqual`), which no library declares.
+  Lowering a dependency body joins such a call by exact public signature to a closed table of those
+  declarations, each signed by the KLIB mangler from its shape `name(T, T)`, and lowers it exactly as
+  checked FIR lowers the source operator: the primitive relation over the two operands. On `Float`
+  and `Double` that relation is IEEE (`1.0 < NaN` and `-0.0 < 0.0` are false), as the built-in is,
+  never `compareTo`'s total order. The table covers `Int`, `Long`, `Float` and `Double`; any other
+  built-in call declines by its signature. Tests:
+  `klib_lowering::ir_builtins::tests::relations_are_signed_as_the_stdlib_calls_them`,
+  `klib_lowering::tests::a_built_in_relation_lowers_as_the_source_comparison_does`,
+  `stdlib_coerce_bodies_lower_as_their_source_does`.
+
 - **Open-end membership names `rangeUntil`.** `x in a..<b`, `x in a until b`, and
   `x in a downTo b` first select that syntax's operator. The result then uses `contains` unless the
   exact selected declaration carries a provider role authorizing direct primitive comparison.

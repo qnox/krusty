@@ -18,6 +18,8 @@ use super::id_signature::{
     decode_public_id_signature, KlibIdSignatureDecodeError, KlibPublicIdSignature,
 };
 
+#[cfg(test)]
+mod arena_fixtures;
 mod symbols;
 pub mod tree;
 mod tree_decoding;
