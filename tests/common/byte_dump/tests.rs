@@ -374,6 +374,56 @@ fn a_published_miss_stores_the_live_invocation_and_a_private_miss_does_not() {
 }
 
 #[test]
+fn replayed_diagnostics_locate_the_sources_this_invocation_passed() {
+    let root = std::env::temp_dir().join(format!("krusty_reroot_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let recorded_dir = root.join("recorded");
+    let current_dir = root.join("current");
+    std::fs::create_dir_all(&recorded_dir).unwrap();
+    std::fs::create_dir_all(&current_dir).unwrap();
+    let recorded_src = recorded_dir.join("F.kt");
+    let current_src = current_dir.join("F.kt");
+    std::fs::write(&recorded_src, "fun f() = 1\n").unwrap();
+    std::fs::write(&current_src, "fun f() = 1\n").unwrap();
+    let invocation = |dir: &Path, src: &Path| {
+        vec![
+            "-d".to_string(),
+            dir.join("out").display().to_string(),
+            src.display().to_string(),
+        ]
+    };
+    let recorded_stderr = format!(
+        "error: warnings found and -Werror specified\n{0}:1:1: warning: visibility.\nfun f() = 1\n^^^^^\n{0}:1:5: warning: return type.\n",
+        recorded_src.display()
+    );
+    let release = version("2.4.20");
+    super::remember_live_compile(
+        &invocation(&recorded_dir, &recorded_src),
+        1,
+        &recorded_stderr,
+        &root,
+        Some(release),
+        true,
+    );
+    let replayed = super::replay_class_dump_with_policy(
+        &invocation(&current_dir, &current_src),
+        &root,
+        Some(release),
+        false,
+        false,
+    )
+    .expect("the recording replays for the same source under another directory");
+    assert_eq!(
+        replayed.stderr,
+        format!(
+            "error: warnings found and -Werror specified\n{0}:1:1: warning: visibility.\nfun f() = 1\n^^^^^\n{0}:1:5: warning: return type.\n",
+            current_src.display()
+        )
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn distinct_class_sets_do_not_share_a_dump_key() {
     assert_ne!(classes_suffix(&["pkg/A"]), classes_suffix(&["pkg/B"]));
     assert_eq!(classes_suffix(&["pkg/B", "pkg/A"]), "#pkg/A,pkg/B");

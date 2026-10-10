@@ -1283,6 +1283,8 @@ fn replay_class_dump_with_policy(
             }
             continue;
         }
+        let mut replayed = replayed;
+        replayed.stderr = reroot_source_paths(&replayed.stderr, args);
         return Some(replayed);
     }
     if saw_incomplete && !compile_missing {
@@ -1379,6 +1381,41 @@ fn split_replay(mut files: BTreeMap<String, Vec<u8>>) -> ReplayedClasses {
         status,
         files,
     }
+}
+
+/// The invocation fingerprint names each source by its file name, so a recording replays for the
+/// same sources under any directory. Its diagnostics still locate them under the directory they were
+/// recorded from; move each such location onto the source path this invocation passed. A file name
+/// shared by two sources is left alone, because the recorded location cannot say which one it was.
+fn reroot_source_paths(stderr: &str, args: &[String]) -> String {
+    let mut sources: BTreeMap<String, Option<&str>> = BTreeMap::new();
+    for arg in args.iter().filter(|arg| is_source_arg(arg)) {
+        sources
+            .entry(basename(arg))
+            .and_modify(|path| *path = None)
+            .or_insert(Some(arg.as_str()));
+    }
+    let mut rerooted = String::with_capacity(stderr.len());
+    for line in stderr.split_inclusive('\n') {
+        rerooted.push_str(&reroot_located_line(line, &sources));
+    }
+    rerooted
+}
+
+fn reroot_located_line(line: &str, sources: &BTreeMap<String, Option<&str>>) -> String {
+    if line.starts_with('/') {
+        for (name, path) in sources {
+            let Some(path) = path else { continue };
+            let suffix = format!("/{name}:");
+            if let Some(end) = line.find(&suffix) {
+                let location = &line[..end + suffix.len() - 1];
+                if !location.contains(char::is_whitespace) {
+                    return format!("{path}{}", &line[location.len()..]);
+                }
+            }
+        }
+    }
+    line.to_string()
 }
 
 fn exit_code(bytes: &[u8]) -> i32 {
