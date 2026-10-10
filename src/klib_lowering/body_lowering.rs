@@ -10,6 +10,8 @@
 //! ([`loops`]), string templates ([`string_templates`]) and type operators
 //! ([`type_operators`]).
 
+use std::collections::HashSet;
+
 mod blocks;
 mod calls;
 mod conditionals;
@@ -64,6 +66,8 @@ pub(super) struct BodyLowering<'a, 'l, 's> {
     /// The loops enclosing the expression being lowered, innermost last: each serialized loop
     /// identity with the label its `break`s and `continue`s name.
     loops: Vec<(u32, String)>,
+    /// Loops whose lowered bodies contain a `break` that names that loop.
+    breakable_loops: HashSet<u32>,
 }
 
 impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
@@ -84,6 +88,7 @@ impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
             linker,
             locals: LocalValues::after(header.parameter_count()),
             loops: Vec::new(),
+            breakable_loops: HashSet::new(),
         }
     }
 

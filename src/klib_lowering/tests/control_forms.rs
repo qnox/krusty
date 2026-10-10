@@ -377,6 +377,25 @@ fn a_valued_body_ending_in_an_endless_loop_lowers_as_its_source_does() {
 }
 
 #[test]
+fn a_valued_body_ending_in_a_constant_loop_that_can_break_declines() {
+    for post_test in [false, true] {
+        let demo = demo(&[("f", &[T::Boolean], T::Int)], move |_, body| {
+            let condition = body.param(0);
+            let broken = body.break_(1);
+            let leave = body.branches("IF", vec![(condition, broken)], T::Unit);
+            let loop_body = body.block(vec![KlibIrStatement::Expression(leave)], T::Unit);
+            let forever = body.boolean(true);
+            Some(vec![body.loop_(1, forever, loop_body, post_test)])
+        });
+        assert_eq!(
+            demo.declined("f", &[]),
+            "the KLIB body of `demo.f` (it ends without a `return`)",
+            "{post_test}"
+        );
+    }
+}
+
+#[test]
 fn a_statement_after_a_jump_declines() {
     let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
         let a = body.param(0);

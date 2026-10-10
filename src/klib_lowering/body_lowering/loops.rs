@@ -69,10 +69,19 @@ impl BodyLowering<'_, '_, '_> {
         if ty != Ty::Nothing {
             return Err(mismatch("a `break` or `continue` is not typed `Nothing`"));
         }
-        let Some((_, label)) = self.loops.iter().rev().find(|(id, _)| *id == loop_id) else {
+        let Some(label) = self
+            .loops
+            .iter()
+            .rev()
+            .find(|(id, _)| *id == loop_id)
+            .map(|(_, label)| label.clone())
+        else {
             return Err(mismatch("a `break` or `continue` names no enclosing loop"));
         };
-        let label = Some(label.clone());
+        if !resume {
+            self.breakable_loops.insert(loop_id);
+        }
+        let label = Some(label);
         Ok(self.ir.add_expr(if resume {
             IrExpr::Continue { label }
         } else {
