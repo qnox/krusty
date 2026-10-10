@@ -62,22 +62,37 @@ pub(super) fn declared_symbols(
 ) -> ResolvedSymbols {
     // A probe never interns its leaf: only an already-interned identity can name a published
     // classifier.
-    let declared = namespace
-        .existing_classifier(name)
-        .filter(|identity| inventory.classifier(*identity).is_some());
-    let (classifier_name, classifier) = match declared {
-        Some(identity) => (
+    let declared_identity = namespace.existing_classifier(name);
+    let alias = declared_identity.and_then(|identity| inventory.type_alias(identity));
+    let declared = declared_identity.filter(|identity| inventory.classifier(*identity).is_some());
+    let (classifier_name, classifier, classifier_declaration) = match (alias, declared) {
+        (Some(alias), _) => {
+            let classifier = classifier_record(inventory, identities, alias.target)
+                .map(std::sync::Arc::new)
+                .or_else(|| {
+                    function_classifiers::classifier(alias.target)
+                        .map(function_classifiers::synthetic)
+                });
+            (
+                Some(alias.target),
+                classifier,
+                Some(ClassifierDeclaration::TypeAlias(alias.clone())),
+            )
+        }
+        (None, Some(identity)) => (
             Some(identity),
             classifier_record(inventory, identities, identity).map(std::sync::Arc::new),
+            Some(ClassifierDeclaration::Ordinary(identity)),
         ),
         // `FunctionN`, `SuspendFunctionN` and `KFunctionN` are declared by the language, not by
         // any library: no KLIB serializes them.
-        None => match language_function_classifier(namespace, name) {
+        (None, None) => match language_function_classifier(namespace, name) {
             Some(function) => (
                 Some(function.identity()),
                 Some(function_classifiers::synthetic(function)),
+                Some(ClassifierDeclaration::Ordinary(function.identity())),
             ),
-            None => (None, None),
+            None => (None, None, None),
         },
     };
     let (overloads, properties) = match namespace {
@@ -111,7 +126,7 @@ pub(super) fn declared_symbols(
     };
     ResolvedSymbols {
         classifier_name,
-        classifier_declaration: classifier_name.map(ClassifierDeclaration::Ordinary),
+        classifier_declaration,
         classifier,
         builtin_classifier: false,
         callables: Callables::from_parts(
