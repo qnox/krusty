@@ -100,6 +100,17 @@ impl ClassWriter {
             .signature
             .as_deref()
             .map(|signature| self.cp.utf8(signature));
+        // `visitParameter` precedes the annotations, so each name is interned before them.
+        let method_parameters = method
+            .parameters
+            .iter()
+            .map(|(name, access)| {
+                (
+                    name.as_deref().map_or(0, |name| self.cp.utf8(name)),
+                    *access,
+                )
+            })
+            .collect();
         let visible_anns = self.copied_annotations(&method.visible_annotations);
         let invisible_anns = self.copied_annotations(&method.invisible_annotations);
         let visible_param_anns =
@@ -130,7 +141,7 @@ impl ClassWriter {
             visible_param_anns,
             user_invisible_param_anns,
             annotation_default: None,
-            method_parameters: Vec::new(),
+            method_parameters,
         };
         let Some(node) = &method.code else {
             self.methods.push(info);

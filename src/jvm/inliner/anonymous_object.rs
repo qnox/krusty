@@ -285,6 +285,7 @@ pub(crate) fn regenerate(
         visible_parameter_annotations: None,
         invisible_parameter_annotations: None,
         annotation_default: None,
+        parameters: Vec::new(),
         deprecated: false,
         code: Some(body),
     })

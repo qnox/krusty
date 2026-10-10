@@ -88,6 +88,8 @@ pub(crate) struct ClassMethod {
     pub invisible_parameter_annotations: Option<Vec<Vec<Annotation>>>,
     /// `AnnotationDefault`.
     pub annotation_default: Option<ElementValue>,
+    /// `MethodParameters`: each parameter's name (absent for an unnamed one) and access flags.
+    pub parameters: Vec<(Option<String>, u16)>,
     pub deprecated: bool,
     pub code: Option<MethodNode>,
 }
