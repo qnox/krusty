@@ -93,15 +93,38 @@ impl SymbolResolver<'_> {
                     .map(|property| (property.owner, property.kind, property.context_count))
                     .collect::<Vec<_>>(),
             );
-            let local_property = local_properties
+            let ranked = local_properties
                 .overloads
                 .into_iter()
                 .filter(|property| property.kind == PropKind::Member && property.receiver_rank == 0)
                 .filter_map(|property| {
                     property_applicable(&property).map(|priority| (priority, property))
                 })
-                .max_by_key(|(priority, property)| (*priority, !property.accessor_derived()));
+                .collect::<Vec<_>>();
+            let rank = |(priority, property): &(_, crate::libraries::PropertyInfo)| {
+                (*priority, !property.accessor_derived())
+            };
+            let best = ranked.iter().map(rank).max();
+            let mut tied = ranked
+                .into_iter()
+                .filter(|candidate| Some(rank(candidate)) == best)
+                .collect::<Vec<_>>();
+            let local_property = (!tied.is_empty()).then(|| tied.remove(0));
             if let Some(((accessible, _), mut property)) = local_property {
+                // Two accessor methods of one classifier that declare the same synthetic property
+                // (`isX()` and `getIsX()`) are competing candidates, not an override pair.
+                let mut competing_accessors = Vec::<crate::libraries::PropertyInfo>::new();
+                if property.accessor_derived() {
+                    for (_, candidate) in tied {
+                        if candidate.getter.name != property.getter.name
+                            && !competing_accessors
+                                .iter()
+                                .any(|other| other.getter.name == candidate.getter.name)
+                        {
+                            competing_accessors.push(candidate);
+                        }
+                    }
+                }
                 crate::trace_compiler!(
                     "resolve",
                     "member property candidate receiver={current:?} owner={} name={name} getter={} classifier_formals={:?} declared={:?}",
@@ -149,6 +172,7 @@ impl SymbolResolver<'_> {
                     interface,
                     visibility: property.visibility,
                     property: Some(property),
+                    competing_accessors,
                 };
                 if accessor_derived {
                     synthetic_fallback.get_or_insert((selected, accessible));

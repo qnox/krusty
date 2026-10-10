@@ -77,3 +77,57 @@ impl Checker<'_> {
         })
     }
 }
+
+impl Checker<'_> {
+    /// The ambiguity a read reports when accessor methods of one classifier declare the same
+    /// synthetic property. Candidates are listed the way kotlinc looks them up: the `isX` getter,
+    /// then the `get` spellings.
+    pub(super) fn competing_accessor_candidates(
+        &self,
+        name: &str,
+        selected: &crate::symbol_resolver::SelectedMemberProperty,
+    ) -> Option<Vec<String>> {
+        if selected.competing_accessors.is_empty() {
+            return None;
+        }
+        let candidates = selected
+            .property
+            .iter()
+            .chain(&selected.competing_accessors)
+            .collect::<Vec<_>>();
+        Some(
+            candidates
+                .into_iter()
+                .map(|candidate| {
+                    let keyword = if candidate.setter.is_some() {
+                        "var"
+                    } else {
+                        "val"
+                    };
+                    let ty = self.diagnostic_type_name(candidate.ty, &[candidate.ty]);
+                    format!("{keyword} {name}: {ty}")
+                })
+                .collect(),
+        )
+    }
+
+    pub(super) fn competing_accessor_ambiguity(
+        &self,
+        name: &str,
+        selected: &crate::symbol_resolver::SelectedMemberProperty,
+    ) -> super::PropertyReadAmbiguity {
+        super::PropertyReadAmbiguity::Accessors(
+            self.competing_accessor_candidates(name, selected)
+                .expect("an accessor ambiguity has competing candidates"),
+        )
+    }
+
+    pub(super) fn report_accessor_ambiguity(&mut self, span: super::Span, candidates: Vec<String>) {
+        let mut message = "overload resolution ambiguity between candidates:".to_string();
+        for candidate in candidates {
+            message.push('\n');
+            message.push_str(&candidate);
+        }
+        self.diags.error(span, message);
+    }
+}

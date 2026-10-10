@@ -7633,9 +7633,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`src/jvm/java_stub.rs::interface_fields_are_implicitly_public_static_final`).
 
 - **All-caps Java getters map to decapitalize-smart properties.** `getID()` reads as `id`,
-  `getURLPath()` as `urlPath` — the physical-getter fallback tries the re-uppercased leading-run
-  spelling after the conventional `getX`
+  `getURLPath()` as `urlPath`: the method's spelling lowercases its leading uppercase run
   (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_maps_all_caps_java_getters_to_properties`).
+  An `isX` property keeps `isX()` and also accepts `getIsX()` (`getIsInstanceType()` reads as
+  `isInstanceType`), including from inside an extension of the same name
+  (`tests/java_source_interop_e2e.rs::java_get_is_accessor_is_an_is_property`). kotlinc never
+  reads `getIsX()` as `x`, reads a non-boolean `String isX()` as `isX`, and makes no property of a
+  lowercase `getisX()`, a getter with a parameter, or a static getter; both compilers report the
+  same unresolved references (`java_is_prefixed_getter_spellings_match_kotlinc`). The JVM provider
+  inventories a Java classifier's methods once and indexes each by the property its spelling
+  declares; lookup reads that index and never guesses getter spellings from the property name.
+  `isX()` and `getIsX()` both declaring `isX` make a read ambiguous ("overload resolution ambiguity
+  between candidates:" listing `val isX: …` for each, the `isX` getter first). A setter is named
+  from its getter's spelling: `isX` pairs with `setX`, `getIsX` with `setIsX` (so `getIsX` plus
+  `setX` is a `val`), and `getURLPath` with `setURLPath`. Verified against kotlinc 2.4.20
+  (`java_accessor_collisions_and_setter_pairing_match_kotlinc`,
+  `java_get_is_accessor_pairs_with_its_own_setter`).
 
 - **Modifier-prefixed local functions parse in any body.** `tailrec fun`/`suspend fun` local
   declarations are statements everywhere, not only in scripts; the soft-keyword prefix no longer

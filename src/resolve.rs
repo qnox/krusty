@@ -2827,6 +2827,8 @@ enum PropertyReadAmbiguity {
     MemberExtension,
     Extension,
     MissingContext,
+    /// Synthetic properties of one classifier declared by different accessor methods.
+    Accessors(Vec<String>),
 }
 
 type ModuleSymbolCache = HashMap<
@@ -11778,6 +11780,9 @@ impl<'a> Checker<'a> {
                         })
                 });
             if let Some(selected) = declaration {
+                if !selected.competing_accessors.is_empty() {
+                    return Err(self.competing_accessor_ambiguity(name, &selected));
+                }
                 let owner = selected.owner;
                 let visibility = selected.visibility;
                 let mut selected_property = selected.property;
@@ -12658,6 +12663,12 @@ impl<'a> Checker<'a> {
                         diagnostic_span,
                         format!("No context argument for '{name}' found."),
                     );
+                }
+                return Ty::Error;
+            }
+            Err(PropertyReadAmbiguity::Accessors(candidates)) => {
+                if report_diagnostics {
+                    self.report_accessor_ambiguity(diagnostic_span, candidates);
                 }
                 return Ty::Error;
             }
@@ -22633,6 +22644,9 @@ impl<'a> Checker<'a> {
                         missing.display(&names)
                     ),
                 ),
+                PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                    self.report_accessor_ambiguity(target_span, candidates)
+                }
                 PropertyWriteSelection::None
                 | PropertyWriteSelection::Implicit(_)
                 | PropertyWriteSelection::Receiverless(_)
@@ -22910,6 +22924,9 @@ impl<'a> Checker<'a> {
                             target_span,
                             format!("No context argument for '{name}' found."),
                         ),
+                        PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                            self.report_accessor_ambiguity(target_span, candidates)
+                        }
                         PropertyWriteSelection::None => self
                             .diags
                             .error(span, format!("unresolved reference '{name}'.")),
@@ -23126,6 +23143,13 @@ impl<'a> Checker<'a> {
                     })
             })
             .flatten();
+        if let Some(candidates) = selected_member_property
+            .as_ref()
+            .and_then(|selected| self.competing_accessor_candidates(&name, selected))
+        {
+            self.report_accessor_ambiguity(self.assignment_target_span(s), candidates);
+            return;
+        }
         let accessor_member_property = selected_member_property.as_ref().and_then(|selected| {
             let property = selected.property.as_ref()?;
             Some((selected.owner, selected.interface, property.clone()))
@@ -59111,6 +59135,9 @@ impl<'a> Checker<'a> {
                                 self.span(target),
                                 format!("No context argument for '{name}' found."),
                             ),
+                            PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                                self.report_accessor_ambiguity(self.span(target), candidates)
+                            }
                             PropertyWriteSelection::None
                             | PropertyWriteSelection::Implicit(_)
                             | PropertyWriteSelection::Receiverless(_)

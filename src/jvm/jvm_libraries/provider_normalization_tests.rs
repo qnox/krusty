@@ -183,8 +183,13 @@ fn reflection_declarations_publish_their_semantic_roles() {
         vec![stdlib],
     )));
 
-    let callable_declarations =
-        libraries.declared_callables_for(Ty::obj("kotlin/reflect/KCallable"), "name", &[], &[]);
+    let callable_declarations = libraries.declared_callables_for(
+        Ty::obj("kotlin/reflect/KCallable"),
+        "name",
+        &[],
+        &[],
+        &super::AccessorInventory::default(),
+    );
     let callable = callable_declarations
         .properties()
         .first()

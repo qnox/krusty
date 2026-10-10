@@ -23,8 +23,10 @@ mod provider_normalization_tests;
 mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
+mod synthetic_properties;
 mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
+use synthetic_properties::{accessor_property_name, setter_name_for_getter, AccessorInventory};
 
 use super::mapped_builtin_declarations::MappedBuiltinMember;
 use crate::language_version::LanguageVersion;
@@ -48,7 +50,7 @@ use super::classpath::{
 use super::classreader::JavaNullability;
 use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
-use crate::jvm::names::{property_getter_name, type_descriptor};
+use crate::jvm::names::type_descriptor;
 use crate::libraries::builtin_top_level_realization::attach_function_realization;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
@@ -71,35 +73,6 @@ fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
 /// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is
 /// composed with this list in the import-level builder and in the seed filter, so neither list is duplicated.
 const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
-
-fn java_property_name(method: &str) -> Option<String> {
-    let stem = method.strip_prefix("get")?;
-    if !stem.is_ascii() {
-        let mut chars = stem.chars();
-        let first = chars.next()?;
-        if !first.is_uppercase() {
-            return None;
-        }
-        return Some(format!("{}{}", first.to_lowercase(), chars.as_str()));
-    }
-    let first = stem.as_bytes().first()?;
-    if !first.is_ascii_uppercase() {
-        return None;
-    }
-    let bytes = stem.as_bytes();
-    let lower = bytes.iter().position(u8::is_ascii_lowercase);
-    let prefix = match lower {
-        None => bytes.len(),
-        Some(0) => return None,
-        Some(1) => 1,
-        Some(index) => index - 1,
-    };
-    Some(format!(
-        "{}{}",
-        stem[..prefix].to_ascii_lowercase(),
-        &stem[prefix..]
-    ))
-}
 
 /// A platform backed by a JVM classpath (dirs + jars + the JDK jimage). The classpath is shared
 /// (`Rc`) with the JVM backend/emitter so the bytecode inliner reads inline-function bodies through
@@ -303,7 +276,7 @@ impl JvmLibraries {
             if let Some(physical) = &member.physical_name {
                 push(physical.clone());
             }
-            if let Some(property) = java_property_name(&member.name) {
+            if let Some(property) = accessor_property_name(&member.name) {
                 push(property);
             }
         }
@@ -3231,6 +3204,7 @@ impl JvmLibraries {
         name: &str,
         mapped_members: &[MappedBuiltinMember],
         function_renames: &[MappedBuiltinMember],
+        accessors: &AccessorInventory,
     ) -> crate::libraries::Callables {
         let mut functions = self.member_functions_with_renames(recv, name, function_renames);
         // Exact declarations on this classifier. The resolver owns the one inheritance walk.
@@ -3726,9 +3700,11 @@ impl JvmLibraries {
             })
         });
         if !declares_instance_field {
-            for getter_name in self.physical_property_getter_names(name) {
+            // The getters come from this classifier's own method inventory: each one declares
+            // `name` by its spelling, and its arity and return type are checked below.
+            for getter_name in accessors.getters(name) {
                 for function in self
-                    .member_functions_with_renames(recv, &getter_name, function_renames)
+                    .member_functions_with_renames(recv, getter_name, function_renames)
                     .overloads
                 {
                     if !function.callable.params.is_empty()
@@ -3746,7 +3722,7 @@ impl JvmLibraries {
                         .map(|signature| signature.ret)
                         .unwrap_or_else(|| function.ret.apply(getter.ret));
                     getter.ret = ty;
-                    let setter_name = crate::names::property_setter_name(name);
+                    let setter_name = setter_name_for_getter(getter_name);
                     let setter = self
                         .member_functions_with_renames(recv, &setter_name, function_renames)
                         .overloads
@@ -3876,12 +3852,20 @@ impl JvmLibraries {
                         .collect::<Vec<_>>();
                     let member_names =
                         self.member_scope_names(internal_name, &classifier, &mapped_members);
+                    let accessors = AccessorInventory::from_methods(
+                        classifier
+                            .members
+                            .iter()
+                            .filter(|member| !member.is_member_extension())
+                            .map(|member| member.name.as_str()),
+                    );
                     for name in member_names {
                         let declarations = self.declared_callables_for(
                             receiver,
                             &name,
                             &mapped_members,
                             &function_renames,
+                            &accessors,
                         );
                         crate::trace_compiler!(
                             "member_slots",
@@ -5284,31 +5268,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         PLATFORM_DEFAULT_IMPORT_PACKAGES
     }
 
-    fn physical_property_getter_names(&self, property: &str) -> Vec<String> {
-        // `property_getter_name` deliberately preserves an `isX` spelling. Keep that candidate:
-        // Java's `boolean isX()` is the getter for Kotlin's synthetic `isX` property, not evidence
-        // that no getter exists.
-        let mut candidates = vec![property_getter_name(property)];
-        // Kotlin maps `getID()` → `id` and `getURLPath()` → `urlPath` (decapitalize-smart:
-        // a LEADING UPPERCASE RUN lowercases as a block). Invert that: re-uppercase the
-        // property's leading lowercase run for the all-caps getter spelling.
-        let run = property
-            .chars()
-            .take_while(|c| c.is_ascii_lowercase())
-            .count();
-        if run > 1 || (run == property.len() && run >= 1) || (run == 1 && property.len() == 1) {
-            let smart = format!(
-                "get{}{}",
-                property[..run].to_ascii_uppercase(),
-                &property[run..]
-            );
-            if !candidates.contains(&smart) {
-                candidates.push(smart);
-            }
-        }
-        candidates
-    }
-
     fn inherited_accessor_properties(
         &self,
         source: &dyn crate::symbol_source::SymbolSource,
@@ -5326,10 +5285,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             return crate::libraries::PropertySet::default();
         }
 
+        let accessors = synthetic_properties::hierarchy_inventory(source, receiver);
         let mut overloads = Vec::new();
-        for getter_name in self.physical_property_getter_names(property) {
+        for getter_name in accessors.getters(property) {
             let getter_callables =
-                crate::symbol_resolver::members_in_hierarchy(source, receiver, &getter_name);
+                crate::symbol_resolver::members_in_hierarchy(source, receiver, getter_name);
             for function in getter_callables.functions().iter().cloned() {
                 if !function.semantic_params().is_empty() {
                     continue;
@@ -5344,16 +5304,20 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     continue;
                 }
                 getter.ret = ty;
-                let setter_name = crate::names::property_setter_name(property);
+                let setter_name = setter_name_for_getter(getter_name);
                 let setter_callables =
                     crate::symbol_resolver::members_in_hierarchy(source, receiver, &setter_name);
-                let setter = setter_callables.functions().iter().cloned().find(|setter| {
-                    // Same pairing as a setter declared on the receiver: one value parameter of
-                    // the getter's storage type. The Java method may return anything.
-                    setter.semantic_params().len() == 1
-                        && self.library_value_form(ty)
-                            == self.library_value_form(setter.semantic_params()[0])
-                });
+                let setter = setter_callables
+                    .functions()
+                    .iter()
+                    .find(|setter| {
+                        // Same pairing as a setter declared on the receiver: one value parameter
+                        // of the getter's storage type. The Java method may return anything.
+                        setter.semantic_params().len() == 1
+                            && self.library_value_form(ty)
+                                == self.library_value_form(setter.semantic_params()[0])
+                    })
+                    .cloned();
                 let getter_declaration = function.stable_declaration;
                 let setter_declaration =
                     setter.as_ref().and_then(|setter| setter.stable_declaration);
