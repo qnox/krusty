@@ -237,7 +237,7 @@ impl Checker<'_> {
     }
 
     /// Commit a selected subscript operator: its value-parameter slots and, for a generic
-    /// extension operator, the type arguments its selection solved (as every other generic call publishes
+    /// operator, the type arguments its selection solved (as every other generic call publishes
     /// them). The selected signature's default flags are its full table; the flags used are its
     /// value-parameter suffix, and a missing suffix does not fall back to that full table.
     pub(super) fn commit_indexed_operator_arguments(
@@ -264,11 +264,7 @@ impl Checker<'_> {
             self.report_inconsistent_parameter_defaults(expression);
             return false;
         };
-        if let Some(signature) = selected
-            .generic_sig
-            .as_ref()
-            .filter(|_| selected.is_extension())
-        {
+        if let Some(signature) = selected.generic_sig.as_ref() {
             let resolved = signature
                 .formals
                 .iter()

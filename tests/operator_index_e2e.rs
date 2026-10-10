@@ -45,6 +45,20 @@ fun box(): String = if (Env()[\"OK\"] == \"OK\") \"OK\" else \"no\"\n";
 }
 
 #[test]
+fn generic_member_get_publishes_its_reified_argument() {
+    const SRC: &str = "class Box {\n\
+    inline operator fun <reified T : Any> get(value: T): String =\n\
+        T::class.simpleName ?: \"missing\"\n\
+}\n\
+fun box(): String {\n\
+    val name = Box()[\"value\"]\n\
+    return if (name == \"String\") \"OK\" else name\n\
+}\n";
+    assert_kotlinc_accepts("GenericMemberGetReifiedArgument", SRC);
+    assert_eq!(run(SRC).expect("generic member get compiles + runs"), "OK");
+}
+
+#[test]
 fn function_value_is_a_function_classifier_map_key() {
     const SRC: &str = "import java.util.concurrent.ConcurrentHashMap\n\
 fun box(): String {\n\

@@ -91,8 +91,9 @@ pub(crate) use member_specialization::{
     UnboundSpecialization,
 };
 use member_specialization::{
-    specialize_call_sig, specialize_callable, specialize_final_signature_output_type,
-    specialize_member_type,
+    bind_member_return, bind_member_return_from_call_args_tracking,
+    preserve_receiver_identity_bindings, specialize_call_sig, specialize_callable,
+    specialize_final_signature_output_type, specialize_member_type,
 };
 #[cfg(test)]
 use overload_selection::fun_return_compatible;
@@ -385,134 +386,6 @@ fn top_level_exact_parameters_admit(
                 argument.ty(),
             )
         })
-}
-
-fn bind_member_return(
-    source: &dyn SymbolSource,
-    gsig: &GenericSig,
-    receiver: Ty,
-    args: &[Ty],
-    type_args: &[Ty],
-    provider_ret: Ty,
-) -> Ty {
-    let args = args
-        .iter()
-        .copied()
-        .map(CallArgKind::Typed)
-        .collect::<Vec<_>>();
-    bind_member_return_from_call_args(
-        source,
-        gsig,
-        receiver,
-        &args,
-        type_args,
-        None,
-        &[],
-        provider_ret,
-    )
-}
-
-fn bind_member_return_from_call_args(
-    source: &dyn SymbolSource,
-    gsig: &GenericSig,
-    receiver: Ty,
-    args: &[CallArgKind],
-    type_args: &[Ty],
-    vararg_index: Option<usize>,
-    no_infer_params: &[bool],
-    provider_ret: Ty,
-) -> Ty {
-    let mut binds = seeded_gsig_binds(gsig, type_args);
-    if let Ty::Obj(owner, arguments) = receiver.non_null() {
-        if let Some(classifier) = source.classifier(owner) {
-            for (formal, argument) in classifier.type_params.iter().zip(arguments) {
-                if !gsig.formals.iter().any(|method| method == formal) {
-                    binds.entry(formal.clone()).or_insert(*argument);
-                }
-            }
-        }
-    }
-    if let Some(declared_receiver) = gsig.receiver {
-        unify_ty_from_symbols(source, declared_receiver, receiver, &mut binds);
-        preserve_receiver_identity_bindings(declared_receiver, receiver, &mut binds);
-    } else {
-        seed_undeclared_return_bindings(gsig.ret, provider_ret, &gsig.formals, &mut binds);
-    }
-    let receiver_bindings = binds.clone();
-    let inferred = infer_generic_call_bindings_from_symbols(
-        source,
-        gsig,
-        gsig.params.iter().zip(args).enumerate().filter_map(
-            |(parameter, (&declared, argument))| {
-                (!no_infer_params.get(parameter).copied().unwrap_or(false)
-                    && !argument.is_omitted_default()
-                    && (!argument.is_expected_type_callable()
-                        || argument.result_is_input_constrained()))
-                .then_some((
-                    parameter,
-                    argument.inference_type(source, declared),
-                    argument.is_spread(),
-                ))
-            },
-        ),
-        vararg_index,
-    );
-    merge_call_argument_bindings(
-        source,
-        gsig,
-        type_args,
-        &receiver_bindings,
-        &mut binds,
-        inferred,
-    );
-    crate::trace_compiler!(
-        "expected_call",
-        "bind member return declared={:?} provider={provider_ret:?} bindings={binds:?}",
-        gsig.ret,
-    );
-    let ret = instantiate_slot(
-        source,
-        Some(gsig),
-        gsig.ret,
-        &binds,
-        TypePosition::Out,
-        UnboundSpecialization::UseUpperBound,
-    );
-    // A direct METHOD-owned return variable specializes to the inferred argument even when its
-    // erased provider return is a non-top upper bound (`<A : Annotation> … : A` physically returns
-    // `Annotation`). Owner variables are deliberately excluded: their provider-specialized return
-    // is the receiver binding that `seed_undeclared_return_bindings` recovered above.
-    let direct_method_return = gsig
-        .ret
-        .non_null()
-        .ty_param_name()
-        .is_some_and(|name| gsig.formals.iter().any(|formal| formal == name));
-    if direct_method_return {
-        ret
-    } else {
-        merge_specialized_return(provider_ret, ret)
-    }
-}
-
-/// Receiver substitution must preserve a caller's still-symbolic type parameter. General call
-/// inference intentionally ignores `T = T`, but a selected member on `Owner<T>` returning that same
-/// `T` must not erase it to its upper bound while the enclosing generic declaration is being checked.
-fn preserve_receiver_identity_bindings(declared: Ty, actual: Ty, bindings: &mut GSigBinds) {
-    match (declared.non_null(), actual.non_null()) {
-        (Ty::TyParam(declared, _), actual @ Ty::TyParam(found, _)) if declared == found => {
-            bindings.entry(declared.to_string()).or_insert(actual);
-        }
-        (Ty::Obj(declared, declared_args), Ty::Obj(found, actual_args)) if declared == found => {
-            for (&declared, &actual) in declared_args.iter().zip(actual_args) {
-                preserve_receiver_identity_bindings(declared, actual, bindings);
-            }
-        }
-        (Ty::InProjection(declared), Ty::InProjection(actual))
-        | (Ty::OutProjection(declared), Ty::OutProjection(actual)) => {
-            preserve_receiver_identity_bindings(*declared, *actual, bindings);
-        }
-        _ => {}
-    }
 }
 
 pub(crate) enum CandidateSelection<T> {
@@ -1410,7 +1283,7 @@ impl<'a> SymbolResolver<'a> {
             } else if selected.is_extension() {
                 (selected.ret.apply(selected.callable.ret), GSigBinds::new())
             } else {
-                let member = resolved_member_from_info(
+                let (member, bindings) = resolved_member_from_info_tracking(
                     self.lib,
                     &self.src,
                     receiver,
@@ -1418,7 +1291,7 @@ impl<'a> SymbolResolver<'a> {
                     type_args,
                     selected.clone(),
                 );
-                (member.ret, GSigBinds::new())
+                (member.ret, bindings)
             };
             return CandidateSelection::Selected((selected, params, resolved, bindings));
         }
@@ -1652,7 +1525,8 @@ impl<'a> SymbolResolver<'a> {
         type_args: &[Ty],
         selected: FunctionInfo,
     ) -> ResolvedMember {
-        resolved_member_from_info(self.lib, &self.src, receiver, args, type_args, selected)
+        resolved_member_from_info_tracking(self.lib, &self.src, receiver, args, type_args, selected)
+            .0
     }
 
     /// Convert an already-specialized overload selection into the checker/lowering handoff. The
@@ -3877,19 +3751,18 @@ impl SelectedMemberProperty {
 /// Resolve an instance member and carry the logical return selected for this call. Generic member
 /// returns may bind from the receiver (`List<Int>.get(Int): Int`) or, for erased-`Any` returns, from
 /// the call arguments (`decodeFromString(serializer, text): T`).
-fn resolved_member_from_info(
+fn resolved_member_from_info_tracking(
     lib: &dyn SemanticPlatform,
     source: &dyn SymbolSource,
     recv: Ty,
     args: &[CallArgKind],
     type_args: &[Ty],
     o: FunctionInfo,
-) -> ResolvedMember {
-    let ret = o
-        .generic_sig
-        .as_ref()
-        .map(|gsig| {
-            bind_member_return_from_call_args(
+) -> (ResolvedMember, GSigBinds) {
+    let (ret, bindings) = o.generic_sig.as_ref().map_or_else(
+        || (o.callable.ret, GSigBinds::new()),
+        |gsig| {
+            bind_member_return_from_call_args_tracking(
                 source,
                 gsig,
                 recv,
@@ -3899,24 +3772,27 @@ fn resolved_member_from_info(
                 &o.call_sig.no_infer_params,
                 o.callable.ret,
             )
-        })
-        .unwrap_or(o.callable.ret);
+        },
+    );
     let ret = o.ret.apply(
         o.generic_sig
             .as_ref()
             .map_or(ret, |sig| sig.apply_return_policy(lib, ret)),
     );
     let member = o.member_with_return(o.callable.ret);
-    ResolvedMember {
-        receiver: recv,
-        ret,
-        member,
-        physical_params: o.callable.physical_params.clone(),
-        context_args: Vec::new(),
-        projected_return_hazard: o.projected_return_hazard,
-        suspend: o.flags.suspend,
-        origin: o.callable.origin.clone(),
-    }
+    (
+        ResolvedMember {
+            receiver: recv,
+            ret,
+            member,
+            physical_params: o.callable.physical_params.clone(),
+            context_args: Vec::new(),
+            projected_return_hazard: o.projected_return_hazard,
+            suspend: o.flags.suspend,
+            origin: o.callable.origin.clone(),
+        },
+        bindings,
+    )
 }
 
 fn member_property_from_callables(callables: &Callables) -> Option<PropertyInfo> {
