@@ -36,7 +36,7 @@ dhat = { version = "0.3", optional = true }
 object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
 cranelift-codegen = { version = "0.134", features = ["x86", "arm64", "riscv64"] }
 cranelift-frontend = "0.134"
-cranelift-module = "0.134"
+cranelift-module = "0.136"
 cranelift-object = "0.134"
 target-lexicon = "0.13.5"
 
