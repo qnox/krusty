@@ -311,6 +311,7 @@ fn read_method(r: &mut Cursor<'_>, pool: &Pool<'_>) -> Result<Declaration, Class
         visible_parameter_annotations: None,
         invisible_parameter_annotations: None,
         annotation_default: None,
+        parameters: Vec::new(),
         deprecated: false,
         code: None,
     };
@@ -347,6 +348,15 @@ fn read_method(r: &mut Cursor<'_>, pool: &Pool<'_>) -> Result<Declaration, Class
             }
             "AnnotationDefault" => {
                 method.annotation_default = Some(read_element_value(&mut a, pool)?)
+            }
+            "MethodParameters" => {
+                for _ in 0..a.u1()? {
+                    let name = match a.u2()? {
+                        0 => None,
+                        index => Some(pool.utf8(index)?),
+                    };
+                    method.parameters.push((name, a.u2()?));
+                }
             }
             "Deprecated" => method.deprecated = true,
             "Synthetic" => method.access |= ACC_SYNTHETIC,
