@@ -4,6 +4,7 @@
 //! extensions it declares, and its `companion { … }` block members. Inherited members are core's
 //! hierarchy walk over the direct supertypes the record lists.
 
+use super::builtin_realizations;
 use super::classifier_signatures::SignedClassifier;
 use super::external_identities::ExternalIdentities;
 use super::inventory::PackageInventory;
@@ -52,7 +53,8 @@ pub(super) fn classifier_record(
     let enclosing = signed.type_parameters.enclosing();
     let mut functions: Vec<(String, FunctionInfo)> = Vec::new();
     for function in &signed.functions {
-        let published = published_function(identities, function, member, enclosing);
+        let mut published = published_function(identities, function, member, enclosing);
+        builtin_realizations::realize_member(identity, &mut published);
         shape.members.push(member_record(&published));
         functions.push((function.declaration.name.clone(), published));
     }
@@ -98,6 +100,8 @@ pub(super) fn classifier_record(
             ),
         );
     }
+
+    crate::libraries::add_core_builtin_declarations(&mut shape, identity);
 
     for function in &signed.associated_functions {
         let published = published_function(

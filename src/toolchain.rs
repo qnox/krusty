@@ -162,10 +162,24 @@ pub fn kotlinc_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// The reference stdlib KLIB a compilation for `target` is analyzed against. The JS and Wasm ones
+/// ship in the kotlinc distribution; Native's is the Kotlin/Native distribution's. `None` for the
+/// JVM, whose stdlib is a jar, and for a distribution that is not provisioned.
+pub fn kotlin_stdlib_klib(target: crate::compilation_target::CompilationTarget) -> Option<PathBuf> {
+    use crate::compilation_target::CompilationTarget;
+    match target {
+        CompilationTarget::Jvm => None,
+        CompilationTarget::Js => dist_jar("kotlin-stdlib-js.klib"),
+        CompilationTarget::WasmJs => dist_jar("kotlin-stdlib-wasm-js.klib"),
+        CompilationTarget::WasmWasi => dist_jar("kotlin-stdlib-wasm-wasi.klib"),
+        CompilationTarget::Native => kotlin_native_stdlib_klib(),
+    }
+}
+
 /// The common stdlib KLIB of the reference Kotlin/Native distribution. `KRUSTY_KOTLIN_NATIVE`
 /// names a distribution root; otherwise `just kotlin-native` provisions this host's distribution
 /// under `target/cache/kotlin-native/<version>/`.
-pub fn kotlin_native_stdlib_klib() -> Option<PathBuf> {
+fn kotlin_native_stdlib_klib() -> Option<PathBuf> {
     let host = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "linux-x86_64",
         ("linux", "aarch64") => "linux-aarch64",

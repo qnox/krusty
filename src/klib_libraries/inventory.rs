@@ -162,6 +162,32 @@ impl PackageInventory {
             .filter(move |property| property.declaration.name == name)
     }
 
+    /// Every published top-level function with its package, in no particular order.
+    #[cfg(test)]
+    pub(super) fn all_functions(&self) -> impl Iterator<Item = (TypeName, &SignedFunction)> {
+        self.functions
+            .iter()
+            .flat_map(|(package, functions)| functions.iter().map(move |f| (*package, f)))
+    }
+
+    /// Every published class with its identity, in no particular order.
+    #[cfg(test)]
+    pub(super) fn all_classifiers(&self) -> impl Iterator<Item = (TypeName, &SignedClassifier)> {
+        self.classifiers
+            .iter()
+            .map(|(identity, classifier)| (*identity, classifier))
+    }
+
+    /// Every companion extension function with the classifier it is named through.
+    #[cfg(test)]
+    pub(super) fn all_companion_functions(
+        &self,
+    ) -> impl Iterator<Item = (TypeName, &CompanionExtension<SignedFunction>)> {
+        self.companion_functions
+            .iter()
+            .flat_map(|(classifier, extensions)| extensions.iter().map(move |e| (*classifier, e)))
+    }
+
     /// The published class with exactly this identity.
     pub(super) fn classifier(&self, identity: TypeName) -> Option<&SignedClassifier> {
         self.classifiers.get(&identity)

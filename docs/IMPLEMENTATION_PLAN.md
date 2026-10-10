@@ -4624,7 +4624,7 @@ code is the one the code generator already names: provider-owned bodies through 
   member or constructor (an enum's, an object's) a public signature.
 - **Platform (done).** `KlibLibraries::open` publishes the KLIBs a compilation selects, zipped or
   unpacked, and is a `SemanticPlatform`; each caller names its own target's libraries (Native's
-  `klib/common/stdlib`, `toolchain::kotlin_native_stdlib_klib`). `for_compilation` starts another
+  `klib/common/stdlib`; `toolchain::kotlin_stdlib_klib` names each target's). `for_compilation` starts another
   compilation over the same signed declarations. Its hooks are target-neutral: the language's
   `FunctionN`/`SuspendFunctionN`/`KFunctionN` classifiers (no KLIB serializes them), function and
   reference types, `KClass`, value-class underlyings, and the contract intrinsic and DSL members,
@@ -4635,6 +4635,14 @@ code is the one the code generator already names: provider-owned bodies through 
   (`Int.plus`, `String.plus`, `compareTo`), and inline stdlib bodies (`let`, `apply`, `run`). The
   Native lane switches, as a per-lane libraries setting in `tests/box_lane.rs`, once it no longer
   regresses.
+- **Builtin operations (done).** A KLIB builtin gets its compiler operation from the shared rules
+  the JVM provider uses (`builtin_member_realization`, `builtin_top_level_realization`,
+  `add_core_builtin_declarations`), by exact declaration, whether or not it has an IR body. A
+  target's own intrinsic annotation (`@TypedIntrinsic`, `@WasmOp`) is never read. The Native
+  corpus passes 3542 of 7089 against the stdlib KLIB (from 2007). Every `external` function of
+  each target's stdlib KLIB must carry an operation: `klib_libraries::tests::external_coverage`
+  checks Native, JS, wasm-js and wasm-wasi against `tests/klib_uncovered_externals/<target>/`,
+  lists that may only shrink (2.4.20: 402, 25, 16 and 1 uncovered).
 - **Joining (done for top-level functions).** `klib_libraries::KlibDeclarationBodies` indexes the
   decoded trees of a library set by linkable identity and answers a selected callable's frozen
   `KlibDeclarationSignature` with its function and arena, never through a name or parameter tuple.
