@@ -180,7 +180,9 @@ fn placement<'a>(
     }
 }
 
-/// A top-level function's identity.
+/// A function's identity. `container` holds the classes around it: none for a top-level function,
+/// and the declaring class last for a member, so this signs a member exactly as
+/// [`member_signature`] signs the same declaration's condensed [`KotlinMember`].
 pub fn package_function_signature(
     container: MetadataContainer<'_>,
     function: &KotlinFunction,
@@ -243,7 +245,7 @@ fn package_property_shape(
     })
 }
 
-/// A top-level property's identity.
+/// A property's identity; `container` is as for [`package_function_signature`].
 pub fn package_property_signature(
     container: MetadataContainer<'_>,
     property: &KotlinProperty,
@@ -274,7 +276,7 @@ fn metadata_accessor<'a>(
     }
 }
 
-/// A top-level property's getter or setter identity.
+/// A property's getter or setter identity; `container` is as for [`package_function_signature`].
 pub fn package_property_accessor_signature(
     container: MetadataContainer<'_>,
     property: &KotlinProperty,

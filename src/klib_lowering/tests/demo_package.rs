@@ -134,6 +134,7 @@ pub(super) fn declaration((name, params, ret): Shape) -> KotlinFunction {
         param_defaults: vec![false; params.len()],
         vararg: None,
         visibility: Visibility::Public,
+        modality: crate::metadata::semantic::KotlinModality::Final,
         is_inline: false,
         has_reified_type_params: false,
         is_suspend: false,
@@ -144,6 +145,8 @@ pub(super) fn declaration((name, params, ret): Shape) -> KotlinFunction {
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        return_value_status: Default::default(),
+        contract: None,
     }
 }
 

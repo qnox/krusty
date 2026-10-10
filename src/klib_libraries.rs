@@ -9,6 +9,8 @@
 //! selection candidates is lazy and memoized per lookup key. [`KlibDeclarationBodies`] answers the
 //! other half of that join: the decoded IR body serialized under a published signature.
 
+mod classifier_records;
+mod classifier_signatures;
 mod declaration_bodies;
 mod declaration_signatures;
 mod external_identities;
@@ -66,5 +68,12 @@ impl SymbolSource for KlibLibraries {
         identity: crate::fir::ExternalCallableId,
     ) -> Option<crate::libraries::ExternalCallableRealization> {
         self.identities.realization(identity)
+    }
+
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        self.identities.property(identity)
     }
 }
