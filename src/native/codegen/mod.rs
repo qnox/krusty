@@ -5,7 +5,7 @@
 //! that was prebuilt when krusty itself was built. A user's build touches no C toolchain. The one
 //! text artifact is the module's public C header: the names a C caller can link, not a program.
 //!
-//! **Why Cranelift, and what it owns.** `docs/BUILD_AND_NATIVE_PLAN.md`, *Decided: Cranelift, as a
+//! **Why Cranelift, and what it owns.** `docs/NATIVE.md`, *Decided: Cranelift, as a
 //! library*: Cranelift owns instruction selection and register allocation — and only those. The
 //! lowering below, the calling convention at every runtime boundary, object layout, collector
 //! integration and the linker are krusty's. The lowering sits behind this module's boundary so a

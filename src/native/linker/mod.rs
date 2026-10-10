@@ -12,12 +12,16 @@
 //! simpler than driving a general writer.
 
 mod abi;
+mod dynamic;
 mod elf;
 #[cfg(test)]
 mod fixture;
+mod libraries;
+mod reachability;
 mod relocate;
 
 pub use elf::runtime_symbols;
+pub use libraries::{Export, ExportKind, ImportLibrary};
 
 use super::prebuilt;
 use super::target::{Arch, NativeTarget};
@@ -43,6 +47,9 @@ pub enum ProgramLinkError {
     RelocationOutOfRange(String),
     /// A section or symbol shape the linker does not model.
     Unsupported(String),
+    /// A library's loader name or one of its exported names cannot be written into the image
+    /// exactly as given.
+    InvalidLibrary(String),
     /// An input's ELF flags or build attributes name an ABI the target does not use, or one the
     /// other inputs' cannot be combined with.
     IncompatibleAbi {
@@ -285,6 +292,7 @@ impl std::fmt::Display for ProgramLinkError {
                 write!(formatter, "relocation out of range: {what}")
             }
             Self::Unsupported(what) => write!(formatter, "{what}"),
+            Self::InvalidLibrary(what) => write!(formatter, "{what}"),
             Self::IncompatibleAbi { input, mismatch } => write!(formatter, "{input} {mismatch}"),
             Self::UnsupportedRelocationTable {
                 input,
@@ -308,10 +316,24 @@ pub fn link_program(
     program_objects: &[&[u8]],
     target: NativeTarget,
 ) -> Result<Vec<u8>, ProgramLinkError> {
+    link_program_with_libraries(program_objects, &[], target)
+}
+
+/// Link a program's objects with the prebuilt runtime for `target`, importing every function they
+/// reference and do not define from `libraries` (searched in order, as `-l` options are).
+///
+/// A program that imports nothing is the same static executable [`link_program`] produces; one
+/// that does is dynamically linked, names the libraries it imports from, and is started by the
+/// target's dynamic loader. See `dynamic.rs` for its shape.
+pub fn link_program_with_libraries(
+    program_objects: &[&[u8]],
+    libraries: &[ImportLibrary],
+    target: NativeTarget,
+) -> Result<Vec<u8>, ProgramLinkError> {
     let runtime = prebuilt::runtime_objects(target).ok_or(ProgramLinkError::NoRuntime(target))?;
     let mut inputs: Vec<&[u8]> = program_objects.to_vec();
     inputs.extend(runtime.iter().map(|(_, bytes)| *bytes));
-    elf::link_static(&inputs, target)
+    elf::link(&inputs, libraries, target)
 }
 
 /// Whether this build of krusty can link native programs for `target` at all.
@@ -535,6 +557,163 @@ mod tests {
             let _ = std::fs::remove_file(&path);
             assert_eq!(status.code(), Some(0), "{target}: {status}");
         }
+    }
+
+    /// The host's own copy of a shared library, by soname, from the directories a Debian-, Fedora-
+    /// or Arch-style system keeps them in.
+    fn host_library(soname: &str) -> Option<ImportLibrary> {
+        let arch = NativeTarget::host()?.arch;
+        let multiarch = format!("{}-linux-gnu", arch.triple_name());
+        ["/lib", "/usr/lib", "/lib64", "/usr/lib64"]
+            .iter()
+            .flat_map(|root| [Path::new(root).join(&multiarch), PathBuf::from(root)])
+            .map(|directory| directory.join(soname))
+            .find_map(|path| {
+                let bytes = std::fs::read(&path).ok()?;
+                let what = path.display().to_string();
+                Some(
+                    ImportLibrary::from_elf_shared_object(&what, &bytes, arch, None)
+                        .unwrap_or_else(|error| panic!("{what}: {error}")),
+                )
+            })
+    }
+
+    /// A `kt_program_entry` that writes what `zlibVersion()` returns, three bytes of it, to
+    /// standard output through the C library's `write`, and returns.
+    fn zlib_version_program(arch: Arch) -> Option<Obj> {
+        let mut program = Obj::new(arch);
+        let (text, calls) = match arch {
+            #[rustfmt::skip]
+            Arch::X86_64 => (program.section(".text", SectionKind::Text, &[
+                0x48, 0x83, 0xec, 0x08,       // 0:  sub rsp, 8 (the stack is 16-aligned at calls)
+                0xe8, 0, 0, 0, 0,             // 4:  call zlibVersion
+                0x48, 0x89, 0xc6,             // 9:  mov rsi, rax
+                0xbf, 1, 0, 0, 0,             // 12: mov edi, 1
+                0xba, 3, 0, 0, 0,             // 17: mov edx, 3
+                0xe8, 0, 0, 0, 0,             // 22: call write
+                0x48, 0x83, 0xc4, 0x08,       // 27: add rsp, 8
+                0xc3,                         // 31: ret
+            ], 16), [(5, 4, -4), (23, 4, -4)]),
+            Arch::Aarch64 => (
+                program.text_words(&[
+                    0xa9bf_7bfd, // 0:  stp x29, x30, [sp, #-16]!
+                    0x9400_0000, // 4:  bl zlibVersion
+                    0xaa00_03e1, // 8:  mov x1, x0
+                    0x5280_0020, // 12: mov w0, #1
+                    0x5280_0062, // 16: mov w2, #3
+                    0x9400_0000, // 20: bl write
+                    0xa8c1_7bfd, // 24: ldp x29, x30, [sp], #16
+                    0xd65f_03c0, // 28: ret
+                ]),
+                [(4, 283, 0), (20, 283, 0)],
+            ),
+            Arch::Riscv64 => return None,
+        };
+        program.define("kt_program_entry", text, 0);
+        for ((at, r_type, addend), name) in calls.into_iter().zip(["zlibVersion", "write"]) {
+            let callee = program.undefined(name);
+            program.reloc(text, at, callee, addend, r_type);
+        }
+        Some(program)
+    }
+
+    /// A `kt_program_entry` for x86-64 that calls each of `callees` in turn.
+    fn x86_64_calls(callees: &[&str]) -> Obj {
+        let mut program = Obj::new(Arch::X86_64);
+        let mut code = vec![0x48, 0x83, 0xec, 0x08]; // sub rsp, 8
+        for _ in callees {
+            code.extend_from_slice(&[0xe8, 0, 0, 0, 0]); // call
+        }
+        code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x08, 0xc3]); // add rsp, 8; ret
+        let text = program.section(".text", SectionKind::Text, &code, 16);
+        program.define("kt_program_entry", text, 0);
+        for (index, callee) in callees.iter().enumerate() {
+            let callee = program.undefined(callee);
+            program.reloc(text, 5 + 5 * index as u64, callee, -4, 4);
+        }
+        program
+    }
+
+    /// Against the real runtime, which always contains the thread start: a program that imports
+    /// a function and starts no thread links, and one that also starts a thread is refused until
+    /// threads start through `pthread_create`.
+    #[test]
+    fn importing_is_refused_only_when_the_program_can_start_a_runtime_thread() {
+        let target = linux(Arch::X86_64);
+        if !runtime_for(target) {
+            return;
+        }
+        let libz = || {
+            ImportLibrary::new(
+                "libz.so.1".to_string(),
+                [(
+                    "deflate".to_string(),
+                    Export {
+                        kind: ExportKind::Function,
+                        version: None,
+                    },
+                )],
+            )
+            .expect("a valid library")
+        };
+        let imports_only = x86_64_calls(&["deflate"]);
+        link_program_with_libraries(&[&imports_only.bytes()], &[libz()], target)
+            .expect("a program that starts no thread links");
+        let starts_a_thread = x86_64_calls(&["deflate", "kt_thread_start"]);
+        assert_eq!(
+            link_program_with_libraries(&[&starts_a_thread.bytes()], &[libz()], target)
+                .expect_err("refused"),
+            ProgramLinkError::Unsupported(
+                "the program imports from libz.so.1 and can start threads with the runtime's \
+                 `clone`, which gives the C library no state for them; starting threads through \
+                 `pthread_create` for such a program is not implemented yet"
+                    .to_string()
+            )
+        );
+    }
+
+    /// A program that calls into two shared libraries of the host — zlib, and the C library — is
+    /// linked from what the libraries' files say, with no C toolchain, and RUNS: the loader binds
+    /// both calls and the program prints the start of zlib's version, `1.x`.
+    #[test]
+    fn a_program_calling_host_shared_libraries_runs() {
+        let Some(target) = NativeTarget::host() else {
+            return;
+        };
+        if !runtime_for(target) {
+            return;
+        }
+        let (Some(libc), Some(zlib)) = (host_library("libc.so.6"), host_library("libz.so.1"))
+        else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must have the C library and zlib installed"
+            );
+            return;
+        };
+        let Some(program) = zlib_version_program(target.arch) else {
+            return;
+        };
+        let bytes = link_program_with_libraries(&[&program.bytes()], &[zlib, libc], target)
+            .unwrap_or_else(|error| panic!("{target}: {error}"));
+        let path = std::env::temp_dir().join(format!(
+            "krusty-linker-dynamic-{target}-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, &bytes).expect("write the executable");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("make the executable executable");
+        }
+        let output = std::process::Command::new(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let output = output.expect("run the linked executable");
+        assert_eq!(output.status.code(), Some(0), "{target}: {output:?}");
+        assert!(
+            output.stdout.starts_with(b"1.") && output.stdout.len() == 3,
+            "{target}: {output:?}"
+        );
     }
 
     /// The names the runtime defines are read out of its objects: its entry point and helpers are

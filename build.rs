@@ -34,6 +34,9 @@ const COMMON_FLAGS: &[&str] = &[
     "-fno-stack-protector",
     "-fno-asynchronous-unwind-tables",
     "-fno-unwind-tables",
+    // One section per function, so the linker can tell which runtime functions a program reaches
+    // (the runtime is linked whole, and a definition being present is not a use).
+    "-ffunction-sections",
     "-O2",
     "-c",
 ];

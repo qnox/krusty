@@ -5,7 +5,7 @@
 //! `try`'s dispatch block, or out of the frame with the slot still set, which IS the propagation.
 //! A caller never reads the value a throwing call returned, because it checks first.
 //!
-//! `docs/BUILD_AND_NATIVE_PLAN.md` records why this and not the alternatives. Table-driven
+//! `docs/NATIVE.md` records why this and not the alternatives. Table-driven
 //! unwinding needs Cranelift emitting `.eh_frame`, the linker placing it, and a DWARF CFI
 //! interpreter in the runtime — a phase, not an increment. `setjmp`/`longjmp` is far smaller and
 //! is rejected on CORRECTNESS: it returns twice, which nothing in Cranelift's SSA can express, so
@@ -24,7 +24,7 @@ impl BodyLowering<'_, '_, '_> {
     /// Every call in a function body goes through here. A `throw` stores the exception in the
     /// runtime's one pending slot and RETURNS, so a caller that did not look would carry on with a
     /// zero value as though nothing had happened; looking is the whole mechanism. See "How an
-    /// exception propagates" in `docs/BUILD_AND_NATIVE_PLAN.md` for why this and not unwind tables
+    /// exception propagates" in `docs/NATIVE.md` for why this and not unwind tables
     /// (they need `.eh_frame` and a DWARF interpreter, which is a phase) or `setjmp`/`longjmp`
     /// (it returns twice, which Cranelift's SSA cannot express without silently stale registers).
     ///

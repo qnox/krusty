@@ -27,6 +27,8 @@ use object::{
 use super::super::prebuilt;
 use super::super::target::{Arch, NativeTarget};
 use super::abi;
+use super::dynamic::{self, Imports, Tables};
+use super::libraries::ImportLibrary;
 use super::relocate::{relocate, Reloc};
 use super::{ProgramLinkError, RelocationTable};
 
@@ -37,7 +39,11 @@ pub(super) type Elf<'data> = ElfFile64<'data, LittleEndian>;
 const BASE: u64 = 0x400000;
 const EHDR_SIZE: u64 = 64;
 const PHDR_SIZE: u64 = 56;
-const PHDR_COUNT: u64 = 2;
+/// A static image's program headers: its two `PT_LOAD` segments.
+const STATIC_PHDR_COUNT: u64 = 2;
+/// A dynamically linked image's: `PT_PHDR`, `PT_INTERP`, the two `PT_LOAD`s, `PT_DYNAMIC` and
+/// `PT_GNU_STACK`, in the order the gABI requires (`PT_PHDR` and `PT_INTERP` before any load).
+const DYNAMIC_PHDR_COUNT: u64 = 6;
 // The executable segment is mapped from file offset 0 at `BASE`, which `PT_LOAD` allows only if
 // the two are congruent modulo the segment's alignment, the target's maximum page size.
 const _: () = {
@@ -77,7 +83,9 @@ fn parse_error(error: object::Error) -> ProgramLinkError {
     ProgramLinkError::Parse(error.to_string())
 }
 
-fn symbol_name<'data>(symbol: &impl ObjectSymbol<'data>) -> Result<&'data str, ProgramLinkError> {
+pub(super) fn symbol_name<'data>(
+    symbol: &impl ObjectSymbol<'data>,
+) -> Result<&'data str, ProgramLinkError> {
     symbol.name().map_err(parse_error)
 }
 
@@ -222,10 +230,24 @@ struct Layout {
     /// The read+write segment's `.data` bytes, and its extent in memory including `.bss`.
     data_file_size: u64,
     data_mem_size: u64,
+    /// Where the import stubs start, as an offset from `BASE` (which is also their file offset).
+    stubs_at: u64,
+}
+
+/// Room the layout keeps for what the linker writes itself rather than copies from an input.
+#[derive(Clone, Copy)]
+struct Reserve {
+    /// The start of the executable segment: the ELF and program headers, and in a dynamically
+    /// linked image the read-only dynamic tables after them.
+    headers: u64,
+    /// Import stubs, placed after the program's code.
+    stubs: u64,
+    /// The start of the writable segment: `.dynamic` and the offset table.
+    writable: u64,
 }
 
 impl Layout {
-    fn new(files: &[Elf], page: u64) -> Result<Self, ProgramLinkError> {
+    fn new(files: &[Elf], page: u64, reserve: Reserve) -> Result<Self, ProgramLinkError> {
         for (file_index, file) in files.iter().enumerate() {
             for section in file.sections() {
                 let name = section.name().unwrap_or("?");
@@ -263,13 +285,19 @@ impl Layout {
             data_vaddr_start: 0,
             data_file_size: 0,
             data_mem_size: 0,
+            stubs_at: 0,
         };
-        // Executable segment: headers, then text, then read-only data. Offsets equal virtual
-        // addresses minus BASE, since the segment is mapped from file offset 0.
-        let mut end = EHDR_SIZE + PHDR_SIZE * PHDR_COUNT;
-        for wanted in [Placement::Text, Placement::ReadOnly] {
-            end = layout.place(files, wanted, end, |at| (BASE + at, Some(at)))?;
+        // Executable segment: headers, then text and the import stubs, then read-only data.
+        // Offsets equal virtual addresses minus BASE, since the segment is mapped from file
+        // offset 0.
+        let mut end = layout.place(files, Placement::Text, reserve.headers, |at| {
+            (BASE + at, Some(at))
+        })?;
+        if reserve.stubs > 0 {
+            layout.stubs_at = align_up(end, 16);
+            end = layout.stubs_at + reserve.stubs;
         }
+        end = layout.place(files, Placement::ReadOnly, end, |at| (BASE + at, Some(at)))?;
         layout.text_end = end;
         // Writable segment: data, then bss, starting on the next maximum-size page in the file as
         // well as in memory. Only its file offset and address need be congruent, so the file could
@@ -280,7 +308,7 @@ impl Layout {
         let vaddr_start = BASE + file_start;
         layout.data_file_start = file_start;
         layout.data_vaddr_start = vaddr_start;
-        layout.data_file_size = layout.place(files, Placement::Data, 0, |at| {
+        layout.data_file_size = layout.place(files, Placement::Data, reserve.writable, |at| {
             (vaddr_start + at, Some(file_start + at))
         })?;
         layout.data_mem_size =
@@ -487,8 +515,20 @@ fn thread_local(name: &str) -> ProgramLinkError {
     ))
 }
 
+/// Link `inputs` into a static executable: no shared library is consulted.
+#[cfg(test)]
 pub(super) fn link_static(
     inputs: &[&[u8]],
+    target: NativeTarget,
+) -> Result<Vec<u8>, ProgramLinkError> {
+    link(inputs, &[], target)
+}
+
+/// Link `inputs` into an executable, importing from `libraries` whatever the inputs reference and
+/// do not define. When nothing is imported the image is exactly the static one.
+pub(super) fn link(
+    inputs: &[&[u8]],
+    libraries: &[ImportLibrary],
     target: NativeTarget,
 ) -> Result<Vec<u8>, ProgramLinkError> {
     let files = inputs
@@ -497,8 +537,44 @@ pub(super) fn link_static(
         .map(|(index, bytes)| parse(&format!("input {index}"), bytes, target.arch))
         .collect::<Result<Vec<_>, _>>()?;
     let e_flags = abi::output_flags(target.arch, &files)?;
-    let layout = Layout::new(&files, target.arch.max_page_size())?;
-    let symbols = Symbols::new(&files, &layout)?;
+    let imports = Imports::collect(&files, libraries)?;
+    dynamic::refuse_clone_threads(&files, &imports, "_start")?;
+    let tables = (!imports.is_empty()).then(|| Tables::new(&imports, target));
+    let phdr_count = match tables {
+        None => STATIC_PHDR_COUNT,
+        Some(_) => DYNAMIC_PHDR_COUNT,
+    };
+    let headers = EHDR_SIZE + PHDR_SIZE * phdr_count;
+    let tables_at = align_up(headers, 8);
+    let reserve = match &tables {
+        None => Reserve {
+            headers,
+            stubs: 0,
+            writable: 0,
+        },
+        Some(tables) => Reserve {
+            headers: tables_at + tables.read_only_size(),
+            stubs: tables.stubs_size(),
+            writable: tables.writable_size(),
+        },
+    };
+    let layout = Layout::new(&files, target.arch.max_page_size(), reserve)?;
+    let mut symbols = Symbols::new(&files, &layout)?;
+    let placement = tables.as_ref().map(|_| dynamic::Placement {
+        tables_vaddr: BASE + tables_at,
+        tables_offset: tables_at,
+        stubs_vaddr: BASE + layout.stubs_at,
+        stubs_offset: layout.stubs_at,
+        writable_vaddr: layout.data_vaddr_start,
+        writable_offset: layout.data_file_start,
+    });
+    if let (Some(tables), Some(placement)) = (&tables, &placement) {
+        for (index, import) in imports.functions.iter().enumerate() {
+            symbols
+                .strong
+                .insert(import.name.clone(), tables.stub(placement, index));
+        }
+    }
     let entry = symbols
         .global("_start")
         .ok_or_else(|| ProgramLinkError::UndefinedSymbol("_start".into()))?;
@@ -578,14 +654,104 @@ pub(super) fn link_static(
         relocate(target.arch, &mut image, &relocations)?;
     }
 
-    write_headers(&mut image, target.arch, e_flags, entry, &layout);
+    let mut program_headers = Vec::with_capacity(phdr_count as usize);
+    let text = ProgramHeader::load(0x5, 0, BASE, layout.text_end, layout.text_end, layout.page);
+    let data = ProgramHeader::load(
+        0x6,
+        layout.data_file_start,
+        layout.data_vaddr_start,
+        layout.data_file_size,
+        layout.data_mem_size,
+        layout.page,
+    );
+    match (&tables, &placement) {
+        (Some(tables), Some(placement)) => {
+            tables.write(&mut image, placement)?;
+            let table = PHDR_SIZE * phdr_count;
+            program_headers.extend([
+                ProgramHeader::other(PT_PHDR, 0x4, EHDR_SIZE, BASE + EHDR_SIZE, table, 8),
+                ProgramHeader::other(
+                    PT_INTERP,
+                    0x4,
+                    tables_at,
+                    BASE + tables_at,
+                    tables.interpreter_len(),
+                    1,
+                ),
+                text,
+                data,
+                ProgramHeader::other(
+                    PT_DYNAMIC,
+                    0x6,
+                    placement.writable_offset,
+                    placement.writable_vaddr,
+                    tables.dynamic_size(),
+                    8,
+                ),
+                ProgramHeader::other(PT_GNU_STACK, 0x6, 0, 0, 0, 16),
+            ]);
+        }
+        _ => program_headers.extend([text, data]),
+    }
+    write_headers(&mut image, target.arch, e_flags, entry, &program_headers);
     Ok(image)
 }
 
-/// Write the ELF header and the two program headers over the start of the image, which the layout
-/// left free for them. `flags` is the `e_flags` the inputs' ABIs merge to ([`abi::output_flags`]).
-fn write_headers(image: &mut [u8], arch: Arch, flags: u32, entry: u64, layout: &Layout) {
-    let mut h = Vec::with_capacity((EHDR_SIZE + PHDR_SIZE * PHDR_COUNT) as usize);
+const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
+const PT_INTERP: u32 = 3;
+const PT_PHDR: u32 = 6;
+const PT_GNU_STACK: u32 = 0x6474_e551;
+
+/// One program header, as written.
+struct ProgramHeader {
+    p_type: u32,
+    p_flags: u32,
+    offset: u64,
+    vaddr: u64,
+    filesz: u64,
+    memsz: u64,
+    align: u64,
+}
+
+impl ProgramHeader {
+    fn load(flags: u32, offset: u64, vaddr: u64, filesz: u64, memsz: u64, align: u64) -> Self {
+        Self {
+            p_type: PT_LOAD,
+            p_flags: flags,
+            offset,
+            vaddr,
+            filesz,
+            memsz,
+            align,
+        }
+    }
+
+    /// A header describing bytes of a loaded segment, as large in memory as in the file.
+    fn other(p_type: u32, flags: u32, offset: u64, vaddr: u64, size: u64, align: u64) -> Self {
+        Self {
+            p_type,
+            p_flags: flags,
+            offset,
+            vaddr,
+            filesz: size,
+            memsz: size,
+            align,
+        }
+    }
+}
+
+/// Write the ELF header and `program_headers` over the start of the image, which the layout left
+/// free for them. `flags` is the `e_flags` the inputs' ABIs merge to ([`abi::output_flags`]).
+fn write_headers(
+    image: &mut [u8],
+    arch: Arch,
+    flags: u32,
+    entry: u64,
+    program_headers: &[ProgramHeader],
+) {
+    let count = program_headers.len() as u64;
+    let mut h = Vec::with_capacity((EHDR_SIZE + PHDR_SIZE * count) as usize);
     h.extend_from_slice(b"\x7fELF");
     h.extend_from_slice(&[2, 1, 1, 0]); // 64-bit, little-endian, ELF version 1, System V ABI
     h.extend_from_slice(&[0; 8]);
@@ -598,32 +764,24 @@ fn write_headers(image: &mut [u8], arch: Arch, flags: u32, entry: u64, layout: &
     h.extend_from_slice(&flags.to_le_bytes());
     h.extend_from_slice(&(EHDR_SIZE as u16).to_le_bytes());
     h.extend_from_slice(&(PHDR_SIZE as u16).to_le_bytes());
-    h.extend_from_slice(&(PHDR_COUNT as u16).to_le_bytes());
+    h.extend_from_slice(&(count as u16).to_le_bytes());
     h.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
     h.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
     h.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
     debug_assert_eq!(h.len(), EHDR_SIZE as usize);
-
-    let mut phdr = |p_flags: u32, offset: u64, vaddr: u64, filesz: u64, memsz: u64| {
-        h.extend_from_slice(&1u32.to_le_bytes()); // PT_LOAD
-        h.extend_from_slice(&p_flags.to_le_bytes());
-        h.extend_from_slice(&offset.to_le_bytes());
-        h.extend_from_slice(&vaddr.to_le_bytes());
-        h.extend_from_slice(&vaddr.to_le_bytes()); // p_paddr
-        h.extend_from_slice(&filesz.to_le_bytes());
-        h.extend_from_slice(&memsz.to_le_bytes());
-        h.extend_from_slice(&layout.page.to_le_bytes()); // p_align
-    };
-    phdr(0x5, 0, BASE, layout.text_end, layout.text_end); // R+X
-    phdr(
-        0x6,
-        layout.data_file_start,
-        layout.data_vaddr_start,
-        layout.data_file_size,
-        layout.data_mem_size,
-    ); // R+W
+    for header in program_headers {
+        h.extend_from_slice(&header.p_type.to_le_bytes());
+        h.extend_from_slice(&header.p_flags.to_le_bytes());
+        h.extend_from_slice(&header.offset.to_le_bytes());
+        h.extend_from_slice(&header.vaddr.to_le_bytes());
+        h.extend_from_slice(&header.vaddr.to_le_bytes()); // p_paddr
+        h.extend_from_slice(&header.filesz.to_le_bytes());
+        h.extend_from_slice(&header.memsz.to_le_bytes());
+        h.extend_from_slice(&header.align.to_le_bytes());
+    }
     image[..h.len()].copy_from_slice(&h);
 }
+
 #[cfg(test)]
 mod tests {
     use object::write::{Symbol, SymbolSection};
