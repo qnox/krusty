@@ -142,9 +142,7 @@ mod missing_dependency_supertypes;
 mod named_class_constructors;
 mod operator_calls;
 mod opt_in_usage;
-use operator_calls::{
-    range_operator, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess,
-};
+use operator_calls::{range_operator, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess};
 mod enhanced_values;
 mod overload_diagnostics;
 mod override_plans;
@@ -60551,9 +60549,7 @@ impl<'a> Checker<'a> {
             prepared_lhs,
         } = operands;
         let operator_key = match op {
-            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                Some(SyntheticOperatorCall::CompareTo)
-            }
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(SyntheticOperatorCall::CompareTo),
             _ => op
                 .arith_operator_name()
                 .and_then(SyntheticOperatorCall::from_name),
