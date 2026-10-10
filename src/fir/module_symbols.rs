@@ -1232,6 +1232,11 @@ impl<'a> StreamedModuleSymbols<'a> {
                 .owned_declaration(declaration, DeclarationKind::Accessor, 1)
                 .and_then(|setter| self.index.declaration_header(setter))
                 .map_or(header.visibility, |setter| setter.visibility);
+            let is_final = header.flags.has(DeclarationFlags::FINAL)
+                || (!is_interface
+                    && !header.flags.has(DeclarationFlags::OPEN)
+                    && !header.flags.has(DeclarationFlags::ABSTRACT)
+                    && !header.flags.has(DeclarationFlags::OVERRIDE));
             properties.push(PropertyInfo {
                 return_value_status: None,
                 name: name.to_owned(),
@@ -1263,11 +1268,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 compile_time_constant: self.index.compile_time_constant(declaration).cloned(),
                 metadata_constant_read: false,
                 deprecated_hidden: self.declaration_is_deprecated_hidden(declaration),
-                is_final: header.flags.has(DeclarationFlags::FINAL)
-                    || (!is_interface
-                        && !header.flags.has(DeclarationFlags::OPEN)
-                        && !header.flags.has(DeclarationFlags::ABSTRACT)
-                        && !header.flags.has(DeclarationFlags::OVERRIDE)),
+                is_final,
                 visibility: header.visibility,
                 owner: internal,
                 receiver_rank: 0,
@@ -1283,7 +1284,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                         || header.flags.has(DeclarationFlags::DELEGATED)
                         || header.flags.has(DeclarationFlags::EXTERNAL)
                         || header.flags.has(DeclarationFlags::EXPECT),
-                    header.flags.has(DeclarationFlags::OPEN),
+                    !is_final,
                     context_count != 0,
                 ),
             });

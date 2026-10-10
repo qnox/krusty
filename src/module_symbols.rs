@@ -1168,6 +1168,7 @@ fn source_property(
     owner_is_interface: bool,
     receiver_rank: u32,
 ) -> PropertyInfo {
+    let is_final = !property.is_open && !property.is_abstract;
     let mut getter = source_property_getter(
         owner,
         property.getter_name.clone(),
@@ -1205,7 +1206,7 @@ fn source_property(
         compile_time_constant: None,
         metadata_constant_read: false,
         deprecated_hidden: false,
-        is_final: !property.is_open && !property.is_abstract,
+        is_final,
         visibility: property.visibility,
         owner,
         receiver_rank,
@@ -1218,7 +1219,7 @@ fn source_property(
         read_stability: crate::libraries::PropertyReadStability::from_declaration(
             property.setter_name.is_some(),
             property.has_custom_getter,
-            property.is_open,
+            !is_final,
             !property.context_params.is_empty(),
         ),
     }
@@ -2260,6 +2261,10 @@ mod tests {
         assert_eq!(properties.overloads.len(), 1);
         assert!(properties.overloads[0].getter.is_abstract);
         assert!(!properties.overloads[0].is_final);
+        assert_eq!(
+            properties.overloads[0].read_stability,
+            crate::libraries::PropertyReadStability::StableOnFinalReceiver
+        );
     }
 
     #[test]
