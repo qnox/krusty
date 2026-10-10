@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ir::{IrClass, IrFile};
-use crate::jvm::classfile::{ClassWriter, DeclarationPaths, InnerClassSpec};
+use crate::jvm::classfile::{ClassWriter, DeclarationPaths, InnerClassSpec, TableOrders};
 use crate::types::{type_name, TypeName};
 
 /// The complete ordered candidate list for one IR file. Every class writer receives the same list;
@@ -21,6 +21,8 @@ pub(super) struct InnerClasses {
     /// Specialized lambdas regenerated at a call site. kotlinc's inliner copies the
     /// `new` into the caller without giving that caller an `InnerClasses` row.
     call_sites: Rc<HashSet<String>>,
+    /// The table orders the file's writers share.
+    orders: Rc<TableOrders>,
 }
 
 impl InnerClasses {
@@ -220,16 +222,16 @@ impl InnerClasses {
             paths: Rc::new(paths),
             declaring: Rc::new(declaring),
             call_sites: Rc::new(call_site_regenerated_lambdas(ir)),
+            orders: Rc::default(),
         }
     }
 
     pub(super) fn register(&self, writer: &mut ClassWriter) {
-        for spec in &self.specs {
-            writer.add_inner_class(spec.clone());
-        }
+        writer.add_inner_classes(&self.specs);
         writer.set_declaration_paths(self.paths.clone());
         writer.set_declaring_classes(self.declaring.clone());
         writer.set_call_site_classes(self.call_sites.clone());
+        writer.set_table_orders(self.orders.clone());
     }
 }
 

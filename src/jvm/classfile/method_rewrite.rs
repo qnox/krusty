@@ -369,7 +369,7 @@ impl ClassWriter {
             );
             return None;
         }
-        self.optimized(method, identity, node, implicit_return, pool)
+        self.optimized(method, identity, node, implicit_return, false, pool)
     }
 
     /// kotlinc's optimizer passes (see [`pipeline`]) over `node`, the body `method` currently holds
@@ -385,6 +385,7 @@ impl ClassWriter {
         source: MethodIdentity<'_>,
         mut node: MethodNode,
         implicit_return: Option<LabelId>,
+        post_coroutine: bool,
         pool: &mut PoolLookup<'_>,
     ) -> Option<Rewritten> {
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
@@ -408,6 +409,7 @@ impl ClassWriter {
             owner: &self.internal_name,
             value_classes: &*self.value_classes,
             parameter_slots: u16::try_from(entry.len()).ok()?,
+            post_coroutine,
         };
         let removed_locals = match pipeline::optimize(&mut node, &context) {
             Outcome::Changed { removed_locals } => removed_locals,

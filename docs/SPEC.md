@@ -9780,6 +9780,44 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_started_threads_stack_has_a_guard_below_it`), each run on x86_64, aarch64 and riscv64 (the
   architectures other than the host's built with clang and lld and run under QEMU's user-mode
   emulators, which CI installs and must use), and `tests/native_concurrency_e2e.rs`.
+- **Native: a static program's POSIX comes from the kernel, not a C library.** `platform.posix`
+  is how Kotlin/Native code reaches the system, and a static program links no libc, so the runtime
+  serves the POSIX functions a server needs straight from system calls, as Go's `syscall` package
+  does: descriptors, `stat`, directories and a minimal unbuffered-write `stdio`
+  (`krusty_posix_io.c`); sockets and epoll (`krusty_posix_net.c`); the environment, `sysconf`,
+  signals, clocks, sleeping and `exit` (`krusty_posix_process.c`); `pthread_create`/`join`/`detach`
+  on the runtime's own `clone`, futex mutexes and condition variables (`krusty_posix_thread.c`); and
+  `<string.h>` (`krusty_posix_string.c`). Each has the C library's name and signature, returns -1 and
+  sets `errno` on failure, and takes glibc's struct layouts for the target: `stat` and `dirent` are
+  the kernel's on every supported target and pass through, as does `epoll_event` (packed on x86_64
+  only), while `sigaction` is translated from glibc's 1024-bit `sigset_t` to the kernel's 64-bit one,
+  with a restorer on x86_64 and aarch64. `errno` is per thread through `__errno_location`: the layer
+  owns the thread pointer (`%fs`, `tpidr_el0`, `tp`), which points at a block that is also the
+  `pthread_t`; the runtime reaches it only through two weak hooks, `kt_os_thread_begin`/`_end`, so a
+  program that links a real C library (which owns the thread pointer) leaves these translation units
+  out and nothing else changes. Where C's own rules are stricter than the kernel's, the layer keeps
+  C's: `fcntl` reads its third argument as nothing, an `int` or a pointer as the command says (a
+  command it does not know is EINVAL), since a variadic argument that was never passed cannot be
+  read; `raise` signals the calling thread (`tgkill`), not the process, whose handler could run on
+  another thread; `abort` unblocks SIGABRT, so a blocked one still ends the process on the signal
+  rather than with an exit status; and `memmove` picks its direction on the addresses as integers,
+  since `<` between pointers into two objects is undefined. Not yet: `printf`, `malloc`, buffered
+  writes, `fork`/`exec`. Tests: `tests/native_runtime_e2e.rs`
+  (`posix_files_answer_with_glibcs_layouts_and_errno`,
+  `posix_process_calls_cover_the_environment_signals_and_clocks`,
+  `posix_sockets_and_epoll_serve_a_loopback_connection`,
+  `posix_threads_keep_their_own_errno_and_share_mutexes`,
+  `posix_memmove_copies_between_objects_and_within_one_either_way`,
+  `posix_abort_ends_the_process_on_sigabrt_even_when_it_is_blocked`,
+  `posix_numbers_are_each_targets_own`), whose drivers compile against each target's own glibc
+  headers and link with no C library. Every number the layer copied by hand (open flags, `fcntl`
+  commands, errno values, `sysconf` names, signal flags, system call numbers) is checked by
+  `_Static_assert` against those headers (`posix_abi.c`), so a value copied from another
+  architecture fails that target's build; aarch64's `O_DIRECTORY`, for one, is `040000`, not the
+  asm-generic `0200000`. The drivers run on x86_64, aarch64 and riscv64, the last two under QEMU,
+  except that the two that install signal actions are only built for riscv64: QEMU 8.2's riscv64
+  `rt_sigaction` takes a structure one word longer than the riscv64 kernel's, which has no
+  `sa_restorer`.
 - **Native: the process boundary — `main(args)` and standard input.** The program's entry is the
   `main` the frontend selected (`IrFile::entry_point`): the backend realizes that record and reads
   its form only to decide whether to build and pass the argument array, so `main(args:
