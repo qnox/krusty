@@ -8419,6 +8419,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_nested_class_reaches_the_outer_class_private_member`,
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
+- **A visibility `@Suppress` is a lexical policy over signatures too.** A resolved `kotlin.Suppress`
+  application naming `INVISIBLE_REFERENCE` or `INVISIBLE_MEMBER` holds for the annotated
+  declaration and everything written inside it. Each declaration publishes the policy in force at
+  it (its file's, its lexically enclosing declarations', and its own applications), and a
+  signature scope reads only that declaration-owned fact: every resolver a signature scope builds
+  installs it as part of its access context, so classifier access in a supertype or member type,
+  constructor and function candidate visibility, and member access sites all consume one policy,
+  as the body checker consumes its policy stack. Signature solving is the one diagnostic authority
+  for a supertype reference, including one it resolves while publishing a classifier header; the
+  file-scope fallback no longer rechecks a superclass reference outside its declaration's policy.
+  Like kotlinc, an inaccessible superclass is reported twice: at the supertype reference and at
+  the constructor call's callee name (`: lib.Base(1)` reports at `lib` and at `Base`); the callee
+  report is checked under the class's own lexical policy. The policy relaxes visibility alone: a
+  final superclass is still rejected with kotlinc's FINAL_SUPERTYPE (`this type is final, so it
+  cannot be extended.`, at the superclass reference), and kotlinc's exposed-supertype and
+  exposed-signature checks are independent of it. An annotation whose resolved identity is not
+  `kotlin.Suppress` opens no policy. Tests:
+  `tests/internal_classpath_access_e2e.rs::invisible_reference_suppression_matches_kotlinc_exactly`
+  (`SupertypeSuppressed.kt`, `NestedSuppressed.kt`, `OuterSuppressed.kt`,
+  `MemberSignatureSuppressed.kt`, and the custom `Suppress` case),
+  `::signature_visibility_without_suppression_matches_kotlinc_exactly`,
+  `::invisible_reference_suppression_keeps_the_final_supertype_error`.
 - **A public-API `inline` function cannot call a non-public-API function.** Public and protected
   are public API, and so is `@PublishedApi internal`: the annotation's resolved classifier
   identity (`kotlin/PublishedApi`) is the declaration fact, on both the inline function and the
@@ -9490,6 +9512,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/serialization_type_parameter_elements_e2e.rs` (same-file and sibling-file runtime,
   plus `childSerializers`/`deserialize`/`typeParametersSerializers` and child-cache factory bodies,
   cross-checked against the reference compiler).
+- **A value-class `@Serializable` element is its underlying value, and a nullable element's null is
+  the absent value.** krusty writes and reads a value-class element through its underlying type's
+  serializer (the JSON matches kotlinc's inline value-class serializer). A nullable element
+  (`Label?`) is its underlying type made nullable, so a JSON `null` decodes. `write$Self` reads the
+  underlying value through the class's sole property, only when a nullable element is present.
+  Decoding hands the carrier to the deserialization constructor, which takes the box: a nullable
+  element's null stays `null`, and a non-null element is always boxed, so a `Stamp(val raw: String?)`
+  element read from `null` is `Stamp(null)` as kotlinc's `Stamp` serializer decodes it. The
+  constructor's argument is the box reference itself (`X`, not `X?`), so storing a nullable element
+  in a carrier-typed field unboxes it null-safely. kotlinc writes `Stamp(null)` in a nullable `Stamp?`
+  element as `null` and reads it back as `null`, and so does krusty.
+  Tests: `tests/serialization_nullable_value_class_e2e.rs` (cross-checked against the reference
+  compiler).
 - **An unsigned zero initializer is a JVM default like any other zero.** kotlinc omits a
   property's declaration store when its value is the one the field already holds, and that is
   observable: a base constructor that dispatches to an override runs before the subclass's
@@ -10651,6 +10686,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   box's physical type on the unboxed result, so the return unboxed the carrier again and the class
   failed verification. Tests: `tests/value_class_delegated_result_e2e.rs`. Corpus:
   `inlineClasses/boxReturnValueOnOverride/kt31585` and `kt31585Generic`.
+- **A `$default` stub takes a value class over a null-capable carrier as its box, wherever the
+  class is declared.** A defaulted non-null parameter of a value class whose carrier can hold
+  `null` (`Port(val raw: String?)`) is the box in the stub's descriptor and the carrier in the real
+  method's, and the stub unboxes it with `unbox-impl()` returning the carrier. Both sides of that
+  boundary read the class's facts, the same ones for a class this file, a sibling file or a
+  dependency declares: the `unbox-impl`/`box-impl` descriptors name the carrier (they named `Object`
+  for a class declared outside the file, which failed verification), and a call into a sibling
+  file's stub boxes a supplied argument and names the box in the descriptor (it named the carrier,
+  a `NoSuchMethodError`). Tests: `tests/sibling_value_class_data_class_e2e.rs` (cross-checked
+  against the reference compiler).
 - **A value class's constructors build the value in a temporary.** The static `constructor-impl`
   that runs a value class's `init` block first stores its parameter in an unnamed temporary typed
   as the value class; `this` and the class's property in the block read it, a `this` passed as a

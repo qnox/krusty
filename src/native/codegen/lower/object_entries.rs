@@ -33,7 +33,7 @@ impl FileLowering<'_> {
         let forwarded = super::super::super::captures::carried_parameters(self.ir, target);
         let forwarded_ret = self.ir.functions[target as usize].ret;
         if forwarded.len() != arity {
-            return Err(format!(
+            return Err(declined!(
                 "a function-slot bridge to `{}`, which takes {} of {arity} operands",
                 self.ir.functions[target as usize].name,
                 forwarded.len()
@@ -49,7 +49,7 @@ impl FileLowering<'_> {
                 // From the REFERENCE the caller passed: a function type's operands are boxed, and
                 // this is the same unboxing the uniform lambda entry point makes.
                 let Some(value) = body.convert(values[index + 1], Some(any()), want)? else {
-                    return Err("a `Unit` operand crossing the function slot".to_string());
+                    return Err("a `Unit` operand crossing the function slot".into());
                 };
                 arguments.push(value);
             }
@@ -99,7 +99,7 @@ impl FileLowering<'_> {
             for (index, &want) in forwarded.iter().enumerate() {
                 let have = carried.get(index).copied();
                 let Some(value) = body.convert(values[index + 1], have, want)? else {
-                    return Err("a `Unit` operand crossing a bridge".to_string());
+                    return Err("a `Unit` operand crossing a bridge".into());
                 };
                 arguments.push(value);
             }
@@ -112,7 +112,7 @@ impl FileLowering<'_> {
                 }
                 None => {
                     let Some(target) = body.file.functions[target as usize] else {
-                        return Err("a bridge to a method with no body".to_string());
+                        return Err("a bridge to a method with no body".into());
                     };
                     let func_ref = body.func_ref(target);
                     let mut operands = vec![values[0]];
@@ -128,7 +128,7 @@ impl FileLowering<'_> {
                 }
                 (Some(answer), _) => {
                     let Some(answer) = body.convert(answer, Some(forwarded_ret), result)? else {
-                        return Err("an answer that does not cross a bridge".to_string());
+                        return Err("an answer that does not cross a bridge".into());
                     };
                     body.builder.ins().return_(&[answer]);
                 }
@@ -145,7 +145,7 @@ impl FileLowering<'_> {
                     body.builder.ins().return_(&[]);
                 }
                 (None, Carrier::Scalar(_, _)) => {
-                    return Err("a `Unit` answer where the base declares a primitive".to_string());
+                    return Err("a `Unit` answer where the base declares a primitive".into());
                 }
             }
             body.terminate();
@@ -176,7 +176,7 @@ impl FileLowering<'_> {
         self.emit_function(id, signature, result, &name, &mut |body, values| {
             if setter {
                 let Some(value) = body.convert(values[1], Some(declared), implemented)? else {
-                    return Err("a `Unit` value crossing an accessor bridge".to_string());
+                    return Err("a `Unit` value crossing an accessor bridge".into());
                 };
                 body.dispatch(values[0], target_slot, &[implemented], Ty::Unit, &[value])?;
                 body.builder.ins().return_(&[]);
@@ -185,10 +185,10 @@ impl FileLowering<'_> {
             }
             let answer = body.dispatch(values[0], target_slot, &[], implemented, &[])?;
             let Some(answer) = answer else {
-                return Err("a `Unit` answer crossing an accessor bridge".to_string());
+                return Err("a `Unit` answer crossing an accessor bridge".into());
             };
             let Some(answer) = body.convert(answer, Some(implemented), declared)? else {
-                return Err("a `Unit` answer crossing an accessor bridge".to_string());
+                return Err("a `Unit` answer crossing an accessor bridge".into());
             };
             body.builder.ins().return_(&[answer]);
             body.terminate();
@@ -333,7 +333,7 @@ impl FileLowering<'_> {
         let (offset, ty) = self.value_storage(class)?;
         let clif = self.carrier(ty).clif().expect("a value is never `Unit`");
         let Some(target) = self.functions[function as usize] else {
-            return Err(format!(
+            return Err(declined!(
                 "a value class member with no body (`{}`)",
                 self.ir.functions[function as usize].name
             ));

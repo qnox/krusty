@@ -66,7 +66,7 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Result<Option<Value>, Unsupported> {
         let value = self.reference(receiver)?;
         let Some(index) = self.coerce(index, Ty::Int)? else {
-            return Err("a `Unit` string index".to_string());
+            return Err("a `Unit` string index".into());
         };
         if self.terminated {
             return Ok(None);

@@ -1053,6 +1053,35 @@ fn remap_class(class: &mut super::IrClass, names: &HashMap<TypeName, TypeName>) 
     }
 }
 
+/// The exact classifier remap, applied to a class's declaration record.
+struct RecordRenaming<'a>(&'a HashMap<TypeName, TypeName>);
+
+impl crate::metadata::class_declarations::ClassifierRenaming for RecordRenaming<'_> {
+    fn name(&self, value: TypeName) -> TypeName {
+        remapped_name(value, self.0)
+    }
+
+    fn ty(&self, value: Ty) -> Ty {
+        ty(value, self.0)
+    }
+
+    fn spelled(&self, value: &mut crate::spelling::Spelled) {
+        spelled(value, self.0);
+    }
+
+    fn spellings(&self, value: &mut crate::spelling::DeclaredSpellings) {
+        declared_spellings(value, self.0);
+    }
+
+    fn annotation(&self, value: &mut super::AppliedAnnotation) {
+        annotation_application(value, self.0);
+    }
+
+    fn type_parameters(&self, value: &mut [super::IrTypeParameter]) {
+        type_parameters(value, self.0);
+    }
+}
+
 impl super::IrFile {
     /// Replace semantic classifier identities with target physical identities at a backend boundary.
     /// The map is exact and declaration-produced; this operation performs no spelling lookup.
@@ -1093,6 +1122,10 @@ impl super::IrFile {
         }
         for class in &mut self.classes {
             remap_class(class, names);
+        }
+        remap_keyed(&mut self.class_declarations, names);
+        for record in self.class_declarations.values_mut().flatten() {
+            record.rename_classifiers(&RecordRenaming(names));
         }
         for parameters in self.fn_params.values_mut() {
             for receiver in &mut parameters.captured_receivers {
@@ -1233,14 +1266,6 @@ impl super::IrFile {
             aliases
                 .iter_mut()
                 .for_each(|alias| type_alias(alias, names));
-        }
-        for constructors in self.jvm_value_class_secondary_ctors.values_mut() {
-            for constructor in constructors {
-                for (_, parameter) in &mut constructor.params {
-                    *parameter = ty(*parameter, names);
-                }
-                annotations(&mut constructor.annotations, names);
-            }
         }
         for function in &mut self.package_functions {
             for (_, parameter) in &mut function.params {
@@ -1495,6 +1520,8 @@ impl super::IrFile {
         remap_keyed(&mut self.external_value_class_declarations, names);
 
         remap_first_key(&mut self.synthesized_data_class_members, names);
+        remap_first_key(&mut self.generated_classes, names);
+        remap_first_key(&mut self.generated_functions, names);
         remap_first_key(&mut self.generated_secondary_constructors, names);
         remap_first_key(&mut self.jvm_companion_property_statics, names);
         remap_first_key(&mut self.property_annotation_markers, names);

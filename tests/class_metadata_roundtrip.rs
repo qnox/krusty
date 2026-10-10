@@ -11,8 +11,8 @@ use krusty::jvm::metadata::{
     ScopedTypeParameter,
 };
 use krusty::metadata::class_builder::{
-    build_class, CapturedTypeParameters, ClassTail, CtorMeta, FnMeta, DEFAULT_CLASS_FLAGS,
-    EQUALS_FN_FLAGS,
+    build_class, CapturedTypeParameters, ClassTail, CtorMeta, FnMeta, JvmClassSignatures,
+    JvmConstructorSignature, DEFAULT_CLASS_FLAGS, EQUALS_FN_FLAGS,
 };
 use krusty::types::{type_name, Ty, TypeVariance};
 
@@ -74,12 +74,15 @@ fn class_member_value_params_round_trip() {
     )];
     let (d1, d2) = build_class(
         type_name("com/example/Greeter"),
-        &[("name".to_string(), Ty::String)], // primary ctor
-        "(Ljava/lang/String;)V",
+        &[("name".to_string(), Ty::String)],
         &[],
         &methods,
         &[],
         &ClassTail::default(),
+        &JvmClassSignatures {
+            primary_constructor: Some(JvmConstructorSignature::init("(Ljava/lang/String;)V")),
+            ..Default::default()
+        },
     );
     let ci = class_info("com/example/Greeter", d1, d2);
 
@@ -106,13 +109,18 @@ fn value_class_constructor_realization_name_round_trips() {
     let (d1, d2) = build_class(
         type_name("sample/Name"),
         &[("value".to_string(), Ty::String)],
-        "(Ljava/lang/String;)Ljava/lang/String;",
         &[],
         &[],
         &[],
         &ClassTail {
             inline_underlying: Some(("value", Some(Ty::String))),
-            ctor_sig_name: Some("constructor-impl"),
+            ..Default::default()
+        },
+        &JvmClassSignatures {
+            primary_constructor: Some(JvmConstructorSignature {
+                name: "constructor-impl".into(),
+                desc: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+            }),
             ..Default::default()
         },
     );
@@ -140,8 +148,6 @@ fn secondary_constructor_default_flags_round_trip() {
         params: &parameters,
         param_spellings: &[],
         param_defaults: &defaults,
-        desc: "(Ljava/lang/String;Ljava/lang/String;)V",
-        sig_name: None,
         vararg_index: None,
         flags: krusty::metadata::class_builder::SECONDARY_CTOR_FLAGS,
         annotations: &krusty::metadata::NO_ANNOTATIONS,
@@ -149,13 +155,22 @@ fn secondary_constructor_default_flags_round_trip() {
     let (d1, d2) = build_class(
         type_name("sample/Secondary"),
         &[],
-        "()V",
         &[],
         &[],
         &[],
         &ClassTail {
-            emit_primary_ctor: false,
             secondary_ctors: &secondary,
+            emit_primary_ctor: false,
+            ..Default::default()
+        },
+        &JvmClassSignatures {
+            primary_constructor: Some(JvmConstructorSignature {
+                name: "<init>".into(),
+                desc: "()V".into(),
+            }),
+            secondary_constructors: vec![JvmConstructorSignature::init(
+                "(Ljava/lang/String;Ljava/lang/String;)V",
+            )],
             ..Default::default()
         },
     );
@@ -181,12 +196,18 @@ fn synthesized_data_equals_recovers_its_implicit_equality_bound() {
     let (d1, d2) = build_class(
         type_name("sample/Data"),
         &[],
-        "()V",
         &[],
         &[equals],
         &[],
         &ClassTail {
             flags: DEFAULT_CLASS_FLAGS | (1 << 10),
+            ..Default::default()
+        },
+        &JvmClassSignatures {
+            primary_constructor: Some(JvmConstructorSignature {
+                name: "<init>".into(),
+                desc: "()V".into(),
+            }),
             ..Default::default()
         },
     );
@@ -212,13 +233,19 @@ fn class_type_parameter_bound_and_variance_round_trip() {
     let (d1, d2) = build_class(
         type_name("com/example/Producer"),
         &[],
-        "()V",
         &[],
         &[],
         &[],
         &ClassTail {
             type_params: &names,
             type_param_bounds: std::slice::from_ref(&parameter),
+            ..Default::default()
+        },
+        &JvmClassSignatures {
+            primary_constructor: Some(JvmConstructorSignature {
+                name: "<init>".into(),
+                desc: "()V".into(),
+            }),
             ..Default::default()
         },
     );
@@ -254,6 +281,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         reified: false,
     };
     let methods = vec![FnMeta {
+        has_source: true,
         contract: None,
         context_count: 0,
         context_parameter_kinds: Vec::new(),
@@ -285,8 +313,6 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         params_have_defaults: false,
         param_modifiers: Vec::new(),
         vararg_index: None,
-        jvm_sig: None,
-        jvm_sig_name: None,
         annotations: Default::default(),
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
@@ -296,7 +322,6 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
     let (d1, d2) = build_class(
         type_name("sample/Outer$Inner"),
         &[],
-        "(Lsample/Outer;)V",
         &[],
         &methods,
         &[],
@@ -304,6 +329,13 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
             type_params: &own_names,
             type_param_bounds: std::slice::from_ref(&own_parameter),
             captured_type_params: CapturedTypeParameters::Reserved(&captured),
+            ..Default::default()
+        },
+        &JvmClassSignatures {
+            primary_constructor: Some(JvmConstructorSignature {
+                name: "<init>".into(),
+                desc: "(Lsample/Outer;)V".into(),
+            }),
             ..Default::default()
         },
     );
@@ -342,6 +374,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
     };
     let parameter = |name: &str| (name.to_string(), Ty::ty_param(name, bound));
     let methods = vec![FnMeta {
+        has_source: true,
         contract: None,
         context_count: 0,
         context_parameter_kinds: Vec::new(),
@@ -358,8 +391,6 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         params_have_defaults: false,
         param_modifiers: Vec::new(),
         vararg_index: None,
-        jvm_sig: None,
-        jvm_sig_name: None,
         annotations: Default::default(),
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
@@ -369,7 +400,6 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
     let (d1, d2) = build_class(
         type_name("sample/Outer$Middle$Inner"),
         &[],
-        "(Lsample/Outer$Middle;)V",
         &[],
         &methods,
         &[],
@@ -377,6 +407,13 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
             type_params: &own_names,
             type_param_bounds: std::slice::from_ref(&own_parameter),
             captured_type_params: CapturedTypeParameters::Reserved(&captured),
+            ..Default::default()
+        },
+        &JvmClassSignatures {
+            primary_constructor: Some(JvmConstructorSignature {
+                name: "<init>".into(),
+                desc: "(Lsample/Outer$Middle;)V".into(),
+            }),
             ..Default::default()
         },
     );
@@ -423,11 +460,17 @@ fn member_type_parameter_bounds_can_reference_later_parameters() {
     let (d1, d2) = build_class(
         type_name("sample/ErrorTest"),
         &[],
-        "()V",
         &[],
         &[get],
         &[],
         &ClassTail::default(),
+        &JvmClassSignatures {
+            primary_constructor: Some(JvmConstructorSignature {
+                name: "<init>".into(),
+                desc: "()V".into(),
+            }),
+            ..Default::default()
+        },
     );
     let ci = class_info("sample/ErrorTest", d1, d2);
     let signature = class_functions(&ci)
