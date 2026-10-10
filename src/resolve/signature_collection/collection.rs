@@ -34,6 +34,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     diags: &mut DiagSink,
     compact_headers: Option<&crate::fir::StreamedHeaderModule>,
     compact_local_contexts: Option<&[PassOneLocalClassContext]>,
+    target: crate::compilation_target::CompilationTarget,
 ) -> SymbolTable {
     let stubs_by_source = compact_headers.map(stub_positions_by_source);
     let SourceTypeUniverse {
@@ -1258,22 +1259,25 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .resolved_annotation(i as u32, annotation)
                             .is_some_and(|name| name == type_name("kotlin/jvm/JvmInline"))
                     });
-                    let wrote_value_keyword = c.value_modifier_span.is_some();
-                    let full_value =
-                        wrote_value_keyword && !has_jvm_inline && file.full_value_classes;
-                    let unboxed_value_class = if wrote_value_keyword {
-                        has_jvm_inline
-                    } else {
-                        classifier_is_value
-                    };
-                    if wrote_value_keyword && !has_jvm_inline && !file.full_value_classes {
-                        if let Some(span) = c.value_modifier_span {
-                            diags.error(
-                                span,
-                                "value classes without '@JvmInline' annotation are not yet supported.",
-                            );
+                    let value_representation = c.value_modifier_span.map(|value_keyword| {
+                        ValueClassDeclaration {
+                            value_keyword,
+                            parameters: c.primary_constructor_parameters_span,
+                            parameter_count: classifier_header.primary_parameters.len(),
+                            jvm_inline: has_jvm_inline,
+                            final_class: classifier_flags.has(ClassFlags::FINAL),
                         }
-                    }
+                        .representation(
+                            target,
+                            file.full_value_classes,
+                            diags,
+                        )
+                    });
+                    let full_value = value_representation == Some(ValueClassRepresentation::Full);
+                    let unboxed_value_class = value_representation
+                        .map_or(classifier_is_value, |r| {
+                            r == ValueClassRepresentation::Inline
+                        });
                     // JVM erasure of every type parameter in scope: the enclosing declarations'
                     // (outer/local) first, then this class's own. A declared reference bound erases to
                     // the bound (`<T : Cargo>` → `Lapp/Cargo;`) — the class counterpart of what the

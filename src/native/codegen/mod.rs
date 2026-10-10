@@ -17,6 +17,7 @@
 //! taught declines with a diagnostic naming the construct — the same discipline the rest of the
 //! native track keeps. Nothing is ever emitted on a guess.
 
+use crate::compilation_target::CompilationTarget;
 mod lower;
 
 use crate::backend::{Artifact, Backend, CheckedIrFile};
@@ -90,6 +91,10 @@ pub struct CodegenModule {
 
 impl Backend for CraneliftBackend {
     type State = CodegenModule;
+
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+        CompilationTarget::Native
+    }
 
     fn lower_ir_file(
         &self,

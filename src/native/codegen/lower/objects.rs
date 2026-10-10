@@ -2350,6 +2350,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     pub(super) fn method_call(
         &mut self,
+        site: u32,
         class: ClassId,
         index: u32,
         receiver: u32,
@@ -2368,7 +2369,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 .map(|(ordinal, _)| ordinal as u32)
                 .collect();
             let supplied: Vec<u32> = args.iter().flatten().copied().collect();
-            return self.defaulted_call(fid, &omitted, Some(receiver), &supplied);
+            return self.defaulted_call(fid, &omitted, Some(receiver), &supplied, site);
         };
         if function.dispatch_receiver.is_none() {
             return Err(format!("a class-static call (`{}`)", function.name));

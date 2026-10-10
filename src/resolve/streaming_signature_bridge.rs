@@ -4704,17 +4704,13 @@ pub(crate) fn finalized_streamed_signature_index(
         if stub.kind == DeclarationKind::Classifier
             && flags.has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
         {
-            let jvm_inline = crate::types::type_name("kotlin/jvm/JvmInline");
             let class = table
                 .classes
                 .values()
                 .find(|class| class.stable_declaration == Some(stub.id));
-            if class.is_some_and(|class| {
-                class
-                    .annotations
-                    .iter()
-                    .any(|annotation| *annotation == jvm_inline)
-            }) {
+            // Signature collection decided the representation for the compilation target; an
+            // inline value class is the one it gave an underlying field.
+            if class.is_some_and(|class| class.value_field.is_some()) {
                 flags = flags.with(crate::fir::DeclarationFlags::VALUE, true);
             } else if class.is_some_and(|class| class.full_value) {
                 flags = flags.with(crate::fir::DeclarationFlags::FULL_VALUE, true);

@@ -7,6 +7,8 @@
 //! target at all. Which of those a given test treats as a failure is the test's business, which is
 //! why each helper below is a different answer to that one question.
 
+use krusty::backend::Backend as _;
+
 use super::jdk_modules;
 
 const NATIVE_SYS_HEADER: &str = include_str!("../../src/native/runtime/krusty_sys.h");
@@ -240,11 +242,22 @@ pub fn native_image(
         .iter()
         .map(|(stem, _)| (*stem).to_string())
         .collect();
+    // A conformance case answers through `box`; a program without one starts at Kotlin's `main`,
+    // which is how a test pins what the backend does with that entry.
+    let entry = if sources.iter().any(|(_, src)| src.contains("fun box(")) {
+        Entry::Box
+    } else {
+        Entry::Main
+    };
+    let backend = CraneliftBackend::new(target).with_entry(entry).verified();
     let mut features = krusty::features::LangFeatures::new();
     for (_, src) in sources {
         features.apply_source_directives(src);
     }
     let mut diags = DiagSink::new();
+    // The backend names the target the source set is analyzed for, so Native rules are not a
+    // choice this helper can get wrong.
+    let platform = krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform);
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
     );
@@ -254,14 +267,6 @@ pub fn native_image(
             refusal.msg
         )));
     }
-    // A conformance case answers through `box`; a program without one starts at Kotlin's `main`,
-    // which is how a test pins what the backend does with that entry.
-    let entry = if sources.iter().any(|(_, src)| src.contains("fun box(")) {
-        Entry::Box
-    } else {
-        Entry::Main
-    };
-    let backend = CraneliftBackend::new(target).with_entry(entry).verified();
     let module_name = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
     let artifacts =
         krusty::compiler::emit_analyzed(analysis, &stems, &backend, module_name, &mut diags);

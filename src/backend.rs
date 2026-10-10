@@ -49,6 +49,10 @@ pub trait Backend {
     /// Cross-file state accumulated while lowering.
     type State: Default;
 
+    /// The platform this backend emits for. The analysis it consumes must have been checked under
+    /// the same platform's rules.
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget;
+
     /// Consume one checked common-IR file produced by the streaming FIR path. No parsed source or
     /// AST-keyed semantic table crosses this boundary; target realization consumes only checked IR
     /// and compact stable module facts.

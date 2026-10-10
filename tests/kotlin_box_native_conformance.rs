@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
+use krusty::backend::Backend as _;
 use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, Entry, NativeTarget};
@@ -262,6 +263,10 @@ fn compile(
         .iter()
         .map(|(stem, _)| stem.clone())
         .collect::<Vec<_>>();
+    let backend = CraneliftBackend::new(target)
+        .with_entry(Entry::Box)
+        .verified();
+    let platform = krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform);
     let features = krusty::conformance::test_features(
         directive_source,
         krusty::conformance::TestTarget::Native,
@@ -273,9 +278,6 @@ fn compile(
     if let Some(first) = diags.diags.first() {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
-    let backend = CraneliftBackend::new(target)
-        .with_entry(Entry::Box)
-        .verified();
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "box", &mut diags);
     if let Some(decline) = diags
         .diags

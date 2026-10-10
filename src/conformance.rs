@@ -198,9 +198,9 @@ pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
 /// Language features Kotlin's codegen-test runner supplies for one target, followed by the test's
 /// own ordered `// LANGUAGE:` overrides.
 ///
-/// Kotlin/Native accepts full value classes without the JVM-only `@JvmInline` marker. Treating the
-/// absence of that annotation through the JVM feature baseline rejects the source before the
-/// Native backend can be tested.
+/// Native corpus migration still enables full value classes as a harness compatibility setting.
+/// The compiler target remains an explicit frontend input; removing this corpus setting belongs to
+/// the later migration that fixes the remaining backend cases instead of growing the ratchet.
 pub fn test_features(src: &str, target: TestTarget) -> crate::features::LangFeatures {
     let mut features = crate::features::LangFeatures::new();
     if target == TestTarget::Native {
@@ -1050,21 +1050,6 @@ mod tests {
         assert_eq!(
             prepare_test_source(source, TestTarget::Jvm),
             "@JvmInline\nvalue class V(val x: Int)\nval here = \"JVM_IR\""
-        );
-    }
-
-    #[test]
-    fn native_test_features_accept_unannotated_value_classes_and_keep_directive_overrides() {
-        assert!(
-            test_features("value class V(val x: Int)", TestTarget::Native).has("FullValueClasses")
-        );
-        assert!(!test_features(
-            "// LANGUAGE: -FullValueClasses\nvalue class V(val x: Int)",
-            TestTarget::Native,
-        )
-        .has("FullValueClasses"));
-        assert!(
-            !test_features("value class V(val x: Int)", TestTarget::Jvm).has("FullValueClasses")
         );
     }
 
@@ -1957,6 +1942,21 @@ fun box(): String = f()
                     refines: vec!["mid".to_string(), "common".to_string()],
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn native_test_features_keep_the_existing_corpus_compatibility_setting() {
+        assert!(
+            test_features("value class V(val x: Int)", TestTarget::Native).has("FullValueClasses")
+        );
+        assert!(!test_features(
+            "// LANGUAGE: -FullValueClasses\nvalue class V(val x: Int)",
+            TestTarget::Native,
+        )
+        .has("FullValueClasses"));
+        assert!(
+            !test_features("value class V(val x: Int)", TestTarget::Jvm).has("FullValueClasses")
         );
     }
 }

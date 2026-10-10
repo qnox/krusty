@@ -48,7 +48,7 @@ fn analyze(sources: &[&str]) -> Vec<Unit> {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );

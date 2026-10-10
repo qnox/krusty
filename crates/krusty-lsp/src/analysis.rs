@@ -5350,7 +5350,10 @@ mod tests {
     fn document_analysis_for(source: &str) -> DocumentAnalysis {
         let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_classpath());
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let mut frontend = crate::compiler_analysis::analyze_source_set(&[source], platform);
+        let mut frontend = crate::compiler_analysis::analyze_source_set(
+            &[source],
+            krusty::frontend::PlatformProvider::jvm(platform),
+        );
         let highlights = HighlightSymbols::from_source_set(&frontend.files, &frontend.symbols);
         let definitions = DefinitionSymbols::from_source_set(
             &[source],
@@ -8281,7 +8284,10 @@ mod tests {
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             krusty::toolchain::stdlib_classpath(),
         ));
-        let analysis = crate::compiler_analysis::analyze_source_set(&[source], platform);
+        let analysis = crate::compiler_analysis::analyze_source_set(
+            &[source],
+            krusty::frontend::PlatformProvider::jvm(platform),
+        );
         let index =
             SemanticTokenIndex::from_file_analysis(source, &analysis.files[0], &analysis.symbols);
         let tokens = decoded_tokens(&index);
@@ -8342,7 +8348,10 @@ mod tests {
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             krusty::toolchain::stdlib_classpath(),
         ));
-        let analysis = crate::compiler_analysis::analyze_source_set(&[source], platform);
+        let analysis = crate::compiler_analysis::analyze_source_set(
+            &[source],
+            krusty::frontend::PlatformProvider::jvm(platform),
+        );
         let index =
             SemanticTokenIndex::from_file_analysis(source, &analysis.files[0], &analysis.symbols);
         let tokens = decoded_tokens(&index);

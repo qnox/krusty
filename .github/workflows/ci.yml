@@ -168,7 +168,13 @@ jobs:
         with:
           path: target/cache/box-corpus
           key: klib-semantics-box-corpus-mock-jdk-${{ hashFiles('kotlin-versions') }}
-      - name: decode the Kotlin/Native stdlib through common metadata
+      # kotlinc-native fetches its toolchain dependencies (LLVM, sysroots) on first use.
+      - name: cache Kotlin/Native dependencies
+        uses: actions/cache@v6
+        with:
+          path: ~/.konan/dependencies
+          key: klib-semantics-konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
+      - name: decode the Kotlin/Native stdlib and compare with kotlinc-native
         run: just klib-semantics
 
   # One gate build of the binaries the matrices run. Conformance uses the test binary and the

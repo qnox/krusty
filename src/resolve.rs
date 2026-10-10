@@ -24961,7 +24961,11 @@ val result = object { fun value(): String = captured }
         platform: Box<dyn crate::libraries::SemanticPlatform>,
     ) -> (File, TypeInfo, DiagSink) {
         let mut diagnostics = DiagSink::new();
-        let (file, _, info) = crate::frontend::analyze_source(src, platform, &mut diagnostics);
+        let (file, _, info) = crate::frontend::analyze_source(
+            src,
+            crate::frontend::PlatformProvider::jvm(platform),
+            &mut diagnostics,
+        );
         let info = info.expect("production frontend must retain checked platform analysis");
         (file, info, diagnostics)
     }
@@ -24981,7 +24985,7 @@ val result = object { fun value(): String = captured }
             .collect::<Vec<_>>();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare_retained(
             &inputs,
-            Box::new(crate::libraries::EmptySymbolSource),
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
             &LangFeatures::new(),
             prepare_symbols,
             &mut diagnostics,
@@ -25021,7 +25025,7 @@ val result = object { fun value(): String = captured }
         ];
         let mut analysis = crate::frontend::analyze_source_set(
             &sources,
-            Box::new(crate::libraries::EmptySymbolSource),
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
             &mut diagnostics,
         );
         let info = analysis.types.get_mut(3).and_then(Option::take);
@@ -28090,7 +28094,7 @@ fun box(): String {
              }";
         let analysis = crate::frontend::analyze_source_set_with_features(
             &[crate::source::SourceInput::kotlin(source).with_file_stem("Diamond")],
-            Box::new(crate::libraries::EmptySymbolSource),
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
             &crate::features::LangFeatures::new(),
             &mut diagnostics,
         );
@@ -28395,7 +28399,7 @@ fun box(): String {
         let cp = std::rc::Rc::new(crate::toolchain::stdlib_classpath());
         let (file, symbols, info) = crate::frontend::analyze_source(
             source,
-            Box::new(initialized_jvm_libraries(cp)),
+            crate::frontend::PlatformProvider::jvm(Box::new(initialized_jvm_libraries(cp))),
             &mut diagnostics,
         );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
@@ -29725,8 +29729,11 @@ fun box(): String {
                  if ((PREFIX as String?) == \"ignored\") return \"early\"\n\
                  return consume(PREFIX)\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            crate::frontend::PlatformProvider::jvm(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert_no_diags(&diagnostics);
     }
 
@@ -29798,7 +29805,7 @@ fun box(): String {
         let inputs = [crate::frontend::SourceInput::kotlin(source)];
         let mut analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
-            Box::new(platform),
+            crate::frontend::PlatformProvider::jvm(Box::new(platform)),
             &LangFeatures::from_source(source),
             &mut diagnostics,
         );
@@ -30673,8 +30680,11 @@ fun use() {
                  execute(Command::Add); execute(Command(), Command::InnerAdd)\n\
                  use0(o::Inner).result\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            crate::frontend::PlatformProvider::jvm(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -30687,8 +30697,11 @@ fun use() {
              fun withO(block: (String) -> String): String = \"\"\n\
              object Host { fun hostFoo(vararg values: String): String = \"\" }\n\
              fun use() { consume(::of); withO(::hostFoo) }";
-        let (file, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let (file, symbols, info) = crate::frontend::analyze_source(
+            source,
+            crate::frontend::PlatformProvider::jvm(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         let _ = info.expect("production frontend must check the source");
         let files = vec![file];
@@ -30748,8 +30761,11 @@ fun use() {
                  use0(o::Inner1).result; use1(o::Inner1).result\n\
                  use0(o::Inner2).result; use1(o::Inner2).result\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            crate::frontend::PlatformProvider::jvm(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -30835,8 +30851,11 @@ fun use() {
     fn unannotated_delegated_properties_infer_classpath_extension_getvalue_return() {
         let source = "package test\nclass Delegate\nval prop by Delegate()";
         let mut diagnostics = DiagSink::new();
-        let (file, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let (file, symbols, info) = crate::frontend::analyze_source(
+            source,
+            crate::frontend::PlatformProvider::jvm(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         let info = info.expect("production frontend must check the source");
         assert!(
@@ -31981,7 +32000,7 @@ fun use(counter: Counter) {
         let inputs = [crate::frontend::SourceInput::kotlin(source)];
         let mut analysis = crate::frontend::analyze_source_set_with_features_and_prepare_retained(
             &inputs,
-            Box::new(crate::libraries::EmptySymbolSource),
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
             &LangFeatures::new(),
             |_, symbols| {
                 // Keep interface search active when superclass metadata is external.
@@ -32176,8 +32195,11 @@ fun use(counter: Counter) {
         let mut diagnostics = DiagSink::new();
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib]));
         let platform = initialized_jvm_libraries(classpath);
-        let (_, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(platform), &mut diagnostics);
+        let (_, symbols, info) = crate::frontend::analyze_source(
+            source,
+            crate::frontend::PlatformProvider::jvm(Box::new(platform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         assert!(info.is_some(), "production frontend must check the source");
         {

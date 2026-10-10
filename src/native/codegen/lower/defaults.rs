@@ -194,14 +194,20 @@ impl<'a> FileLowering<'a> {
         // arguments does not decide which implementation runs. Where the method has a slot, the
         // wrapper dispatches through it; a method with none — a top-level function, or a final
         // member with no vtable entry — is called directly.
+        // A value class is final and its member takes the VALUE as `this`, so the member is
+        // called directly.
+        let value_receiver = declaration
+            .dispatch_receiver
+            .is_some_and(|owner| self.values.is_value_class(owner));
         let virtual_slot = declaration
             .dispatch_receiver
+            .filter(|_| !value_receiver)
             .and_then(|owner| self.ir.class_id_by_name(owner))
             .and_then(|class| {
                 let key = model::function_key(self.ir, class, key.function);
                 self.model.slot(class, &key)
             });
-        if declaration.dispatch_receiver.is_some() && virtual_slot.is_none() {
+        if declaration.dispatch_receiver.is_some() && !value_receiver && virtual_slot.is_none() {
             // Calling the declaration directly would run the base's body for a receiver whose
             // class overrides it. A member with no slot is one this model does not dispatch — a
             // member extension today — so the call is declined rather than answered by the wrong
@@ -287,6 +293,7 @@ impl BodyLowering<'_, '_, '_> {
         omitted: &[u32],
         receiver: Option<u32>,
         args: &[u32],
+        site: u32,
     ) -> Result<Option<Value>, Unsupported> {
         let key = super::defaults::Omission {
             function,
@@ -306,13 +313,25 @@ impl BodyLowering<'_, '_, '_> {
             .collect();
         let mut arguments = Vec::with_capacity(parameters.len() + 1);
         match (wants_receiver, receiver) {
-            (true, Some(receiver)) => {
-                let Some(object) = self.receiver(receiver)? else {
-                    return Ok(None);
-                };
-                self.null_check(object)?;
-                arguments.push(object);
-            }
+            (true, Some(receiver)) => match declaration.dispatch_receiver {
+                // The wrapper takes a value class's receiver as the value, which is never null.
+                Some(owner) if self.file.values.is_value_class(owner) => {
+                    let Some(value) = self.coerce(receiver, Ty::Obj(owner, &[]))? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    arguments.push(value);
+                }
+                _ => {
+                    let Some(object) = self.receiver(receiver)? else {
+                        return Ok(None);
+                    };
+                    self.null_check(object)?;
+                    arguments.push(object);
+                }
+            },
             (true, None) => return Err("a defaulted member call with no receiver".to_string()),
             (false, _) => {}
         }
@@ -322,7 +341,17 @@ impl BodyLowering<'_, '_, '_> {
         }
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
-        Ok(self.builder.inst_results(call).first().copied())
+        let Some(result) = self.builder.inst_results(call).first().copied() else {
+            return Ok(None);
+        };
+        // The wrapper answers in the declaration's representation. An inherited provider declares
+        // the result as its own type parameter, so `Input<V>.foo()` answers a box where the call
+        // reads a `V`.
+        let declared = self.file.ir.functions[function as usize].ret;
+        match self.type_of(site) {
+            Some(read) => self.convert(result, Some(declared), read),
+            None => Ok(Some(result)),
+        }
     }
 }
 
@@ -569,7 +598,9 @@ impl<'a> FileLowering<'a> {
             let Some(frame) = self.constructor_frame_of(class, secondary) else {
                 continue;
             };
-            let mut parameters = vec![Ty::Obj(self.ir.classes[class as usize].fq_name_id(), &[])];
+            // The constructor fills the object the call site allocated, a value class's box
+            // included, so `this` is a reference whatever the class's own carrier is.
+            let mut parameters = vec![any()];
             for (ordinal, ty) in frame.iter().enumerate() {
                 if key.omitted.contains(&(ordinal as u32)) {
                     continue;
@@ -624,7 +655,7 @@ impl<'a> FileLowering<'a> {
                 "a construction with a defaulted argument of `{name}`, whose constructor is absent"
             ));
         };
-        let mut parameters = vec![Ty::Obj(declaration.fq_name_id(), &[])];
+        let mut parameters = vec![any()];
         let mut supplied = Vec::new();
         for (ordinal, ty) in frame.iter().enumerate() {
             if key.omitted.contains(&(ordinal as u32)) {
@@ -642,7 +673,7 @@ impl<'a> FileLowering<'a> {
                 .copied(),
         }
         .expect("checked when the wrapper was declared");
-        let mut slots = vec![Ty::Obj(declaration.fq_name_id(), &[])];
+        let mut slots = vec![any()];
         slots.extend(frame.iter().copied());
         let omitted = key.omitted.clone();
         let label = format!("{name}.<init>$defaults");

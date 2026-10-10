@@ -9,7 +9,9 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, kotlinc_box_result};
+use super::common::{
+    expect_box_ok_with_stdlib, expect_native_box, kotlin_native_box, kotlinc_box_result,
+};
 
 /// Require kotlinc's answer, krusty's JVM answer and the NATIVE answer to agree.
 fn every_backend_agrees_with_kotlinc(stem: &str, source: &str) {
@@ -233,4 +235,74 @@ fn a_multi_field_value_class_keeps_every_field() {
          \x20   return \"OK\"\n\
          }\n";
     every_backend_agrees_with_kotlinc("MultiFieldValueClass", source);
+}
+
+/// Kotlin/Native reads a single-field `value class` as inline from the keyword alone. Without
+/// `@JvmInline` it answers exactly as an annotated one does, through the value and through a box.
+/// kotlinc-native compiles this program and answers "OK" (recorded, or run live where
+/// kotlin-native is provisioned); the JVM rejects it.
+#[test]
+fn a_value_class_needs_no_jvm_inline_on_native() {
+    let source = "value class Count(val n: Int) {\n\
+         \x20   fun doubled(): Int = n * 2\n\
+         }\n\
+         value class Label(val text: String)\n\
+         fun describe(value: Any): String = when (value) {\n\
+         \x20   is Count -> \"count ${value.n}\"\n\
+         \x20   else -> \"other\"\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   if (Count(1) != Count(1)) return \"fail 1\"\n\
+         \x20   if (Count(1) == Count(2)) return \"fail 2\"\n\
+         \x20   if (Count(1).hashCode() != Count(1).hashCode()) return \"fail 3\"\n\
+         \x20   if (Count(1).toString() != \"Count(n=1)\") return \"fail 4: ${Count(1)}\"\n\
+         \x20   if (Count(21).doubled() != 42) return \"fail 5\"\n\
+         \x20   val any: Any = Count(3)\n\
+         \x20   if (describe(any) != \"count 3\") return \"fail 6: ${describe(any)}\"\n\
+         \x20   val label: Label? = Label(\"ab\")\n\
+         \x20   if (\"$label\" != \"Label(text=ab)\") return \"fail 7: $label\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    if let Some(answer) = kotlin_native_box(source) {
+        assert_eq!(answer, "OK", "kotlinc-native's answer");
+    }
+    expect_native_box(source, "UnannotatedValueClass", "OK");
+}
+
+/// An override whose declared result is a value class answers a call through a generic interface
+/// whose result is the type parameter: the call site holds the value class's box, and the default
+/// argument stub carries the override's own representation.
+#[test]
+fn a_value_class_result_reaches_a_generic_caller_through_a_default_argument() {
+    let source = "@JvmInline value class Ucn(private val i: UInt)\n\
+         interface Input<T> {\n\
+         \x20   fun foo(n: Int = 0): T\n\
+         }\n\
+         class Kx(val x: UInt) : Input<Ucn> {\n\
+         \x20   override fun foo(n: Int): Ucn = if (n < 0) Ucn(0u) else Ucn(x)\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val p = Kx(42u).foo()\n\
+         \x20   if (p.toString() != \"Ucn(i=42)\") return \"fail: $p\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("GenericValueClassResult", source);
+}
+
+/// A value class's defaulted constructor fills the box the call site allocated, and a defaulted
+/// member takes the value as `this` and is called directly: a value class is final.
+#[test]
+fn a_value_class_fills_its_defaulted_arguments() {
+    let source = "@JvmInline value class Z(val x: Int = 1234) {\n\
+         \x20   fun test(y: Int = 42) = x + y\n\
+         }\n\
+         @JvmInline value class S(val x: String = \"foobar\")\n\
+         fun box(): String {\n\
+         \x20   if (Z().x != 1234) return \"fail 1\"\n\
+         \x20   if (S().x != \"foobar\") return \"fail 2\"\n\
+         \x20   if (Z(800).test() != 842) return \"fail 3\"\n\
+         \x20   if (Z(400).test(32) != 432) return \"fail 4\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassDefaults", source);
 }

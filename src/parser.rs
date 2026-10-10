@@ -161,6 +161,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         is_data: false,
         is_value: false,
         value_modifier_span: None,
+        primary_constructor_parameters_span: None,
         kind: ClassKind::Class,
         singleton: false,
         enum_entries: Vec::new(),
@@ -2198,6 +2199,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
@@ -2585,6 +2587,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Enum,
             singleton: false,
             enum_entries: entries,
@@ -3157,7 +3160,9 @@ impl<'a> Parser<'a> {
         }
         let mut props = Vec::new();
         let mut ctor_close_lo = 0u32;
+        let primary_ctor_open = self.tok().span.lo;
         let has_primary_ctor_parens = self.eat(TokenKind::LParen);
+        let mut primary_constructor_parameters_span = None;
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
         if has_primary_ctor_parens {
             self.skip_newlines();
@@ -3230,7 +3235,10 @@ impl<'a> Parser<'a> {
             // The byte offset of the primary ctor's `)` — rewritten to a source LINE by the
             // decl-line post-pass; kotlinc maps the ctor `$default`'s `return` to it.
             ctor_close_lo = self.tok().span.lo;
-            self.expect(TokenKind::RParen, "')'");
+            let close = self.tok().span;
+            if self.expect(TokenKind::RParen, "')'") {
+                primary_constructor_parameters_span = Some(Span::new(primary_ctor_open, close.hi));
+            }
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
@@ -3338,6 +3346,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3691,6 +3700,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Interface,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3804,6 +3814,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3939,6 +3950,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Class,
             singleton: true,
             enum_entries: Vec::new(),

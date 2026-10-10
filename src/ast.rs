@@ -1124,6 +1124,9 @@ pub struct ClassDecl {
     /// Span of the `value` keyword. Absent for a legacy `inline class` and for an ordinary class.
     /// The missing-`@JvmInline` diagnostic points here.
     pub value_modifier_span: Option<Span>,
+    /// Span of the primary constructor's parameter list, `(` through `)`. Absent when the class
+    /// writes no parameter list.
+    pub primary_constructor_parameters_span: Option<Span>,
     /// `enum class Name { A, B }` — the entries in declaration order (extends `java/lang/Enum`). Each
     /// [`AstEnumEntry`] carries its own name / constructor args / body methods / body properties.
     pub enum_entries: Vec<AstEnumEntry>,

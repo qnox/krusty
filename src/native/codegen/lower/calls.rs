@@ -55,6 +55,7 @@ impl BodyLowering<'_, '_, '_> {
 
     pub(super) fn call(
         &mut self,
+        site: u32,
         callee: &Callee,
         dispatch_receiver: Option<u32>,
         args: &[u32],
@@ -63,11 +64,11 @@ impl BodyLowering<'_, '_, '_> {
             Callee::LocalWithDefaults { function, defaults }
             | Callee::ClassStaticWithDefaults {
                 function, defaults, ..
-            } => self.defaulted_call(*function, defaults, dispatch_receiver, args),
+            } => self.defaulted_call(*function, defaults, dispatch_receiver, args, site),
             Callee::ModuleWithDefaults { defaults, .. } => {
                 match self.file.inherited_default_provider(callee) {
                     Some(provider) => {
-                        self.defaulted_call(provider, defaults, dispatch_receiver, args)
+                        self.defaulted_call(provider, defaults, dispatch_receiver, args, site)
                     }
                     None => Err(format!("a {} call", callee_kind(callee))),
                 }

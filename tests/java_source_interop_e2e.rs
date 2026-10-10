@@ -352,10 +352,10 @@ fn run_kotlin_first(kotlin: &str, java: &[(&str, &str)]) -> String {
     let mut diagnostics = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        krusty::frontend::PlatformProvider::jvm(Box::new(
             krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &krusty::features::LangFeatures::new(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,

@@ -1479,7 +1479,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 callee,
                 dispatch_receiver,
                 args,
-            } => self.call(&callee, dispatch_receiver, &args),
+            } => self.call(id, &callee, dispatch_receiver, &args),
             IrExpr::TypeOp {
                 op,
                 arg,
@@ -1551,7 +1551,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 index,
                 receiver,
                 args,
-            } => self.method_call(class, index, receiver, &args),
+            } => self.method_call(id, class, index, receiver, &args),
             IrExpr::GetField {
                 receiver,
                 class,
