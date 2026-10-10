@@ -1,8 +1,8 @@
-//! A property read inside a non-private inline member function.
+//! Property access inside a non-private inline member function.
 //!
 //! A caller in another class splices the inline body, so the body cannot load this class's private
-//! backing field: kotlinc reads the property through its getter there, while an ordinary method of
-//! the same class keeps the direct field load.
+//! backing field: kotlinc reaches the property through its getter or setter there, while an ordinary
+//! method of the same class keeps direct field access.
 
 use super::common;
 
@@ -31,5 +31,18 @@ fn a_public_inline_object_member_reads_a_property_through_its_getter() {
          \x20   fun direct(): String = log\n\
          }\n",
         "sample/Registry",
+    );
+}
+
+#[test]
+fn a_public_inline_member_writes_a_property_through_its_setter() {
+    common::assert_class_code_matches_kotlinc(
+        "Counter",
+        "package sample\n\
+         class Counter(var value: Int) {\n\
+         \x20   inline fun increment(): Int { value += 1; return value }\n\
+         \x20   fun direct(): Int { value += 1; return value }\n\
+         }\n",
+        "sample/Counter",
     );
 }

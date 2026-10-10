@@ -1,7 +1,7 @@
-//! Selecting the physical read for a property declared by the module being emitted.
+//! Selecting physical access for a property declared by the module being emitted.
 //!
 //! Local declarations have no class file to query. Their recorded property, field, accessor, and
-//! bridge identities are therefore the complete source of the JVM read shape.
+//! bridge identities are therefore the complete source of the JVM access shape.
 
 use super::*;
 
@@ -35,9 +35,13 @@ impl Emitter<'_> {
             return true;
         }
         // A body a caller may splice into another class cannot name this class's private field: a
-        // non-private inline function reads a non-private property through its getter, as kotlinc
-        // does in a public inline scope. A private property keeps its exported field accessor.
-        if !writable && self.export_private_calls && declared.is_some_and(|p| !p.is_private) {
+        // non-private inline function reaches a non-private property through its getter or setter,
+        // as kotlinc does in a public inline scope. A private property keeps its exported field
+        // accessor. A writable `val` remains a direct deferred-initialization write because it has
+        // no setter.
+        if self.export_private_calls
+            && declared.is_some_and(|p| !p.is_private && (!writable || p.is_var))
+        {
             return false;
         }
         // An explicit backing field is a different type from the property. The checker already
