@@ -50035,12 +50035,11 @@ impl<'a> Checker<'a> {
             let header_scope = scope.child(ScopeKind::Block);
             header_scope.declare_tparams(&cl.type_params, &class_tparams, |_| false);
             if let Some(base) = cl.base_class.as_deref() {
-                let reference = base_class_type_ref(
-                    base,
-                    &cl.base_type_args,
-                    cl.base_class_span.unwrap_or(cl.span),
-                );
-                self.type_ref_ty(&header_scope, &reference);
+                let span = cl.base_class_span.unwrap_or(cl.span);
+                let reference = base_class_type_ref(base, &cl.base_type_args, span);
+                if !self.resolved_type_tys.contains_key(&(span.lo, span.hi)) {
+                    self.type_ref_ty(&header_scope, &reference);
+                }
             }
             for reference in &cl.supertypes {
                 self.type_ref_ty(&header_scope, reference);
