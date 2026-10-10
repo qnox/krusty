@@ -9512,6 +9512,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/serialization_type_parameter_elements_e2e.rs` (same-file and sibling-file runtime,
   plus `childSerializers`/`deserialize`/`typeParametersSerializers` and child-cache factory bodies,
   cross-checked against the reference compiler).
+- **A value-class `@Serializable` element is its underlying value, and a nullable element's null is
+  the absent value.** krusty writes and reads a value-class element through its underlying type's
+  serializer (the JSON matches kotlinc's inline value-class serializer). A nullable element
+  (`Label?`) is its underlying type made nullable, so a JSON `null` decodes. `write$Self` reads the
+  underlying value through the class's sole property, only when a nullable element is present.
+  Decoding hands the carrier to the deserialization constructor, which takes the box: a nullable
+  element's null stays `null`, and a non-null element is always boxed, so a `Stamp(val raw: String?)`
+  element read from `null` is `Stamp(null)` as kotlinc's `Stamp` serializer decodes it. The
+  constructor's argument is the box reference itself (`X`, not `X?`), so storing a nullable element
+  in a carrier-typed field unboxes it null-safely. kotlinc writes `Stamp(null)` in a nullable `Stamp?`
+  element as `null` and reads it back as `null`, and so does krusty.
+  Tests: `tests/serialization_nullable_value_class_e2e.rs` (cross-checked against the reference
+  compiler).
 - **An unsigned zero initializer is a JVM default like any other zero.** kotlinc omits a
   property's declaration store when its value is the one the field already holds, and that is
   observable: a base constructor that dispatches to an override runs before the subclass's
