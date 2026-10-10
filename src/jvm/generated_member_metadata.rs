@@ -1,208 +1,83 @@
 //! JVM realization of producer-owned generated-function metadata.
 //!
-//! Common IR publishes language-level identity, visibility, and exact parameter names. This
-//! boundary combines those facts with the function's post-lowering JVM representation without
-//! inventing names or selecting declarations by spelling.
+//! The class's declaration record describes a generated function from the language-level identity,
+//! visibility, and exact parameter names its producer published. This boundary adds how the JVM
+//! realizes that function after lowering, without inventing names or selecting declarations by
+//! spelling.
 
-use crate::ir::{IrFile, IrGeneratedMemberPublication};
-use crate::metadata::class_builder::FnMeta;
-use crate::types::Visibility;
+use crate::ir::IrFile;
+use crate::metadata::class_builder::{FnMeta, JvmFunctionSignature};
 
-pub(super) fn functions(ir: &IrFile, publication: &IrGeneratedMemberPublication) -> Vec<FnMeta> {
-    publication
-        .functions
-        .iter()
-        .filter_map(|member| {
-            let metadata = member.metadata.as_ref()?;
-            let function = &ir.functions[member.function as usize];
-            let declared = ir.vc_declared_sigs.get(&member.function);
-            let realized_params = declared
-                .map(|(_, params, _)| params.as_slice())
-                .unwrap_or(function.params.as_slice());
-            let realized_ret = declared.map(|(_, _, ret)| *ret).unwrap_or(function.ret);
-            let semantic_signature = ir.signatures.get(&member.function);
-            let member_semantic = ir.member_semantic_sigs.get(&member.function);
-            let params = semantic_signature
-                .map(|signature| signature.params.as_slice())
-                .or(member_semantic.map(|(params, _)| params.as_slice()))
-                .unwrap_or(realized_params);
-            let ret = semantic_signature
-                .and_then(|signature| signature.ret)
-                .or(member_semantic.map(|(_, ret)| *ret))
-                .unwrap_or(realized_ret);
-            assert_eq!(
-                member.parameter_identities.len(),
-                params.len(),
-                "generated metadata parameter identities exactly match semantic arity"
-            );
-            let mut result = FnMeta::plain(
-                metadata.source_name.clone(),
-                member
-                    .parameter_identities
-                    .iter()
-                    .map(|identity| {
-                        crate::jvm::parameter_names::metadata_owned(identity)
-                            .expect("generated metadata parameters carry semantic names")
-                    })
-                    .zip(params.iter().copied())
-                    .collect(),
-                ret,
-            );
-            result.flags = function_flags(ir, member.function, function, metadata.visibility);
-            let physical_descriptor = crate::jvm::names::method_descriptor(
-                &crate::jvm::ir_emit::jvm_tys(&function.params),
-                function.ret,
-            );
-            let declared_descriptor =
-                crate::jvm::names::method_descriptor(&crate::jvm::ir_emit::jvm_tys(params), ret);
-            // The descriptor is recorded when it differs from the declared one, and also when a
-            // reader could not derive it from the recorded types at all — a `kotlin/Array` anywhere
-            // in the signature, whose descriptor depends on the type ARGUMENT. That is the rule
-            // every other metadata path applies, and it is why kotlinc records one for a generated
-            // `childSerializers(): Array<KSerializer<*>>` while recording none for its siblings.
-            let underivable = std::iter::once(ret)
-                .chain(params.iter().copied())
-                .any(crate::metadata::descriptor_needs_recording);
-            if physical_descriptor != declared_descriptor || underivable {
-                result.jvm_sig = Some(physical_descriptor);
-            }
-            if function.name != metadata.source_name {
-                result.jvm_sig_name = Some(function.name.clone());
-            }
-            result.annotations = crate::metadata::MetadataAnnotations::of_optional(
-                ir.function_annotations.get(&member.function),
-            );
-            Some(result)
-        })
-        .collect()
-}
-
-fn function_flags(
-    ir: &IrFile,
-    function_id: u32,
-    function: &crate::ir::IrFunction,
-    visibility: Visibility,
-) -> u64 {
-    let visibility = match visibility {
-        Visibility::Internal => 0,
-        Visibility::Private => 1,
-        Visibility::Protected => 2,
-        Visibility::Public => 3,
-        Visibility::PackagePrivate => {
-            unreachable!("package-private is never published in Kotlin metadata")
-        }
-    };
-    let modality = if function.body.is_none() {
-        2
-    } else if ir.open_methods.contains(&function_id) {
-        1
-    } else {
-        0
-    };
-    (visibility << 1) | (modality << 4)
+/// How the JVM realizes the generated `function` its class's record describes as `record`: the
+/// physical name and descriptor, each recorded only where a reader cannot rebuild it.
+pub(super) fn signature(ir: &IrFile, function: u32, record: &FnMeta) -> JvmFunctionSignature {
+    let realized = &ir.functions[function as usize];
+    let params = record.params.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
+    let physical_descriptor = crate::jvm::names::method_descriptor(
+        &crate::jvm::ir_emit::jvm_tys(&realized.params),
+        realized.ret,
+    );
+    let declared_descriptor =
+        crate::jvm::names::method_descriptor(&crate::jvm::ir_emit::jvm_tys(&params), record.ret);
+    // The descriptor is recorded when it differs from the declared one, and also when a reader
+    // could not derive it from the recorded types at all — a `kotlin/Array` anywhere in the
+    // signature, whose descriptor depends on the type ARGUMENT. That is the rule every other
+    // metadata path applies, and it is why kotlinc records one for a generated
+    // `childSerializers(): Array<KSerializer<*>>` while recording none for its siblings.
+    let underivable = std::iter::once(record.ret)
+        .chain(params.iter().copied())
+        .any(crate::metadata::descriptor_needs_recording);
+    JvmFunctionSignature {
+        name: (realized.name != record.name).then(|| realized.name.clone()),
+        desc: (physical_descriptor != declared_descriptor || underivable)
+            .then_some(physical_descriptor),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{function_flags, functions};
-    use crate::ir::{
-        IrFile, IrFunction, IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata,
-        IrGeneratedFunctionMetadataScope, IrGeneratedFunctionPublication,
-        IrGeneratedMemberPublication,
-    };
-    use crate::types::{Ty, Visibility};
+    use super::signature;
+    use crate::ir::{IrFile, IrFunction};
+    use crate::metadata::class_builder::FnMeta;
+    use crate::types::Ty;
 
-    #[test]
-    fn generated_function_flags_use_semantic_visibility_and_real_modality() {
-        let mut ir = IrFile::default();
-        let body = ir.add_expr(crate::ir::IrExpr::Block {
-            stmts: Vec::new(),
-            value: None,
-        });
-        let function = ir.add_fun(IrFunction {
-            name: "physical".to_string(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-            body: Some(body),
-            is_static: false,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        assert_eq!(
-            function_flags(
-                &ir,
-                function,
-                &ir.functions[function as usize],
-                Visibility::Internal,
-            ),
-            0
-        );
-        ir.open_methods.insert(function);
-        assert_eq!(
-            function_flags(
-                &ir,
-                function,
-                &ir.functions[function as usize],
-                Visibility::Public,
-            ),
-            22
-        );
-    }
-
-    #[test]
-    fn generated_metadata_keeps_canonical_names_and_semantic_value_class_shape() {
-        let mut ir = IrFile::default();
-        let function = ir.add_fun(IrFunction {
-            name: "write$Self$app".to_string(),
-            params: vec![Ty::Long, Ty::obj("kotlin/String"), Ty::obj("kotlin/Unit")],
-            ret: Ty::Unit,
+    fn function(ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty) -> u32 {
+        ir.add_fun(IrFunction {
+            name: name.to_string(),
+            params,
+            ret,
             body: None,
             is_static: true,
             dispatch_receiver: None,
-            param_checks: vec![None, None, None],
-        });
-        ir.vc_declared_sigs.insert(
-            function,
-            (
-                "write$Self".to_string(),
-                vec![Ty::obj("sample/Value"), Ty::String, Ty::Unit],
-                Ty::Unit,
-            ),
-        );
-        let publication = IrGeneratedMemberPublication {
-            metadata_scope: IrGeneratedFunctionMetadataScope::Additive,
-            functions: vec![IrGeneratedFunctionPublication {
-                function,
-                parameter_identities: ["self", "output", "serialDesc"]
-                    .map(crate::ir::IrParameterIdentity::producer_value)
-                    .to_vec(),
-                metadata: Some(IrGeneratedFunctionMetadata {
-                    source_name: "write$Self".to_string(),
-                    visibility: Visibility::Internal,
-                }),
-                debug: IrGeneratedDeclarationDebug::declaration_line(3),
-            }],
-        };
+            param_checks: Vec::new(),
+        })
+    }
 
-        let metadata = functions(&ir, &publication);
-        assert_eq!(metadata.len(), 1);
-        assert_eq!(metadata[0].name, "write$Self");
-        assert_eq!(
-            metadata[0].params,
+    #[test]
+    fn a_lowered_generated_function_records_its_physical_name_and_descriptor() {
+        let mut ir = IrFile::default();
+        let lowered = function(
+            &mut ir,
+            "write$Self$app",
+            vec![Ty::Long, Ty::obj("kotlin/String"), Ty::obj("kotlin/Unit")],
+            Ty::Unit,
+        );
+        let record = FnMeta::plain(
+            "write$Self".to_string(),
             vec![
                 ("self".to_string(), Ty::obj("sample/Value")),
                 ("output".to_string(), Ty::String),
                 ("serialDesc".to_string(), Ty::Unit),
-            ]
+            ],
+            Ty::Unit,
         );
-        assert_eq!(metadata[0].ret, Ty::Unit);
-        assert_eq!(metadata[0].flags, 32);
-        assert_eq!(metadata[0].jvm_sig_name.as_deref(), Some("write$Self$app"));
+
+        let signature = signature(&ir, lowered, &record);
+        assert_eq!(signature.name.as_deref(), Some("write$Self$app"));
         assert_eq!(
-            metadata[0].jvm_sig.as_deref(),
+            signature.desc.as_deref(),
             Some("(JLjava/lang/String;Lkotlin/Unit;)V")
         );
-        assert!(!metadata[0].annotations.declares_annotations());
     }
 
     #[test]
@@ -213,31 +88,11 @@ mod tests {
             &[Ty::star_projection(Ty::nullable(Ty::obj("fixtures/Token")))],
         );
         let array = Ty::obj_args("kotlin/Array", &[element]);
-        let function = ir.add_fun(IrFunction {
-            name: "release".to_string(),
-            params: Vec::new(),
-            ret: array,
-            body: None,
-            is_static: false,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let publication = IrGeneratedMemberPublication {
-            metadata_scope: IrGeneratedFunctionMetadataScope::Exclusive,
-            functions: vec![IrGeneratedFunctionPublication {
-                function,
-                parameter_identities: Vec::new(),
-                metadata: Some(IrGeneratedFunctionMetadata {
-                    source_name: "release".to_string(),
-                    visibility: Visibility::Public,
-                }),
-                debug: IrGeneratedDeclarationDebug::declaration_line(1),
-            }],
-        };
+        let release = function(&mut ir, "release", Vec::new(), array);
+        let record = FnMeta::plain("release".to_string(), Vec::new(), array);
 
-        let metadata = functions(&ir, &publication);
-        assert_eq!(metadata.len(), 1);
-        assert_eq!(metadata[0].ret, array);
-        assert_eq!(metadata[0].jvm_sig.as_deref(), Some("()[Lfixtures/Coffer;"));
+        let signature = signature(&ir, release, &record);
+        assert_eq!(signature.name, None);
+        assert_eq!(signature.desc.as_deref(), Some("()[Lfixtures/Coffer;"));
     }
 }

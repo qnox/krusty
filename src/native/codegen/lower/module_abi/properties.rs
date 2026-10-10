@@ -94,27 +94,31 @@ impl PropertyAbi {
 fn plan(declaration: &PropertyDeclaration) -> Result<PropertyAbi, Unsupported> {
     let flags = declaration.flags;
     if declaration.receiver_parameters {
-        return Err("a cross-file property with an extension receiver or context".to_string());
+        return Err(
+            "a cross-file property with an extension receiver or context"
+                .to_string()
+                .into(),
+        );
     }
     if flags.has(DeclarationFlags::EXPECT) {
-        return Err("a cross-file `expect` property".to_string());
+        return Err("a cross-file `expect` property".into());
     }
     if declaration.visibility == crate::types::Visibility::Private {
-        return Err("a private property of another file".to_string());
+        return Err("a private property of another file".into());
     }
     let placement = match declaration.owner {
         None => PropertyPlacement::Package,
         Some(owner) => match owner.kind {
             OwnerKind::Interface => {
-                return Err("a cross-file interface property".to_string());
+                return Err("a cross-file interface property".into());
             }
             OwnerKind::Annotation => {
-                return Err("a cross-file annotation property".to_string());
+                return Err("a cross-file annotation property".into());
             }
             // A classifier constant is folded at its uses and stored as a static of the
             // classifier, not as a member of its instance.
             OwnerKind::Concrete if flags.has(DeclarationFlags::CONST) => {
-                return Err("a cross-file classifier constant".to_string());
+                return Err("a cross-file classifier constant".into());
             }
             OwnerKind::Concrete => PropertyPlacement::Member {
                 owner: owner.classifier,
@@ -297,7 +301,8 @@ impl FileLowering<'_> {
             }),
             _ => Err(format!(
                 "internal: the module property `{name}` has no local layout of its planned shape"
-            )),
+            )
+            .into()),
         }
     }
 
@@ -339,10 +344,10 @@ impl FileLowering<'_> {
                 return Ok(());
             }
             let Some((value, produced)) = produced else {
-                return Err(format!("a read of `{name}` produced no value"));
+                return Err(format!("a read of `{name}` produced no value").into());
             };
             let Some(value) = body.convert(value, Some(produced), ty)? else {
-                return Err(format!("a read of `{name}` produced no value"));
+                return Err(format!("a read of `{name}` produced no value").into());
             };
             body.builder.ins().return_(&[value]);
             body.terminate();
@@ -375,7 +380,7 @@ impl FileLowering<'_> {
                     }
                     let stored = body.top_level_written_ty(&target)?;
                     let Some(value) = body.convert(params[0], Some(ty), stored)? else {
-                        return Err(format!("a `Unit` value assigned to `{name}`"));
+                        return Err(format!("a `Unit` value assigned to `{name}`").into());
                     };
                     body.top_level_write_value(&target, value)?;
                 }
@@ -384,12 +389,13 @@ impl FileLowering<'_> {
                 } => {
                     return Err(format!(
                         "internal: a writable property of a value class (`{name}`)"
-                    ));
+                    )
+                    .into());
                 }
                 LocalRealization::Member { class, index, .. } => {
                     let stored = body.written_property_ty(class, index)?;
                     let Some(value) = body.convert(params[1], Some(ty), stored)? else {
-                        return Err(format!("a `Unit` value assigned to `{name}`"));
+                        return Err(format!("a `Unit` value assigned to `{name}`").into());
                     };
                     body.property_write_of(class, index, params[0], value)?;
                 }
@@ -447,7 +453,9 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Result<(), Unsupported> {
         let abi = self.file.imported_property(target)?;
         if !abi.writable {
-            return Err("a read-only cross-file property was written".to_string());
+            return Err("a read-only cross-file property was written"
+                .to_string()
+                .into());
         }
         let Some(mut arguments) = self.module_property_receiver(&abi, receiver)? else {
             return Ok(());
@@ -457,7 +465,9 @@ impl BodyLowering<'_, '_, '_> {
             return Ok(());
         }
         let Some(value) = value else {
-            return Err("a `Unit` value assigned to a cross-file property".to_string());
+            return Err("a `Unit` value assigned to a cross-file property"
+                .to_string()
+                .into());
         };
         arguments.push(value);
         let id = self
@@ -483,16 +493,18 @@ impl BodyLowering<'_, '_, '_> {
                     return Ok(None);
                 }
                 let Some(value) = value else {
-                    return Err("a `Unit` receiver of a cross-file property".to_string());
+                    return Err("a `Unit` receiver of a cross-file property"
+                        .to_string()
+                        .into());
                 };
                 Ok(Some(vec![value]))
             }
-            (None, Some(_)) => {
-                Err("a cross-file package property read through a receiver".to_string())
-            }
-            (Some(_), None) => {
-                Err("a receiver-less access to a cross-file member property".to_string())
-            }
+            (None, Some(_)) => Err("a cross-file package property read through a receiver"
+                .to_string()
+                .into()),
+            (Some(_), None) => Err("a receiver-less access to a cross-file member property"
+                .to_string()
+                .into()),
         }
     }
 

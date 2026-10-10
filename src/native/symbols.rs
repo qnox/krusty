@@ -123,6 +123,13 @@ fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
     Some(())
 }
 
+/// Symbol of the entry another file calls when it leaves arguments of a top-level function out:
+/// the function's whole parameter frame followed by a mask of the omitted ordinals. See
+/// `codegen::lower::defaults`.
+pub(super) fn module_default_symbol(callable: crate::fir::CallableId) -> String {
+    format!("kt_mod_{}__defaults", callable.raw())
+}
+
 /// Symbol of a file's once-only top-level initializer. Both the file and any caller in the module
 /// derive it from the source-file identity, the same way [`module_function_symbol`] is derived.
 pub(super) fn file_init_symbol(source: crate::fir::SourceFileId) -> String {
@@ -185,6 +192,7 @@ pub(super) fn symbols(ir: &IrFile, reserved: HashSet<String>) -> Symbols {
         }
         let symbol = module_function_symbol(*callable);
         taken.insert(symbol.clone());
+        taken.insert(module_default_symbol(*callable));
         functions[index] = symbol;
     }
     // A property's entry points are synthesized from its identity rather than being entries in

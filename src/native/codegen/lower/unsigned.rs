@@ -71,13 +71,13 @@ impl BodyLowering<'_, '_, '_> {
             };
             if matches!(name, "rangeTo" | "rangeUntil") {
                 let Some(first) = self.coerce(receiver, carried)? else {
-                    return Err(format!("a `Unit` receiver of `{name}`"));
+                    return Err(declined!("a `Unit` receiver of `{name}`"));
                 };
                 let Some(&end) = args.first() else {
-                    return Err(format!("`{name}` without a bound"));
+                    return Err(declined!("`{name}` without a bound"));
                 };
                 let Some(last) = self.coerce(end, carried)? else {
-                    return Err(format!("a `Unit` bound of `{name}`"));
+                    return Err(declined!("a `Unit` bound of `{name}`"));
                 };
                 if self.terminated {
                     return Ok(None);
@@ -106,7 +106,7 @@ impl BodyLowering<'_, '_, '_> {
             _ => ret.non_null(),
         };
         let Some(left) = self.coerce(receiver, width)? else {
-            return Err(format!("a `Unit` receiver of `{name}`"));
+            return Err(declined!("a `Unit` receiver of `{name}`"));
         };
         if self.terminated {
             return Ok(None);
@@ -120,7 +120,7 @@ impl BodyLowering<'_, '_, '_> {
                 width
             };
             let Some(value) = self.coerce(*argument, ty)? else {
-                return Err(format!("a `Unit` operand of `{name}`"));
+                return Err(declined!("a `Unit` operand of `{name}`"));
             };
             operands.push(value);
         }
@@ -128,7 +128,7 @@ impl BodyLowering<'_, '_, '_> {
             return Ok(None);
         }
         if self.carrier(width).clif().is_none() {
-            return Err(format!("an unsigned `{name}` on a non-scalar"));
+            return Err(declined!("an unsigned `{name}` on a non-scalar"));
         }
         let answer = match (name, operands.as_slice()) {
             // Two's complement: the bits the machine produces are the same either way.
@@ -169,7 +169,7 @@ impl BodyLowering<'_, '_, '_> {
                 return self.convert(left, Some(width), target);
             }
             _ => {
-                return Err(format!(
+                return Err(declined!(
                     "the unsigned member `{}.{name}`",
                     unsigned_suffix(element)?
                 ))
@@ -205,7 +205,7 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Result<Option<Value>, Unsupported> {
         let carrier = carrier.non_null();
         if !matches!(carrier, Ty::Int | Ty::Long) {
-            return Err(format!(
+            return Err(declined!(
                 "an unsigned comparison with a non-integral carrier `{carrier:?}`"
             ));
         }
@@ -215,7 +215,7 @@ impl BodyLowering<'_, '_, '_> {
             return Ok(None);
         }
         let (Some(left), Some(right)) = (left, right) else {
-            return Err("an unsigned comparison on `Unit`".to_string());
+            return Err("an unsigned comparison on `Unit`".into());
         };
         let answer = self.unsigned_three_way_compare(left, right);
         self.convert(answer, Some(Ty::Int), ret)
@@ -263,7 +263,7 @@ impl BodyLowering<'_, '_, '_> {
         let signed = match width {
             Ty::UInt => Ty::Int,
             Ty::ULong => Ty::Long,
-            other => return Err(format!("a shift of `{other:?}`")),
+            other => return Err(declined!("a shift of `{other:?}`")),
         };
         let bits = self
             .convert(bits, Some(Ty::Int), Ty::Int)?
@@ -277,7 +277,7 @@ impl BodyLowering<'_, '_, '_> {
             signed,
             &[value, bits],
         )?
-        .ok_or_else(|| "a shift answered nothing".to_string())
+        .ok_or_else(|| "a shift answered nothing".into())
     }
 }
 
@@ -308,6 +308,6 @@ fn unsigned_suffix(ty: Ty) -> Result<&'static str, Unsupported> {
         Ty::UShort => "ushort",
         Ty::UInt => "uint",
         Ty::ULong => "ulong",
-        other => return Err(format!("an unsigned operation at `{other:?}`")),
+        other => return Err(declined!("an unsigned operation at `{other:?}`")),
     })
 }

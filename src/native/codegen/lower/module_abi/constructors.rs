@@ -47,20 +47,16 @@ fn plan(record: &IrModuleConstructor) -> Result<ConstructorAbi, Unsupported> {
         (DeclarationFlags::EXPECT, "an `expect` class"),
     ];
     if let Some((_, kind)) = declined.iter().find(|(flag, _)| owner.has(*flag)) {
-        return Err(format!("a cross-file construction of {kind} (`{name}`)"));
+        return Err(format!("a cross-file construction of {kind} (`{name}`)").into());
     }
     if record.flags.has(DeclarationFlags::EXPECT) {
-        return Err(format!("a cross-file `expect` constructor of `{name}`"));
+        return Err(format!("a cross-file `expect` constructor of `{name}`").into());
     }
     if record.visibility == crate::types::Visibility::Private {
-        return Err(format!(
-            "a private constructor of `{name}` from another file"
-        ));
+        return Err(format!("a private constructor of `{name}` from another file").into());
     }
     if record.context_parameter_count != 0 {
-        return Err(format!(
-            "a cross-file constructor with context parameters (`{name}`)"
-        ));
+        return Err(format!("a cross-file constructor with context parameters (`{name}`)").into());
     }
     let symbol = super::super::super::super::symbols::module_constructor_symbol(record)
         .ok_or_else(|| {
@@ -107,7 +103,8 @@ impl FileLowering<'_> {
             if self.ir.classes[class as usize].fq_name != abi.owner {
                 return Err(format!(
                     "internal: the module constructor of `{name}` belongs to another class here"
-                ));
+                )
+                .into());
             }
             let local = match ordinal {
                 0 => self.classes[class as usize].constructor.map(|function| {
@@ -134,7 +131,7 @@ impl FileLowering<'_> {
             let Some((function, physical)) = local else {
                 return Err(format!(
                     "internal: the module constructor {ordinal} of `{name}` has no local constructor"
-                ));
+                ).into());
             };
             if physical.len() != abi.parameters.len() {
                 return Err(format!(
@@ -142,7 +139,7 @@ impl FileLowering<'_> {
                      not the {} its plan declares",
                     physical.len(),
                     abi.parameters.len()
-                ));
+                ).into());
             }
             self.define_constructor_entry_point(&abi, class, function, &physical, file_init)?;
         }
@@ -176,7 +173,7 @@ impl FileLowering<'_> {
             let mut arguments = Vec::with_capacity(params.len() + 1);
             for ((value, declared), physical) in params.iter().zip(&declared).zip(physical) {
                 let Some(value) = body.convert(*value, Some(*declared), *physical)? else {
-                    return Err(format!("a `Unit` constructor parameter of `{name}`"));
+                    return Err(format!("a `Unit` constructor parameter of `{name}`").into());
                 };
                 arguments.push(value);
             }
@@ -188,7 +185,7 @@ impl FileLowering<'_> {
                 return Ok(());
             }
             let Some(value) = body.constructed(object, class)? else {
-                return Err(format!("construction of `{name}` produced no instance"));
+                return Err(format!("construction of `{name}` produced no instance").into());
             };
             body.builder.ins().return_(&[value]);
             body.terminate();
@@ -220,20 +217,22 @@ impl BodyLowering<'_, '_, '_> {
         if record.owner != internal {
             return Err(format!(
                 "internal: a construction of `{name}` selected another class's constructor"
-            ));
+            )
+            .into());
         }
         let abi = plan(record)?;
         if defaulted {
-            return Err(format!(
-                "a cross-file constructor with a default argument (`{name}`)"
-            ));
+            return Err(
+                format!("a cross-file constructor with a default argument (`{name}`)").into(),
+            );
         }
         if args.len() != abi.parameters.len() {
             return Err(format!(
                 "internal: a construction of `{name}` passes {} arguments to a constructor of {}",
                 args.len(),
                 abi.parameters.len()
-            ));
+            )
+            .into());
         }
         let result = abi.result();
         let id = self.file.import(&abi.symbol, &abi.parameters, result)?;

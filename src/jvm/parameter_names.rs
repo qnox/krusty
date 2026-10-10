@@ -9,10 +9,7 @@ use crate::ir::{
     IrParameterIdentity, IrParameterRole,
 };
 use crate::jvm::anonymous_context_labels;
-pub(super) use crate::metadata::declaration_records::{
-    context_kind as metadata_context_kind, explicit_setter_name as explicit_setter,
-    parameter_name as metadata, DESTRUCTURED,
-};
+pub(super) use crate::metadata::declaration_records::{parameter_name as metadata, DESTRUCTURED};
 
 /// Name of a JVM `LocalVariableTable` entry, or `None` for a genuinely unnamed parameter.
 pub(super) fn local_variable(
@@ -270,17 +267,6 @@ fn function_local_variable(
         }
     }
     local_variable(identity, "")
-}
-
-/// Kotlin metadata name for a parameter. Source names remain borrowed; a compiler-generated
-/// delegation parameter is formatted here, at the JVM boundary, from its recorded semantic role.
-pub(super) fn metadata_owned(identity: &IrParameterIdentity) -> Option<String> {
-    match identity.role {
-        IrParameterRole::Generated(IrGeneratedParameterRole::InterfaceDelegationValue {
-            ordinal,
-        }) => Some(format!("p{ordinal}")),
-        _ => metadata(identity).map(str::to_owned),
-    }
 }
 
 /// Name of one Java-reflection `MethodParameters` entry.
@@ -989,7 +975,6 @@ mod tests {
             Some("p2".to_string())
         );
         assert_eq!(metadata(&generated), None);
-        assert_eq!(metadata_owned(&generated), Some("p2".to_string()));
     }
 
     #[test]
