@@ -81,23 +81,23 @@ fn every_settings_case_is_shown_as_the_toolchain_shows_it() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `show settings` run whole does what `kotlin show settings` does: a clean success with and
-/// without naming the only module, a success with warnings before the settings, a failure with
-/// errors only, and the selection among several modules (`support/command.rs`).
+/// `show settings` run whole does what `kotlin show settings` does (`support/command.rs`): every
+/// case with `--all-modules`, among them clean successes, successes with warnings before the
+/// settings and failures with errors only; the only module of a project, named and not; and the
+/// selection among several modules: one named, none, and an unknown one.
 #[test]
 fn every_settings_command_does_what_the_toolchain_does() {
-    let differences = command::differences(
-        "settings",
-        &[
-            ("library", &["show", "settings"]),
-            ("library", &["show", "settings", "-m", "project"]),
-            ("misplaced-settings", &["show", "settings", "--all-modules"]),
-            ("wrong-values", &["show", "settings", "--all-modules"]),
-            ("multi-module", &["show", "settings", "--all-modules"]),
-            ("multi-module", &["show", "settings", "-m", "b"]),
-            ("multi-module", &["show", "settings"]),
-            ("multi-module", &["show", "settings", "-m", "c"]),
-        ],
-    );
+    const ALL: &[&str] = &["show", "settings", "--all-modules"];
+    let cases = support::cases("settings");
+    let mut commands: Vec<(&str, &[&str])> =
+        cases.iter().map(|case| (case.name.as_str(), ALL)).collect();
+    commands.extend([
+        ("library", &["show", "settings"][..]),
+        ("library", &["show", "settings", "-m", "project"]),
+        ("multi-module", &["show", "settings", "-m", "b"]),
+        ("multi-module", &["show", "settings"]),
+        ("multi-module", &["show", "settings", "-m", "c"]),
+    ]);
+    let differences = command::differences("settings", &commands);
     assert!(differences.is_empty(), "{}", differences.join("\n"));
 }
