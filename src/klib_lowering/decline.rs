@@ -29,6 +29,13 @@ pub enum KlibBodyDeclineReason {
     UnsupportedOperation(&'static str),
     /// The body calls a declaration lowering cannot realize.
     UnsupportedCallee(Box<KlibPublicIdSignature>),
+    /// The body calls a dependency declaration no frozen selection describes, so lowering has no
+    /// normalized declaration to call it by.
+    UnselectedCallee(Box<KlibPublicIdSignature>),
+    /// The body calls a dependency declaration that two frozen selections describe.
+    AmbiguousCallee(Box<KlibPublicIdSignature>),
+    /// The body reaches, through calls, a dependency body that declines.
+    CalleeDeclined(Box<KlibBodyDecline>),
     /// The body names a type lowering does not model, by its form.
     UnsupportedType(&'static str),
     /// A value flows into a place of a different type, which the body leaves to an implicit
@@ -100,6 +107,19 @@ impl std::fmt::Display for KlibBodyDecline {
                 write!(formatter, "it calls `")?;
                 write_qualified(formatter, callee)?;
                 write!(formatter, "`")
+            }
+            KlibBodyDeclineReason::UnselectedCallee(callee) => {
+                write!(formatter, "it calls `")?;
+                write_qualified(formatter, callee)?;
+                write!(formatter, "`, which no selected declaration describes")
+            }
+            KlibBodyDeclineReason::AmbiguousCallee(callee) => {
+                write!(formatter, "it calls `")?;
+                write_qualified(formatter, callee)?;
+                write!(formatter, "`, which two selected declarations describe")
+            }
+            KlibBodyDeclineReason::CalleeDeclined(callee) => {
+                write!(formatter, "it reaches {callee}")
             }
             KlibBodyDeclineReason::UnsupportedType(what) => {
                 write!(formatter, "it uses {what}")
