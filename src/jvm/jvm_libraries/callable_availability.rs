@@ -41,7 +41,7 @@ impl JvmLibraries {
         &self,
         internal: TypeName,
         class: &crate::jvm::classreader::ClassInfo,
-        functions: &crate::jvm::classpath::MetaFns,
+        functions: &[crate::jvm::metadata::MetaFn],
         members: &[crate::libraries::LibraryMember],
         kotlin_scope_is_authoritative: bool,
     ) -> std::collections::HashSet<String> {

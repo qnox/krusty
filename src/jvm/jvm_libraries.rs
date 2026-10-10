@@ -2349,7 +2349,7 @@ impl JvmLibraries {
             let hidden_deprecated_callables = self.hidden_deprecated_callables(
                 internal_name,
                 &ci,
-                &meta_fns,
+                meta_fns,
                 &members,
                 kotlin_scope_is_authoritative,
             );
