@@ -5,7 +5,7 @@
 //! the argument passes itself. Any other default (a call, a reference to another parameter) is
 //! not a closed value and stays unpublished, so such a call is rejected rather than miscompiled.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::libraries::DefaultValue;
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrExprId, KlibIrExprKind, KlibIrFunction};
@@ -16,12 +16,19 @@ use crate::metadata::klib_ir::{KlibIrConstant, KlibIrModuleTrees, KlibIrSignatur
 #[derive(Default)]
 pub(super) struct ParameterDefaults {
     defaults: HashMap<KlibIrSignature, Vec<Option<DefaultValue>>>,
+    /// Every identity a library already declared, constant defaults or not.
+    declared: HashSet<KlibIrSignature>,
 }
 
 impl ParameterDefaults {
     /// Read the defaults of every function `trees` declares.
     pub(super) fn add_library(&mut self, trees: &KlibIrModuleTrees) {
         for signature in trees.function_signatures() {
+            // The inventory keeps the first library's declaration of a repeated identity, so the
+            // defaults are that declaration's.
+            if !self.declared.insert(signature.clone()) {
+                continue;
+            }
             let Some((arena, function)) = trees.function(signature) else {
                 continue;
             };

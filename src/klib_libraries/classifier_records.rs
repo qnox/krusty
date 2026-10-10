@@ -39,6 +39,7 @@ pub(super) fn classifier_record(
             identity,
             &mut member,
         );
+        member.default_values = constructor.defaults.clone();
         shape
             .named_parameter_lists
             .push(constructor_parameter_list(&member));
