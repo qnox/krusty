@@ -31,7 +31,7 @@ pub(crate) use folding_ranges::{
     FOLDING_KIND_REGION, TEXT_BLOCK_COMMENT, TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC,
     TEXT_PARENTHESES, TEXT_RAW_STRING, TEXT_REGION_LABEL,
 };
-pub use krusty::frontend::{FrontendSymbols, FrontendTypeInfo};
+pub use krusty::frontend::{FrontendSymbols, FrontendTypeInfo, PlatformProvider};
 pub use navigation::{DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, LibraryRef};
 pub(crate) use rendering::render_ty;
 pub(crate) use semantic::{hover_wire_cost, SemanticLimits, MAX_LIBRARY_DEFINITION_BYTES};

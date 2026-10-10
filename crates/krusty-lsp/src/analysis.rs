@@ -11,7 +11,7 @@ use crate::compiler_analysis::{
     CompletionDetails, CompletionKind, CompletionSymbols, DefinitionOccurrence, DefinitionSymbols,
     DefinitionTarget, DocumentSymbolOccurrence, FileAnalysis, FoldingRangeOccurrence,
     FrontendSymbols, HighlightOccurrence, HighlightSymbols, HoverOccurrence, LibraryRef,
-    SemanticLimits, SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols,
+    PlatformProvider, SemanticLimits, SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols,
     FOLDING_KIND_COMMENT, FOLDING_KIND_IMPORTS, FOLDING_KIND_REGION, MAX_LIBRARY_DEFINITION_BYTES,
     TEXT_BLOCK_COMMENT, TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC, TEXT_PARENTHESES, TEXT_RAW_STRING,
     TEXT_REGION_LABEL,
@@ -4065,7 +4065,7 @@ fn analyze_source_inputs_for_lsp(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler_analysis::CompletionKind;
+    use crate::compiler_analysis::analyze_source_set;
 
     /// Sizing probe, not a gate test: replays the engine's 128-file sweep over a real corpus so
     /// the retention ceilings can be sized from measurements instead of guesses. Run it with
@@ -5350,10 +5350,7 @@ mod tests {
     fn document_analysis_for(source: &str) -> DocumentAnalysis {
         let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_classpath());
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let mut frontend = crate::compiler_analysis::analyze_source_set(
-            &[source],
-            krusty::frontend::PlatformProvider::jvm(platform),
-        );
+        let mut frontend = analyze_source_set(&[source], PlatformProvider::jvm(platform));
         let highlights = HighlightSymbols::from_source_set(&frontend.files, &frontend.symbols);
         let definitions = DefinitionSymbols::from_source_set(
             &[source],
@@ -8284,10 +8281,7 @@ mod tests {
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             krusty::toolchain::stdlib_classpath(),
         ));
-        let analysis = crate::compiler_analysis::analyze_source_set(
-            &[source],
-            krusty::frontend::PlatformProvider::jvm(platform),
-        );
+        let analysis = analyze_source_set(&[source], PlatformProvider::jvm(platform));
         let index =
             SemanticTokenIndex::from_file_analysis(source, &analysis.files[0], &analysis.symbols);
         let tokens = decoded_tokens(&index);
@@ -8348,10 +8342,7 @@ mod tests {
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             krusty::toolchain::stdlib_classpath(),
         ));
-        let analysis = crate::compiler_analysis::analyze_source_set(
-            &[source],
-            krusty::frontend::PlatformProvider::jvm(platform),
-        );
+        let analysis = analyze_source_set(&[source], PlatformProvider::jvm(platform));
         let index =
             SemanticTokenIndex::from_file_analysis(source, &analysis.files[0], &analysis.symbols);
         let tokens = decoded_tokens(&index);

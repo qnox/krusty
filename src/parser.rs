@@ -11,6 +11,7 @@ use crate::types::Visibility;
 use std::collections::HashMap;
 
 mod anonymous_functions;
+mod class_recovery;
 mod companion_declarations;
 mod constructors;
 mod context_clause;
@@ -31,6 +32,7 @@ mod nesting;
 mod properties;
 mod return_labels;
 mod value_parameters;
+use class_recovery::error_class_decl;
 use declaration_modifiers::{function_flags, has_visibility_modifier, visibility_of};
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use file_features::apply_file_features;
@@ -137,54 +139,6 @@ fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
         sealed || modifiers.iter().any(|modifier| modifier == "abstract"),
         sealed,
     )
-}
-
-/// The degraded result of a tripped declaration-nesting guard: an empty final class named
-/// `<error>`. That source-impossible synthetic name cannot collide with a declared class, and the
-/// empty body gives the later passes nothing to recurse over.
-fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
-    ClassDecl {
-        name_span: span,
-        primary_ctor_visibility: Visibility::Public,
-        name: "<error>".to_string(),
-        visibility: Visibility::Public,
-        annotations: Vec::new(),
-        annotation_args: Vec::new(),
-        type_parameters: crate::ast::ClassTypeParameters::new(Vec::new(), Vec::new(), Vec::new()),
-        context_params: Vec::new(),
-        lexical_type_parameter_captures: Vec::new(),
-        props: Vec::new(),
-        methods: Vec::new(),
-        companion: None,
-        body_props: Vec::new(),
-        init_order: Vec::new(),
-        is_data: false,
-        is_value: false,
-        value_modifier_span: None,
-        primary_constructor_parameters_span: None,
-        kind: ClassKind::Class,
-        singleton: false,
-        enum_entries: Vec::new(),
-        is_fun_interface: false,
-        modality: crate::ast::Modality::Final,
-        inner_of: None,
-        supertypes: Vec::new(),
-        interface_delegations: Vec::new(),
-        base_class: None,
-        base_class_span: None,
-        base_type_args: Vec::new(),
-        base_args: Vec::new(),
-        primary_ctor_annotations: Some(Vec::new()),
-        primary_ctor_annotation_args: Vec::new(),
-        secondary_ctors: Vec::new(),
-        type_aliases: Vec::new(),
-        span,
-        ctor_close_line: 0,
-        companion_block_members: Vec::new(),
-        decl_line: 0,
-        decl_start_line: 0,
-        decl_end_line: 0,
-    }
 }
 
 /// A non-nullable, non-generic type reference.
