@@ -39,7 +39,7 @@ impl<'a> FileLowering<'a> {
             .declare_function(symbol, Linkage::Export, &signature)
             .map_err(|error| format!("declaring `{symbol}` ({error})"))?;
         let Some(target) = self.functions[function as usize] else {
-            return Err(format!("`{symbol}` has no body"));
+            return Err(declined!("`{symbol}` has no body"));
         };
         self.emit_function(id, signature, ret, symbol, &mut |body, arguments| {
             let init = body.func_ref(file_init);

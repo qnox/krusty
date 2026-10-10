@@ -5337,33 +5337,28 @@ fn full_default_masks(param_count: usize) -> Vec<i32> {
         .collect()
 }
 
-/// A value class's (erased) underlying JVM type — its single field's type.
-fn vc_underlying_jvm(ir: &IrFile, vc: &Ty) -> Ty {
-    vc.obj_internal()
-        .and_then(|fq| ir.classes.iter().find(|c| c.fq_name == fq))
-        .and_then(|c| c.fields.first())
-        .map(|f| jvm_declared_ty(&f.ty))
-        .unwrap_or(Ty::obj("java/lang/Object"))
+/// The owner and JVM carrier of a value class adapted through its own `box-impl`/`unbox-impl`.
+/// The carrier comes from the IR's value-class facts, which cover a value class declared in
+/// another file of the module or in a dependency as well as one this file declares.
+fn vc_adapter_shape(ir: &IrFile, vc: &Ty) -> (String, Ty) {
+    let classifier = vc
+        .obj_internal()
+        .expect("a value-class adapter names its value class");
+    let carrier = crate::jvm::value_classes::boxed_value_class_carrier(ir, classifier)
+        .expect("a value-class adapter names a value class the IR's facts carry");
+    (classifier.render(), jvm_declared_ty(&carrier))
 }
 
 /// Emit `VC.box-impl(<underlying>)LVC;` (static) — boxes the underlying value on the stack into `VC`.
 fn emit_box_impl(ir: &IrFile, cw: &mut ClassWriter, vc: &Ty, code: &mut CodeBuilder) {
-    let fq = vc
-        .obj_internal()
-        .map(|n| n.render())
-        .unwrap_or_else(|| "java/lang/Object".to_string());
-    let u = vc_underlying_jvm(ir, vc);
+    let (fq, u) = vc_adapter_shape(ir, vc);
     let m = cw.methodref(&fq, "box-impl", &format!("({})L{fq};", type_descriptor(u)));
     code.invokestatic(m, slot_words(u) as i32, 1);
 }
 
 /// Emit `VC.unbox-impl()<underlying>` (virtual) — unboxes the `VC` on the stack to its underlying.
 fn emit_unbox_impl(ir: &IrFile, cw: &mut ClassWriter, vc: &Ty, code: &mut CodeBuilder) {
-    let fq = vc
-        .obj_internal()
-        .map(|n| n.render())
-        .unwrap_or_else(|| "java/lang/Object".to_string());
-    let u = vc_underlying_jvm(ir, vc);
+    let (fq, u) = vc_adapter_shape(ir, vc);
     let m = cw.methodref(&fq, "unbox-impl", &format!("(){}", type_descriptor(u)));
     code.invokevirtual(m, 0, slot_words(u) as i32);
 }
