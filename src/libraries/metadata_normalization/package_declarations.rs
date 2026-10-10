@@ -81,6 +81,7 @@ pub(crate) fn package_function(
         suspend: function.is_suspend,
         operator: function.is_operator,
         infix: function.is_infix,
+        deprecated_hidden: false,
         is_abstract: false,
         is_final: true,
         inherited_by_delegation: false,
