@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use krusty::backend::Artifact;
+use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
@@ -29,17 +29,8 @@ use super::common;
 struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new(tag: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "krusty-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |elapsed| elapsed.as_nanos())
-        ));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("create scratch directory");
-        Self(path)
+    fn new() -> Self {
+        Self(common::scratch_dir().expect("allocate native GC stress scratch directory"))
     }
 
     fn path(&self) -> &Path {
@@ -72,10 +63,13 @@ fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     let mut diags = DiagSink::new();
     let mut features = krusty::features::LangFeatures::new();
     features.apply_source_directives(source);
-    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
-    );
     let backend = CraneliftBackend::new(target).verified();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform),
+        &features,
+        &mut diags,
+    );
     let artifacts = krusty::compiler::emit_analyzed(
         analysis,
         &["Main".to_string()],
@@ -100,7 +94,7 @@ fn run(source: &str) -> String {
         .map(|(_, bytes)| bytes.as_slice())
         .collect::<Vec<_>>();
     let image = krusty::native::link_program(&objects, target).expect("link");
-    let scratch = Scratch::new("stress");
+    let scratch = Scratch::new();
     let executable = scratch.path().join("program");
     std::fs::write(&executable, &image).expect("write");
     #[cfg(unix)]

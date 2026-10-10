@@ -4,6 +4,7 @@
 
 use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
 
+use krusty::backend::Backend as _;
 use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, Entry, NativeTarget};
@@ -29,10 +30,11 @@ fn native_object(source: &str, stem: &str) -> Option<Vec<u8>> {
     let inputs = [SourceInput::kotlin(source).with_file_stem(stem)];
     let features = krusty::features::LangFeatures::new();
     let mut diags = DiagSink::new();
+    let backend = CraneliftBackend::new(target).with_entry(Entry::Box);
+    let platform = krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform);
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
     );
-    let backend = CraneliftBackend::new(target).with_entry(Entry::Box);
     let artifacts =
         krusty::compiler::emit_analyzed(analysis, &[stem.to_string()], &backend, stem, &mut diags);
     let messages = diags
@@ -50,11 +52,32 @@ fn native_object(source: &str, stem: &str) -> Option<Vec<u8>> {
     objects.pop()
 }
 
+/// Calls to the allocator from the program's own code. A module constructor's exported entry point
+/// (`kt_modctor_*`) allocates for whichever file constructs that class, so its allocation says
+/// nothing about where this file's constructions place their objects and is not counted.
 fn allocation_relocations(object: &[u8]) -> usize {
     let file = object::File::parse(object).expect("the native object parses");
+    let entry_points: Vec<_> = file
+        .symbols()
+        .filter(|symbol| {
+            symbol
+                .name()
+                .is_ok_and(|name| name.starts_with("kt_modctor_"))
+        })
+        .filter_map(|symbol| {
+            let section = symbol.section_index()?;
+            Some((section, symbol.address()..symbol.address() + symbol.size()))
+        })
+        .collect();
     let mut count = 0;
     for section in file.sections() {
-        for (_, relocation) in section.relocations() {
+        for (offset, relocation) in section.relocations() {
+            if entry_points
+                .iter()
+                .any(|(owner, range)| *owner == section.index() && range.contains(&offset))
+            {
+                continue;
+            }
             let RelocationTarget::Symbol(index) = relocation.target() else {
                 continue;
             };

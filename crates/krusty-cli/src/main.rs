@@ -161,20 +161,28 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
 /// instead of terminating: a worker that exits on a broken source takes the whole build's worker
 /// process down with it.
 pub fn compile(opts: &cli::Options) -> Result<usize, String> {
-    let mut promoted = String::new();
+    let mut configured_errors = String::new();
+    let mut unconfigured_warning_under_werror = false;
     for warning in &opts.warnings {
-        match opts.warning_policy.level(warning.name) {
-            cli::WarningLevel::Warning => eprintln!("warning: {}", warning.message),
-            cli::WarningLevel::Error => {
-                promoted.push_str("error: ");
-                promoted.push_str(&warning.message);
-                promoted.push('\n');
+        match opts.warning_policy.command_line_disposition(warning.name) {
+            cli::WarningDisposition::Warning => eprintln!("warning: {}", warning.message),
+            cli::WarningDisposition::Error => {
+                configured_errors.push_str("error: ");
+                configured_errors.push_str(&warning.message);
+                configured_errors.push('\n');
             }
-            cli::WarningLevel::Disabled => {}
+            cli::WarningDisposition::Disabled => {}
+            cli::WarningDisposition::WarningAndFail => {
+                eprintln!("warning: {}", warning.message);
+                unconfigured_warning_under_werror = true;
+            }
         }
     }
-    if !promoted.is_empty() {
-        return Err(promoted);
+    if !configured_errors.is_empty() {
+        return Err(configured_errors);
+    }
+    if unconfigured_warning_under_werror {
+        return Err("error: warnings found and -Werror specified\n".to_string());
     }
     let version = match opts.kotlin_reference_version {
         Some(version) => version,
@@ -220,7 +228,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     let libraries = JvmLibraries::new(cp.clone())
         .map(|libraries| libraries.with_api_version(opts.language_settings.api_version));
     let platform =
-        krusty::frontend::PlatformProvider::from(libraries).with_native_plugins(plugins.native);
+        krusty::frontend::PlatformProvider::jvm(libraries).with_native_plugins(plugins.native);
     let source_inputs = opts
         .sources
         .iter()
@@ -284,7 +292,39 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
             diags.diags.len()
         ));
     }
-    // Warnings alone do not fail the compilation, but they are still reported.
+    // The same typed policy owns ordinary compiler and module warnings. Unlike command-line
+    // configuration warnings, these are suppressed by `-nowarn`; `-Werror` reports them and fails
+    // before any output is written.
+    let warning_diagnostics = diags
+        .diags
+        .iter()
+        .any(|diagnostic| diagnostic.severity == krusty::diag::Severity::Warning)
+        || !diags.module_warnings.is_empty();
+    match opts.warning_policy.compiler_disposition() {
+        cli::WarningDisposition::WarningAndFail if warning_diagnostics => {
+            // kotlinc reports unlocated module warnings before its -Werror summary, then the
+            // located source warnings. Keep those three ledger segments distinct instead of
+            // prepending the summary to the generic renderer (which owns module-before-source
+            // order for an ordinary successful compilation).
+            let module_warnings = std::mem::take(&mut diags.module_warnings);
+            let mut report = String::new();
+            for warning in module_warnings {
+                report.push_str("warning: ");
+                report.push_str(&warning);
+                report.push('\n');
+            }
+            report.push_str("error: warnings found and -Werror specified\n");
+            report.push_str(&diags.render_all(&rendered));
+            return Err(report);
+        }
+        cli::WarningDisposition::Disabled => {
+            diags.diags.clear();
+            diags.module_warnings.clear();
+        }
+        cli::WarningDisposition::WarningAndFail
+        | cli::WarningDisposition::Warning
+        | cli::WarningDisposition::Error => {}
+    }
     eprint!("{}", diags.render_all(&rendered));
 
     let emitted = outputs

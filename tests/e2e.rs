@@ -20,6 +20,8 @@ pub(crate) use common_core::server_pool::Pool as ServerPool;
 mod e2e_support;
 #[path = "common/inner_class_rows.rs"]
 mod inner_class_rows_support;
+#[path = "common/reference_targets.rs"]
+mod reference_targets_support;
 
 mod common {
     pub use super::bytecode_comparison_support::*;
@@ -28,6 +30,7 @@ mod common {
     pub use super::inner_class_rows_support::{
         assert_same_inner_classes, compile_with_kotlinc, compile_with_kotlinc_for_target,
     };
+    pub use super::reference_targets_support::*;
 }
 
 #[path = "abstract_instantiation_check_e2e.rs"]
@@ -40,6 +43,8 @@ mod abstract_member_shape_e2e;
 mod abstract_modifier_consistency_e2e;
 #[path = "adapted_callable_reference_equality_e2e.rs"]
 mod adapted_callable_reference_equality_e2e;
+#[path = "allopen_plugin_e2e.rs"]
+mod allopen_plugin_e2e;
 #[path = "also_apply_result_line_e2e.rs"]
 mod also_apply_result_line_e2e;
 #[path = "annotated_class_decl_line_e2e.rs"]
@@ -1627,6 +1632,8 @@ mod value_class_constructor_bodies_e2e;
 mod value_class_constructor_default_e2e;
 #[path = "value_class_constructor_reference_e2e.rs"]
 mod value_class_constructor_reference_e2e;
+#[path = "value_class_declaration_e2e.rs"]
+mod value_class_declaration_e2e;
 #[path = "value_class_delegated_result_e2e.rs"]
 mod value_class_delegated_result_e2e;
 #[path = "value_class_dependency_bridge_e2e.rs"]
@@ -2870,6 +2877,8 @@ mod wildcard_branch_join_e2e;
 #[path = "wrapped_param_type_e2e.rs"]
 mod wrapped_param_type_e2e;
 
+#[path = "reified_member_splice_e2e.rs"]
+mod reified_member_splice_e2e;
 #[path = "reified_unit_splice_e2e.rs"]
 mod reified_unit_splice_e2e;
 #[path = "reified_value_class_splice_e2e.rs"]

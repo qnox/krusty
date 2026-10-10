@@ -39,6 +39,7 @@ mod implementor_dispatch;
 mod lists;
 mod local_delegates;
 mod maps;
+mod module_abi;
 mod object_entries;
 mod objects;
 mod ranges;
@@ -232,6 +233,7 @@ pub fn lower_file(
 
     let mut lowering = FileLowering {
         ir,
+        source,
         classifiers,
         callables,
         values: value_classes,
@@ -304,6 +306,9 @@ pub fn lower_file(
             )?;
         }
     }
+    lowering.define_property_entry_points(file_init)?;
+    lowering.define_constructor_entry_points(file_init)?;
+    lowering.define_value_box_entry_points()?;
     let defines_entry = selected.is_some();
     let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
@@ -321,6 +326,9 @@ pub fn lower_file(
 
 struct FileLowering<'a> {
     ir: &'a IrFile,
+    /// This file's stable module identity, used to distinguish a declaration copied into the
+    /// module-reference table from one that is genuinely owned by another file.
+    source: crate::fir::SourceFileId,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     callables: &'a crate::backend::CheckedBackendCallables,
     /// Which classifiers are value classes, and which occurrences travel unboxed.
@@ -1204,6 +1212,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     )?;
                     return Ok(());
                 }
+                // A property declared in another file of the module has no layout here; its
+                // declaring file exports the entry points of one shared plan.
+                if self.file.is_imported_property(&target) {
+                    return self.module_property_write(&target, dispatch_receiver, value);
+                }
                 match self.checked_property(&target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_write(class, index, dispatch_receiver, value)?
@@ -1534,7 +1547,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 callee,
                 dispatch_receiver,
                 args,
-            } => self.call(&callee, dispatch_receiver, &args),
+            } => self.call(id, &callee, dispatch_receiver, &args),
             IrExpr::TypeOp {
                 op,
                 arg,
@@ -1599,6 +1612,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     None => frame_objects::Placement::Heap,
                 };
                 self.construction(
+                    id,
                     internal,
                     &args,
                     ctor_params.as_deref(),
@@ -1611,7 +1625,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 index,
                 receiver,
                 args,
-            } => self.method_call(class, index, receiver, &args),
+            } => self.method_call(id, class, index, receiver, &args),
             IrExpr::GetField {
                 receiver,
                 class,
@@ -1806,6 +1820,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         &context_arguments,
                         None,
                     );
+                }
+                if self.file.is_imported_property(&target) {
+                    return self.module_property_read(&target, dispatch_receiver);
                 }
                 match self.checked_property(&target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
@@ -2187,6 +2204,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 | Callee::Intrinsic { ret, .. }
                 | Callee::Module { ret, .. }
                 | Callee::ModuleWithDefaults { ret, .. }
+                // Another file's function returns what its declaration fixes; both files carry
+                // that type by the same projection, a value class as its value.
+                | Callee::CrossFile { ret, .. }
                 | Callee::Super { ret, .. } => *ret,
                 Callee::Special { source, .. } => {
                     let function = self.file.ir.checked_callable_functions.get(&(*source)?)?;
@@ -2242,9 +2262,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     self.file.ir.classes[*class as usize].fields[*index as usize].ty,
                 )
             }
+            IrExpr::EnclosingInstance { inner, .. } => {
+                let (class, field) = self.enclosing_field(*inner).ok()?;
+                self.file.ir.classes[class as usize].fields[field as usize].ty
+            }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
             IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::InvokeFunction { ret, .. } => *ret,
+            // What the checked accessor the access calls answers.
+            IrExpr::LocalDelegateAccess(access) => {
+                let plan = self
+                    .file
+                    .ir
+                    .local_delegate_plans
+                    .get(access.plan as usize)?;
+                match access.value {
+                    Some(_) => plan.setter.as_ref()?.result,
+                    None => plan.getter.result,
+                }
+            }
             IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
             IrExpr::CallableReference(reference) => reference.function_type,
             IrExpr::Lambda { .. } | IrExpr::RefNew { .. } => any(),
@@ -2351,7 +2387,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // A `lateinit` read yields its operand too; only the guard differs.
             IrExpr::LateinitCheck { operand, .. } => self.physical_type_of(*operand)?,
             IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
-                self.file.ir.checked_properties.get(target)?.ty
+                match self.file.is_imported_property(target) {
+                    // A property declared in another file: the type its getter entry point
+                    // returns.
+                    true => self.module_property_ty(target)?,
+                    false => self.file.ir.checked_properties.get(target)?.ty,
+                }
             }
             _ => return None,
         })

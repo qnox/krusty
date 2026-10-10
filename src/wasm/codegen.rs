@@ -78,6 +78,13 @@ impl Started {
 impl Backend for WasmBackend {
     type State = WasmModule;
 
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+        match self.target {
+            WasmTarget::Js => crate::compilation_target::CompilationTarget::WasmJs,
+            WasmTarget::Wasi => crate::compilation_target::CompilationTarget::WasmWasi,
+        }
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -230,7 +237,10 @@ mod tests {
         let mut diags = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_streaming_with_features(
             &inputs,
-            Box::new(EmptySymbolSource),
+            crate::frontend::PlatformProvider::new(
+                crate::compiler::Backend::compilation_target(&WasmBackend::new(target)),
+                Box::new(EmptySymbolSource),
+            ),
             &crate::features::LangFeatures::new(),
             &mut diags,
         );

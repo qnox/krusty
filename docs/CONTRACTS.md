@@ -123,3 +123,9 @@ encode→decode round trip is `contract_round_trips_through_metadata` in
 `src/metadata/builder.rs` (a `ConditionalReturns` contract through emission and back); the
 kinded `callsInPlace` forms round-trip through the same path, the kindless form degrades per
 §2.
+
+JVM classfiles and KLIB fragments share the wire-level effect/expression decoder. Each adapter
+supplies only its own type-table resolver. A KLIB provider publishes the resulting contract on the
+same `LibraryCallable` as the signed declaration; generic `is T` conclusions use that exact
+declaration's opaque type-parameter identity, not the written name `T`. Malformed or unsupported
+contract shapes reject metadata explicitly instead of being treated as an absent contract.
