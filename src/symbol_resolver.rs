@@ -3858,6 +3858,9 @@ pub struct SelectedMemberProperty {
     pub visibility: crate::types::Visibility,
     /// The selected Kotlin declaration. Target storage realization remains opaque on its accessors.
     pub property: Option<PropertyInfo>,
+    /// Synthetic accessor properties of the same classifier that tie with `property` through a
+    /// different getter method (`isX()` and `getIsX()`). Non-empty means the read is ambiguous.
+    pub competing_accessors: Vec<PropertyInfo>,
 }
 
 impl SelectedMemberProperty {
