@@ -11,7 +11,7 @@ use crate::compiler_analysis::{
     CompletionDetails, CompletionKind, CompletionSymbols, DefinitionOccurrence, DefinitionSymbols,
     DefinitionTarget, DocumentSymbolOccurrence, FileAnalysis, FoldingRangeOccurrence,
     FrontendSymbols, HighlightOccurrence, HighlightSymbols, HoverOccurrence, LibraryRef,
-    PlatformProvider, SemanticLimits, SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols,
+    SemanticLimits, SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols,
     FOLDING_KIND_COMMENT, FOLDING_KIND_IMPORTS, FOLDING_KIND_REGION, MAX_LIBRARY_DEFINITION_BYTES,
     TEXT_BLOCK_COMMENT, TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC, TEXT_PARENTHESES, TEXT_RAW_STRING,
     TEXT_REGION_LABEL,
@@ -4066,6 +4066,7 @@ fn analyze_source_inputs_for_lsp(
 mod tests {
     use super::*;
     use crate::compiler_analysis::analyze_source_set;
+    use krusty::frontend::PlatformProvider;
 
     /// Sizing probe, not a gate test: replays the engine's 128-file sweep over a real corpus so
     /// the retention ceilings can be sized from measurements instead of guesses. Run it with

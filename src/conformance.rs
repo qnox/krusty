@@ -126,12 +126,6 @@ pub enum TestTarget {
 }
 
 impl TestTarget {
-    /// Whether the target compiles a `value class` without the JVM's `@JvmInline` marker. Every
-    /// non-JVM target does: the annotation exists for the JVM's boxed representation alone.
-    fn full_value_classes(self) -> bool {
-        self != Self::Jvm
-    }
-
     /// The production source-semantics target represented by this corpus lane.
     pub fn compilation_target(self) -> crate::compilation_target::CompilationTarget {
         match self {
