@@ -24,7 +24,7 @@ pub(super) struct SignedConstructor {
     pub(super) declaration: KotlinConstructor,
     pub(super) signature: KlibPublicIdSignature,
     pub(super) parameters: Box<[ResolvedParameterIdentity]>,
-    /// The constant default of each value parameter, read from the library's IR.
+    /// As for a function, the constant default of each value parameter read from the IR.
     pub(super) defaults: Vec<Option<crate::libraries::DefaultValue>>,
 }
 

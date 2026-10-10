@@ -126,3 +126,20 @@ fun box(): String {
 "#;
     assert_eq!(diagnostics(&libraries, source), Vec::<String>::new());
 }
+
+#[test]
+fn an_omitted_constant_constructor_default_is_the_klib_parameter_default() {
+    let Some(libraries) = native_stdlib() else {
+        return;
+    };
+    let source = r#"
+fun box(): String {
+    try {
+        throw NotImplementedError()
+    } catch (e: NotImplementedError) {
+        return "OK"
+    }
+}
+"#;
+    assert_eq!(diagnostics(&libraries, source), Vec::<String>::new());
+}
