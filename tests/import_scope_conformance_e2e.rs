@@ -9,10 +9,26 @@ const LIB: &str = "package mylib\n\
     fun provide(): String = \"OK\"\n\
     fun String.tagged(): String = this + \"!\"\n";
 
-fn mentions(diags: &[String], needle: &str) -> bool {
-    diags
-        .iter()
-        .any(|d| d.contains(needle) || d.to_lowercase().contains("unresolved"))
+fn assert_unresolved_against_library(
+    main: &str,
+    column: usize,
+    name: &str,
+    receiver: Option<&str>,
+) {
+    let library = common::kotlinc_library(LIB).expect("kotlinc compiles the dependency");
+    let result =
+        common::compiler_diagnostics(&[("Main.kt", main)], &[library, common::stdlib_jar()]);
+    let expected = [common::CompilerError {
+        file: "Main.kt".to_string(),
+        line: 1,
+        column,
+        message: krusty::diagnostic_wording::unresolved_reference_on(name, receiver),
+    }];
+    assert_eq!(result.krusty_code, 1, "{}", result.krusty_stderr);
+    assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), expected);
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
 }
 
 #[test]
@@ -20,13 +36,7 @@ fn unimported_top_level_function_is_unresolved() {
     // No `import mylib.provide` — kotlinc requires it, so a bare `provide()` must NOT resolve to the
     // classpath function (the over-permissive whole-classpath lookup would have found it).
     let main = "fun box(): String = provide()\n";
-    let Some(diags) = common::checker_diags_against("scope_tl_neg", LIB, main) else {
-        return; // toolchain not provisioned
-    };
-    assert!(
-        !diags.is_empty() && mentions(&diags, "provide"),
-        "an un-imported top-level function must be unresolved, got {diags:?}"
-    );
+    assert_unresolved_against_library(main, 21, "provide", None);
 }
 
 #[test]
@@ -46,13 +56,7 @@ fn imported_top_level_function_resolves_and_runs() {
 #[test]
 fn unimported_extension_is_unresolved() {
     let main = "fun box(): String = \"x\".tagged()\n";
-    let Some(diags) = common::checker_diags_against("scope_ext_neg", LIB, main) else {
-        return;
-    };
-    assert!(
-        !diags.is_empty() && mentions(&diags, "tagged"),
-        "an un-imported extension must be unresolved, got {diags:?}"
-    );
+    assert_unresolved_against_library(main, 25, "tagged", Some("String"));
 }
 
 #[test]
@@ -107,4 +111,241 @@ fn each_file_infers_its_signatures_through_its_own_imports() {
         ),
     ];
     common::expect_box_ok_files_with_stdlib(&sources, "per-file import aliases in signatures");
+}
+
+/// Two explicit imports of one name from different packages (`import a.contain`, `import
+/// b.contain`) both put their callables at the explicit-import level; overload resolution picks
+/// by receiver. Neither import replaces the other, from a dependency or from this module.
+const SAME_NAME_IMPORTS_MAIN: &str = "import same.lists.contain\n\
+    import same.text.contain\n\
+    fun box(): String {\n\
+        val list = listOf(1, 2) contain 2\n\
+        val text = \"abc\" contain \"b\"\n\
+        return if (list == \"list\" && text == \"text\") \"OK\" else \"$list $text\"\n\
+    }\n";
+
+const SAME_NAME_IMPORTS_LIB: [(&str, &str); 2] = [
+    (
+        "Lists.kt",
+        "package same.lists\n\
+         infix fun <T> Collection<T>.contain(element: T): String = if (element in this) \"list\" else \"-\"\n",
+    ),
+    (
+        "Text.kt",
+        "package same.text\n\
+         infix fun String.contain(part: String): String = if (part in this) \"text\" else \"-\"\n",
+    ),
+];
+
+#[test]
+fn same_name_explicit_imports_from_a_dependency_are_all_candidates() {
+    let build = common::compile_libs_build("same_name_imports", &SAME_NAME_IMPORTS_LIB)
+        .expect("krusty compiles the dependency");
+    let lib = build
+        .reference_out()
+        .expect("kotlinc compiles the dependency")
+        .to_path_buf();
+    let jdk = common::jdk_modules();
+    let classpath = [common::stdlib_jar(), lib.clone()];
+    let krusty =
+        common::compile_and_run_box(SAME_NAME_IMPORTS_MAIN, "Main", &classpath, Some(&jdk))
+            .expect("krusty resolves both imports");
+    let reference = common::kotlinc_box_files_result_with_classpath(
+        &[("Main.kt", SAME_NAME_IMPORTS_MAIN)],
+        "MainKt",
+        &[lib],
+    );
+    assert_eq!(krusty, "OK");
+    assert_eq!(reference, "OK");
+}
+
+#[test]
+fn same_name_explicit_imports_from_this_module_are_all_candidates() {
+    let sources = [
+        SAME_NAME_IMPORTS_LIB[0],
+        SAME_NAME_IMPORTS_LIB[1],
+        ("Main.kt", SAME_NAME_IMPORTS_MAIN),
+    ];
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let krusty = common::compile_and_run_box_files(&sources, &[stdlib], Some(&jdk))
+        .expect("krusty resolves both same-module imports");
+    let reference = common::kotlinc_box_files_result(&sources, "MainKt");
+    assert_eq!(krusty, "OK");
+    assert_eq!(reference, "OK");
+}
+
+/// Compile `Conflict.kt`, which imports `a.Same` and `b.Same`, beside `module` sources and against
+/// `dependencies`, and assert kotlinc's complete ledger, multi-line messages included: the two
+/// conflicting-import errors followed by `use_sites` (line, column, message) in `Conflict.kt`.
+fn assert_conflicting_classifier_imports(
+    module: &[(&str, &str)],
+    dependencies: &[std::path::PathBuf],
+    conflict: &str,
+    use_sites: &[(usize, usize, &str)],
+) {
+    let sources = module
+        .iter()
+        .copied()
+        .chain([("Conflict.kt", conflict)])
+        .collect::<Vec<_>>();
+    let classpath = dependencies
+        .iter()
+        .cloned()
+        .chain([common::stdlib_jar()])
+        .collect::<Vec<_>>();
+    let result = common::compiler_diagnostics(&sources, &classpath);
+    let conflicting = "conflicting import: imported name 'Same' is ambiguous.";
+    let expected = [(1, 10, conflicting), (2, 10, conflicting)]
+        .into_iter()
+        .chain(use_sites.iter().copied())
+        .flat_map(|(line, column, message)| {
+            let mut lines = message.lines();
+            let header = format!(
+                "Conflict.kt:{line}:{column}: {}",
+                lines.next().unwrap_or_default()
+            );
+            std::iter::once(header)
+                .chain(lines.map(|line| format!("| {line}")))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(result.krusty_code, 1, "{}", result.krusty_stderr);
+    assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr),
+        expected
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.reference_stderr),
+        expected
+    );
+}
+
+const SAME_CLASSES: [(&str, &str); 2] = [
+    ("A.kt", "package a\nclass Same\n"),
+    ("B.kt", "package b\nclass Same\n"),
+];
+
+const CLASS_AMBIGUITY: &str =
+    "overload resolution ambiguity between candidates:\nclass Same : Any\nclass Same : Any";
+
+#[test]
+fn conflicting_classifier_imports_report_the_complete_kotlinc_ledger() {
+    // A type reference lists the conflicting classifiers; a constructor call binds no classifier
+    // and reports its name unresolved (kotlinc 2.4.20).
+    assert_conflicting_classifier_imports(
+        &SAME_CLASSES,
+        &[],
+        "import a.Same\nimport b.Same\nval value: Same = Same()\n",
+        &[
+            (3, 12, CLASS_AMBIGUITY),
+            (3, 19, "unresolved reference 'Same'."),
+        ],
+    );
+}
+
+#[test]
+fn conflicting_classifier_imports_are_ambiguous_in_body_type_positions() {
+    assert_conflicting_classifier_imports(
+        &SAME_CLASSES,
+        &[],
+        "import a.Same\nimport b.Same\nfun g() {\n    val x: Same? = null\n    val y = x is Same\n}\n",
+        &[(4, 12, CLASS_AMBIGUITY), (5, 18, CLASS_AMBIGUITY)],
+    );
+}
+
+#[test]
+fn conflicting_classifier_imports_select_the_only_complete_type_path() {
+    // Only `a.Same` declares `N`, so the qualified type binds it; the import list still conflicts.
+    assert_conflicting_classifier_imports(
+        &[
+            ("A.kt", "package a\nclass Same { class N }\n"),
+            ("B.kt", "package b\nclass Same\n"),
+        ],
+        &[],
+        "import a.Same\nimport b.Same\nfun f(x: Same.N) {}\n",
+        &[],
+    );
+}
+
+#[test]
+fn conflicting_class_and_typealias_imports_list_the_alias_declaration() {
+    let dependency = common::kotlinc_library("package b\ntypealias Same = Any\n")
+        .expect("kotlinc compiles the dependency");
+    assert_conflicting_classifier_imports(
+        &[("A.kt", "package a\nclass Same\n")],
+        &[dependency],
+        "import a.Same\nimport b.Same\nfun g() {\n    val x: Same? = null\n    val y = Same()\n}\n",
+        &[
+            (
+                4,
+                12,
+                "overload resolution ambiguity between candidates:\nclass Same : Any\ntypealias Same = Any",
+            ),
+            (5, 13, "unresolved reference 'Same'."),
+        ],
+    );
+}
+
+#[test]
+fn conflicting_generic_classifier_imports_render_type_parameters() {
+    let dependency = common::kotlinc_library("package b\ntypealias Same<T> = List<T>\n")
+        .expect("kotlinc compiles the dependency");
+    assert_conflicting_classifier_imports(
+        &[("A.kt", "package a\nclass Same<T>\n")],
+        &[dependency],
+        "import a.Same\nimport b.Same\nfun g() {\n    val x: Same<String>? = null\n}\n",
+        &[(
+            4,
+            12,
+            "overload resolution ambiguity between candidates:\nclass Same<T> : Any\ntypealias Same<T> = List<T>",
+        )],
+    );
+}
+
+fn assert_mixed_imports_run(main: &str) {
+    let sources = [
+        (
+            "Functions.kt",
+            "package mixed.functions\nfun selected(): String = \"OK\"\nfun chosen(): String = \"OK\"\n",
+        ),
+        (
+            "Object.kt",
+            "package mixed.objects\nobject selected { operator fun invoke(): String = \"OK\" }\n",
+        ),
+        (
+            "Property.kt",
+            "package mixed.properties\nval chosen: String = \"not callable\"\n",
+        ),
+        ("Main.kt", main),
+    ];
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let krusty = common::compile_and_run_box_files(&sources, &[stdlib], Some(&jdk))
+        .expect("krusty resolves the callable facet");
+    let reference = common::kotlinc_box_files_result(&sources, "MainKt");
+    assert_eq!(krusty, "OK");
+    assert_eq!(reference, "OK");
+}
+
+#[test]
+fn callable_and_object_imports_are_order_independent() {
+    for main in [
+        "import mixed.functions.selected\nimport mixed.objects.selected\nfun box(): String = selected()\n",
+        "import mixed.objects.selected\nimport mixed.functions.selected\nfun box(): String = selected()\n",
+    ] {
+        assert_mixed_imports_run(main);
+    }
+}
+
+#[test]
+fn callable_and_property_imports_are_order_independent() {
+    for main in [
+        "import mixed.functions.chosen\nimport mixed.properties.chosen\nfun box(): String = chosen()\n",
+        "import mixed.properties.chosen\nimport mixed.functions.chosen\nfun box(): String = chosen()\n",
+    ] {
+        assert_mixed_imports_run(main);
+    }
 }

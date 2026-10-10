@@ -817,20 +817,8 @@ impl ProductionSignatureSemantics<'_> {
             let (selection, failed_segment) =
                 resolver.qualified_type_classifier_binding_in_scope(spelling);
             match selection {
-                crate::symbol_resolver::CandidateSelectionWithTies::Selected(classifier) => {
-                    return Some((Some(classifier), None));
-                }
-                // Conflicting explicit imports name no complete candidates; the import list
-                // owns that conflict, so the reference reports its unbound root.
-                crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(candidates)
-                    if candidates.is_empty() =>
-                {
-                    return Some((
-                        None,
-                        Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
-                            failed_segment.unwrap_or_else(|| first.to_string()),
-                        )),
-                    ));
+                crate::symbol_resolver::CandidateSelectionWithTies::Selected(path) => {
+                    return Some((Some(path.classifier), None));
                 }
                 crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(candidates) => {
                     return Some((

@@ -1123,11 +1123,8 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
     ) -> Option<(TypeName, String)> {
         let imports = self.function_import_scope(source).ok()?;
-        let (namespace, declared_name) = imports.explicit_target(spelling)?;
-        let crate::symbol_source::SymbolNamespace::Classifier(owner) = namespace else {
-            return None;
-        };
-        Some((owner, declared_name))
+        let mut targets = imports.explicit_classifier_member_targets(spelling);
+        (targets.len() == 1).then(|| targets.pop()).flatten()
     }
 
     fn prioritized_enum_entries(&self, scope: crate::fir::SignatureScope) -> bool {

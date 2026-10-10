@@ -51,7 +51,7 @@ impl ProductionSignatureSemantics<'_> {
             &module as &dyn crate::symbol_source::SymbolSource,
             self.table.libraries.as_ref() as &dyn crate::symbol_source::SymbolSource,
         ]);
-        let mut explicit = HashMap::new();
+        let mut explicit = Vec::new();
         let mut stars = Vec::new();
         for import in self.headers.scopes.imports(file.imports) {
             let imported = path(import.path).ok_or_else(Self::failure)?;
@@ -91,10 +91,10 @@ impl ProductionSignatureSemantics<'_> {
                 .alias
                 .and_then(|alias| self.headers.lookup_names.get(alias))
                 .unwrap_or(declared_name);
-            explicit.insert(
+            explicit.push((
                 visible_name.to_owned(),
                 crate::symbol_resolver::CallableImport::new(owner, declared_name.to_owned()),
-            );
+            ));
         }
         let own_package = self
             .headers

@@ -2865,6 +2865,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests:
   `import_resolution_diag_e2e::an_unresolved_import_keeps_the_rest_of_the_file_scope`,
   `::an_unresolved_star_import_keeps_default_imports`.
+- **Conflicting explicit classifier imports stay candidates at the use site.** `import a.Same` and
+  `import b.Same` occupy one explicit-import rung. Beyond the two `conflicting import` errors on the
+  import list, a type reference (`val v: Same`, `x is Same`, `Same<String>`) selects among the
+  complete explicit paths: one completion binds (`Same.N` when only `a.Same` declares `N`), several
+  report `overload resolution ambiguity between candidates:` with each candidate's declaration
+  header — `class Same<T> : Any`, or `typealias Same<T> = List<T>` for an alias import. An
+  expression qualifier commits its root first, so a constructor call `Same()` binds no root and
+  reports `unresolved reference 'Same'.` (kotlinc 2.4.20). Signature collection and the body
+  checker read the same facet-based explicit candidates; neither picks the last import. KNOWN GAP:
+  the Pass-2 module provider (`StreamedModuleSymbols::symbols`) publishes no classifier facet for a
+  same-module `typealias`, so a same-module alias import neither conflicts nor becomes a candidate
+  in body checking; the alias tests therefore import the alias from a kotlinc-compiled dependency.
+  Tests: `import_scope_conformance_e2e::conflicting_classifier_imports_report_the_complete_kotlinc_ledger`
+  and its `conflicting_*` siblings.
 - **A signature-pass member call hands its parameter to a nested generic call.** A nested call
   argument (`emptyList()`, `mapOf()`) is probed with its formals defaulted (`List<Any>`) and is
   marked `contextual_call`; the top-level path re-selects it under the selected parameter, but

@@ -417,23 +417,29 @@ impl ProductionSignatureSemantics<'_> {
         // cannot select them; retain the already-normalized classifier import rung and select the
         // declaration fact directly. Lexical values and receiver members above remain nearer.
         let imports = self.function_import_scope(scope.source)?;
-        if let Some((namespace, declared_name)) = imports.explicit_target(spelling) {
-            if let crate::symbol_source::SymbolNamespace::Classifier(owner) = namespace {
-                if self.classifier_has_enum_entry(owner, &declared_name) {
-                    return Self::enum_entry_value(owner, &declared_name);
-                }
-                // A companion-declared property may be realized by an associated platform
-                // accessor rather than an instance accessor (`@JvmField` on JVM). Explicit import
-                // still denotes the Kotlin property declaration; consume the provider-normalized
-                // property exactly as the ordinary Pass-2 checker does.
-                if let Ok(property) = self.with_resolver(scope, |resolver| {
-                    resolver.associated_property(owner, &declared_name)
-                }) {
-                    return crate::fir::ResolvedTy::new(property.ty)
-                        .map_err(|_| Self::failure())
-                        .map(SelectedValue::plain);
-                }
+        let mut explicit_values = Vec::new();
+        for (owner, declared_name) in imports.explicit_classifier_member_targets(spelling) {
+            if self.classifier_has_enum_entry(owner, &declared_name) {
+                explicit_values.push(Self::enum_entry_value(owner, &declared_name)?);
+                continue;
             }
+            // A companion-declared property may be realized by an associated platform accessor
+            // rather than an instance accessor (`@JvmField` on JVM). Explicit import still denotes
+            // the Kotlin declaration; select only this value facet from the shared import name.
+            if let Ok(property) = self.with_resolver(scope, |resolver| {
+                resolver.associated_property(owner, &declared_name)
+            }) {
+                explicit_values.push(
+                    crate::fir::ResolvedTy::new(property.ty)
+                        .map_err(|_| Self::failure())
+                        .map(SelectedValue::plain)?,
+                );
+            }
+        }
+        match explicit_values.len() {
+            0 => {}
+            1 => return explicit_values.pop().ok_or_else(Self::failure),
+            _ => return Err(Self::failure()),
         }
         let mut imported_entry_owners = Vec::new();
         for owner in imports.levels()[1].iter().copied() {
