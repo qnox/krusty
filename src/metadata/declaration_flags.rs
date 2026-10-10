@@ -1,10 +1,9 @@
-//! `@Metadata` flag words for classes and their declared functions, read from the IR's recorded
+//! Metadata flag words for classes and their declared functions, read from the IR's recorded
 //! declaration facts.
 
-use crate::ir::IrFile;
-pub(super) use crate::metadata::declaration_records::declared_value_parameters;
+use crate::ir::{IrDataClassMemberRole, IrFile};
 
-pub(super) fn declaration_visibility_bits(visibility: crate::types::Visibility) -> u64 {
+pub(crate) fn declaration_visibility_bits(visibility: crate::types::Visibility) -> u64 {
     match visibility {
         crate::types::Visibility::Internal => 0,
         crate::types::Visibility::Private => 1,
@@ -16,7 +15,7 @@ pub(super) fn declaration_visibility_bits(visibility: crate::types::Visibility) 
     }
 }
 
-pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
+pub(crate) fn class_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     // Visibility bits: INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3 — an `internal class` must
     // record explicit 0 so a consumer enforces the module boundary; synthesized classes without a
     // recorded visibility stay public.
@@ -68,7 +67,7 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
         | (u64::from(c.is_enum) << 15)
 }
 
-/// `Function.flags` (proto field 9) — ONE bitfield like [`class_metadata_flags`], not a per-shape
+/// `Function.flags` (proto field 9) — ONE bitfield like [`class_flags`], not a per-shape
 /// constant. Decoded from kotlinc 2.4.0 (copy 198, componentN 454, hashCode/toString 65750, equals
 /// 66006): bit0 hasAnnotations | bits1-3 visibility (PUBLIC=3, PRIVATE=1) | bits4-5 modality
 /// (FINAL=0, OPEN=1, ABSTRACT=2) | bits6-7 memberKind (DECLARATION=0, DELEGATION=2,
@@ -76,7 +75,7 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
 /// isOperator | bit9 isInfix.
 /// Used for a class's REAL declared members and its interface-delegation forwarders; the
 /// data/value-class synthesized sets keep their own (already kotlinc-verified) constants.
-pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
+pub(crate) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
     let visibility = declaration_visibility_bits(ir.method_visibility(fid));
     let modality: u64 = if f.body.is_none() {
         2 // abstract (an interface method or an `abstract fun`)
@@ -121,4 +120,62 @@ pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -
         | tailrec
         | return_value_status
         | companion
+}
+
+/// `Function.flags` for one synthesized `componentN`: `COMPONENT_FN_FLAGS` with the visibility
+/// bits swapped to the constructor property's visibility. An internal component stays operator,
+/// final, and synthesized, and records internal (0) rather than public (3). `None` when the class
+/// generates no such member.
+pub(crate) fn data_component_flags(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    ordinal: u32,
+) -> Option<u64> {
+    use crate::metadata::class_builder::COMPONENT_FN_FLAGS;
+    let fid = ir.data_class_member(c.fq_name_id(), IrDataClassMemberRole::Component(ordinal))?;
+    let visibility = declaration_visibility_bits(ir.method_visibility(fid));
+    Some(
+        (COMPONENT_FN_FLAGS & !crate::metadata::property_flags::VISIBILITY_MASK)
+            | (visibility << 1),
+    )
+}
+
+/// `Function.flags` for the synthesized `copy`: `COPY_FN_FLAGS` (public final SYNTHESIZED member)
+/// with the visibility bits swapped to the copy's actual visibility — the primary constructor's
+/// under `DataClassCopyRespectsConstructorVisibility` (kotlinc 2.4.10: private ctor → 0xC2).
+pub(crate) fn data_copy_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
+    use crate::metadata::class_builder::COPY_FN_FLAGS;
+    let Some(fid) = ir.data_class_member(c.fq_name_id(), IrDataClassMemberRole::Copy) else {
+        return COPY_FN_FLAGS;
+    };
+    let visibility = declaration_visibility_bits(ir.method_visibility(fid));
+    (COPY_FN_FLAGS & !crate::metadata::property_flags::VISIBILITY_MASK) | (visibility << 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::function_flags;
+    use crate::ir::IrFile;
+
+    #[test]
+    fn member_metadata_flags_keep_inline_operator_and_infix_capabilities() {
+        let mut ir = IrFile::default();
+        let function = ir.add_fun(crate::ir::IrFunction {
+            name: "convention".into(),
+            params: Vec::new(),
+            ret: crate::types::Ty::Unit,
+            body: None,
+            is_static: false,
+            dispatch_receiver: Some(crate::types::type_name("demo/Owner")),
+            param_checks: Vec::new(),
+        });
+        ir.inline_fns.insert(function);
+        ir.operator_fns.insert(function);
+        ir.infix_fns.insert(function);
+
+        let flags = function_flags(&ir, function, &ir.functions[function as usize]);
+        assert_ne!(flags & (1 << 8), 0);
+        assert_ne!(flags & (1 << 9), 0);
+        assert_ne!(flags & (1 << 10), 0);
+    }
 }

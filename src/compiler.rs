@@ -257,8 +257,11 @@ pub fn emit_analyzed<B: Backend>(
             source_id,
             &backend_module_facts,
             &symbols,
-            module_name,
-            stems,
+            backend_handoff::ModuleEmission {
+                module_name,
+                stems,
+                origins: source_map.origins(),
+            },
             diags,
         ) else {
             continue;
@@ -269,6 +272,9 @@ pub fn emit_analyzed<B: Backend>(
         default_arguments.is_empty(),
         "Pass 2 must consume every checked signature default"
     );
+    if !diags.has_errors() {
+        backend.check_module(&state, diags);
+    }
     if !diags.has_errors() {
         outputs.extend(backend.finalize(state, module_name));
     }

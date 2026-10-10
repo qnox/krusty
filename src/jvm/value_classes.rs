@@ -1780,23 +1780,16 @@ pub(crate) fn lower_value_classes(
         } = &ir.exprs[i]
         {
             if serialization_constructor_calls.contains(&id) {
-                for (&argument, &parameter) in args.iter().zip(
-                    ctor_params
-                        .as_deref()
-                        .expect("generated constructor call retains its exact parameters"),
-                ) {
-                    let Some(value_class) = parameter
-                        .non_null()
-                        .obj_internal()
-                        .filter(|classifier| under.contains_key(classifier))
-                    else {
-                        continue;
-                    };
-                    if repr_ctx.unboxed_value_class(argument, &under) == Some(value_class) {
-                        value_member_constructor_ops
-                            .push((argument, repr_ctx.box_op(argument, value_class)));
-                    }
-                }
+                value_member_constructor_ops.extend(
+                    constructor_arguments::deserialization_argument_boxes(
+                        &repr_ctx,
+                        args,
+                        ctor_params
+                            .as_deref()
+                            .expect("generated constructor call retains its exact parameters"),
+                        &under,
+                    ),
+                );
                 continue;
             }
             let fields;
@@ -4850,13 +4843,19 @@ fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
 
 /// Null-safe box: replace the expr at `id` with `{ tmp = <orig>; if (tmp == null) null else box-impl(tmp) }`
 /// — boxing a nullable (reference-underlying) value class without hitting the ctor null-check on `null`.
+/// A carrier recorded physically nullable (a decoded `Int?` for `X(Int)`) is held as that nullable
+/// value, so the test sees its null before `box-impl` takes the primitive.
 fn box_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, slot: u32) {
+    let nullable_carrier = ir
+        .physical_types
+        .get(&id)
+        .is_some_and(|ty| ty.is_nullable());
     let orig_id = clone_below_representation_wrapper(ir, id);
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let var = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Variable {
         index: slot,
-        ty: u.clone(),
+        ty: if nullable_carrier { Ty::nullable(u) } else { u },
         init: Some(orig_id),
         named: false,
     });
