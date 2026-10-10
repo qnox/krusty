@@ -232,6 +232,7 @@ mod streaming_signature_bridge;
 mod streaming_signature_tests;
 mod super_calls;
 pub use super_calls::ResolvedSuperCall;
+mod superclass_validation;
 mod tailrec_declarations;
 mod type_join;
 mod type_parameter_owners;
@@ -1532,6 +1533,9 @@ pub struct ClassSig {
     /// Arena declaration that owns this source classifier. Synthetic companion classifiers have no
     /// independent class declaration and therefore leave this unset.
     pub source_decl: Option<DeclId>,
+    /// Whether the declaration is structurally owned by another classifier. This is captured from
+    /// the declaration graph while source ownership is live; an internal-name `$` is not ownership.
+    pub is_nested: bool,
     pub visibility: Visibility,
     /// Resolved classifier declaration annotations, projected to the stable module index before
     /// Pass 2 so plugins and semantic checks never revisit source occurrences.
@@ -1693,6 +1697,7 @@ struct DeclaredCallableClassHeader {
     stable_declaration: Option<crate::fir::DeclarationId>,
     source_file: u32,
     source_decl: DeclId,
+    is_nested: bool,
     visibility: Visibility,
     flags: ClassFlags,
     methods: MethodMap,
@@ -1718,6 +1723,7 @@ impl ClassSig {
             stable_declaration,
             source_file,
             source_decl,
+            is_nested,
             visibility,
             flags,
             methods,
@@ -1735,6 +1741,7 @@ impl ClassSig {
             stable_declaration,
             source_file,
             source_decl: Some(source_decl),
+            is_nested,
             visibility,
             annotations: Vec::new(),
             applied_annotations: Vec::new(),
@@ -34773,11 +34780,10 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 // lose nested classifiers and violate bind-once resolution.
                 continue;
             }
-            if reference.is_annotation() {
-                // Annotation occurrences are retained by their owning declaration and checked in
-                // that declaration's lexical scope. `detached_type_refs` carries the same reference
-                // only so Pass 1 can bind its identity for compact-header projection; rechecking it
-                // here from file scope loses local/nested scope and declaration suppressions.
+            if reference.is_annotation() || reference.is_superclass() {
+                // Annotation and superclass occurrences are checked by their owning declaration (a
+                // superclass by signature solving); the detached copy only lets Pass 1 bind it, and
+                // rechecking it from file scope loses its declaration's lexical policies.
                 continue;
             }
             c.type_ref_ty(scope, reference);
@@ -49882,6 +49888,19 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        if let Some((span, superclass)) = cl.base_class_span.zip(
+            current_classifier
+                .as_ref()
+                .and_then(|classifier| classifier.stable_declaration)
+                .and_then(|declaration| {
+                    self.resolved_index?
+                        .classifier_header(declaration)?
+                        .superclass
+                })
+                .map(|superclass| superclass.get()),
+        ) {
+            self.record_finalized_superclass_type(span, superclass);
+        }
         if !body_local_class && self.active_declarations.is_none() {
             // The retained inspection pipeline keeps the original declaration AST so editor
             // navigation can point from each header occurrence to the declaration selected by the
@@ -49892,12 +49911,11 @@ impl<'a> Checker<'a> {
             let header_scope = scope.child(ScopeKind::Block);
             header_scope.declare_tparams(&cl.type_params, &class_tparams, |_| false);
             if let Some(base) = cl.base_class.as_deref() {
-                let reference = base_class_type_ref(
-                    base,
-                    &cl.base_type_args,
-                    cl.base_class_span.unwrap_or(cl.span),
-                );
-                self.type_ref_ty(&header_scope, &reference);
+                let span = cl.base_class_span.unwrap_or(cl.span);
+                let reference = base_class_type_ref(base, &cl.base_type_args, span);
+                if !self.resolved_type_tys.contains_key(&(span.lo, span.hi)) {
+                    self.type_ref_ty(&header_scope, &reference);
+                }
             }
             for reference in &cl.supertypes {
                 self.type_ref_ty(&header_scope, reference);
@@ -49946,76 +49964,7 @@ impl<'a> Checker<'a> {
         if !self.fragment.is_type_use_annotations() {
             self.check_class_missing_supertypes(cl, d, current_owner, is_anonymous_object);
         }
-        if let Some((owner, superclass, separate_emission)) = current_owner.and_then(|owner| {
-            cl.base_class.as_ref()?;
-            self.resolved_body_local_supertypes
-                .get(&owner)
-                .and_then(|supertypes| supertypes.first())
-                .and_then(|supertype| supertype.kotlin_class_internal())
-                .or_else(|| self.direct_superclass_name(owner))
-                .map(|superclass| {
-                    (
-                        owner,
-                        superclass,
-                        self.resolved_type_name(superclass)
-                            .is_none_or(|class| class.source_file != Some(self.file_index)),
-                    )
-                })
-        }) {
-            let inheritance = self
-                .resolver()
-                .classifier(superclass)
-                .map(|shape| shape.inheritance);
-            crate::trace_compiler!(
-                "resolve",
-                "superclass capability class={} declaration={d:?} superclass={} separate_emission={separate_emission} inheritance={inheritance:?}",
-                cl.name,
-                superclass.render(),
-            );
-            let cyclic_header = self.diags.diags.iter().any(|diagnostic| {
-                diagnostic.file == self.file_index
-                    && cl.span.lo <= diagnostic.span.lo
-                    && diagnostic.span.hi <= cl.span.hi
-                    && diagnostic
-                        .msg
-                        .contains("cycle in supertypes and/or containing declarations")
-            });
-            let diagnostic = match inheritance {
-                _ if cyclic_header => None,
-                _ if cl.is_enum() => None,
-                None => None,
-                Some(shape) if !shape.is_extensible => Some("it is not extensible"),
-                _ => None,
-            };
-            if let Some(reason) = diagnostic {
-                self.diags.error(
-                    cl.span,
-                    format!(
-                        "krusty: superclass '{}' cannot be subclassed: {reason}",
-                        superclass.render()
-                    ),
-                );
-            }
-            // `sealed` is abstract: its own subclasses discharge members the sealed class leaves
-            // open, including members inherited from a superclass emitted in another unit.
-            let leaves_abstract_members = !cl.is_enum()
-                && separate_emission
-                && inheritance.is_some_and(|shape| shape.is_abstract)
-                && !cl.modality.is_abstract()
-                && !self.has_no_unimplemented_abstract_members(owner);
-            if leaves_abstract_members {
-                // This is a Kotlin declaration error, not an emitter capability gate. Diagnose it
-                // while the complete semantic hierarchy is live so an invalid concrete class can
-                // never reach common lowering.
-                self.diags.error(
-                    cl.span,
-                    format!(
-                        "class '{}' is not abstract and does not implement all abstract members",
-                        cl.name
-                    ),
-                );
-            }
-        }
+        self.validate_class_superclass(d, cl, current_owner);
         // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so
         // does a LOCAL class — it is entered from the body it was written in and captures the
         // enclosing instance, so the outer receivers and type parameters stay reachable.

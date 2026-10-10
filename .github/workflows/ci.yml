@@ -187,15 +187,56 @@ jobs:
       - name: cache Kotlin/Native distribution
         uses: actions/cache@v6
         with:
-          path: target/cache/kotlin-native
-          key: klib-semantics-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
+          path: |
+            target/cache/kotlin-native
+            target/cache/krusty-deps
+          key: klib-semantics-serialization-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
       - name: cache kotlin toolchain
         uses: actions/cache@v6
         with:
           path: target/cache/kotlinc
           key: klib-semantics-kotlinc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
-      - name: decode the Kotlin/Native stdlib through common metadata
+      - name: cache box corpus
+        uses: actions/cache@v6
+        with:
+          path: target/cache/box-corpus
+          key: klib-semantics-box-corpus-mock-jdk-${{ hashFiles('kotlin-versions') }}
+      - name: restore recorded kotlinc-native bytes
+        id: native-recordings
+        uses: actions/cache/restore@v6
+        with:
+          path: target/cache/native-recordings
+          key: recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          restore-keys: |
+            recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-
+      - name: select kotlinc-native recording mode
+        id: native-recording-mode
+        env:
+          CACHE_HIT: ${{ steps.native-recordings.outputs.cache-hit }}
+          MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+        run: |
+          set -euo pipefail
+          write=0
+          if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
+            write=1
+          fi
+          echo "write=$write" >> "$GITHUB_OUTPUT"
+      - name: decode and compare Kotlin/Native metadata
+        env:
+          # A cold lane provisions and launches kotlinc-native to create the exact binary
+          # reference before comparing it. Keep the ordinary local test deadline unchanged.
+          KRUSTY_TEST_TIMEOUT_SECONDS: "600"
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
+          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: just klib-semantics
+      - name: save recorded kotlinc-native bytes
+        if: steps.native-recording-mode.outputs.write == '1'
+        uses: actions/cache/save@v6
+        with:
+          path: target/cache/native-recordings
+          key: recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-${{ github.sha }}
 
   # One gate build of the binaries the matrices run. Conformance uses the test binary and the
   # CLI. Gradle uses the same CLI and the krusty-build test binary; it does not compile krusty.
