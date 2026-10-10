@@ -467,6 +467,28 @@ pub(crate) fn split_declaration_annotations(
     )
 }
 
+/// What every `@kotlin.Metadata` of one compilation stamps beside its payload: the `mv` version,
+/// and whether `xi` carries kotlinc's pre-release flag (`LanguageVersionSettings.isPreRelease`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MetadataStamp {
+    pub version: [i32; 3],
+    pub pre_release: bool,
+}
+
+impl MetadataStamp {
+    /// `JvmAnnotationNames.METADATA_PRE_RELEASE_FLAG`.
+    const PRE_RELEASE_FLAG: i32 = 1 << 1;
+
+    /// The `xi` written for a class whose own flags are `flags`.
+    pub fn xi(self, flags: i32) -> i32 {
+        if self.pre_release {
+            flags | Self::PRE_RELEASE_FLAG
+        } else {
+            flags
+        }
+    }
+}
+
 pub struct ClassWriter {
     cp: ConstPool,
     /// Every internal class name mentioned in class-type position by a field/method descriptor, a
@@ -865,7 +887,7 @@ impl ClassWriter {
     pub fn set_kotlin_metadata(
         &mut self,
         k: i32,
-        mv: &[i32],
+        stamp: MetadataStamp,
         xi: i32,
         d1: &[String],
         d2: &[String],
@@ -884,13 +906,13 @@ impl ClassWriter {
         u2(&mut body, if has_payload { 5 } else { 3 });
         let n_mv = self.cp.utf8("mv");
         u2(&mut body, n_mv);
-        self.ev_int_array(&mut body, mv);
+        self.ev_int_array(&mut body, &stamp.version);
         let n_k = self.cp.utf8("k");
         u2(&mut body, n_k);
         self.ev_int(&mut body, k);
         let n_xi = self.cp.utf8("xi");
         u2(&mut body, n_xi);
-        self.ev_int(&mut body, xi);
+        self.ev_int(&mut body, stamp.xi(xi));
         if has_payload {
             let n_d1 = self.cp.utf8("d1");
             u2(&mut body, n_d1);

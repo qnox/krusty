@@ -7,17 +7,23 @@ use std::collections::BTreeMap;
 /// promise a policy the compiler cannot apply.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum WarningName {
+    CliArgDisablesStableFeature,
+    DeprecatedCliArg,
     DeprecatedLanguageVersion,
     ExperimentalLanguageVersion,
     RedundantCliArg,
+    RemovedCliArg,
 }
 
 impl WarningName {
     fn parse(name: &str) -> Option<Self> {
         Some(match name {
+            "CLI_ARG_DISABLES_STABLE_FEATURE" => Self::CliArgDisablesStableFeature,
+            "DEPRECATED_CLI_ARG" => Self::DeprecatedCliArg,
             "DEPRECATED_LANGUAGE_VERSION" => Self::DeprecatedLanguageVersion,
             "EXPERIMENTAL_LANGUAGE_VERSION" => Self::ExperimentalLanguageVersion,
             "REDUNDANT_CLI_ARG" => Self::RedundantCliArg,
+            "REMOVED_CLI_ARG" => Self::RemovedCliArg,
             _ => return None,
         })
     }
@@ -112,9 +118,10 @@ impl WarningPolicy {
     }
 
     /// Command-line configuration warnings are not hidden by plain `-nowarn`. An explicit named
-    /// level still wins, while global `-Werror` retains warning severity and fails afterward.
-    pub fn command_line_disposition(&self, name: WarningName) -> WarningDisposition {
-        match self.configured_level(name) {
+    /// level still wins, while global `-Werror` retains warning severity and fails afterward. A
+    /// warning without a configurable identity follows only the global policy.
+    pub fn command_line_disposition(&self, name: Option<WarningName>) -> WarningDisposition {
+        match name.and_then(|name| self.configured_level(name)) {
             Some(WarningLevel::Disabled) => WarningDisposition::Disabled,
             Some(WarningLevel::Warning) => WarningDisposition::Warning,
             Some(WarningLevel::Error) => WarningDisposition::Error,

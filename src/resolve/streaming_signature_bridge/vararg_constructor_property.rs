@@ -48,7 +48,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features(
             &[SourceInput::kotlin(source).with_file_stem("VarargPropertyFlag")],
-            Box::new(EmptySymbolSource),
+            crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
             &LangFeatures::new(),
             &mut diagnostics,
         );

@@ -1,5 +1,6 @@
 use super::*;
 use crate::backend::{Artifact, CheckedIrFile};
+use crate::compilation_target::CompilationTarget;
 use crate::features::LangFeatures;
 use crate::frontend::analyze_source_set_with_features_and_prepare;
 use crate::libraries::EmptySymbolSource;
@@ -39,7 +40,9 @@ fn jvm_production_stream_captures_anonymous_receiver_in_accessor_lambda() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(initialized_jvm_libraries(classpath.clone())),
+        crate::frontend::PlatformProvider::jvm(Box::new(initialized_jvm_libraries(
+            classpath.clone(),
+        ))),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -76,6 +79,10 @@ struct RecoveryMustNotLowerBackend;
 impl Backend for RecoveryMustNotLowerBackend {
     type State = ();
 
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+        CompilationTarget::Jvm
+    }
+
     fn lower_ir_file(
         &self,
         _file: CheckedIrFile<'_>,
@@ -96,6 +103,7 @@ fn empty_signature_recovery_analysis() -> StreamingSourceSetAnalysis {
         crate::frontend::collect_signatures(&[], &mut setup_diags).into_pass_two_symbols();
     assert!(setup_diags.diags.is_empty());
     StreamingSourceSetAnalysis {
+        target: CompilationTarget::Jvm,
         symbols,
         reparse_sources: Vec::new(),
         streamed: Some(crate::frontend::StreamedPassState {
@@ -175,6 +183,10 @@ fn attributed_signature_failure_is_not_duplicated_by_recovery() {
 impl Backend for SharedClassCaptureBackend {
     type State = u8;
 
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+        CompilationTarget::Jvm
+    }
+
     fn lower_ir_file(
         &self,
         file: CheckedIrFile<'_>,
@@ -224,6 +236,10 @@ impl Backend for SharedClassCaptureBackend {
 
 impl Backend for PackageDeclarationBackend {
     type State = u8;
+
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+        CompilationTarget::Jvm
+    }
 
     fn lower_ir_file(
         &self,
@@ -292,7 +308,7 @@ fn pass_two_publishes_backend_neutral_shared_anonymous_class_capture() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -325,7 +341,7 @@ fn pass_two_publishes_complete_package_declarations_into_common_ir() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -359,7 +375,7 @@ fn pass_two_preserves_definitely_non_null_generic_parameter_shape() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -457,7 +473,7 @@ fn postponed_builder_receiver_is_read_through_the_anonymous_capture_identity() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -481,7 +497,7 @@ fn generic_context_property_header_uses_its_stable_type_parameter() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::from_source(source),
         |_, _| {},
         &mut diagnostics,
@@ -504,7 +520,7 @@ fn typealiased_fun_interface_constructor_reference_uses_stable_expansion() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -530,7 +546,7 @@ fn pass_two_publishes_deferred_generic_local_classifier_before_common_lowering()
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::from_source(source),
         |_, _| {},
         &mut diagnostics,
@@ -564,7 +580,7 @@ fn deeply_nested_enum_entry_inner_receiver_reaches_common_lowering() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,

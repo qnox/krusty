@@ -54,7 +54,7 @@ fn a_discarded_generic_result_still_runs_its_call() {
         src,
         "discarded_generic_result",
         &[common::stdlib_jar()],
-        None,
+        Some(&common::jdk_modules()),
     )
     .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "OK");
