@@ -1205,7 +1205,7 @@ fn source_property(
         compile_time_constant: None,
         metadata_constant_read: false,
         deprecated_hidden: false,
-        is_final: !property.is_open,
+        is_final: !property.is_open && !property.is_abstract,
         visibility: property.visibility,
         owner,
         receiver_rank,
@@ -2198,6 +2198,7 @@ mod tests {
         assert_eq!(property.receiver, Some(Ty::obj("demo/Base")));
         assert_eq!(property.ty, Ty::String);
         assert_eq!(property.visibility, Visibility::Protected);
+        assert!(property.is_final);
         assert_eq!(property.receiver_rank, 0);
         assert!(property.owner.matches("demo/Base"));
         assert_eq!(
@@ -2220,6 +2221,45 @@ mod tests {
             .1
             .overloads
             .is_empty());
+    }
+
+    #[test]
+    fn abstract_member_property_remains_an_override_target() {
+        let mut symbols = FrontendSymbols::default();
+        let mut base = class("demo/Base");
+        base.declared_callable_order.push("state".to_string());
+        base.declared_props.insert(
+            "state".into(),
+            FrontendDeclaredPropertySig {
+                ty: Ty::String,
+                storage_ty: None,
+                visibility: Visibility::Public,
+                source_visible: true,
+                is_const: false,
+                annotations: Vec::new(),
+                getter_name: "getState".into(),
+                setter_name: None,
+                setter_parameter_name: None,
+                setter_visibility: None,
+                has_custom_getter: false,
+                // Source `is_open` records an explicit `open` or a non-final `override`; an
+                // abstract declaration is independently overridable even when this bit is false.
+                is_abstract: true,
+                is_open: false,
+                context_params: Vec::new(),
+                source_member: None,
+                stable_declaration: None,
+            },
+        );
+        symbols.insert_class(base);
+        let source = ModuleSymbols::new(&symbols);
+
+        let properties = declared(&source, Ty::obj("demo/Base"), "state")
+            .into_parts()
+            .1;
+        assert_eq!(properties.overloads.len(), 1);
+        assert!(properties.overloads[0].getter.is_abstract);
+        assert!(!properties.overloads[0].is_final);
     }
 
     #[test]
