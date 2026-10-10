@@ -45,7 +45,7 @@ pub enum KlibBodyDeclineReason {
     ForeignReturnTarget,
     /// The body reads a value it does not declare.
     ForeignValue,
-    /// The body ends without returning.
+    /// The body of a function whose result is not `Unit` can reach its end without returning.
     MissingReturn,
     /// An expression of the given form carries no type.
     UntypedExpression(&'static str),

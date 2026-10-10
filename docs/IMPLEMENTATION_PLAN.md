@@ -4676,6 +4676,22 @@ code is the one the code generator already names: provider-owned bodies through 
   inlined function blocks, `throw`, `&&`/`||` and object construction.
   Next: members and classes in the provider, `throw` and object construction, `&&`/`||`, then
   wiring the unit into the Native lane switch (nothing is wired into a backend yet).
+- **Lowering (third slice).** Control and value forms, each lowered to what checked FIR lowering
+  produces for the equivalent source (`klib_lowering/body_lowering/` by form: `blocks`,
+  `conditionals`, `loops`, `string_templates`, `type_operators`, `calls`): `&&`/`||` with their
+  short-circuit facts; `if` and `when` without `else` as statements; nested plain blocks typed as
+  the source block and `Unit` bodies without a trailing `return`; the `Unit` coercions a KLIB adds,
+  dropped or converted by context; `throw`; string templates with merged literal runs; `while` and
+  `do`-`while` with labelled `break`/`continue`; `is`/`!is`, `as` and the `T?`-to-`T` smart cast;
+  `null` typed as the null literal. Still declining by form: constructor calls (a frozen
+  `KlibBodyCallable` has no classifier to construct, so `throw IllegalArgumentException(…)` and
+  `coerceIn` stop there), `as?`, `is` of a nullable type, implicit non-null assertions, other
+  implicit casts (a widening is not told from a narrowing without supertypes), blocks of a
+  compiler-introduced origin (inlined bodies, `for` loops) and composite blocks. The stdlib's
+  `boundsErrorMessage`, `messagePrefix`, `ensureNeverFrozen` and `initRuntimeIfNeeded` now lower
+  too; the remaining declines are led by generics, inlined blocks, file-private and member callees
+  and constructor calls.
+  Next: constructors and member callees in the provider, then the Native lane switch.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`

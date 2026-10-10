@@ -6,577 +6,14 @@
 use std::collections::HashMap;
 
 use super::super::*;
-use super::{
-    base, distribution_root, frozen_function, kotlin_class, local_symbol, lowered_body,
-    public_symbol, render, stdlib, validated,
-};
-use crate::backend::BackendCallableFact;
-use crate::ir::FunId;
-use crate::klib_libraries::{KlibDeclarationBodies, KlibLibraries};
-use crate::libraries::KlibDeclarationSignature;
-use crate::metadata::id_signature::{
-    callable_signature, metadata_class_signature, CallableShape, ClassScope, DeclarationContainer,
-    KlibPublicIdSignature, MetadataClass, MetadataContainer, Placement,
-};
+use super::demo_package::*;
+use super::{distribution_root, frozen_function, kotlin_class, lowered_body, stdlib, validated};
 use crate::metadata::klib_ir::tree::{
-    KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrBranch, KlibIrExprId, KlibIrExprKind,
-    KlibIrFunction, KlibIrMember, KlibIrMemberAccess, KlibIrNullability, KlibIrParameter,
-    KlibIrStatement, KlibIrType, KlibIrTypeId, KlibIrTypeOperator, KlibIrVariable,
+    KlibIrArena, KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
 };
-use crate::metadata::klib_ir::{
-    read_declaration_trees, KlibIrConstant, KlibIrDeclarationTree, KlibIrModuleTrees,
-    KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
-};
-use crate::metadata::semantic::{
-    semantic_ty, KotlinFunction, KotlinFunctionTypeShape, KotlinPackage, KotlinType,
-};
-use crate::types::{Ty, Visibility};
-
-// --- A hand-built package `demo` --------------------------------------------------------------
-
-/// A type a `demo` declaration or body uses, by its Kotlin class.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum T {
-    Int,
-    Double,
-    Boolean,
-    String,
-    Unit,
-    Nothing,
-    NullableAny,
-}
-
-impl T {
-    fn class(self) -> &'static str {
-        match self {
-            T::Int => "Int",
-            T::Double => "Double",
-            T::Boolean => "Boolean",
-            T::String => "String",
-            T::Unit => "Unit",
-            T::Nothing => "Nothing",
-            T::NullableAny => "Any",
-        }
-    }
-
-    fn nullable(self) -> bool {
-        self == T::NullableAny
-    }
-
-    fn kotlin(self) -> KotlinType {
-        KotlinType::Class {
-            internal: format!("kotlin/{}", self.class()),
-            args: Vec::new(),
-            nullable: self.nullable(),
-            shape: KotlinFunctionTypeShape::default(),
-        }
-    }
-
-    fn semantic(self) -> Ty {
-        semantic_ty(&self.kotlin(), &HashMap::new())
-    }
-
-    fn klib(self) -> KlibIrType {
-        let kotlin = ["kotlin".to_owned()];
-        let signature = metadata_class_signature(
-            MetadataContainer {
-                package: &kotlin,
-                classes: &[],
-                native_interop_library: false,
-            },
-            MetadataClass {
-                name: self.class(),
-                type_params: &[],
-                expect: false,
-            },
-        );
-        KlibIrType::Simple {
-            classifier: public_symbol(KlibIrSymbolKind::Class, signature),
-            nullability: if self.nullable() {
-                KlibIrNullability::MarkedNullable
-            } else {
-                KlibIrNullability::NotSpecified
-            },
-            arguments: Vec::new(),
-            annotations: Vec::new(),
-            abbreviation: None,
-        }
-    }
-}
-
-/// A top-level `demo` function: its name, value parameter types and result.
-type Shape = (&'static str, &'static [T], T);
-
-const PARAMETER_NAMES: [&str; 3] = ["a", "b", "c"];
-
-fn declaration((name, params, ret): Shape) -> KotlinFunction {
-    KotlinFunction {
-        name: name.to_owned(),
-        receiver: None,
-        params: params.iter().map(|param| param.kotlin()).collect(),
-        ret: ret.kotlin(),
-        formals: Vec::new(),
-        param_names: PARAMETER_NAMES[..params.len()]
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect(),
-        param_defaults: vec![false; params.len()],
-        vararg: None,
-        visibility: Visibility::Public,
-        modality: crate::metadata::semantic::KotlinModality::Final,
-        is_inline: false,
-        has_reified_type_params: false,
-        is_suspend: false,
-        is_operator: false,
-        is_infix: false,
-        is_expect: false,
-        is_external: false,
-        is_static: false,
-        context_count: 0,
-        context_kinds: Vec::new(),
-        annotations: Vec::new(),
-        return_value_status: Default::default(),
-        contract: None,
-    }
-}
-
-/// The signature of a built-in operator declared in package `package`, inside `class` if any.
-fn operator(
-    package: &[&str],
-    class: Option<&str>,
-    name: &str,
-    params: &[KotlinType],
-) -> OperatorSignature {
-    let package = package
-        .iter()
-        .map(|segment| (*segment).to_owned())
-        .collect::<Vec<_>>();
-    let classes = class
-        .map(|name| ClassScope {
-            name,
-            type_parameters: Vec::new(),
-            expect: false,
-        })
-        .into_iter()
-        .collect::<Vec<_>>();
-    OperatorSignature(
-        callable_signature(
-            DeclarationContainer::<KotlinType> {
-                package: &package,
-                classes: &classes,
-                native_interop_library: false,
-            },
-            &CallableShape {
-                name,
-                contexts: Vec::new(),
-                receiver: None,
-                params: params.iter().collect(),
-                vararg: None,
-                type_parameters: Vec::new(),
-                expect: false,
-                placement: Placement::Ordinary,
-            },
-        )
-        .expect("a non-generic shape is signable"),
-    )
-}
-
-/// A built-in operator's exact signature.
-struct OperatorSignature(KlibPublicIdSignature);
-
-fn eqeq() -> OperatorSignature {
-    let any = T::NullableAny.kotlin();
-    operator(
-        &["kotlin", "internal", "ir"],
-        None,
-        "EQEQ",
-        &[any.clone(), any],
-    )
-}
-
-fn eqeqeq() -> OperatorSignature {
-    let any = T::NullableAny.kotlin();
-    operator(
-        &["kotlin", "internal", "ir"],
-        None,
-        "EQEQEQ",
-        &[any.clone(), any],
-    )
-}
-
-fn ieee754equals(operand: &str) -> OperatorSignature {
-    let operand = KotlinType::Class {
-        internal: format!("kotlin/{operand}"),
-        args: Vec::new(),
-        nullable: true,
-        shape: KotlinFunctionTypeShape::default(),
-    };
-    operator(
-        &["kotlin", "internal", "ir"],
-        None,
-        "ieee754equals",
-        &[operand.clone(), operand],
-    )
-}
-
-fn not() -> OperatorSignature {
-    operator(&["kotlin"], Some("Boolean"), "not", &[])
-}
-
-fn relation(name: &str) -> OperatorSignature {
-    let int = kotlin_class("Int");
-    operator(
-        &["kotlin", "internal", "ir"],
-        None,
-        name,
-        &[int.clone(), int],
-    )
-}
-
-/// The tree builder of one `demo` function body.
-struct Body {
-    arena: KlibIrArena,
-    types: Vec<(T, KlibIrTypeId)>,
-    function: KlibIrSymbol,
-    params: Vec<(KlibIrSymbol, T)>,
-    signatures: HashMap<&'static str, KlibPublicIdSignature>,
-    next_slot: u32,
-}
-
-impl Body {
-    fn ty(&mut self, ty: T) -> KlibIrTypeId {
-        if let Some((_, id)) = self.types.iter().find(|(known, _)| *known == ty) {
-            return *id;
-        }
-        let id = self.arena.push_type(ty.klib());
-        self.types.push((ty, id));
-        id
-    }
-
-    fn expr(&mut self, ty: T, kind: KlibIrExprKind) -> KlibIrExprId {
-        let ty = self.ty(ty);
-        self.arena.push_expr(Some(ty), kind)
-    }
-
-    fn param(&mut self, index: usize) -> KlibIrExprId {
-        let (symbol, ty) = self.params[index].clone();
-        self.get(&symbol, ty)
-    }
-
-    fn get(&mut self, symbol: &KlibIrSymbol, ty: T) -> KlibIrExprId {
-        self.expr(
-            ty,
-            KlibIrExprKind::GetValue {
-                symbol: symbol.clone(),
-                origin: None,
-            },
-        )
-    }
-
-    fn constant(&mut self, ty: T, constant: KlibIrConstant) -> KlibIrExprId {
-        self.expr(ty, KlibIrExprKind::Const(constant))
-    }
-
-    fn int(&mut self, value: i32) -> KlibIrExprId {
-        self.constant(T::Int, KlibIrConstant::Int(value))
-    }
-
-    fn call_signature(
-        &mut self,
-        signature: KlibPublicIdSignature,
-        arguments: Vec<KlibIrExprId>,
-        origin: Option<&str>,
-        ty: T,
-    ) -> KlibIrExprId {
-        self.expr(
-            ty,
-            KlibIrExprKind::Call {
-                access: KlibIrMemberAccess {
-                    symbol: public_symbol(KlibIrSymbolKind::Function, signature),
-                    arguments: KlibIrArguments::Flat(arguments.into_iter().map(Some).collect()),
-                    type_arguments: Vec::new(),
-                    origin: origin.map(str::to_owned),
-                },
-                super_qualifier: None,
-            },
-        )
-    }
-
-    /// A call of the `demo` function `name`.
-    fn call(&mut self, name: &str, arguments: Vec<KlibIrExprId>, ty: T) -> KlibIrExprId {
-        let signature = self.signatures[name].clone();
-        self.call_signature(signature, arguments, None, ty)
-    }
-
-    fn builtin(
-        &mut self,
-        operator: OperatorSignature,
-        arguments: Vec<KlibIrExprId>,
-        origin: Option<&str>,
-    ) -> KlibIrExprId {
-        self.call_signature(operator.0, arguments, origin, T::Boolean)
-    }
-
-    /// A `when` of `origin` with these condition branches and an `else`.
-    fn when_(
-        &mut self,
-        origin: &str,
-        branches: Vec<(KlibIrExprId, KlibIrExprId)>,
-        otherwise: KlibIrExprId,
-        ty: T,
-    ) -> KlibIrExprId {
-        let condition = self.constant(T::Boolean, KlibIrConstant::Boolean(true));
-        let branches = branches
-            .into_iter()
-            .map(|(condition, result)| KlibIrBranch { condition, result })
-            .chain([KlibIrBranch {
-                condition,
-                result: otherwise,
-            }])
-            .collect();
-        self.expr(
-            ty,
-            KlibIrExprKind::When {
-                branches,
-                origin: Some(origin.to_owned()),
-            },
-        )
-    }
-
-    /// A local variable declaration with these serialized flags and origin.
-    fn variable_with(
-        &mut self,
-        ty: T,
-        initializer: Option<KlibIrExprId>,
-        flags: u64,
-        origin: &str,
-    ) -> (KlibIrStatement, KlibIrSymbol) {
-        self.next_slot += 1;
-        let symbol = local_symbol(KlibIrSymbolKind::Variable, self.next_slot);
-        let mut declaration = base(symbol.clone());
-        declaration.flags = flags;
-        declaration.origin = origin.to_owned();
-        let ty = self.ty(ty);
-        let variable = self.arena.push_variable(KlibIrVariable {
-            base: declaration,
-            name: format!("local{}", self.next_slot),
-            ty,
-            initializer,
-        });
-        (KlibIrStatement::Variable(variable), symbol)
-    }
-
-    fn val(&mut self, ty: T, initializer: KlibIrExprId) -> (KlibIrStatement, KlibIrSymbol) {
-        self.variable_with(ty, Some(initializer), 0, "DEFINED")
-    }
-
-    fn var(&mut self, ty: T, initializer: KlibIrExprId) -> (KlibIrStatement, KlibIrSymbol) {
-        self.variable_with(ty, Some(initializer), 0b10, "DEFINED")
-    }
-
-    fn set(&mut self, symbol: &KlibIrSymbol, value: KlibIrExprId) -> KlibIrStatement {
-        let assignment = self.expr(
-            T::Unit,
-            KlibIrExprKind::SetValue {
-                symbol: symbol.clone(),
-                value,
-                origin: Some("EQ".to_owned()),
-            },
-        );
-        KlibIrStatement::Expression(assignment)
-    }
-
-    fn type_operator(
-        &mut self,
-        operator: KlibIrTypeOperator,
-        argument: KlibIrExprId,
-        ty: T,
-    ) -> KlibIrExprId {
-        let operand = self.ty(ty);
-        self.expr(
-            ty,
-            KlibIrExprKind::TypeOperator {
-                operator,
-                operand,
-                argument,
-            },
-        )
-    }
-
-    fn throw(&mut self, value: KlibIrExprId) -> KlibIrExprId {
-        self.expr(T::Nothing, KlibIrExprKind::Throw(value))
-    }
-
-    fn ret(&mut self, value: KlibIrExprId) -> KlibIrStatement {
-        let target = self.function.clone();
-        KlibIrStatement::Expression(self.expr(T::Nothing, KlibIrExprKind::Return { target, value }))
-    }
-}
-
-/// A provider publishing the `demo` functions, the frozen selection of each, and one library
-/// serializing the bodies `build` makes for them (by function name; `None` for a body-less one).
-struct Demo {
-    facts: HashMap<&'static str, BackendCallableFact>,
-    bodies: KlibDeclarationBodies,
-}
-
-fn demo(shapes: &[Shape], build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>) -> Demo {
-    let libraries = KlibLibraries::from_packages(vec![(
-        vec!["demo".to_owned()],
-        KotlinPackage {
-            functions: shapes.iter().copied().map(declaration).collect(),
-            ..KotlinPackage::default()
-        },
-    )])
-    .expect("the declarations are signable");
-    let facts = shapes
-        .iter()
-        .map(|(name, params, _)| {
-            let params = params
-                .iter()
-                .map(|param| param.semantic())
-                .collect::<Vec<_>>();
-            (
-                *name,
-                frozen_function(&libraries, "demo", name, None, &params),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let signatures = facts
-        .iter()
-        .map(|(name, fact)| match &fact.declaration_signature {
-            Some(KlibDeclarationSignature::Public(signature)) => (*name, signature.clone()),
-            _ => panic!("a top-level KLIB function freezes its public signature"),
-        })
-        .collect::<HashMap<_, _>>();
-    let mut slot = 0;
-    let trees = shapes
-        .iter()
-        .map(|&(name, params, ret)| {
-            let function = public_symbol(KlibIrSymbolKind::Function, signatures[name].clone());
-            let params = params
-                .iter()
-                .map(|param| {
-                    slot += 1;
-                    (local_symbol(KlibIrSymbolKind::ValueParameter, slot), *param)
-                })
-                .collect::<Vec<_>>();
-            let mut body = Body {
-                arena: KlibIrArena::default(),
-                types: Vec::new(),
-                function: function.clone(),
-                params: params.clone(),
-                signatures: signatures.clone(),
-                next_slot: 1000 * slot,
-            };
-            let statements = build(name, &mut body);
-            let parameters = params
-                .iter()
-                .zip(PARAMETER_NAMES)
-                .map(|((symbol, ty), name)| KlibIrParameter {
-                    base: base(symbol.clone()),
-                    name: name.to_owned(),
-                    ty: body.ty(*ty),
-                    vararg_element_type: None,
-                    default_value: None,
-                })
-                .collect();
-            let return_type = body.ty(ret);
-            let mut arena = body.arena;
-            let function = arena.push_function(KlibIrFunction {
-                base: base(function),
-                name: name.to_owned(),
-                constructor: false,
-                type_parameters: Vec::new(),
-                dispatch_receiver: None,
-                context_parameters: Vec::new(),
-                extension_receiver: None,
-                regular_parameters: parameters,
-                return_type,
-                overridden: Vec::new(),
-                companion_extension_class: None,
-                prepared_inline_file: None,
-                body: statements.map(KlibIrBody::Block),
-            });
-            KlibIrDeclarationTree {
-                arena,
-                declaration: KlibIrMember::Function(function),
-            }
-        })
-        .collect();
-    let trees = KlibIrModuleTrees::from_trees(trees).expect("one tree defines each identity once");
-    let bodies = KlibDeclarationBodies::from_libraries(vec![trees]).expect("one library");
-    Demo { facts, bodies }
-}
-
-impl Demo {
-    fn callable(&self, name: &str) -> KlibCallable<'_> {
-        self.facts[name]
-            .klib_body_callable()
-            .expect("a demo function is signed")
-    }
-
-    /// The frozen declarations of the `demo` functions `names`.
-    fn callees(&self, names: &[&str]) -> KlibCalleeFacts<'_> {
-        KlibCalleeFacts::new(names.iter().map(|name| self.callable(name)))
-    }
-
-    fn lower(
-        &self,
-        unit: &mut DependencyBodyUnit,
-        name: &str,
-        callees: &[&str],
-    ) -> Result<FunId, KlibBodyDecline> {
-        let callees = self.callees(callees);
-        unit.lower_function(self.callable(name), &self.bodies, &callees)
-    }
-
-    /// The complete decline of lowering `name` with the frozen `callees`, and proof that the unit
-    /// was left empty.
-    fn declined(&self, name: &str, callees: &[&str]) -> String {
-        let mut unit = DependencyBodyUnit::default();
-        let decline = self
-            .lower(&mut unit, name, callees)
-            .expect_err("the body declines");
-        assert_unit_is_empty(&unit);
-        decline.to_string()
-    }
-}
-
-fn assert_unit_is_empty(unit: &DependencyBodyUnit) {
-    let ir = unit.ir();
-    assert!(ir.exprs.is_empty());
-    assert!(ir.functions.is_empty());
-    assert!(ir.logical_types.is_empty());
-    assert!(ir.binding_read_stability.is_empty());
-    assert!(ir.checked_return_depths.is_empty());
-    assert!(ir.callable_scopes.is_empty());
-    assert!(ir.negations.is_empty());
-    assert!(ir.fn_source_names.is_empty());
-    assert!(ir.fn_params.is_empty());
-}
-
-/// The rendered body checked FIR lowering produces for the one function of `source` named `name`
-/// with `arity` parameters.
-fn source_body(source: &str, name: &str, arity: usize) -> String {
-    let ir = crate::fir_lower::tests::lower_single_source_with_platform(
-        source,
-        "KlibBodyEquivalent",
-        Box::new(crate::libraries::EmptySymbolSource),
-    );
-    let functions = ir
-        .fn_source_names
-        .iter()
-        .filter(|(function, source_name)| {
-            source_name.as_str() == name && ir.functions[**function as usize].params.len() == arity
-        })
-        .map(|(function, _)| *function)
-        .collect::<Vec<_>>();
-    let [function] = functions.as_slice() else {
-        panic!("expected one source `{name}`, found {}", functions.len());
-    };
-    render(&ir, ir.functions[*function as usize].body.expect("a body"))
-}
+use crate::metadata::klib_ir::{read_declaration_trees, KlibIrConstant, KlibIrSignature};
+use crate::metadata::semantic::semantic_ty;
+use crate::types::Ty;
 
 // --- Calls --------------------------------------------------------------------------------------
 
@@ -671,7 +108,7 @@ fn a_declining_callee_leaves_the_unit_as_it_was() {
         let a = body.param(0);
         let value = match name {
             "a" => body.call("b", vec![a], T::Int),
-            "b" => body.throw(a),
+            "b" => body.type_operator(KlibIrTypeOperator::SafeCast, a, T::Int),
             _ => a,
         };
         Some(vec![body.ret(value)])
@@ -682,10 +119,10 @@ fn a_declining_callee_leaves_the_unit_as_it_was() {
     let expressions = unit.ir().exprs.len();
     let decline = demo
         .lower(&mut unit, "a", &["b"])
-        .expect_err("the callee throws");
+        .expect_err("the callee declines");
     assert_eq!(
         decline.to_string(),
-        "the KLIB body of `demo.a` (it reaches the KLIB body of `demo.b` (it uses `throw`))"
+        "the KLIB body of `demo.a` (it reaches the KLIB body of `demo.b` (it uses a safe cast))"
     );
     assert_eq!(unit.ir().functions.len(), 1);
     assert_eq!(unit.ir().exprs.len(), expressions);
@@ -695,9 +132,9 @@ fn a_declining_callee_leaves_the_unit_as_it_was() {
     // own form.
     assert_eq!(
         demo.lower(&mut unit, "b", &[])
-            .expect_err("it throws")
+            .expect_err("it casts safely")
             .to_string(),
-        "the KLIB body of `demo.b` (it uses `throw`)"
+        "the KLIB body of `demo.b` (it uses a safe cast)"
     );
 }
 
@@ -781,15 +218,6 @@ fn binary(
         let value = build(body, lhs, rhs);
         Some(vec![body.ret(value)])
     })
-}
-
-fn lowered_f(demo: &Demo) -> String {
-    let mut unit = DependencyBodyUnit::default();
-    let f = demo
-        .lower(&mut unit, "f", &[])
-        .unwrap_or_else(|decline| panic!("{decline}"));
-    validated(unit.ir());
-    lowered_body(&unit, f)
 }
 
 #[test]
@@ -1082,51 +510,6 @@ fn a_flat_if_chain_lowers_as_the_source_else_if_chain_does() {
     assert_eq!(lowered_f(&sign("IF")), source_body(source, "f", 1));
 }
 
-#[test]
-fn a_short_circuit_or_a_when_without_else_declines() {
-    let and = demo(
-        &[("f", &[T::Boolean, T::Boolean], T::Boolean)],
-        |_, body| {
-            let a = body.param(0);
-            let b = body.param(1);
-            let otherwise = body.constant(T::Boolean, KlibIrConstant::Boolean(false));
-            let when = body.when_("ANDAND", vec![(a, b)], otherwise, T::Boolean);
-            Some(vec![body.ret(when)])
-        },
-    );
-    assert_eq!(
-        and.declined("f", &[]),
-        "the KLIB body of `demo.f` (it uses `&&`)"
-    );
-    let without_else = demo(&[("f", &[T::Boolean], T::Int)], |_, body| {
-        let a = body.param(0);
-        let one = body.int(1);
-        let b = body.param(0);
-        let two = body.int(2);
-        let when = body.expr(
-            T::Int,
-            KlibIrExprKind::When {
-                branches: vec![
-                    KlibIrBranch {
-                        condition: a,
-                        result: one,
-                    },
-                    KlibIrBranch {
-                        condition: b,
-                        result: two,
-                    },
-                ],
-                origin: Some("WHEN".to_owned()),
-            },
-        );
-        Some(vec![body.ret(when)])
-    });
-    assert_eq!(
-        without_else.declined("f", &[]),
-        "the KLIB body of `demo.f` (it uses a `when` without an `else`)"
-    );
-}
-
 // --- The Kotlin/Native stdlib -------------------------------------------------------------------
 
 /// The semantic type of the class `kotlin.<name>`.
@@ -1199,7 +582,7 @@ fn stdlib_unsigned_max_declines_through_its_callee() {
             .expect_err("the callee declines")
             .to_string(),
         "the KLIB body of `kotlin.math.max` \
-         (it reaches the KLIB body of `kotlin.comparisons.maxOf` (it uses a block))"
+         (it reaches the KLIB body of `kotlin.comparisons.maxOf` (it uses a block of a compiler-introduced form))"
     );
     assert_unit_is_empty(&unit);
     assert_eq!(
@@ -1328,12 +711,82 @@ fn stdlib_local_variable_flags_have_the_decoded_layout() {
 /// statement, and a function's body root is the callable's own scope; neither is a value.
 #[test]
 fn every_lowered_value_has_a_checked_type() {
-    let shapes: [Shape; 3] = [
+    let shapes: [Shape; 5] = [
         ("callee", &[T::Int], T::Int),
         ("f", &[T::Int, T::Double], T::Boolean),
         ("g", &[T::Int], T::Int),
+        ("h", &[T::Boolean, T::Int, T::NullableAny], T::String),
+        ("t", &[T::Throwable], T::Nothing),
     ];
     let demo = demo(&shapes, |name, body| match name {
+        // var x = b
+        // while (x > 0) { if (a && x > 5) break; if (a) callee(x); x = callee(x) }
+        // if (c is String) return c as String
+        // return "x$x"
+        "h" => {
+            let b = body.param(1);
+            let (x_declaration, x) = body.var(T::Int, b);
+            let a = body.param(0);
+            let x_read = body.get(&x, T::Int);
+            let five = body.int(5);
+            let above = body.builtin(relation("greater"), vec![x_read, five], Some("GT"));
+            let otherwise = body.otherwise();
+            let constant = body.boolean(false);
+            let both = body.branches(
+                "ANDAND",
+                vec![(a, above), (otherwise, constant)],
+                T::Boolean,
+            );
+            let broken = body.break_(1);
+            let leave = body.branches("IF", vec![(both, broken)], T::Unit);
+            let a = body.param(0);
+            let x_read = body.get(&x, T::Int);
+            let called = body.call("callee", vec![x_read], T::Int);
+            let coerced = body.coerced(called);
+            let effect = body.branches("IF", vec![(a, coerced)], T::Unit);
+            let x_read = body.get(&x, T::Int);
+            let called = body.call("callee", vec![x_read], T::Int);
+            let assignment = body.set(&x, called);
+            let loop_body = body.block(
+                vec![
+                    KlibIrStatement::Expression(leave),
+                    KlibIrStatement::Expression(effect),
+                    assignment,
+                ],
+                T::Unit,
+            );
+            let x_read = body.get(&x, T::Int);
+            let zero = body.int(0);
+            let positive = body.builtin(relation("greater"), vec![x_read, zero], Some("GT"));
+            let looped = body.loop_(1, positive, loop_body, false);
+            let c = body.param(2);
+            let string = body.ty(T::String);
+            let check = body.expr(
+                T::Boolean,
+                KlibIrExprKind::TypeOperator {
+                    operator: KlibIrTypeOperator::InstanceOf,
+                    operand: string,
+                    argument: c,
+                },
+            );
+            let c = body.param(2);
+            let cast = body.type_operator(KlibIrTypeOperator::Cast, c, T::String);
+            let returned = body.return_(cast);
+            let guard = body.branches("IF", vec![(check, returned)], T::Unit);
+            let text = body.string("x");
+            let x_read = body.get(&x, T::Int);
+            let template = body.concat(vec![text, x_read]);
+            Some(vec![
+                x_declaration,
+                looped,
+                KlibIrStatement::Expression(guard),
+                body.ret(template),
+            ])
+        }
+        "t" => {
+            let a = body.param(0);
+            Some(vec![KlibIrStatement::Expression(body.throw(a))])
+        }
         "callee" => {
             let a = body.param(0);
             Some(vec![body.ret(a)])
@@ -1375,6 +828,10 @@ fn every_lowered_value_has_a_checked_type() {
     let g_function = g
         .lower(&mut unit, "f", &[])
         .unwrap_or_else(|decline| panic!("{decline}"));
+    for name in ["h", "t"] {
+        demo.lower(&mut unit, name, &["callee"])
+            .unwrap_or_else(|decline| panic!("{decline}"));
+    }
     validated(unit.ir());
     let ir = unit.ir();
     let roots = ir
@@ -1382,11 +839,20 @@ fn every_lowered_value_has_a_checked_type() {
         .iter()
         .map(|function| function.body.expect("a lowered function has a body"))
         .collect::<Vec<_>>();
-    assert_eq!(ir.functions.len(), 3, "{f} {g_function}");
+    assert_eq!(ir.functions.len(), 5, "{f} {g_function}");
     let untyped = (0..ir.exprs.len())
         .map(|index| crate::ir::ExprId::try_from(index).expect("fits"))
         .filter(|expression| !roots.contains(expression))
-        .filter(|expression| !matches!(ir.expr(*expression), crate::ir::IrExpr::Variable { .. }))
+        // Declarations, loops and jumps are statements.
+        .filter(|expression| {
+            !matches!(
+                ir.expr(*expression),
+                crate::ir::IrExpr::Variable { .. }
+                    | crate::ir::IrExpr::While { .. }
+                    | crate::ir::IrExpr::Break { .. }
+                    | crate::ir::IrExpr::Continue { .. }
+            )
+        })
         .filter(|expression| ir.checked_type(*expression).is_none())
         .map(|expression| format!("{:?}", ir.expr(expression)))
         .collect::<Vec<_>>();
