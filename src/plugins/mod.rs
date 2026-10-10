@@ -869,10 +869,17 @@ fn record_external_value_classes(
             continue;
         };
         collect(underlying, &mut referenced);
-        resolved.push((name, underlying));
+        resolved.push((
+            name,
+            underlying,
+            classifiers.classifier_value_declaration(name),
+        ));
     }
-    for (name, underlying) in resolved {
+    for (name, underlying, declaration) in resolved {
         ir.insert_external_value_class_name(name, underlying);
+        if let Some(declaration) = declaration {
+            ir.insert_external_value_class_declaration(name, declaration);
+        }
     }
 }
 
