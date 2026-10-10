@@ -92,6 +92,35 @@ pub enum IrClassifierKind {
     Object,
 }
 
+/// A module constructor as every file that names it sees it. The file that declares the class
+/// and each file that constructs it copy this record from one checked declaration, so a target
+/// can realize both sides of the call from the same facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrModuleConstructor {
+    /// The constructed classifier's stable qualified identity.
+    pub owner: TypeName,
+    /// The constructed classifier's declaration flags: its kind, `abstract`/`sealed`, `inner`,
+    /// local, `expect`, and value-class shape.
+    pub owner_flags: crate::fir::DeclarationFlags,
+    pub flags: crate::fir::DeclarationFlags,
+    pub visibility: crate::types::Visibility,
+    pub context_parameter_count: u32,
+    /// The checked declaration signature, context parameters first, each at its stored value type.
+    /// An inner class's enclosing instance is not a declared parameter; `outer` names it.
+    pub parameters: Box<[Ty]>,
+    /// An inner class's enclosing classifier, whose instance a construction passes first.
+    pub outer: Option<TypeName>,
+}
+
+/// The module constructors a file names: what each construction selected, and the record of
+/// every module constructor that file constructs or declares.
+#[derive(Clone, Debug, Default)]
+pub struct IrModuleConstructions {
+    /// Construction `ExprId` → the checked constructor declaration it selected.
+    pub selected: std::collections::HashMap<super::ExprId, crate::fir::DeclarationId>,
+    pub records: std::collections::HashMap<crate::fir::DeclarationId, IrModuleConstructor>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrModuleClassifier {
     pub singleton: bool,

@@ -6,8 +6,10 @@
 //! selected declaration to its serialized IR body. Nothing here names a target.
 //!
 //! Declarations are validated and signed once, when the provider is built. Conversion into
-//! selection candidates is lazy and memoized per lookup key.
+//! selection candidates is lazy and memoized per lookup key. [`KlibDeclarationBodies`] answers the
+//! other half of that join: the decoded IR body serialized under a published signature.
 
+mod declaration_bodies;
 mod declaration_signatures;
 mod external_identities;
 mod inventory;
@@ -19,6 +21,7 @@ use crate::metadata::semantic::KotlinPackage;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
 
+pub use declaration_bodies::{KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
 
 /// Declarations of a set of KLIB libraries, published as one symbol source.

@@ -30,8 +30,8 @@ pub use annotation_application::{
 };
 pub use call_realization::{
     DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
-    ExternalPropertyRealization, KlibDeclarationSignature, NonvirtualCallRealization,
-    OverriddenCallKind, OverriddenCallRealization,
+    ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
+    NonvirtualCallRealization, OverriddenCallKind, OverriddenCallRealization,
 };
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
@@ -672,19 +672,10 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         &[]
     }
 
-    /// Platform spellings for physical zero-arg getters when declaration metadata is unavailable.
-    /// Common resolution asks for a semantic property name; the target returns every physical spelling
-    /// as one provider result because JVM uses JavaBean-style `getX`/`isX` while other targets need not.
-    /// The candidates are most-conventional first
-    /// (`id` → `getId`, `getID`; `urlPath` → `getUrlPath`, `getURLPath`) — the inverse of
-    /// Kotlin's decapitalize-smart getter-to-property mapping.
-    fn physical_property_getter_names(&self, _property: &str) -> Vec<String> {
-        Vec::new()
-    }
-
     /// Project accessor methods inherited through a foreign classifier into semantic Kotlin
     /// properties. Core supplies the federated declaration source so a provider can pair methods
-    /// across module/library boundaries; the returned values are ordinary [`PropertyInfo`] records.
+    /// across module/library boundaries; the provider derives each property from the methods the
+    /// hierarchy declares, and the returned values are ordinary [`PropertyInfo`] records.
     /// Targets without accessor-property interop return an empty set.
     fn inherited_accessor_properties(
         &self,

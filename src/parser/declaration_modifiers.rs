@@ -5,6 +5,34 @@ use crate::ast::{AnnotationRef, DeclarationPrefix, ExprId};
 use crate::diag::Span;
 use crate::types::Visibility;
 
+/// Map parsed class modifiers to their declaration modality. `sealed` wins because it implies
+/// abstract and open; otherwise an explicit abstract/open modifier wins over the final default.
+pub(super) fn modality_of(
+    is_open: bool,
+    is_abstract: bool,
+    is_sealed: bool,
+) -> crate::ast::Modality {
+    use crate::ast::Modality;
+    if is_sealed {
+        Modality::Sealed
+    } else if is_abstract {
+        Modality::Abstract
+    } else if is_open {
+        Modality::Open
+    } else {
+        Modality::Final
+    }
+}
+
+pub(super) fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
+    let sealed = modifiers.iter().any(|modifier| modifier == "sealed");
+    modality_of(
+        sealed || modifiers.iter().any(|modifier| modifier == "open"),
+        sealed || modifiers.iter().any(|modifier| modifier == "abstract"),
+        sealed,
+    )
+}
+
 /// The modifier list of the declaration being parsed, accumulated across its `skip_decl_prefix`
 /// runs (a context clause or `companion` may separate them) until the declaration records it.
 #[derive(Default)]

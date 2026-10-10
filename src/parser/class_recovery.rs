@@ -30,6 +30,7 @@ pub(super) fn error_class_decl(span: Span) -> ClassDecl {
         enum_entries: Vec::new(),
         is_fun_interface: false,
         modality: crate::ast::Modality::Final,
+        final_modifier: false,
         inner_of: None,
         supertypes: Vec::new(),
         interface_delegations: Vec::new(),

@@ -411,7 +411,7 @@ jobs:
       # version 22. Each lane's ratchet fails the step on a regression or an unrecorded pass. The
       # lanes still analyze against the JVM library surface, so they gate the Wasm emitter and
       # publish no conformance badge until a Wasm klib platform backs them.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: matrix.target == 'wasm'
         with:
           node-version: '22'

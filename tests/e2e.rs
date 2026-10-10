@@ -43,6 +43,8 @@ mod abstract_member_shape_e2e;
 mod abstract_modifier_consistency_e2e;
 #[path = "adapted_callable_reference_equality_e2e.rs"]
 mod adapted_callable_reference_equality_e2e;
+#[path = "allopen_plugin_e2e.rs"]
+mod allopen_plugin_e2e;
 #[path = "also_apply_result_line_e2e.rs"]
 mod also_apply_result_line_e2e;
 #[path = "annotated_class_decl_line_e2e.rs"]
@@ -2873,6 +2875,8 @@ mod wildcard_branch_join_e2e;
 #[path = "wrapped_param_type_e2e.rs"]
 mod wrapped_param_type_e2e;
 
+#[path = "reified_member_splice_e2e.rs"]
+mod reified_member_splice_e2e;
 #[path = "reified_unit_splice_e2e.rs"]
 mod reified_unit_splice_e2e;
 #[path = "reified_value_class_splice_e2e.rs"]

@@ -2,6 +2,7 @@
 //! krusty's classpath, and run the Java and Kotlin outputs together.
 
 use super::common;
+use super::diagnostics_parity_support::{errors, ObservedError};
 
 /// javac_compile alone: one Java class in, its `.class` bytes out.
 #[test]
@@ -676,6 +677,258 @@ fun box(): String {
 }
 "#,
     );
+}
+
+/// kotlinc reads `String getIsInstanceType()` as the synthetic property `isInstanceType` (never
+/// `instanceType`) and a non-boolean `String isName()` as `isName`. A lowercase `getisLower()`, a
+/// getter with a parameter, and a static getter are no synthetic properties. Both compilers must
+/// report exactly the same unresolved references.
+#[test]
+fn java_is_prefixed_getter_spellings_match_kotlinc() {
+    let java = [(
+        "p/Expr.java",
+        "package p; public class Expr { \
+         public String getIsInstanceType() { return \"S\"; } \
+         public String isName() { return \"N\"; } \
+         public String getisLower() { return \"L\"; } \
+         public String getIsParam(int x) { return \"P\"; } \
+         public static String getIsStatic() { return \"T\"; } }",
+    )];
+    let kotlin = "fun probe(e: p.Expr): String {\n\
+                  \x20   val a: String = e.isInstanceType\n\
+                  \x20   val b: String = e.isName\n\
+                  \x20   e.instanceType\n\
+                  \x20   e.isLower\n\
+                  \x20   e.lower\n\
+                  \x20   e.isParam\n\
+                  \x20   p.Expr.isStatic\n\
+                  \x20   return a + b\n\
+                  }\n";
+    let Some((javadir, _)) = compile_java(&java) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let result = common::compiler_diagnostics(
+        &[("Probe.kt", kotlin)],
+        &[common::stdlib_jar(), javadir.clone()],
+    );
+    cleanup(&javadir);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    let unresolved = |line, column, message: &str| ObservedError {
+        file: "Probe.kt".to_string(),
+        line,
+        column,
+        message: message.to_string(),
+    };
+    let expected = vec![
+        unresolved(
+            4,
+            7,
+            "unresolved reference 'instanceType' on receiver of type 'Expr'.",
+        ),
+        unresolved(
+            5,
+            7,
+            "unresolved reference 'isLower' on receiver of type 'Expr'.",
+        ),
+        unresolved(
+            6,
+            7,
+            "unresolved reference 'lower' on receiver of type 'Expr'.",
+        ),
+        unresolved(
+            7,
+            7,
+            "unresolved reference 'isParam' on receiver of type 'Expr'.",
+        ),
+        unresolved(8, 12, "unresolved reference 'isStatic'."),
+    ];
+    let mut krusty = errors(&result.krusty_stderr);
+    krusty.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+    assert_eq!(errors(&result.reference_stderr), expected);
+}
+
+const ACCESSOR_PAIRS_JAVA: (&str, &str) = (
+    "p/Accessors.java",
+    "package p; public class Accessors { \
+     private String mutable = \"M\"; \
+     public boolean isBoth() { return true; } \
+     public String getIsBoth() { return \"G\"; } \
+     public String isWritableBoth() { return mutable; } \
+     public void setWritableBoth(String value) { mutable = value; } \
+     public String getIsWritableBoth() { return mutable; } \
+     public void setIsWritableBoth(String value) { mutable = value; } \
+     public String getIsMutable() { return mutable; } \
+     public void setIsMutable(String value) { mutable = value; } \
+     public String getIsPlain() { return \"Q\"; } \
+     public void setPlain(String value) { } \
+     public int getURLPath() { return 1; } \
+     public String getUrlPath() { return \"path\"; } }",
+);
+
+/// `isBoth()` and `getIsBoth()` both declare the synthetic property `isBoth`, so a read is
+/// ambiguous. `setIsMutable` is the setter of `getIsMutable` (`isMutable` is a `var`), while
+/// `setPlain` is no setter of `getIsPlain`: a setter is named from its getter's own spelling.
+#[test]
+fn java_accessor_collisions_and_setter_pairing_match_kotlinc() {
+    let kotlin = "fun probe(a: p.Accessors) {\n\
+                  \x20   val both = a.isBoth\n\
+                  \x20   a.isMutable = \"x\"\n\
+                  \x20   a.isPlain = \"y\"\n\
+                  }\n";
+    let Some((javadir, _)) = compile_java(&[ACCESSOR_PAIRS_JAVA]) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let result = common::compiler_diagnostics(
+        &[("Accessors.kt", kotlin)],
+        &[common::stdlib_jar(), javadir.clone()],
+    );
+    cleanup(&javadir);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    let expected = [
+        "Accessors.kt:2:18: overload resolution ambiguity between candidates:",
+        "| val isBoth: Boolean",
+        "| val isBoth: String!",
+        "Accessors.kt:4:7: 'val' cannot be reassigned.",
+    ];
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stdout, false),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        expected
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.reference_stderr, true),
+        expected
+    );
+}
+
+/// A write must not select an arbitrary setter when two Java getter/setter pairs declare the same
+/// synthetic property. This is equally ambiguous through an explicit or implicit receiver.
+#[test]
+fn java_accessor_write_collisions_match_kotlinc() {
+    let kotlin = "fun explicit(a: p.Accessors) {\n\
+                  \x20   a.isWritableBoth = \"x\"\n\
+                  }\n\
+                  fun p.Accessors.implicit() {\n\
+                  \x20   isWritableBoth = \"y\"\n\
+                  }\n";
+    let Some((javadir, _)) = compile_java(&[ACCESSOR_PAIRS_JAVA]) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let result = common::compiler_diagnostics(
+        &[("AccessorWrites.kt", kotlin)],
+        &[common::stdlib_jar(), javadir.clone()],
+    );
+    cleanup(&javadir);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    let expected = [
+        "AccessorWrites.kt:2:7: overload resolution ambiguity between candidates:",
+        "| var isWritableBoth: String!",
+        "| var isWritableBoth: String!",
+        "AccessorWrites.kt:5:5: overload resolution ambiguity between candidates:",
+        "| var isWritableBoth: String!",
+        "| var isWritableBoth: String!",
+    ];
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stdout, false),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        expected
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.reference_stderr, true),
+        expected
+    );
+}
+
+/// The conventional `getUrlPath` declaration precedes the acronym form `getURLPath` in Kotlin's
+/// candidate order even when the Java class file declares them in the opposite order.
+#[test]
+fn java_smart_decapitalization_collision_has_stable_candidate_order() {
+    let kotlin = "fun probe(a: p.Accessors) = a.urlPath\n";
+    let Some((javadir, _)) = compile_java(&[ACCESSOR_PAIRS_JAVA]) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let result = common::compiler_diagnostics(
+        &[("AccessorOrder.kt", kotlin)],
+        &[common::stdlib_jar(), javadir.clone()],
+    );
+    cleanup(&javadir);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    let expected = [
+        "AccessorOrder.kt:1:31: overload resolution ambiguity between candidates:",
+        "| val urlPath: String!",
+        "| val urlPath: Int",
+    ];
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stdout, false),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        expected
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.reference_stderr, true),
+        expected
+    );
+}
+
+/// The `var` paired through `getIsMutable`/`setIsMutable` writes and reads at runtime.
+#[test]
+fn java_get_is_accessor_pairs_with_its_own_setter() {
+    run_mixed(
+        &[ACCESSOR_PAIRS_JAVA],
+        r#"
+fun box(): String {
+    val accessors = p.Accessors()
+    accessors.isMutable = "OK"
+    return accessors.isMutable
+}
+"#,
+    );
+}
+
+/// `getIsInstanceType()` is the Java getter of Kotlin property `isInstanceType`, even inside an
+/// extension that uses the same name. A boolean `isInstanceType()` would also be that getter;
+/// protobuf spells the accessor with `get`.
+#[test]
+fn java_get_is_accessor_is_an_is_property() {
+    run_mixed(
+        &[(
+            "p/Expr.java",
+            "package p; public class Expr { public boolean hasIsInstanceType() { return true; } public String getIsInstanceType() { return \"OK\"; } public int getIsInstanceTypeId() { return 7; } }",
+        )],
+        r#"
+fun p.Expr.isInstanceType(): String = if (hasIsInstanceType()) isInstanceType else "missing"
+fun box(): String {
+    val value = p.Expr()
+    return if (value.isInstanceType() == "OK" && value.isInstanceTypeId == 7) "OK" else "FAIL"
+}
+"#,
+    );
+}
+
+#[test]
+fn kotlin_getter_shaped_function_is_not_a_java_synthetic_property() {
+    let library = common::compile_lib(
+        "kotlin-getter-is-not-property",
+        "package lib\nclass K { fun getFoo(): String = \"K\" }\n",
+    )
+    .expect("Kotlin dependency");
+    let source = "import lib.K\nfun probe(k: K): String = k.foo\n";
+    let result =
+        common::compiler_diagnostics(&[("Use.kt", source)], &[library, common::stdlib_jar()]);
+    common::expect_identical_rejection(&result, "Kotlin getter-shaped function");
 }
 
 /// Compile the Java sources with javac, then the Kotlin source with krusty against the javac output

@@ -18,6 +18,111 @@ pub(super) fn module_function_symbol(callable: crate::fir::CallableId) -> String
     format!("kt_mod_{}", callable.raw())
 }
 
+/// Symbol of the getter entry point of a property one file of a module declares and another uses.
+///
+/// Same rule as [`module_function_symbol`]: the id is the checked property identity, so the file
+/// that declares the property and the file that reads it name one symbol without seeing each
+/// other's lowering. A `var`'s setter is [`module_property_setter_symbol`].
+pub(super) fn module_property_getter_symbol(property: crate::fir::PropertyId) -> String {
+    format!("kt_modprop_get_{}", property.raw())
+}
+
+/// Symbol of the setter entry point of a module `var`; see [`module_property_getter_symbol`].
+pub(super) fn module_property_setter_symbol(property: crate::fir::PropertyId) -> String {
+    format!("kt_modprop_set_{}", property.raw())
+}
+
+/// Symbol of the allocating entry point of a module constructor.
+///
+/// The symbol spells the constructor's stable identity: the qualified name of the class it
+/// constructs and its complete parameter list, in an injective encoding. It depends neither on
+/// interning order nor on where the constructor sits among its class's constructors, so the file
+/// that declares the class and the file that constructs it name one symbol. `None` for a parameter
+/// type that a checked signature never carries.
+pub(super) fn module_constructor_symbol(
+    constructor: &crate::ir::IrModuleConstructor,
+) -> Option<String> {
+    let mut symbol = String::from("kt_modctor_");
+    mangle_name(&mut symbol, &constructor.owner.render());
+    symbol.push_str("__");
+    if let Some(outer) = constructor.outer {
+        symbol.push('X');
+        mangle_ty(&mut symbol, crate::types::Ty::obj_name(outer))?;
+    }
+    for parameter in &constructor.parameters {
+        mangle_ty(&mut symbol, *parameter)?;
+    }
+    Some(symbol)
+}
+
+/// Letters and digits stand for themselves; every other character, `_` included, is `_<hex>_`.
+fn mangle_name(out: &mut String, text: &str) {
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() {
+            out.push(character);
+        } else {
+            out.push_str(&format!("_{:x}_", character as u32));
+        }
+    }
+}
+
+/// One type in a prefix code: each form opens with its own tag, and a name or a list is length-
+/// or terminator-delimited, so two different parameter lists never spell alike.
+fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
+    use crate::types::Ty;
+    let nested = |out: &mut String, tag: char, inner: Ty| {
+        out.push(tag);
+        mangle_ty(out, inner)
+    };
+    match ty {
+        Ty::Unit => out.push('U'),
+        Ty::Null => out.push('Z'),
+        Ty::Nothing => out.push('W'),
+        Ty::Obj(name, arguments) => {
+            let mut spelled = String::new();
+            mangle_name(&mut spelled, &name.render());
+            out.push_str(&format!("L{}_{spelled}", spelled.len()));
+            for argument in arguments {
+                mangle_ty(out, *argument)?;
+            }
+            out.push('E');
+        }
+        Ty::TyParam(name, _) => {
+            let mut spelled = String::new();
+            mangle_name(&mut spelled, name);
+            out.push_str(&format!("P{}_{spelled}", spelled.len()));
+        }
+        Ty::Fun(signature) => {
+            out.push_str(&format!(
+                "F{}_{}_{}_",
+                signature.context_count,
+                u8::from(signature.has_receiver),
+                u8::from(signature.suspend),
+            ));
+            for parameter in &signature.params {
+                mangle_ty(out, *parameter)?;
+            }
+            out.push('R');
+            mangle_ty(out, signature.ret)?;
+        }
+        Ty::Intersection(components) => {
+            out.push('I');
+            for component in components {
+                mangle_ty(out, *component)?;
+            }
+            out.push('E');
+        }
+        Ty::Nullable(inner) => nested(out, 'N', *inner)?,
+        Ty::PlatformNullable(inner) => nested(out, 'Q', *inner)?,
+        Ty::InProjection(inner) => nested(out, 'M', *inner)?,
+        Ty::OutProjection(inner) => nested(out, 'O', *inner)?,
+        Ty::StarProjection(bound) => nested(out, 'S', *bound)?,
+        Ty::DefinitelyNotNull(inner) => nested(out, 'D', *inner)?,
+        Ty::Error | Ty::Pending => return None,
+    }
+    Some(())
+}
+
 /// Symbol of the entry another file calls when it leaves arguments of a top-level function out:
 /// the function's whole parameter frame followed by a mask of the omitted ordinals. See
 /// `codegen::lower::defaults`.
@@ -90,6 +195,22 @@ pub(super) fn symbols(ir: &IrFile, reserved: HashSet<String>) -> Symbols {
         taken.insert(module_default_symbol(*callable));
         functions[index] = symbol;
     }
+    // A property's entry points are synthesized from its identity rather than being entries in
+    // `functions`. Reserving them keeps a function from being handed the same spelling.
+    for property in ir
+        .checked_properties
+        .keys()
+        .chain(ir.referenced_module_properties.keys())
+    {
+        taken.insert(module_property_getter_symbol(*property));
+        taken.insert(module_property_setter_symbol(*property));
+    }
+    taken.extend(
+        ir.module_constructions
+            .records
+            .values()
+            .filter_map(module_constructor_symbol),
+    );
     let mut unique = |base: String, family: &dyn Fn(&str) -> Vec<String>| -> String {
         let mut candidate = base.clone();
         let mut ordinal = 0;
