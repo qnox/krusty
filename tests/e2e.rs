@@ -937,6 +937,8 @@ mod fq_targ_trailing_lambda_e2e;
 mod fq_toplevel_call_e2e;
 #[path = "fq_vararg_call_e2e.rs"]
 mod fq_vararg_call_e2e;
+#[path = "friend_module_smart_cast_e2e.rs"]
+mod friend_module_smart_cast_e2e;
 #[path = "front_end_errors_e2e.rs"]
 mod front_end_errors_e2e;
 #[path = "front_end_errors_more_e2e.rs"]
