@@ -1660,6 +1660,30 @@ fun box(): String {
 }
 
 #[test]
+fn nested_alias_constructors_inside_their_declaring_class_keep_target_identity() {
+    let src = r#"
+class Container {
+    inner class Item(val value: String)
+    inner class GenericItem<T>(val value: T)
+    class NestedItem<T>(val value: T)
+
+    typealias ItemAlias = Item
+    typealias GenericAlias<T> = GenericItem<T>
+    typealias NestedAlias = NestedItem<String>
+
+    fun result(): String {
+        if (ItemAlias("O").value != "O") return "item"
+        if (GenericAlias("K").value != "K") return "generic"
+        return NestedAlias("OK").value
+    }
+}
+
+fun box(): String = Container().result()
+"#;
+    assert_accepted_and_runs(src, "ResolverNestedAliasConstructorIdentity");
+}
+
+#[test]
 fn top_level_alias_to_an_inner_classifier_binds_the_implicit_outer_receiver() {
     let src = r#"
 class Container {
