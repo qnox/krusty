@@ -204,7 +204,7 @@ impl<'a> SymbolResolver<'a> {
                 specialize_final_signature_output_type(&self.src, semantic.ret, &bindings);
             specialized_extension_return(self.lib, &selected, inferred)
         } else {
-            let provider = resolved_member_from_info(
+            let provider = resolved_member_from_info_tracking(
                 self.lib,
                 &self.src,
                 receiver,
@@ -212,6 +212,7 @@ impl<'a> SymbolResolver<'a> {
                 type_args,
                 selected.clone(),
             )
+            .0
             .ret;
             let inferred = if expected_result.is_some() {
                 specialize_final_signature_output_type(&self.src, semantic.ret, &bindings)
