@@ -50845,17 +50845,8 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let source = self.fed_source();
-                    let implementation_declaration = self
-                        .resolved_index
-                        .zip(self.active_declarations)
-                        .and_then(|(index, active)| {
-                            let owner = active.canonical_classifier_declaration(d, index)?;
-                            index.owned_declaration(
-                                owner,
-                                crate::fir::DeclarationKind::Function,
-                                u32::try_from(method_index).ok()?,
-                            )
-                        });
+                    let implementation_declaration =
+                        self.member_declaration(d, current_owner, method_index);
                     let implementation = crate::symbol_resolver::declared_member_declarations(
                         &source, receiver, &m.name,
                     )
