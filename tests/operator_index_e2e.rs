@@ -105,14 +105,20 @@ fn function_value_is_not_a_different_function_classifier() {
 /// `V` (to the star's `Any?`), exactly as the equivalent `t.get(key)` call does. The subscript form
 /// published no solved type arguments, so an expectation-free `val local = table["a"]` read its
 /// `Any?` result as the unsolved fallback and reported "cannot infer type for type parameter 'V'".
-/// The stdlib `Map<*, *>` subscript is the same extension shape.
+/// The stdlib `Map<*, *>` subscript is the same extension shape, and a `vararg` index parameter
+/// (`Grid<out K, V>.get(vararg keys: K)`) solves through its own call shape the same way.
 const STAR_PROJECTED_LIB: &str = "package lib\n\
     class Table<K, V>(private val keys: List<K>, private val values: List<V>) {\n\
         fun find(key: Any?): V? = keys.indexOf(key).let { if (it < 0) null else values[it] }\n\
     }\n\
-    operator fun <K, V> Table<out K, V>.get(key: K): V? = find(key)\n";
+    operator fun <K, V> Table<out K, V>.get(key: K): V? = find(key)\n\
+    class Grid<K, V>(private val keys: List<K>, private val values: List<V>) {\n\
+        fun find(key: Any?): V? = keys.indexOf(key).let { if (it < 0) null else values[it] }\n\
+    }\n\
+    operator fun <K, V> Grid<out K, V>.get(vararg keys: K): V? = find(keys.firstOrNull())\n";
 
-const STAR_PROJECTED_MAIN: &str = "import lib.Table\n\
+const STAR_PROJECTED_MAIN: &str = "import lib.Grid\n\
+    import lib.Table\n\
     import lib.get\n\
     fun cell(table: Table<*, *>): Any? = table[\"b\"]\n\
     fun entry(map: Map<*, *>): Any? = map[\"b\"]\n\
@@ -120,7 +126,9 @@ const STAR_PROJECTED_MAIN: &str = "import lib.Table\n\
         val table: Table<*, *> = Table(listOf(\"a\", \"b\"), listOf(1, 2))\n\
         val local = table[\"a\"]\n\
         val map: Map<*, *> = mapOf(\"b\" to \"K\")\n\
-        return if (cell(table) == 2 && local == 1 && entry(map) == \"K\") \"OK\" else \"FAIL\"\n\
+        val grid: Grid<*, *> = Grid(listOf(\"a\"), listOf(3))\n\
+        val slot = grid[\"a\"]\n\
+        return if (cell(table) == 2 && local == 1 && entry(map) == \"K\" && slot == 3) \"OK\" else \"FAIL\"\n\
     }\n";
 
 #[test]

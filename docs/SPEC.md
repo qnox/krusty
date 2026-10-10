@@ -3299,7 +3299,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   extension through its semantic signature (receiver included) but recorded no type arguments, so an
   expectation-free `val x = m["k"]` could not tell the solved `Any?` from the unsolved fallback and
   reported "cannot infer type for type parameter 'V'". The selected subscript now commits its
-  bindings with its argument slots, like every other generic call. Test:
+  bindings with its argument slots, like every other generic call; a `vararg` index parameter
+  publishes the bindings its own call shape solved. Test:
   `tests/operator_index_e2e.rs` (`a_star_projected_receiver_binds_an_indexed_extension_result`).
 - **A receiver-less classifier callable reference is the `Classifier.name(...)` family.** A Java
   static method, and any other classifier callable with no value receiver, is named by

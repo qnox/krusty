@@ -1422,7 +1422,7 @@ impl<'a> SymbolResolver<'a> {
             };
             return CandidateSelection::Selected((selected, params, resolved, bindings));
         }
-        let Some((params, ret)) = indexed_call_shape(
+        let Some((params, ret, bindings)) = indexed_call_shape(
             self.lib,
             &self.src,
             &selected,
@@ -1433,7 +1433,7 @@ impl<'a> SymbolResolver<'a> {
         ) else {
             return CandidateSelection::None;
         };
-        CandidateSelection::Selected((selected, params, ret, GSigBinds::new()))
+        CandidateSelection::Selected((selected, params, ret, bindings))
     }
 
     /// Select the `set` convention used by indexed assignment. The assignment RHS binds the final
@@ -1510,7 +1510,7 @@ impl<'a> SymbolResolver<'a> {
             let ret = selected.ret.apply(inferred_ret);
             return CandidateSelection::Selected((selected, params, ret));
         }
-        let Some((params, ret)) = indexed_call_shape(
+        let Some((params, ret, _)) = indexed_call_shape(
             self.lib,
             &self.src,
             &selected,

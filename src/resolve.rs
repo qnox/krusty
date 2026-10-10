@@ -58394,12 +58394,7 @@ impl<'a> Checker<'a> {
                     return self.set(e, Ty::Error);
                 }
                 if !self.commit_indexed_operator_arguments(
-                    e,
-                    &selected,
-                    &bindings,
-                    &params,
-                    vararg,
-                    &indices,
+                    e, &selected, &bindings, &params, vararg, &indices,
                 ) {
                     return self.set(e, Ty::Error);
                 }
