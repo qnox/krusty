@@ -2052,15 +2052,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             );
             return self.convert(value, Some(stored), field);
         }
-        let Some(object) = self.receiver(receiver)? else {
-            return Ok(None);
-        };
         let ty = captures::physical_ty(
             self.file.ir,
             class,
             index,
             self.file.ir.classes[class as usize].fields[index as usize].ty,
         );
+        if let Some(value) = self.frame_field_read(receiver, class, index, ty)? {
+            return Ok(Some(value));
+        }
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
         self.load_field(object, class, index, ty).map(Some)
     }
 
@@ -2109,6 +2112,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .clif()
             .expect("fields are never `Unit`");
         let value = self.builder.ins().load(clif, trusted(), object, offset);
+        self.field_value(value, class, index, ty)
+    }
+
+    /// A field's stored `value` read at `ty`, with the throw-if-null a `lateinit` one carries.
+    pub(super) fn field_value(
+        &mut self,
+        value: Value,
+        class: ClassId,
+        index: u32,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
+        let stored = model::field_storage_ty(self.file.values, self.file.ir, class, index)?;
         let field = &self.file.ir.classes[class as usize].fields[index as usize];
         if field.is_lateinit() {
             let name = field.name.clone();
@@ -2344,7 +2359,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         let object = match placement {
             super::frame_objects::Placement::Heap => self.allocate(descriptor, size)?,
-            super::frame_objects::Placement::Frame => self.frame_object(descriptor, size),
+            super::frame_objects::Placement::Frame { local } => {
+                return self.frame_object(class, local, &arguments, &params);
+            }
         };
         arguments.insert(0, object);
         let func_ref = self.func_ref(constructor);
@@ -2472,6 +2489,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 return Ok(None);
             };
             return self.value_property_read_of(class, index, value);
+        }
+        if let Some(field) = self.file.ir.classes[class as usize].properties[index].backing_field {
+            let ty = self.file.ir.classes[class as usize].fields[field as usize].ty;
+            if let Some(value) = self.frame_field_read(receiver, class, field, ty)? {
+                return Ok(Some(value));
+            }
         }
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
