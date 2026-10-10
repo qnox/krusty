@@ -2391,6 +2391,8 @@ mod serialization_external_kinds_e2e;
 mod serialization_generated_debug_e2e;
 #[path = "serialization_krusty_only_e2e.rs"]
 mod serialization_krusty_only_e2e;
+#[path = "serialization_nullable_value_class_e2e.rs"]
+mod serialization_nullable_value_class_e2e;
 #[path = "serialization_object_serializer_e2e.rs"]
 mod serialization_object_serializer_e2e;
 #[path = "serialization_plain_enum_element_e2e.rs"]

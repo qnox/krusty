@@ -14,7 +14,8 @@
 use crate::ir::{ClassId, IrConst, IrFile};
 use crate::types::{type_name, Ty};
 
-use super::{serializer_name, value_class_underlying, TRANSIENT_FQ};
+use super::value_class_types::element_underlying;
+use super::{serializer_name, TRANSIENT_FQ};
 
 /// The backing-field index of each serial element, in element (declaration) order.
 pub(super) struct SerialElements {
@@ -65,9 +66,9 @@ impl SerialElements {
 /// Every vector is indexed by backing field; [`SerialElements::select`] restates one in element
 /// order for a generator that addresses elements.
 pub(super) struct SerializedProperties {
-    /// Name and type of each field. A `@JvmInline value class` field is its underlying type: krusty
-    /// stores the unboxed underlying, so serialize/deserialize encode that primitive directly (the
-    /// same JSON as kotlinc's inline serializer) rather than a boxed `<Foo>$serializer` value.
+    /// Name and type of each field. A `@JvmInline value class` field is its underlying type (nullable
+    /// when the property is): serialize/deserialize encode that underlying value directly (the same
+    /// JSON as kotlinc's inline serializer) rather than a boxed `<Foo>$serializer` value.
     pub(super) fields: Vec<(String, Ty)>,
     /// Each field's type as the SERIALIZER sees it: the declared property type, not always the
     /// field's own.
@@ -87,7 +88,7 @@ impl SerializedProperties {
             .map(|field| {
                 (
                     field.name.clone(),
-                    value_class_underlying(ir, &field.ty).unwrap_or(field.ty),
+                    element_underlying(ir, &field.ty).unwrap_or(field.ty),
                 )
             })
             .collect();
@@ -102,7 +103,7 @@ impl SerializedProperties {
                     .find(|property| property.backing_field == Some(index as u32))
                     .map(|property| property.ty)
                     .unwrap_or(field.ty);
-                value_class_underlying(ir, &declared).unwrap_or(declared)
+                element_underlying(ir, &declared).unwrap_or(declared)
             })
             .collect();
         let constant_defaults = class.fields.iter().map(|f| f.default.clone()).collect();
