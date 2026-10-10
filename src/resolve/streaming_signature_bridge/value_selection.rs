@@ -139,6 +139,7 @@ impl ProductionSignatureSemantics<'_> {
                     std::slice::from_ref(&package),
                 )
                 .with_access_context(access_package, scope.source.raw(), Vec::new())
+                .with_visibility_suppression(self.scope_suppresses_visibility(scope))
                 .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
                 .and_then(crate::symbol_resolver::Symbol::value)
                 .filter(|property| property.kind == crate::libraries::PropKind::TopLevel);

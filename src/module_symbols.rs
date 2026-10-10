@@ -424,7 +424,7 @@ impl<'a> ModuleSymbols<'a> {
             access: c.visibility.into(),
             source_file: Some(c.source_file),
             stable_declaration: c.stable_declaration,
-            is_nested: c.internal_name().contains("$"),
+            is_nested: c.is_nested,
             outer_instance: c.inner_of,
             kind,
             inheritance: crate::libraries::ClassifierInheritance {
@@ -1657,6 +1657,7 @@ mod tests {
             stable_declaration: None,
             source_file: 0,
             source_decl: None,
+            is_nested: false,
             visibility: Visibility::Public,
             annotations: vec![],
             applied_annotations: vec![],
