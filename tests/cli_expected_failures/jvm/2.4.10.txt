@@ -8,7 +8,12 @@ XXmultiPlatformProject/multiplatformCompilationWithCommonScript.args
 XXmultiPlatformProject/multiplatformCompilationWithScript.args
 XexplicitApi/explicitApiAndExplicitReturnTypesAtTheSameTime.args
 XjdkRelease/jdkRelease.args
+XjdkRelease/jdkRelease6WithJvmTarget8Jdk11.args
+XjdkRelease/jdkRelease6WithJvmTarget8Jdk8.args
+XjdkRelease/jdkRelease6WithJvmTarget9.args
 XjdkRelease/jdkRelease6WithoutExplicitJvmTarget.args
+XjdkRelease/jdkRelease7WithJvmTarget8Jdk11.args
+XjdkRelease/jdkRelease7WithJvmTarget8Jdk8.args
 XjdkRelease/jdkRelease8.args
 XjspecifyAnnotation/jspecifyDefault.args
 XjspecifyAnnotation/jspecifyFileRootsProgressive.args
@@ -159,6 +164,7 @@ jvm6Target.args
 jvmDefaultIncorrectValue.args
 jvmDefaultIncorrectValueOld.args
 jvmDefaultOld.args
+jvmRecordWrongTarget.args
 k2SimpleMultiplatformGenericClass.args
 kmpMissingActual.args
 kotlinHomeWithoutStdlib.args
