@@ -126,6 +126,7 @@ fn classifier_identities(qualified: &str) -> Vec<TypeName> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::cli::ALLOPEN_PLUGIN_ID;
 
     fn option(key: &str, value: &str) -> PluginOption {
         PluginOption {
