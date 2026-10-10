@@ -67,9 +67,10 @@ pub struct FnMeta {
     /// (`class C { operator fun String.invoke(…) }`) — recorded separately from `params` (the
     /// LOGICAL value parameters, receiver excluded). `None` for an ordinary member.
     pub receiver: Option<Ty>,
-    /// Function-owned type parameters. Class parameters are inherited from the enclosing class
-    /// table; these are emitted on the function with ids following that inherited prefix.
-    pub type_params: Vec<String>,
+    /// Function-owned type parameters in order `(name, reified)`. Class parameters are inherited
+    /// from the enclosing class table; these are emitted on the function with ids following that
+    /// inherited prefix.
+    pub type_params: Vec<(String, bool)>,
     /// Semantic identities parallel to `type_params`.
     pub semantic_type_params: Vec<String>,
     pub type_param_bounds: Vec<Vec<Ty>>,
