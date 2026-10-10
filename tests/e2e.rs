@@ -1806,6 +1806,8 @@ mod native_float_predicates_e2e;
 mod native_floating_ranges_e2e;
 #[path = "native_floor_mod_e2e.rs"]
 mod native_floor_mod_e2e;
+#[path = "native_frame_objects_e2e.rs"]
+mod native_frame_objects_e2e;
 #[path = "native_function_slot_bridge_e2e.rs"]
 mod native_function_slot_bridge_e2e;
 #[path = "native_function_type_checks_e2e.rs"]

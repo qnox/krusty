@@ -26,6 +26,7 @@ mod defaults;
 mod entry;
 mod enums;
 mod exceptions;
+mod frame_objects;
 mod intrinsic_operations;
 use arithmetic::{arithmetic_result, scalar_bound};
 use carrier::{box_suffix, machine_carrier, scalar_suffix, Carrier};
@@ -556,6 +557,7 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
+                    frame_objects: std::collections::HashSet::new(),
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -645,6 +647,7 @@ impl<'a> FileLowering<'a> {
                     let variable = lowering.declare_value(slot as u32, *ty)?;
                     lowering.builder.def_var(variable, *value);
                 }
+                lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)
             },
         );
@@ -729,6 +732,8 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
+    /// The constructions of this body whose object lives in this frame; see `frame_objects`.
+    frame_objects: std::collections::HashSet<u32>,
 }
 
 /// One `finally` the current position is inside.
@@ -1539,11 +1544,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .iter()
                     .map(|ordinal| ordinal + default_prefix_count)
                     .collect();
+                let placement = if self.frame_objects.contains(&id) {
+                    frame_objects::Placement::Frame
+                } else {
+                    frame_objects::Placement::Heap
+                };
                 self.construction(
                     internal,
                     &args,
                     ctor_params.as_deref(),
                     (!omitted.is_empty()).then_some(omitted.as_slice()),
+                    placement,
                 )
             }
             IrExpr::MethodCall {
