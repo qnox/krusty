@@ -273,6 +273,31 @@ pub fn store_shared_files(slot: &str, fingerprint: u128, files: &BTreeMap<String
     store_files(&dumps_root(), "_libs", slot, compiler, fingerprint, files);
 }
 
+/// Arbitrary reference artifacts recorded under the same exact-version, binary GHA cache contract
+/// as kotlinc class dumps. A release/RC cache miss fails locally and compiles only when CI enables
+/// `KRUSTY_CLASS_DUMP_COMPILE_MISSING`; master alone may publish the resulting bytes.
+pub fn reference_files(
+    slot: &str,
+    fingerprint: u128,
+    compile: impl FnOnce() -> Option<BTreeMap<String, Vec<u8>>>,
+) -> Option<BTreeMap<String, Vec<u8>>> {
+    recall(
+        Recall {
+            root: &dumps_root(),
+            module: "_references",
+            key: slot,
+            compiler: compiler_dump_version(),
+            fingerprint,
+            legacy_fingerprint: fingerprint,
+            force: record_forced(),
+            compile_missing: compile_missing_allowed(),
+            write: ci_allows_write(),
+        },
+        |_| true,
+        compile,
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Channel {
     Release,
@@ -953,6 +978,15 @@ fn flush_dirty_archives() {
             flush_archive(root);
         }
     }
+}
+
+/// Publish every class-dump recording made by this test process.
+///
+/// The scored corpus runner flushes before returning from the test so the GHA cache contains the
+/// complete recording, and so a publication failure remains an ordinary test diagnostic instead
+/// of being swallowed by the best-effort process-exit hook.
+pub fn flush_recorded_class_dumps() {
+    flush_dirty_archives();
 }
 
 fn flush_archive(root: &Path) {

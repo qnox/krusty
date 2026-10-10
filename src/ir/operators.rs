@@ -29,6 +29,26 @@ pub enum IrBinOp {
     Ushr,
 }
 
+impl IrBinOp {
+    /// Whether the operator answers a `Boolean` whatever its operands: a comparison, an identity
+    /// test, or a logical connective.
+    pub fn yields_boolean(self) -> bool {
+        matches!(
+            self,
+            IrBinOp::Lt
+                | IrBinOp::Le
+                | IrBinOp::Gt
+                | IrBinOp::Ge
+                | IrBinOp::Eq
+                | IrBinOp::Ne
+                | IrBinOp::RefEq
+                | IrBinOp::RefNe
+                | IrBinOp::And
+                | IrBinOp::Or
+        )
+    }
+}
+
 /// The `IrTypeOperatorCall` operators (Kotlin IR's `IrTypeOperator`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrTypeOp {

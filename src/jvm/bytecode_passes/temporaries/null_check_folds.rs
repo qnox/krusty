@@ -28,8 +28,8 @@ use super::super::insn_list::NodeId;
 use super::super::opcodes::GOTO;
 use super::adjacency::Body;
 use super::shapes::{
-    ends_flow, is_swappable, loads_reference, null_jump, var_op, Kind, VarOp, DUP, IFNONNULL,
-    IFNULL, POP, SWAP,
+    ends_flow, is_swappable, is_terminator, loads_reference, null_jump, var_op, Kind, VarOp, DUP,
+    IFNONNULL, IFNULL, POP, SWAP,
 };
 use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
 
@@ -86,13 +86,18 @@ fn reload(body: &Body, from: Option<NodeId>, slot: u16) -> Option<(NodeId, Optio
 
 /// Every jump to the instruction `target` stands in front of, or `None` when something besides
 /// jumps reaches it: a switch, a protected range, or the fall-through of the instruction in front
-/// of it. Also that instruction.
-fn only_jumps_to(body: &Body, target: LabelId) -> Option<(NodeId, Vec<NodeId>)> {
+/// of it. Also that instruction. A transformed coroutine's generated safe-call temporary may put a
+/// physical return directly before the target; unlike kotlinc's pre-transform input, it has no dead
+/// `nop` fall-through there.
+fn only_jumps_to(
+    body: &Body,
+    target: LabelId,
+    allow_return_termination: bool,
+) -> Option<(NodeId, Vec<NodeId>)> {
     let start = body.insn_at(target)?;
-    if !body
-        .prev_insn(start)
-        .is_some_and(|prev| ends_flow(body.insn(prev)))
-    {
+    if !body.prev_insn(start).is_some_and(|prev| {
+        ends_flow(body.insn(prev)) || allow_return_termination && is_terminator(body.insn(prev))
+    }) {
         return None;
     }
     if body.protected_label(start) {
@@ -146,6 +151,7 @@ fn preserved_boundary_intervenes(
 pub(super) fn fold(
     body: &mut Body,
     preserved_unreachable_labels: &BTreeSet<LabelId>,
+    post_coroutine: bool,
 ) -> Option<Folds> {
     let loads: Vec<NodeId> = body
         .instructions()
@@ -182,7 +188,8 @@ pub(super) fn fold(
         let Some((op, target)) = null_jump(body.insn(jump)) else {
             continue;
         };
-        let Some((start, jumps)) = only_jumps_to(body, target) else {
+        let generated_receiver = post_coroutine && generated_receiver_temporary(body, jump, slot);
+        let Some((start, jumps)) = only_jumps_to(body, target, generated_receiver) else {
             continue;
         };
         if op == IFNONNULL {
@@ -241,7 +248,12 @@ pub(super) fn fold(
             else {
                 break;
             };
-            let Some(next) = body.next_insn(other).filter(|&next| !body.labelled(next)) else {
+            let Some(next) = body.next_insn(other).filter(|&next| {
+                !body.labelled(next)
+                    || post_coroutine
+                        && generated_receiver_temporary(body, other, checked_slot)
+                        && body.line_only_labelled(next)
+            }) else {
                 break;
             };
             let Some((reload, swap_after)) = reload(body, Some(next), checked_slot) else {
@@ -269,7 +281,7 @@ pub(super) fn fold(
     let remaining = body.instructions();
     if remaining.iter().any(|&load| {
         candidate(body, load).is_some()
-            && kotlinc_could_rewrite(body, load, preserved_unreachable_labels)
+            && kotlinc_could_rewrite(body, load, preserved_unreachable_labels, post_coroutine)
     }) {
         return None;
     }
@@ -292,6 +304,7 @@ fn kotlinc_could_rewrite(
     body: &Body,
     load: NodeId,
     preserved_unreachable_labels: &BTreeSet<LabelId>,
+    post_coroutine: bool,
 ) -> bool {
     let part = |jump: NodeId| {
         let Some(checked) = body.prev_insn(jump) else {
@@ -309,20 +322,24 @@ fn kotlinc_could_rewrite(
                 !start.is_some_and(|start| body.marked(start))
                     && reload(body, start, slot).is_some()
             }
-            Some((IFNULL, _)) => body
-                .next_insn(jump)
-                .filter(|&next| !body.labelled(next))
-                .is_some_and(|next| reload(body, Some(next), slot).is_some()),
+            Some((IFNULL, _)) => body.next_insn(jump).is_some_and(|next| {
+                (!body.labelled(next)
+                    || post_coroutine
+                        && generated_receiver_temporary(body, jump, slot)
+                        && body.line_only_labelled(next))
+                    && reload(body, Some(next), slot).is_some()
+            }),
             _ => false,
         }
     };
-    let Some((_, jump)) = candidate(body, load) else {
+    let Some((slot, jump)) = candidate(body, load) else {
         return false;
     };
     let Some((op, target)) = null_jump(body.insn(jump)) else {
         return false;
     };
-    let Some((start, jumps)) = only_jumps_to(body, target) else {
+    let generated_receiver = post_coroutine && generated_receiver_temporary(body, jump, slot);
+    let Some((start, jumps)) = only_jumps_to(body, target, generated_receiver) else {
         return body.protected_bound_at(target);
     };
     if op == IFNULL
@@ -335,6 +352,22 @@ fn kotlinc_could_rewrite(
     } else {
         jumps.iter().all(|&jump| part(jump))
     }
+}
+
+/// Whether `jump` checks a reference slot immediately after the backend stored and reloaded it.
+/// This is the conservative receiver shape emitted before coroutine transformation; the slot is
+/// removed by the ordinary temporary analysis after the null-check fold keeps the value on stack.
+fn generated_receiver_temporary(body: &Body, jump: NodeId, slot: u16) -> bool {
+    let Some(load) = body.prev_insn(jump) else {
+        return false;
+    };
+    let Some(store) = body.prev_insn(load) else {
+        return false;
+    };
+    matches!(
+        var_op(body.insn(store)),
+        Some(VarOp::Store(Kind::Reference, stored)) if stored == slot
+    ) && !body.labelled(load)
 }
 
 /// Stand what describes each `ifnull` target's instruction after the `pop` put in front of it:

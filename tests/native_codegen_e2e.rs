@@ -63,6 +63,11 @@ fn objects_of(artifacts: &[Artifact]) -> Vec<&[u8]> {
 }
 
 fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Vec<String>) {
+    let (artifacts, diags) = compile_with_sink(sources, target);
+    (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
+}
+
+fn compile_with_sink(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, DiagSink) {
     let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
     let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
     let platform = Box::new(
@@ -87,7 +92,7 @@ fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Ve
     );
     let backend = CraneliftBackend::new(target).verified();
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
-    (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
+    (artifacts, diags)
 }
 
 /// Compile, link with krusty's linker, run, and return stdout.
@@ -475,6 +480,64 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         artifacts.is_empty(),
         "a declined file must emit no object: {:?}",
         artifacts.iter().map(|(name, _)| name).collect::<Vec<_>>()
+    );
+}
+
+/// Compile `sources` for the host and render every diagnostic as `file:line:column: …`, in
+/// emission order, against the files they belong to.
+fn rendered_diagnostics(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, String) {
+    let (artifacts, diags) = compile_with_sink(sources, target);
+    let files: Vec<(String, &str)> = sources
+        .iter()
+        .map(|(stem, text)| (format!("{stem}.kt"), *text))
+        .collect();
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), *text))
+        .collect();
+    (artifacts, diags.render_all(&files))
+}
+
+#[test]
+fn declines_with_the_same_message_are_reported_at_each_ones_own_position() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // The same still-declined construct twice, at different lines and columns, in the second file
+    // of a module and below code that lowers. A file stops at its first decline, so it reports the
+    // first occurrence once; with that one gone, the second is reported at its own position. The
+    // message is identical both times: only the node decides where it lands.
+    let helpers = "package demo\nfun one(): Int = 1\n";
+    let both = "package demo\n\nfun main() {\n    println(one())\n  val a = runCatching { 1 }.getOrNull()\n    val x = 2; println(runCatching { x }.getOrNull())\n}\n";
+    let second = "package demo\n\nfun main() {\n    println(one())\n  val a = 1\n    val x = 2; println(runCatching { x }.getOrNull())\n}\n";
+    let (artifacts, rendered) =
+        rendered_diagnostics(&[("Helpers", helpers), ("Main", both)], target);
+    assert_eq!(
+        rendered,
+        "Main.kt:5:11: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+    );
+    assert!(artifacts.iter().all(|(name, _)| name != "Main.o"));
+    let (_, rendered) = rendered_diagnostics(&[("Helpers", helpers), ("Main", second)], target);
+    assert_eq!(
+        rendered,
+        "Main.kt:6:24: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+    );
+}
+
+#[test]
+fn a_decline_nested_in_lowered_expressions_is_reported_at_the_innermost_one() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // The decline surfaces through the argument list, `listOf`, the `println` call and the
+    // statement around them; the node it names is the innermost one, the `getOrNull` call.
+    let main = "fun main() {\n    println(listOf(1, runCatching { 2 }.getOrNull()))\n}\n";
+    let (_, rendered) = rendered_diagnostics(&[("Main", main)], target);
+    assert_eq!(
+        rendered,
+        "Main.kt:2:23: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
     );
 }
 
@@ -2896,18 +2959,4 @@ fn a_list_answers_its_first_and_last_element() {
          }\n";
     common::expect_box_ok_with_stdlib(source, "ListEnds");
     common::expect_native_box(source, "ListEnds", "OK");
-}
-
-/// Kotlin's other entry point declines by name. This target does not pass a program its
-/// arguments yet, and without the decline the file lowers with no entry at all and the link fails
-/// on a symbol that says nothing about `main`.
-#[test]
-fn a_main_taking_its_arguments_declines() {
-    common::expect_native_decline(
-        "fun main(args: Array<String>) {\n\
-         \x20   println(\"OK\")\n\
-         }\n",
-        "MainWithArguments",
-        "a `main` that takes its arguments",
-    );
 }

@@ -1490,6 +1490,8 @@ pub struct ResolvedModuleIndex {
     source_packages: HashMap<SourceFileId, TypeName>,
     /// Each source unit's Kotlin `main`, selected once by the frontend (`fir::entry_point`).
     pub(super) source_entry_points: HashMap<SourceFileId, super::ResolvedEntryPoint>,
+    /// Each source unit's `fun box(): String` test entry, selected with its `main`.
+    pub(super) source_box_entries: HashMap<SourceFileId, CallableId>,
     /// Every package some source unit publishes, with all of its enclosing packages: the
     /// namespaces the source module contributes. Derived from `source_packages` as each identity
     /// is published, so a package-child probe is one lookup instead of a walk of every source
@@ -3160,6 +3162,7 @@ impl ResolvedModuleIndex {
             + self.source_package_namespaces.len() * std::mem::size_of::<TypeName>()
             + self.source_entry_points.len()
                 * std::mem::size_of::<(SourceFileId, super::ResolvedEntryPoint)>()
+            + self.source_box_entries.len() * std::mem::size_of::<(SourceFileId, CallableId)>()
             + self.source_inventory.len()
                 * (std::mem::size_of::<SourceFileId>()
                     + std::mem::size_of::<Box<[DeclarationId]>>())

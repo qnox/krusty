@@ -1305,6 +1305,8 @@ mod jvm_name_toplevel_e2e;
 mod jvmfield_companion_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
+#[path = "klib_class_surface_e2e.rs"]
+mod klib_class_surface_e2e;
 #[path = "klib_container_e2e.rs"]
 mod klib_container_e2e;
 #[path = "klib_semantic_e2e.rs"]
@@ -1605,6 +1607,8 @@ mod suspend_lambda_private_property_e2e;
 mod suspend_lambda_shared_capture_e2e;
 #[path = "suspend_result_nullability_e2e.rs"]
 mod suspend_result_nullability_e2e;
+#[path = "suspend_safe_call_receiver_e2e.rs"]
+mod suspend_safe_call_receiver_e2e;
 #[path = "suspend_under_try_e2e.rs"]
 mod suspend_under_try_e2e;
 #[path = "suspend_value_class_delegation_e2e.rs"]
@@ -1808,6 +1812,8 @@ mod native_float_predicates_e2e;
 mod native_floating_ranges_e2e;
 #[path = "native_floor_mod_e2e.rs"]
 mod native_floor_mod_e2e;
+#[path = "native_frame_objects_e2e.rs"]
+mod native_frame_objects_e2e;
 #[path = "native_function_slot_bridge_e2e.rs"]
 mod native_function_slot_bridge_e2e;
 #[path = "native_function_type_checks_e2e.rs"]
@@ -1844,6 +1850,8 @@ mod native_number_subclass_e2e;
 mod native_pair_construction_e2e;
 #[path = "native_preconditions_e2e.rs"]
 mod native_preconditions_e2e;
+#[path = "native_process_e2e.rs"]
+mod native_process_e2e;
 #[path = "native_property_reference_e2e.rs"]
 mod native_property_reference_e2e;
 #[path = "native_range_bound_control_e2e.rs"]
@@ -2385,6 +2393,8 @@ mod serialization_external_kinds_e2e;
 mod serialization_generated_debug_e2e;
 #[path = "serialization_krusty_only_e2e.rs"]
 mod serialization_krusty_only_e2e;
+#[path = "serialization_nullable_value_class_e2e.rs"]
+mod serialization_nullable_value_class_e2e;
 #[path = "serialization_object_serializer_e2e.rs"]
 mod serialization_object_serializer_e2e;
 #[path = "serialization_plain_enum_element_e2e.rs"]

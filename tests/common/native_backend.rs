@@ -7,7 +7,7 @@
 //! target at all. Which of those a given test treats as a failure is the test's business, which is
 //! why each helper below is a different answer to that one question.
 
-use super::{jdk_modules, run_freshly_written};
+use super::jdk_modules;
 
 const NATIVE_SYS_HEADER: &str = include_str!("../../src/native/runtime/krusty_sys.h");
 const NATIVE_RUNTIME_HEADER: &str = include_str!("../../src/native/runtime/krusty_rt.h");
@@ -157,7 +157,7 @@ pub fn expect_native_exit(src: &str, stem: &str, code: i32, said: &str) {
     }
 }
 
-enum NativeBox {
+pub enum NativeBox {
     /// What `box()` returned. The JVM's answer for the same program is the oracle.
     Answered(String),
     /// Declined by the generator, or refused by the frontend before it — neither is the native
@@ -180,7 +180,7 @@ enum NativeBox {
 
 impl NativeBox {
     /// How an abnormal end reads when a test did not ask for one.
-    fn as_failure(&self) -> String {
+    pub fn as_failure(&self) -> String {
         match self {
             NativeBox::Exited {
                 code,
@@ -201,19 +201,35 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     native_sources_outcome(&[(stem, src)], target)
 }
 
-/// `sources` is `(file stem, text)` in the order the module is compiled. One of the files holds
-/// `box` or `main`; the rest are the declarations it calls.
-fn native_sources_outcome(
+/// The analysis a Native compilation of `sources` (`(stem, text)`) starts from: the semantic
+/// platform and language settings every Native test compiles with, and the file stems in order.
+/// `None` when this build has no stdlib to analyze against.
+pub fn native_analysis(
     sources: &[(&str, &str)],
-    target: krusty::native::NativeTarget,
-) -> NativeBox {
-    use krusty::diag::DiagSink;
-    use krusty::native::{CraneliftBackend, Entry};
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
+    analyze_natively(sources, &[], false, diags)
+}
+
+/// [`native_analysis`] of a build applying every compiler plugin krusty ships, with their
+/// `libraries` (the plugins' runtimes) on the classpath after the stdlib and `kotlin-test`.
+pub fn native_analysis_with_plugins(
+    sources: &[(&str, &str)],
+    libraries: &[std::path::PathBuf],
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
+    analyze_natively(sources, libraries, true, diags)
+}
+
+fn analyze_natively(
+    sources: &[(&str, &str)],
+    libraries: &[std::path::PathBuf],
+    plugins: bool,
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
     use krusty::source::SourceInput;
 
-    let Some(jar) = krusty::toolchain::stdlib_jar() else {
-        return NativeBox::Unavailable;
-    };
+    let jar = krusty::toolchain::stdlib_jar()?;
     // Stdlib AND JDK, the same pair the JVM helpers compile against. The bridge `native/intrinsics`
     // describes runs through here: signatures are read out of JVM artifacts until the provider is
     // klib-based, and `kotlin.RuntimeException` is a typealias for `java.lang.RuntimeException`, so
@@ -226,6 +242,7 @@ fn native_sources_outcome(
     // gap in what this helper was given.
     let jars = std::iter::once(jar)
         .chain(krusty::toolchain::kotlin_test_jar())
+        .chain(libraries.iter().cloned())
         .collect::<Vec<_>>();
     let classpath = super::cached_classpath(&jars, Some(&jdk_modules()));
     let platform = Box::new(
@@ -244,12 +261,35 @@ fn native_sources_outcome(
     for (_, src) in sources {
         features.apply_source_directives(src);
     }
-    let mut diags = DiagSink::new();
+    let platform = if plugins {
+        super::with_native_plugins(platform)
+    } else {
+        platform.into()
+    };
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
+        &inputs, platform, &features, diags,
     );
+    Some((analysis, stems))
+}
+
+/// Compile `sources` with the native code generator and link them into an executable image, or say
+/// why there is none.
+pub fn native_image(
+    sources: &[(&str, &str)],
+    target: krusty::native::NativeTarget,
+) -> Result<Vec<u8>, NativeBox> {
+    use krusty::diag::DiagSink;
+    use krusty::native::{CraneliftBackend, Entry};
+
+    let mut diags = DiagSink::new();
+    let Some((analysis, stems)) = native_analysis(sources, &mut diags) else {
+        return Err(NativeBox::Unavailable);
+    };
     if let Some(refusal) = diags.diags.first() {
-        return NativeBox::Declined(format!("the frontend refused it: {}", refusal.msg));
+        return Err(NativeBox::Declined(format!(
+            "the frontend refused it: {}",
+            refusal.msg
+        )));
     }
     // A conformance case answers through `box`; a program without one starts at Kotlin's `main`,
     // which is how a test pins what the backend does with that entry.
@@ -267,13 +307,15 @@ fn native_sources_outcome(
         .iter()
         .find(|diagnostic| diagnostic.msg.starts_with(NATIVE_DECLINE))
     {
-        return NativeBox::Declined(decline.msg.clone());
+        return Err(NativeBox::Declined(decline.msg.clone()));
     }
     if let Some(refusal) = diags.diags.first() {
-        return NativeBox::Declined(refusal.msg.clone());
+        return Err(NativeBox::Declined(refusal.msg.clone()));
     }
     if artifacts.is_empty() {
-        return NativeBox::Declined("the backend emitted nothing".to_string());
+        return Err(NativeBox::Declined(
+            "the backend emitted nothing".to_string(),
+        ));
     }
     let objects: Vec<Vec<u8>> = artifacts
         .into_iter()
@@ -283,57 +325,101 @@ fn native_sources_outcome(
     let object_refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
     let image = match krusty::native::link_program(&object_refs, target) {
         Ok(image) => image,
-        Err(error) => return NativeBox::Failed(format!("link: {error}")),
+        Err(error) => return Err(NativeBox::Failed(format!("link: {error}"))),
     };
+    Ok(image)
+}
+
+/// Run a linked image with `arguments` and `input` on standard input, and an empty environment.
+pub fn run_native_image(
+    image: &[u8],
+    stem: &str,
+    arguments: &[&std::ffi::OsStr],
+    input: &[u8],
+) -> Result<std::process::Output, NativeBox> {
+    use std::io::Write as _;
+
     let directory = std::env::temp_dir().join(format!(
         "krusty-native-e2e-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
     if std::fs::create_dir_all(&directory).is_err() {
-        return NativeBox::Unavailable;
+        return Err(NativeBox::Unavailable);
     }
-    let executable = directory.join(sources.first().map(|(stem, _)| *stem).unwrap_or("program"));
-    if let Err(error) = std::fs::write(&executable, &image) {
-        return NativeBox::Failed(format!("writing the executable: {error}"));
+    let executable = directory.join(stem);
+    if let Err(error) = std::fs::write(&executable, image) {
+        return Err(NativeBox::Failed(format!(
+            "writing the executable: {error}"
+        )));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755));
     }
-    let output = run_freshly_written(
+    let child = super::spawn_freshly_written(
         std::process::Command::new(&executable)
+            .args(arguments)
             .env_clear()
-            .stdin(std::process::Stdio::null()),
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
     );
+    let output = child.and_then(|mut child| {
+        // Written whole and closed before waiting: the inputs are small, and closing is what lets
+        // the program see the end of its input.
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        let written = stdin.write_all(input);
+        drop(stdin);
+        // A program that stops reading early closes the pipe; that is its business, not a failure.
+        if let Err(error) = written {
+            if error.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(error);
+            }
+        }
+        child.wait_with_output()
+    });
     let _ = std::fs::remove_file(&executable);
     let _ = std::fs::remove_dir(&directory);
-    match output {
-        Err(error) => NativeBox::Failed(format!("running it: {error}")),
-        Ok(output) if !output.status.success() => NativeBox::Exited {
+    output.map_err(|error| NativeBox::Failed(format!("running it: {error}")))
+}
+
+/// `sources` is `(file stem, text)` in the order the module is compiled. One of the files holds
+/// `box` or `main`; the rest are the declarations it calls.
+fn native_sources_outcome(
+    sources: &[(&str, &str)],
+    target: krusty::native::NativeTarget,
+) -> NativeBox {
+    let image = match native_image(sources, target) {
+        Ok(image) => image,
+        Err(outcome) => return outcome,
+    };
+    let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("program");
+    let output = match run_native_image(&image, stem, &[], b"") {
+        Ok(output) => output,
+        Err(outcome) => return outcome,
+    };
+    if !output.status.success() {
+        return NativeBox::Exited {
             code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        },
-        // The entry prints what `box()` returned after a frame marker, and nothing after it: the
-        // answer is every byte past the one marker. What comes before is the
-        // program's own output — `when (b) { true -> println("t") … }` prints `t` and then answers
-        // `OK` — which the JVM path never sees, because there the answer is a return value rather
-        // than a stream. Reading the last LINE instead would take `"FAIL\nOK"` for `OK`.
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            match stdout.split_once(krusty::native::BOX_RESULT_FRAME) {
-                Some((_, answer)) if answer.contains(krusty::native::BOX_RESULT_FRAME) => {
-                    NativeBox::Failed(
-                        "the program printed more than one box result frame".to_string(),
-                    )
-                }
-                Some((_, answer)) => NativeBox::Answered(answer.to_owned()),
-                None => NativeBox::Failed(format!(
-                    "the program ended without framing an answer; stdout {stdout:?}"
-                )),
-            }
+        };
+    }
+    // The entry prints what `box()` returned after a frame marker, and nothing after it: the
+    // answer is every byte past the one marker. What comes before is the
+    // program's own output — `when (b) { true -> println("t") … }` prints `t` and then answers
+    // `OK` — which the JVM path never sees, because there the answer is a return value rather
+    // than a stream. Reading the last LINE instead would take `"FAIL\nOK"` for `OK`.
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    match stdout.split_once(krusty::native::BOX_RESULT_FRAME) {
+        Some((_, answer)) if answer.contains(krusty::native::BOX_RESULT_FRAME) => {
+            NativeBox::Failed("the program printed more than one box result frame".to_string())
         }
+        Some((_, answer)) => NativeBox::Answered(answer.to_owned()),
+        None => NativeBox::Failed(format!(
+            "the program ended without framing an answer; stdout {stdout:?}"
+        )),
     }
 }

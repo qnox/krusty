@@ -1,0 +1,13 @@
+Several modules are each shown under their name.
+--- project.yaml
+modules: [ a, b ]
+--- a/module.yaml
+product: jvm/lib
+settings:
+  jvm:
+    release: 21
+--- b/module.yaml
+product: jvm/app
+settings:
+  jvm:
+    mainClass: example.MainKt

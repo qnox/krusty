@@ -26,6 +26,7 @@ mod defaults;
 mod entry;
 mod enums;
 mod exceptions;
+mod frame_objects;
 mod intrinsic_operations;
 use arithmetic::{arithmetic_result, scalar_bound};
 use carrier::{box_suffix, machine_carrier, scalar_suffix, Carrier};
@@ -63,7 +64,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ir::{
     Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
-    IrLocalPropertyLayout, IrStatic, IrTypeOp,
+    IrLocalPropertyLayout, IrStatic, IrTypeOp, MainEntryParameters,
 };
 use crate::types::{Ty, TypeName};
 
@@ -72,8 +73,65 @@ use super::super::symbols::Symbols;
 use super::super::target::NativeTarget;
 use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 
-/// The construct a lowering declined, phrased for a diagnostic.
-pub type Unsupported = String;
+/// A construct the lowering declined, and the checked node it was declined at.
+///
+/// The phrase is presentation; the node is identity. The innermost expression or statement a
+/// decline leaves through records its common-IR origin, and an outer one never replaces it, so the
+/// diagnostic lands on the node that could not be lowered rather than on whatever encloses it.
+#[derive(Debug)]
+pub struct Unsupported {
+    construct: String,
+    origin: Option<crate::fir::OriginId>,
+}
+
+impl Unsupported {
+    /// The construct, phrased for a diagnostic.
+    pub fn construct(&self) -> &str {
+        &self.construct
+    }
+
+    /// The checked origin of the node the construct was declined at, when one recorded it.
+    pub fn origin(&self) -> Option<crate::fir::OriginId> {
+        self.origin
+    }
+
+    /// Attribute this decline to `origin` unless a more deeply nested node already claimed it.
+    fn at(mut self, origin: Option<crate::fir::OriginId>) -> Self {
+        if self.origin.is_none() {
+            self.origin = origin;
+        }
+        self
+    }
+}
+
+impl From<String> for Unsupported {
+    fn from(construct: String) -> Self {
+        Self {
+            construct,
+            origin: None,
+        }
+    }
+}
+
+impl From<&str> for Unsupported {
+    fn from(construct: &str) -> Self {
+        construct.to_string().into()
+    }
+}
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.construct)
+    }
+}
+
+/// `format!` for a decline: the phrase of an [`Unsupported`] with no origin yet.
+macro_rules! declined {
+    ($($argument:tt)*) => {
+        $crate::native::codegen::lower::Unsupported::from(format!($($argument)*))
+    };
+}
+pub(crate) use declined;
 
 /// One lowered Kotlin file.
 pub struct Lowered {
@@ -115,7 +173,7 @@ fn isa_for(
     cranelift_codegen::isa::lookup(triple)
         .map_err(|error| format!("target {target} ({error})"))?
         .finish(settings::Flags::new(flags))
-        .map_err(|error| format!("target {target} ({error})"))
+        .map_err(|error| declined!("target {target} ({error})"))
 }
 
 /// What the generator is given beyond the file: the pieces a native IR pass prepared for it.
@@ -191,6 +249,7 @@ pub fn lower_file(
         lambdas: HashMap::new(),
         local_delegate_helpers: HashMap::new(),
         default_wrappers: HashMap::new(),
+        module_default_entries: Vec::new(),
         default_constructors: HashMap::new(),
         enum_entries: HashMap::new(),
         reference_identities: HashMap::new(),
@@ -217,6 +276,7 @@ pub fn lower_file(
     lowering.declare_lambdas()?;
     lowering.declare_local_delegate_helpers()?;
     lowering.declare_default_wrappers()?;
+    lowering.declare_module_default_entries()?;
     lowering.declare_default_constructors()?;
     lowering.declare_enum_entries()?;
     // Constructors are bodies too, so property-reference artifacts must exist before classes are
@@ -226,42 +286,25 @@ pub fn lower_file(
     lowering.define_local_delegate_helpers()?;
     lowering.define_classes()?;
     lowering.define_default_wrappers()?;
+    lowering.define_module_default_entries()?;
     lowering.define_default_constructors()?;
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let file_init = lowering.define_file_init(source, statics_init)?;
-    let mut defines_entry = false;
+    let selected = entry.selected(ir);
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
-        let function = &ir.functions[index];
-        let is_entry = function.params.is_empty()
-            && function.is_static
-            && function.dispatch_receiver.is_none()
-            && match entry {
-                Entry::Main => function.name == "main",
-                Entry::Box => {
-                    function.name == "box" && lowering.carrier(function.ret) == Carrier::Ref
-                }
-            };
-        if is_entry {
-            lowering.define_program_entry(index, entry, file_init, statics_init.is_some())?;
-            defines_entry = true;
+        if let Some((_, parameters)) = selected.filter(|(function, _)| *function == index as u32) {
+            lowering.define_program_entry(
+                index,
+                entry,
+                file_init,
+                statics_init.is_some(),
+                parameters == MainEntryParameters::Arguments,
+            )?;
         }
     }
-    // Kotlin's other entry point, `fun main(args: Array<String>)`, is a program whose arguments
-    // this target does not pass yet. Declining here names it; without this the file lowers with no
-    // entry and the link fails on an undefined symbol that says nothing about `main`.
-    if matches!(entry, Entry::Main)
-        && !defines_entry
-        && ir.functions.iter().any(|function| {
-            function.name == "main"
-                && function.is_static
-                && function.dispatch_receiver.is_none()
-                && function.params.len() == 1
-        })
-    {
-        return Err("a `main` that takes its arguments".to_string());
-    }
+    let defines_entry = selected.is_some();
     let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
 
@@ -311,6 +354,9 @@ struct FileLowering<'a> {
     local_delegate_helpers: HashMap<(u32, bool), FuncId>,
     /// One wrapper per omission shape a call in this file uses.
     default_wrappers: HashMap<defaults::Omission, FuncId>,
+    /// The entry each top-level function with defaults exports for callers in other files, by IR
+    /// function, in function order.
+    module_default_entries: Vec<(u32, FuncId)>,
     /// The same, for a construction that leaves arguments out.
     default_constructors: HashMap<defaults::CtorOmission, FuncId>,
     /// Per enum class, its constants' static slots and getters, in declaration order.
@@ -367,7 +413,7 @@ impl<'a> FileLowering<'a> {
         for param in params {
             match self.carrier(*param).abi_param() {
                 Some(abi) => signature.params.push(abi),
-                None => return Err("a `Unit` parameter".to_string()),
+                None => return Err("a `Unit` parameter".into()),
             }
         }
         if let Some(abi) = self.carrier(ret).abi_param() {
@@ -382,7 +428,7 @@ impl<'a> FileLowering<'a> {
         let mut params = Vec::with_capacity(function.params.len() + 1);
         if let Some(owner) = function.dispatch_receiver {
             if self.ir.class_id_by_name(owner).is_none() {
-                return Err(format!(
+                return Err(declined!(
                     "a method of `{}`, which is not declared in this file",
                     owner.render()
                 ));
@@ -552,6 +598,8 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
+                    frame_objects: std::collections::HashMap::new(),
+                    frame_fields: std::collections::HashMap::new(),
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -586,7 +634,7 @@ impl<'a> FileLowering<'a> {
         // reads correctly — the difference is then in this, and nothing else shows it.
         crate::trace_compiler!("native", "{name}\n{}", context.func.display());
         if let Err(error) = self.module.define_function(id, &mut context) {
-            return Err(format!(
+            return Err(declined!(
                 "compiling `{name}` ({error:?})\n{}",
                 context.func.display()
             ));
@@ -614,7 +662,7 @@ impl<'a> FileLowering<'a> {
         // one kotlinc leaves recursive too — it reports NON_TAIL_RECURSIVE_CALL and emits the
         // call — so declining those refused programs kotlinc compiles, and compiles the same way.
         if self.ir.unlooped_tailrec.contains(&(index as u32)) {
-            return Err(format!(
+            return Err(declined!(
                 "a `tailrec` function `{}` common lowering leaves recursive",
                 function.name
             ));
@@ -641,6 +689,7 @@ impl<'a> FileLowering<'a> {
                     let variable = lowering.declare_value(slot as u32, *ty)?;
                     lowering.builder.def_var(variable, *value);
                 }
+                lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)
             },
         );
@@ -725,6 +774,11 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
+    /// The constructions of this body whose object lives in this frame, each with the local it
+    /// initializes; see `frame_objects`.
+    frame_objects: std::collections::HashMap<u32, u32>,
+    /// The field variables of each local that holds a frame object.
+    frame_fields: std::collections::HashMap<u32, Vec<Variable>>,
 }
 
 /// One `finally` the current position is inside.
@@ -750,7 +804,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     fn declare_value(&mut self, slot: u32, ty: Ty) -> Result<Variable, Unsupported> {
         let Some(clif) = self.carrier(ty).clif() else {
-            return Err("a `Unit`-typed local".to_string());
+            return Err("a `Unit`-typed local".into());
         };
         let variable = self.builder.declare_var(clif);
         self.values.insert(slot, (variable, ty));
@@ -919,6 +973,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     fn statement(&mut self, id: u32) -> Result<(), Unsupported> {
+        self.statement_effect(id)
+            .map_err(|declined| declined.at(self.file.ir.node_origin(id)))
+    }
+
+    fn statement_effect(&mut self, id: u32) -> Result<(), Unsupported> {
         // `var x = 0` in a class body stores NOTHING. The rule is Kotlin's, it is observable
         // rather than an optimization, and the IR is what knows which store is a declaration's —
         // see `property_initializer_stores`. A fresh object's storage is already zero here, as it
@@ -979,9 +1038,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             return Ok(());
                         }
                         let Some(lowered) = lowered else {
-                            return Err(
-                                "a `return` of no value from a non-`Unit` function".to_string()
-                            );
+                            return Err("a `return` of no value from a non-`Unit` function".into());
                         };
                         // The expression need not already be in the result's representation: a
                         // body whose value is typed by a type PARAMETER carries a reference, and
@@ -991,8 +1048,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         let declared = self.result_type;
                         let Some(value) = self.convert(lowered, source, declared)? else {
                             return Err(
-                                "a `return` whose value does not reach the declared result"
-                                    .to_string(),
+                                "a `return` whose value does not reach the declared result".into(),
                             );
                         };
                         if self.terminated {
@@ -1049,7 +1105,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         return Ok(());
                     }
                     let Some(value) = value else {
-                        return Err("a local initialized from a `Unit` value".to_string());
+                        return Err("a local initialized from a `Unit` value".into());
                     };
                     self.builder.def_var(variable, value);
                 } else {
@@ -1067,14 +1123,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(());
                 }
                 let Some(&(variable, ty)) = self.values.get(&var) else {
-                    return Err("an assignment to an undeclared local".to_string());
+                    return Err("an assignment to an undeclared local".into());
                 };
                 let value = self.coerce(value, ty)?;
                 if self.terminated {
                     return Ok(());
                 }
                 let Some(value) = value else {
-                    return Err("an assignment of a `Unit` value".to_string());
+                    return Err("an assignment of a `Unit` value".into());
                 };
                 self.builder.def_var(variable, value);
             }
@@ -1149,10 +1205,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(());
                 }
                 match self.checked_property(&target) {
-                    Ok((class, index)) => {
+                    Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_write(class, index, dispatch_receiver, value)?
                     }
-                    Err(reason) if reason == objects::TOP_LEVEL => {
+                    Ok(objects::CheckedProperty::TopLevel) => {
                         self.top_level_write(&target, value)?;
                     }
                     Err(reason) => return Err(reason),
@@ -1175,7 +1231,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 .rposition(|frame| frame.label.as_deref() == Some(label)),
             None => self.loops.len().checked_sub(1),
         };
-        found.ok_or_else(|| format!("a `{keyword}` outside the loop it names"))
+        found.ok_or_else(|| declined!("a `{keyword}` outside the loop it names"))
     }
 
     /// `while`, `do…while`, and the shape a lowered `for` takes: a loop whose `update` runs after
@@ -1200,7 +1256,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(());
         }
         let Some(condition) = condition else {
-            return Err("a loop condition of no value".to_string());
+            return Err("a loop condition of no value".into());
         };
         self.builder
             .ins()
@@ -1305,7 +1361,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         break;
                     }
                     let Some(condition) = condition else {
-                        return Err("a condition of no value".to_string());
+                        return Err("a condition of no value".into());
                     };
                     let then_block = self.builder.create_block();
                     let else_block = self.builder.create_block();
@@ -1380,9 +1436,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             (Some(_), Some(value)) => {
                 self.builder.ins().jump(merge, &[BlockArg::Value(value)]);
             }
-            (Some(_), None) => {
-                return Err("a `when` arm of no value where one is needed".to_string())
-            }
+            (Some(_), None) => return Err("a `when` arm of no value where one is needed".into()),
             (None, _) => {
                 self.builder.ins().jump(merge, &[]);
             }
@@ -1407,6 +1461,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// rather than about a node are said here, and cover every route in rather than the routes
     /// thought of one at a time.
     fn expression(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
+        self.expression_value(id)
+            .map_err(|declined| declined.at(self.file.ir.node_origin(id)))
+    }
+
+    fn expression_value(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
         let logical = self.file.ir.logical_types.get(&id).copied();
         let value = self.lowered_expression(id)?;
         let (Some(value), Some(logical)) = (value, logical) else {
@@ -1451,7 +1510,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(None);
                 }
                 let Some(&(variable, _)) = self.values.get(&slot) else {
-                    return Err("a read of an undeclared local".to_string());
+                    return Err("a read of an undeclared local".into());
                 };
                 Ok(Some(self.builder.use_var(variable)))
             }
@@ -1535,11 +1594,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .iter()
                     .map(|ordinal| ordinal + default_prefix_count)
                     .collect();
+                let placement = match self.frame_objects.get(&id) {
+                    Some(&local) => frame_objects::Placement::Frame { local },
+                    None => frame_objects::Placement::Heap,
+                };
                 self.construction(
                     internal,
                     &args,
                     ctor_params.as_deref(),
                     (!omitted.is_empty()).then_some(omitted.as_slice()),
+                    placement,
                 )
             }
             IrExpr::MethodCall {
@@ -1632,7 +1696,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }) if self.throwable_field(target).is_some() => {
                 let symbol = self.throwable_field(target).expect("just matched");
                 if self.file.overrides_a_throwable_accessor {
-                    return Err(format!(
+                    return Err(declined!(
                         "a read of `Throwable.{}` in a file that overrides one",
                         if symbol == "kt_throwable_cause" {
                             "cause"
@@ -1679,7 +1743,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .expect("checked by the guard");
                 match self.list_property_member(&name, receiver, any()) {
                     Some(realized) => realized,
-                    None => Err(format!("`{name}` of a receiver that answers none of it")),
+                    None => Err(declined!("`{name}` of a receiver that answers none of it")),
                 }
             }
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -1693,7 +1757,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let answer = lists::indexed_value_getter_ty(&name);
                 match self.list_property_member(&name, receiver, answer) {
                     Some(realized) => realized,
-                    None => Err(format!(
+                    None => Err(declined!(
                         "`{name}` of a receiver that is not an indexed value"
                     )),
                 }
@@ -1708,7 +1772,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .expect("checked by the guard");
                 match self.list_property_member(&name, receiver, Ty::Int) {
                     Some(realized) => realized,
-                    None => Err(format!("`{name}` of a receiver that is not a collection")),
+                    None => Err(declined!("`{name}` of a receiver that is not a collection")),
                 }
             }
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -1721,7 +1785,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .expect("checked by the guard");
                 match self.map_property_member(property, receiver, property.answer()) {
                     Some(realized) => realized,
-                    None => Err(format!(
+                    None => Err(declined!(
                         "`{}` of a receiver that is not a map",
                         property.name()
                     )),
@@ -1744,8 +1808,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     );
                 }
                 match self.checked_property(&target) {
-                    Ok((class, index)) => self.property_read(class, index, dispatch_receiver),
-                    Err(reason) if reason == objects::TOP_LEVEL => self.top_level_read(&target),
+                    Ok(objects::CheckedProperty::Member(class, index)) => {
+                        self.property_read(class, index, dispatch_receiver)
+                    }
+                    Ok(objects::CheckedProperty::TopLevel) => self.top_level_read(&target),
                     Err(reason) => Err(reason),
                 }
             }
@@ -1796,7 +1862,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.statement(id)?;
                 Ok(None)
             }
-            other => Err(self.describe_declined(&other)),
+            other => Err(self.describe_declined(&other).into()),
         }
     }
 
@@ -1871,7 +1937,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 // Kotlin admits unpaired surrogates; UTF-8 does not encode them and the runtime is
                 // UTF-8, so such a literal is declined rather than mangled.
                 let Some(text) = value.as_str() else {
-                    return Err("a string constant containing an unpaired surrogate".to_string());
+                    return Err("a string constant containing an unpaired surrogate".into());
                 };
                 self.string_literal(text.as_bytes())?
             }
@@ -1905,7 +1971,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // so a call that leaves it out still names the declaration that has it.
         let has_message = args.len() > compared;
         if args.len() < compared {
-            return Err(format!(
+            return Err(declined!(
                 "a `kotlin.test` assertion missing an operand (`{symbol}`)"
             ));
         }
@@ -2125,6 +2191,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 Callee::External { ret, .. }
                 | Callee::Intrinsic { ret, .. }
+                | Callee::Module { ret, .. }
                 | Callee::ModuleWithDefaults { ret, .. }
                 | Callee::Super { ret, .. } => *ret,
                 Callee::Special { source, .. } => {
@@ -2341,7 +2408,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return self.runtime_call("kt_hash_code", &[any()], Ty::Int, &[value]);
         }
         let Some(operand) = self.coerce(value, ty)? else {
-            return Err("a `Unit` data-class field".to_string());
+            return Err("a `Unit` data-class field".into());
         };
         if self.terminated {
             return Ok(None);
@@ -2387,7 +2454,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let bits = self.bits_of(operand, types::I64);
                 self.fold_to_int(bits)
             }
-            other => return Err(format!("a data-class field of type `{other:?}`")),
+            other => return Err(declined!("a data-class field of type `{other:?}`")),
         };
         Ok(hash)
     }
@@ -2433,7 +2500,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 return Ok(None);
             }
             let (Some(left), Some(right)) = (left, right) else {
-                return Err("a `Unit` data-class field".to_string());
+                return Err("a `Unit` data-class field".into());
             };
             return self.values_equal(left, right, ty).map(Some);
         }
@@ -2495,7 +2562,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 return Ok(values);
             }
             let Some(value) = value else {
-                return Err("a `Unit` argument".to_string());
+                return Err("a `Unit` argument".into());
             };
             values.push(value);
         }
