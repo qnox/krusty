@@ -197,7 +197,10 @@ fn a_plugin_krusty_cannot_run_fails_the_compile() {
     for (jar_name, options) in [
         (
             "sam-with-receiver-compiler-plugin.jar",
-            Some(("org.jetbrains.kotlin.samWithReceiver", "annotation=probe.Open")),
+            Some((
+                "org.jetbrains.kotlin.samWithReceiver",
+                "annotation=probe.Open",
+            )),
         ),
         ("compose-compiler-plugin.jar", None),
     ] {
