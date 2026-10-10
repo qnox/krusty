@@ -178,7 +178,7 @@ fn a_lambda_class_nesting_a_local_function_is_reported_not_left_to_indy() {
         src,
         "NestedLambdaClass",
         &[common::stdlib_jar()],
-        None,
+        Some(&common::jdk_modules()),
     );
     assert_eq!(
         diagnostics,

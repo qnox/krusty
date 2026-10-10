@@ -4,6 +4,7 @@
 //!
 //! krusty builds the library chain itself: `a` alone, then `b` against `a`. Each consumer is then
 //! compiled by both compilers against `b` only, so every supertype `b` takes from `a` is missing.
+//! A compilation without a JDK is compared too: every JDK supertype is missing there.
 
 use std::path::{Path, PathBuf};
 
@@ -58,8 +59,7 @@ fn krusty_library(work: &Path, name: &str, source: &str, classpath: Option<&Path
 }
 
 /// Compile `source` with both compilers against the library `b` alone (and `a` too when
-/// `complete`), under `arguments`; both must exit alike, report the same diagnostics at the same
-/// file, line and column in the same order, and write the same output tree byte for byte.
+/// `complete`), under `arguments`; see [`assert_like_kotlinc_on`].
 fn assert_like_kotlinc(source: &str, complete: bool, arguments: &[&str]) {
     let work = common::scratch_dir().expect("allocate a scratch directory");
     let a = krusty_library(&work, "a", A, None);
@@ -69,6 +69,18 @@ fn assert_like_kotlinc(source: &str, complete: bool, arguments: &[&str]) {
     } else {
         b.clone().into_os_string()
     };
+    assert_like_kotlinc_on(&work, source, &classpath, arguments);
+}
+
+/// Compile `source` with both compilers against `classpath` under `arguments`; both must exit
+/// alike, report the same diagnostics at the same file, line and column in the same order, and
+/// write the same output tree byte for byte.
+fn assert_like_kotlinc_on(
+    work: &Path,
+    source: &str,
+    classpath: &std::ffi::OsStr,
+    arguments: &[&str],
+) {
     let consumer = work.join("Use.kt");
     std::fs::write(&consumer, source).expect("write the consumer");
     let command_line = |output: &str| {
@@ -199,5 +211,59 @@ fn no_jdk_reports_missing_platform_supertypes() {
         "package n\nfun length(value: String) = value.length\n",
         true,
         &["-no-jdk"],
+    );
+}
+
+/// Without a JDK every JDK supertype is missing, including the `java.io.Serializable` kotlinc gives
+/// arrays and the mapped builtins whatever the classpath holds. Each operator convention on a
+/// primitive is a member access of that primitive.
+#[test]
+fn without_a_jdk_its_supertypes_are_missing() {
+    let work = common::scratch_dir().expect("allocate a scratch directory");
+    let stdlib = common::stdlib_jar();
+    assert_like_kotlinc_on(
+        &work,
+        "\
+package n
+fun read(s: String, a: Array<Int>, p: Pair<Int, Int>, r: Result<Int>) = s.length + a.size + p.first
+fun success(r: Result<Int>) = r.isSuccess
+fun template(i: Int, s: String) = \"v=$i $s\" + s
+fun equality(s: String, i: Int) = s == \"x\" && i == 3
+fun members(i: Int, e: Enum<*>, n: Number, t: Throwable) = i.toLong() + e.name.length + n.toInt() + t.hashCode()
+class C : Throwable()
+fun extension(s: String) = s.uppercase()
+fun index(s: String) = s[0]
+fun compare(i: Int, j: Int, a: Long, b: Long) = i < j || a >= b
+fun unary(i: Int, b: Boolean) = if (!!b) -i else +i
+fun increment(i: Int): Int {
+    var j = i
+    j++
+    --j
+    j += 1
+    return ++j
+}
+fun ranges(n: Int, x: Int, l: List<Int>) {
+    for (i in 0..n) {}
+    for (i in 0 until n) {}
+    val r = 0..<n
+    val c = 'a'..'z'
+    val u = 1 until 3
+    if (x in 1..3 || x !in l) {}
+}
+fun collections(l: List<String>, m: Map<String, Int>) = l.size + m.entries.first().value
+fun def(s: String, flag: Boolean = false) = 0
+fun named(r: IntRange) {
+    val a = def(\"x\", flag = true) < 1
+    val b = 1 + def(s = \"x\")
+    val c = (def(s = \"x\")) + 1
+    val d = def(s = \"x\")..3
+    val e = def(s = \"x\") !in r
+    val f = def(s = \"x\") until 3
+    for (i in def(s = \"x\")..3) {}
+}
+fun nested() = 1 + run { var k = 0; k += 1; k } + (fun(): Int { val z = 2; return z })()
+",
+        stdlib.as_os_str(),
+        &["-no-jdk", "-no-stdlib", "-no-reflect"],
     );
 }

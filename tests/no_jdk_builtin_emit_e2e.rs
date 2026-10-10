@@ -15,6 +15,11 @@
 //! which fails only when the class is LOADED (`IncompatibleClassChangeError`) or CALLED
 //! (`NoSuchMethodError`). A diagnostics-only assertion cannot see any of that, so these tests compile
 //! against a JDK-less classpath and then actually run `box()` on a real JVM.
+//!
+//! Every source here is one kotlinc `-no-jdk` accepts, which the tests check first. Without a JDK,
+//! `java.io.Serializable` is missing, so kotlinc rejects any member access through `String`, the
+//! primitives, `Number` or an array; the sources reach those only through string templates and
+//! equality, which select no member.
 
 use super::common;
 
@@ -24,6 +29,7 @@ use super::common;
 /// when the compiler REJECTS the source, so an early return would turn a resolution regression into a
 /// silent pass. The only legitimate skip is a missing toolchain, which is checked first.
 fn run_no_jdk_box(src: &str, stem: &str) -> Option<String> {
+    assert_kotlinc_accepts_without_a_jdk(src, stem);
     let stdlib = common::stdlib_jar();
     // A runtime JVM is still required to LOAD the emitted class; only the COMPILE is JDK-less.
     let _ = common::java_home();
@@ -37,6 +43,31 @@ fn run_no_jdk_box(src: &str, stem: &str) -> Option<String> {
     )
 }
 
+/// kotlinc `-no-jdk` compiles `src` against the stdlib alone without a diagnostic.
+fn assert_kotlinc_accepts_without_a_jdk(src: &str, stem: &str) {
+    let work = common::scratch_dir()
+        .expect("allocate a scratch directory")
+        .join(format!("{stem}-no-jdk-reference"));
+    std::fs::create_dir_all(&work).expect("create the reference directory");
+    let source = work.join("Main.kt");
+    std::fs::write(&source, src).expect("write the reference source");
+    let (code, diagnostics) = common::kotlinc_compile(&[
+        source.to_string_lossy().into_owned(),
+        "-no-jdk".to_string(),
+        "-cp".to_string(),
+        common::stdlib_jar().to_string_lossy().into_owned(),
+        "-d".to_string(),
+        work.join("classes").to_string_lossy().into_owned(),
+    ])
+    .expect("the reference kotlinc is available");
+    assert_eq!(
+        (code, common::compiler_errors(&diagnostics)),
+        (0, Vec::new()),
+        "{stem}: kotlinc -no-jdk rejects the source: {diagnostics}"
+    );
+    let _ = std::fs::remove_dir_all(work);
+}
+
 /// A read of a Kotlin collection PROPERTY (`size`) must realize as the mapped `java.util` stub
 /// (`size()`), not an invented JavaBean getter (`getSize()`), and dispatch with `invokeinterface`.
 #[test]
@@ -44,10 +75,10 @@ fn builtin_collection_property_read_runs_without_jdk() {
     let src = r#"
 fun box(): String {
     val l: List<String> = listOf("a", "b", "c")
-    if (l.size != 3) return "FAIL size=" + l.size
+    if (l.size != 3) return "FAIL size=${l.size}"
     val m: Map<String, Int> = mapOf("k" to 1)
-    if (m.size != 1) return "FAIL map size=" + m.size
-    if (m.keys.size != 1) return "FAIL keys=" + m.keys.size
+    if (m.size != 1) return "FAIL map size=${m.size}"
+    if (m.keys.size != 1) return "FAIL keys=${m.keys.size}"
     return "OK"
 }
 "#;
@@ -69,7 +100,7 @@ fn builtin_noncollection_property_read_runs_without_jdk() {
     let src = r#"
 fun box(): String {
     val text: CharSequence = "shape"
-    return if (text.length == 5) "OK" else "FAIL length=" + text.length
+    return if (text.length == 5) "OK" else "FAIL length=${text.length}"
 }
 "#;
     let Some(out) = run_no_jdk_box(src, "nojdk_noncollection_property") else {
@@ -90,9 +121,9 @@ fn builtin_interface_member_call_runs_without_jdk() {
     let src = r#"
 fun box(): String {
     val l: List<String> = listOf("x", "y")
-    if (l.get(1) != "y") return "FAIL get=" + l.get(1)
+    if (l.get(1) != "y") return "FAIL get=${l.get(1)}"
     if (l.isEmpty()) return "FAIL isEmpty"
-    if (!l.contains("x")) return "FAIL contains"
+    if (l.contains("x") == false) return "FAIL contains"
     val m: Map<String, Int> = mapOf("k" to 7)
     if (m.get("k") != 7) return "FAIL map get"
     return "OK"
@@ -115,8 +146,8 @@ fn builtin_generic_property_read_erases_without_jdk() {
 fun box(): String {
     val m: Map<String, Int> = mapOf("k" to 7)
     val e: Map.Entry<String, Int> = m.entries.first()
-    if (e.key != "k") return "FAIL key=" + e.key
-    if (e.value != 7) return "FAIL value=" + e.value
+    if (e.key != "k") return "FAIL key=${e.key}"
+    if (e.value != 7) return "FAIL value=${e.value}"
     return "OK"
 }
 "#;
@@ -137,10 +168,11 @@ fun box(): String {
 /// `.kotlin_builtins` entry (`kotlin/collections/Map.Entry`) instead.
 ///
 /// The source matrix deliberately crosses more than the collection aliases that first exposed the
-/// defect. Read-only and mutable collections, ordinary mapped interfaces/classes, numeric owners,
-/// iterators, generic arrays, and primitive arrays must all consume the same canonical metadata-owner
-/// mapping. Keeping them in one byte-for-byte comparison catches a future provider- or type-specific
-/// branch even when each isolated call would still load and return the expected value.
+/// defect. Read-only and mutable collections, ordinary mapped interfaces and iterators must all
+/// consume the same canonical metadata-owner mapping. Keeping them in one byte-for-byte comparison
+/// catches a future provider- or type-specific branch even when each isolated call would still load
+/// and return the expected value. `String`, `Number` and array members are absent: kotlinc `-no-jdk`
+/// rejects them, their `java.io.Serializable` supertype being missing.
 #[test]
 fn no_jdk_emit_matches_jdk_emit_for_builtin_members() {
     let (stdlib, jdk) = (common::stdlib_jar(), common::jdk_modules());
@@ -157,14 +189,10 @@ fun ms(l: MutableList<String>): Int = l.size
 fun ma(l: MutableList<String>): Boolean = l.add("x")
 fun mm(m: MutableMap<String, Int>): Int = m.size
 fun mk(m: MutableMap<String, Int>): MutableSet<String> = m.keys
-fun st(s: String): Int = s.length
-fun sc(s: String): Char = s.get(0)
 fun cp(a: Comparable<String>, b: String): Int = a.compareTo(b)
-fun nt(n: Number): Int = n.toInt()
 fun it(i: Iterator<String>): Boolean = i.hasNext()
-fun ar(a: Array<String>): Int = a.size
-fun ia(a: IntArray): Int = a.size
 "#;
+    assert_kotlinc_accepts_without_a_jdk(src, "cmp");
     let jars = [stdlib];
     assert_eq!(
         common::front_end_diagnostics(src, &jars, Some(&jdk)),

@@ -76,9 +76,10 @@ fn reference_box(src: &str, stem: &str) -> String {
 
 fn krusty_box(src: &str, stem: &str) -> String {
     let jars = runtime_jars();
-    let classes = common::compile_in_process(src, stem, &jars, None).unwrap_or_else(|| {
-        let diagnostics = common::front_end_diagnostics(src, &jars, None);
-        let outcome = common::backend_outcome_in_process(src, stem, &jars, None);
+    let jdk = common::jdk_modules();
+    let classes = common::compile_in_process(src, stem, &jars, Some(&jdk)).unwrap_or_else(|| {
+        let diagnostics = common::front_end_diagnostics(src, &jars, Some(&jdk));
+        let outcome = common::backend_outcome_in_process(src, stem, &jars, Some(&jdk));
         panic!(
             "krusty failed to compile {stem}; diagnostics: {diagnostics:?}; backend: {outcome:?}"
         )
@@ -135,7 +136,8 @@ fn reference_box_files(sources: &[(&str, &str)], stem: &str) -> String {
 
 fn krusty_box_files(sources: &[(&str, &str)], stem: &str) -> String {
     let jars = runtime_jars();
-    let classes = common::compile_in_process_files(sources, &jars, None)
+    let jdk = common::jdk_modules();
+    let classes = common::compile_in_process_files(sources, &jars, Some(&jdk))
         .unwrap_or_else(|| panic!("krusty failed to compile the {stem} fixture"));
     let box_class =
         common::find_box_class(&classes).unwrap_or_else(|| panic!("no box class for {stem}"));
@@ -217,9 +219,10 @@ pub(super) fn both_compilers_box_against_dependency(
     let reference = common::run_box(&[], "MainKt", &reference_classpath)
         .unwrap_or_else(|| panic!("{stem}: the reference-built box() did not run"));
 
-    let classes = common::compile_in_process(src, stem, &jars, None).unwrap_or_else(|| {
-        let diagnostics = common::front_end_diagnostics(src, &jars, None);
-        let outcome = common::backend_outcome_in_process(src, stem, &jars, None);
+    let jdk = common::jdk_modules();
+    let classes = common::compile_in_process(src, stem, &jars, Some(&jdk)).unwrap_or_else(|| {
+        let diagnostics = common::front_end_diagnostics(src, &jars, Some(&jdk));
+        let outcome = common::backend_outcome_in_process(src, stem, &jars, Some(&jdk));
         panic!(
             "krusty failed to compile {stem}; diagnostics: {diagnostics:?}; backend: {outcome:?}"
         )

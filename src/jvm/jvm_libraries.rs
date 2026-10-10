@@ -1924,18 +1924,8 @@ impl JvmLibraries {
             let kotlin_supertypes_are_authoritative = metadata_class_signature.is_some();
             let mut supertypes = TypeNameList::new();
             if kotlin_scope_is_authoritative {
-                // `java/io/Serializable` survives the replacement. It is not a Kotlin type and so is
-                // absent from every `.kotlin_builtins` declaration, but kotlinc still reports a mapped
-                // builtin as implementing it whenever the Java class does — `JvmBuiltInsCustomizer`
-                // adds it back in `getSupertypes` (`isSerializableInJava`). Dropping it made
-                // `val v: java.io.Serializable = "abc"` an error against a kotlinc that accepts it.
-                // The mapped COLLECTIONS never noticed: `java/util/List` does not implement it, and a
-                // concrete `java.util` class that does (`ArrayList`) is not an authoritative name.
-                for s in ci.interfaces.iter_ids() {
-                    if s.matches("java/io/Serializable") {
-                        supertypes.push_name(s);
-                    }
-                }
+                // Nothing from the Java class: `java/io/Serializable`, the one JVM supertype kotlinc
+                // keeps on a mapped builtin, comes from `JvmBuiltInsCustomizer`, JDK or not.
             } else if let Some((_, _, declared)) = &metadata_class_signature {
                 // A function-type supertype (`KProperty0<V> : () -> V`) is an edge to the function
                 // classifier it instantiates, which declares the inherited `invoke`.

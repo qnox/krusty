@@ -12,7 +12,6 @@ use object::{Object, ObjectSymbol};
 
 use krusty::backend::Artifact;
 use krusty::diag::DiagSink;
-use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
 
@@ -51,8 +50,7 @@ fn host() -> Option<NativeTarget> {
 }
 
 fn compile(sources: &[(&str, &str)], module: &str) -> (Vec<Artifact>, Vec<String>) {
-    let jar = krusty::toolchain::stdlib_jar().expect("the native tests require the stdlib jar");
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),

@@ -1,4 +1,5 @@
-//! Source locations retained for declaration modifiers with modifier-owned diagnostics.
+//! Declaration modifiers: the source locations kept for modifier-owned diagnostics, and the
+//! modality a modifier list selects.
 
 use super::{Parser, TokenKind};
 use crate::ast::{AnnotationRef, DeclarationPrefix, ExprId};
@@ -336,4 +337,32 @@ pub(super) fn record_nested_actual(
     if modifiers.iter().any(|modifier| modifier == "actual") {
         file.actual_decls.push(nested);
     }
+}
+
+/// Map the parsed class modifiers to a [`Modality`]. `sealed` wins (it implies abstract+open), then
+/// `abstract`, then `open`, else `final`.
+pub(super) fn modality_of(
+    is_open: bool,
+    is_abstract: bool,
+    is_sealed: bool,
+) -> crate::ast::Modality {
+    use crate::ast::Modality;
+    if is_sealed {
+        Modality::Sealed
+    } else if is_abstract {
+        Modality::Abstract
+    } else if is_open {
+        Modality::Open
+    } else {
+        Modality::Final
+    }
+}
+
+pub(super) fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
+    let sealed = modifiers.iter().any(|modifier| modifier == "sealed");
+    modality_of(
+        sealed || modifiers.iter().any(|modifier| modifier == "open"),
+        sealed || modifiers.iter().any(|modifier| modifier == "abstract"),
+        sealed,
+    )
 }

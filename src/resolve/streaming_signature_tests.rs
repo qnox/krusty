@@ -585,7 +585,7 @@ fun array(): IntArray = Sam(::IntArray).make(2)
 "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("SamArrayConstructorReference")];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for(source),
+        crate::toolchain::jvm_classpath_jars_for(source),
     ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
@@ -753,7 +753,7 @@ class App {
     let inputs = [SourceInput::kotlin(source).with_file_stem("ExplicitMemberTypeArgument")];
     let stems = ["ExplicitMemberTypeArgument".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+        crate::toolchain::jvm_classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
@@ -1073,7 +1073,7 @@ class Holder {
     let inputs = [SourceInput::kotlin(source).with_file_stem("NestedLocalConstraint")];
     let mut diagnostics = DiagSink::new();
     let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+        crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
             "// WITH_STDLIB",
         )),
     ))
@@ -1459,7 +1459,7 @@ class Callable<T> : suspend (T) -> String {
 "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("FunctionSupertypeHierarchy")];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for(source),
+        crate::toolchain::jvm_classpath_jars_for(source),
     ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
@@ -2765,7 +2765,7 @@ fn inferred_signature_invokes_nominal_constructor_reference_through_callable_sha
     .with_file_stem("ConstructorReferenceInvokeSignature")];
     let stems = ["ConstructorReferenceInvokeSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+        crate::toolchain::jvm_classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
@@ -2818,7 +2818,7 @@ fn inferred_signatures_select_nested_and_unbound_inner_constructor_references() 
     .with_file_stem("NestedConstructorReferenceSignature")];
     let stems = ["NestedConstructorReferenceSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+        crate::toolchain::jvm_classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
@@ -2956,7 +2956,7 @@ fn qualified_companion_singleton_reference_is_bound_during_signature_solving() {
     .with_file_stem("BoundCompanionReferenceSignature")];
     let stems = ["BoundCompanionReferenceSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+        crate::toolchain::jvm_classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
@@ -3031,7 +3031,7 @@ fn natural_bound_callable_reference_prefers_the_member_rung_over_extensions() {
     .with_file_stem("NaturalMemberCallableReferenceSignature")];
     let stems = ["NaturalMemberCallableReferenceSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+        crate::toolchain::jvm_classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
@@ -3074,7 +3074,7 @@ class Child : Base<String>("") {
     let inputs = [SourceInput::kotlin(source).with_file_stem("InnerClassLiteralSignature")];
     let stems = ["InnerClassLiteralSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+        crate::toolchain::jvm_classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
@@ -3142,7 +3142,7 @@ fn delegated_signature_checks_bound_property_reference_against_reflective_parame
     let inputs = [SourceInput::kotlin(source).with_file_stem("BoundPropertyDelegateSignature")];
     let stems = ["BoundPropertyDelegateSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for(source),
+        crate::toolchain::jvm_classpath_jars_for(source),
     ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
@@ -3781,7 +3781,7 @@ fn compact_graph_finalizes_an_extension_property_after_legacy_approximation_decl
     let inputs = [SourceInput::kotlin(source).with_file_stem("CapturedExtensionPropertySignature")];
     let stems = ["CapturedExtensionPropertySignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+        crate::toolchain::jvm_classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
@@ -3950,7 +3950,7 @@ fn inherited_generic_member_extension_is_visible_inside_a_receiver_lambda() {
     let inputs = [SourceInput::kotlin(source).with_file_stem("InheritedMemberExtensionSignature")];
     let stems = ["InheritedMemberExtensionSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for(source),
+        crate::toolchain::jvm_classpath_jars_for(source),
     ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
