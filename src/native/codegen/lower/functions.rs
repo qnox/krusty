@@ -70,7 +70,7 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
             receiver_capture: None,
         })),
         IrExpr::CallableReference(reference) => Some(if reference.declaration_suspend {
-            Err("a suspend callable reference".to_string())
+            Err("a suspend callable reference".into())
         } else {
             Ok(Site {
                 impl_fn: reference.adapter,
@@ -244,7 +244,7 @@ impl<'a> FileLowering<'a> {
             // What the body takes beyond the captures is what a caller supplies. A SUSPEND lambda's
             // body takes a continuation nobody here can pass, and that is what this catches.
             let Some(arity) = body.params.len().checked_sub(captures.len()) else {
-                return Err(format!(
+                return Err(declined!(
                     "a function value whose body takes {} parameters for {} captures",
                     body.params.len(),
                     captures.len()
@@ -255,7 +255,7 @@ impl<'a> FileLowering<'a> {
             } = &self.ir.exprs[index]
             {
                 if usize::from(*declared) != arity {
-                    return Err(format!(
+                    return Err(declined!(
                         "a lambda of arity {declared} whose body takes {} parameters for {} \
                          captures",
                         body.params.len(),
@@ -467,10 +467,10 @@ impl<'a> FileLowering<'a> {
         capture_offsets: &[u32],
     ) -> Result<(Vec<FuncId>, Vec<DataId>, String), Unsupported> {
         if target.suspend {
-            return Err("a suspend functional interface".to_string());
+            return Err("a suspend functional interface".into());
         }
         let Some(interface) = self.ir.class_id_by_name(target.classifier) else {
-            return Err(format!(
+            return Err(declined!(
                 "a functional interface declared outside this file (`{}`)",
                 target.classifier.render()
             ));
@@ -536,12 +536,12 @@ impl<'a> FileLowering<'a> {
                 | model::Slot::Bridge { .. }
                 | model::Slot::FunctionBridge { .. }
                 | model::Slot::AccessorBridge { .. } => {
-                    return Err("a functional interface with a synthesized member".to_string())
+                    return Err("a functional interface with a synthesized member".into())
                 }
             });
         }
         if slot >= vtable.len() {
-            return Err("a functional interface member outside the vtable".to_string());
+            return Err("a functional interface member outside the vtable".into());
         }
         vtable[slot] = thunk;
 
@@ -591,7 +591,7 @@ impl<'a> FileLowering<'a> {
         let target =
             self.functions[impl_fn as usize].ok_or_else(|| self.missing_body_reason(impl_fn))?;
         if declared.len() != capture_offsets.len() + parameters.len() {
-            return Err("a functional interface method of a different arity".to_string());
+            return Err("a functional interface method of a different arity".into());
         }
         let mut signature = vec![any()];
         signature.extend(parameters.iter().copied());
@@ -612,7 +612,7 @@ impl<'a> FileLowering<'a> {
             for (index, ty) in declared[capture_offsets.len()..].iter().enumerate() {
                 let Some(value) = body.convert(params[index + 1], Some(incoming[index]), *ty)?
                 else {
-                    return Err("a `Unit` argument to a functional interface".to_string());
+                    return Err("a `Unit` argument to a functional interface".into());
                 };
                 arguments.push(value);
             }
@@ -674,7 +674,7 @@ impl<'a> FileLowering<'a> {
             }
             for (index, ty) in parameters[capture_offsets.len()..].iter().enumerate() {
                 let Some(value) = body.convert(params[index + 1], Some(any()), *ty)? else {
-                    return Err("a `Unit` lambda parameter".to_string());
+                    return Err("a `Unit` lambda parameter".into());
                 };
                 arguments.push(value);
             }
@@ -777,7 +777,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let mut values = Vec::with_capacity(captures.len());
         for (capture, ty) in captures.iter().zip(&parameters) {
             let Some(value) = self.coerce(*capture, *ty)? else {
-                return Err("a `Unit` capture".to_string());
+                return Err("a `Unit` capture".into());
             };
             if self.terminated {
                 return Ok(None);
@@ -808,13 +808,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let mut arguments = Vec::with_capacity(args.len());
         for (argument, ty) in args.iter().zip(params) {
             let Some(value) = self.coerce(*argument, *ty)? else {
-                return Err("a `Unit` argument to a function value".to_string());
+                return Err("a `Unit` argument to a function value".into());
             };
             if self.terminated {
                 return Ok(None);
             }
             let Some(value) = self.convert(value, Some(*ty), any())? else {
-                return Err("a `Unit` argument to a function value".to_string());
+                return Err("a `Unit` argument to a function value".into());
             };
             arguments.push(value);
         }
@@ -898,7 +898,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let (offsets, instance_size, _) = super::functions::layout(self.file.values, &[elem]);
         let value = if let Some(init) = init {
             let Some(value) = self.coerce(init, elem)? else {
-                return Err("a captured `Unit` variable".to_string());
+                return Err("a captured `Unit` variable".into());
             };
             Some(value)
         } else {
@@ -948,7 +948,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         let Some(value) = value else {
-            return Err("a `Unit` value assigned to a captured variable".to_string());
+            return Err("a `Unit` value assigned to a captured variable".into());
         };
         let (offsets, _, _) = super::functions::layout(self.file.values, &[elem]);
         self.builder

@@ -19,6 +19,8 @@ static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub enum Platform {
     Jvm,
     Native,
+    WasmJs,
+    WasmWasi,
 }
 
 impl Platform {
@@ -26,6 +28,8 @@ impl Platform {
         match self {
             Self::Jvm => "jvm",
             Self::Native => "native",
+            Self::WasmJs => "wasm-js",
+            Self::WasmWasi => "wasm-wasi",
         }
     }
 }
@@ -71,12 +75,10 @@ fn manifest_path(directory: &str, platform: Platform, version: KotlinVersion) ->
 
 pub fn load(platform: Platform, version: KotlinVersion) -> Baseline {
     Baseline {
-        // JVM has no failure ratchet: absence means exactly the required empty set. Native's
-        // failure inventory is part of its committed baseline and may never disappear silently.
-        failures: load_path(
-            &failure_path(platform, version),
-            platform == Platform::Native,
-        ),
+        // JVM has no failure ratchet: absence means exactly the required empty set. Every other
+        // lane's failure inventory is part of its committed baseline and may never disappear
+        // silently.
+        failures: load_path(&failure_path(platform, version), platform != Platform::Jvm),
         not_applicable: load_path(&not_applicable_path(platform, version), true),
     }
 }

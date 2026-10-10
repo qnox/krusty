@@ -181,3 +181,51 @@ fn a_class_whose_constructor_does_more_than_store_stays_on_the_heap() {
         "HeapClasses",
     );
 }
+
+#[test]
+fn a_frame_object_read_inside_a_lambda_of_its_function_keeps_its_fields() {
+    // The lambda runs while the function that made the object is still running, and reads the
+    // object only for a field. Whether or not the object lives in the frame, the lambda must see
+    // the values the construction gave it.
+    expect_ok_everywhere(
+        "class Pair2(val a: Int, val b: String)\n\
+         fun box(): String {\n\
+         \x20   val p = Pair2(4, \"four\")\n\
+         \x20   val read = { p.b + p.a }\n\
+         \x20   val direct = p.a\n\
+         \x20   return if (read() == \"four4\" && direct == 4) \"OK\" else \"fail: ${read()}\"\n\
+         }\n",
+        "FrameLambda",
+    );
+}
+
+#[test]
+fn a_frame_object_converts_and_guards_its_fields_as_the_heap_object_does() {
+    // Fields of every carrier the constructor converts into, a nullable one left null, a
+    // `lateinit` one no constructor assigns (read before assignment raises Kotlin's exception),
+    // and a class whose companion the construction creates first.
+    expect_ok_everywhere(
+        "var created = 0\n\
+         class Mixed(val d: Double, val f: Float, val l: Long, val c: Char, val b: Boolean, val n: String?) {\n\
+         \x20   lateinit var later: String\n\
+         \x20   companion object { init { created++ } }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   var total = 0.0\n\
+         \x20   for (i in 0 until 3) {\n\
+         \x20       val m = Mixed(i + 0.5, i * 2f, i * 10L, 'a' + i, i % 2 == 0, null)\n\
+         \x20       total += m.d + m.f + m.l + m.c.code + (if (m.b) 1 else 0) + (m.n?.length ?: 0)\n\
+         \x20   }\n\
+         \x20   if (total != 336.5 || created != 1) return \"fail: $total $created\"\n\
+         \x20   val m = Mixed(0.0, 0f, 0L, 'x', false, \"set\")\n\
+         \x20   try {\n\
+         \x20       m.later.length\n\
+         \x20       return \"fail: read an unassigned lateinit\"\n\
+         \x20   } catch (e: UninitializedPropertyAccessException) {\n\
+         \x20       if (e.message != \"lateinit property later has not been initialized\") return \"fail: ${e.message}\"\n\
+         \x20   }\n\
+         \x20   return if (m.n == \"set\") \"OK\" else \"fail n\"\n\
+         }\n",
+        "FrameMixed",
+    );
+}

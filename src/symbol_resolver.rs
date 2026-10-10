@@ -14,6 +14,7 @@ use crate::libraries::{
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName, Visibility};
+mod access_site;
 mod argument_compatibility;
 mod call_argument;
 mod callable_shapes;
@@ -907,6 +908,10 @@ pub struct SymbolResolver<'a> {
     access_package: Option<TypeName>,
     /// Current source file, for top-level `private` declarations in this compilation module.
     access_file: Option<u32>,
+    /// The access site's lexical `@Suppress("INVISIBLE_REFERENCE")`/`("INVISIBLE_MEMBER")` policy.
+    /// Every access predicate of this resolver consumes it, so candidate collection, overload
+    /// applicability, and classifier access diagnostics read one decision.
+    visibility_suppressed: bool,
     /// Type variables of the enclosing postponed calls; extension receivers match over them.
     type_variables: &'a [String],
 }
@@ -1102,129 +1107,6 @@ impl<'a> SymbolResolver<'a> {
 
     fn receiver_mro(&self, receiver: Ty) -> ReceiverMro {
         ReceiverMro::new(&self.src, receiver).with_type_variables(self.type_variables)
-    }
-
-    pub(crate) fn with_access_context(
-        mut self,
-        package: TypeName,
-        file: u32,
-        classes: Vec<TypeName>,
-    ) -> Self {
-        self.access_package = Some(package);
-        self.access_file = Some(file);
-        self.lexical_classes = classes;
-        self
-    }
-
-    fn classifier_accessible(&self, internal: TypeName) -> bool {
-        let Some(classifier) = self.src.classifier(internal) else {
-            return false;
-        };
-        // A companion's physical nested classifier may be non-public even though source code exposes
-        // it through the outer classifier's public companion value (`Double.Companion`). Admit exactly
-        // that metadata edge; an arbitrary internal nested classifier remains inaccessible.
-        if let Some(owner) = internal.nested_owner() {
-            let exposed_companion = self
-                .src
-                .classifier(owner)
-                .and_then(|outer| outer.companion_object.as_ref().map(|(_, name)| *name))
-                .is_some_and(|companion| companion == internal);
-            if exposed_companion && self.classifier_accessible(owner) {
-                return true;
-            }
-        }
-        let visibility = classifier.access.visibility();
-        if classifier.access == crate::libraries::ClassifierAccess::Public
-            || (classifier.access == crate::libraries::ClassifierAccess::Internal
-                && (self
-                    .module
-                    .is_some_and(|module| module.classifier(internal).is_some())
-                    || self.lib.internal_accessible(internal)))
-        {
-            return true;
-        }
-        if classifier.access == crate::libraries::ClassifierAccess::PackagePrivate
-            && self.package_private_member_accessible(internal)
-        {
-            return true;
-        }
-        if classifier.access == crate::libraries::ClassifierAccess::Private
-            && !internal.contains("$")
-            && classifier.source_file == self.access_file
-        {
-            return true;
-        }
-        // A private/protected nested classifier is a member of its enclosing classifier. Module
-        // lookup therefore needs the lexical owner stack: code in `Outer` (or one of its nested
-        // classes) may name `Outer$Hidden` / `Outer$Stage` directly. Protected access from a
-        // subclass is handled by the inherited-classifier walk below; this arm covers the declaring
-        // class itself, which does not inherit from itself. The module source separately handles
-        // top-level file-private declarations.
-        if matches!(
-            visibility,
-            crate::types::Visibility::Private | crate::types::Visibility::Protected
-        ) && self
-            .module
-            .is_some_and(|module| module.classifier(internal).is_some())
-        {
-            // A private member of a companion object is visible throughout the class that owns the
-            // companion (kotlinc's private visibility treats the companion's containing class as
-            // the declaring scope), so `Outer` may name `Outer$Companion$Hidden`.
-            let declaring_owner = internal.nested_owner().map(|declaring_owner| {
-                match declaring_owner.nested_owner() {
-                    Some(outer)
-                        if visibility == crate::types::Visibility::Private
-                            && self.src.classifier(outer).and_then(|outer| {
-                                outer.companion_object.as_ref().map(|(_, name)| *name)
-                            }) == Some(declaring_owner) =>
-                    {
-                        outer
-                    }
-                    _ => declaring_owner,
-                }
-            });
-            if declaring_owner.is_some_and(|declaring_owner| {
-                self.lexical_classes
-                    .iter()
-                    .copied()
-                    .any(|lexical| lexical.same_or_nested_within(declaring_owner))
-            }) {
-                return true;
-            }
-        }
-        if internal.nested_owner().is_none() {
-            return false;
-        }
-        let simple = internal.nested_segment_ref();
-        self.lexical_classes.iter().copied().any(|owner| {
-            inherited_nested_classifier_name(
-                simple,
-                direct_supertypes(&self.src, Ty::obj_name(owner))
-                    .into_iter()
-                    .filter_map(Ty::kotlin_class_internal)
-                    .collect(),
-                |candidate_owner| {
-                    direct_supertypes(&self.src, Ty::obj_name(candidate_owner))
-                        .into_iter()
-                        .filter_map(Ty::kotlin_class_internal)
-                        .collect()
-                },
-                |candidate| inherited_classifier_shape(&self.src, candidate, owner).is_some(),
-            ) == InheritedNestedClassifier::Found(internal)
-        })
-    }
-
-    pub(crate) fn inaccessible_classifier_access(
-        &self,
-        internal: TypeName,
-    ) -> Option<crate::symbol_source::ClassifierAccess> {
-        let access = self.src.classifier(internal)?.access;
-        (!self.classifier_accessible(internal)).then_some(access)
-    }
-
-    fn package_private_member_accessible(&self, owner: TypeName) -> bool {
-        self.access_package
-            .is_some_and(|package| package == owner.namespace())
     }
 
     /// Whether the type named `internal` — or anything in its (classpath) supertype chain — declares a
@@ -1840,7 +1722,7 @@ impl<'a> SymbolResolver<'a> {
         let receiver_mro = self.receiver_mro(receiver);
         let mut candidates = properties
             .filter(|property| property.kind == PropKind::Extension)
-            .filter(|property| source_property_visible(self.lib, property))
+            .filter(|property| self.property_visible(property))
             .filter(|property| {
                 generic_bounds_admit(
                     &self.src,
@@ -2180,10 +2062,11 @@ impl<'a> SymbolResolver<'a> {
         )
     }
 
-    /// Select from a caller-provided family when Kotlin's `INVISIBLE_REFERENCE` or
-    /// `INVISIBLE_MEMBER` suppression makes otherwise hidden declarations applicable. Visibility
-    /// is the only relaxed predicate; argument mapping, applicability, generic inference and
-    /// specificity remain the ordinary top-level algorithm.
+    /// Select from a caller-provided family without the source visibility gate, for a
+    /// compiler-selected runtime callable that no source reference names. Visibility is the only
+    /// relaxed predicate; argument mapping, applicability, generic inference and specificity
+    /// remain the ordinary top-level algorithm. A source site under a lexical visibility
+    /// suppression installs that policy with [`Self::with_visibility_suppression`] instead.
     pub(crate) fn select_top_level_function_candidates_ignoring_visibility(
         &self,
         name: &str,
@@ -2193,19 +2076,6 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<(FunctionInfo, LibraryCallable)> {
         self.select_top_level_function_candidates_with_visibility(
             name, candidates, args, type_args, None, true,
-        )
-    }
-
-    pub(crate) fn select_top_level_function_candidates_with_expected_ignoring_visibility(
-        &self,
-        name: &str,
-        candidates: Vec<FunctionInfo>,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        expected: Option<Ty>,
-    ) -> Option<(FunctionInfo, LibraryCallable)> {
-        self.select_top_level_function_candidates_with_visibility(
-            name, candidates, args, type_args, expected, true,
         )
     }
 
@@ -2472,7 +2342,7 @@ impl<'a> SymbolResolver<'a> {
                             .into_iter()
                             .flat_map(|symbols| property_overloads(&symbols.callables))
                             .filter(|property| property.kind == PropKind::TopLevel)
-                            .filter(|property| source_property_visible(self.lib, property))
+                            .filter(|property| self.property_visible(property))
                             .collect::<Vec<_>>()
                     })
                     .find(|properties| !properties.is_empty())
