@@ -20,6 +20,7 @@ impl Parser<'_> {
         Self::mark_inline_accessors(&mut property, modifiers);
         property.visibility = visibility_of(modifiers);
         property.has_visibility_modifier = has_visibility_modifier(modifiers);
+        property.is_final = modifiers.iter().any(|modifier| modifier == "final");
         property.is_open = !modifiers.iter().any(|modifier| modifier == "final")
             && modifiers
                 .iter()
@@ -274,6 +275,7 @@ impl Parser<'_> {
         self.pop_lexical_type_params(lexical_type_param_lens);
         PropDecl {
             is_open: false,
+            is_final: false,
             name,
             annotations,
             annotation_args,
