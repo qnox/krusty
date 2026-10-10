@@ -4622,8 +4622,21 @@ code is the one the code generator already names: provider-owned bodies through 
   arguments, function types) and declaration shape declines by name with a `KlibBodyDecline`
   (`the KLIB body of `kotlin.ranges.coerceIn` (it uses `throw`)`), leaving the unit unchanged. The
   stdlib's `coerceAtLeast`/`coerceAtMost` on the four primitives lower and pass the IR validators.
-  Next: locals, `throw` and object construction, calls of other KLIB bodies, then wiring the unit
-  into the Native lane switch (nothing is wired into a backend yet).
+- **Lowering (second slice).** Calls of other dependency functions: `lower_function` takes the
+  frozen declarations the caller selected (`KlibCalleeFacts`, keyed by `KlibDeclarationSignature`
+  over `KlibBodyCallable` views), declares each reached callee in the unit and lowers its body,
+  once per signature and cycle-safe; any declining body rolls the whole attempt back. A callee
+  without a frozen fact declines by name (the provider freezes only the identities a checked file
+  references, so transitive callees need that file to have selected them; the provider lane that
+  freezes them comes with the Native lane switch). Also modelled: the `EQEQ`/`EQEQEQ`/
+  `ieee754equals` built-ins and `Boolean.not` (with `!=`/`!==` folded as the source operator),
+  local `val`/`var` declarations, reads and assignments, no-op implicit casts, and multi-branch
+  `when`s by origin (`WHEN` flat, `IF` nested). The equality mode is the checker's own rule
+  (`EqualityMode::of_source_operands`). The stdlib's `Kotlin_equals` now lowers; most remaining
+  stdlib bodies decline on generics, member callees (classes and members are not published yet),
+  inlined function blocks, `throw`, `&&`/`||` and object construction.
+  Next: members and classes in the provider, `throw` and object construction, `&&`/`||`, then
+  wiring the unit into the Native lane switch (nothing is wired into a backend yet).
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
