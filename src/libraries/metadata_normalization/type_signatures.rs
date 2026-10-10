@@ -1,16 +1,21 @@
 //! Declared type signatures of decoded Kotlin declarations, in semantic types.
 
+use std::collections::HashMap;
+
 use crate::libraries::GenericSig;
 use crate::metadata::semantic::{
     semantic_bounds_with_identities, semantic_ty_with_identities, KotlinFunction, KotlinProperty,
-    KotlinType, KotlinTypeParameter,
+    KotlinType, KotlinTypeParameter, KotlinTypeParameterId,
 };
 
 use super::TypeParameterIdentities;
 
-/// A top-level function's declared signature: its own type parameters with their bounds, the
-/// extension receiver, every parameter (context parameters first), and the result. No target
-/// erasure is applied; a target derives its physical shape from this.
+/// Declared primary upper bounds of the type parameters a declaration's enclosing classes put in
+/// scope, keyed by their metadata identity. Empty for a top-level declaration.
+pub(crate) type EnclosingBounds = HashMap<KotlinTypeParameterId, crate::types::Ty>;
+
+/// A top-level function's declared signature using source names. This is retained only for
+/// consumers that have no provider declaration identity; a provider uses the identity-aware form.
 pub(crate) fn function_generic_sig(function: &KotlinFunction) -> GenericSig {
     declared_generic_sig_with_source_names(
         &function.formals,
@@ -24,8 +29,19 @@ pub(crate) fn function_generic_sig_with_identities(
     function: &KotlinFunction,
     identities: &TypeParameterIdentities,
 ) -> GenericSig {
+    declared_function_generic_sig(function, &EnclosingBounds::new(), identities)
+}
+
+/// A function's declared signature with declaration-owned type-parameter identities and the
+/// semantic bounds its enclosing classes put in scope.
+pub(crate) fn declared_function_generic_sig(
+    function: &KotlinFunction,
+    enclosing: &EnclosingBounds,
+    identities: &TypeParameterIdentities,
+) -> GenericSig {
     declared_generic_sig(
         &function.formals,
+        enclosing,
         function.receiver.as_ref(),
         &function.params,
         &function.ret,
@@ -33,14 +49,23 @@ pub(crate) fn function_generic_sig_with_identities(
     )
 }
 
-/// A top-level property's declared signature, in the shape of its getter: its own type parameters
-/// with their bounds, the extension receiver, its context parameters, and the property type.
 pub(crate) fn property_generic_sig_with_identities(
     property: &KotlinProperty,
     identities: &TypeParameterIdentities,
 ) -> GenericSig {
+    declared_property_generic_sig(property, &EnclosingBounds::new(), identities)
+}
+
+/// A property's declared signature, in the shape of its getter, with declaration-owned parameter
+/// identities and the semantic bounds its enclosing classes put in scope.
+pub(crate) fn declared_property_generic_sig(
+    property: &KotlinProperty,
+    enclosing: &EnclosingBounds,
+    identities: &TypeParameterIdentities,
+) -> GenericSig {
     declared_generic_sig(
         &property.formals,
+        enclosing,
         property.receiver.as_ref(),
         &property.context_params,
         &property.ty,
@@ -50,16 +75,13 @@ pub(crate) fn property_generic_sig_with_identities(
 
 fn declared_generic_sig(
     formals: &[KotlinTypeParameter],
+    enclosing: &EnclosingBounds,
     receiver: Option<&KotlinType>,
     params: &[KotlinType],
     ret: &KotlinType,
     identities: &TypeParameterIdentities,
 ) -> GenericSig {
-    let bounds = semantic_bounds_with_identities(
-        formals,
-        &std::collections::HashMap::new(),
-        identities.by_id(),
-    );
+    let bounds = semantic_bounds_with_identities(formals, enclosing, identities.by_id());
     GenericSig {
         formals: identities.formals().to_vec(),
         formal_bounds: formals
@@ -83,7 +105,7 @@ fn declared_generic_sig(
     }
 }
 
-/// Names of the type parameters metadata marks as `@OnlyInputTypes`.
+/// Names of the type parameters metadata marks as OnlyInputTypes.
 pub(crate) fn only_input_type_formals(formals: &[KotlinTypeParameter]) -> Vec<String> {
     formals
         .iter()
@@ -137,7 +159,7 @@ fn declared_generic_sig_with_source_names(
     }
 }
 
-/// Declaration ordinals of the type parameters metadata marks `reified`.
+/// Declaration ordinals of the type parameters metadata marks reified.
 pub(crate) fn reified_type_parameter_ordinals(formals: &[KotlinTypeParameter]) -> Vec<u32> {
     formals
         .iter()

@@ -61,10 +61,14 @@ pub use inline_body::{
     InlineIterationTraversal,
 };
 pub(crate) use metadata_normalization::{
-    function_generic_sig, function_parameter_identities, only_input_type_formals, package_function,
-    package_property, property_parameter_identities, reified_type_parameter_ordinals,
-    FunctionParameterIdentities, PropertyAccessorNames, PropertyParameterIdentities,
-    TypeParameterIdentities,
+    associated_function_parameter_identities, associated_property_parameter_identities,
+    classifier_shape, constructor_parameter_identities, constructor_parameter_list,
+    declared_constructor, declared_function, declared_property, declared_retention,
+    declared_targets, enum_entries_getter, enum_value_of, enum_values, function_generic_sig,
+    function_parameter_identities, member_record, only_input_type_formals,
+    property_parameter_identities, reified_type_parameter_ordinals, settle_no_arg_construction,
+    CallablePlacement, ClassTypeParameters, EnclosingBounds, FunctionParameterIdentities,
+    PropertyAccessorNames, PropertyParameterIdentities, TypeParameterIdentities,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};

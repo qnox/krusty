@@ -908,7 +908,7 @@ struct SemanticFunctionShape {
     is_inline: bool,
     is_suspend: bool,
     is_expect: bool,
-    is_abstract: bool,
+    modality: metadata::KotlinModality,
     is_operator: bool,
     is_infix: bool,
     is_static: bool,
@@ -1014,7 +1014,7 @@ fn semantic_function_shape(
         is_inline: flags & (1 << 10) != 0,
         is_suspend: flags & (1 << 13) != 0,
         is_expect: flags & crate::metadata::function_flags::IS_EXPECT != 0,
-        is_abstract: (flags >> 4) & 0x3 == 2,
+        modality: metadata::declaration_modality(flags),
         is_operator: flags & (1 << 8) != 0,
         is_infix: flags & (1 << 9) != 0,
         is_static: modern_flags
@@ -1041,9 +1041,7 @@ fn semantic_function(
     body: &[u8],
     tables: &SemanticTables<'_>,
     inherited: &TypeParameterScope,
-    top_level: bool,
-) -> Result<(metadata::KotlinMember, Option<metadata::KotlinFunction>), PackageFragmentDecodeError>
-{
+) -> Result<(metadata::KotlinMember, metadata::KotlinFunction), PackageFragmentDecodeError> {
     let contract_type_table = type_table_bodies(body, "function declaration")?;
     // Metadata's own annotation fields, `.kotlin_builtins`' `BuiltInsProtoBuf.functionAnnotation`
     // (150), and the KLIB extensions (170, 171).
@@ -1250,7 +1248,7 @@ fn semantic_function(
         is_expect: function.is_expect,
         is_operator: function.is_operator,
         is_infix: function.is_infix,
-        is_abstract: function.is_abstract,
+        is_abstract: function.modality == metadata::KotlinModality::Abstract,
         is_static: function.is_static,
         return_value_status: function.return_value_status,
         formals: formals.clone(),
@@ -1262,7 +1260,7 @@ fn semantic_function(
         annotations: annotations.clone(),
         contract: contract.clone(),
     };
-    let top = top_level.then_some(metadata::KotlinFunction {
+    let declaration = metadata::KotlinFunction {
         name,
         receiver,
         params: top_params,
@@ -1272,6 +1270,7 @@ fn semantic_function(
         param_defaults,
         vararg,
         visibility: function.visibility,
+        modality: function.modality,
         is_inline: function.is_inline,
         has_reified_type_params: function
             .type_params
@@ -1287,17 +1286,15 @@ fn semantic_function(
         annotations,
         return_value_status: function.return_value_status,
         contract,
-    });
-    Ok((member, top))
+    };
+    Ok((member, declaration))
 }
 
 fn semantic_property(
     body: &[u8],
     tables: &SemanticTables<'_>,
     inherited: &TypeParameterScope,
-    top_level: bool,
-) -> Result<(metadata::KotlinMember, Option<metadata::KotlinProperty>), PackageFragmentDecodeError>
-{
+) -> Result<(metadata::KotlinMember, metadata::KotlinProperty), PackageFragmentDecodeError> {
     validate_annotation_fields(
         body,
         &[14, 15, 16, 33, 34, 35, 170, 177, 178, 181, 182, 183],
@@ -1513,12 +1510,13 @@ fn semantic_property(
         annotations: annotations.clone(),
         contract: None,
     };
-    let property = top_level.then_some(metadata::KotlinProperty {
+    let property = metadata::KotlinProperty {
         name,
         receiver,
         ty: ret,
         formals,
         visibility,
+        modality: metadata::declaration_modality(flags),
         setter_visibility,
         setter_parameter_name,
         is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
@@ -1532,7 +1530,7 @@ fn semantic_property(
         constant,
         annotations,
         return_value_status: member.return_value_status,
-    });
+    };
     Ok((member, property))
 }
 
@@ -1659,6 +1657,8 @@ fn semantic_constructor(
         }
     }
     Ok(metadata::KotlinConstructor {
+        // Constructor flag bit 4 is `isSecondary`.
+        is_primary: flags & (1 << 4) == 0,
         params,
         param_names: names,
         param_defaults: defaults,
@@ -1835,15 +1835,20 @@ fn semantic_class(
         .collect::<Result<Vec<_>, _>>()?;
     let mut members = Vec::new();
     let mut nullable_member_returns = Vec::new();
+    let mut function_declarations = Vec::with_capacity(functions.len());
     for body in functions {
-        let (member, _) = semantic_function(body, &tables, &type_parameters, false)?;
+        let (member, declaration) = semantic_function(body, &tables, &type_parameters)?;
         if member.ret_nullable {
             nullable_member_returns.push((member.name.clone(), member.params.len()));
         }
         members.push(member);
+        function_declarations.push(declaration);
     }
+    let mut property_declarations = Vec::with_capacity(properties.len());
     for body in properties {
-        members.push(semantic_property(body, &tables, &type_parameters, false)?.0);
+        let (member, declaration) = semantic_property(body, &tables, &type_parameters)?;
+        members.push(member);
+        property_declarations.push(declaration);
     }
     for body in type_aliases {
         validate_type_alias(body, &tables, &type_parameters)?;
@@ -1858,6 +1863,8 @@ fn semantic_class(
             supertypes,
             supertype_tys,
             members,
+            functions: function_declarations,
+            properties: property_declarations,
             constructors,
             companion_name,
             type_params,
@@ -1872,6 +1879,7 @@ fn semantic_class(
             is_expect: header.flags & (1 << 12) != 0,
             modality: metadata::declaration_modality(header.flags),
             is_nested,
+            is_inner: header.flags & (1 << 9) != 0,
             metadata_flags: header.flags,
             annotations,
         },
@@ -1910,18 +1918,12 @@ pub(super) fn parse(
             first_nullable,
         };
         for body in message_bodies(package, 3, "package declaration")? {
-            let (_, function) =
-                semantic_function(body, &tables, &TypeParameterScope::default(), true)?;
-            result.functions.push(
-                function.ok_or_else(|| semantic_error("top-level function lost its identity"))?,
-            );
+            let (_, function) = semantic_function(body, &tables, &TypeParameterScope::default())?;
+            result.functions.push(function);
         }
         for body in message_bodies(package, 4, "package declaration")? {
-            let (_, property) =
-                semantic_property(body, &tables, &TypeParameterScope::default(), true)?;
-            result.properties.push(
-                property.ok_or_else(|| semantic_error("top-level property lost its identity"))?,
-            );
+            let (_, property) = semantic_property(body, &tables, &TypeParameterScope::default())?;
+            result.properties.push(property);
         }
         for body in message_bodies(package, 5, "package declaration")? {
             validate_type_alias(body, &tables, &TypeParameterScope::default())?;

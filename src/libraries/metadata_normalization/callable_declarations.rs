@@ -1,19 +1,83 @@
-//! Package-level Kotlin declarations normalized into common library candidates.
+//! Kotlin functions and properties normalized into common library candidates.
+//!
+//! One declaration model covers every place a function or property can sit: at package level, as
+//! a member of a class, or named through a classifier with no value operand. The placement decides
+//! the candidate's kind and owners; every type stays semantic either way.
 
 use super::parameter_identities::{FunctionParameterIdentities, PropertyParameterIdentities};
 use super::type_signatures::{
-    function_generic_sig_with_identities, only_input_type_formals_with_identities,
-    property_generic_sig_with_identities, reified_type_parameter_ordinals,
+    declared_function_generic_sig, declared_property_generic_sig,
+    only_input_type_formals_with_identities, reified_type_parameter_ordinals, EnclosingBounds,
 };
 use super::TypeParameterIdentities;
 use crate::libraries::{
     CallSig, FnFlags, FnKind, FunctionInfo, InlineKind, LibraryCallable, LibraryConst, PropKind,
     PropertyInfo, PropertyProducer, PropertyReadStability,
 };
-use crate::metadata::semantic::{KotlinFunction, KotlinProperty};
+use crate::metadata::semantic::{KotlinFunction, KotlinModality, KotlinProperty};
 use crate::types::{stored_value_ty, SemanticCallableOwner, Ty, TypeName};
 
-/// Normalize one top-level function of `package` into a selection candidate.
+/// Where a normalized function or property is declared and how a call reaches it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CallablePlacement {
+    /// A top-level declaration of a package, or an extension declared there.
+    Package(TypeName),
+    /// A member of a class, or a member extension, dispatched on an instance of `owner`.
+    Member {
+        owner: TypeName,
+        owner_is_interface: bool,
+    },
+    /// Named through `classifier` with no value operand: a `companion { … }` block member, which
+    /// `classifier` declares and whose lexical body owns its private access, or a companion
+    /// extension (`companion fun C.name()`), which a package declares. A written receiver names
+    /// the classifier and is not a parameter.
+    Associated {
+        classifier: TypeName,
+        declaration_owner: SemanticCallableOwner,
+        access_owner: Option<TypeName>,
+    },
+}
+
+impl CallablePlacement {
+    fn declaration_owner(self) -> SemanticCallableOwner {
+        match self {
+            Self::Package(package) => SemanticCallableOwner::Package(package),
+            Self::Member { owner, .. } => SemanticCallableOwner::Classifier(owner),
+            Self::Associated {
+                declaration_owner, ..
+            } => declaration_owner,
+        }
+    }
+
+    fn owner_is_interface(self) -> bool {
+        matches!(
+            self,
+            Self::Member {
+                owner_is_interface: true,
+                ..
+            }
+        )
+    }
+
+    fn associated(self) -> (Option<TypeName>, Option<TypeName>) {
+        match self {
+            Self::Associated {
+                classifier,
+                access_owner,
+                ..
+            } => (Some(classifier), access_owner),
+            Self::Package(_) | Self::Member { .. } => (None, None),
+        }
+    }
+
+    /// Whether the declaration's written receiver is an extension receiver parameter.
+    fn receiver_is_parameter(self) -> bool {
+        !matches!(self, Self::Associated { .. })
+    }
+}
+
+/// Normalize one function at `placement` into a selection candidate. `enclosing` bounds the type
+/// parameters of the classes around the declaration.
 ///
 /// Every type stays semantic: the callable's parameters are the declared ones in physical source
 /// order (leading context parameters, then the extension receiver, then value parameters), and its
@@ -25,13 +89,20 @@ use crate::types::{stored_value_ty, SemanticCallableOwner, Ty, TypeName};
 ///
 /// Normalization attaches no target realization: a compiler intrinsic or a semantic role is a
 /// fact a provider decides from what its artifact says about the declaration's implementation.
-pub(crate) fn package_function(
-    package: TypeName,
+///
+/// A member is a [`FnKind::Member`], or a [`FnKind::Extension`] when it declares an extension
+/// receiver; an associated function is receiver-less and names its classifier.
+pub(crate) fn declared_function(
+    placement: CallablePlacement,
     function: &KotlinFunction,
     parameters: &FunctionParameterIdentities,
     type_parameters: &TypeParameterIdentities,
+    enclosing: &EnclosingBounds,
 ) -> FunctionInfo {
-    let generic_sig = function_generic_sig_with_identities(function, type_parameters);
+    let mut generic_sig = declared_function_generic_sig(function, enclosing, type_parameters);
+    if !placement.receiver_is_parameter() {
+        generic_sig.receiver = None;
+    }
     let (contexts, values) = generic_sig
         .params
         .split_at_checked(function.context_count)
@@ -42,23 +113,29 @@ pub(crate) fn package_function(
         .chain(values)
         .copied()
         .collect();
-    let kind = if generic_sig.receiver.is_some() {
-        FnKind::Extension
-    } else {
-        FnKind::TopLevel
+    let kind = match (generic_sig.receiver, placement) {
+        (Some(_), _) => FnKind::Extension,
+        (None, CallablePlacement::Member { .. }) => FnKind::Member,
+        (None, CallablePlacement::Package(_) | CallablePlacement::Associated { .. }) => {
+            FnKind::TopLevel
+        }
     };
     let inline = InlineKind::from_flags(function.is_inline, function.is_inline);
     let reified = reified_type_parameter_ordinals(&function.formals);
+    let declaration_owner = placement.declaration_owner();
+    let is_abstract = function.modality == KotlinModality::Abstract;
 
     let mut callable = LibraryCallable::library(
-        package,
+        declaration_owner.name(),
         function.name.clone(),
         params,
         generic_sig.ret,
         generic_sig.ret,
         String::new(),
     );
-    callable.declaration_owner = Some(SemanticCallableOwner::Package(package));
+    callable.declaration_owner = Some(declaration_owner);
+    callable.owner_is_interface = placement.owner_is_interface();
+    callable.is_abstract = is_abstract;
     callable.visibility = function.visibility;
     callable.inline = inline;
     callable.suspend = function.is_suspend;
@@ -73,6 +150,10 @@ pub(crate) fn package_function(
         .map(|contract| type_parameters.normalize_contract(contract));
 
     let mut normalized = FunctionInfo::plain(kind, generic_sig.receiver, callable);
+    (
+        normalized.associated_classifier,
+        normalized.associated_access_owner,
+    ) = placement.associated();
     normalized.call_sig = CallSig::metadata_member(
         generic_sig.params.len(),
         function.param_names.clone(),
@@ -92,8 +173,8 @@ pub(crate) fn package_function(
         suspend: function.is_suspend,
         operator: function.is_operator,
         infix: function.is_infix,
-        is_abstract: false,
-        is_final: true,
+        is_abstract,
+        is_final: function.modality == KotlinModality::Final,
         inherited_by_delegation: false,
         return_value_status: Some(function.return_value_status),
     };
@@ -107,26 +188,33 @@ pub(crate) struct PropertyAccessorNames<'a> {
     pub(crate) setter: Option<&'a str>,
 }
 
-/// Normalize one top-level property of `package` into a selection candidate.
+/// Normalize one property at `placement` into a selection candidate.
 ///
 /// The property type and every accessor parameter stay semantic. Each accessor lists its
 /// parameters in physical source order (leading context parameters, then the extension receiver,
 /// then a setter's value); its result is the property type, or `Unit` for a setter. The candidate
 /// names no physical owner, descriptor, or storage and carries no provider identity; the provider
-/// that publishes it assigns one to each accessor and to the property.
-///
-/// `parameters` are the property's validated parameter identities. As for functions,
+/// that publishes it assigns one to each accessor and to the property. As for functions,
 /// normalization attaches no compiler intrinsic and no semantic role to either accessor.
-pub(crate) fn package_property(
-    package: TypeName,
+///
+/// A member is a [`PropKind::Member`], or a [`PropKind::MemberExtension`] when it declares an
+/// extension receiver; an associated property is receiver-less and names its classifier.
+pub(crate) fn declared_property(
+    placement: CallablePlacement,
     property: &KotlinProperty,
     parameters: &PropertyParameterIdentities,
     type_parameters: &TypeParameterIdentities,
     accessors: PropertyAccessorNames<'_>,
+    enclosing: &EnclosingBounds,
 ) -> PropertyInfo {
-    let generic_sig = property_generic_sig_with_identities(property, type_parameters);
+    let mut generic_sig = declared_property_generic_sig(property, enclosing, type_parameters);
+    if !placement.receiver_is_parameter() {
+        generic_sig.receiver = None;
+    }
     let receiver = generic_sig.receiver;
     let ty = generic_sig.ret;
+    let declaration_owner = placement.declaration_owner();
+    let is_abstract = property.modality == KotlinModality::Abstract;
     let getter_params: Vec<Ty> = generic_sig
         .params
         .iter()
@@ -134,8 +222,17 @@ pub(crate) fn package_property(
         .copied()
         .collect();
     let accessor = |name: &str, params: Vec<Ty>, ret: Ty| {
-        let mut callable = LibraryCallable::library(package, name, params, ret, ret, String::new());
-        callable.declaration_owner = Some(SemanticCallableOwner::Package(package));
+        let mut callable = LibraryCallable::library(
+            declaration_owner.name(),
+            name,
+            params,
+            ret,
+            ret,
+            String::new(),
+        );
+        callable.declaration_owner = Some(declaration_owner);
+        callable.owner_is_interface = placement.owner_is_interface();
+        callable.is_abstract = is_abstract;
         callable.source_receiver = receiver;
         callable.context_count = property.context_count;
         callable
@@ -169,16 +266,21 @@ pub(crate) fn package_property(
         .clone()
         .filter(|_| property.is_const)
         .map(|value| LibraryConst { ty, value });
+    let kind = match (receiver, placement) {
+        (Some(_), CallablePlacement::Member { .. }) => PropKind::MemberExtension,
+        (Some(_), _) => PropKind::Extension,
+        (None, CallablePlacement::Member { .. }) => PropKind::Member,
+        (None, CallablePlacement::Package(_) | CallablePlacement::Associated { .. }) => {
+            PropKind::TopLevel
+        }
+    };
+    let (associated_classifier, associated_access_owner) = placement.associated();
     PropertyInfo {
         name: property.name.clone(),
-        kind: if receiver.is_some() {
-            PropKind::Extension
-        } else {
-            PropKind::TopLevel
-        },
+        kind,
         receiver,
-        associated_classifier: None,
-        associated_access_owner: None,
+        associated_classifier,
+        associated_access_owner,
         formals: generic_sig.formals,
         ty,
         context_count: property.context_count,
@@ -196,7 +298,7 @@ pub(crate) fn package_property(
         compile_time_constant,
         metadata_constant_read: false,
         visibility: property.visibility,
-        owner: package,
+        owner: declaration_owner.name(),
         receiver_rank: 0,
         source_key: None,
         stable_declaration: None,

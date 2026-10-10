@@ -32,6 +32,7 @@ fn function(name: &str, receiver: Option<KotlinType>, params: Vec<KotlinType>) -
         formals: Vec::new(),
         vararg: None,
         visibility: Visibility::Public,
+        modality: crate::metadata::semantic::KotlinModality::Final,
         is_inline: false,
         has_reified_type_params: false,
         is_suspend: false,
@@ -616,4 +617,5 @@ fn a_declaration_without_a_role_per_context_parameter_is_rejected() {
     );
 }
 
+mod classes;
 mod properties;
