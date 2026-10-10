@@ -3068,7 +3068,10 @@ mod module_reader_tests {
         assert!(
             req.effects.contains(&Effect::ConditionalReturns {
                 returns: ReturnsValue::Any,
-                conclusion: Condition::BoolParam(ParamRef::Param(0)),
+                conclusion: Condition::BoolParam {
+                    param: ParamRef::Param(0),
+                    negated: false,
+                },
             }),
             "require contract effects: {:?}",
             req.effects

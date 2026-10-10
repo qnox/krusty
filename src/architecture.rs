@@ -422,7 +422,7 @@ mod tests {
         for path in rust_files_under("src/klib_libraries") {
             if path.starts_with(&tests) || path.ends_with("tests.rs") {
                 let mut budget = provider.to_vec();
-                budget.push("klib");
+                budget.extend(["contracts", "klib"]);
                 assert_allowed_crate_modules_in_file(&path, &budget);
             } else {
                 assert_allowed_crate_modules_in_file(&path, &provider);

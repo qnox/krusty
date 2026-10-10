@@ -247,8 +247,8 @@ fn decode_expression(
     if constant.is_some() && parameter.is_some() {
         return Err(cursor.error("contract constant also names a parameter"));
     }
-    if negated && !null_check && instance_type.is_none() {
-        return Err(cursor.error("unsupported negated boolean contract expression"));
+    if negated && (constant.is_some() || parameter.is_none()) {
+        return Err(cursor.error("unsupported negated contract expression"));
     }
     let primitive = if null_check {
         Some(Condition::IsNull {
@@ -273,7 +273,10 @@ fn decode_expression(
             }
         })
     } else {
-        parameter.map(|value| Condition::BoolParam(ParamRef::from_wire(value)))
+        parameter.map(|value| Condition::BoolParam {
+            param: ParamRef::from_wire(value),
+            negated,
+        })
     };
     let conjunction = !ands.is_empty();
     let operands = if conjunction { ands } else { ors };
@@ -369,6 +372,29 @@ mod tests {
         let error = decode_contract(&contract_with(&effect), &mut |_| unreachable!())
             .expect_err("RETURNS_RESULT_OF is not modeled");
         assert_eq!(error.into_parts().1, "unsupported contract effect type 3");
+    }
+
+    #[test]
+    fn a_negated_boolean_parameter_keeps_its_negation() {
+        // `returns() implies !actual`, kotlin.test's `assertFalse`.
+        let mut expression = Vec::new();
+        int_field(&mut expression, 1, 1);
+        int_field(&mut expression, 2, 1);
+        let mut effect = Vec::new();
+        message_field(&mut effect, 3, &expression);
+        let contract = decode_contract(&contract_with(&effect), &mut |_| unreachable!())
+            .expect("a negated boolean parameter is a modeled conclusion")
+            .expect("the contract has an effect");
+        assert_eq!(
+            contract.effects,
+            vec![Effect::ConditionalReturns {
+                returns: ReturnsValue::Any,
+                conclusion: Condition::BoolParam {
+                    param: ParamRef::Param(0),
+                    negated: true,
+                },
+            }]
+        );
     }
 
     #[test]

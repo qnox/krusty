@@ -25,13 +25,6 @@ pub(crate) fn function_generic_sig(function: &KotlinFunction) -> GenericSig {
     )
 }
 
-pub(crate) fn function_generic_sig_with_identities(
-    function: &KotlinFunction,
-    identities: &TypeParameterIdentities,
-) -> GenericSig {
-    declared_function_generic_sig(function, &EnclosingBounds::new(), identities)
-}
-
 /// A function's declared signature with declaration-owned type-parameter identities and the
 /// semantic bounds its enclosing classes put in scope.
 pub(crate) fn declared_function_generic_sig(
@@ -47,13 +40,6 @@ pub(crate) fn declared_function_generic_sig(
         &function.ret,
         identities,
     )
-}
-
-pub(crate) fn property_generic_sig_with_identities(
-    property: &KotlinProperty,
-    identities: &TypeParameterIdentities,
-) -> GenericSig {
-    declared_property_generic_sig(property, &EnclosingBounds::new(), identities)
 }
 
 /// A property's declared signature, in the shape of its getter, with declaration-owned parameter

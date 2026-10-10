@@ -437,6 +437,7 @@ fn same_spelled_function_and_property_type_parameters_keep_distinct_identities()
         ty: parameter_ty(37),
         formals: vec![parameter(37)],
         visibility: Visibility::Public,
+        modality: crate::metadata::semantic::KotlinModality::Final,
         setter_visibility: Visibility::Public,
         setter_parameter_name: None,
         is_var: false,
@@ -467,7 +468,7 @@ fn same_spelled_function_and_property_type_parameters_keep_distinct_identities()
     };
     let function_formal = identity
         .generic_sig
-        .as_deref()
+        .as_ref()
         .expect("generic function signature")
         .formals[0]
         .as_str();

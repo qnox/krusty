@@ -1086,7 +1086,9 @@ fn semantic_function(
             first_nullable,
         };
         let bounds = metadata::semantic_bounds(&formals, &std::collections::HashMap::new());
-        let mut resolve_type = |reference| {
+        let mut resolve_type = |reference: crate::metadata::contract_decoder::ContractTypeRef<
+            '_,
+        >| {
             use crate::metadata::contract_decoder::ContractTypeRef;
             let decoded = match reference {
                 ContractTypeRef::Inline(body) => {
