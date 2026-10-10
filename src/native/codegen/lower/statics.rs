@@ -283,19 +283,32 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         &mut self,
         target: &crate::fir::PropertyId,
     ) -> Result<Option<Value>, Unsupported> {
+        Ok(self.top_level_read_typed(target)?.map(|(value, _)| value))
+    }
+
+    /// [`Self::top_level_read`], with the type the produced value is carried at: the slot's
+    /// storage type, or the accessor's result.
+    pub(super) fn top_level_read_typed(
+        &mut self,
+        target: &crate::fir::PropertyId,
+    ) -> Result<Option<(Value, Ty)>, Unsupported> {
         match self.top_level(target, false)? {
             TopLevel::Slot(index) => {
                 let declaration = &self.file.ir.statics[index as usize];
                 let guarded = declaration.is_lateinit;
                 let name = declaration.name.clone();
+                let ty = declaration.ty;
                 let value = self.static_read(index)?;
                 if guarded {
                     let value = value.expect("a `lateinit` property has a reference carrier");
                     self.lateinit_guard(value, &name)?;
                 }
-                Ok(value)
+                Ok(value.map(|value| (value, ty)))
             }
-            TopLevel::Accessor(function) => self.accessor_call(function, &[]),
+            TopLevel::Accessor(function) => {
+                let ty = self.file.ir.functions[function as usize].ret;
+                Ok(self.accessor_call(function, &[])?.map(|value| (value, ty)))
+            }
         }
     }
 

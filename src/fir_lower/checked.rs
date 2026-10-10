@@ -924,6 +924,7 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::MissingCallable(*target))?;
                 self.module_constructor_call(ModuleConstructorRequest {
                     classifier: classifier.classifier,
+                    constructor: callable.declaration,
                     argument_parameter_types: &parameter_types,
                     declaration_parameter_types: &declaration_parameter_types,
                     primary_in_current_file,

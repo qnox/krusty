@@ -75,6 +75,34 @@ impl NativeValueClasses {
                 }
             }
         }
+        // A declaration another file of the module defines is called through the ABI its
+        // declared types fix, and the defining file carries those types by its own inventory. So
+        // the classifiers they name are this file's to know as well: otherwise a value class
+        // projected to its value there would travel as a reference here.
+        for property in ir.referenced_module_properties.values() {
+            pending.extend(property.owner);
+            for ty in property
+                .context_parameters
+                .iter()
+                .chain(&property.extension_receiver)
+                .chain([&property.ty])
+            {
+                crate::ir::referenced_classifiers::collect_classifier_names(*ty, &mut pending);
+            }
+        }
+        for callable in ir.referenced_module_callables.values() {
+            pending.extend(callable.owner);
+            for ty in callable.parameters.iter().chain([&callable.result]) {
+                crate::ir::referenced_classifiers::collect_classifier_names(*ty, &mut pending);
+            }
+        }
+        for constructor in ir.module_constructions.records.values() {
+            pending.push(constructor.owner);
+            pending.extend(constructor.outer);
+            for ty in constructor.parameters.iter() {
+                crate::ir::referenced_classifiers::collect_classifier_names(*ty, &mut pending);
+            }
+        }
         pending.extend(ir.classes.iter().filter_map(|class| {
             (class.is_value && class.ctor_param_count == 1).then_some(class.fq_name)
         }));
