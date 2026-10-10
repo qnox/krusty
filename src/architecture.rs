@@ -100,6 +100,11 @@ mod tests {
                 "types",
             ],
         );
+        // The class tables every backend lays its objects out from read only the checked IR: no
+        // provider, no frontend state, and nothing about any one target's representation, which
+        // each backend answers through `Representation`.
+        assert_allowed_crate_modules_in_tree("src/backend/class_tables", &["fir", "ir", "types"]);
+        assert_allowed_crate_modules("src/backend/class_tables.rs", &["fir", "ir", "types"]);
     }
 
     #[test]
@@ -553,6 +558,7 @@ mod tests {
             "src/wasm/target.rs",
             "src/wasm/host.rs",
             "src/wasm/runtime.rs",
+            "src/wasm/objects.rs",
         ] {
             assert_allowed_crate_modules(path, &[]);
         }
@@ -561,6 +567,14 @@ mod tests {
             &["backend", "compilation_target", "diag", "types"],
         );
         assert_allowed_crate_modules("src/wasm/codegen/lower.rs", &["ir", "types"]);
+        // A class's WasmGC form is built on the shared class tables (`backend`), whose slot keys
+        // name the opaque checked property and callable ids IR carries (`fir`).
+        for path in [
+            "src/wasm/codegen/classes.rs",
+            "src/wasm/codegen/lower/objects.rs",
+        ] {
+            assert_allowed_crate_modules(path, &["backend", "fir", "ir", "types"]);
+        }
     }
 
     #[test]
