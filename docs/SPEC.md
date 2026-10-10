@@ -10651,6 +10651,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   box's physical type on the unboxed result, so the return unboxed the carrier again and the class
   failed verification. Tests: `tests/value_class_delegated_result_e2e.rs`. Corpus:
   `inlineClasses/boxReturnValueOnOverride/kt31585` and `kt31585Generic`.
+- **A `$default` stub takes a value class over a null-capable carrier as its box, wherever the
+  class is declared.** A defaulted non-null parameter of a value class whose carrier can hold
+  `null` (`Port(val raw: String?)`) is the box in the stub's descriptor and the carrier in the real
+  method's, and the stub unboxes it with `unbox-impl()` returning the carrier. Both sides of that
+  boundary read the class's facts, the same ones for a class this file, a sibling file or a
+  dependency declares: the `unbox-impl`/`box-impl` descriptors name the carrier (they named `Object`
+  for a class declared outside the file, which failed verification), and a call into a sibling
+  file's stub boxes a supplied argument and names the box in the descriptor (it named the carrier,
+  a `NoSuchMethodError`). Tests: `tests/sibling_value_class_data_class_e2e.rs` (cross-checked
+  against the reference compiler).
 - **A value class's constructors build the value in a temporary.** The static `constructor-impl`
   that runs a value class's `init` block first stores its parameter in an unnamed temporary typed
   as the value class; `this` and the class's property in the block read it, a `this` passed as a
