@@ -9,9 +9,9 @@ use super::declaration_signatures::{SignedFunction, SignedProperty};
 use super::external_identities::ExternalIdentities;
 use super::inventory::PackageInventory;
 use crate::libraries::{
-    declared_function, declared_property, CallablePlacement, Callables, ClassifierDeclaration,
-    ExternalCallableKind, FnKind, FunctionInfo, FunctionSet, PropertyAccessorNames, PropertyInfo,
-    PropertySet, ResolvedSymbols,
+    declared_function, declared_property, function_classifiers, CallablePlacement, Callables,
+    ClassifierDeclaration, ExternalCallableKind, FnKind, FunctionInfo, FunctionSet,
+    PropertyAccessorNames, PropertyInfo, PropertySet, ResolvedSymbols,
 };
 use crate::symbol_source::SymbolNamespace;
 
@@ -62,12 +62,24 @@ pub(super) fn declared_symbols(
 ) -> ResolvedSymbols {
     // A probe never interns its leaf: only an already-interned identity can name a published
     // classifier.
-    let classifier_name = namespace
+    let declared = namespace
         .existing_classifier(name)
         .filter(|identity| inventory.classifier(*identity).is_some());
-    let classifier = classifier_name
-        .and_then(|identity| classifier_record(inventory, identities, identity))
-        .map(std::sync::Arc::new);
+    let (classifier_name, classifier) = match declared {
+        Some(identity) => (
+            Some(identity),
+            classifier_record(inventory, identities, identity).map(std::sync::Arc::new),
+        ),
+        // `FunctionN`, `SuspendFunctionN` and `KFunctionN` are declared by the language, not by
+        // any library: no KLIB serializes them.
+        None => match language_function_classifier(namespace, name) {
+            Some(function) => (
+                Some(function.identity()),
+                Some(function_classifiers::synthetic(function)),
+            ),
+            None => (None, None),
+        },
+    };
     let (overloads, properties) = match namespace {
         SymbolNamespace::Package(package) => (
             inventory
@@ -172,4 +184,15 @@ pub(super) fn published_property(
     let kind = realization_kind(placement, property.receiver.is_some());
     identities.assign_property(signed, kind, &mut property);
     property
+}
+
+fn language_function_classifier(
+    namespace: SymbolNamespace,
+    name: &str,
+) -> Option<function_classifiers::FunctionClassifier> {
+    let SymbolNamespace::Package(package) = namespace else {
+        return None;
+    };
+    function_classifiers::classifier_name_in(package, name)
+        .and_then(function_classifiers::classifier)
 }

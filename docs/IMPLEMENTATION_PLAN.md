@@ -4621,8 +4621,20 @@ code is the one the code generator already names: provider-owned bodies through 
   extensions and an enum's `values`/`valueOf` (and `entries`, only with `hasEnumEntries`) are
   receiver-less candidates of the classifier's namespace naming it as `associated_classifier`.
   Private classes, members and constructors are not published, although IR gives a private class
-  member or constructor (an enum's, an object's) a public signature. The `SemanticPlatform` hooks
-  come next, then the Native lane switch.
+  member or constructor (an enum's, an object's) a public signature.
+- **Platform (done).** `KlibLibraries::open` publishes the KLIBs a compilation selects, zipped or
+  unpacked, and is a `SemanticPlatform`; each caller names its own target's libraries (Native's
+  `klib/common/stdlib`, `toolchain::kotlin_native_stdlib_klib`). `for_compilation` starts another
+  compilation over the same signed declarations. Its hooks are target-neutral: the language's
+  `FunctionN`/`SuspendFunctionN`/`KFunctionN` classifiers (no KLIB serializes them), function and
+  reference types, `KClass`, value-class underlyings, and the contract intrinsic and DSL members,
+  recognized by `contracts::is_contract_intrinsic`/`dsl_member` as the JVM provider does. Against
+  the 2.4.20 Native box corpus the stdlib KLIB currently passes 2007 of 7089 applicable cases where
+  the JVM surface passes 5372. The gaps, largest first: KLIB default arguments (`assertEquals`'s
+  `message`, from the parameter's IR default), builtin members carrying no compiler intrinsic
+  (`Int.plus`, `String.plus`, `compareTo`), and inline stdlib bodies (`let`, `apply`, `run`). The
+  Native lane switches, as a per-lane libraries setting in `tests/box_lane.rs`, once it no longer
+  regresses.
 - **Joining (done for top-level functions).** `klib_libraries::KlibDeclarationBodies` indexes the
   decoded trees of a library set by linkable identity and answers a selected callable's frozen
   `KlibDeclarationSignature` with its function and arena, never through a name or parameter tuple.

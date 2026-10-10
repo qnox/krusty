@@ -618,5 +618,6 @@ fn a_declaration_without_a_role_per_context_parameter_is_rejected() {
     );
 }
 
+mod analysis;
 mod classes;
 mod properties;
