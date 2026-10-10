@@ -53,6 +53,7 @@ pub enum MetadataDecodeError {
     MalformedWire,
     MissingField(&'static str),
     InvalidVariance(u64),
+    InvalidContract,
 }
 
 impl From<ParameterDecodeError> for MetadataDecodeError {
@@ -2094,21 +2095,8 @@ fn decode_functions(
                         None,
                         function_type_table,
                     );
-                    let contract = pf.contract_body.as_deref().and_then(|body| {
-                        let tparams = type_parameter_context(
-                            &[],
-                            &[],
-                            &pf.type_params,
-                            records,
-                            d2,
-                            function_type_table,
-                        )
-                        .map(|c| c.names)
-                        .unwrap_or_default();
-                        // Function-level table wins if present; the container's otherwise.
-                        contract::decode_contract(body, records, d2, &tparams, function_type_table)
-                            .map(std::sync::Arc::new)
-                    });
+                    let contract =
+                        contract::decode_function_contract(&pf, records, d2, function_type_table)?;
                     if pf.contract_body.is_some() {
                         crate::trace_compiler!(
                             "metadata_contracts",
@@ -3065,7 +3053,10 @@ mod module_reader_tests {
         assert!(
             req.effects.contains(&Effect::ConditionalReturns {
                 returns: ReturnsValue::Any,
-                conclusion: Condition::BoolParam(ParamRef::Param(0)),
+                conclusion: Condition::BoolParam {
+                    param: ParamRef::Param(0),
+                    negated: false,
+                },
             }),
             "require contract effects: {:?}",
             req.effects

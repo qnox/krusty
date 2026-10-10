@@ -1,10 +1,11 @@
-//! Object layout and virtual-dispatch tables for the classes of one IR file.
+//! Object layout and virtual-dispatch tables for the classes of one IR file, as Native lays them
+//! out in memory.
 //!
-//! Everything here is a pure function over an [`IrFile`]; nothing emits code. The code generator
-//! asks two questions of the result — "where is this field" and "which vtable slot is this member"
-//! — and this module answers both from the IR's own hierarchy and override tables
-//! (`IrFile::classifier_hierarchies`, `function_overrides`, `property_overrides`) rather than by
-//! matching names.
+//! Which fields precede a class's own, and which slot each member dispatches through, are the
+//! shared class tables' answers (`crate::backend::class_tables`); this module adds what is Native's
+//! own: the byte offset of every field, the descriptor's reference offsets, and what realizes each
+//! slot in the runtime — `kotlin.Any`'s members by runtime symbol, and the members of annotation
+//! instances and value-class boxes, which Native synthesizes.
 //!
 //! **Layout** is the classic single-inheritance one: the object header, then the superclass's
 //! fields as a prefix in the superclass's order, then this class's fields in declaration order,
@@ -13,28 +14,21 @@
 //! the loads and stores the generator emits and the `reference_offsets` table in the class's
 //! descriptor, so the program and the collector cannot disagree about where a reference is.
 //!
-//! **Vtables** are the classic single-inheritance ones too: a class's table is its superclass's
-//! with overridden slots replaced and newly declared members appended. Slot numbers are assigned
-//! at the declaring class and stay valid down the hierarchy, which is what lets a call through an
-//! `A`-typed value reach `B`'s override with one load. Every table begins with `kotlin.Any`'s
-//! three slots — `equals`, `hashCode`, `toString`, in that order — which the runtime defines.
-//!
-//! Property accessors are members too. A property that is `open` (or overrides one) dispatches
-//! through a getter (and, for a `var`, a setter) slot; when the source declares no accessor body,
-//! the slot is a synthesized field access, so `x.v` through an `A`-typed `x` reads `B`'s `v` when
-//! `B` overrides it. A property that is neither open nor an override is a direct field access.
-//!
 //! **Refusals.** [`check_supported`] declines, by name, the two class kinds this model does not lay
-//! out — an annotation's implementation class and a callable reference's class — and layout
-//! declines a superclass declared in another file and an override of a method declared outside it,
-//! so the file declines with a diagnostic instead of emitting something unverified.
+//! out — an annotation's implementation class and a callable reference's class — and the shared
+//! tables decline a superclass declared in another file and an override of a method declared
+//! outside it, so the file declines with a diagnostic instead of emitting something unverified.
 
 use super::value_classes::NativeValueClasses;
 use std::collections::HashMap;
 
-use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
-use crate::ir::{ClassId, FunId, IrClass, IrFile, IrFunction};
+use crate::backend::class_tables::{self, ClassTable, Representation};
+use crate::ir::{ClassId, FunId, IrClass, IrFile};
 use crate::types::{Ty, TypeName};
+
+pub(super) use crate::backend::class_tables::{
+    function_key, local_property_target, AnyMember, SlotKey, FUNCTION_SLOT,
+};
 
 /// The construct a lowering declined, phrased for a diagnostic.
 pub(super) type Unsupported = String;
@@ -142,15 +136,13 @@ pub(super) fn field_storage_ty(
     index: u32,
 ) -> Result<Ty, Unsupported> {
     let declaration = &ir.classes[class as usize];
-    if values.is_value_class(declaration.fq_name) {
-        if value_field(ir, class)? == index {
-            return values.underlying(declaration.fq_name).ok_or_else(|| {
-                format!(
-                    "a value class with no checked underlying type (`{}`)",
-                    declaration.fq_name()
-                )
-            });
-        }
+    if values.is_value_class(declaration.fq_name) && value_field(ir, class)? == index {
+        return values.underlying(declaration.fq_name).ok_or_else(|| {
+            format!(
+                "a value class with no checked underlying type (`{}`)",
+                declaration.fq_name()
+            )
+        });
     }
     Ok(super::captures::physical_ty(
         ir,
@@ -239,7 +231,8 @@ pub(super) struct FieldLayout {
     pub kind: CKind,
 }
 
-/// What a vtable slot holds.
+/// What a vtable slot holds: a shared table's slot as Native realizes it, plus the members Native
+/// synthesizes itself. The variants shared with [`class_tables::Slot`] mean what they mean there.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Slot {
     /// One of `kotlin.Any`'s defaults, by runtime symbol.
@@ -252,51 +245,16 @@ pub(super) enum Slot {
     FieldGetter { class: ClassId, field: u32 },
     /// A synthesized setter, likewise.
     FieldSetter { class: ClassId, field: u32 },
-    /// An override reachable through a base whose signature has a different REPRESENTATION:
-    /// `A<T : Number>.foo(): T` erases its result to a reference, and `Z : A<Int>` overriding it
-    /// returns an unboxed machine integer. The base's slot cannot hold that body — a caller reading
-    /// the slot through `A` would read an integer as a pointer — so it holds this instead: a small
-    /// function with the BASE's signature that converts each operand and forwards.
-    ///
-    /// It forwards by DISPATCH rather than by calling the override directly, and that is the whole
-    /// reason it is a slot number here and not a function id. A further subclass replaces `target`
-    /// with its own body, and a bridge that had named the override would keep running the wrong
-    /// one; re-dispatching through the receiver's own vtable reaches whatever that receiver
-    /// actually is.
+    /// See [`class_tables::Slot::Bridge`].
     Bridge {
-        /// The base method whose signature this entry wears.
         declared: FunId,
-        /// The slot to forward through, and the method whose carriers that slot expects.
-        ///
-        /// `None` where there is no slot to forward through: an INTERFACE's own bridge stands in
-        /// the default an implementor inherits, and the slot it would name is the interface's
-        /// table index rather than that implementor's. A default is reached only where nothing
-        /// overrides the member, so calling `target` outright is the same answer — and it is the
-        /// same thing a plain `Slot::Function` default already does.
         target_slot: Option<u32>,
         target: FunId,
     },
-    /// The FUNCTION SLOT's own stand-in: `invoke` overriding `kotlin.Function{N}.invoke` where
-    /// the override does not carry references throughout.
-    ///
-    /// A caller through a function type reads a FIXED number (`KT_SLOT_INVOKE`) and passes and
-    /// reads references there, because that is the one signature every function value shares.
-    /// `class A : (Int) -> Int { override fun invoke(p: Int) = p + 1 }` carries machine integers
-    /// instead, so its body cannot stand in that number — a caller would read an integer as a
-    /// pointer. This stands there and converts, forwarding to the method's own slot.
-    ///
-    /// It carries an ARITY rather than a declaration id, which is what separates it from
-    /// [`Slot::Bridge`]: the signature it wears belongs to `kotlin.Function{N}`, which is declared
-    /// in no file this target compiles, so there is no `FunId` to read it off. Every operand and
-    /// the result are references, and the arity is the whole of the rest.
-    ///
-    /// It forwards by DISPATCH for the same reason [`Slot::Bridge`] does: a further subclass
-    /// replaces `target` with its own body, and naming the override would keep running the wrong
-    /// one.
+    /// See [`class_tables::Slot::FunctionBridge`]; the runtime names the number it stands in
+    /// `KT_SLOT_INVOKE`.
     FunctionBridge {
-        /// How many operands `invoke` takes, not counting the receiver.
         arity: usize,
-        /// The slot the real `invoke` occupies, and the method whose carriers it expects.
         target_slot: u32,
         target: FunId,
     },
@@ -313,47 +271,94 @@ pub(super) enum Slot {
     /// `this` — that is what a value class is — while a vtable is read off an object, so this
     /// entry takes the box, reads the value out of it, and calls the member with that.
     ValueBridge { class: ClassId, function: FunId },
-    /// The same thing for a property ACCESSOR reached through an INTERFACE that declares it with
-    /// a different representation: `interface C<T> { var size: T }` erases its accessors to a
-    /// reference while `class B : C<Int>, A()` inherits an unboxed machine integer. The
-    /// interface's program-wide number holds this rather than an alias of the class's own slot,
-    /// which would have a caller read that integer as a pointer.
-    ///
-    /// It carries TYPES where [`Slot::Bridge`] carries function ids, because neither end need be
-    /// a source accessor: either may be a synthesized field access, which has no declaration to
-    /// name. It forwards by DISPATCH for the same reason the method bridge does.
+    /// See [`class_tables::Slot::AccessorBridge`].
     AccessorBridge {
-        /// The property type as the INTERFACE declares it: the carrier this entry wears.
         declared: Ty,
-        /// The property type as the implementation has it: the carrier `target_slot` expects.
         implemented: Ty,
-        /// Whether this stands in for the setter — which takes the value and answers nothing —
-        /// rather than the getter.
+        receiver: Option<(Ty, Ty)>,
         setter: bool,
         target_slot: u32,
     },
 }
 
-/// Which of `kotlin.Any`'s three members a synthesized one answers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) enum AnyMember {
-    Equals,
-    HashCode,
-    ToString,
+impl Slot {
+    /// A shared table's slot as Native realizes it, where `kotlin.Any`'s members are those of the
+    /// base `root` — the class at the top of the hierarchy in this file — extends.
+    fn realized(slot: class_tables::Slot, root: &IrClass) -> Self {
+        match slot {
+            class_tables::Slot::AnyMember(member) => Self::Runtime(any_member_symbol(root, member)),
+            class_tables::Slot::Function(function) => Self::Function(function),
+            class_tables::Slot::Abstract => Self::Abstract,
+            class_tables::Slot::FieldGetter { class, field } => Self::FieldGetter { class, field },
+            class_tables::Slot::FieldSetter { class, field } => Self::FieldSetter { class, field },
+            class_tables::Slot::Bridge {
+                declared,
+                target_slot,
+                target,
+            } => Self::Bridge {
+                declared,
+                target_slot,
+                target,
+            },
+            class_tables::Slot::FunctionBridge {
+                arity,
+                target_slot,
+                target,
+            } => Self::FunctionBridge {
+                arity,
+                target_slot,
+                target,
+            },
+            class_tables::Slot::AccessorBridge {
+                declared,
+                implemented,
+                receiver,
+                setter,
+                target_slot,
+            } => Self::AccessorBridge {
+                declared,
+                implemented,
+                receiver,
+                setter,
+                target_slot,
+            },
+        }
+    }
 }
 
-/// The identity of a virtual member, independent of which class's implementation fills it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) enum SlotKey {
-    /// `kotlin.Any`'s slots, by number.
-    Any(u32),
-    /// A method, by its implementation in some class; an override registers under its own id too,
-    /// so a further override finds the slot through either.
-    Function(FunId),
-    /// A property accessor, by the frontend's stable declaration identity. The accessor role is
-    /// part of the key because a mutable property owns two independently dispatched members.
-    Getter(ResolvedPropertyOverrideTarget),
-    Setter(ResolvedPropertyOverrideTarget),
+/// The runtime symbol realizing `kotlin.Any`'s `member` for objects whose hierarchy in this file
+/// starts at `root`.
+///
+/// A base the runtime owns fills `kotlin.Any`'s three its own way — a `Throwable` renders as
+/// `qualified.Name: message` rather than by identity — and Kotlin's `Enum.toString()` is the
+/// constant's name, which the runtime answers because the storage it reads belongs to
+/// `kotlin.Enum`, a base no file declares.
+fn any_member_symbol(root: &IrClass, member: AnyMember) -> &'static str {
+    if member == AnyMember::ToString && is_enum(root) {
+        return "kt_enum_to_string";
+    }
+    let defaults = match external_base(root.superclass) {
+        Some(base) => base.any_slots,
+        None => ["kt_any_equals", "kt_any_hash_code", "kt_any_to_string"],
+    };
+    defaults[member.slot() as usize]
+}
+
+/// How Native carries values, as the shared tables ask it.
+struct NativeRepresentation<'v>(&'v NativeValueClasses);
+
+impl Representation for NativeRepresentation<'_> {
+    fn same(&self, a: Ty, b: Ty) -> bool {
+        representation(self.0, a) == representation(self.0, b)
+    }
+
+    fn is_reference(&self, ty: Ty) -> bool {
+        c_kind(self.0, ty) == CKind::Ref
+    }
+
+    fn owns_base(&self, superclass: TypeName) -> bool {
+        superclass == crate::types::wk::kotlin_enum() || external_base(superclass).is_some()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -372,11 +377,6 @@ pub(super) struct ClassLayout {
     pub reference_offsets: Vec<u32>,
     pub vtable: Vec<Slot>,
     pub slots: HashMap<SlotKey, u32>,
-    /// Interface members this class implements through a declaration of a DIFFERENT
-    /// representation, by the interface's own spelling of the member. The interface's
-    /// program-wide number is filled with the bridge recorded here instead of an alias of this
-    /// class's slot — see [`Slot::AccessorBridge`].
-    pub interface_bridges: HashMap<SlotKey, Slot>,
 }
 
 /// The layouts of every class in a file, indexed by `ClassId`, plus the order in which a
@@ -401,39 +401,7 @@ impl ClassModel {
     }
 }
 
-/// How many slots `kotlin.Any` occupies at the front of every vtable.
-const ANY_SLOTS: u32 = 3;
-
-/// `kotlin.Any`'s vtable, the prefix of every class's.
-fn any_vtable() -> (Vec<Slot>, HashMap<SlotKey, u32>) {
-    let vtable = vec![
-        Slot::Runtime("kt_any_equals"),
-        Slot::Runtime("kt_any_hash_code"),
-        Slot::Runtime("kt_any_to_string"),
-    ];
-    let slots = (0..3).map(|slot| (SlotKey::Any(slot), slot)).collect();
-    (vtable, slots)
-}
-
-/// The fixed `kotlin.Any` slot named by one exact checked override edge.
-fn any_slot(role: Option<crate::types::SemanticCallRole>) -> Option<u32> {
-    match role {
-        Some(crate::types::SemanticCallRole::KotlinAnyEquals) => Some(0),
-        Some(crate::types::SemanticCallRole::KotlinAnyHashCode) => Some(1),
-        Some(crate::types::SemanticCallRole::KotlinAnyToString) => Some(2),
-        Some(
-            crate::types::SemanticCallRole::KotlinComparableCompareTo
-            | crate::types::SemanticCallRole::KotlinFunctionInvoke
-            | crate::types::SemanticCallRole::KotlinCallableReferenceName
-            | crate::types::SemanticCallRole::KotlinPropertyReferenceGet(_)
-            | crate::types::SemanticCallRole::KotlinPropertyReferenceSet(_)
-            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
-            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateSet(_),
-        ) => None,
-        None => None,
-    }
-}
-
+/// Reject, by name, a class this step does not lower.
 /// Reject, by name, a class this step does not lower.
 pub(super) fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
     let name = class.fq_name();
@@ -447,27 +415,25 @@ pub(super) fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
     Err(format!("{construct} (`{name}`)"))
 }
 
+/// How many slots `kotlin.Any` occupies at the front of every vtable.
+const ANY_SLOTS: u32 = class_tables::ANY_SLOTS;
+
 /// Build the layout and vtable of every class in `ir`, superclasses first.
 pub(super) fn build(ir: &IrFile, values: &NativeValueClasses) -> Result<ClassModel, Unsupported> {
     for class in &ir.classes {
         check_supported(class)?;
     }
-    let order = hierarchy_order(ir)?;
-    // Before the layouts because the program-wide interface region uses the complete transitive
-    // set after each class has consumed its exact override edges.
-    let interfaces = interface_closure(ir);
-
+    let tables = class_tables::build(&NativeRepresentation(values), ir)?;
     let mut layouts: Vec<Option<ClassLayout>> = vec![None; ir.classes.len()];
-    for &id in &order {
-        let class = &ir.classes[id as usize];
-        let superclass = ir.class_id_by_name(class.superclass);
+    for &id in &tables.order {
+        let table = tables.table(id);
         let layout = {
-            let parent = superclass.map(|parent| {
+            let parent = table.superclass.map(|parent| {
                 layouts[parent as usize]
                     .as_ref()
                     .expect("superclasses are laid out first")
             });
-            layout_class(values, ir, id, superclass, parent)?
+            layout_class(values, ir, id, table, parent)?
         };
         layouts[id as usize] = Some(layout);
     }
@@ -475,7 +441,6 @@ pub(super) fn build(ir: &IrFile, values: &NativeValueClasses) -> Result<ClassMod
         .into_iter()
         .map(|layout| layout.expect("every class was laid out"))
         .collect();
-    place_interface_slots(ir, &order, &mut layouts, &interfaces)?;
     // A value class's own members take the VALUE as `this`, and a vtable is read off its box, so
     // every entry naming one of them reaches it through a bridge that unboxes first.
     for (id, class) in ir.classes.iter().enumerate() {
@@ -495,496 +460,30 @@ pub(super) fn build(ir: &IrFile, values: &NativeValueClasses) -> Result<ClassMod
     }
     Ok(ClassModel {
         layouts,
-        order,
-        interfaces,
+        order: tables.order,
+        interfaces: tables.interfaces,
     })
-}
-
-/// Every interface each class implements, transitively: its own, its superclass's, and the bases
-/// of both. An interface's entry holds the interfaces it extends, not itself.
-fn interface_closure(ir: &IrFile) -> Vec<Vec<ClassId>> {
-    let direct = |id: ClassId| -> Vec<ClassId> {
-        let class = &ir.classes[id as usize];
-        class
-            .interfaces
-            .iter()
-            .chain(
-                class
-                    .supertypes
-                    .iter()
-                    .copied()
-                    .filter_map(Ty::obj_internal),
-            )
-            .filter_map(|name| ir.class_id_by_name(name))
-            .filter(|&candidate| ir.classes[candidate as usize].is_interface)
-            .collect()
-    };
-    let mut closures: Vec<Vec<ClassId>> = vec![Vec::new(); ir.classes.len()];
-    // A fixed point rather than an order-dependent single pass: a class may precede an interface
-    // it implements in IR order, and the closure is small enough that iterating to stability costs
-    // nothing.
-    loop {
-        let mut changed = false;
-        for id in 0..ir.classes.len() as ClassId {
-            let mut collected: Vec<ClassId> = closures[id as usize].clone();
-            let add = |collected: &mut Vec<ClassId>, candidate: ClassId| {
-                if !collected.contains(&candidate) {
-                    collected.push(candidate);
-                }
-            };
-            for candidate in direct(id) {
-                add(&mut collected, candidate);
-                for inherited in closures[candidate as usize].clone() {
-                    add(&mut collected, inherited);
-                }
-            }
-            if let Some(parent) = ir.class_id_by_name(ir.classes[id as usize].superclass) {
-                for inherited in closures[parent as usize].clone() {
-                    add(&mut collected, inherited);
-                }
-            }
-            if collected.len() != closures[id as usize].len() {
-                closures[id as usize] = collected;
-                changed = true;
-            }
-        }
-        if !changed {
-            return closures;
-        }
-    }
-}
-
-/// Give every interface member a slot number that is the same in EVERY class implementing it.
-///
-/// A class's own methods are numbered as they are declared, so two classes number their methods
-/// differently — which is fine for a call through a class-typed receiver, because the call site
-/// knows the class. A call through an INTERFACE-typed receiver does not: it knows only the
-/// interface, so the number it uses has to mean the same thing in every implementation. So the
-/// interface members share one numbering, placed above every class's own slots: each class's
-/// vtable is its own slots, padded to `interface_base`, then one entry per interface member in the
-/// program. A class fills only the entries of interfaces it implements; the rest are the abstract
-/// trap, which nothing can reach because nothing can name them through a type this class has.
-///
-/// The cost is a vtable as long as the program's interface surface rather than the class's own,
-/// and it is paid per class. That is the trade Kotlin's own targets make differently — the JVM has
-/// `invokeinterface` and an itable search — and it is the right one while a compilation unit is a
-/// file: dispatch stays a single indexed load, exactly like a class method's.
-fn place_interface_slots(
-    ir: &IrFile,
-    order: &[ClassId],
-    layouts: &mut [ClassLayout],
-    interfaces: &[Vec<ClassId>],
-) -> Result<(), Unsupported> {
-    let is_interface = |id: ClassId| ir.classes[id as usize].is_interface;
-    // Relative numbering, assigned interface by interface so an extending interface inherits the
-    // slots of the one it extends.
-    let mut members: Vec<InterfaceMember> = Vec::new();
-    let mut relative: Vec<HashMap<SlotKey, u32>> = vec![HashMap::new(); ir.classes.len()];
-    for &id in order.iter().filter(|&&id| is_interface(id)) {
-        let mut own: HashMap<SlotKey, u32> = HashMap::new();
-        for &base in &interfaces[id as usize] {
-            for (key, slot) in &relative[base as usize] {
-                own.insert(key.clone(), *slot);
-            }
-        }
-        let layout = &layouts[id as usize];
-        // The provisional layout numbered this interface's members as if they were a class's, and
-        // ONE of its entries can be named by several keys: `interface Base2 : Base` redeclaring
-        // `test` registers both its own spelling and `Base`'s at the same slot. They are one
-        // member, so they are numbered together — numbering them one by one would give `Base2`'s
-        // spelling a second number, which every implementor that registered `Base`'s would then
-        // miss, silently taking the interface's default over its own implementation. Grouping by
-        // slot also makes the numbering independent of the map's iteration order, which sorting by
-        // slot alone did not: two keys sharing a slot compared equal.
-        let mut groups: std::collections::BTreeMap<u32, Vec<SlotKey>> =
-            std::collections::BTreeMap::new();
-        for (key, slot) in &layout.slots {
-            // A member occupying one of `kotlin.Any`'s slots is already numbered, and numbered the
-            // same way for every object there is: a `fun interface` that overrides `toString`
-            // wants slot 2, which is where the runtime's own rendering looks. Numbering it again in
-            // the interface region would leave the slot every caller actually uses empty. Both
-            // spellings of such a member — `Any(2)` and the method's own key — are skipped here and
-            // carried through below.
-            if *slot < ANY_SLOTS {
-                continue;
-            }
-            groups.entry(*slot).or_default().push(key.clone());
-        }
-        for (slot, mut keys) in groups {
-            keys.sort_by_key(key_order);
-            let entry = layout.vtable[slot as usize].clone();
-            // What each key is already numbered as, through some base. A key with none is a
-            // spelling this interface introduced for a member a sibling key already names, so it
-            // joins that number instead of taking one of its own. `interface D : A, B` overriding a
-            // member BOTH declare is why each key keeps its own number when it has one: `A.f` and
-            // `B.f` are two members of the program that one entry happens to fill, and an
-            // implementor has to fill both numbers.
-            let inherited: Vec<Option<u32>> = keys
-                .iter()
-                .map(|key| {
-                    interfaces[id as usize]
-                        .iter()
-                        .find_map(|&base| relative[base as usize].get(key).copied())
-                })
-                .collect();
-            // A key with no number of its own joins one that HAS one — but only a number that
-            // carries the entry as it stands. A number needing a bridge wears the base's
-            // signature, and a key that does not need one is callable with the entry's: sharing
-            // the two would make a caller through this interface pass what the bridge converts.
-            // `interface Z1 : A<String>, B<String, Int>` overriding `foo(String, Int)` is that
-            // case — `A`'s number takes the body, `B`'s takes a bridge, and `Z1`'s own spelling
-            // has to join `A`'s.
-            let plain = |key: &SlotKey| !layout.interface_bridges.contains_key(key);
-            let joined = match keys
-                .iter()
-                .zip(&inherited)
-                .find_map(|(key, number)| number.filter(|_| plain(key)))
-            {
-                Some(number) => number,
-                None => {
-                    let assigned = members.len() as u32;
-                    members.push(InterfaceMember {
-                        interface: id,
-                        key: keys
-                            .iter()
-                            .find(|key| plain(key))
-                            .or_else(|| keys.first())
-                            .expect("a group has a key")
-                            .clone(),
-                        aliases: Vec::new(),
-                        // Filled by the loop below, which knows which key this number wears.
-                        defaults: Vec::new(),
-                    });
-                    assigned
-                }
-            };
-            let numbered: Vec<u32> = inherited
-                .iter()
-                .map(|number| number.unwrap_or(joined))
-                .collect();
-            for (key, &number) in keys.iter().zip(&numbered) {
-                // An interface redeclaring an inherited member with a body replaces what the base
-                // supplied, for classes that implement neither themselves.
-                //
-                // Per KEY, because one entry can fill several numbers and need a bridge in only
-                // some of them: `interface Z1 : A<String>, B<String, Int>` overriding
-                // `foo(String, Int)` is callable through `A`'s number as it stands — `A.foo(T,
-                // Int)` already carries the second operand as a machine integer — and through
-                // `B`'s number only after conversion, since `B.foo(T, U)` carries both as
-                // references. Reading the entry for both numbers put the raw body where `B`'s
-                // caller passes a boxed integer.
-                let supplied = layout
-                    .interface_bridges
-                    .get(key)
-                    .cloned()
-                    .unwrap_or_else(|| entry.clone());
-                if !matches!(supplied, Slot::Abstract) {
-                    let member = &mut members[number as usize];
-                    match member.defaults.iter_mut().find(|(who, _)| *who == id) {
-                        Some((_, existing)) => *existing = supplied,
-                        None => member.defaults.push((id, supplied)),
-                    }
-                }
-                // A class implementing `Both : Named` registers what it overrides under the key the
-                // override names, and that can be ANY interface's spelling of the same member — a
-                // property's key carries its declaring class, and a method's carries the declaring
-                // interface's own `FunId`. So the member records every spelling that shares its
-                // number, and the class is looked up by all of them.
-                for (alias, _) in keys
-                    .iter()
-                    .zip(&numbered)
-                    .filter(|(_, &other)| other == number)
-                {
-                    let member = &mut members[number as usize];
-                    if *alias != member.key && !member.aliases.contains(alias) {
-                        member.aliases.push(alias.clone());
-                    }
-                }
-                own.insert(key.clone(), number);
-            }
-        }
-        relative[id as usize] = own;
-    }
-
-    let base = layouts
-        .iter()
-        .enumerate()
-        .filter(|(id, _)| !is_interface(*id as ClassId))
-        .map(|(_, layout)| layout.vtable.len() as u32)
-        .max()
-        .unwrap_or(0)
-        .max(ANY_SLOTS);
-    for id in 0..layouts.len() as ClassId {
-        if is_interface(id) {
-            // An interface has no instances of its own, so this table is never the table of an
-            // object the program constructs. It is still worth building: it is what an implementor
-            // that supplies nothing of its own would have — every member this interface DEFINES a
-            // body for, and the abstract trap elsewhere — and the object a lambda becomes when it
-            // is converted to this interface starts from exactly that and fills in the one member
-            // the lambda is.
-            let own = relative[id as usize].clone();
-            let mut slots: HashMap<SlotKey, u32> = own
-                .iter()
-                .map(|(key, slot)| (key.clone(), base + slot))
-                .collect();
-            let mut table = layouts[id as usize].vtable.clone();
-            for (key, slot) in &layouts[id as usize].slots {
-                if *slot < ANY_SLOTS {
-                    slots.insert(key.clone(), *slot);
-                }
-            }
-            let mut defaults = vec![Slot::Abstract; base as usize + members.len()];
-            defaults[..ANY_SLOTS as usize].clone_from_slice(&any_vtable().0);
-            // An `Any` member the interface itself overrides keeps `Any`'s slot, which is where
-            // every caller looks for it — including the runtime's own `toString`.
-            for (slot, entry) in defaults.iter_mut().take(ANY_SLOTS as usize).enumerate() {
-                if let Some(own) = table.get(slot) {
-                    *entry = own.clone();
-                }
-            }
-            for (member_slot, member) in members.iter().enumerate() {
-                let mine = own
-                    .get(&member.key)
-                    .is_some_and(|slot| *slot == member_slot as u32);
-                if !mine {
-                    continue;
-                }
-                defaults[base as usize + member_slot] = supplied(member, id, interfaces);
-            }
-            table = defaults;
-            layouts[id as usize].slots = slots;
-            layouts[id as usize].vtable = table;
-            continue;
-        }
-        let mut vtable = std::mem::take(&mut layouts[id as usize].vtable);
-        vtable.resize(base as usize, Slot::Abstract);
-        for member in &members {
-            let implemented = interfaces[id as usize].contains(&member.interface);
-            let spellings = || std::iter::once(&member.key).chain(&member.aliases);
-            let entry = if !implemented {
-                Slot::Abstract
-            } else if let Some(bridge) =
-                spellings().find_map(|key| layouts[id as usize].interface_bridges.get(key))
-            {
-                // The class implements the member with a different REPRESENTATION than the
-                // interface declares, so this number cannot alias its slot — it wears the
-                // interface's carrier and converts.
-                bridge.clone()
-            } else {
-                match spellings().find_map(|key| layouts[id as usize].slots.get(key)) {
-                    // The class (or an ancestor) implements the member: its own slot already holds
-                    // the most derived implementation, whatever further overrides did to it.
-                    Some(&slot) => vtable[slot as usize].clone(),
-                    None => supplied(member, id, interfaces),
-                }
-            };
-            // A CONCRETE class reaching the abstract trap for an interface it DOES implement
-            // means the implementation exists in the source and this model failed to find it —
-            // Kotlin would not have compiled the class otherwise. Declining says so at compile
-            // time; emitting the trap would say it at run time, as a program that aborts where it
-            // should print an answer. A slot of an interface the class does not implement is
-            // padding, and unreachable: nothing can name it through a type this class has.
-            // An ENUM whose every entry has a BODY is not instantiable as itself: each instance
-            // is an entry subclass, and the slot is filled there — the check below runs for each
-            // of those too, so a genuinely missing implementation is still caught. Kotlin marks
-            // such a class abstract for the same reason; common IR does not, so the shape is read
-            // here. An entry WITHOUT a body is an instance of the enum class, and then the trap is
-            // reachable and this does not apply.
-            let entries_carry_it = is_enum(&ir.classes[id as usize])
-                && !ir.classes[id as usize].enum_entries.is_empty()
-                && ir.classes[id as usize]
-                    .enum_entries
-                    .iter()
-                    .all(|entry| entry.subclass.is_some());
-            if implemented
-                && matches!(entry, Slot::Abstract)
-                && !ir.classes[id as usize].is_abstract
-                && !ir.classes[id as usize].is_interface
-                && !entries_carry_it
-            {
-                crate::trace_compiler!(
-                    "native",
-                    "interface member unfilled class={} member={} key={:?} aliases={:?} slots={:?} bridges={:?}",
-                    ir.classes[id as usize].fq_name(),
-                    member_name(ir, member),
-                    member.key,
-                    member.aliases,
-                    layouts[id as usize].slots.keys().collect::<Vec<_>>(),
-                    layouts[id as usize].interface_bridges.keys().collect::<Vec<_>>(),
-                );
-                return Err(format!(
-                    "an interface member with no implementation found (`{}` in `{}`)",
-                    member_name(ir, member),
-                    ir.classes[id as usize].fq_name()
-                ));
-            }
-            vtable.push(entry);
-        }
-        layouts[id as usize].vtable = vtable;
-    }
-    Ok(())
-}
-
-/// How a diagnostic names an interface member.
-fn member_name(ir: &IrFile, member: &InterfaceMember) -> String {
-    let interface = ir.classes[member.interface as usize].fq_name();
-    let name = match &member.key {
-        SlotKey::Function(fid) => ir.functions[*fid as usize].name.clone(),
-        SlotKey::Getter(target) => format!("get {}", property_name(ir, *target)),
-        SlotKey::Setter(target) => format!("set {}", property_name(ir, *target)),
-        SlotKey::Any(slot) => format!("kotlin.Any slot {slot}"),
-    };
-    format!("{interface}.{name}")
-}
-
-fn property_name(ir: &IrFile, target: ResolvedPropertyOverrideTarget) -> String {
-    match target {
-        ResolvedPropertyOverrideTarget::Module(property) => ir
-            .checked_properties
-            .get(&property)
-            .map(|property| property.name.clone())
-            .unwrap_or_else(|| format!("property#{}", property.raw())),
-        ResolvedPropertyOverrideTarget::External(property) => {
-            format!("external-property#{}", property.raw())
-        }
-    }
-}
-
-/// A total order over slot keys, so an interface's members are numbered the same way on every
-/// run — the map they come from has no order of its own.
-fn key_order(key: &SlotKey) -> (u8, u32, u32) {
-    match key {
-        SlotKey::Any(slot) => (0, *slot, 0),
-        SlotKey::Function(fid) => (1, *fid, 0),
-        SlotKey::Getter(target) => property_key_order(2, *target),
-        SlotKey::Setter(target) => property_key_order(3, *target),
-    }
-}
-
-fn property_key_order(kind: u8, target: ResolvedPropertyOverrideTarget) -> (u8, u32, u32) {
-    match target {
-        ResolvedPropertyOverrideTarget::Module(property) => (kind, 0, property.raw()),
-        ResolvedPropertyOverrideTarget::External(property) => (kind, 1, property.raw()),
-    }
-}
-
-/// One member of one interface, in the program-wide numbering.
-struct InterfaceMember {
-    interface: ClassId,
-    key: SlotKey,
-    /// The same member as spelled through each interface that inherits it.
-    aliases: Vec<SlotKey>,
-    /// What a class that implements the interface without supplying this member gets, PER
-    /// interface that supplies one — the interface's own body where it has one.
-    ///
-    /// Several interfaces can supply one number: `interface Z1 : A, B` and `interface Z2 : B, A`
-    /// each override the member `A` and `B` both declare, and both are numbered onto `A`'s entry.
-    /// One recorded answer meant the last interface laid out won, and a class implementing the
-    /// other answered with a body it does not have. [`supplied`] chooses against the
-    /// implementor's own hierarchy instead.
-    defaults: Vec<(ClassId, Slot)>,
-}
-
-/// What an implementor inherits for one interface member: the body of the MOST DERIVED interface
-/// in its own hierarchy that supplies one, or the abstract trap when none does.
-///
-/// "Most derived" is the supplier that no other candidate extends. Kotlin guarantees there is one:
-/// a class inheriting two unrelated bodies for the same member does not compile without an
-/// override of its own, and that override is what this is consulted instead of.
-fn supplied(member: &InterfaceMember, class: ClassId, interfaces: &[Vec<ClassId>]) -> Slot {
-    let reaches =
-        |from: ClassId, to: ClassId| from == to || interfaces[from as usize].contains(&to);
-    let candidates: Vec<&(ClassId, Slot)> = member
-        .defaults
-        .iter()
-        .filter(|(supplier, _)| reaches(class, *supplier))
-        .collect();
-    candidates
-        .iter()
-        .find(|(supplier, _)| {
-            !candidates
-                .iter()
-                .any(|(other, _)| other != supplier && reaches(*other, *supplier))
-        })
-        .map(|(_, slot)| slot.clone())
-        .unwrap_or(Slot::Abstract)
-}
-
-/// Classes sorted so that everything a class is laid out FROM precedes it: its superclass, whose
-/// fields and vtable it extends, and — for an interface — the interfaces it extends, whose member
-/// numbering it inherits. A superclass that is not in this file (other than `kotlin.Any`) is
-/// declined.
-///
-/// This is a topological sort rather than a sort by hierarchy depth. Depth is not a valid key
-/// here: two classes can sit at the same recorded depth with one extending the other, once
-/// interfaces contribute their own depths to the same number, and laying out a subclass before its
-/// superclass reads a layout that does not exist yet.
-fn hierarchy_order(ir: &IrFile) -> Result<Vec<ClassId>, Unsupported> {
-    for class in &ir.classes {
-        if class.superclass != crate::types::wk::any()
-            && class.superclass != crate::types::wk::kotlin_enum()
-            && external_base(class.superclass).is_none()
-            && ir.class_id_by_name(class.superclass).is_none()
-        {
-            return Err(format!(
-                "a superclass declared outside this file (`{}` extends `{}`)",
-                class.fq_name(),
-                class.superclass.render()
-            ));
-        }
-    }
-    let requires = |id: ClassId| -> Vec<ClassId> {
-        let class = &ir.classes[id as usize];
-        let mut needed: Vec<ClassId> = ir.class_id_by_name(class.superclass).into_iter().collect();
-        if class.is_interface {
-            needed.extend(
-                class
-                    .interfaces
-                    .iter()
-                    .chain(
-                        class
-                            .supertypes
-                            .iter()
-                            .copied()
-                            .filter_map(Ty::obj_internal),
-                    )
-                    .filter_map(|name| ir.class_id_by_name(name)),
-            );
-        }
-        needed.retain(|&needed| needed != id);
-        needed
-    };
-    let mut placed = vec![false; ir.classes.len()];
-    let mut order = Vec::with_capacity(ir.classes.len());
-    // IR order within a level, so emission stays deterministic for a given source.
-    while order.len() < ir.classes.len() {
-        let mut progressed = false;
-        for id in 0..ir.classes.len() as ClassId {
-            if placed[id as usize] || !requires(id).iter().all(|&need| placed[need as usize]) {
-                continue;
-            }
-            placed[id as usize] = true;
-            order.push(id);
-            progressed = true;
-        }
-        if !progressed {
-            // A cycle among supertypes: not expressible in Kotlin, so this is a defect in the
-            // hierarchy the frontend handed over rather than something to lower.
-            return Err("a cycle among supertypes".to_string());
-        }
-    }
-    Ok(order)
 }
 
 fn round_up(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
 }
 
+/// The class at the top of `id`'s hierarchy in this file.
+fn root_class(ir: &IrFile, mut id: ClassId) -> &IrClass {
+    while let Some(parent) = ir.class_id_by_name(ir.classes[id as usize].superclass) {
+        id = parent;
+    }
+    &ir.classes[id as usize]
+}
+
+/// Lay out class `id` in memory over its shared `table`, whose superclass in this file (already
+/// laid out) is `parent`.
 fn layout_class(
     values: &NativeValueClasses,
     ir: &IrFile,
     id: ClassId,
-    superclass: Option<ClassId>,
+    table: &ClassTable,
     parent: Option<&ClassLayout>,
 ) -> Result<ClassLayout, Unsupported> {
     let class = &ir.classes[id as usize];
@@ -1033,426 +532,14 @@ fn layout_class(
         end = offset + kind.size();
     }
     let instance_size = round_up(end, 8);
-
     // ---- vtable ----
-    // Bridges against an INTERFACE's member numbers, which are placed program-wide rather than in
-    // this table. Filled below wherever an implementation and the interface's declaration disagree
-    // about representation, and read where the interface region is laid out.
-    // Inherited, because a subclass's vtable inherits the slot the bridge forwards through and
-    // would otherwise take the raw implementation at the interface's number.
-    let mut interface_bridges: HashMap<SlotKey, Slot> = parent
-        .map(|parent| parent.interface_bridges.clone())
-        .unwrap_or_default();
-    let (mut vtable, mut slots) = match (parent, external) {
-        (Some(parent), _) => (parent.vtable.clone(), parent.slots.clone()),
-        // A base the runtime owns fills `kotlin.Any`'s three slots its own way — a `Throwable`
-        // renders as `qualified.Name: message` rather than by identity — and a subclass inherits
-        // that table before putting anything of its own in it.
-        (None, Some(base)) => {
-            let (_, slots) = any_vtable();
-            (base.any_slots.map(Slot::Runtime).to_vec(), slots)
-        }
-        (None, None) => any_vtable(),
-    };
-    // The FUNCTION SLOT follows `kotlin.Any`'s three in every table, whether or not the class is a
-    // function. A class that becomes one lower in the hierarchy — `class B : A(), () -> String` —
-    // inherits its superclass's table, and a member of `A` already standing at that number would be
-    // overwritten by `invoke` while every call through `A` still expected it there. Reserved at the
-    // root, the number is never anyone else's.
-    if vtable.len() <= FUNCTION_SLOT as usize {
-        vtable.resize(FUNCTION_SLOT as usize + 1, Slot::Abstract);
-    }
-
-    // A class implementing MORE THAN ONE function type has more `invoke`s than there are fixed
-    // numbers to put them in. `KT_SLOT_INVOKE` is one number, and `object Test : () -> Unit,
-    // (Boolean) -> Unit` declares two bodies that both belong there — whichever took it, a call
-    // through the other function type would reach the wrong one (`intersectionTypeToFun`
-    // `InterfaceConversion.kt` answered `KK` for `OK`). Decline rather than pick.
-    {
-        let invokes = ir
-            .function_overrides
-            .get(&class.fq_name_id())
-            .into_iter()
-            .flatten()
-            .filter(|edge| {
-                edge.overridden_semantic_role
-                    == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
-                    && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
-            })
-            .map(|edge| edge.overridden_owner)
-            .collect::<std::collections::HashSet<_>>();
-        if invokes.len() > 1 {
-            return Err(format!(
-                "a class implementing {} function types at once (`{}`)",
-                invokes.len(),
-                class.fq_name()
-            ));
-        }
-    }
-
-    // A class naming a function type of more than 22 parameters among its supertypes. Kotlin
-    // declares `invoke` on `Function0` through `Function22` only, so a wider arity has no declaration
-    // for an override edge to reach: nothing says which method is the function's body, the function
-    // slot stays abstract, and every call through the type would reach it. Decline rather than pick
-    // a method by its name.
-    if let Some(arity) = class
-        .supertypes
+    let root = root_class(ir, id);
+    let mut vtable: Vec<Slot> = table
+        .vtable
         .iter()
-        .filter_map(|supertype| match supertype.non_null() {
-            Ty::Fun(signature) => Some(signature.params.len()),
-            _ => None,
-        })
-        .find(|&arity| arity > 22)
-    {
-        return Err(format!(
-            "a class implementing a function type of {arity} parameters (`{}`)",
-            class.fq_name()
-        ));
-    }
-
-    // Which methods are property accessors, so their slots are keyed by the property. Common
-    // lowering records bodyless abstract accessors too, so this boundary consumes exact function
-    // identities and never reconstructs a property relationship from an accessor spelling.
-    //
-    // Only where the property has no STORAGE of its own. A property with a field is read through
-    // that field — the accessor for it is synthesized below — so a method that happens to spell
-    // the accessor's name is a method and not that accessor. `class Bottom(val data: Int) : Top {
-    // override fun getData(): Int = data }` declares both, which is legal Kotlin and not even
-    // unusual; keying the method as the property's getter took it out of the method numbering
-    // entirely, so the base's slot kept the base's body and a call through the base jumped into
-    // whatever stood there.
-    let accessor_keys: HashMap<FunId, SlotKey> = class
-        .methods
-        .iter()
-        .filter_map(|&function| property_accessor_key(ir, id, function).map(|key| (function, key)))
+        .map(|slot| Slot::realized(slot.clone(), root))
         .collect();
-    let overridden_functions = overridden_functions(ir, class)?;
-    let overridden_properties = overridden_properties(ir, id, class)?;
 
-    for &fid in &class.methods {
-        let function = &ir.functions[fid as usize];
-        if function.dispatch_receiver.is_none() || function.is_static {
-            continue;
-        }
-        let entry = if function.body.is_some() {
-            Slot::Function(fid)
-        } else {
-            Slot::Abstract
-        };
-        let own_key = accessor_keys
-            .get(&fid)
-            .cloned()
-            .unwrap_or(SlotKey::Function(fid));
-
-        let mut override_edges = ir
-            .function_overrides
-            .get(&class.fq_name_id())
-            .into_iter()
-            .flatten()
-            .filter(|edge| {
-                // Either shape of implementation reference. An edge for a method the checked
-                // lowering built names it by CALLABLE and leaves `implementation_function` empty,
-                // which a pre-filter on that field alone used to drop — and dropping it is why
-                // `invoke` never took the slot by this route at all.
-                edge.implementation_function == Some(fid)
-                    || ir
-                        .checked_callable_functions
-                        .get(match &edge.implementation {
-                            ResolvedFunctionOverrideTarget::Module(callable) => callable,
-                            ResolvedFunctionOverrideTarget::External(_) => return false,
-                        })
-                        == Some(&fid)
-            });
-        let generated_any_replaces = [
-            (crate::ir::IrDataClassMemberRole::Equals, 0),
-            (crate::ir::IrDataClassMemberRole::HashCode, 1),
-            (crate::ir::IrDataClassMemberRole::ToString, 2),
-        ]
-        .into_iter()
-        .find_map(|(role, slot)| {
-            (ir.data_class_member(class.fq_name_id(), role) == Some(fid)).then_some(slot)
-        });
-        let override_any_replaces = override_edges
-            .clone()
-            .find_map(|edge| any_slot(edge.overridden_semantic_role));
-        if let (Some(generated), Some(overridden)) = (generated_any_replaces, override_any_replaces)
-        {
-            assert_eq!(
-                generated, overridden,
-                "a synthesized data-class role and its override edge must name the same Any slot"
-            );
-        }
-        let any_replaces = generated_any_replaces.or(override_any_replaces);
-        // The edge by which this method overrides a function classifier's `invoke`, if it does.
-        // Read once, because both the fixed slot below and the stand-in that covers a representation
-        // mismatch are the same question about the same exact edge.
-        let invoke_edge = override_edges.find(|edge| {
-            edge.overridden_semantic_role
-                == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
-        });
-        let replaces = match any_replaces {
-            Some(slot) => Some(slot),
-            // `invoke` on a class implementing a FUNCTION TYPE takes the one other fixed slot this
-            // target has: the runtime names it (`KT_SLOT_INVOKE`) and every caller through a
-            // function type reads it, a lambda's body included.
-            None => invoke_edge.and_then(|edge| external_invoke_slot(values, edge, function)),
-        };
-        // Whether the FUNCTION SLOT needs a stand-in for this method: it is an `invoke` over a
-        // function type that could not take the slot outright, because it does not carry
-        // references throughout. `replaces` is `None` for it, so the method takes a slot of its
-        // own below and the fixed number gets the converting entry once that slot is known.
-        let function_bridge = match (replaces, invoke_edge) {
-            (None, Some(_)) => Some(function.params.len()),
-            _ => None,
-        };
-        // What this method overrides, split by what each target owns: a class base owns a slot in
-        // this vtable to replace, while an interface base owns a number in the program-wide
-        // interface region, which is pointed at this method's slot once that slot is known.
-        // The interface bases this method satisfies, each with the declaration a BRIDGE against
-        // that number would wear — `None` where the representations already agree.
-        let mut interface_keys: Vec<(SlotKey, Option<FunId>)> = Vec::new();
-        let mut class_replaces = None;
-        // A base whose signature has a different REPRESENTATION keeps its own slot and gets a
-        // bridge placed in it once this method's slot is known. A class base can always take one;
-        // an interface base's number is program-wide rather than this vtable's, so one there is
-        // still declined.
-        let mut bridged: Vec<(u32, FunId)> = Vec::new();
-        // The same, for a property accessor whose base declares a different representation. It is
-        // kept apart because neither end need be a source accessor, so the entry carries the two
-        // property TYPES rather than two declaration ids.
-        let mut accessor_bridged: Vec<(u32, Ty, Ty, bool)> = Vec::new();
-        for &overridden in overridden_functions.get(&fid).into_iter().flatten() {
-            let matches = same_representation(values, function, &ir.functions[overridden as usize]);
-            let owner = ir.functions[overridden as usize]
-                .dispatch_receiver
-                .and_then(|owner| ir.class_id_by_name(owner))
-                .ok_or_else(|| {
-                    format!(
-                        "an override of a method declared outside this file (`{}`)",
-                        function.name
-                    )
-                })?;
-            let key = function_key(ir, owner, overridden);
-            if ir.classes[owner as usize].is_interface {
-                // The interface's number is placed program-wide rather than in this vtable, so
-                // there is no entry HERE to put a bridge in. The bridge is recorded against the
-                // interface's own key instead, and read where that number is filled — which is
-                // the arrangement a property accessor's interface bridge already uses.
-                interface_keys.push((key, (!matches).then_some(overridden)));
-                continue;
-            }
-            let slot = slots.get(&key).copied().ok_or_else(|| {
-                format!("an override with no slot to replace (`{}`)", function.name)
-            })?;
-            if matches {
-                class_replaces = Some(slot);
-            } else {
-                bridged.push((slot, overridden));
-            }
-        }
-        let replaces = match replaces {
-            Some(slot) => Some(slot),
-            None => match class_replaces {
-                Some(slot) => Some(slot),
-                None => match &own_key {
-                    SlotKey::Getter(target) | SlotKey::Setter(target) => {
-                        let setter = matches!(own_key, SlotKey::Setter(..));
-                        let implemented = property_type(ir, *target, &overridden_properties)
-                            .ok_or_else(|| {
-                                format!(
-                                    "a property accessor without a recorded semantic type (`{}.{}`)",
-                                    class.fq_name(),
-                                    function.name
-                                )
-                            })?;
-                        match overridden_property_slot(
-                            ir,
-                            &overridden_properties,
-                            &slots,
-                            *target,
-                            setter,
-                            &class.fq_name(),
-                        )? {
-                            // The base declares the property with a different REPRESENTATION, so
-                            // its slot cannot hold this accessor. This one takes a slot of its own
-                            // and the base's gets a bridge, exactly as a method's does.
-                            Some((slot, declared))
-                                if representation(values, declared)
-                                    != representation(values, implemented) =>
-                            {
-                                accessor_bridged.push((slot, declared, implemented, setter));
-                                None
-                            }
-                            Some((slot, _)) => Some(slot),
-                            None => None,
-                        }
-                    }
-                    _ => None,
-                },
-            },
-        };
-        let slot = match replaces {
-            Some(slot) => {
-                vtable[slot as usize] = entry;
-                slot
-            }
-            None => {
-                vtable.push(entry);
-                (vtable.len() - 1) as u32
-            }
-        };
-        slots.insert(own_key, slot);
-        // The FUNCTION SLOT, once this method's own is known — reserved when the table began, so
-        // the two are never the same number.
-        if let Some(arity) = function_bridge {
-            debug_assert_ne!(
-                slot, FUNCTION_SLOT,
-                "the stand-in forwards through its own number"
-            );
-            vtable[FUNCTION_SLOT as usize] = Slot::FunctionBridge {
-                arity,
-                target_slot: slot,
-                target: fid,
-            };
-        }
-        for (key, bridge) in interface_keys {
-            // The number wears the INTERFACE's signature and converts; the slot map still points
-            // at this method, because everything else that reads the map wants the
-            // implementation. Which of the two a caller gets is decided where the number is
-            // filled, and it prefers the bridge.
-            if let Some(declared) = bridge {
-                interface_bridges
-                    .entry(key.clone())
-                    .or_insert(Slot::Bridge {
-                        declared,
-                        // An INTERFACE's entry is a default an implementor inherits, and this
-                        // slot is the interface's own table index — not that implementor's.
-                        target_slot: (!class.is_interface).then_some(slot),
-                        target: fid,
-                    });
-            }
-            slots.insert(key, slot);
-        }
-        // The base keeps its own slot and its own signature; what changes is only what stands in
-        // it. Forwarding by DISPATCH rather than to this method by id is what keeps a further
-        // subclass's override reachable through the same base.
-        for (base_slot, declared) in bridged {
-            vtable[base_slot as usize] = Slot::Bridge {
-                declared,
-                target_slot: Some(slot),
-                target: fid,
-            };
-        }
-        for (base_slot, declared, implemented, setter) in accessor_bridged {
-            vtable[base_slot as usize] = Slot::AccessorBridge {
-                declared,
-                implemented,
-                setter,
-                target_slot: slot,
-            };
-        }
-    }
-
-    // Open or overriding properties with no source accessor still dispatch: synthesize the
-    // field access as a slot.
-    for (property_index, property) in class.properties.iter().enumerate() {
-        let target = local_property_target(ir, id, property_index);
-        let overrides = target.is_some_and(|target| overridden_properties.contains_key(&target));
-        // A property a SUBCLASS hands to an interface is dispatched through as well, whether or
-        // not it is `open` here: `class B : C, A<Int>()` implements `C.size` with the `size` that
-        // `A` declares plainly, and the interface's number has to reach it. Kotlin needs no
-        // `open` for that — B overrides nothing — so the declaration alone cannot say it.
-        if !property.is_open
-            && !overrides
-            && !target.is_some_and(|target| implements_an_interface(ir, target))
-        {
-            continue;
-        }
-        let target = target.ok_or_else(|| {
-            format!(
-                "a virtual property without a stable declaration identity (`{}.{}`)",
-                class.fq_name(),
-                property.name
-            )
-        })?;
-        let accessors = [
-            (false, property.getter.is_none()),
-            (true, property.is_var && property.setter.is_none()),
-        ];
-        for (setter, needed) in accessors {
-            if !needed {
-                continue;
-            }
-            let entry = match property.backing_field {
-                Some(field) if setter => Slot::FieldSetter { class: id, field },
-                Some(field) => Slot::FieldGetter { class: id, field },
-                None => Slot::Abstract,
-            };
-            let key = if setter {
-                SlotKey::Setter(target)
-            } else {
-                SlotKey::Getter(target)
-            };
-            let replaces = overridden_property_slot(
-                ir,
-                &overridden_properties,
-                &slots,
-                target,
-                setter,
-                &class.fq_name(),
-            )?;
-            // A base declaring a different REPRESENTATION keeps its slot and takes a bridge, as
-            // above: a synthesized field access is exactly as unusable through the base's carrier
-            // as a source accessor would be.
-            let bridged = match replaces {
-                Some((slot, declared))
-                    if representation(values, declared) != representation(values, property.ty) =>
-                {
-                    Some((slot, declared))
-                }
-                _ => None,
-            };
-            let slot = match replaces.filter(|_| bridged.is_none()) {
-                Some((slot, _)) => {
-                    vtable[slot as usize] = entry;
-                    slot
-                }
-                None => {
-                    vtable.push(entry);
-                    (vtable.len() - 1) as u32
-                }
-            };
-            if let Some((base_slot, declared)) = bridged {
-                vtable[base_slot as usize] = Slot::AccessorBridge {
-                    declared,
-                    implemented: property.ty,
-                    setter,
-                    target_slot: slot,
-                };
-            }
-            slots.insert(key, slot);
-            for overridden in overridden_properties.get(&target).into_iter().flatten() {
-                if !overridden.interface {
-                    continue;
-                }
-                let key = if setter {
-                    SlotKey::Setter(overridden.target)
-                } else {
-                    SlotKey::Getter(overridden.target)
-                };
-                slots.insert(key, slot);
-            }
-        }
-    }
-
-    register_inherited_interface_members(values, ir, class, &mut slots, &mut interface_bridges)?;
-
-    // Kotlin's `Enum.toString()` is the constant's name, where `kotlin.Any`'s is its identity. The
-    // runtime answers it, because the storage it reads belongs to `kotlin.Enum` — a base no file
-    // declares — rather than to this class.
-    if is_enum(class) && matches!(vtable[2], Slot::Runtime(_)) {
-        vtable[2] = Slot::Runtime("kt_enum_to_string");
-    }
     // An annotation INSTANCE is a value whose three `kotlin.Any` members Kotlin defines over its
     // members rather than by identity. A declaration that carries none of them is still one — the
     // language gives no way to write them — so there is nothing to preserve.
@@ -1464,20 +551,6 @@ fn layout_class(
         ] {
             vtable[slot] = Slot::AnnotationMember { class: id, member };
         }
-    }
-    // An `inner` class of a value class — Kotlin admits one only with its error suppressed — holds
-    // its outer instance as a value this layout has no storage decision for yet.
-    if class.is_inner_class
-        && class
-            .ctor_args
-            .iter()
-            .take(class.constructor_prefix_count as usize)
-            .any(|argument| values.unboxed(argument.ty).is_some())
-    {
-        return Err(format!(
-            "an inner class of a value class (`{}`)",
-            class.fq_name()
-        ));
     }
     // A value class's box answers `kotlin.Any`'s three by the value it holds. One the class
     // declares itself keeps its own, reached through the unboxing bridge `build` installs.
@@ -1493,550 +566,29 @@ fn layout_class(
             }
         }
     }
-
     Ok(ClassLayout {
-        superclass,
+        superclass: table.superclass,
         fields,
         fields_end: end,
         instance_size,
         reference_offsets,
         vtable,
-        slots,
-        interface_bridges,
+        slots: table.slots.clone(),
     })
-}
-
-/// Point an interface's member numbers at implementations this class INHERITS rather than declares.
-///
-/// Kotlin calls this a fake override: `class B : A(), I` satisfies `I.foo` with `A.foo`, and `A`
-/// knows nothing about `I`. `A.foo` already occupies a slot in this class's table — inherited with
-/// the rest of `A`'s — so what is missing is only the interface's number pointing at that slot,
-/// which nothing in the loop over the class's OWN members could have added. The frontend records
-/// the edge on the class that brings the two together, which is this one.
-fn register_inherited_interface_members(
-    values: &NativeValueClasses,
-    ir: &IrFile,
-    class: &IrClass,
-    slots: &mut HashMap<SlotKey, u32>,
-    interface_bridges: &mut HashMap<SlotKey, Slot>,
-) -> Result<(), Unsupported> {
-    let module_function = |target: &ResolvedFunctionOverrideTarget| match target {
-        ResolvedFunctionOverrideTarget::Module(callable) => {
-            ir.checked_callable_functions.get(callable).copied()
-        }
-        ResolvedFunctionOverrideTarget::External(_) => None,
-    };
-    for edge in ir
-        .function_overrides
-        .get(&class.fq_name_id())
-        .into_iter()
-        .flatten()
-    {
-        if !edge.overridden_is_interface {
-            continue;
-        }
-        let implementation = edge
-            .implementation_function
-            .or_else(|| module_function(&edge.implementation));
-        let (Some(implementation), Some(overridden)) =
-            (implementation, module_function(&edge.overridden))
-        else {
-            continue;
-        };
-        let (Some(owner), Some(interface)) = (
-            ir.class_id_by_name(edge.implementation_owner),
-            ir.class_id_by_name(edge.overridden_owner),
-        ) else {
-            continue;
-        };
-        let Some(&slot) = slots.get(&function_key(ir, owner, implementation)) else {
-            continue;
-        };
-        // The inherited method has to be CALLABLE through the interface's signature. `class F5 :
-        // F3, D4()` where `D4.foo(): Int` is what `D1.foo(): Any` gets is the case that says why:
-        // one returns an unboxed machine integer, the other a reference, and pointing the
-        // interface's number straight at it would have a caller read an integer as a pointer. The
-        // number takes a bridge wearing the interface's carrier instead — the same answer the
-        // property path below gives, and the same one the JVM gives by emitting a bridge method.
-        let key = function_key(ir, interface, overridden);
-        if !same_representation(
-            values,
-            &ir.functions[implementation as usize],
-            &ir.functions[overridden as usize],
-        ) {
-            interface_bridges
-                .entry(key.clone())
-                .or_insert(Slot::Bridge {
-                    declared: overridden,
-                    target_slot: Some(slot),
-                    target: implementation,
-                });
-        }
-        slots.entry(key).or_insert(slot);
-    }
-    for edge in ir
-        .property_overrides
-        .get(&class.fq_name_id())
-        .into_iter()
-        .flatten()
-    {
-        if !edge.overridden_is_interface {
-            continue;
-        }
-        // The same representation question the METHOD path above asks, for the same reason.
-        // `interface C<T> { var size: T }` implemented by `class B : C<Int>, A()` where `A`
-        // declares `var size: Int` erases the interface's accessors to a REFERENCE while the
-        // inherited ones are an unboxed machine integer. Aliasing the interface's number onto them
-        // would have a caller read that integer as a pointer; the number takes a bridge wearing
-        // the interface's carrier instead. A property is what `bridges/test7.kt` is about, which
-        // is why the method check did not catch it.
-        let bridged = representation(values, edge.implementation_type)
-            != representation(values, edge.declared_type);
-        for setter in [false, true] {
-            let (from, to) = if setter {
-                (
-                    SlotKey::Setter(edge.implementation),
-                    SlotKey::Setter(edge.overridden),
-                )
-            } else {
-                (
-                    SlotKey::Getter(edge.implementation),
-                    SlotKey::Getter(edge.overridden),
-                )
-            };
-            if let Some(&slot) = slots.get(&from) {
-                if bridged {
-                    interface_bridges
-                        .entry(to.clone())
-                        .or_insert(Slot::AccessorBridge {
-                            declared: edge.declared_type,
-                            implemented: edge.implementation_type,
-                            setter,
-                            target_slot: slot,
-                        });
-                }
-                slots.entry(to).or_insert(slot);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Whether any class in this file hands this exact property to an interface it implements.
-/// Such a property is reached through the interface's number and so has to dispatch, even where
-/// the declaration is neither `open` nor an override — the class that implements the interface
-/// declares nothing of its own.
-fn implements_an_interface(ir: &IrFile, target: ResolvedPropertyOverrideTarget) -> bool {
-    ir.property_overrides
-        .values()
-        .flatten()
-        .any(|edge| edge.overridden_is_interface && edge.implementation == target)
-}
-
-/// The stable property identity attached to one class-property coordinate by common lowering.
-pub(super) fn local_property_target(
-    ir: &IrFile,
-    owner: ClassId,
-    property: usize,
-) -> Option<ResolvedPropertyOverrideTarget> {
-    if let Some(target) = ir
-        .local_property_layouts
-        .iter()
-        .find_map(|(identity, layout)| match layout {
-            crate::ir::IrLocalPropertyLayout::Member {
-                class,
-                property: index,
-                ..
-            } if *class == owner
-                && usize::try_from(*index).expect("a property index fits usize") == property =>
-            {
-                Some(ResolvedPropertyOverrideTarget::Module(*identity))
-            }
-            _ => None,
-        })
-    {
-        return Some(target);
-    }
-
-    // Interface delegation generates an accessor body and an `IrProperty`, but no new source
-    // property declaration: its exact declaration identity is the interface target carried by
-    // the override edge. Bind the generated property back through those accessor identities. A
-    // name is deliberately insufficient here — unrelated interfaces may declare the same one.
-    let declaration = ir.classes.get(owner as usize)?.properties.get(property)?;
-    let owner = ir.classes[owner as usize].fq_name_id();
-    let mut found = None;
-    for edge in ir.property_overrides.get(&owner).into_iter().flatten() {
-        let realizes_getter = declaration
-            .getter
-            .is_some_and(|getter| edge.implementation_getter == Some(getter));
-        let realizes_setter = declaration
-            .setter
-            .is_some_and(|setter| edge.implementation_setter == Some(setter));
-        if !realizes_getter && !realizes_setter {
-            continue;
-        }
-        assert!(
-            found.is_none_or(|target| target == edge.implementation),
-            "one generated property cannot realize two property declarations"
-        );
-        found = Some(edge.implementation);
-    }
-    found
-}
-
-/// The exact property accessor realized by one common-IR function, if any.
-fn property_accessor_key(ir: &IrFile, owner: ClassId, function: FunId) -> Option<SlotKey> {
-    let owner_name = ir.classes[owner as usize].fq_name_id();
-    let mut found = None;
-    let mut record = |key: SlotKey| {
-        if let Some(existing) = &found {
-            assert_eq!(
-                existing, &key,
-                "one common-IR function cannot realize two property declarations"
-            );
-        } else {
-            found = Some(key);
-        }
-    };
-    for (identity, layout) in &ir.local_property_layouts {
-        let accessors = match layout {
-            crate::ir::IrLocalPropertyLayout::Member {
-                class,
-                getter,
-                setter,
-                ..
-            } if *class == owner => Some((*getter, *setter)),
-            crate::ir::IrLocalPropertyLayout::MemberExtension {
-                owner,
-                getter,
-                setter,
-                ..
-            } if *owner == owner_name => Some((Some(*getter), *setter)),
-            _ => None,
-        };
-        let Some((getter, setter)) = accessors else {
-            continue;
-        };
-        if getter == Some(function) {
-            record(SlotKey::Getter(ResolvedPropertyOverrideTarget::Module(
-                *identity,
-            )));
-        }
-        if setter == Some(function) {
-            record(SlotKey::Setter(ResolvedPropertyOverrideTarget::Module(
-                *identity,
-            )));
-        }
-    }
-    for edge in ir.property_overrides.get(&owner_name).into_iter().flatten() {
-        if edge.implementation_getter == Some(function) {
-            record(SlotKey::Getter(edge.implementation));
-        }
-        if edge.implementation_setter == Some(function) {
-            record(SlotKey::Setter(edge.implementation));
-        }
-    }
-    found
-}
-
-/// The slot key of a method of `owner`: a property accessor is keyed by its property.
-pub(super) fn function_key(ir: &IrFile, owner: ClassId, fid: FunId) -> SlotKey {
-    property_accessor_key(ir, owner, fid).unwrap_or(SlotKey::Function(fid))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PropertyOverrideSlot {
-    target: ResolvedPropertyOverrideTarget,
-    declared: Ty,
-    implemented: Ty,
-    interface: bool,
-}
-
-type PropertyOverrideSlots = HashMap<ResolvedPropertyOverrideTarget, Vec<PropertyOverrideSlot>>;
-
-fn property_type(
-    ir: &IrFile,
-    target: ResolvedPropertyOverrideTarget,
-    overrides: &PropertyOverrideSlots,
-) -> Option<Ty> {
-    overrides
-        .get(&target)
-        .and_then(|targets| targets.first())
-        .map(|edge| edge.implemented)
-        .or_else(|| match target {
-            ResolvedPropertyOverrideTarget::Module(property) => ir
-                .checked_properties
-                .get(&property)
-                .map(|property| property.ty),
-            ResolvedPropertyOverrideTarget::External(_) => None,
-        })
-}
-
-/// The slot an overriding property accessor replaces, found through the overridden property's
-/// declaring class.
-fn overridden_property_slot(
-    ir: &IrFile,
-    overridden: &PropertyOverrideSlots,
-    slots: &HashMap<SlotKey, u32>,
-    implementation: ResolvedPropertyOverrideTarget,
-    setter: bool,
-    class_name: &str,
-) -> Result<Option<(u32, Ty)>, Unsupported> {
-    // Only a CLASS base owns a slot to replace. An interface base owns a number in the program-wide
-    // interface region instead, and that is pointed at this property afterwards rather than
-    // replaced here.
-    let Some(overridden) = overridden
-        .get(&implementation)
-        .and_then(|targets| targets.iter().find(|target| !target.interface))
-    else {
-        return Ok(None);
-    };
-    let key = if setter {
-        SlotKey::Setter(overridden.target)
-    } else {
-        SlotKey::Getter(overridden.target)
-    };
-    // A `val` overridden by a `var` adds a setter the base never had: a new slot, not an override.
-    if setter && !slots.contains_key(&key) {
-        return Ok(None);
-    }
-    // The base's declared type travels on the exact override edge, because whether the slot can simply be
-    // REPLACED depends on it: a base declaring `var size: T` carries a reference where an
-    // overriding `var size: Int` carries a machine integer, and replacing then has a caller
-    // reading the base's slot read that integer as a pointer.
-    slots
-        .get(&key)
-        .copied()
-        .map(|slot| (slot, overridden.declared))
-        .map(Some)
-        .ok_or_else(|| {
-            format!(
-                "a property override with no slot to replace (`{class_name}.{}`)",
-                property_name(ir, implementation)
-            )
-        })
-}
-
-/// The fixed slot a dependency override occupies, for the one dependency member that has one.
-///
-/// `kotlin.Function{N}.invoke` is it: a function value's body sits right after `kotlin.Any`'s
-/// three, the runtime names that number itself (`KT_SLOT_INVOKE`), and every caller through a
-/// function type reads it. A class implementing a function type puts its `invoke` there for the
-/// same reason a lambda does.
-///
-/// Only when every operand and the result are REFERENCES. A caller through the function type
-/// passes and reads references, and an `invoke(x: Int): Int` carries machine integers — that one
-/// needs a bridge and declines instead of being pointed at.
-/// The vtable number every function value's body occupies, which the runtime names as
-/// `KT_SLOT_INVOKE`: right after `kotlin.Any`'s three.
-pub(super) const FUNCTION_SLOT: u32 = 3;
-
-fn external_invoke_slot(
-    values: &NativeValueClasses,
-    edge: &crate::ir::IrFunctionOverride,
-    function: &IrFunction,
-) -> Option<u32> {
-    if edge.overridden_semantic_role != Some(crate::types::SemanticCallRole::KotlinFunctionInvoke) {
-        return None;
-    }
-    let reference = |ty: Ty| c_kind(values, ty) == CKind::Ref;
-    (function.params.iter().copied().all(reference) && reference(function.ret))
-        .then_some(FUNCTION_SLOT)
-}
-
-/// Implementation method → the method it overrides, for the methods `class` declares. Both ends
-/// must be functions of this file.
-fn overridden_functions(
-    ir: &IrFile,
-    class: &IrClass,
-) -> Result<HashMap<FunId, Vec<FunId>>, Unsupported> {
-    let mut map: HashMap<FunId, Vec<FunId>> = HashMap::new();
-    let Some(overrides) = ir.function_overrides.get(&class.fq_name_id()) else {
-        return Ok(map);
-    };
-    for edge in overrides {
-        let implementation = match (&edge.implementation, edge.implementation_function) {
-            (_, Some(fid)) => Some(fid),
-            (ResolvedFunctionOverrideTarget::Module(callable), None) => {
-                ir.checked_callable_functions.get(callable).copied()
-            }
-            (ResolvedFunctionOverrideTarget::External(_), None) => None,
-        };
-        let Some(implementation) = implementation else {
-            continue;
-        };
-        let function = &ir.functions[implementation as usize];
-        match &edge.overridden {
-            ResolvedFunctionOverrideTarget::Module(callable) => {
-                match ir.checked_callable_functions.get(callable) {
-                    Some(&overridden) => {
-                        // EVERY target, not just the nearest: one method can override its
-                        // superclass's and an interface's at once, and the two want different
-                        // things — one slot replaced, one interface number pointed here.
-                        let targets = map.entry(implementation).or_default();
-                        if !targets.contains(&overridden) {
-                            targets.push(overridden);
-                        }
-                    }
-                    None => {
-                        return Err(format!(
-                            "an override of a method declared in another file (`{}.{}`)",
-                            class.fq_name(),
-                            function.name
-                        ))
-                    }
-                }
-            }
-            ResolvedFunctionOverrideTarget::External(_) => {
-                // An override of a DEPENDENCY method takes a slot of its own, like any method
-                // this class declares freshly: a caller naming the class reaches it, and a caller
-                // naming the dependency type declines at the call site, where the type it named
-                // is still in sight.
-                //
-                // `invoke` is the exception, because it is the one dependency member this target
-                // already gives a FIXED number: a function value's body sits right after
-                // `kotlin.Any`'s three and the runtime names that number itself
-                // (`KT_SLOT_INVOKE`), so every caller through a function type reads it rather
-                // than asking. One that cannot take that slot outright — its operands are not all
-                // references — gets a `Slot::FunctionBridge` there instead, placed where the
-                // method's own slot is known; nothing is recorded here.
-            }
-        }
-    }
-    Ok(map)
-}
-
-/// Exact implementation property → the declarations it overrides in this file.
-fn overridden_properties(
-    ir: &IrFile,
-    id: ClassId,
-    class: &IrClass,
-) -> Result<PropertyOverrideSlots, Unsupported> {
-    let mut map: PropertyOverrideSlots = HashMap::new();
-    let Some(overrides) = ir.property_overrides.get(&class.fq_name_id()) else {
-        return Ok(map);
-    };
-    for edge in overrides {
-        let implemented_here = edge.implementation_getter.is_some()
-            || edge.implementation_setter.is_some()
-            || match edge.implementation {
-                ResolvedPropertyOverrideTarget::Module(property) => ir
-                    .checked_properties
-                    .get(&property)
-                    .is_some_and(|property| property.class == Some(id)),
-                ResolvedPropertyOverrideTarget::External(_) => false,
-            };
-        if !implemented_here {
-            continue;
-        }
-        // An override of a property declared OUTSIDE this file takes a slot of its own, like any
-        // property this class declares freshly: a caller naming the class reaches it, and a caller
-        // naming the dependency type declines at the call site, where the type it named is still
-        // in sight. There is no base slot here to replace, and nothing in this file numbers one.
-        if !matches!(edge.overridden, ResolvedPropertyOverrideTarget::Module(_)) {
-            continue;
-        }
-        // Every target: a property can override a superclass's and an interface's at once, and
-        // the direct base's edge (depth 1) is the one whose slot is replaced, so it goes first.
-        let overridden = PropertyOverrideSlot {
-            target: edge.overridden,
-            declared: edge.declared_type,
-            implemented: edge.implementation_type,
-            interface: edge.overridden_is_interface,
-        };
-        let targets = map.entry(edge.implementation).or_default();
-        if !targets.contains(&overridden) {
-            if edge.depth == 1 {
-                targets.insert(0, overridden);
-            } else {
-                targets.push(overridden);
-            }
-        }
-    }
-    Ok(map)
-}
-
-/// Whether an override is callable through the overridden slot's signature as it stands.
-///
-/// Kotlin permits a covariant return (`A` → `B`, both references), which changes nothing here, and
-/// generic specialization (`T` → `Int`), which changes the machine representation. The second needs
-/// a [`Slot::Bridge`] in the base's slot; this is the question that says which.
-fn same_representation(
-    values: &NativeValueClasses,
-    implementation: &IrFunction,
-    overridden: &IrFunction,
-) -> bool {
-    implementation.params.len() == overridden.params.len()
-        && implementation
-            .params
-            .iter()
-            .zip(&overridden.params)
-            .all(|(a, b)| representation(values, *a) == representation(values, *b))
-        && representation(values, implementation.ret) == representation(values, overridden.ret)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrField, IrProperty, IrfFlags};
+    use crate::backend::class_tables::fixtures::{
+        add_method, class, field, function, record_override, record_semantic_override,
+        stored_property,
+    };
+    use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
+    use crate::ir::IrProperty;
 
     fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
         super::build(ir, &NativeValueClasses::default())
-    }
-
-    fn function(name: &str, owner: &str, params: Vec<Ty>, ret: Ty, abstract_: bool) -> IrFunction {
-        IrFunction {
-            name: name.to_string(),
-            params,
-            ret,
-            body: if abstract_ { None } else { Some(0) },
-            is_static: false,
-            dispatch_receiver: Some(crate::types::type_name(owner)),
-            param_checks: Vec::new(),
-        }
-    }
-
-    fn field(name: &str, ty: Ty) -> IrField {
-        IrField {
-            name: name.to_string(),
-            ty,
-            // A debug coordinate for a primary-constructor store, which a synthesized fixture has
-            // no source line for; zero is what "none retained" is spelled as.
-            constructor_store_line: 0,
-            type_param: None,
-            default: None,
-            flags: IrfFlags::default(),
-        }
-    }
-
-    fn stored_property(name: &str, ty: Ty, field: u32) -> IrProperty {
-        IrProperty {
-            name: name.to_string(),
-            context_params: Vec::new(),
-            source_order: 0,
-            decl_line: 0,
-            ty,
-            type_params: Vec::new(),
-            visibility: crate::types::Visibility::Public,
-            return_value_status: Default::default(),
-            annotations: Box::new([]),
-            initializer: None,
-            has_constant_initializer: false,
-            storage_ty: None,
-            backing_field: Some(field),
-            is_var: false,
-            is_open: false,
-            modifiers: Default::default(),
-            delegate_field: None,
-            is_private: false,
-            setter_visibility: crate::types::Visibility::Public,
-            getter: None,
-            setter: None,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
-            needs_access_bridge: false,
-            accessor_annotations: Default::default(),
-        }
     }
 
     #[test]
@@ -2052,117 +604,6 @@ mod tests {
         let class = ir.add_class(value);
 
         assert_eq!(value_field(&ir, class), Ok(1));
-    }
-
-    fn class(ir: &mut IrFile, name: &str, superclass: &str, depth: u32) -> ClassId {
-        let mut class = IrClass::synthetic(crate::types::type_name(name));
-        class.superclass = crate::types::type_name(superclass);
-        class.is_open = true;
-        let id = ir.classes.len() as ClassId;
-        ir.classes.push(class);
-        let mut applied = vec![crate::ir::IrAppliedClassifier {
-            classifier: crate::types::type_name(name),
-            applied: Ty::obj(name),
-            depth: 0,
-        }];
-        if depth > 0 {
-            applied.push(crate::ir::IrAppliedClassifier {
-                classifier: crate::types::type_name(superclass),
-                applied: Ty::obj(superclass),
-                depth,
-            });
-        }
-        ir.classifier_hierarchies
-            .insert(crate::types::type_name(name), applied);
-        id
-    }
-
-    fn add_method(ir: &mut IrFile, class: ClassId, function: IrFunction) -> FunId {
-        let fid = ir.functions.len() as FunId;
-        ir.functions.push(function);
-        ir.classes[class as usize].methods.push(fid);
-        fid
-    }
-
-    fn record_override(ir: &mut IrFile, class: ClassId, implementation: FunId, overridden: FunId) {
-        // The frontend records overrides by callable identity; the test uses the function index
-        // as that identity, which is what `checked_callable_functions` maps back.
-        use crate::fir::CallableId;
-        let implementation_id = CallableId::from_raw(1000 + implementation);
-        let overridden_id = CallableId::from_raw(1000 + overridden);
-        ir.checked_callable_functions
-            .insert(implementation_id, implementation);
-        ir.checked_callable_functions
-            .insert(overridden_id, overridden);
-        let name = ir.functions[implementation as usize].name.clone();
-        let owner = ir.classes[class as usize].fq_name_id();
-        ir.function_overrides
-            .entry(owner)
-            .or_default()
-            .push(crate::ir::IrFunctionOverride {
-                implementation: ResolvedFunctionOverrideTarget::Module(implementation_id),
-                implementation_function: None,
-                implementation_owner: owner,
-                overridden: ResolvedFunctionOverrideTarget::Module(overridden_id),
-                overridden_owner: ir.functions[overridden as usize]
-                    .dispatch_receiver
-                    .expect("instance method"),
-                overridden_semantic_role: None,
-                collection_barrier: None,
-                overridden_is_interface: false,
-                name,
-                declared_parameters: Vec::new(),
-                declared_result: Ty::Unit,
-                applied_parameters: Vec::new(),
-                applied_result: Ty::Unit,
-                implementation_parameters: Vec::new(),
-                implementation_parameter_identities: Vec::new(),
-                overridden_parameter_identities: Vec::new(),
-                implementation_result: Ty::Unit,
-                suspend: false,
-                has_kotlin_superclass_override: false,
-                depth: 1,
-            });
-    }
-
-    fn record_semantic_override(
-        ir: &mut IrFile,
-        class: ClassId,
-        implementation: FunId,
-        role: crate::types::SemanticCallRole,
-    ) {
-        use crate::fir::{CallableId, ExternalCallableId};
-        let owner = ir.classes[class as usize].fq_name_id();
-        let name = ir.functions[implementation as usize].name.clone();
-        ir.function_overrides
-            .entry(owner)
-            .or_default()
-            .push(crate::ir::IrFunctionOverride {
-                implementation: ResolvedFunctionOverrideTarget::Module(CallableId::from_raw(
-                    3000 + implementation,
-                )),
-                implementation_function: Some(implementation),
-                implementation_owner: owner,
-                overridden: ResolvedFunctionOverrideTarget::External(ExternalCallableId::from_raw(
-                    2,
-                )),
-                overridden_owner: crate::types::type_name("fixture/Root"),
-                overridden_semantic_role: Some(role),
-                collection_barrier: None,
-                overridden_is_interface: false,
-                name,
-                declared_parameters: Vec::new(),
-                declared_result: Ty::Unit,
-                applied_parameters: Vec::new(),
-                applied_result: Ty::Unit,
-                implementation_parameters: Vec::new(),
-                implementation_parameter_identities: Vec::new(),
-                overridden_parameter_identities: Vec::new(),
-                implementation_result: Ty::Unit,
-                suspend: false,
-                has_kotlin_superclass_override: false,
-                depth: 1,
-            });
     }
 
     #[test]

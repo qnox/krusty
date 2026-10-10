@@ -5,7 +5,8 @@ use crate::fir::ResolvedParameterIdentity;
 use crate::libraries::{ExternalCallableKind, FnKind, FunctionInfo, KlibDeclarationSignature};
 use crate::metadata::id_signature::{package_function_signature, MetadataContainer};
 use crate::metadata::semantic::{
-    KotlinFunction, KotlinFunctionTypeShape, KotlinType, KotlinTypeParameter, KotlinTypeParameterId,
+    KotlinFunction, KotlinFunctionTypeShape, KotlinProperty, KotlinType, KotlinTypeParameter,
+    KotlinTypeParameterId,
 };
 use crate::types::{
     type_name, ContextParameterKind, SemanticCallableOwner, Ty, TypeVariance, Visibility,
@@ -31,16 +32,20 @@ fn function(name: &str, receiver: Option<KotlinType>, params: Vec<KotlinType>) -
         formals: Vec::new(),
         vararg: None,
         visibility: Visibility::Public,
+        modality: crate::metadata::semantic::KotlinModality::Final,
         is_inline: false,
         has_reified_type_params: false,
         is_suspend: false,
         is_operator: false,
         is_infix: false,
         is_expect: false,
+        is_external: false,
         is_static: false,
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        return_value_status: Default::default(),
+        contract: None,
     }
 }
 
@@ -56,6 +61,66 @@ fn package_of(functions: Vec<KotlinFunction>) -> KotlinPackage {
         functions,
         ..KotlinPackage::default()
     }
+}
+
+#[test]
+fn a_package_type_alias_is_published_from_its_metadata_declaration() {
+    let upper = Ty::nullable(Ty::obj("kotlin/Any"));
+    let parameter = Ty::ty_param("T", upper);
+    let expansion = Ty::fun(vec![parameter], Ty::String);
+    let fragment = crate::metadata::klib_fragment::package_fragment(
+        &["fixture"],
+        &crate::metadata::klib_fragment::KlibFileMembers {
+            file_name: "aliases.kt".to_string(),
+            functions: Vec::new(),
+            properties: Vec::new(),
+            constants: Vec::new(),
+            aliases: vec![crate::metadata::builder::TypeAliasMeta {
+                name: "Transform".to_string(),
+                formals: vec!["T".to_string()],
+                expansion,
+                visibility: Visibility::Public,
+                expansion_spelling: Default::default(),
+                decl_order: 0,
+            }],
+        },
+        &[],
+        true,
+    );
+    let package = crate::metadata::semantic::parse_package_fragment_checked(&fragment)
+        .expect("the alias fragment decodes");
+    let libraries = KlibLibraries::from_packages(vec![(segments(&["fixture"]), package)])
+        .expect("the alias package is publishable");
+
+    let identity = type_name("fixture/Transform");
+    let target = type_name("kotlin/Function1");
+    let symbols = libraries.symbols(SymbolNamespace::Package(type_name("fixture")), "Transform");
+    assert_eq!(symbols.classifier_name, Some(target));
+    assert!(symbols.classifier.is_some());
+    assert_eq!(
+        symbols.classifier_declaration,
+        Some(crate::libraries::ClassifierDeclaration::TypeAlias(
+            crate::libraries::AliasExpansion {
+                identity,
+                target,
+                formals: vec!["T".to_string()],
+                expansion,
+                expansion_spelling: Default::default(),
+            }
+        ))
+    );
+    assert_eq!(
+        <KlibLibraries as crate::libraries::SemanticPlatform>::type_alias_expansion(
+            &libraries, identity,
+        ),
+        Some(crate::libraries::AliasExpansion {
+            identity,
+            target,
+            formals: vec!["T".to_string()],
+            expansion,
+            expansion_spelling: Default::default(),
+        })
+    );
 }
 
 fn println() -> KotlinFunction {
@@ -152,6 +217,20 @@ fn a_top_level_function_resolves_with_its_semantic_signature() {
     assert_eq!(println.callable.declaration_owner, Some(kotlin_io));
     assert_eq!(println.visibility, Visibility::Public);
     assert_eq!(println.context_count, 0);
+}
+
+#[test]
+fn a_top_level_function_publishes_its_return_value_status() {
+    let mut declaration = function("answer", None, Vec::new());
+    declaration.return_value_status = crate::types::ReturnValueStatus::MustUse;
+    let libraries =
+        KlibLibraries::from_packages(vec![(segments(&["p"]), package_of(vec![declaration]))])
+            .expect("the function is signable");
+    let answer = single_function(&libraries, "p", "answer");
+    assert_eq!(
+        answer.flags.return_value_status,
+        Some(crate::types::ReturnValueStatus::MustUse)
+    );
 }
 
 #[test]
@@ -340,15 +419,30 @@ fn realized_parameters(
 
 #[test]
 fn a_klib_function_is_published_without_a_compiler_intrinsic() {
-    let libraries = kotlin_io();
-    let println = single_function(&libraries, "kotlin/io", "println");
-    assert_eq!(println.callable.compiler_intrinsic, None);
-    assert_eq!(println.callable.semantic_role, None);
+    let mut greet = function("greet", None, vec![class("kotlin/Any", true)]);
+    greet.param_names = vec!["message".to_owned()];
+    let libraries =
+        KlibLibraries::from_packages(vec![(segments(&["kotlin", "io"]), package_of(vec![greet]))])
+            .expect("an in-memory kotlin.io package is signable");
+    let greet = single_function(&libraries, "kotlin/io", "greet");
+    assert_eq!(greet.callable.compiler_intrinsic, None);
+    assert_eq!(greet.callable.semantic_role, None);
     let realization = libraries
-        .external_callable(println.callable.external_identity.expect("identity"))
+        .external_callable(greet.callable.external_identity.expect("identity"))
         .expect("realization");
     assert_eq!(realization.callable.compiler_intrinsic, None);
     assert_eq!(realization.callable.semantic_role, None);
+}
+
+#[test]
+fn a_builtin_klib_function_carries_its_shared_compiler_operation() {
+    let libraries = kotlin_io();
+    let println = single_function(&libraries, "kotlin/io", "println");
+    assert_eq!(
+        println.callable.compiler_intrinsic,
+        Some(crate::libraries::CompilerIntrinsic::Println)
+    );
+    assert_eq!(println.callable.semantic_role, None);
 }
 
 #[test]
@@ -374,6 +468,133 @@ fn a_klib_delegate_function_keeps_its_serialized_body_authoritative() {
             &property_reference_get_value()
         ))
     );
+}
+
+#[test]
+fn same_spelled_function_and_property_type_parameters_keep_distinct_identities() {
+    let parameter = |id| KotlinTypeParameter {
+        id: KotlinTypeParameterId(id),
+        name: "T".to_owned(),
+        bounds: Vec::new(),
+        variance: TypeVariance::Invariant,
+        only_input: false,
+        reified: false,
+    };
+    let parameter_ty = |id| KotlinType::Param {
+        name: "T".to_owned(),
+        id: KotlinTypeParameterId(id),
+        nullable: false,
+    };
+    let mut identity = function("identity", None, vec![parameter_ty(11)]);
+    identity.ret = parameter_ty(11);
+    identity.formals = vec![parameter(11)];
+    identity.contract = Some(std::sync::Arc::new(crate::contracts::Contract {
+        effects: vec![crate::contracts::Effect::ConditionalReturns {
+            returns: crate::contracts::ReturnsValue::Any,
+            conclusion: crate::contracts::Condition::IsType {
+                param: crate::contracts::ParamRef::Param(0),
+                ty: crate::contracts::ConditionType::Metadata(Ty::ty_param(
+                    "T",
+                    Ty::nullable(Ty::obj("kotlin/Any")),
+                )),
+                negated: false,
+            },
+        }],
+    }));
+    let property = KotlinProperty {
+        name: "last".to_owned(),
+        receiver: Some(KotlinType::Class {
+            internal: "kotlin/collections/List".to_owned(),
+            args: vec![parameter_ty(37)],
+            nullable: false,
+            shape: KotlinFunctionTypeShape::default(),
+        }),
+        context_params: Vec::new(),
+        ty: parameter_ty(37),
+        formals: vec![parameter(37)],
+        visibility: Visibility::Public,
+        modality: crate::metadata::semantic::KotlinModality::Final,
+        setter_visibility: Visibility::Public,
+        setter_parameter_name: None,
+        is_var: false,
+        is_const: false,
+        is_expect: false,
+        is_static: false,
+        context_count: 0,
+        context_param_names: Vec::new(),
+        context_kinds: Vec::new(),
+        constant: None,
+        annotations: Vec::new(),
+        return_value_status: Default::default(),
+    };
+    let libraries = KlibLibraries::from_packages(vec![(
+        segments(&["p"]),
+        KotlinPackage {
+            functions: vec![identity],
+            properties: vec![property],
+            ..KotlinPackage::default()
+        },
+    )])
+    .expect("both generic declarations are signable");
+
+    let identity = single_function(&libraries, "p", "identity");
+    let symbols = libraries.symbols(SymbolNamespace::Package(type_name("p")), "last");
+    let [property] = symbols.callables.properties() else {
+        panic!("expected one generic property");
+    };
+    let function_formal = identity
+        .generic_sig
+        .as_ref()
+        .expect("generic function signature")
+        .formals[0]
+        .as_str();
+    let property_formal = property.formals[0].as_str();
+    assert_ne!(function_formal, property_formal);
+    assert_eq!(
+        crate::types::type_parameter_source_name(function_formal),
+        "T"
+    );
+    assert_eq!(
+        crate::types::type_parameter_source_name(property_formal),
+        "T"
+    );
+    assert_eq!(
+        identity.semantic_params().as_ref(),
+        [Ty::ty_param(
+            function_formal,
+            Ty::nullable(Ty::obj("kotlin/Any"))
+        )]
+    );
+    assert_eq!(
+        identity.callable.ret,
+        Ty::ty_param(function_formal, Ty::nullable(Ty::obj("kotlin/Any")))
+    );
+    assert_eq!(
+        property.ty,
+        Ty::ty_param(property_formal, Ty::nullable(Ty::obj("kotlin/Any")))
+    );
+    assert_eq!(
+        property.receiver.expect("extension receiver").type_args(),
+        [property.ty]
+    );
+    let contract = identity
+        .callable
+        .contract
+        .as_deref()
+        .expect("the provider publishes the function contract");
+    let [crate::contracts::Effect::ConditionalReturns { conclusion, .. }] =
+        contract.effects.as_slice()
+    else {
+        panic!("expected the generic conditional return effect");
+    };
+    let crate::contracts::Condition::IsType {
+        ty: crate::contracts::ConditionType::Metadata(Ty::TyParam(contract_formal, _)),
+        ..
+    } = conclusion
+    else {
+        panic!("expected the generic is-type conclusion");
+    };
+    assert_eq!(*contract_formal, function_formal);
 }
 
 #[test]
@@ -472,3 +693,9 @@ fn a_declaration_without_a_role_per_context_parameter_is_rejected() {
          function contextual declares 1 context parameters with 0 roles among 1 parameters"
     );
 }
+
+mod analysis;
+mod builtin_operations;
+mod classes;
+mod external_coverage;
+mod properties;

@@ -12,7 +12,7 @@ use crate::fir::{
 };
 use crate::ir::{
     Callee, IrCheckedOperation, IrClassifierKind, IrExpr, IrFile, IrHeaderAnnotation,
-    IrModuleCallable, IrModuleClassifier, IrModuleProperty, IrModuleSource,
+    IrModuleCallable, IrModuleClassifier, IrModuleConstructor, IrModuleProperty, IrModuleSource,
 };
 use crate::types::TypeName;
 
@@ -330,6 +330,67 @@ fn publish_classifier(
     Ok(())
 }
 
+/// Copy one module constructor's declaration facts. The declaring file and every constructing
+/// file publish the record through this one function, from the same checked declaration.
+fn publish_constructor(
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+    constructor: DeclarationId,
+) -> Result<(), FirFileLoweringFailure> {
+    if ir.module_constructions.records.contains_key(&constructor) {
+        return Ok(());
+    }
+    let missing = || FirFileLoweringFailure::MissingCallable(constructor);
+    let callable = index
+        .callable_for_declaration(constructor)
+        .ok_or_else(missing)?;
+    let header = index.declaration_header(constructor).ok_or_else(missing)?;
+    let owner = index
+        .declaration_anchor(constructor)
+        .ok_or_else(missing)?
+        .owner
+        .ok_or_else(missing)?;
+    // A classifier with no module header is local to the body that declares it: no other file can
+    // name it, so it has no module constructor record and no file realizes one.
+    let Some(owner) = index.classifier_header(owner) else {
+        return Ok(());
+    };
+    let owner_flags = index
+        .declaration_header(owner.declaration)
+        .ok_or(FirFileLoweringFailure::MissingModuleClassifier(
+            owner.classifier,
+        ))?
+        .flags;
+    let outer = if owner_flags.has(DeclarationFlags::INNER) {
+        let outer = index.enclosing_owner_classifier(owner.declaration).ok_or(
+            FirFileLoweringFailure::MissingModuleClassifier(owner.classifier),
+        )?;
+        Some(outer.classifier)
+    } else {
+        None
+    };
+    let parameters = index
+        .signature(constructor)
+        .ok_or_else(missing)?
+        .parameters
+        .iter()
+        .map(|parameter| crate::types::stored_value_ty(parameter.get()))
+        .collect();
+    ir.module_constructions.records.insert(
+        constructor,
+        IrModuleConstructor {
+            owner: owner.classifier,
+            owner_flags,
+            flags: header.flags,
+            visibility: header.visibility,
+            context_parameter_count: callable.shape.context_parameter_count,
+            parameters,
+            outer,
+        },
+    );
+    Ok(())
+}
+
 pub(super) fn publish_referenced(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
@@ -408,10 +469,10 @@ pub(super) fn publish_referenced(
                     callables.insert(target);
                 }
             }
-            IrExpr::SingletonValue { classifier } => {
-                if index.classifier_declaration(*classifier).is_some() {
-                    classifiers.insert(*classifier);
-                }
+            IrExpr::SingletonValue { classifier }
+                if index.classifier_declaration(*classifier).is_some() =>
+            {
+                classifiers.insert(*classifier);
             }
             _ => {}
         }
@@ -456,6 +517,20 @@ pub(super) fn publish_referenced(
     }
     for classifier in classifiers {
         publish_classifier(index, ir, classifier)?;
+    }
+    // Both sides of a module construction: what this file constructs, and what it declares and
+    // therefore exports.
+    let mut constructors = ir
+        .module_constructions
+        .selected
+        .values()
+        .chain(ir.checked_constructor_bodies.keys())
+        .copied()
+        .collect::<Vec<_>>();
+    constructors.sort_unstable_by_key(|constructor| constructor.raw());
+    constructors.dedup();
+    for constructor in constructors {
+        publish_constructor(index, ir, constructor)?;
     }
     Ok(())
 }

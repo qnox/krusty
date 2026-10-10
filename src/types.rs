@@ -20,8 +20,10 @@ mod spelling;
 pub use annotation_targets::{
     AnnotationTargets, DeclaredTargetPolicies, KotlinTarget, PropertyAnnotationSite,
 };
+mod equality_mode;
 mod substitute;
 mod type_parameter_identity;
+pub use equality_mode::EqualityMode;
 
 pub(crate) use substitute::{
     ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_alias_expansion, ty_subst_all,
@@ -39,7 +41,7 @@ use std::fmt;
 use std::sync::OnceLock;
 pub(crate) use type_parameter_identity::{
     call_site_type_variable, constructor_type_parameter, declaration_type_parameter,
-    postponed_call_type_variable, type_parameter_source_name,
+    metadata_type_parameter, postponed_call_type_variable, type_parameter_source_name,
 };
 
 /// Compile-time policy for Kotlin's `assert` operation. Every backend must guard, retain, or elide
@@ -50,21 +52,6 @@ pub enum AssertionMode {
     Runtime,
     AlwaysEnabled,
     AlwaysDisabled,
-}
-
-/// The semantic mode selected when the frontend checks a source `==` or `!=`.
-///
-/// Inline substitution preserves this decision even when it changes the operands' physical
-/// representation. Common IR carries the mode and each backend realizes it without reclassifying
-/// the substituted operand types.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EqualityMode {
-    /// Kotlin structural equality, including boxed floating-point `equals` semantics.
-    Structural,
-    /// Primitive IEEE-754 equality of a `Float` or `Double` pair.
-    Ieee754,
-    /// Primitive equality of scalar operands that are not a floating-point pair.
-    Primitive,
 }
 
 /// Semantic shape of one compiler-provided Kotlin array factory.

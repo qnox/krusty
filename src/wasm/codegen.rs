@@ -5,6 +5,7 @@
 //! generator has not been taught declines the compilation with a diagnostic naming the construct,
 //! and a declined compilation emits nothing.
 
+mod classes;
 mod lower;
 
 use crate::backend::{Artifact, Backend, CheckedIrFile, Entry, BOX_RESULT_FRAME};
@@ -78,6 +79,13 @@ impl Started {
 impl Backend for WasmBackend {
     type State = WasmModule;
 
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+        match self.target {
+            WasmTarget::Js => crate::compilation_target::CompilationTarget::WasmJs,
+            WasmTarget::Wasi => crate::compilation_target::CompilationTarget::WasmWasi,
+        }
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -102,14 +110,19 @@ impl Backend for WasmBackend {
             return Vec::new();
         }
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
-        if crate::backend::local_properties::realize(&mut file.ir).is_err() {
+        let Ok(properties) = crate::backend::local_properties::realize(&mut file.ir) else {
             decline(state, "a local delegated property".to_string());
             return Vec::new();
-        }
+        };
         let started = state
             .started
             .get_or_insert_with(|| Started::new(self.target));
-        let lowered = match lower::lower_file(&file.ir, &mut started.module, &mut started.runtime) {
+        let lowered = match lower::lower_file(
+            &file.ir,
+            &properties,
+            &mut started.module,
+            &mut started.runtime,
+        ) {
             Ok(lowered) => lowered,
             Err(construct) => {
                 decline(state, construct);
@@ -230,7 +243,10 @@ mod tests {
         let mut diags = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_streaming_with_features(
             &inputs,
-            Box::new(EmptySymbolSource),
+            crate::frontend::PlatformProvider::new(
+                crate::compiler::Backend::compilation_target(&WasmBackend::new(target)),
+                Box::new(EmptySymbolSource),
+            ),
             &crate::features::LangFeatures::new(),
             &mut diags,
         );
@@ -269,13 +285,27 @@ mod tests {
     fn an_unsupported_construct_declines_the_whole_compilation_by_name() {
         let (outputs, diagnostics) = compile(
             WasmTarget::Js,
-            "class Box(val value: String)\nfun box(): String = Box(\"OK\").value",
+            "enum class Color { RED }\nfun box(): String = \"OK\"",
         );
         assert_eq!(outputs, Vec::<Artifact>::new());
         assert_eq!(
             diagnostics,
-            ["krusty: the wasm backend does not support a class yet"]
+            ["krusty: the wasm backend does not support an enum class (`Color`) yet"]
         );
+    }
+
+    #[test]
+    fn a_class_compiles_to_one_module_on_both_targets() {
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(
+                target,
+                "open class Box(val value: String) { open fun get() = value }\n\
+                 class Wrapped(value: String) : Box(value) { override fun get() = value }\n\
+                 fun box(): String = (Wrapped(\"OK\") as Box).get()",
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
     }
 
     #[test]
@@ -332,6 +362,34 @@ mod tests {
             diagnostics,
             ["krusty: the wasm backend does not support a `main` that takes its arguments yet"]
         );
+    }
+
+    /// Each operator's width comes from the result common lowering recorded for the selected
+    /// operator, so every mixed form lowers without the generator deriving a promotion itself.
+    #[test]
+    fn mixed_numeric_operators_lower_at_their_selected_result() {
+        let source = "fun box(): String {\n\
+            \x20   val i = 2147483647\n\
+            \x20   if (i + 1L != 2147483648L) return \"fail int long\"\n\
+            \x20   if ('a' + 2 != 'c') return \"fail char plus\"\n\
+            \x20   if ('z' - 'a' != 25) return \"fail char minus\"\n\
+            \x20   val b: Byte = 127\n\
+            \x20   val s: Short = 2\n\
+            \x20   if (b * s != 254) return \"fail narrow\"\n\
+            \x20   var c = 'x'\n\
+            \x20   c += 2\n\
+            \x20   c++\n\
+            \x20   if (c != '{') return \"fail char compound\"\n\
+            \x20   var l = 1L\n\
+            \x20   l += 2\n\
+            \x20   l++\n\
+            \x20   return if (l == 4L) \"OK\" else \"fail long compound\"\n\
+            }\n";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
     }
 
     #[test]

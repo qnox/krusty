@@ -237,23 +237,50 @@ kotlinc VERSION=`just max-version`:
     chmod +x "$bin"
     echo "$bin"
 
+# Regenerate krusty's copy of one kotlinc release's argument table and language feature table from
+# that release's compiler jar (crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv and
+# src/features/releases/<ver>.{features,language-versions}.tsv). The conformance e2e test fails
+# until the vendored tables equal what the provisioned compiler declares.
+# Every release keeps its own files even when they equal another release's, so a later refresh can
+# never silently apply one release's policy to another.
+kotlinc-arguments VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lib="$(dirname "$(dirname "$(just kotlinc "{{VERSION}}")")")/lib"
+    dump() {
+        local main="$1" releases="$2" suffix="$3"
+        java -cp "$lib/kotlin-compiler.jar:$lib/kotlin-stdlib.jar" \
+            "scripts/kotlinc-arguments/$main.java" > "$releases/{{VERSION}}$suffix"
+    }
+    dump DumpKotlincArguments crates/krusty-cli/src/kotlinc_arguments/releases .tsv
+    dump DumpLanguageFeatures src/features/releases .features.tsv
+    dump DumpLanguageVersions src/features/releases .language-versions.tsv
+
 # Provision the Kotlin/Native distribution whose stdlib KLIB supplies the real metadata format.
 # The extracted root is versioned and cached beside the JVM compiler distribution.
 kotlin-native VERSION=`just max-version`:
     @scripts/kotlin-native.sh "{{VERSION}}" "$PWD/target/cache/kotlin-native"
 
-# This lane is deliberately required: the integration test may be optional in an ordinary local
+# This lane is deliberately required: the integration tests may be optional in an ordinary local
 # run, but this recipe provisions the distribution and turns absence or an undecodable fragment
-# into a failure.
+# into a failure. It also runs the tests that take kotlinc-native as their reference compiler,
+# with that compiler required, so a source set no recording covers is compiled live instead of
+# skipped.
 klib-semantics VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
     root="$(just kotlin-native "{{VERSION}}")"
+    # KLIB semantics read the Native distribution only, never the box or CLI corpus.
+    KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 KRUSTY_REQUIRE_KOTLIN_NATIVE=1 \
+      KRUSTY_CLASS_DUMP_COMPILE_MISSING=1 KRUSTY_PROVISION_BOX_CORPUS=0 \
+      ./run-tests.sh --test e2e -- klib_ value_class_declaration_e2e \
+        native_value_classes_e2e::a_value_class_needs_no_jvm_inline_on_native --nocapture
     KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 \
-      ./run-tests.sh --test e2e klib_ -- --nocapture
+      ./run-tests.sh --lib klib_
 
 # Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and
-# print the path to compiler/testData/codegen/box. Blobless + sparse clone of just that directory at
+# print the path to compiler/testData/codegen/box. The same checkout carries the command-line corpus,
+# compiler/testData/cli, beside it. Blobless + sparse clone of just that directory at
 # the matching tag — small and idempotent (no-op once present, cheap to cache). Mirrors `kotlinc`:
 # the conformance test FAILS (not skips) without it, so the harness provisions it rather than
 # silently skipping. The same checkout carries JetBrains' mock JDK,
@@ -294,20 +321,36 @@ box-corpus VERSION=`just max-version`:
         # Keep cone mode: a fresh sparse clone checks out the repository-root files that cone mode
         # owns. Switching to non-cone while excluding them can leave those paths in place and abort
         # the update before the requested corpus directory is materialized.
-        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" >&2
+        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs >&2
     }
+    # Kotlin's command-line test corpus (`.args`/`.out` pairs) and the third-party annotation
+    # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it.
+    cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305"
     mock_dir=""
     if [ -d "$root/.git" ] && [ -d "$box" ]; then
         mock_dir="$(mock_dir_at_tag)"
     fi
+    complete=0
     if [ -n "$mock_dir" ] && [ -f "$root/$mock_dir/rt.jar" ]; then
+        complete=1
+        for dir in $cli_dirs; do [ -d "$root/$dir" ] || complete=0; done
+    fi
+    if [ "$complete" = 1 ]; then
         echo "$box"
         exit 0
-    elif [ -n "$mock_dir" ]; then
-        # A cache provisioned before the mock JDK was needed: extend it rather than accept it.
-        echo "adding the mock JDK to the Kotlin codegen/box corpus (v${ver})…" >&2
-        git -C "$root" sparse-checkout add "$mock_dir" >&2 \
-            || { echo "failed to add $mock_dir to the v${ver} corpus checkout" >&2; exit 1; }
+    fi
+    # CI sets this after restoring an immutable cache entry: a hit must already hold every input,
+    # so fetching here would mean the cache key no longer names what the checkout contains.
+    if [ "${KRUSTY_BOX_CORPUS_OFFLINE:-}" = 1 ]; then
+        echo "the restored v${ver} corpus checkout is incomplete and KRUSTY_BOX_CORPUS_OFFLINE=1 forbids fetching; version its cache key" >&2
+        exit 1
+    fi
+    if [ -n "$mock_dir" ]; then
+        # A cache provisioned before the mock JDK or the CLI corpus was needed: extend it rather
+        # than accept it.
+        echo "adding the mock JDK and the CLI corpus to the Kotlin codegen/box corpus (v${ver})…" >&2
+        git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs >&2 \
+            || { echo "failed to extend the v${ver} corpus checkout" >&2; exit 1; }
     else
         # No checkout, or a restored one whose tree cannot name its mock JDK: provision afresh.
         clone_corpus
@@ -315,6 +358,8 @@ box-corpus VERSION=`just max-version`:
     [ -d "$box" ] || { echo "box dir missing after sparse checkout: $box" >&2; exit 1; }
     [ -f "$root/$mock_dir/rt.jar" ] \
         || { echo "mock JDK missing after sparse checkout: $root/$mock_dir/rt.jar" >&2; exit 1; }
+    [ -d "$root/compiler/testData/cli/jvm" ] \
+        || { echo "CLI corpus missing after sparse checkout: $root/compiler/testData/cli/jvm" >&2; exit 1; }
     echo "$box"
 
 # Provision the kotlinx.serialization compiler-plugin box corpus (plugins/kotlinx-serialization/
@@ -419,21 +464,13 @@ test-all *ARGS:
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
-    bin=$(cargo test --no-run --profile gate -p krusty-build --lib --message-format=json \
-      | jq -r 'select(.reason=="compiler-artifact" and .target.name=="krusty_build" and .executable != null) | .executable // empty' \
-      | tail -1)
-    [ -n "$bin" ] && [ -x "$bin" ] || { echo "could not locate krusty-build test binary" >&2; exit 1; }
-    printf '%s\n' "$bin"
+    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
 
 # Build the conformance test binary and print its path.
 conformance-bin:
     #!/usr/bin/env bash
     set -euo pipefail
-    bin=$(cargo test --no-run --profile gate --test conformance --message-format=json \
-      | jq -r 'select(.reason=="compiler-artifact" and .target.name=="conformance") | .executable // empty' \
-      | tail -1)
-    [ -n "$bin" ] && [ -x "$bin" ] || { echo "could not locate conformance test binary" >&2; exit 1; }
-    printf '%s\n' "$bin"
+    scripts/cargo-test-binary.sh conformance --test conformance
 
 # Run the codegen/box conformance suite and print the case report "<pct> <passed> <applicable>":
 # applicable cases whose box() returns "OK". The same run's JVM byte report "<pct> <matched> <total>",
