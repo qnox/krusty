@@ -28,6 +28,7 @@ use super::common;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -195,7 +196,13 @@ fn build_and_run(driver: &str) -> Option<Output> {
         "{driver}: the driver and runtime did not build:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    Some(Command::new(&executable).output().expect("run the driver"))
+    // A driver can read its own name from the environment, which is how one checks `getenv`.
+    Some(
+        Command::new(&executable)
+            .env("KRUSTY_DRIVER", driver)
+            .output()
+            .expect("run the driver"),
+    )
 }
 
 /// Run `driver`, which must succeed EXACTLY: exit status 0, stdout exactly `OK\n`, and nothing on
@@ -601,13 +608,18 @@ fn foreign_architectures() -> &'static [ForeignArchitecture] {
                 let emulator = std::env::split_paths(&path)
                     .map(|directory| directory.join(format!("qemu-{arch}")))
                     .find(|candidate| candidate.is_file());
-                let Some(emulator) = emulator.filter(|_| lld) else {
+                let headers = Path::new("/usr")
+                    .join(format!("{arch}-linux-gnu"))
+                    .join("include");
+                let Some(emulator) = emulator.filter(|_| lld && headers.is_dir()) else {
                     assert!(
                         std::env::var_os("CI").is_none(),
-                        "CI must run the thread drivers on {arch}, but this host has no \
-                         qemu-{arch} on PATH or no ld.lld"
+                        "CI must run the drivers on {arch}, but this host has no \
+                         qemu-{arch} on PATH, no ld.lld or no {arch} glibc headers"
                     );
-                    eprintln!("thread drivers not run on {arch}: no qemu-{arch} or no ld.lld");
+                    eprintln!(
+                        "drivers not run on {arch}: no qemu-{arch}, no ld.lld or no glibc headers"
+                    );
                     return None;
                 };
                 Some(ForeignArchitecture {
@@ -620,8 +632,15 @@ fn foreign_architectures() -> &'static [ForeignArchitecture] {
     })
 }
 
+/// Compiling for `arch`: its target triple, and its own glibc headers in place of the host's, so a
+/// POSIX driver checks the layer's numbers and layouts against the target's C library.
 fn foreign_flags(arch: &str) -> Vec<String> {
-    let mut flags = vec![format!("--target={arch}-linux-gnu")];
+    let mut flags = vec![
+        format!("--target={arch}-linux-gnu"),
+        "-nostdlibinc".to_string(),
+        "-isystem".to_string(),
+        format!("/usr/{arch}-linux-gnu/include"),
+    ];
     flags.extend(compile_flags().iter().map(|flag| flag.to_string()));
     flags
 }
@@ -668,6 +687,16 @@ fn foreign_runtime_objects(arch: &str) -> Result<Vec<PathBuf>, String> {
 
 /// Build `driver` for `foreign`'s architecture and run it under its emulator.
 fn build_and_run_on(foreign: &ForeignArchitecture, driver: &str) -> Output {
+    let executable = build_on(foreign, driver);
+    Command::new(&foreign.emulator)
+        .arg(&executable)
+        .env("KRUSTY_DRIVER", driver)
+        .output()
+        .expect("run the driver under its emulator")
+}
+
+/// Build `driver` for `foreign`'s architecture, against that target's own headers.
+fn build_on(foreign: &ForeignArchitecture, driver: &str) -> PathBuf {
     let arch = foreign.arch;
     let objects = foreign.objects.as_ref().unwrap_or_else(|errors| {
         panic!("{driver} on {arch}: the runtime did not build:\n{errors}")
@@ -692,10 +721,7 @@ fn build_and_run_on(foreign: &ForeignArchitecture, driver: &str) -> Output {
         "{driver} on {arch}: the driver and runtime did not build:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    Command::new(&foreign.emulator)
-        .arg(&executable)
-        .output()
-        .expect("run the driver under its emulator")
+    executable
 }
 
 /// `run_driver`, on the host and on every other supported architecture.
@@ -708,6 +734,29 @@ fn run_driver_everywhere(driver: &str) {
         );
     }
 }
+
+/// `run_driver_everywhere`, except that on the architectures in `build_only` the driver is built
+/// against that target's headers but not run, because its emulator does not answer as the kernel
+/// does.
+fn run_driver_everywhere_building_only_on(driver: &str, build_only: &[&str]) {
+    run_driver(driver);
+    for foreign in foreign_architectures() {
+        if build_only.contains(&foreign.arch) {
+            build_on(foreign, driver);
+        } else {
+            assert_ok(
+                &format!("{driver} on {}", foreign.arch),
+                &build_and_run_on(foreign, driver),
+            );
+        }
+    }
+}
+
+/// QEMU 8.2's riscv64 user mode reads and writes `rt_sigaction`'s structure one word longer than
+/// the riscv64 kernel's, which has no `sa_restorer`, so an action the kernel would install is not
+/// the one QEMU installs, and a driver that installs one cannot run there. It is still built
+/// against riscv64's glibc headers.
+const SIGNAL_ACTIONS_NOT_EMULATED: &[&str] = &["riscv64"];
 
 /// `run_driver_expecting_failure`, on the host and on every other supported architecture.
 fn run_driver_everywhere_expecting_failure(driver: &str, message: &str) {
@@ -797,6 +846,62 @@ fn threads_the_runtime_starts_keep_their_argument_until_they_run() {
 #[test]
 fn a_started_threads_stack_has_a_guard_below_it() {
     run_driver_everywhere("thread_stack_guard");
+}
+
+// The POSIX layer a static program calls instead of a C library. These drivers are compiled
+// against each target's own C library headers, so each struct they pass has that glibc's layout
+// and each errno its number, and linked with no C library, so the runtime answers every call.
+
+#[test]
+fn posix_files_answer_with_glibcs_layouts_and_errno() {
+    run_driver_everywhere("posix_files");
+}
+
+#[test]
+fn posix_process_calls_cover_the_environment_signals_and_clocks() {
+    run_driver_everywhere_building_only_on("posix_process", SIGNAL_ACTIONS_NOT_EMULATED);
+}
+
+#[test]
+fn posix_sockets_and_epoll_serve_a_loopback_connection() {
+    run_driver_everywhere("posix_net");
+}
+
+#[test]
+fn posix_threads_keep_their_own_errno_and_share_mutexes() {
+    run_driver_everywhere_building_only_on("posix_threads", SIGNAL_ACTIONS_NOT_EMULATED);
+}
+
+/// The layer's hand-copied numbers, each checked by `_Static_assert` against the target's own glibc
+/// and kernel headers: building the driver for a target is the check.
+#[test]
+fn posix_numbers_are_each_targets_own() {
+    run_driver_everywhere("posix_abi");
+}
+
+#[test]
+fn posix_memmove_copies_between_objects_and_within_one_either_way() {
+    run_driver_everywhere("posix_string");
+}
+
+/// `abort` with SIGABRT blocked still ends the process ON SIGABRT: the status is the signal, not an
+/// exit code, and nothing is written.
+#[test]
+fn posix_abort_ends_the_process_on_sigabrt_even_when_it_is_blocked() {
+    let Some(output) = build_and_run("posix_abort") else {
+        return;
+    };
+    assert!(
+        output.status.signal() == Some(6)
+            && output.status.code().is_none()
+            && output.stdout.is_empty()
+            && output.stderr.is_empty(),
+        "posix_abort: expected termination by SIGABRT with no output, got {}\nstdout: {:?}\n\
+         stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -2184,9 +2289,15 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_thread.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_io.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_net.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_process.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_string.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
              cargo:rerun-if-changed=src/native/target_contract.rs\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
@@ -2207,7 +2318,7 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
          /// The runtime sources every target's objects were compiled from, in the table's order. Only\n\
          /// the test that checks the table against them reads it.\n\
          #[cfg(test)]\n\
-         pub const SOURCES: &[&str] = &[\"krusty_rt.c\", \"krusty_collections.c\", \"krusty_maps.c\", \"krusty_classes.c\", \"krusty_lang.c\", \"krusty_fp.c\", \"krusty_gc.c\", \"krusty_threads.c\", \"krusty_start.c\"];\n"
+         pub const SOURCES: &[&str] = &[\"krusty_rt.c\", \"krusty_collections.c\", \"krusty_maps.c\", \"krusty_classes.c\", \"krusty_lang.c\", \"krusty_fp.c\", \"krusty_gc.c\", \"krusty_threads.c\", \"krusty_start.c\", \"krusty_posix_thread.c\", \"krusty_posix_io.c\", \"krusty_posix_net.c\", \"krusty_posix_process.c\", \"krusty_posix_string.c\"];\n"
     );
 }
 
@@ -2246,9 +2357,15 @@ fn a_failing_runtime_compiler_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_thread.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_io.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_net.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_process.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_string.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
              cargo:rerun-if-changed=src/native/target_contract.rs\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
@@ -2308,9 +2425,15 @@ fn a_runtime_compiler_that_emits_another_machines_code_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_thread.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_io.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_net.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_process.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_string.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
              cargo:rerun-if-changed=src/native/target_contract.rs\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
@@ -2383,9 +2506,15 @@ fn a_runtime_object_aligned_past_the_targets_page_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_threads.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_thread.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_io.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_net.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_process.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix_string.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
              cargo:rerun-if-changed=src/native/target_contract.rs\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\

@@ -21,6 +21,7 @@ __attribute__((noreturn, used)) void kt_process_start(long *initial_stack) {
     kt_argc = (kt_int)initial_stack[0];
     kt_argv = (char **)(initial_stack + 1);
     kt_envp = kt_argv + kt_argc + 1;
+    kt_os_thread_begin();
     kt_program_entry();
     kt_sys_exit(0);
 }
@@ -49,6 +50,13 @@ __asm__(".globl _start\n"
 #else
 #error "krusty native: unsupported architecture"
 #endif
+
+char **kt_process_environment(void) { return kt_envp; }
+
+/* A program with no POSIX layer keeps no per-thread state of its own; the layer, when a static
+   program links it, replaces these with the strong definitions that do. */
+__attribute__((weak)) void kt_os_thread_begin(void) {}
+__attribute__((weak)) void kt_os_thread_end(void) {}
 
 /* ---- text from outside ------------------------------------------------------------------------
 

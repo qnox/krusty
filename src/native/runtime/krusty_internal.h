@@ -83,6 +83,27 @@ struct KThread {
    Kotlin reports an exception nothing caught on `thread`, and end the process with 134. */
 void kt_report_uncaught(const char *thread, size_t thread_length);
 
+/* The environment block the kernel left on the initial stack: NULL-terminated `NAME=value`
+   strings, followed by the auxiliary vector. */
+char **kt_process_environment(void);
+
+/* Called first on every thread the runtime creates, the program's first among them, and last on
+   every one but that, before it ends. Defined weakly to nothing: a static program's POSIX layer
+   defines them to give each thread the state a C program expects of its own, such as `errno`. A
+   program that links a C library has the library's instead. */
+void kt_os_thread_begin(void);
+void kt_os_thread_end(void);
+
+/* `clone(2)` a thread sharing this process onto the stack ending at `stack_top`, running
+   `routine(argument)`, which must not return; the kernel clears `*exited` and wakes it when the
+   thread ends. Answers the thread's id or a negated errno. */
+long kt_clone(unsigned long flags, void *stack_top, uint32_t *exited, void (*routine)(void *),
+              void *argument);
+
+/* The flags a thread of this process is cloned with: the address space, files, filesystem view and
+   signal handlers shared, and its id word cleared and woken when it ends. */
+#define KT_CLONE_THREAD_FLAGS 0x00250f00ul
+
 uintptr_t kt_threads_running_bottom(void);
 void kt_threads_scan_released(void);
 void kt_gc_scan_word(uintptr_t word);

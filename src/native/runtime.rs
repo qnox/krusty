@@ -17,7 +17,7 @@
 //! Only the compiler-provided freestanding headers are used (`stdint.h`, `stddef.h`, `stdbool.h`),
 //! which C11 §4 guarantees exist without a hosted implementation.
 //!
-//! The runtime is nine translation units over three headers:
+//! The runtime is fourteen translation units over four headers:
 //!
 //! * `SYS_HEADER` (`krusty_sys.h`) is the kernel interface — the syscall shim per architecture
 //!   and the page-mapping primitives over it. It is the whole of the target-specific surface, a
@@ -49,6 +49,14 @@
 //!   supply itself, the arguments and environment the kernel leaves on the initial stack, and
 //!   standard input's lines. Text from outside is decoded from UTF-8 here, ill-formed bytes and all,
 //!   so every `String` the rest of the runtime walks is well-formed.
+//!
+//! * `krusty_posix.h` and the `krusty_posix_*.c` units are the POSIX a static program calls in
+//!   place of a C library, served from system calls with glibc's names, errno and struct layouts:
+//!   files (`_io`), sockets and epoll (`_net`), the process, signals and clocks (`_process`),
+//!   threads, mutexes and the per-thread `errno` behind the thread pointer (`_thread`), and
+//!   `<string.h>` (`_string`). The rest of the runtime never calls them; it reaches the layer only
+//!   through two weak hooks a thread runs at its start and end, so a program that links a real C
+//!   library can leave the layer out.
 //!
 //! Every value the runtime allocates, it allocates through the collector.
 //!
