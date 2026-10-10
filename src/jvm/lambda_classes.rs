@@ -283,6 +283,54 @@ fn reachable_lambdas(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> Vec<E
     nodes
 }
 
+/// [`reachable_lambdas`] for every function at once. [`realize`] asks for each lambda of the file
+/// in turn; one walk of the emitted roots answers every query until a realization changes the IR,
+/// where a walk per lambda would make the step quadratic in the file's size.
+#[derive(Default)]
+struct ReachableLambdaIndex {
+    every_emitted_root: Option<std::collections::HashMap<FunId, Vec<ExprId>>>,
+    function_roots: Option<std::collections::HashMap<FunId, Vec<ExprId>>>,
+}
+
+impl ReachableLambdaIndex {
+    fn reachable(&mut self, ir: &IrFile, fid: FunId, every_emitted_root: bool) -> Vec<ExprId> {
+        let index = if every_emitted_root {
+            &mut self.every_emitted_root
+        } else {
+            &mut self.function_roots
+        };
+        index
+            .get_or_insert_with(|| reachable_lambda_index(ir, every_emitted_root))
+            .get(&fid)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Forget every answer once the IR may have changed.
+    fn invalidate(&mut self) {
+        *self = Self::default();
+    }
+}
+
+fn reachable_lambda_index(
+    ir: &IrFile,
+    every_emitted_root: bool,
+) -> std::collections::HashMap<FunId, Vec<ExprId>> {
+    let mut index = std::collections::HashMap::<FunId, Vec<ExprId>>::new();
+    for root in emitted_roots(ir, every_emitted_root) {
+        for node in crate::ir::value_namespace_expressions(ir, root) {
+            if let IrExpr::Lambda { impl_fn, .. } = ir.exprs[node as usize] {
+                index.entry(impl_fn).or_default().push(node);
+            }
+        }
+    }
+    for nodes in index.values_mut() {
+        nodes.sort_unstable();
+        nodes.dedup();
+    }
+    index
+}
+
 /// The `Lambda` nodes building `fid`'s value inside the `inline_body` template of a lambda that
 /// some emitted root reaches, at any depth. A template numbers its own values, so the namespace
 /// walk of [`reachable_lambdas`] does not enter it.
@@ -488,6 +536,7 @@ pub(super) fn realize(
     lambdas.sort_unstable();
     lambdas.dedup();
     let inline_default_classes = inline_default_class_contexts(ir, &lambdas);
+    let mut reachable = ReachableLambdaIndex::default();
     for fid in lambdas {
         let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
         let inline_anonymous = ir.inline_anonymous_lambdas.contains(&fid);
@@ -500,7 +549,7 @@ pub(super) fn realize(
         // their origin record.
         let every_emitted_root =
             ir.lambda_origins.contains_key(&fid) || runtime_reified || inline_anonymous;
-        let values = reachable_lambdas(ir, fid, every_emitted_root);
+        let values = reachable.reachable(ir, fid, every_emitted_root);
         let Some(function_type) = values
             .first()
             .and_then(|node| ir.logical_types.get(node).copied())
@@ -525,6 +574,8 @@ pub(super) fn realize(
         {
             continue;
         }
+        // Every step past here may realize a class or replace a value.
+        reachable.invalidate();
         let class_name = ir
             .specialized_functions
             .contains_key(&fid)
@@ -1199,5 +1250,71 @@ mod method_domain_tests {
                 .collect::<std::collections::HashSet<_>>(),
             [3, 4].into_iter().collect()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn function(ir: &mut IrFile, body: Option<ExprId>) -> FunId {
+        ir.add_fun(crate::ir::IrFunction {
+            name: "f".to_string(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        })
+    }
+
+    fn lambda(ir: &mut IrFile, impl_fn: FunId) -> ExprId {
+        ir.add_expr(IrExpr::Lambda {
+            impl_fn,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: None,
+        })
+    }
+
+    #[test]
+    fn the_shared_index_answers_as_each_lambdas_own_walk() {
+        let mut ir = IrFile::default();
+        let first = function(&mut ir, None);
+        let second = function(&mut ir, None);
+        let unreached = function(&mut ir, None);
+        let values = vec![
+            lambda(&mut ir, second),
+            lambda(&mut ir, first),
+            lambda(&mut ir, second),
+        ];
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: values,
+            value: None,
+        });
+        let other_value = lambda(&mut ir, first);
+        let other_body = ir.add_expr(IrExpr::Block {
+            stmts: vec![other_value],
+            value: None,
+        });
+        // Left behind in the arena by an earlier rewrite: no emitted root reaches it.
+        lambda(&mut ir, unreached);
+        function(&mut ir, Some(body));
+        function(&mut ir, Some(other_body));
+
+        let mut index = ReachableLambdaIndex::default();
+        for every_emitted_root in [false, true] {
+            for fid in [first, second, unreached] {
+                assert_eq!(
+                    index.reachable(&ir, fid, every_emitted_root),
+                    reachable_lambdas(&ir, fid, every_emitted_root),
+                );
+            }
+        }
+        assert_eq!(index.reachable(&ir, first, true).len(), 2);
+        assert_eq!(index.reachable(&ir, second, true).len(), 2);
+        assert!(index.reachable(&ir, unreached, true).is_empty());
     }
 }
