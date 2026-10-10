@@ -208,6 +208,25 @@ pub fn native_analysis(
     sources: &[(&str, &str)],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
+    analyze_natively(sources, &[], false, diags)
+}
+
+/// [`native_analysis`] of a build applying every compiler plugin krusty ships, with their
+/// `libraries` (the plugins' runtimes) on the classpath after the stdlib and `kotlin-test`.
+pub fn native_analysis_with_plugins(
+    sources: &[(&str, &str)],
+    libraries: &[std::path::PathBuf],
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
+    analyze_natively(sources, libraries, true, diags)
+}
+
+fn analyze_natively(
+    sources: &[(&str, &str)],
+    libraries: &[std::path::PathBuf],
+    plugins: bool,
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
     use krusty::source::SourceInput;
 
     let jar = krusty::toolchain::stdlib_jar()?;
@@ -223,6 +242,7 @@ pub fn native_analysis(
     // gap in what this helper was given.
     let jars = std::iter::once(jar)
         .chain(krusty::toolchain::kotlin_test_jar())
+        .chain(libraries.iter().cloned())
         .collect::<Vec<_>>();
     let classpath = super::cached_classpath(&jars, Some(&jdk_modules()));
     let platform = Box::new(
@@ -241,6 +261,11 @@ pub fn native_analysis(
     for (_, src) in sources {
         features.apply_source_directives(src);
     }
+    let platform = if plugins {
+        super::with_native_plugins(platform)
+    } else {
+        platform.into()
+    };
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, diags,
     );

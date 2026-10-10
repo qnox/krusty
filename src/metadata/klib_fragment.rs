@@ -46,6 +46,8 @@ pub(crate) struct KlibClass<'a> {
     pub(crate) declaration: ClassDeclaration<'a>,
     /// Parallel to the declaration's properties: a `const val`'s value.
     pub(crate) constants: &'a [Option<crate::ir::IrConst>],
+    /// Whether the file declares the class, rather than a compiler plugin generating it.
+    pub(crate) in_source_file: bool,
 }
 
 /// The `PackageFragment` bytes for one file declaring into `package` (its segments; empty for the
@@ -104,7 +106,7 @@ pub(crate) fn package_fragment(
     let mut class_names = Vec::new();
     for class in classes {
         let carrier = KlibCarrier {
-            source_file: &file.file_name,
+            source_file: class.in_source_file.then_some(file.file_name.as_str()),
             constants: class.constants,
         };
         class_messages.push(class_message(&mut st, &class.declaration, &carrier));
@@ -228,6 +230,7 @@ mod tests {
         let point = KlibClass {
             declaration: point,
             constants: &[],
+            in_source_file: true,
         };
         let fragment = package_fragment(&["p", "q"], &file_members(), &[point], true);
         let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");

@@ -1520,6 +1520,8 @@ impl super::IrFile {
         remap_keyed(&mut self.external_value_class_declarations, names);
 
         remap_first_key(&mut self.synthesized_data_class_members, names);
+        remap_first_key(&mut self.generated_classes, names);
+        remap_first_key(&mut self.generated_functions, names);
         remap_first_key(&mut self.generated_secondary_constructors, names);
         remap_first_key(&mut self.jvm_companion_property_statics, names);
         remap_first_key(&mut self.property_annotation_markers, names);

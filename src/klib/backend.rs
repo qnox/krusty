@@ -174,6 +174,7 @@ impl Backend for KlibBackend {
             .map(|((record, tail), (entries, constants))| KlibClass {
                 declaration: record.declaration(tail, entries),
                 constants,
+                in_source_file: record.has_source_file(),
             })
             .collect::<Vec<_>>();
         let fragment = package_fragment(
@@ -208,11 +209,12 @@ fn declared_setter(
     }
 }
 
-/// The classes a library records for a file, in fragment order: each source-declared member
-/// classifier after the classifier it is nested in, siblings in declaration order. A classifier
-/// declared in executable code is no declaration of the library.
+/// The classes a library records for a file, in fragment order: each top-level source classifier
+/// in declaration order, each followed by the classifiers its `nestedClassName` list names (the
+/// declared ones, those a compiler plugin generated, the companion), in that list's order. A
+/// classifier declared in executable code is no declaration of the library.
 fn library_classes(ir: &IrFile) -> Vec<&IrClass> {
-    let mut members = ir
+    let mut top_level = ir
         .classes
         .iter()
         .enumerate()
@@ -222,6 +224,7 @@ fn library_classes(ir: &IrFile) -> Vec<&IrClass> {
                 && !class.is_local_class
                 && !class.is_anonymous_object
                 && !class.is_enum_entry
+                && class.fq_name.nested_owner().is_none()
         })
         .map(|(index, class)| {
             let order = ir
@@ -230,22 +233,25 @@ fn library_classes(ir: &IrFile) -> Vec<&IrClass> {
             (order, class)
         })
         .collect::<Vec<_>>();
-    members.sort_by_key(|(order, _)| *order);
-    let mut ordered = Vec::with_capacity(members.len());
-    let mut pending = members
-        .iter()
+    top_level.sort_by_key(|(order, _)| *order);
+    let mut ordered = Vec::with_capacity(ir.classes.len());
+    let mut pending = top_level
+        .into_iter()
         .rev()
-        .filter(|(_, class)| class.fq_name.nested_owner().is_none())
-        .map(|(_, class)| *class)
+        .map(|(_, class)| class)
         .collect::<Vec<_>>();
     while let Some(class) = pending.pop() {
         ordered.push(class);
         pending.extend(
-            members
+            crate::metadata::class_declarations::nested_classifiers(ir, class)
                 .iter()
                 .rev()
-                .filter(|(_, nested)| nested.fq_name.nested_owner() == Some(class.fq_name))
-                .map(|(_, nested)| *nested),
+                .map(|segment| {
+                    let id = ir
+                        .class_id_by_name(class.fq_name.nested_child(segment))
+                        .expect("a listed nested classifier is declared in its owner's file");
+                    &ir.classes[id as usize]
+                }),
         );
     }
     ordered
@@ -253,12 +259,6 @@ fn library_classes(ir: &IrFile) -> Vec<&IrClass> {
 
 /// A construct of `class` this writer does not record yet.
 fn unsupported_class_construct(ir: &IrFile, class: &IrClass) -> Option<&'static str> {
-    if ir
-        .generated_member_publication(class.fq_name_id())
-        .is_some()
-    {
-        return Some("compiler-plugin members");
-    }
     if ir
         .companion_blocks
         .properties_of(class.fq_name_id())

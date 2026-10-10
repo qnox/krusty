@@ -10,8 +10,9 @@ use super::declarations::FnMeta;
 /// A class written into a KLIB fragment for the file `source_file`.
 pub(crate) struct KlibCarrier<'a> {
     /// The file declaring the class, recorded on the class (`classFile` = 175) and on each member
-    /// with a source (`functionFile` = 172, `propertyFile` = 176).
-    pub(crate) source_file: &'a str,
+    /// with a source (`functionFile` = 172, `propertyFile` = 176). `None` for a class a compiler
+    /// plugin generated: neither it nor its members name a file.
+    pub(crate) source_file: Option<&'a str>,
     /// Parallel to the declaration's properties: a `const val`'s value (`compileTimeValue` = 173),
     /// which a JVM class file keeps in a `ConstantValue` attribute instead.
     pub(crate) constants: &'a [Option<crate::ir::IrConst>],
@@ -44,7 +45,9 @@ impl ClassCarrier for KlibCarrier<'_> {
     fn property_trailer(&self, st: &mut StringTable<'_>, index: usize) -> Pb {
         let mut trailer = Pb::new();
         // The file interns before the constant, as for a top-level property.
-        trailer.field_varint(176, u64::from(st.local(self.source_file))); // propertyFile = 176
+        if let Some(file) = self.source_file {
+            trailer.field_varint(176, u64::from(st.local(file))); // propertyFile = 176
+        }
         if let Some(Some(constant)) = self.constants.get(index) {
             let value = crate::metadata::builder::constant_value_pb(st, constant);
             trailer.field_message(173, &value); // compileTimeValue = 173
@@ -58,8 +61,8 @@ impl ClassCarrier for KlibCarrier<'_> {
 
     fn function_trailer(&self, st: &mut StringTable<'_>, function: &FnMeta) -> Pb {
         let mut trailer = Pb::new();
-        if function.has_source {
-            trailer.field_varint(172, u64::from(st.local(self.source_file))); // functionFile = 172
+        if let Some(file) = self.source_file.filter(|_| function.has_source) {
+            trailer.field_varint(172, u64::from(st.local(file))); // functionFile = 172
         }
         trailer
     }
@@ -70,7 +73,9 @@ impl ClassCarrier for KlibCarrier<'_> {
 
     fn class_trailer(&self, st: &mut StringTable<'_>) -> Pb {
         let mut trailer = Pb::new();
-        trailer.field_varint(175, u64::from(st.local(self.source_file))); // classFile = 175
+        if let Some(file) = self.source_file {
+            trailer.field_varint(175, u64::from(st.local(file))); // classFile = 175
+        }
         trailer
     }
 }
