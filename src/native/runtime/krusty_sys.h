@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #if defined(__x86_64__)
+#define KT_SYS_READ 0
 #define KT_SYS_WRITE 1
 #define KT_SYS_MMAP 9
 #define KT_SYS_MUNMAP 11
@@ -17,6 +18,7 @@
 #define KT_SYS_GETTID 186
 #define KT_SYS_FUTEX 202
 #elif defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
+#define KT_SYS_READ 63
 #define KT_SYS_WRITE 64
 #define KT_SYS_MMAP 222
 #define KT_SYS_MUNMAP 215
@@ -85,6 +87,12 @@ __attribute__((noreturn)) static inline void kt_sys_exit_thread(void) {
 
 #define KT_EINTR 4
 #define KT_EAGAIN 11
+
+/* `read(2)`: up to `length` bytes into `bytes`, answering the count, 0 at end of input, or a
+   negated errno. Retrying is the caller's, since only it knows whether a short read is enough. */
+static inline long kt_sys_read(long fd, char *bytes, size_t length) {
+    return kt_syscall(KT_SYS_READ, fd, (long)bytes, (long)length, 0, 0, 0);
+}
 
 static inline void kt_sys_write(long fd, const char *bytes, size_t length) {
     size_t written = 0;

@@ -1842,6 +1842,8 @@ mod native_number_subclass_e2e;
 mod native_pair_construction_e2e;
 #[path = "native_preconditions_e2e.rs"]
 mod native_preconditions_e2e;
+#[path = "native_process_e2e.rs"]
+mod native_process_e2e;
 #[path = "native_property_reference_e2e.rs"]
 mod native_property_reference_e2e;
 #[path = "native_range_bound_control_e2e.rs"]

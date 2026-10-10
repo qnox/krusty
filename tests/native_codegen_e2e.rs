@@ -2897,17 +2897,3 @@ fn a_list_answers_its_first_and_last_element() {
     common::expect_box_ok_with_stdlib(source, "ListEnds");
     common::expect_native_box(source, "ListEnds", "OK");
 }
-
-/// Kotlin's other entry point declines by name. This target does not pass a program its
-/// arguments yet, and without the decline the file lowers with no entry at all and the link fails
-/// on a symbol that says nothing about `main`.
-#[test]
-fn a_main_taking_its_arguments_declines() {
-    common::expect_native_decline(
-        "fun main(args: Array<String>) {\n\
-         \x20   println(\"OK\")\n\
-         }\n",
-        "MainWithArguments",
-        "a `main` that takes its arguments",
-    );
-}

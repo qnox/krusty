@@ -448,6 +448,8 @@ KT_THROWABLE_TYPE(kt_type_uninitialized_property_access_exception, "kotlin.",
                   "UninitializedPropertyAccessException", &kt_type_runtime_exception)
 KT_THROWABLE_TYPE(kt_type_no_when_branch_matched_exception, "kotlin.",
                   "NoWhenBranchMatchedException", &kt_type_runtime_exception)
+KT_THROWABLE_TYPE(kt_type_read_after_eof_exception, "kotlin.io.", "ReadAfterEOFException",
+                  &kt_type_runtime_exception)
 
 KRef kt_throwable_new(const KType *type, KRef message) {
     /* `message` stays in this parameter across the allocation: it is its root.

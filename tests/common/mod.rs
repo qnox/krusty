@@ -7,7 +7,7 @@ pub(crate) mod kotlinc_lib;
 pub(crate) mod kotlinc_server;
 pub mod language_directives;
 mod metadata_diff;
-mod native_backend;
+pub mod native_backend;
 pub(crate) mod producing_jdk;
 pub(crate) mod server_pool;
 pub use kotlinc_lib::kotlinc_lib_out;
@@ -1166,6 +1166,47 @@ pub fn java_home() -> String {
              There is no fallback to /usr/libexec/java_home — set it explicitly to a JDK 21+ home."
         )
     })
+}
+
+/// Start `main_class` in its own `java` process with `arguments` as raw bytes and `input` on its
+/// standard input, and wait for it. The persistent runners cannot do this: a program's arguments and
+/// standard input belong to its process, and theirs carry the runner protocol. The locale is UTF-8
+/// so the launcher decodes the arguments as UTF-8, and the environment is otherwise empty, so
+/// nothing the host exports (a `JAVA_TOOL_OPTIONS` banner) reaches the program's output. `None` when
+/// no JDK is there.
+pub fn run_jvm_main(
+    classpath: &[PathBuf],
+    main_class: &str,
+    arguments: &[&std::ffi::OsStr],
+    input: &[u8],
+) -> Option<std::process::Output> {
+    let java = Path::new(&java_home()).join("bin/java");
+    if !java.is_file() {
+        return None;
+    }
+    let classpath = std::env::join_paths(classpath).expect("build the class path");
+    let mut child = Command::new(java)
+        .env_clear()
+        .env("LANG", "C.UTF-8")
+        .env("LC_ALL", "C.UTF-8")
+        .arg("-cp")
+        .arg(classpath)
+        .arg(main_class)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    // Written on its own thread: a program may print before it has read all of its input.
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
+    let output = child.wait_with_output().ok()?;
+    writer.join().expect("the input writer");
+    Some(output)
 }
 
 /// Compile `BoxRunner.java` once into a stable cache dir keyed by the source hash; return its dir.

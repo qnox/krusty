@@ -45,7 +45,10 @@
 //!   it calls into Kotlin.
 //!   A thread holds the lock while it runs Kotlin and releases it in foreign code, recording its
 //!   registers and stack pointer, which is what the collector scans it by.
-//! * `krusty_start.c` is `_start`, which with no C library the runtime must supply itself.
+//! * `krusty_start.c` is the process boundary: `_start`, which with no C library the runtime must
+//!   supply itself, the arguments and environment the kernel leaves on the initial stack, and
+//!   standard input's lines. Text from outside is decoded from UTF-8 here, ill-formed bytes and all,
+//!   so every `String` the rest of the runtime walks is well-formed.
 //!
 //! Every value the runtime allocates, it allocates through the collector.
 //!

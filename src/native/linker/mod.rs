@@ -548,7 +548,7 @@ mod tests {
             }
             let names = runtime_symbols(target).unwrap_or_else(|error| panic!("{target}: {error}"));
             assert!(names.contains("_start"), "{target}: {names:?}");
-            assert!(names.contains("kt_program_returned"), "{target}: {names:?}");
+            assert!(names.contains("kt_process_start"), "{target}: {names:?}");
             assert!(!names.contains("kt_program_entry"), "{target}: {names:?}");
         }
     }

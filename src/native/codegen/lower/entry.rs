@@ -8,9 +8,9 @@ use super::*;
 
 impl<'a> FileLowering<'a> {
     /// `kt_program_entry`: what the runtime's `_start` calls. Records the stack bottom for the
-    /// collector, runs the entry function — printing its result when it has one, which is how a
-    /// `box()` case reports its verdict — and exits through the kernel; it never returns to
-    /// `_start`.
+    /// collector, runs the entry function (passing the program's arguments to a `main` that takes
+    /// them), prints its result when it has one, which is how a `box()` case reports its verdict,
+    /// and exits through the kernel; it never returns to `_start`.
     ///
     /// A `box()` answer is printed after [`BOX_RESULT_FRAME`], with nothing after it. A harness
     /// requires exactly one frame and reads every byte after it. Its last LINE would not do,
@@ -22,6 +22,7 @@ impl<'a> FileLowering<'a> {
         entry: Entry,
         file_init: FuncId,
         statics_may_throw: bool,
+        takes_arguments: bool,
     ) -> Result<(), Unsupported> {
         let void = Signature::new(CallConv::SystemV);
         let entry_id = self
@@ -31,6 +32,11 @@ impl<'a> FileLowering<'a> {
         let init = self.import("kt_runtime_init", &[Ty::obj("kotlin/Any")], Ty::Unit)?;
         let exit = self.import("kt_exit", &[Ty::Int], Ty::Unit)?;
         let uncaught = self.import("kt_check_uncaught", &[], Ty::Unit)?;
+        let arguments = if takes_arguments {
+            Some(self.import("kt_program_arguments", &[], any())?)
+        } else {
+            None
+        };
         let prints_result = self.carrier(self.ir.functions[main_index].ret) == Carrier::Ref;
         let println = if prints_result && entry == Entry::Main {
             Some(self.import("kt_println_any", &[any()], Ty::Unit)?)
@@ -79,8 +85,18 @@ impl<'a> FileLowering<'a> {
                 // ends here, reporting it, before the entry's first statement can run.
                 builder.ins().call(uncaught_ref, &[]);
             }
+            // `main(args)`'s array, built after the collector knows the stack and the file's
+            // properties are initialized, as the JVM launcher builds it before `main` runs.
+            let passed = match arguments {
+                Some(arguments) => {
+                    let arguments_ref = self.module.declare_func_in_func(arguments, builder.func);
+                    let made = builder.ins().call(arguments_ref, &[]);
+                    vec![builder.inst_results(made)[0]]
+                }
+                None => Vec::new(),
+            };
             let main_ref = self.module.declare_func_in_func(main, builder.func);
-            let call = builder.ins().call(main_ref, &[]);
+            let call = builder.ins().call(main_ref, &passed);
             // A `throw` nothing caught has left the exception pending and returned a zero value
             // all the way to here. Kotlin ends the program reporting it, which is what this does —
             // and it must happen BEFORE the answer is printed, because that zero is not an answer.

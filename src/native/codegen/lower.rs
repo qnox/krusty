@@ -63,7 +63,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ir::{
     Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
-    IrLocalPropertyLayout, IrStatic, IrTypeOp,
+    IrLocalPropertyLayout, IrStatic, IrTypeOp, MainEntryParameters,
 };
 use crate::types::{Ty, TypeName};
 
@@ -230,37 +230,41 @@ pub fn lower_file(
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let file_init = lowering.define_file_init(source, statics_init)?;
+    let program_entry = match entry {
+        // The frontend selected the file's `main` and its form; the backend only realizes it.
+        Entry::Main => ir.entry_point.map(|point| {
+            (
+                point.function as usize,
+                point.parameters == MainEntryParameters::Arguments,
+            )
+        }),
+        // A `box` case answers through a parameterless `box(): String`, the test corpus's own
+        // convention rather than a Kotlin entry point.
+        Entry::Box => ir
+            .functions
+            .iter()
+            .position(|function| {
+                function.params.is_empty()
+                    && function.is_static
+                    && function.dispatch_receiver.is_none()
+                    && function.name == "box"
+                    && lowering.carrier(function.ret) == Carrier::Ref
+            })
+            .map(|index| (index, false)),
+    };
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
-        let function = &ir.functions[index];
-        let is_entry = function.params.is_empty()
-            && function.is_static
-            && function.dispatch_receiver.is_none()
-            && match entry {
-                Entry::Main => function.name == "main",
-                Entry::Box => {
-                    function.name == "box" && lowering.carrier(function.ret) == Carrier::Ref
-                }
-            };
-        if is_entry {
-            lowering.define_program_entry(index, entry, file_init, statics_init.is_some())?;
+        if let Some((_, takes_arguments)) = program_entry.filter(|(chosen, _)| *chosen == index) {
+            lowering.define_program_entry(
+                index,
+                entry,
+                file_init,
+                statics_init.is_some(),
+                takes_arguments,
+            )?;
             defines_entry = true;
         }
-    }
-    // Kotlin's other entry point, `fun main(args: Array<String>)`, is a program whose arguments
-    // this target does not pass yet. Declining here names it; without this the file lowers with no
-    // entry and the link fails on an undefined symbol that says nothing about `main`.
-    if matches!(entry, Entry::Main)
-        && !defines_entry
-        && ir.functions.iter().any(|function| {
-            function.name == "main"
-                && function.is_static
-                && function.dispatch_receiver.is_none()
-                && function.params.len() == 1
-        })
-    {
-        return Err("a `main` that takes its arguments".to_string());
     }
     let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
