@@ -258,7 +258,7 @@ fn native_sources_outcome(
     } else {
         Entry::Main
     };
-    let backend = CraneliftBackend::new(target).with_entry(entry);
+    let backend = CraneliftBackend::new(target).with_entry(entry).verified();
     let module_name = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
     let artifacts =
         krusty::compiler::emit_analyzed(analysis, &stems, &backend, module_name, &mut diags);

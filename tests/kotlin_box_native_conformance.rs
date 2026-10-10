@@ -273,7 +273,9 @@ fn compile(
     if let Some(first) = diags.diags.first() {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
-    let backend = CraneliftBackend::new(target).with_entry(Entry::Box);
+    let backend = CraneliftBackend::new(target)
+        .with_entry(Entry::Box)
+        .verified();
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "box", &mut diags);
     if let Some(decline) = diags
         .diags

@@ -47,6 +47,7 @@ pub enum Entry {
 pub struct CraneliftBackend {
     target: NativeTarget,
     entry: Entry,
+    verify: bool,
 }
 
 impl CraneliftBackend {
@@ -54,7 +55,16 @@ impl CraneliftBackend {
         Self {
             target,
             entry: Entry::Main,
+            verify: false,
         }
+    }
+
+    /// Run Cranelift's verifier over every lowered function. It costs about a sixth of code
+    /// generation, so a build leaves it off; tests turn it on, where a malformed function should
+    /// fail at the lowering that produced it rather than as a miscompiled program.
+    pub fn verified(mut self) -> Self {
+        self.verify = true;
+        self
     }
 
     /// Start the program in `entry` instead of `main`.
@@ -142,6 +152,7 @@ impl Backend for CraneliftBackend {
             self.target,
             &stem,
             self.entry,
+            self.verify,
         ) {
             Ok(lowered) => lowered,
             Err(unsupported) => {
