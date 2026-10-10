@@ -62365,6 +62365,38 @@ impl<'a> Checker<'a> {
         applied_owner: Ty,
         name: &str,
     ) -> NestedConstructorRefSelection {
+        // A nested typealias occupies this classifier's Kotlin type namespace, but its semantic
+        // target is the expanded classifier rather than a synthetic `$Alias` classifier. Consume
+        // the provider-published declaration facet directly so the alias's fixed arguments and
+        // declaration identity stay attached to the constructor selection. In particular,
+        // `Foo<String>::ToInner` must not fall through to an import-spelling lookup for
+        // `ToInner`: the already-bound `Foo` owner is the namespace authority.
+        let nested_alias = {
+            let source = self.fed_source();
+            let record = source.symbols(
+                crate::symbol_source::SymbolNamespace::Classifier(owner),
+                name,
+            );
+            match record.classifier_declaration.as_ref() {
+                Some(crate::libraries::ClassifierDeclaration::TypeAlias(alias)) => {
+                    Some(alias.clone())
+                }
+                Some(crate::libraries::ClassifierDeclaration::Ordinary(_)) | None => None,
+            }
+        };
+        if let Some(alias) = nested_alias {
+            let target = self.apply_inner_classifier_outer(alias.expansion, applied_owner);
+            return self
+                .constructor_reference(
+                    scope,
+                    expression,
+                    expected,
+                    target,
+                    ConstructorReferenceOuter::Unbound,
+                )
+                .map(NestedConstructorRefSelection::Selected)
+                .unwrap_or(NestedConstructorRefSelection::Inapplicable);
+        }
         let source = self.fed_source();
         let nested = crate::symbol_resolver::inherited_nested_classifier_name(
             name,
@@ -62708,37 +62740,7 @@ impl<'a> Checker<'a> {
             ) {
                 NestedConstructorRefSelection::Selected(ty) => return Some(ty),
                 NestedConstructorRefSelection::Inapplicable => {}
-                NestedConstructorRefSelection::Missing => {
-                    // An imported nested typealias participates only after the receiver's real
-                    // nested-classifier rung is empty. Preserve its applied expansion so fixed
-                    // outer/class arguments survive into the constructor-reference result.
-                    if let Some(target) =
-                        self.scoped_source_alias_target(scope, name)
-                            .filter(|target| {
-                                target
-                                    .kotlin_class_internal()
-                                    .and_then(|target| self.fed_source().classifier(target))
-                                    .and_then(|classifier| classifier.outer_instance)
-                                    .is_some_and(|outer| {
-                                        self.receiver_is_assignable(
-                                            Ty::obj_name(internal),
-                                            Ty::obj_name(outer),
-                                        )
-                                    })
-                            })
-                    {
-                        let target = self.apply_inner_classifier_outer(target, receiver_ty);
-                        if let Some(ty) = self.constructor_reference(
-                            scope,
-                            expression,
-                            expected,
-                            target,
-                            ConstructorReferenceOuter::Unbound,
-                        ) {
-                            return Some(ty);
-                        }
-                    }
-                }
+                NestedConstructorRefSelection::Missing => {}
             }
             crate::trace_compiler!(
             "resolve",

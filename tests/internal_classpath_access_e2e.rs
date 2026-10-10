@@ -316,8 +316,8 @@ fn classifier_access_diagnostics_follow_resolution_scope() {
              fun use(): Int { PackageBox(1); return 0 }\n",
         ),
         [
-            "cannot access 'constructor(p0: Int): PackageBox': it is package-private in 'javafixture.PackageBox'.",
             "cannot access 'class PackageBox : Any': it is package-private in file.",
+            "cannot access 'constructor(p0: Int): PackageBox': it is package-private in 'javafixture.PackageBox'.",
         ]
     );
 }
