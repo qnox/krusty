@@ -264,7 +264,7 @@ impl ClassWriter {
             desc: method_desc,
         };
         let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
-        let optimized = self.optimized(&self.methods[index], identity, node, None, &mut pool);
+        let optimized = self.optimized(&self.methods[index], identity, node, None, true, &mut pool);
         if let Some(optimized) = optimized {
             self.methods[index].take_rewritten(optimized);
         }

@@ -172,6 +172,7 @@ impl ClassWriter {
             identity,
             node.clone(),
             None,
+            false,
             &mut pool,
         );
         if let Some(optimized) = optimized {
@@ -195,6 +196,7 @@ impl ClassWriter {
             owner: &self.internal_name,
             value_classes: &*self.value_classes,
             parameter_slots,
+            post_coroutine: false,
         };
         let mut optimized = node.clone();
         match pipeline::optimize(&mut optimized, &context) {

@@ -181,6 +181,22 @@ impl Body {
             .any(|label| self.kept_by_process_labels(*label))
     }
 
+    /// Whether only source-line labels stand before `id`. The coroutine transformer can leave the
+    /// selector's line between a generated safe-call receiver check and its reload; crossing that
+    /// label is safe, while an arrival, local boundary, or protected-range boundary is not.
+    pub(super) fn line_only_labelled(&self, id: NodeId) -> bool {
+        let labels = self.labels_before(id);
+        !labels.is_empty()
+            && labels.iter().all(|label| {
+                self.marks.contains(label)
+                    && !self.arrivals.contains(label)
+                    && !self.local_marks.contains(label)
+                    && !self.protected_starts.contains(label)
+                    && !self.protected_ends.contains(label)
+                    && !self.handlers.contains(label)
+            })
+    }
+
     /// Whether kotlinc's `processLabels` keeps this label before temporary elimination. Labels
     /// used by control flow, debug tables or protected ranges remain in the raw instruction list;
     /// an unused label is removed and cannot interrupt an adjacency match.
