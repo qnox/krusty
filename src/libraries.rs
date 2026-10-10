@@ -30,8 +30,8 @@ pub use annotation_application::{
 };
 pub use call_realization::{
     DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
-    ExternalPropertyRealization, KlibDeclarationSignature, NonvirtualCallRealization,
-    OverriddenCallKind, OverriddenCallRealization,
+    ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
+    NonvirtualCallRealization, OverriddenCallKind, OverriddenCallRealization,
 };
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;

@@ -1,8 +1,8 @@
 //! A selected KLIB function as a common-IR function declaration.
 //!
 //! The declaration's parameters and result are the ones its provider normalized and the backend
-//! handoff froze ([`BackendCallableFact`]): the body is lowered against exactly the declaration a
-//! call selected. The serialized declaration describes the same identity, so its parameter list
+//! handoff froze ([`KlibBodyCallable`]): the body is lowered against exactly the declaration a call
+//! selected. The serialized declaration describes the same identity, so its parameter list
 //! must agree with the frozen one, parameter by parameter in role and type; a disagreement is an
 //! internal inconsistency and declines rather than picking either side. Agreement also maps each
 //! serialized parameter symbol to the value index the body reads it by.
@@ -11,11 +11,11 @@ use std::collections::HashMap;
 
 use super::decline::KlibBodyDeclineReason;
 use super::klib_types::semantic_type;
-use crate::backend::BackendCallableFact;
 use crate::fir::ResolvedParameterIdentity;
 use crate::ir::{ExprId, FnParamInfo, FunId, IrFile, IrFunction, IrParameterIdentity};
+use crate::libraries::KlibBodyCallable;
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrFunction};
-use crate::metadata::klib_ir::KlibIrSymbol;
+use crate::metadata::klib_ir::{KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::Ty;
 
 /// One parameter as the body reads it.
@@ -55,18 +55,23 @@ enum SerializedRole {
     Value,
 }
 
-/// Join the frozen declaration of `fact` with its serialized declaration `function`.
+/// Join the frozen declaration of `callable` with its serialized declaration `function`.
 pub(super) fn function_header(
-    fact: &BackendCallableFact,
+    callable: KlibBodyCallable<'_>,
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
+    if function.base.symbol.kind != KlibIrSymbolKind::Function {
+        return Err(mismatch(
+            "the serialized declaration's symbol is not a function".to_owned(),
+        ));
+    }
     if function.constructor {
         return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
             "a constructor",
         ));
     }
-    if function.dispatch_receiver.is_some() || !fact.is_top_level() {
+    if function.dispatch_receiver.is_some() || !callable.is_top_level() {
         return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
             "a dispatch receiver",
         ));
@@ -93,26 +98,32 @@ pub(super) fn function_header(
                 .map(|parameter| (SerializedRole::Value, parameter)),
         )
         .collect::<Vec<_>>();
-    if serialized.len() != fact.params.len() || serialized.len() != fact.parameter_identities.len()
+    if serialized.len() != callable.params().len()
+        || serialized.len() != callable.parameter_identities().len()
     {
         return Err(mismatch(format!(
             "{} serialized parameters, {} selected parameters with {} identities",
             serialized.len(),
-            fact.params.len(),
-            fact.parameter_identities.len()
+            callable.params().len(),
+            callable.parameter_identities().len()
         )));
     }
-    if function.context_parameters.len() != fact.context_count {
+    if function.context_parameters.len() != callable.context_count() {
         return Err(mismatch(format!(
             "{} serialized context parameters, {} selected",
             function.context_parameters.len(),
-            fact.context_count
+            callable.context_count()
         )));
     }
     let mut values = HashMap::new();
     for (index, ((role, parameter), (selected, identity))) in serialized
         .into_iter()
-        .zip(fact.params.iter().zip(fact.parameter_identities.iter()))
+        .zip(
+            callable
+                .params()
+                .iter()
+                .zip(callable.parameter_identities().iter()),
+        )
         .enumerate()
     {
         let stable_read = parameter_role(role, identity).ok_or_else(|| {
@@ -137,27 +148,34 @@ pub(super) fn function_header(
             )));
         }
         let index = u32::try_from(index).expect("a parameter list fits u32");
-        values.insert(
-            parameter.base.symbol.clone(),
-            ParameterValue { index, stable_read },
-        );
+        if values
+            .insert(
+                parameter.base.symbol.clone(),
+                ParameterValue { index, stable_read },
+            )
+            .is_some()
+        {
+            return Err(mismatch(format!(
+                "parameter {index} repeats another serialized parameter's identity"
+            )));
+        }
     }
     let ret = semantic_type(arena, function.return_type)?;
-    if ret != fact.ret {
+    if ret != callable.ret() {
         return Err(mismatch(format!(
             "the result is {ret:?} serialized and {:?} selected",
-            fact.ret
+            callable.ret()
         )));
     }
     Ok(FunctionHeader {
-        params: fact.params.clone(),
+        params: callable.params().to_vec(),
         ret,
-        identities: fact
-            .parameter_identities
+        identities: callable
+            .parameter_identities()
             .iter()
             .map(IrParameterIdentity::resolved)
             .collect(),
-        context_count: fact.context_count,
+        context_count: callable.context_count(),
         extension_receiver: function.extension_receiver.is_some(),
         values,
     })
@@ -194,7 +212,7 @@ fn mismatch(detail: String) -> KlibBodyDeclineReason {
 /// lowering publishes for a top-level function.
 pub(super) fn add_function(
     ir: &mut IrFile,
-    fact: &BackendCallableFact,
+    callable: KlibBodyCallable<'_>,
     header: FunctionHeader,
     body: ExprId,
 ) -> FunId {
@@ -207,7 +225,7 @@ pub(super) fn add_function(
         values: _,
     } = header;
     let function = ir.add_fun(IrFunction {
-        name: fact.name.clone(),
+        name: callable.name().to_owned(),
         // A dependency declaration's parameters were checked where it was compiled; the
         // entry guards a backend adds are those of the module's own visible functions.
         param_checks: vec![None; params.len()],
@@ -217,7 +235,8 @@ pub(super) fn add_function(
         is_static: true,
         dispatch_receiver: None,
     });
-    ir.fn_source_names.insert(function, fact.name.clone());
+    ir.fn_source_names
+        .insert(function, callable.name().to_owned());
     ir.fn_params
         .insert(function, FnParamInfo::identities(identities));
     if extension_receiver {

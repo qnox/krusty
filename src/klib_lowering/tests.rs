@@ -453,7 +453,7 @@ fn declined(body: impl FnOnce(&Parts, &mut KlibIrArena) -> Option<KlibIrBody>) -
     let (fact, bodies) = coerce_fixture(body);
     let mut unit = DependencyBodyUnit::default();
     let decline = unit
-        .lower_function(KlibCallable::of(&fact).expect("signed"), &bodies)
+        .lower_function(fact.klib_body_callable().expect("signed"), &bodies)
         .expect_err("the body declines");
     assert_eq!(
         Some(decline.declaration()),
@@ -478,7 +478,7 @@ fn a_built_in_relation_lowers_as_the_source_comparison_does() {
     let (fact, bodies) = coerce_fixture(|parts, arena| parts.stdlib_body(arena));
     let mut unit = DependencyBodyUnit::default();
     let function = unit
-        .lower_function(KlibCallable::of(&fact).expect("signed"), &bodies)
+        .lower_function(fact.klib_body_callable().expect("signed"), &bodies)
         .expect("the stdlib body shape lowers");
 
     validated(unit.ir());
@@ -507,7 +507,7 @@ fn a_built_in_relation_lowers_as_the_source_comparison_does() {
 fn a_signature_lowers_into_one_function() {
     let (fact, bodies) = coerce_fixture(|parts, arena| parts.stdlib_body(arena));
     let mut unit = DependencyBodyUnit::default();
-    let callable = KlibCallable::of(&fact).expect("signed");
+    let callable = fact.klib_body_callable().expect("signed");
     let first = unit.lower_function(callable, &bodies).expect("lowers");
     let expressions = unit.ir().exprs.len();
     let second = unit.lower_function(callable, &bodies).expect("lowers");
@@ -554,6 +554,39 @@ fn a_call_of_a_library_declaration_declines_by_its_callee() {
         message,
         "the KLIB body of `kotlin.ranges.coerceAtLeast` \
          (it calls `kotlin.ranges.coerceAtLeast`)"
+    );
+}
+
+#[test]
+fn a_call_whose_symbol_is_not_a_function_declines() {
+    let message = declined(|parts, arena| {
+        let this = parts.read(arena, &parts.receiver);
+        let minimum = parts.read(arena, &parts.value);
+        let malformed = arena.push_expr(
+            Some(parts.boolean),
+            KlibIrExprKind::Call {
+                access: KlibIrMemberAccess {
+                    symbol: public_symbol(KlibIrSymbolKind::Property, less_int()),
+                    arguments: KlibIrArguments::Flat(vec![Some(this), Some(minimum)]),
+                    type_arguments: Vec::new(),
+                    origin: Some("LT".to_owned()),
+                },
+                super_qualifier: None,
+            },
+        );
+        let minimum = parts.read(arena, &parts.value);
+        let conditional = parts.conditional(arena, malformed, minimum);
+        Some(KlibIrBody::Block(vec![parts.return_from(
+            arena,
+            parts.function.clone(),
+            conditional,
+        )]))
+    });
+    assert_eq!(
+        message,
+        "the KLIB body of `kotlin.ranges.coerceAtLeast` \
+         (its serialized declaration disagrees with the selected one: \
+         a call target's symbol is not a function)"
     );
 }
 
@@ -628,6 +661,44 @@ fn a_returned_value_of_another_type_declines() {
 }
 
 #[test]
+fn an_else_marker_with_a_non_boolean_type_declines() {
+    let message = declined(|parts, arena| {
+        let less = parts.call(arena, less_int());
+        let minimum = parts.read(arena, &parts.value);
+        let malformed_else = arena.push_expr(
+            Some(parts.int),
+            KlibIrExprKind::Const(KlibIrConstant::Boolean(true)),
+        );
+        let this = parts.read(arena, &parts.receiver);
+        let conditional = arena.push_expr(
+            Some(parts.int),
+            KlibIrExprKind::When {
+                branches: vec![
+                    KlibIrBranch {
+                        condition: less,
+                        result: minimum,
+                    },
+                    KlibIrBranch {
+                        condition: malformed_else,
+                        result: this,
+                    },
+                ],
+                origin: Some("IF".to_owned()),
+            },
+        );
+        Some(KlibIrBody::Block(vec![parts.return_from(
+            arena,
+            parts.function.clone(),
+            conditional,
+        )]))
+    });
+    assert_eq!(
+        message,
+        "the KLIB body of `kotlin.ranges.coerceAtLeast` (it converts a value implicitly)"
+    );
+}
+
+#[test]
 fn a_body_without_a_final_return_declines() {
     let message = declined(|parts, arena| {
         let this = parts.read(arena, &parts.receiver);
@@ -656,7 +727,7 @@ fn a_signature_no_library_serializes_declines() {
     let (fact, _) = coerce_fixture(|parts, arena| parts.stdlib_body(arena));
     let empty = KlibDeclarationBodies::from_libraries(Vec::new()).expect("no libraries");
     let decline = DependencyBodyUnit::default()
-        .lower_function(KlibCallable::of(&fact).expect("signed"), &empty)
+        .lower_function(fact.klib_body_callable().expect("signed"), &empty)
         .expect_err("nothing to join");
     assert_eq!(
         decline.to_string(),
@@ -760,7 +831,7 @@ fn lowered_stdlib_body(
 ) -> String {
     let fact = frozen(libraries, "kotlin/ranges", name, receiver, &[receiver]);
     let function = unit
-        .lower_function(KlibCallable::of(&fact).expect("signed"), bodies)
+        .lower_function(fact.klib_body_callable().expect("signed"), bodies)
         .unwrap_or_else(|decline| panic!("{name} on {receiver:?}: {decline}"));
     lowered_body(unit, function)
 }
@@ -823,7 +894,7 @@ fn stdlib_coerce_in_declines_by_its_throw() {
     );
     let mut unit = DependencyBodyUnit::default();
     let decline = unit
-        .lower_function(KlibCallable::of(&fact).expect("signed"), &bodies)
+        .lower_function(fact.klib_body_callable().expect("signed"), &bodies)
         .expect_err("coerceIn throws on an empty range");
     assert_eq!(
         decline.to_string(),

@@ -15,5 +15,6 @@ mod klib_types;
 #[cfg(test)]
 mod tests;
 
-pub use body_unit::{DependencyBodyUnit, KlibCallable};
+pub use crate::libraries::KlibBodyCallable as KlibCallable;
+pub use body_unit::DependencyBodyUnit;
 pub use decline::{KlibBodyDecline, KlibBodyDeclineReason};

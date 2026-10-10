@@ -15,7 +15,7 @@ use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBranch, KlibIrExpr, KlibIrExprId, KlibIrExprKind,
     KlibIrMemberAccess, KlibIrStatement, KlibIrTypeOperator,
 };
-use crate::metadata::klib_ir::{KlibIrConstant, KlibIrSignature, KlibIrSymbol};
+use crate::metadata::klib_ir::{KlibIrConstant, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::Ty;
 
 type Lowered<T> = Result<T, KlibBodyDeclineReason>;
@@ -227,6 +227,11 @@ impl BodyLowering<'_> {
     /// over two operands of one primitive type: the primitive relation itself. On `Float` and
     /// `Double` that relation is the IEEE one, as the built-in is.
     fn call(&mut self, access: &KlibIrMemberAccess, ty: Ty) -> Lowered<ExprId> {
+        if access.symbol.kind != KlibIrSymbolKind::Function {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a call target's symbol is not a function".to_owned(),
+            ));
+        }
         let KlibIrSignature::Public(callee) = &access.symbol.signature else {
             return unsupported("a call of a file-private declaration");
         };
@@ -286,6 +291,9 @@ impl BodyLowering<'_> {
                     KlibIrExprKind::Const(KlibIrConstant::Boolean(true))
                 );
             let condition = if otherwise {
+                if self.ty(self.arena.expr(branch.condition), "`else` condition")? != Ty::Boolean {
+                    return Err(KlibBodyDeclineReason::ImplicitConversion);
+                }
                 None
             } else {
                 Some(self.operand(branch.condition, Ty::Boolean)?)

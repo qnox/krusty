@@ -430,7 +430,6 @@ mod tests {
         // Dependency bodies lower into common IR that Native and Wasm consume alike. The tests
         // beside the lowering may also reach the frontend to lower equivalent source.
         let allowed = [
-            "backend",
             "fir",
             "ir",
             "klib_libraries",
