@@ -91,8 +91,9 @@ pub struct Options {
     /// What kotlinc reports about the `-XXLanguage` arguments after the syntax warnings: the
     /// unsafe-arguments notice and each value it cannot use.
     pub language_feature_problems: Vec<ArgumentProblem>,
-    /// kotlinc's configuration errors (a feature that cannot be disabled), in its words. They are
-    /// reported before the configuration warnings and fail the invocation.
+    /// kotlinc's configuration errors (an inconsistent klib inliner configuration, a feature that
+    /// cannot be disabled), in its words. They are reported before the configuration warnings and
+    /// fail the invocation.
     pub configuration_errors: Vec<String>,
     /// Named CLI warnings and their configured severity. These are evaluated before compilation;
     /// an `error` level fails the invocation and `disabled` removes the diagnostic entirely.

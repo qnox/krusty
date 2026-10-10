@@ -221,15 +221,24 @@ pub(super) fn unmodeled_progressive_error(
         })
 }
 
-/// kotlinc's `configureLanguageFeaturesFromInternalArgs` checks: the error for disabling a feature
-/// whose introducing language version is no longer supported, and the warning for enabling an
-/// unreleased feature that forces pre-release binaries.
+/// kotlinc's `configureLanguageFeaturesFromInternalArgs` checks: the errors for enabling the
+/// cross-module klib inliner without the intra-module one and for disabling a feature whose
+/// introducing language version is no longer supported, and the warning for enabling an unreleased
+/// feature that forces pre-release binaries. `settings` are every explicit state in configuration
+/// order (`@Enables`/`@Disables`, `-progressive`, then `-XXLanguage`), the map kotlinc checks once
+/// the manual settings are applied. Nothing is checked without a manual setting, as kotlinc runs
+/// these checks only for `-XXLanguage` arguments.
 pub(super) fn manual_setting_checks(
     manual: &[ManualSetting],
+    settings: &[FeatureSetting],
     table: &FeatureTable,
     versions: &LanguageVersionPolicy,
     language_version: LanguageVersion,
-) -> (Option<String>, Option<CliWarning>) {
+) -> (Vec<String>, Option<CliWarning>) {
+    let mut errors = Vec::new();
+    if manual.is_empty() {
+        return (errors, None);
+    }
     let mut pre_release = Vec::new();
     let mut cannot_disable = Vec::new();
     for manual in manual {
@@ -245,13 +254,14 @@ pub(super) fn manual_setting_checks(
             cannot_disable.push(feature.name.as_str());
         }
     }
-    let error = (!cannot_disable.is_empty()).then(|| {
-        format!(
+    errors.extend(klib_inliner_consistency_error(settings));
+    if !cannot_disable.is_empty() {
+        errors.push(format!(
             "the following features cannot be disabled manually, because the version they first \
              appeared in is no longer supported:\n{}",
             cannot_disable.join(", ")
-        )
-    });
+        ));
+    }
     let warning = (!pre_release.is_empty()).then(|| CliWarning {
         name: None,
         message: format!(
@@ -259,7 +269,30 @@ pub(super) fn manual_setting_checks(
             pre_release.join(", ")
         ),
     });
-    (error, warning)
+    (errors, warning)
+}
+
+/// The explicit state `settings` leave for `feature`: the last setting naming it, if any.
+fn explicit_state(settings: &[FeatureSetting], feature: &str) -> Option<bool> {
+    settings
+        .iter()
+        .rev()
+        .find(|setting| setting.feature == feature)
+        .map(|setting| setting.enabled)
+}
+
+/// kotlinc refuses an explicitly enabled `IrCrossModuleInlinerBeforeKlibSerialization` unless
+/// `IrIntraModuleInlinerBeforeKlibSerialization` is explicitly enabled as well; the intra-module
+/// inliner's default state does not count.
+fn klib_inliner_consistency_error(settings: &[FeatureSetting]) -> Option<String> {
+    let cross = explicit_state(settings, "IrCrossModuleInlinerBeforeKlibSerialization");
+    let intra = explicit_state(settings, "IrIntraModuleInlinerBeforeKlibSerialization");
+    (cross == Some(true) && intra != Some(true)).then(|| {
+        "-XXLanguage:+IrCrossModuleInlinerBeforeKlibSerialization requires \
+         -XXLanguage:+IrIntraModuleInlinerBeforeKlibSerialization. Enable the intra-module inliner \
+         as well to avoid inconsistent configuration."
+            .to_string()
+    })
 }
 
 /// kotlinc's `checkRedundantArguments`: an `@Enables` argument that changes no default is

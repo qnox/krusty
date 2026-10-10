@@ -11,10 +11,15 @@ const SOURCE: &str = "package p\nclass Box(val v: String)\nfun box(): String = B
 /// Compile [`SOURCE`] with both compilers under `arguments`; both must exit alike, report the same
 /// words, and write the same output tree byte for byte, which is empty when they fail.
 fn assert_like_kotlinc(arguments: &[&str]) {
+    assert_source_like_kotlinc(SOURCE, arguments);
+}
+
+/// [`assert_like_kotlinc`] for `source`.
+fn assert_source_like_kotlinc(source: &str, arguments: &[&str]) {
     let work = common::scratch_dir().expect("allocate a scratch directory");
     let path = |name: &str| -> PathBuf { work.join(name) };
     let text = |path: &Path| path.to_string_lossy().into_owned();
-    std::fs::write(path("Box.kt"), SOURCE).expect("write the source");
+    std::fs::write(path("Box.kt"), source).expect("write the source");
     let command_line = |output: &str| {
         let mut command_line = vec![text(&path("Box.kt")), "-d".into(), text(&path(output))];
         command_line.extend(arguments.iter().map(|argument| argument.to_string()));
@@ -109,4 +114,46 @@ fn an_enables_argument_that_changes_no_default_is_redundant() {
         "2.5",
         "-Xname-based-destructuring=only-syntax",
     ]);
+}
+
+/// The klib inliner features select lowerings kotlinc runs only before serializing a klib, so a
+/// JVM compilation is the same with either state. kotlinc still refuses the cross-module inliner
+/// unless the intra-module one is explicitly enabled too, and the cross-module inliner forces
+/// pre-release binaries.
+#[test]
+fn klib_inliner_features_are_checked_for_consistency() {
+    assert_like_kotlinc(&["-XXLanguage:+IrCrossModuleInlinerBeforeKlibSerialization"]);
+    assert_like_kotlinc(&[
+        "-XXLanguage:-IrIntraModuleInlinerBeforeKlibSerialization",
+        "-XXLanguage:+IrCrossModuleInlinerBeforeKlibSerialization",
+    ]);
+    assert_like_kotlinc(&[
+        "-XXLanguage:+IrCrossModuleInlinerBeforeKlibSerialization",
+        "-XXLanguage:-TypeAliases",
+    ]);
+}
+
+const INLINE_SOURCE: &str = r#"package p
+
+inline fun <reified T> isOf(value: Any): Boolean = value is T
+
+fun box(): String = if (isOf<String>("x")) "OK" else "fail"
+"#;
+
+#[test]
+fn klib_inliner_features_do_not_change_jvm_output() {
+    for arguments in [
+        &[
+            "-XXLanguage:+IrIntraModuleInlinerBeforeKlibSerialization",
+            "-XXLanguage:+IrCrossModuleInlinerBeforeKlibSerialization",
+        ][..],
+        &["-XXLanguage:-IrIntraModuleInlinerBeforeKlibSerialization"],
+        &[
+            "-XXLanguage:-IrIntraModuleInlinerBeforeKlibSerialization",
+            "-XXLanguage:-IrCrossModuleInlinerBeforeKlibSerialization",
+        ],
+        &[],
+    ] {
+        assert_source_like_kotlinc(INLINE_SOURCE, arguments);
+    }
 }

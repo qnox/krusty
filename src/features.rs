@@ -108,7 +108,9 @@ impl LangFeatures {
 
 /// The kotlinc `LanguageFeature`s krusty's frontend or backend consumes, sorted by name, one per
 /// line. A feature is listed once some phase checks it (`LangFeatures::has`), so a command line may
-/// turn it on and get that behaviour.
+/// turn it on and get that behaviour, or once kotlinc's own consumers are shown to leave every
+/// target krusty emits unchanged (each such decision is recorded in `docs/SPEC.md`): the klib
+/// inliner features select lowerings kotlinc runs only before serializing a klib.
 const MODELED_FEATURES: &[&str] = &[
     "AllowAccessToProtectedFieldFromSuperCompanion",
     "AllowEagerSupertypeAccessibilityChecks",
@@ -131,6 +133,8 @@ const MODELED_FEATURES: &[&str] = &[
     "FullValueClasses",
     "FunctionalTypeWithExtensionAsSupertype",
     "ImplicitSignedToUnsignedIntegerConversion",
+    "IrCrossModuleInlinerBeforeKlibSerialization",
+    "IrIntraModuleInlinerBeforeKlibSerialization",
     "JvmInlineMultiFieldValueClasses",
     "JvmSupportRecursiveTypeOf",
     "LocalTypeAliases",

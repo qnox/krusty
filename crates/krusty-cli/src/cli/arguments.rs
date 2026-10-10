@@ -500,18 +500,23 @@ pub(super) fn finish_language_settings(
     } else {
         Vec::new()
     };
-    let settings =
+    let settings_in_order =
         language_features::ordered_settings(common.clone(), progressive.clone(), &manual);
-    match LanguageSettings::for_release(reference_version, language_version, api_version, &settings)
-    {
+    match LanguageSettings::for_release(
+        reference_version,
+        language_version,
+        api_version,
+        &settings_in_order,
+    ) {
         Ok(settings) => {
-            let (cannot_disable, pre_release) = language_features::manual_setting_checks(
+            let (configuration_errors, pre_release) = language_features::manual_setting_checks(
                 &manual,
+                &settings_in_order,
                 table,
                 versions,
                 language_version,
             );
-            opts.configuration_errors.extend(cannot_disable);
+            opts.configuration_errors.extend(configuration_errors);
             let defaults = LangFeatures::for_release(
                 reference_version,
                 settings.language_version,
