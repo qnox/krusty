@@ -211,6 +211,49 @@ mod tests {
     }
 
     #[test]
+    fn a_type_alias_reads_back_as_a_semantic_declaration() {
+        let upper = Ty::nullable(Ty::obj("kotlin/Any"));
+        let mut members = file_members();
+        members.aliases.push(TypeAliasMeta {
+            name: "Boxed".to_string(),
+            formals: vec!["T".to_string()],
+            expansion: Ty::obj_args("fixture/Box", &[Ty::ty_param("T", upper)]),
+            visibility: crate::types::Visibility::Public,
+            expansion_spelling: Default::default(),
+            decl_order: 2,
+        });
+
+        let fragment = package_fragment(&["fixture"], &members, &[], true);
+        let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");
+        let [alias] = package.type_aliases.as_slice() else {
+            panic!("expected exactly one retained type alias");
+        };
+        assert_eq!(alias.name, "Boxed");
+        assert_eq!(alias.visibility, crate::types::Visibility::Public);
+        assert_eq!(
+            alias
+                .formals
+                .iter()
+                .map(|formal| formal.name.as_str())
+                .collect::<Vec<_>>(),
+            ["T"]
+        );
+        assert_eq!(
+            alias.expansion,
+            KotlinType::Class {
+                internal: "fixture/Box".to_string(),
+                args: vec![KotlinType::Param {
+                    name: "T".to_string(),
+                    id: crate::metadata::semantic::KotlinTypeParameterId(0),
+                    nullable: false,
+                }],
+                nullable: false,
+                shape: Default::default(),
+            }
+        );
+    }
+
+    #[test]
     fn a_class_is_written_after_the_package_and_reads_back_through_the_klib_reader() {
         use crate::metadata::class_builder::{ClassDeclaration, ClassTail};
         let methods = [crate::metadata::class_builder::FnMeta::plain(

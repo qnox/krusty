@@ -39,6 +39,7 @@ fn function(name: &str, receiver: Option<KotlinType>, params: Vec<KotlinType>) -
         is_operator: false,
         is_infix: false,
         is_expect: false,
+        is_external: false,
         is_static: false,
         context_count: 0,
         context_kinds: Vec::new(),
@@ -60,6 +61,66 @@ fn package_of(functions: Vec<KotlinFunction>) -> KotlinPackage {
         functions,
         ..KotlinPackage::default()
     }
+}
+
+#[test]
+fn a_package_type_alias_is_published_from_its_metadata_declaration() {
+    let upper = Ty::nullable(Ty::obj("kotlin/Any"));
+    let parameter = Ty::ty_param("T", upper);
+    let expansion = Ty::fun(vec![parameter], Ty::String);
+    let fragment = crate::metadata::klib_fragment::package_fragment(
+        &["fixture"],
+        &crate::metadata::klib_fragment::KlibFileMembers {
+            file_name: "aliases.kt".to_string(),
+            functions: Vec::new(),
+            properties: Vec::new(),
+            constants: Vec::new(),
+            aliases: vec![crate::metadata::builder::TypeAliasMeta {
+                name: "Transform".to_string(),
+                formals: vec!["T".to_string()],
+                expansion,
+                visibility: Visibility::Public,
+                expansion_spelling: Default::default(),
+                decl_order: 0,
+            }],
+        },
+        &[],
+        true,
+    );
+    let package = crate::metadata::semantic::parse_package_fragment_checked(&fragment)
+        .expect("the alias fragment decodes");
+    let libraries = KlibLibraries::from_packages(vec![(segments(&["fixture"]), package)])
+        .expect("the alias package is publishable");
+
+    let identity = type_name("fixture/Transform");
+    let target = type_name("kotlin/Function1");
+    let symbols = libraries.symbols(SymbolNamespace::Package(type_name("fixture")), "Transform");
+    assert_eq!(symbols.classifier_name, Some(target));
+    assert!(symbols.classifier.is_some());
+    assert_eq!(
+        symbols.classifier_declaration,
+        Some(crate::libraries::ClassifierDeclaration::TypeAlias(
+            crate::libraries::AliasExpansion {
+                identity,
+                target,
+                formals: vec!["T".to_string()],
+                expansion,
+                expansion_spelling: Default::default(),
+            }
+        ))
+    );
+    assert_eq!(
+        <KlibLibraries as crate::libraries::SemanticPlatform>::type_alias_expansion(
+            &libraries, identity,
+        ),
+        Some(crate::libraries::AliasExpansion {
+            identity,
+            target,
+            formals: vec!["T".to_string()],
+            expansion,
+            expansion_spelling: Default::default(),
+        })
+    );
 }
 
 fn println() -> KotlinFunction {
@@ -358,15 +419,30 @@ fn realized_parameters(
 
 #[test]
 fn a_klib_function_is_published_without_a_compiler_intrinsic() {
-    let libraries = kotlin_io();
-    let println = single_function(&libraries, "kotlin/io", "println");
-    assert_eq!(println.callable.compiler_intrinsic, None);
-    assert_eq!(println.callable.semantic_role, None);
+    let mut greet = function("greet", None, vec![class("kotlin/Any", true)]);
+    greet.param_names = vec!["message".to_owned()];
+    let libraries =
+        KlibLibraries::from_packages(vec![(segments(&["kotlin", "io"]), package_of(vec![greet]))])
+            .expect("an in-memory kotlin.io package is signable");
+    let greet = single_function(&libraries, "kotlin/io", "greet");
+    assert_eq!(greet.callable.compiler_intrinsic, None);
+    assert_eq!(greet.callable.semantic_role, None);
     let realization = libraries
-        .external_callable(println.callable.external_identity.expect("identity"))
+        .external_callable(greet.callable.external_identity.expect("identity"))
         .expect("realization");
     assert_eq!(realization.callable.compiler_intrinsic, None);
     assert_eq!(realization.callable.semantic_role, None);
+}
+
+#[test]
+fn a_builtin_klib_function_carries_its_shared_compiler_operation() {
+    let libraries = kotlin_io();
+    let println = single_function(&libraries, "kotlin/io", "println");
+    assert_eq!(
+        println.callable.compiler_intrinsic,
+        Some(crate::libraries::CompilerIntrinsic::Println)
+    );
+    assert_eq!(println.callable.semantic_role, None);
 }
 
 #[test]
@@ -618,5 +694,8 @@ fn a_declaration_without_a_role_per_context_parameter_is_rejected() {
     );
 }
 
+mod analysis;
+mod builtin_operations;
 mod classes;
+mod external_coverage;
 mod properties;

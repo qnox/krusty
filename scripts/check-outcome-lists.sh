@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # The platform/version outcome manifests only shrink: a change may remove entries, never add one, so a
 # regression cannot be recorded as expected and a fix cannot pay for one. That covers the box
-# expected failures and not-applicable lists and the CLI corpus expected failures. A manifest the
-# base does not have yet (a newly supported Kotlin version) is exempt. Only the head's own changes
-# count: it is compared with its merge base, so a branch that is behind a base which has since
-# dropped entries is not charged with them. The CLI not-applicable lists are not checked here: they
-# record what the reference kotlinc cannot run in this environment, and the required reference run
-# proves every entry instead.
+# expected failures and not-applicable lists, the CLI corpus expected failures, and uncovered KLIB
+# externals. A manifest the base does not have yet (a newly supported Kotlin version or target) is
+# exempt. Only the head's own changes count: it is compared with its merge base, so a branch that
+# is behind a base which has since dropped entries is not charged with them. The CLI not-applicable
+# lists are not checked here: they record what the reference kotlinc cannot run in this environment,
+# and the required reference run proves every entry instead.
 #
 #   scripts/check-outcome-lists.sh <base-rev> <head-rev>
 set -euo pipefail
@@ -35,7 +35,8 @@ done < <(
   git ls-tree -r --name-only "$head" -- \
     tests/box_expected_failures \
     tests/box_expected_not_applicable \
-    tests/cli_expected_failures
+    tests/cli_expected_failures \
+    tests/klib_uncovered_externals
 )
 
 if ((added_total)); then

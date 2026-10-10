@@ -1602,6 +1602,8 @@ mod reference_carrier_cast_e2e;
 mod result_generic_override_argument_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
 mod same_module_inline_frame_markers_e2e;
+#[path = "serialization_explicit_companion_e2e.rs"]
+mod serialization_explicit_companion_e2e;
 #[path = "setter_return_line_e2e.rs"]
 mod setter_return_line_e2e;
 #[path = "source_map_annotation_parts_e2e.rs"]
