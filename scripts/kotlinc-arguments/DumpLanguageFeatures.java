@@ -10,7 +10,7 @@ public class DumpLanguageFeatures {
         Map<?, ?> flags = (Map<?, ?>) Class.forName("org.jetbrains.kotlin.diagnostics.rendering.RuntimeFeatureToFlagMapKt")
             .getMethod("buildRuntimeFeatureToFlagMap", ClassLoader.class)
             .invoke(null, feature.getClassLoader());
-        System.out.println("# name\tsinceVersion\tsinceApiVersion\tprogressive\tforcesPreReleaseBinaries\tforcesPreReleaseBinariesBefore\ttestOnly\tbehaviorAfterSinceVersion\thintUrl\tflag\tpresentableName");
+        System.out.println("# name\tsinceVersion\tsinceApiVersion\tprogressive\tforcesPreReleaseBinaries\tforcesPreReleaseBinariesBefore\ttestOnly\tbehaviorAfterSinceVersion\thintUrl\tflag\tissue\tpresentableName");
         for (Object entry : feature.getEnumConstants()) {
             System.out.println(String.join("\t",
                 ((Enum<?>) entry).name(),
@@ -23,6 +23,7 @@ public class DumpLanguageFeatures {
                 behavior(get(feature, entry, "getBehaviorAfterSinceVersion")),
                 text(get(feature, entry, "getHintUrl")),
                 text(flags.get(entry)),
+                issue(get(feature, entry, "getIssue")),
                 // Last: every feature has one, so no row ends in an empty cell's tab.
                 text(get(feature, entry, "getPresentableName"))));
         }
@@ -46,6 +47,11 @@ public class DumpLanguageFeatures {
 
     private static String text(Object value) {
         return value == null ? "" : (String) value;
+    }
+
+    /** The tracker issue a deprecation names; kotlinc's `NO_ISSUE_SPECIFIED` is none. */
+    private static String issue(Object value) {
+        return value == null || "No YT issue".equals(value) ? "" : (String) value;
     }
 
     private static String flag(Object value, String name) {

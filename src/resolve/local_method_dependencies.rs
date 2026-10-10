@@ -619,6 +619,7 @@ impl Checker<'_> {
                 .iter()
                 .map(super::written_inline_modifier)
                 .collect(),
+            reified_type_parameter_ordinals: declared_reified_type_parameter_ordinals(function),
             visibility: function.visibility,
             context_count: function.context_count,
             source_decl: None,

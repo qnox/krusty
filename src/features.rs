@@ -8,10 +8,12 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
 
+mod deprecation;
 mod language_versions;
 mod table;
 mod unsupported;
 
+pub use deprecation::DeprecationGate;
 pub use language_versions::{vendored_language_versions, LanguageVersionPolicy, VersionStatus};
 pub use table::{vendored_table, BehaviorAfterSinceVersion, FeatureTable, LanguageFeature};
 pub use unsupported::FeatureGate;
@@ -143,6 +145,7 @@ const MODELED_FEATURES: &[&str] = &[
     "NameBasedDestructuring",
     "NestedTypeAliases",
     "PrioritizedEnumEntries",
+    "ProhibitIntersectionReifiedTypeParameter",
     "UnitConversionsOnArbitraryExpressions",
     "UnnamedLocalVariables",
     "WhenGuards",
@@ -420,6 +423,7 @@ mod tests {
             "ExplicitBackingFields",
             "MultiDollarInterpolation",
             "PrioritizedEnumEntries",
+            "ProhibitIntersectionReifiedTypeParameter",
             "WhenGuards",
         ] {
             assert!(features.has(name), "{name} is stable in 2.4");
@@ -452,6 +456,7 @@ mod tests {
             "ExplicitBackingFields",
             "ExplicitContextArguments",
             "NameBasedDestructuring",
+            "ProhibitIntersectionReifiedTypeParameter",
         ] {
             assert!(!features.has(name), "{name} is not stable in 2.2");
         }

@@ -87,6 +87,7 @@ pub(super) fn signature_from_resolved_function(function: &FunctionInfo) -> Signa
         lambda_param_types: function.call_sig.lambda_param_types.clone(),
         lambda_recv: function.call_sig.lambda_receiver_params.clone(),
         inline_modifiers: function.call_sig.inline_modifiers.clone(),
+        reified_type_parameter_ordinals: function.call_sig.reified_type_parameter_ordinals.clone(),
         visibility: function.visibility,
         context_count: function.context_count,
         source_decl,

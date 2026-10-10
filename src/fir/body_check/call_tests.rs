@@ -4604,6 +4604,7 @@ fn reified_intersection_argument_records_its_common_supertype() {
          object B : X, Y\n\
          fun <T> sel(left: T, right: T): T = left\n\
          inline fun <reified T> T.keep(): T = this\n\
+         @Suppress(\"TYPE_INTERSECTION_AS_REIFIED_WARNING\")\n\
          fun run() { sel(A, B).keep() }\n",
         "run",
     );
