@@ -13,6 +13,7 @@ use crate::ir::{
 };
 use crate::types::Ty;
 
+mod arithmetic_result_types;
 mod callable_body_returns;
 mod catch_clauses;
 mod checked_hierarchy;

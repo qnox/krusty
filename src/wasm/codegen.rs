@@ -344,6 +344,34 @@ mod tests {
         );
     }
 
+    /// Each operator's width comes from the result common lowering recorded for the selected
+    /// operator, so every mixed form lowers without the generator deriving a promotion itself.
+    #[test]
+    fn mixed_numeric_operators_lower_at_their_selected_result() {
+        let source = "fun box(): String {\n\
+            \x20   val i = 2147483647\n\
+            \x20   if (i + 1L != 2147483648L) return \"fail int long\"\n\
+            \x20   if ('a' + 2 != 'c') return \"fail char plus\"\n\
+            \x20   if ('z' - 'a' != 25) return \"fail char minus\"\n\
+            \x20   val b: Byte = 127\n\
+            \x20   val s: Short = 2\n\
+            \x20   if (b * s != 254) return \"fail narrow\"\n\
+            \x20   var c = 'x'\n\
+            \x20   c += 2\n\
+            \x20   c++\n\
+            \x20   if (c != '{') return \"fail char compound\"\n\
+            \x20   var l = 1L\n\
+            \x20   l += 2\n\
+            \x20   l++\n\
+            \x20   return if (l == 4L) \"OK\" else \"fail long compound\"\n\
+            }\n";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
+    }
+
     #[test]
     fn a_main_program_starts_in_main() {
         let (outputs, diagnostics) =
