@@ -72,6 +72,22 @@ impl KlibIrModuleTrees {
         self.functions.len()
     }
 
+    /// The linkable identity of every function [`Self::function`] answers for.
+    pub fn function_signatures(&self) -> impl Iterator<Item = &KlibIrSignature> {
+        self.functions.keys()
+    }
+
+    /// Index trees built by hand, as decoding indexes the trees it reads.
+    #[cfg(test)]
+    pub(crate) fn from_trees(trees: Vec<KlibIrDeclarationTree>) -> Result<Self, KlibIrDecodeError> {
+        let mut module = Self {
+            trees,
+            functions: HashMap::new(),
+        };
+        module.index()?;
+        Ok(module)
+    }
+
     fn index(&mut self) -> Result<(), KlibIrDecodeError> {
         for (tree_index, tree) in self.trees.iter().enumerate() {
             for (function_index, function) in tree.arena.functions.iter().enumerate() {

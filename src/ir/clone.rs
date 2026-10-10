@@ -389,6 +389,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(jvm_protected_dependency_calls);
     copy_map!(construction_declared_params);
     copy_map!(construction_targets);
+    if let Some(constructor) = ir.module_constructions.selected.get(&source).copied() {
+        ir.module_constructions.selected.insert(target, constructor);
+    }
     copy_map!(static_extension_receivers);
     copy_map!(call_inline_modifiers);
     copy_map!(suspend_calls);

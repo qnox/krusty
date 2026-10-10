@@ -4621,14 +4621,29 @@ code is the one the code generator already names: provider-owned bodies through 
   extensions and an enum's `values`/`valueOf` (and `entries`, only with `hasEnumEntries`) are
   receiver-less candidates of the classifier's namespace naming it as `associated_classifier`.
   Private classes, members and constructors are not published, although IR gives a private class
-  member or constructor (an enum's, an object's) a public signature.
-  The `SemanticPlatform` hooks come next, then the Native lane switch.
-- **Joining (next).** A selected dependency callable is joined to its decoded body through its
-  exact public signature, never through a name or parameter tuple.
-- **Lowering (next).** The decoded body is lowered into checked common IR so the native generator
-  compiles it as it compiles a module function; a body using an operation the lowering does not
-  model declines by name.
-- Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs` and `metadata/id_signature/`. End-to-end coverage comes through
+  member or constructor (an enum's, an object's) a public signature. The `SemanticPlatform` hooks
+  come next, then the Native lane switch.
+- **Joining (done for top-level functions).** `klib_libraries::KlibDeclarationBodies` indexes the
+  decoded trees of a library set by linkable identity and answers a selected callable's frozen
+  `KlibDeclarationSignature` with its function and arena, never through a name or parameter tuple.
+  A signature two libraries both define rejects the set when it is built.
+- **Lowering (first slice).** `klib_lowering` (target-neutral, shared with Wasm) lowers a joined
+  body into a `DependencyBodyUnit`, one common-IR function per signature, lowering each once. The
+  function's parameters and result are the frozen `BackendCallableFact`'s; the serialized
+  parameter list must agree with them in role and type, or the body declines as an internal
+  inconsistency. Modelled so far: a block body ending in `return`, `return` to the function itself,
+  an `if`-`else` `when`, parameter reads, constants, and calls of the compiler built-in relations
+  (`kotlin.internal.ir.less`/`lessOrEqual`/`greater`/`greaterOrEqual` on `Int`, `Long`, `Float`,
+  `Double`), whose identities the mangler computes. Each lowers to exactly the common IR, and the
+  per-expression facts, checked FIR lowering produces for the equivalent source; the tests compare
+  the two renderings. Every other expression form, statement, callee, type (type parameters, type
+  arguments, function types) and declaration shape declines by name with a `KlibBodyDecline`
+  (`the KLIB body of `kotlin.ranges.coerceIn` (it uses `throw`)`), leaving the unit unchanged. The
+  stdlib's `coerceAtLeast`/`coerceAtMost` on the four primitives lower and pass the IR validators.
+  Next: locals, `throw` and object construction, calls of other KLIB bodies, then wiring the unit
+  into the Native lane switch (nothing is wired into a backend yet).
+- Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
+  `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
   topology, where krusty compiles each dependency module to a KLIB itself (metadata and serialized
   IR) and then compiles the main module against it; kotlinc only supplies the expected output.

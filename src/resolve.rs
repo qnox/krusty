@@ -150,6 +150,7 @@ pub use platform_value_narrowing::PlatformNarrowing;
 mod plugin_class_checks;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
+mod plugin_status;
 mod postponed_applicability;
 mod postponed_constraints;
 mod postponed_diagnostics;
@@ -287,6 +288,7 @@ pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_constraints::PostponedCallConstraints;
 use postponed_diagnostics::PostponedDiagnostics;
+use property_read_selection::{PropertyReadAmbiguity, PropertyReadMemberSelection};
 use property_write_selection::PropertyWriteSelection;
 use qualifiers::*;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
@@ -2807,33 +2809,6 @@ enum PropertyReadSelection {
     /// The selected extension, with the actual receiver when it mentions a postponed call's type
     /// variables: reading the property adds that receiver constraint to the call.
     Extension(Box<ResolvedPropertyAccess>, Option<Ty>),
-}
-
-struct PropertyReadMemberSelection {
-    name: String,
-    ty: Ty,
-    owner: TypeName,
-    interface: bool,
-    getter: Option<crate::symbol_resolver::ResolvedMember>,
-    accessor: Option<Box<crate::libraries::LibraryCallable>>,
-    /// Provider-chosen field, Kotlin accessor, or Java accessor. The platform null-check names it.
-    producer: crate::libraries::PropertyProducer,
-    /// Provider-published constant-value expression fact for this selected read.
-    metadata_constant_read: bool,
-    context_access: Option<Box<ResolvedPropertyAccess>>,
-    compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
-    compile_time_constant: Option<crate::libraries::LibraryConst>,
-    source_member: Option<crate::libraries::SourceMember>,
-    stable_declaration: Option<crate::fir::DeclarationId>,
-    access: Option<(Visibility, TypeName)>,
-    /// Whether a second read through the same receiver returns the same value.
-    stable_read: bool,
-}
-
-enum PropertyReadAmbiguity {
-    MemberExtension,
-    Extension,
-    MissingContext,
 }
 
 type ModuleSymbolCache = HashMap<
@@ -11785,6 +11760,9 @@ impl<'a> Checker<'a> {
                         })
                 });
             if let Some(selected) = declaration {
+                if !selected.competing_accessors.is_empty() {
+                    return Err(self.competing_accessor_ambiguity(name, &selected));
+                }
                 let owner = selected.owner;
                 let visibility = selected.visibility;
                 let mut selected_property = selected.property;
@@ -12665,6 +12643,12 @@ impl<'a> Checker<'a> {
                         diagnostic_span,
                         format!("No context argument for '{name}' found."),
                     );
+                }
+                return Ty::Error;
+            }
+            Err(PropertyReadAmbiguity::Accessors(candidates)) => {
+                if report_diagnostics {
+                    self.report_accessor_ambiguity(diagnostic_span, candidates);
                 }
                 return Ty::Error;
             }
@@ -22640,6 +22624,9 @@ impl<'a> Checker<'a> {
                         missing.display(&names)
                     ),
                 ),
+                PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                    self.report_accessor_ambiguity(target_span, candidates)
+                }
                 PropertyWriteSelection::None
                 | PropertyWriteSelection::Implicit(_)
                 | PropertyWriteSelection::Receiverless(_)
@@ -22917,6 +22904,9 @@ impl<'a> Checker<'a> {
                             target_span,
                             format!("No context argument for '{name}' found."),
                         ),
+                        PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                            self.report_accessor_ambiguity(target_span, candidates)
+                        }
                         PropertyWriteSelection::None => self
                             .diags
                             .error(span, format!("unresolved reference '{name}'.")),
@@ -23133,6 +23123,13 @@ impl<'a> Checker<'a> {
                     })
             })
             .flatten();
+        if let Some(candidates) = selected_member_property
+            .as_ref()
+            .and_then(|selected| self.competing_accessor_candidates(&name, selected))
+        {
+            self.report_accessor_ambiguity(self.assignment_target_span(s), candidates);
+            return;
+        }
         let accessor_member_property = selected_member_property.as_ref().and_then(|selected| {
             let property = selected.property.as_ref()?;
             Some((selected.owner, selected.interface, property.clone()))
@@ -59060,6 +59057,9 @@ impl<'a> Checker<'a> {
                                 self.span(target),
                                 format!("No context argument for '{name}' found."),
                             ),
+                            PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                                self.report_accessor_ambiguity(self.span(target), candidates)
+                            }
                             PropertyWriteSelection::None
                             | PropertyWriteSelection::Implicit(_)
                             | PropertyWriteSelection::Receiverless(_)
