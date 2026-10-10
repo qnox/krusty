@@ -2,7 +2,6 @@
 //! kotlinc-style flags, and the real kotlinc compiles + runs a Kotlin consumer against that jar.
 
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 
 use super::common;
@@ -614,29 +613,6 @@ fn warning_diagnostic_ledger(stderr: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// kotlinc's ledger for `source`. The recorded-byte archive is keyed by source content, not by
-/// path, so a replay carries the scratch directory of the run that recorded it; a located
-/// diagnostic naming `source`'s file is relocated to this run's `source`.
-fn reference_warning_ledger(stderr: &str, source: &Path) -> Vec<String> {
-    let file = format!(
-        "{}{}:",
-        std::path::MAIN_SEPARATOR,
-        source
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("the source has a UTF-8 file name")
-    );
-    warning_diagnostic_ledger(stderr.as_bytes())
-        .into_iter()
-        .map(|line| match line.find(&file) {
-            Some(end) if Path::new(&line[..end]).is_absolute() => {
-                format!("{}{}", source.display(), &line[end + file.len() - 1..])
-            }
-            _ => line,
-        })
-        .collect()
-}
-
 /// Global and named warning policy has kotlinc's exact status, ordered diagnostic ledger, stdout,
 /// and complete output-file set. This covers configuration, module, and located source warnings.
 #[test]
@@ -791,7 +767,7 @@ fn warning_policy_precedence_matches_kotlinc() {
             });
         assert_eq!(reference_code, case.code, "{}", case.tag);
         assert_eq!(
-            reference_warning_ledger(&reference_stderr, &source),
+            warning_diagnostic_ledger(reference_stderr.as_bytes()),
             case.diagnostics,
             "{}: reference diagnostics",
             case.tag
